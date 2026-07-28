@@ -8,6 +8,7 @@ import {
   type DeliverablesCatalog,
   type OutputExportResult,
 } from "./deliverables";
+import { documentIcon } from "./documentIcon";
 import { MessageMarkdown } from "./MessageMarkdown";
 import {
   PICKER_BUSY_MESSAGE,
@@ -240,7 +241,9 @@ export function DeliverablesView({
                 </div>
               </div>
               <div className="deliverables-list">
-                {catalog.deliverables.map((item) => (
+                {catalog.deliverables.map((item) => {
+                  const Icon = documentIcon(item.mediaType);
+                  return (
                   <button
                     type="button"
                     className={`deliverable-row${selected === item.outputId ? " is-selected" : ""}`}
@@ -249,7 +252,7 @@ export function DeliverablesView({
                     onClick={() => setSelected(item.outputId)}
                   >
                     <span className="deliverable-icon" aria-hidden="true">
-                      <FileOutput size={16} />
+                      <Icon size={16} />
                     </span>
                     <span className="deliverable-copy">
                       <strong>{item.filename}</strong>
@@ -262,7 +265,8 @@ export function DeliverablesView({
                       </small>
                     </span>
                   </button>
-                ))}
+                  );
+                })}
               </div>
             </section>
 

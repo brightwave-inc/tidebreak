@@ -13,6 +13,17 @@ export type ImportQueueEntry = LibraryImportProgress & {
 export type ImportQueueStore = {
   entries: ImportQueueEntry[];
   receive: (progress: LibraryImportProgress) => void;
+  /**
+   * Manual dismissal, from the reader clicking away the widget. Clears the run
+   * once it is no longer active — failures and all, because a reader who has
+   * read the failure and asks to close it should be obeyed.
+   */
+  dismiss: () => void;
+  /**
+   * Automatic dismissal, for a caller clearing the widget on the reader's
+   * behalf. A clean completed run goes; a run with a failure stays put until
+   * the reader has seen it and dismissed it themselves.
+   */
   dismissCleanRun: () => void;
 };
 
@@ -28,6 +39,12 @@ export function createImportQueueStore() {
         entries[index] = next;
         return { entries };
       }),
+    dismiss: () =>
+      set((state) =>
+        state.entries.some((entry) => importIsActive(entry.status))
+          ? state
+          : { entries: [] },
+      ),
     // A failed run stays visible until its reader has seen and resolved it.
     dismissCleanRun: () =>
       set((state) =>

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { FileText } from "lucide-react";
 import {
   deleteLibraryDocument,
+  exportLibraryDocument,
   importLibraryDocuments,
   listLibraryDocuments,
   retryLibraryDocument,
@@ -13,6 +13,8 @@ import {
   type LibraryImportSuccess,
   type LibrarySearchResult,
 } from "./documents";
+import { documentIcon } from "./documentIcon";
+import { hasNativeHost } from "./host";
 import {
   PICKER_BUSY_MESSAGE,
   PICKER_HOLDERS,
@@ -73,6 +75,7 @@ export function DocumentsView({
   const catalogRequestRef = useRef(0);
   const searchRequestRef = useRef(0);
   const { confirm, dialog: confirmDialog } = useConfirm();
+  const nativeHost = hasNativeHost();
 
   function isCurrentScope(scope: number) {
     return mountedRef.current && scope === scopeRef.current;
@@ -241,6 +244,17 @@ export function DocumentsView({
       }
     } finally {
       if (isCurrentScope(scope)) setBusyDocument(null);
+    }
+  }
+
+  async function onDownload(document: LibraryDocument) {
+    const scope = scopeRef.current;
+    try {
+      await exportLibraryDocument(chatId, document.documentId);
+    } catch (err) {
+      if (isCurrentScope(scope)) {
+        setError(friendlyError(err, "Could not save that source."));
+      }
     }
   }
 
@@ -461,6 +475,7 @@ export function DocumentsView({
                       {visibleDocuments.map((document) => {
                         const title = documentTitle(document);
                         const busy = busyDocument === document.documentId;
+                        const Icon = documentIcon(document.mediaType);
                         return (
                           <tr
                             key={document.documentId}
@@ -477,7 +492,7 @@ export function DocumentsView({
                                 aria-label={`Open ${title}`}
                               >
                                 <span className="document-icon" aria-hidden="true">
-                                  <FileText size={16} />
+                                  <Icon size={16} />
                                 </span>
                                 <strong>{title}</strong>
                               </button>
@@ -506,6 +521,17 @@ export function DocumentsView({
                                 >
                                   Open
                                 </button>
+                                {nativeHost && (
+                                  <button
+                                    type="button"
+                                    className="document-action"
+                                    disabled={busy}
+                                    onClick={() => void onDownload(document)}
+                                    aria-label={`Download ${title}`}
+                                  >
+                                    Download
+                                  </button>
+                                )}
                                 <button
                                   type="button"
                                   className="document-action is-danger"

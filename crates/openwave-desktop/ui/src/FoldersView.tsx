@@ -13,6 +13,7 @@ import {
   PICKER_HOLDERS,
   useNativePickerLatch,
 } from "./NativePickerLatch";
+import { useConfirm } from "./components/ConfirmDialog";
 
 /**
  * A chat's connected folders: the directories the native host may read on this
@@ -27,6 +28,7 @@ export function FoldersView({ chat }: { chat: Chat }) {
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const refreshGeneration = useRef(0);
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const connectedIds = new Set(folders.map((folder) => folder.rootId));
   const availableFolders = approvedFolders.filter(
     (folder) => !connectedIds.has(folder.rootId),
@@ -95,11 +97,18 @@ export function FoldersView({ chat }: { chat: Chat }) {
     );
   }
 
-  async function removeFolder(rootId: string) {
+  async function removeFolder(folder: ConnectedFolder) {
+    const accepted = await confirm({
+      title: `Disconnect ${folder.displayName}?`,
+      description: "The agent loses access to this folder.",
+      confirmLabel: "Disconnect",
+      destructive: true,
+    });
+    if (!accepted) return;
     setWorking(true);
     setError(null);
     try {
-      await disconnectFolder(chat, rootId);
+      await disconnectFolder(chat, folder.rootId);
       await refresh();
     } catch (err) {
       setError(String(err));
@@ -159,7 +168,7 @@ export function FoldersView({ chat }: { chat: Chat }) {
                     type="button"
                     className="btn"
                     disabled={working}
-                    onClick={() => void removeFolder(folder.rootId)}
+                    onClick={() => void removeFolder(folder)}
                   >
                     Disconnect
                   </button>
@@ -195,6 +204,7 @@ export function FoldersView({ chat }: { chat: Chat }) {
           </div>
         )}
       </div>
+      {confirmDialog}
     </section>
   );
 }
