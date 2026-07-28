@@ -2,8 +2,8 @@
 
 OpenWave exposes one foreground `exec` tool through a provider-neutral command
 execution contract. The first provider is a native local sandbox. A managed
-provider such as E2B can implement the same contract later without changing the
-model-facing tool schema.
+provider can implement the same contract without changing the model-facing tool
+schema; E2B and Daytona are the current managed adapters.
 
 This capability is separate from a sandbox *agent*. A sandbox agent is a
 depth-one model run with a constrained tool budget. A code-execution sandbox is
@@ -17,6 +17,8 @@ The authenticated local API owns provider selection and timeout policy:
 | --- | --- |
 | `GET /code-execution` | Return the selected provider, timeout, and host readiness |
 | `PUT /code-execution` | Select a fixed provider or disable execution, and update the bounded timeout |
+| `PUT /code-execution/credentials/{e2b\|daytona}` | Store that provider's API key in its fixed host-secret slot |
+| `DELETE /code-execution/credentials/{e2b\|daytona}` | Remove only that provider's saved API key |
 
 The initial state is:
 
@@ -24,7 +26,8 @@ The initial state is:
 {
   "provider": "local",
   "timeout_ms": 20000,
-  "available": true
+  "available": true,
+  "has_credential": false
 }
 ```
 
@@ -33,8 +36,9 @@ the current host. The example above is the supported macOS state; it is false
 when execution is disabled or unsupported.
 Timeouts must be between 1 and 120 seconds. Sending `{"provider": null}`
 disables execution; sending `{"provider": "local"}` enables the local adapter.
-No executable, endpoint, environment value, or secret reference is accepted by
-this settings surface.
+`e2b` and `daytona` select the managed adapters, which become available once
+their fixed credential slot is populated. No executable, endpoint, environment
+value, or secret reference is accepted by the non-secret settings surface.
 
 The `exec` tool remains registered with a stable schema while settings change.
 The host resolves the selected provider immediately before execution, so a
@@ -52,7 +56,9 @@ CodeExecutionProvider::execute
     |
     +-- LocalExecutionProvider
     |
-    `-- future managed provider (for example E2B)
+    +-- E2BExecutionProvider --------+
+    |                                |
+    `-- DaytonaExecutionProvider ----+-- shared remote session + receipt layer
 ```
 
 A request contains:
@@ -64,8 +70,8 @@ A request contains:
 
 The execution ID is a provider idempotency key. Reusing it with different
 arguments is an identity conflict. The workspace ID lets local execution map a
-chat to private scratch and gives a future managed provider a stable key for a
-remote session or staged workspace.
+chat to private scratch and lets managed providers map the same chat identity to
+a reusable remote sandbox.
 
 Every provider returns the same bounded shape: provider kind, optional exit
 code, stdout, stderr, timeout and truncation flags, and duration. Provider-native
@@ -94,7 +100,7 @@ The initial adapter is deliberately fail-closed and macOS-first:
 
 This is a defense-in-depth boundary for OpenWave's single-user local runtime,
 not a VM-grade multi-tenant boundary. Hostile or remotely supplied workloads
-should use a managed isolation provider once one is available.
+should use a managed isolation provider.
 
 The executable receives its arguments directly. A model that truly needs a
 shell must invoke one explicitly, such as `/bin/sh` with `["-c", "..."]`.
@@ -110,18 +116,25 @@ model-visible chat scratch directory.
 approval/standing-grant boundary. Native confinement limits what an approved
 command can do; it does not replace user consent for command execution.
 
-## Adding E2B or another managed provider
+## Managed sandboxes
 
-A managed adapter should preserve the same invariants:
+E2B and Daytona share one process-local session pool, request fingerprint and
+receipt state machine, bounded capture primitive, response decoder, and
+credential primitive. Both serialize commands within a chat workspace and
+reconcile the remote sandbox before each new execution. An exact retry returns
+the cached normalized response; a changed request is rejected; an ambiguous
+dispatch is never started a second time.
 
-1. Treat the execution ID as an idempotency/reconciliation key.
-2. Map the opaque workspace ID to a bounded remote sandbox lifecycle.
-3. Keep credentials and endpoint selection host-owned.
-4. Enforce host-selected time, output, file, concurrency, and network policy.
-5. Normalize terminal results before they enter model context.
-6. Fail conservatively after an ambiguous dispatch instead of starting a second
-   remote job.
+The provider adapters own only their control-plane and command transports:
 
-Provider-specific configuration and credentials can be added beside the current
-host-owned selection once a second adapter exists. They should not become
-`exec` arguments.
+- E2B sends the executable and argv directly through envd's process protocol.
+- Daytona's toolbox accepts shell text, so its adapter quotes every executable
+  and argv element before dispatch and prefixes the result with `exec`. Shell
+  metacharacters therefore remain argument data. A caller that deliberately
+  needs a shell must still name `/bin/sh` and `-c` explicitly.
+
+Managed credentials remain in the OS secret store and never enter configuration,
+tool arguments, logs, or renderer responses. Remote API endpoints are fixed by
+the build; Daytona toolbox URLs returned by the control plane are restricted to
+HTTPS Daytona origins. Both managed providers allow internet access inside the
+sandbox, unlike the local native provider.

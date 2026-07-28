@@ -3,8 +3,8 @@
 //! The model cannot select a provider or timeout. The foreground `exec` tool
 //! calls [`ConfiguredCodeExecutionProvider`], which reads the current host
 //! setting at the last possible boundary and delegates to the selected adapter.
-//! Local and E2B adapters implement the same provider contract without changing
-//! the tool schema or persisted tool-call arguments.
+//! Local and managed adapters implement the same provider contract without
+//! changing the tool schema or persisted tool-call arguments.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,8 +13,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use openwave_code_execution::{
     CodeExecutionError, CodeExecutionProvider, CodeExecutionProviderKind, CodeExecutionRequest,
-    CodeExecutionResponse, E2BCredential, E2BExecutionProvider, E2BSessionPool,
-    LocalExecutionProvider, E2B_CREDENTIAL_KEY,
+    CodeExecutionResponse, DaytonaCredential, DaytonaExecutionProvider, E2BCredential,
+    E2BExecutionProvider, LocalExecutionProvider, RemoteSessionPool, DAYTONA_CREDENTIAL_KEY,
+    E2B_CREDENTIAL_KEY,
 };
 use openwave_core::{Result, SecretProvider, Store};
 use serde::{Deserialize, Serialize};
@@ -79,7 +80,7 @@ pub struct CodeExecutionConfigInfo {
     pub has_credential: bool,
 }
 
-/// Renderer-safe readiness for E2B's fixed credential slot.
+/// Renderer-safe readiness for one managed provider's fixed credential slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 pub struct CodeExecutionCredentialReadiness {
     pub provider: CodeExecutionProviderKind,
@@ -130,12 +131,13 @@ pub async fn config_info(
     secrets: &dyn SecretProvider,
 ) -> Result<CodeExecutionConfigInfo> {
     let config = read_config(store).await?;
-    let e2b_has_credential = E2BCredential::load(secrets).await.ok().flatten().is_some();
-    let has_credential =
-        matches!(config.provider, Some(CodeExecutionProviderKind::E2b)) && e2b_has_credential;
+    let has_credential = match config.provider {
+        Some(provider) => has_credential(secrets, provider).await,
+        None => false,
+    };
     let available = match config.provider {
         Some(CodeExecutionProviderKind::Local) => LocalExecutionProvider::is_supported(),
-        Some(CodeExecutionProviderKind::E2b) => e2b_has_credential,
+        Some(CodeExecutionProviderKind::E2b | CodeExecutionProviderKind::Daytona) => has_credential,
         None => false,
         _ => false,
     };
@@ -166,29 +168,72 @@ pub async fn update_config(
 
 pub async fn write_credential(
     secrets: &dyn SecretProvider,
+    provider: CodeExecutionProviderKind,
     api_key: &str,
 ) -> std::result::Result<CodeExecutionCredentialReadiness, ServerError> {
+    let (key, label) = credential_spec(provider)?;
     secrets
-        .set_secret(E2B_CREDENTIAL_KEY, api_key)
+        .set_secret(key, api_key)
         .await
-        .map_err(|_| ServerError::internal("E2B credential storage is unavailable"))?;
+        .map_err(|_| ServerError::internal(format!("{label} credential storage is unavailable")))?;
     Ok(CodeExecutionCredentialReadiness {
-        provider: CodeExecutionProviderKind::E2b,
+        provider,
         has_credential: true,
     })
 }
 
 pub async fn delete_credential(
     secrets: &dyn SecretProvider,
+    provider: CodeExecutionProviderKind,
 ) -> std::result::Result<CodeExecutionCredentialReadiness, ServerError> {
+    let (key, label) = credential_spec(provider)?;
     secrets
-        .delete_secret(E2B_CREDENTIAL_KEY)
+        .delete_secret(key)
         .await
-        .map_err(|_| ServerError::internal("E2B credential storage is unavailable"))?;
+        .map_err(|_| ServerError::internal(format!("{label} credential storage is unavailable")))?;
     Ok(CodeExecutionCredentialReadiness {
-        provider: CodeExecutionProviderKind::E2b,
+        provider,
         has_credential: false,
     })
+}
+
+pub fn credential_provider(
+    value: &str,
+) -> std::result::Result<CodeExecutionProviderKind, ServerError> {
+    match value {
+        "e2b" => Ok(CodeExecutionProviderKind::E2b),
+        "daytona" => Ok(CodeExecutionProviderKind::Daytona),
+        _ => Err(ServerError::not_found(format!(
+            "unknown credentialed code execution provider kind: {value}"
+        ))),
+    }
+}
+
+async fn has_credential(secrets: &dyn SecretProvider, provider: CodeExecutionProviderKind) -> bool {
+    match provider {
+        CodeExecutionProviderKind::E2b => {
+            E2BCredential::load(secrets).await.ok().flatten().is_some()
+        }
+        CodeExecutionProviderKind::Daytona => DaytonaCredential::load(secrets)
+            .await
+            .ok()
+            .flatten()
+            .is_some(),
+        CodeExecutionProviderKind::Local => false,
+        _ => false,
+    }
+}
+
+fn credential_spec(
+    provider: CodeExecutionProviderKind,
+) -> std::result::Result<(&'static str, &'static str), ServerError> {
+    match provider {
+        CodeExecutionProviderKind::E2b => Ok((E2B_CREDENTIAL_KEY, "E2B")),
+        CodeExecutionProviderKind::Daytona => Ok((DAYTONA_CREDENTIAL_KEY, "Daytona")),
+        _ => Err(ServerError::not_found(format!(
+            "unknown credentialed code execution provider kind: {provider}"
+        ))),
+    }
 }
 
 /// Late-binding provider used by the stable foreground tool registration.
@@ -196,7 +241,7 @@ pub struct ConfiguredCodeExecutionProvider {
     store: Arc<dyn Store>,
     secrets: Arc<dyn SecretProvider>,
     scratch_root: PathBuf,
-    e2b_sessions: E2BSessionPool,
+    remote_sessions: RemoteSessionPool,
 }
 
 impl ConfiguredCodeExecutionProvider {
@@ -210,7 +255,7 @@ impl ConfiguredCodeExecutionProvider {
             store,
             secrets,
             scratch_root: scratch_root.into(),
-            e2b_sessions: E2BSessionPool::default(),
+            remote_sessions: RemoteSessionPool::default(),
         }
     }
 }
@@ -242,7 +287,18 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
                 let provider = E2BExecutionProvider::with_session_pool(
                     credential,
                     Duration::from_millis(config.timeout_ms),
-                    self.e2b_sessions.clone(),
+                    self.remote_sessions.clone(),
+                )?;
+                provider.execute(request).await
+            }
+            CodeExecutionProviderKind::Daytona => {
+                let credential = DaytonaCredential::load(&*self.secrets)
+                    .await?
+                    .ok_or(CodeExecutionError::NotConfigured)?;
+                let provider = DaytonaExecutionProvider::with_session_pool(
+                    credential,
+                    Duration::from_millis(config.timeout_ms),
+                    self.remote_sessions.clone(),
                 )?;
                 provider.execute(request).await
             }

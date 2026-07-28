@@ -25,6 +25,8 @@ pub enum CodeExecutionProviderKind {
     Local,
     /// A managed E2B cloud sandbox.
     E2b,
+    /// A managed Daytona cloud sandbox.
+    Daytona,
 }
 
 impl CodeExecutionProviderKind {
@@ -33,6 +35,7 @@ impl CodeExecutionProviderKind {
         match self {
             Self::Local => "local",
             Self::E2b => "e2b",
+            Self::Daytona => "daytona",
         }
     }
 }

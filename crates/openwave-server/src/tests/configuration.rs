@@ -682,6 +682,7 @@ async fn code_execution_config_route_is_authenticated_and_preserves_explicit_dis
     );
 
     let ready = router
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/code-execution")
@@ -693,6 +694,88 @@ async fn code_execution_config_route_is_authenticated_and_preserves_explicit_dis
         .unwrap();
     let ready: serde_json::Value = json_body(ready).await;
     assert_eq!(ready["provider"], "e2b");
+    assert_eq!(ready["available"], true);
+    assert_eq!(ready["has_credential"], true);
+
+    let daytona = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/code-execution")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "provider": "daytona",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(daytona.status(), StatusCode::OK);
+    let daytona: serde_json::Value = json_body(daytona).await;
+    assert_eq!(daytona["provider"], "daytona");
+    assert_eq!(daytona["available"], false);
+    assert_eq!(daytona["has_credential"], false);
+
+    let daytona_key = "test-daytona-key";
+    let saved = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/code-execution/credentials/daytona")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"api_key": daytona_key}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(saved.status(), StatusCode::OK);
+    let saved_body = to_bytes(saved.into_body(), usize::MAX).await.unwrap();
+    assert!(!std::str::from_utf8(&saved_body)
+        .unwrap()
+        .contains(daytona_key));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&saved_body).unwrap(),
+        serde_json::json!({"provider": "daytona", "has_credential": true})
+    );
+    assert_eq!(
+        secrets
+            .get_secret(openwave_code_execution::DAYTONA_CREDENTIAL_KEY)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(daytona_key)
+    );
+    assert_eq!(
+        secrets
+            .get_secret(openwave_code_execution::E2B_CREDENTIAL_KEY)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(key),
+        "managed providers retain separate fixed credential slots"
+    );
+
+    let ready = router
+        .oneshot(
+            Request::builder()
+                .uri("/code-execution")
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let ready: serde_json::Value = json_body(ready).await;
+    assert_eq!(ready["provider"], "daytona");
     assert_eq!(ready["available"], true);
     assert_eq!(ready["has_credential"], true);
 }

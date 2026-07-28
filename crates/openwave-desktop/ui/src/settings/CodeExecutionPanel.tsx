@@ -71,6 +71,13 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
 
   const state = codeExecutionState(config);
   const activeProvider = config?.provider;
+  const managedProvider =
+    activeProvider === "e2b" || activeProvider === "daytona"
+      ? activeProvider
+      : null;
+  const managedProviderLabel = managedProvider
+    ? codeExecutionProviderLabel(managedProvider)
+    : null;
   const working = savingConfig || savingCredential || removingCredential;
 
   async function saveConfig() {
@@ -105,14 +112,14 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
   }
 
   async function saveCredential() {
-    if (activeProvider !== "e2b" || !apiKey.trim()) return;
+    if (!managedProvider || !managedProviderLabel || !apiKey.trim()) return;
     setSavingCredential(true);
     setError(null);
     try {
-      await client.putCodeExecutionCredential("e2b", apiKey.trim());
+      await client.putCodeExecutionCredential(managedProvider, apiKey.trim());
       setApiKey("");
       await refresh();
-      toast.success("Saved the E2B API key");
+      toast.success(`Saved the ${managedProviderLabel} API key`);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -121,13 +128,13 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
   }
 
   async function removeCredential() {
-    if (activeProvider !== "e2b") return;
+    if (!managedProvider || !managedProviderLabel) return;
     setRemovingCredential(true);
     setError(null);
     try {
-      await client.deleteCodeExecutionCredential("e2b");
+      await client.deleteCodeExecutionCredential(managedProvider);
       await refresh();
-      toast.success("Removed the saved E2B API key");
+      toast.success(`Removed the saved ${managedProviderLabel} API key`);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -176,6 +183,9 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
                   <SelectItem value={NO_PROVIDER}>Disabled</SelectItem>
                   <SelectItem value="local">Local native sandbox</SelectItem>
                   <SelectItem value="e2b">E2B cloud sandbox</SelectItem>
+                  <SelectItem value="daytona">
+                    Daytona cloud sandbox
+                  </SelectItem>
                 </SelectContent>
               </Select>
             </SettingsField>
@@ -206,8 +216,8 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
             </Button>
           </SettingsSection>
 
-          {activeProvider === "e2b" && (
-            <SettingsSection title="E2B credential">
+          {managedProvider && managedProviderLabel && (
+            <SettingsSection title={`${managedProviderLabel} credential`}>
               <span className="text-xs text-muted-foreground">
                 {config.has_credential
                   ? "credential saved"
@@ -218,7 +228,7 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
               >
                 <Input
                   type="password"
-                  placeholder="Paste a new E2B API key"
+                  placeholder={`Paste a new ${managedProviderLabel} API key`}
                   value={apiKey}
                   maxLength={8_192}
                   autoComplete="new-password"
@@ -261,9 +271,10 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
 
           <p className="text-sm leading-relaxed text-muted-foreground">
             Local execution blocks network and confines writes to private chat
-            scratch. E2B runs commands in a managed cloud sandbox, reuses its
-            workspace while the sandbox is alive, and allows internet access.
-            Both providers retain the execution consent boundary.
+            scratch. E2B and Daytona run commands in managed cloud sandboxes,
+            reuse their workspace while the sandbox is alive, and allow internet
+            access. Every provider retains the same direct-command, bounded
+            output, idempotency, and execution-consent contract.
           </p>
         </>
       )}
@@ -289,16 +300,16 @@ function codeExecutionState(config: CodeExecutionConfigInfo | null): {
       kind: "ready",
       label: "Ready",
       description:
-        config.provider === "e2b"
-          ? "E2B is selected and has a saved credential."
+        config.provider !== "local"
+          ? `${codeExecutionProviderLabel(config.provider)} is selected and has a saved credential.`
           : "The local native sandbox is available.",
     };
   }
-  if (config.provider === "e2b" && !config.has_credential) {
+  if (config.provider !== "local" && !config.has_credential) {
     return {
       kind: "not-configured",
       label: "Not configured",
-      description: "E2B is selected but needs an API key.",
+      description: `${codeExecutionProviderLabel(config.provider)} is selected but needs an API key.`,
     };
   }
   return {
@@ -306,4 +317,17 @@ function codeExecutionState(config: CodeExecutionConfigInfo | null): {
     label: "Unavailable",
     description: "The selected execution provider is unavailable.",
   };
+}
+
+function codeExecutionProviderLabel(
+  provider: CodeExecutionProviderKind,
+): string {
+  switch (provider) {
+    case "local":
+      return "Local";
+    case "e2b":
+      return "E2B";
+    case "daytona":
+      return "Daytona";
+  }
 }

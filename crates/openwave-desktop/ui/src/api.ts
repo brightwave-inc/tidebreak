@@ -145,7 +145,7 @@ export type CodeExecutionProviderKind = WireCodeExecutionProviderKind;
 /** Non-secret code-execution selection, timeout policy, and host readiness. */
 export type CodeExecutionConfigInfo = WireCodeExecutionConfigInfo;
 
-/** Readiness only: the API never returns the saved E2B key. */
+/** Readiness only: the API never returns a saved managed-provider key. */
 export type CodeExecutionCredentialReadiness =
   WireCodeExecutionCredentialReadiness;
 
