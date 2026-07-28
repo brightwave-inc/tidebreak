@@ -45,6 +45,7 @@ export function AppShell() {
   const [info, setInfo] = useState<ServerInfo | null>(null);
   const [client, setClient] = useState<ApiClient | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
+  const [defaultModelKey, setDefaultModelKey] = useState<string | null>(null);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [status, setStatus] = useState("starting…");
   const sidebarCollapsed = useUiStore((state) => state.sidebarCollapsed);
@@ -92,6 +93,7 @@ export function AppShell() {
         ]);
         if (cancelled) return;
         setModels(catalog.models);
+        setDefaultModelKey(catalog.default_key);
         setProviders(providerList.providers);
         chatListActions.setChats(existingChats);
       } catch (err) {
@@ -110,6 +112,7 @@ export function AppShell() {
       client.listProviders(),
     ]);
     setModels(catalog.models);
+    setDefaultModelKey(catalog.default_key);
     setProviders(providerList.providers);
   }
 
@@ -244,6 +247,7 @@ export function AppShell() {
       value={{
         client,
         models,
+        defaultModelKey,
         providers,
         refreshCatalog,
         status,

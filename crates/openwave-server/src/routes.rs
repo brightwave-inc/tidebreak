@@ -668,6 +668,14 @@ pub struct ModelInfo {
 pub struct ModelCatalog {
     /// The models a client can select from.
     pub models: Vec<ModelInfo>,
+    /// The catalog key a turn runs against when its chat carries no override —
+    /// the global default, else the one this server booted with.
+    ///
+    /// A selector that offers "default" as a choice can only say what that
+    /// choice means if the server says which model it lands on. `None` when the
+    /// fallback resolves to nothing the catalog can name, which leaves the
+    /// client with nothing to promise rather than a guess.
+    pub default_key: Option<String>,
 }
 
 /// `GET /models` — the catalog a chat's model selector chooses from.
@@ -675,6 +683,15 @@ pub struct ModelCatalog {
 /// All typed registry rows plus current availability. Clients may explain
 /// unavailable rows, but must never offer them as usable selections.
 pub async fn list_models(State(state): State<AppState>) -> Result<Json<ModelCatalog>, ServerError> {
+    // The same order `POST /chats/{id}/turns` resolves a new turn with, minus
+    // the chat override, so the label a client shows for "default" is the model
+    // the next turn actually gets.
+    let fallback = read_model(&*state.store)
+        .await?
+        .unwrap_or_else(|| state.agent_config.model.clone());
+    let default_key = providers::resolve_model_policy(&*state.store, &fallback, true)
+        .await?
+        .map(|policy| policy.key);
     let models = providers::catalog_models(&*state.store, &*state.secrets)
         .await?
         .into_iter()
@@ -695,7 +712,10 @@ pub async fn list_models(State(state): State<AppState>) -> Result<Json<ModelCata
                 .contains(&crate::model_registry::InputModality::Image),
         })
         .collect();
-    Ok(Json(ModelCatalog { models }))
+    Ok(Json(ModelCatalog {
+        models,
+        default_key,
+    }))
 }
 
 /// Body of `POST /projects`.

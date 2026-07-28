@@ -1,14 +1,7 @@
-import { Bot, Brain, Check, ChevronDown, Image as ImageIcon } from "lucide-react";
-import type {
-  ModelInfo,
-  ModelSelectionKey,
-  ReasoningEffort,
-} from "./api";
-import {
-  canonicalModelSelection,
-  modelForSelection,
-  providerLabel,
-} from "./ModelSelection";
+import { Atom, Check, ChevronDown, Gauge, Info } from "lucide-react";
+import type { ModelInfo, ModelSelectionKey, ProviderKind, ReasoningEffort } from "./api";
+import { canonicalModelSelection, modelForSelection } from "./ModelSelection";
+import { ProviderIcon } from "./ProviderIcons";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -16,115 +9,130 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Switch } from "@/components/ui/switch";
+import { WithTooltip } from "@/components/ui/tooltip";
+import { cn } from "@/lib/utils";
 
 /**
- * Brand marks for the providers the model registry curates. Paths are the
- * monochrome logos (from Simple Icons, CC0); they inherit `currentColor` so
- * they follow the menu's text color in both themes. Unknown providers (e.g.
- * OpenAI-compatible custom endpoints) fall back to a generic glyph.
+ * The order the vendors are listed in, ahead of any the catalog carries that
+ * this build does not know about. Fixed rather than first-seen so the list does
+ * not reshuffle when a provider is configured or a custom endpoint gains a
+ * model — muscle memory is worth more here than catalog order.
  */
-const PROVIDER_ICON_PATHS: Record<string, string> = {
-  anthropic:
-    "M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2932-5.9456 2.2932 5.9456Z",
-  openai:
-    "M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z",
-};
+const PROVIDER_ORDER: readonly ProviderKind[] = ["anthropic", "openai", "gemini"];
 
-/** Brand icon for a provider, or a neutral glyph when it isn't recognized. */
-export function ProviderIcon({
-  provider,
-  size = 14,
-}: {
-  provider: string;
-  size?: number;
-}) {
-  const path = PROVIDER_ICON_PATHS[provider.toLowerCase()];
-  if (!path) {
-    return <Bot size={size} aria-hidden="true" />;
+/** Catalog rows by provider, in {@link PROVIDER_ORDER}, then the rest as found. */
+function groupByProvider(
+  models: readonly ModelInfo[],
+): { provider: ProviderKind; models: ModelInfo[] }[] {
+  const byProvider = new Map<ProviderKind, ModelInfo[]>();
+  for (const model of models) {
+    const list = byProvider.get(model.provider);
+    if (list) list.push(model);
+    else byProvider.set(model.provider, [model]);
   }
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="currentColor"
-      aria-hidden="true"
-    >
-      <path d={path} />
-    </svg>
-  );
+
+  const groups: { provider: ProviderKind; models: ModelInfo[] }[] = [];
+  for (const provider of PROVIDER_ORDER) {
+    const found = byProvider.get(provider);
+    if (found) {
+      groups.push({ provider, models: found });
+      byProvider.delete(provider);
+    }
+  }
+  for (const [provider, found] of byProvider) {
+    groups.push({ provider, models: found });
+  }
+  return groups;
 }
 
 /**
- * Compact token count, e.g. 200000 -> "200K", 1000000 -> "1M".
+ * The row that reads as a mode rather than another model.
  *
- * Millions truncate rather than round, so a 1,050,000-token window reads as
- * "1M". A limit that rounds up reads as more headroom than the model has.
+ * A picker that offers "default" as one more entry never says what picking it
+ * gets you. The switch makes the choice binary — a default, or an override —
+ * and the tooltip names the model the default currently lands on, which is the
+ * only thing the reader actually wanted to know.
  */
-export function formatContextWindow(tokens: number): string {
-  if (tokens >= 1_000_000) {
-    return `${Math.floor(tokens / 100_000) / 10}M`;
-  }
-  if (tokens >= 1_000) {
-    return `${Math.round(tokens / 1_000)}K`;
-  }
-  return `${tokens}`;
-}
-
-/**
- * Subtle capability hints for a model row: context window plus icon markers for
- * image input and adjustable reasoning effort. The reasoning marker flags which
- * models expose the live effort control surfaced by [`ReasoningEffortMenu`].
- */
-export function ModelCapabilities({ model }: { model: ModelInfo }) {
+function DefaultRow({
+  isDefault,
+  tooltip,
+  disabled,
+  onToggle,
+}: {
+  isDefault: boolean;
+  tooltip: string;
+  disabled: boolean;
+  onToggle: (useDefault: boolean) => void;
+}) {
   return (
-    <div className="model-menu-item-meta">
-      <span title={`${model.context_window.toLocaleString()} token context window`}>
-        {formatContextWindow(model.context_window)}
-      </span>
-      {model.multimodal && (
-        <ImageIcon size={12} aria-label="Accepts image input" />
-      )}
-      {model.reasoning_efforts.length > 0 && (
-        <Brain size={12} aria-label="Adjustable reasoning effort" />
-      )}
+    <div
+      role="group"
+      className="bg-accent/40 flex items-center gap-2 rounded-sm px-2 py-2"
+    >
+      <span className="text-sm font-medium">Default</span>
+      <WithTooltip label={tooltip} side="top">
+        <button
+          type="button"
+          aria-label="About Default"
+          className="text-muted-foreground hover:text-foreground focus-visible:ring-ring rounded-sm focus-visible:ring-2 focus-visible:outline-none"
+        >
+          <Info className="size-3.5" />
+        </button>
+      </WithTooltip>
+      <Switch
+        className="ml-auto"
+        checked={isDefault}
+        disabled={disabled}
+        onCheckedChange={onToggle}
+      />
     </div>
   );
 }
 
 /**
  * Per-chat model selector for the message bar. `null` means "use the default"
- * (the global default model, or the server default when none is set). Mirrors
- * the OpenWave composer picker: a compact pill that opens a grouped list.
+ * — the global default model, or the server's own when none is set.
+ *
+ * `defaultKey` is the catalog key the server says that fallback resolves to,
+ * so the default can be named rather than described. It is absent only when
+ * the server's fallback is not something the catalog can name, and the copy
+ * then says nothing rather than guessing.
  */
 export function ModelMenu({
   models,
   value,
+  defaultKey = null,
   disabled,
   onChange,
 }: {
   models: ModelInfo[];
   value: string | null;
+  defaultKey?: string | null;
   disabled?: boolean;
   onChange: (key: ModelSelectionKey | null) => void | Promise<void>;
 }) {
   const known = modelForSelection(models, value);
   const canonical = canonicalModelSelection(models, value);
-  const label = value ? (known?.display_name ?? `${value} (unavailable)`) : "Default";
+  const isDefault = value === null;
+  const resolvedDefault = modelForSelection(models, defaultKey);
 
-  // Group by provider, preserving first-seen order.
-  const groups: { provider: ModelInfo["provider"]; models: ModelInfo[] }[] = [];
-  const byProvider = new Map<ModelInfo["provider"], ModelInfo[]>();
-  for (const model of models) {
-    const existing = byProvider.get(model.provider);
-    if (existing) {
-      existing.push(model);
-    } else {
-      const list = [model];
-      byProvider.set(model.provider, list);
-      groups.push({ provider: model.provider, models: list });
-    }
-  }
+  const label = isDefault ? "Default" : (known?.display_name ?? `${value} (unavailable)`);
+  // The pill names the default's resolution too: the reader is hovering the
+  // control precisely because "Default" does not tell them what will run.
+  const triggerLabel =
+    isDefault && resolvedDefault
+      ? `Model: Default (${resolvedDefault.display_name})`
+      : `Model: ${label}`;
+  const defaultTooltip = resolvedDefault
+    ? isDefault
+      ? `New turns run against the default model. Currently: ${resolvedDefault.display_name}.`
+      : "Override active. Toggle Default to go back to the default model."
+    : "New turns run against the default model.";
+
+  // The mark of whatever will actually run, so the pill reads the same whether
+  // the model was chosen here or inherited.
+  const pillModel = known ?? (isDefault ? resolvedDefault : null);
 
   return (
     <DropdownMenu>
@@ -133,67 +141,89 @@ export function ModelMenu({
           type="button"
           className="model-menu-trigger"
           disabled={disabled}
-          aria-label={`Model: ${label}`}
-          title={`Model: ${label}`}
+          aria-label={triggerLabel}
+          title={triggerLabel}
         >
-          {known ? <ProviderIcon provider={known.provider} /> : <Bot size={14} />}
+          {pillModel ? (
+            <ProviderIcon
+              provider={pillModel.provider}
+              modelId={pillModel.id}
+              className="size-3.5"
+            />
+          ) : (
+            <Atom className="size-3.5" />
+          )}
           <span className="model-menu-label">{label}</span>
-          <ChevronDown size={13} />
+          <ChevronDown className="size-3.5" />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="start"
         side="top"
-        className="model-menu-content overflow-y-auto"
+        className="model-menu-content w-80 overflow-y-auto p-0"
       >
-        <DropdownMenuItem
-          onSelect={() => {
-            if (value !== null) void onChange(null);
-          }}
-        >
-          <span className="model-menu-item-label">Default</span>
-          {value === null && <Check className="ml-auto" />}
-        </DropdownMenuItem>
-        {groups.map((group) => (
-          <div key={group.provider}>
-            <DropdownMenuSeparator />
-            <div className="model-menu-group-label">
-              <ProviderIcon provider={group.provider} size={12} />
-              <span>{providerLabel(group.provider)}</span>
+        <div className="flex flex-col gap-1 p-1">
+          <DefaultRow
+            isDefault={isDefault}
+            tooltip={defaultTooltip}
+            disabled={Boolean(disabled)}
+            onToggle={(useDefault) => {
+              if (useDefault) {
+                void onChange(null);
+                return;
+              }
+              // Turning the default off has to land on something; the first
+              // model that can actually run is the only sane candidate.
+              const first = models.find((model) => model.available);
+              if (first) void onChange(first.key);
+            }}
+          />
+
+          {groupByProvider(models).map((group) => (
+            <div key={group.provider}>
+              <DropdownMenuSeparator />
+              {group.models.map((model) => {
+                const selected = !isDefault && canonical === model.key;
+                return (
+                  <DropdownMenuItem
+                    key={model.key}
+                    disabled={disabled || !model.available}
+                    // The menu stays open: the switch above and the rows here
+                    // are one control, and closing on a row would strand a
+                    // reader who meant to flip back to the default.
+                    onSelect={(event) => {
+                      event.preventDefault();
+                      if (selected || !model.available) return;
+                      void onChange(model.key);
+                    }}
+                    className={cn(
+                      "flex items-center gap-2",
+                      isDefault && "opacity-60",
+                    )}
+                  >
+                    <ProviderIcon
+                      provider={model.provider}
+                      modelId={model.id}
+                      className="size-4 shrink-0"
+                    />
+                    <span className="text-sm">{model.display_name}</span>
+                    {selected && <Check className="ml-auto size-4" />}
+                  </DropdownMenuItem>
+                );
+              })}
             </div>
-            {group.models.map((model) => {
-              const selected = canonical === model.key;
-              return (
-                <DropdownMenuItem
-                  key={model.key}
-                  disabled={!model.available}
-                  onSelect={() => {
-                    if (!selected && model.available) void onChange(model.key);
-                  }}
-                >
-                  <ProviderIcon provider={model.provider} />
-                  <div className="model-menu-item-main">
-                    <span className="model-menu-item-label">
-                      {model.display_name}
-                    </span>
-                    <ModelCapabilities model={model} />
-                  </div>
-                  {selected && <Check className="ml-auto" />}
-                </DropdownMenuItem>
-              );
-            })}
-          </div>
-        ))}
-        {value !== null && !known && (
-          <>
-            <DropdownMenuSeparator />
-            <div className="model-menu-group-label">Unavailable legacy selection</div>
-            <DropdownMenuItem disabled>
-              <span className="model-menu-item-label">{value}</span>
-              <Check className="ml-auto" />
-            </DropdownMenuItem>
-          </>
-        )}
+          ))}
+
+          {!isDefault && !known && (
+            <div>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem disabled className="flex items-center gap-2">
+                <span className="text-sm">{value}</span>
+                <Check className="ml-auto size-4" />
+              </DropdownMenuItem>
+            </div>
+          )}
+        </div>
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -203,22 +233,21 @@ export function ModelMenu({
  * Every effort level in ascending order, with its menu label.
  *
  * "Off" rather than "None" for the lowest level, because the menu already has
- * a "Default" entry: one means "do not reason", the other means "leave the
- * provider's own default alone".
+ * a default: one means "do not reason", the other means "leave the provider's
+ * own default alone".
  */
 const REASONING_EFFORT_SCALE: { value: ReasoningEffort; label: string }[] = [
   { value: "none", label: "Off" },
   { value: "low", label: "Low" },
   { value: "medium", label: "Medium" },
   { value: "high", label: "High" },
-  { value: "xhigh", label: "Extra High" },
+  { value: "xhigh", label: "X-high" },
   { value: "max", label: "Max" },
 ];
 
-const REASONING_EFFORT_LABELS: Record<ReasoningEffort, string> =
-  Object.fromEntries(
-    REASONING_EFFORT_SCALE.map((option) => [option.value, option.label]),
-  ) as Record<ReasoningEffort, string>;
+const REASONING_EFFORT_LABELS: Record<ReasoningEffort, string> = Object.fromEntries(
+  REASONING_EFFORT_SCALE.map((option) => [option.value, option.label]),
+) as Record<ReasoningEffort, string>;
 
 /**
  * The levels to offer for a model, ordered by the scale rather than by the
@@ -229,9 +258,7 @@ const REASONING_EFFORT_LABELS: Record<ReasoningEffort, string> =
 export function reasoningEffortOptions(
   accepted: readonly ReasoningEffort[],
 ): { value: ReasoningEffort; label: string }[] {
-  return REASONING_EFFORT_SCALE.filter((option) =>
-    accepted.includes(option.value),
-  );
+  return REASONING_EFFORT_SCALE.filter((option) => accepted.includes(option.value));
 }
 
 /**
@@ -257,7 +284,8 @@ export function ReasoningEffortMenu({
   onChange: (effort: ReasoningEffort | null) => void | Promise<void>;
 }) {
   const options = reasoningEffortOptions(levels);
-  const label = value ? REASONING_EFFORT_LABELS[value] : "Default";
+  const isDefault = value === null;
+  const label = isDefault ? "Default" : REASONING_EFFORT_LABELS[value];
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -268,39 +296,59 @@ export function ReasoningEffortMenu({
           aria-label={`Reasoning effort: ${label}`}
           title={`Reasoning effort: ${label}`}
         >
-          <Brain size={14} />
+          <Gauge className="size-3.5" />
           <span className="model-menu-label">{label}</span>
-          <ChevronDown size={13} />
+          <ChevronDown className="size-3.5" />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="start"
         side="top"
-        className="model-menu-content overflow-y-auto"
+        className="model-menu-content w-80 overflow-y-auto p-0"
       >
-        <DropdownMenuItem
-          onSelect={() => {
-            if (value !== null) void onChange(null);
-          }}
-        >
-          <span className="model-menu-item-label">Default</span>
-          {value === null && <Check className="ml-auto" />}
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        {options.map((option) => {
-          const selected = value === option.value;
-          return (
-            <DropdownMenuItem
-              key={option.value}
-              onSelect={() => {
-                if (!selected) void onChange(option.value);
-              }}
-            >
-              <span className="model-menu-item-label">{option.label}</span>
-              {selected && <Check className="ml-auto" />}
-            </DropdownMenuItem>
-          );
-        })}
+        <div className="flex flex-col gap-1 p-1">
+          <DefaultRow
+            isDefault={isDefault}
+            tooltip={
+              isDefault
+                ? "The provider decides how hard the model thinks."
+                : "Override active. Toggle Default to let the provider decide."
+            }
+            disabled={Boolean(disabled)}
+            onToggle={(useDefault) => {
+              if (useDefault) {
+                void onChange(null);
+                return;
+              }
+              const first = options[0];
+              if (first) void onChange(first.value);
+            }}
+          />
+
+          <DropdownMenuSeparator />
+
+          {options.map((option) => {
+            const selected = !isDefault && value === option.value;
+            return (
+              <DropdownMenuItem
+                key={option.value}
+                disabled={disabled}
+                onSelect={(event) => {
+                  event.preventDefault();
+                  if (selected) return;
+                  void onChange(option.value);
+                }}
+                className={cn(
+                  "flex items-center gap-2",
+                  isDefault && "opacity-60",
+                )}
+              >
+                <span className="text-sm">{option.label}</span>
+                {selected && <Check className="ml-auto size-4" />}
+              </DropdownMenuItem>
+            );
+          })}
+        </div>
       </DropdownMenuContent>
     </DropdownMenu>
   );
