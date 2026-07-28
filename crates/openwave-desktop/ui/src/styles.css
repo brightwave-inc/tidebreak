@@ -1,4 +1,7 @@
 @import "tailwindcss";
+@import "react-pdf/dist/esm/Page/AnnotationLayer.css";
+@import "react-pdf/dist/esm/Page/TextLayer.css";
+
 @plugin "tailwindcss-animate";
 
 @custom-variant dark (&:where(.dark, .dark *));
