@@ -321,7 +321,12 @@ jobs:
   vectors:
     name: durable vector store
     needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' }}
+    # LanceDB is ~330 crates nobody else compiles, and it is the most expensive
+    # lane we run. While the durable store is parked, pay for it once per merge
+    # instead of once per push to every open PR: post-merge is late signal, but
+    # the feature is off by default in shipped builds. See #760 to restore the
+    # pull-request run when durable vectors come back into active development.
+    if: ${{ needs.changes.outputs.rust == 'true' && github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -510,7 +515,6 @@ jobs:
               test "$LINT_RESULT" = success
               test "$DESKTOP_RESULT" = success
               test "$TEST_RESULT" = success
-              test "$VECTORS_RESULT" = success
               test "$POSTGRES_RESULT" = success
               ;;
             false)
@@ -518,7 +522,6 @@ jobs:
               test "$LINT_RESULT" = skipped
               test "$DESKTOP_RESULT" = skipped
               test "$TEST_RESULT" = skipped
-              test "$VECTORS_RESULT" = skipped
               test "$POSTGRES_RESULT" = skipped
               ;;
             *)
@@ -526,3 +529,16 @@ jobs:
               exit 1
               ;;
           esac
+
+          # The durable vector store is deliberately not a pull-request gate
+          # (see the job's own comment and #760). Assert the exemption rather
+          # than dropping the lane from the gate, so a silent regression on main
+          # still fails here.
+          if test "$EVENT_NAME" = pull_request; then
+            test "$VECTORS_RESULT" = skipped
+          else
+            case "$RUST_CHANGED" in
+              true) test "$VECTORS_RESULT" = success ;;
+              false) test "$VECTORS_RESULT" = skipped ;;
+            esac
+          fi
