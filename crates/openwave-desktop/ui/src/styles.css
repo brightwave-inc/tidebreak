@@ -695,7 +695,16 @@ body {
   max-width: 48rem;
   display: flex;
   flex-direction: column;
-  gap: 1.5rem;
+  gap: 0.5rem;
+  padding-block: 1.5rem;
+}
+
+/* The column's base rhythm is the tight intra-exchange gap; a user message opens
+   a new exchange, so it carries the larger separation above it. Combined with the
+   0.5rem gap this lands at ~1.5rem between exchanges and ~0.5rem between a
+   question and its reply. */
+.message-user-frame:not(:first-child) {
+  margin-top: 1rem;
 }
 
 .messages.is-empty {
@@ -812,8 +821,8 @@ body {
 
 .message-user-frame {
   width: fit-content;
-  max-width: min(80%, 38rem);
-  align-self: flex-end;
+  max-width: 100%;
+  align-self: flex-start;
 }
 
 .message-user {
@@ -862,28 +871,30 @@ body {
   padding-top: 0.25rem;
   color: var(--muted-foreground);
   font-size: 0.72rem;
-  opacity: 0;
-  transition: opacity 120ms ease;
 }
 
 .message-user-frame .message-footer {
   padding-inline: 0.3rem;
 }
 
-.message-assistant:hover .message-footer,
-.message-assistant:focus-within .message-footer,
-.message-user-frame:hover .message-footer,
-.message-user-frame:focus-within .message-footer {
+/* Action buttons stay put; only the timestamp is a quiet detail revealed on
+   hover, so the row does not shift as it appears. */
+.message-footer time {
+  cursor: default;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.message-assistant:hover .message-footer time,
+.message-assistant:focus-within .message-footer time,
+.message-user-frame:hover .message-footer time,
+.message-user-frame:focus-within .message-footer time {
   opacity: 1;
 }
 
 .message-footer-spacer {
   flex: 1 1 auto;
-}
-
-.message-footer time {
-  cursor: default;
-  white-space: nowrap;
 }
 
 .message-copy {
@@ -910,7 +921,7 @@ body {
 }
 
 @media (hover: none) {
-  .message-footer {
+  .message-footer time {
     opacity: 1;
   }
 }
@@ -1400,7 +1411,7 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   .assistant-sources-chevron,
-  .message-footer,
+  .message-footer time,
   .assistant-working-mark {
     animation: none;
     transition: none;
