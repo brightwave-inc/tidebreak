@@ -387,6 +387,30 @@ async fn a_stale_refresh_token_reads_as_signed_out() {
 }
 
 #[tokio::test]
+async fn a_session_for_a_different_deployment_reads_as_signed_out() {
+    let (_gateway, connection) = signed_in_connection().await;
+    let stored = connection.stored_credentials().await.unwrap().unwrap();
+
+    // The same vault contents viewed by a connection configured for a
+    // different deployment — the settings URL was edited after sign-in.
+    let vault = CredentialVault::new(Arc::new(MockSecrets::default()));
+    vault.save(&stored).await.unwrap();
+    let other = GatewayConnection::new(
+        GatewayAuth::new(GatewayAuthConfig::new("http://127.0.0.1:9").unwrap()).unwrap(),
+        vault,
+    );
+
+    assert!(other.stored_credentials().await.unwrap().is_none());
+    // Refused before any refresh attempt: the failure must read as
+    // "sign-in required", not as a provider error downstream.
+    let error = other
+        .access_token(RESOURCE_CONTROL)
+        .await
+        .expect_err("a mismatched session must not mint tokens");
+    assert!(is_sign_in_required(&error), "{error}");
+}
+
+#[tokio::test]
 async fn a_state_mismatch_never_reaches_the_token_endpoint() {
     let gateway = Arc::new(FakeGateway::default());
     gateway.corrupt_state.store(true, Ordering::SeqCst);

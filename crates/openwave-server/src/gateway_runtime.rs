@@ -261,13 +261,13 @@ impl GatewayRuntime {
         Ok(Some(connection))
     }
 
-    /// A router token source, when the provider is configured and a session is
-    /// stored. `None` keeps the gateway route out of the router entirely.
+    /// A router token source, when the provider is configured and a session
+    /// for that deployment is stored. `None` keeps the gateway route out of
+    /// the router entirely — including when the stored session belongs to a
+    /// different gateway than the configured base URL.
     pub(crate) async fn route_token_source(&self) -> Option<Arc<dyn BearerTokenSource>> {
-        if !openwave_connectors::has_stored_credentials(&*self.secrets).await {
-            return None;
-        }
         let connection = self.connection().await.ok().flatten()?;
+        connection.stored_credentials().await.ok().flatten()?;
         Some(Arc::new(GatewayTokenSource(connection)))
     }
 
@@ -578,6 +578,33 @@ mod tests {
             .await
             .unwrap();
         assert!(config.models.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_session_for_a_different_gateway_reads_signed_out() {
+        let address = serve(Arc::new(FakeGateway::default())).await;
+        let base = format!("http://{address}");
+        let (runtime, store, _directory) = signed_in_runtime(&base).await;
+
+        // Repoint the provider at a different deployment; the stored session
+        // (minted against `base`) stays in the vault untouched.
+        let mut config = providers::read_config(&*store, ProviderKind::ModelGateway)
+            .await
+            .unwrap();
+        config.base_url = Some("http://127.0.0.1:9".to_string());
+        providers::write_config(&*store, ProviderKind::ModelGateway, &config)
+            .await
+            .unwrap();
+
+        let status = runtime.status().await.unwrap();
+        assert!(status.configured);
+        assert!(
+            !status.signed_in,
+            "a foreign session must not read signed-in"
+        );
+        assert!(status.account_hint.is_none());
+        assert!(status.installation_id.is_none());
+        assert!(runtime.route_token_source().await.is_none());
     }
 
     #[tokio::test]

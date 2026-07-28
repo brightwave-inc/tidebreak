@@ -629,9 +629,32 @@ impl GatewayConnection {
             .await
     }
 
-    /// The stored (offline) identity, if signed in.
+    /// Whether stored credentials were minted against this connection's
+    /// configured gateway. Trailing slashes are normalized the same way
+    /// [`GatewayAuth::endpoint`] does, so a subpath deployment retyped with
+    /// or without one never reads as a different gateway.
+    fn matches_deployment(&self, credentials: &GatewayCredentials) -> bool {
+        fn normalized(url: &reqwest::Url) -> String {
+            let mut base = url.to_string();
+            if !base.ends_with('/') {
+                base.push('/');
+            }
+            base
+        }
+        reqwest::Url::parse(&credentials.base_url)
+            .is_ok_and(|url| normalized(&url) == normalized(&self.auth.config.base_url))
+    }
+
+    /// The stored (offline) identity, if signed in to this connection's
+    /// configured gateway. A session minted against a different deployment
+    /// reads as absent: reporting it would assert an identity that is simply
+    /// wrong for the configured base URL.
     pub async fn stored_credentials(&self) -> Result<Option<GatewayCredentials>> {
-        self.vault.load().await
+        Ok(self
+            .vault
+            .load()
+            .await?
+            .filter(|credentials| self.matches_deployment(credentials)))
     }
 
     /// A fresh access token for `resource`, from cache when possible and via
@@ -641,6 +664,13 @@ impl GatewayConnection {
         let Some(mut credentials) = self.vault.load().await? else {
             return Err(sign_in_required("no gateway session is stored"));
         };
+        // Refuse early rather than let installation pinning fail downstream:
+        // "sign-in required" is actionable, a provider 500 is not.
+        if !self.matches_deployment(&credentials) {
+            return Err(sign_in_required(
+                "the stored gateway session belongs to a different gateway deployment",
+            ));
+        }
         if let Some(cached) = credentials.access_tokens.get(resource) {
             if cached.is_fresh() {
                 return Ok(cached.token.clone());
