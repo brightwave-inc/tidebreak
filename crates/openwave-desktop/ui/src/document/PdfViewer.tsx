@@ -6,7 +6,7 @@ import {
   PlusIcon,
 } from "lucide-react";
 import type { HTMLAttributes } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
 import { Document, Page, pdfjs } from "react-pdf";
 // The worker ships as an app asset rather than being pulled from a CDN at
@@ -145,7 +145,9 @@ export function PdfViewer({
 
       e.preventDefault();
       e.stopPropagation();
-      void openExternal(href);
+      void openExternal(href).then((opened) => {
+        if (!opened) window.open(href, "_blank", "noopener,noreferrer");
+      });
     };
 
     containerRef.addEventListener("click", handleClickCapture, true);
@@ -347,15 +349,17 @@ function useResizeObserver(
   element: Element | null,
   onResize: (entry: ResizeObserverEntry) => void,
 ): void {
-  const [callback] = useState(() => ({ current: onResize }));
-  callback.current = onResize;
+  const onResizeRef = useRef(onResize);
+  useEffect(() => {
+    onResizeRef.current = onResize;
+  });
 
   useEffect(() => {
     if (!element) return;
     const observer = new ResizeObserver(([entry]) => {
-      if (entry) callback.current(entry);
+      if (entry) onResizeRef.current(entry);
     });
     observer.observe(element);
     return () => observer.disconnect();
-  }, [element, callback]);
+  }, [element]);
 }
