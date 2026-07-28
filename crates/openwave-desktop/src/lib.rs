@@ -259,8 +259,10 @@ async fn boot_server(
     data_dir: PathBuf,
 ) -> Result<(), String> {
     let client_executor_id = app.state::<host_access::HostAccess>().client_executor_id();
-    #[cfg_attr(not(debug_assertions), allow(unused_mut))]
     let mut config = Config::desktop(data_dir);
+    // The effective identifier — including the debug-build override — keys
+    // the macOS managed-preferences (MDM) domain the server reads policy from.
+    config.bundle_id = Some(app.config().identifier.clone());
     // Debug builds keep their own keychain service, completing the identifier
     // and app-data split: dev and release must not share mutable secret state,
     // and items created by a dev-signed binary fail the release app's keychain

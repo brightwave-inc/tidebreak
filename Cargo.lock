@@ -6818,6 +6818,7 @@ dependencies = [
  "openwave-retrieval",
  "openwave-router",
  "openwave-web-search",
+ "plist",
  "reqwest 0.12.28",
  "schemars 1.2.1",
  "serde",
@@ -6832,6 +6833,7 @@ dependencies = [
  "unicode-general-category",
  "uuid",
  "windows-sys 0.61.2",
+ "winreg",
 ]
 
 [[package]]

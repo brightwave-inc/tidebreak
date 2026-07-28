@@ -645,6 +645,9 @@ async fn bind_inner(
     // instances over the same keychain entry can race a stale refresh token
     // into the gateway's reuse detection (a spurious full sign-out).
     state.gateway = gateway;
+    // Directly assembled AppState stays hermetic; the product boot path is
+    // where this platform's OS-managed (MDM) policy reader gets selected.
+    state.os_policy = managed_policy::platform_source(&state.config);
     state.mcp.initialize(mcp_servers).await?;
     let token = state.token.clone();
     let client_executor_token = state.client_executor_token.clone();

@@ -45,6 +45,12 @@ pub struct Config {
     /// split.
     #[serde(default)]
     pub keychain_service: Option<String>,
+    /// The embedding app's OS bundle identifier, when it runs as one (the
+    /// desktop app; its debug builds use a distinct id). On macOS this names
+    /// the managed-preferences domain consulted for OS-managed (MDM) policy;
+    /// `None` — the CLI, tests, self-host — reads no such domain.
+    #[serde(default)]
+    pub bundle_id: Option<String>,
 }
 
 impl Config {
@@ -54,6 +60,7 @@ impl Config {
             profile: Profile::Desktop,
             data_dir: data_dir.into(),
             keychain_service: None,
+            bundle_id: None,
         }
     }
 
@@ -91,6 +98,7 @@ impl Config {
             profile,
             data_dir,
             keychain_service: None,
+            bundle_id: None,
         })
     }
 
