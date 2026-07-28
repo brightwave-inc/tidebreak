@@ -322,6 +322,9 @@ mod tests {
         generate::collect_from::<crate::routes::client_execution::PendingFolderAccessRequest>(
             &cfg, &mut out,
         );
+        generate::collect_from::<crate::routes::client_execution::PendingOutputWritebackRequest>(
+            &cfg, &mut out,
+        );
         // Configuration, catalog, and project surfaces. These carry no shared
         // types with the conversation path, but one generated module keeps the
         // renderer importing from a single place.
@@ -561,6 +564,12 @@ mod tests {
             folder_hint: Some(openwave_core::RequestedFolderHint::Documents),
             claimed: true,
         };
+        let output_writeback =
+            crate::routes::client_execution::PendingOutputWritebackRequest {
+                call_id: openwave_core::CallId(id(6)),
+                turn_id: openwave_core::TurnId(id(7)),
+                claimed: false,
+            };
 
         vec![
             (
@@ -574,6 +583,11 @@ mod tests {
             (
                 "PENDING_FOLDER_ACCESS_REQUEST",
                 serde_json::to_value(&folder_access).expect("a folder request serializes"),
+            ),
+            (
+                "PENDING_OUTPUT_WRITEBACK_REQUEST",
+                serde_json::to_value(&output_writeback)
+                    .expect("an output write-back request serializes"),
             ),
         ]
     }

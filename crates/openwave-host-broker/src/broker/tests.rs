@@ -1,4 +1,5 @@
 use super::*;
+use crate::WriteApproval;
 
 #[derive(Default)]
 struct CollectingAudit {
@@ -165,6 +166,26 @@ fn operate(
         context,
         request,
     }))
+}
+
+fn write_request(
+    operation_id: OperationId,
+    root_id: RootId,
+    path: &str,
+    mode: WriteFileMode,
+    approval: Option<WriteApproval>,
+    content: &[u8],
+) -> OperationRequest {
+    OperationRequest::WriteFile(WriteFileRequest {
+        operation_id,
+        root_id,
+        path: RelativePath::parse(path).unwrap(),
+        mode,
+        approval,
+        content_base64: BASE64.encode(content),
+        bytes: content.len(),
+        sha256: Sha256::digest(content).into(),
+    })
 }
 
 fn list_approved(controller: &Controller) -> Vec<RootSummary> {
@@ -2459,4 +2480,219 @@ fn binary_reads_are_bounded_and_fenced_by_revocation() {
             ..
         })
     ));
+}
+
+#[test]
+fn writes_create_without_clobber_and_retry_from_the_terminal_receipt() {
+    let (_temp, broker, path) = setup();
+    let conversation = Uuid::new_v4();
+    let subject = GrantSubject::conversation(conversation).unwrap();
+    let registered = register(
+        &broker.controller(),
+        subject,
+        conversation,
+        path.clone(),
+        OperationId::new(),
+    );
+    let context = ExecutionContext::standalone(conversation).unwrap();
+    let operation_id = OperationId::new();
+    let request = write_request(
+        operation_id,
+        registered.root.root_id,
+        "published/report.txt",
+        WriteFileMode::Create,
+        None,
+        b"authoritative revision",
+    );
+    std::fs::create_dir(path.join("published")).unwrap();
+
+    let first = operate(&broker.operator(), context, request.clone()).unwrap();
+    assert_eq!(
+        first,
+        OperationResult::WriteFile(WriteFileResult {
+            operation_id,
+            bytes: 22,
+            replaced: false,
+        })
+    );
+    assert_eq!(
+        std::fs::read(path.join("published/report.txt")).unwrap(),
+        b"authoritative revision"
+    );
+    assert_eq!(
+        operate(&broker.operator(), context, request).unwrap(),
+        first,
+        "the exact retry returns the durable receipt"
+    );
+
+    assert!(matches!(
+        operate(
+            &broker.operator(),
+            context,
+            write_request(
+                OperationId::new(),
+                registered.root.root_id,
+                "published/report.txt",
+                WriteFileMode::Create,
+                None,
+                b"different bytes",
+            ),
+        ),
+        Err(ErrorResponse {
+            code: ErrorCode::AlreadyExists,
+            ..
+        })
+    ));
+    assert_eq!(
+        std::fs::read(path.join("published/report.txt")).unwrap(),
+        b"authoritative revision",
+        "create mode never clobbers the destination"
+    );
+}
+
+#[test]
+fn replacement_requires_native_approval_and_fails_closed_on_symlinks_and_revoke() {
+    let (_temp, broker, path) = setup();
+    let conversation = Uuid::new_v4();
+    let subject = GrantSubject::conversation(conversation).unwrap();
+    let registered = register(
+        &broker.controller(),
+        subject,
+        conversation,
+        path.clone(),
+        OperationId::new(),
+    );
+    let context = ExecutionContext::standalone(conversation).unwrap();
+    let root_id = registered.root.root_id;
+
+    assert!(matches!(
+        operate(
+            &broker.operator(),
+            context,
+            write_request(
+                OperationId::new(),
+                root_id,
+                "note.txt",
+                WriteFileMode::Replace,
+                None,
+                b"replacement",
+            ),
+        ),
+        Err(ErrorResponse {
+            code: ErrorCode::InvalidRequest,
+            ..
+        })
+    ));
+    assert_eq!(
+        std::fs::read(path.join("note.txt")).unwrap(),
+        b"hello from broker"
+    );
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(path.join("note.txt"), path.join("link.txt")).unwrap();
+        assert!(operate(
+            &broker.operator(),
+            context,
+            write_request(
+                OperationId::new(),
+                root_id,
+                "link.txt",
+                WriteFileMode::Replace,
+                Some(WriteApproval {
+                    approval_id: Uuid::new_v4(),
+                }),
+                b"replacement",
+            ),
+        )
+        .is_err());
+        assert_eq!(
+            std::fs::read(path.join("note.txt")).unwrap(),
+            b"hello from broker"
+        );
+    }
+
+    revoke(
+        &broker.controller(),
+        OperationId::new(),
+        subject,
+        root_id,
+    );
+    assert!(matches!(
+        operate(
+            &broker.operator(),
+            context,
+            write_request(
+                OperationId::new(),
+                root_id,
+                "new.txt",
+                WriteFileMode::Create,
+                None,
+                b"never written",
+            ),
+        ),
+        Err(ErrorResponse {
+            code: ErrorCode::Denied,
+            ..
+        })
+    ));
+    assert!(!path.join("new.txt").exists());
+}
+
+#[test]
+fn pending_write_recovery_never_replays_an_ambiguous_native_result() {
+    let (_temp, broker, path) = setup();
+    let conversation = Uuid::new_v4();
+    let subject = GrantSubject::conversation(conversation).unwrap();
+    let registered = register(
+        &broker.controller(),
+        subject,
+        conversation,
+        path,
+        OperationId::new(),
+    );
+    let context = ExecutionContext::standalone(conversation).unwrap();
+    let operation_id = OperationId::new();
+    let request = WriteFileRequest {
+        operation_id,
+        root_id: registered.root.root_id,
+        path: RelativePath::parse("note.txt").unwrap(),
+        mode: WriteFileMode::Replace,
+        approval: Some(WriteApproval {
+            approval_id: Uuid::new_v4(),
+        }),
+        content_base64: BASE64.encode(b"expected replacement"),
+        bytes: 20,
+        sha256: Sha256::digest(b"expected replacement").into(),
+    };
+    let fingerprint = WriteFingerprint {
+        context,
+        root_id: request.root_id,
+        path: request.path.clone(),
+        mode: request.mode,
+        approval_id: request.approval.map(|approval| approval.approval_id),
+        byte_len: request.bytes,
+        sha256: request.sha256,
+    };
+    broker.shared.state.lock().unwrap().mutations.insert(
+        operation_id,
+        MutationRecord::Write {
+            request: fingerprint,
+            outcome: MutationOutcome::Pending,
+        },
+    );
+
+    for _ in 0..2 {
+        assert!(matches!(
+            operate(
+                &broker.operator(),
+                context,
+                OperationRequest::WriteFile(request.clone()),
+            ),
+            Err(ErrorResponse {
+                code: ErrorCode::AmbiguousWrite,
+                ..
+            })
+        ));
+    }
 }

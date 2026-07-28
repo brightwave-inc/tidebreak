@@ -41,6 +41,7 @@ export type ChatSessionState = {
 
 export type ChatSessionEffect =
   | { type: "refresh_folder_access" }
+  | { type: "refresh_output_writebacks" }
   | { type: "refresh_user_questions" }
   /** A turn began; the host resets cancel state (and steer state when asked). */
   | { type: "turn_began"; turnId: string; startsDifferentTurn: boolean }
@@ -182,6 +183,9 @@ export function reduceChatSessionEvent(
       }
       if (event.name === "request_folder_access") {
         effects.push({ type: "refresh_folder_access" });
+      }
+      if (event.name === "write_output_to_connected_folder") {
+        effects.push({ type: "refresh_output_writebacks" });
       }
       const provisionalToolCallIds = new Set(state.provisionalToolCallIds);
       provisionalToolCallIds.add(event.call_id);

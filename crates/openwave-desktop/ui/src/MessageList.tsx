@@ -5,6 +5,7 @@ import type {
   ApiClient,
   AgentRun,
   PendingFolderAccessRequest,
+  PendingOutputWritebackRequest,
   PendingUserQuestions,
   ToolActionPreview,
   ToolResultPreview,
@@ -13,7 +14,11 @@ import type {
 import { ApprovalCard } from "./ApprovalCard";
 import { AssistantWorkingIndicator } from "./AssistantWorkingIndicator";
 import { FolderAccessCard } from "./FolderAccessCard";
-import type { FolderAccessDecision } from "./host";
+import type {
+  FolderAccessDecision,
+  OutputWritebackDecision,
+} from "./host";
+import { OutputWritebackCard } from "./OutputWritebackCard";
 import { MessageMarkdown } from "./MessageMarkdown";
 import { MessageFooter } from "./MessageFooter";
 import { AssistantSources, type AssistantSource } from "./AssistantSources";
@@ -82,11 +87,14 @@ type MessageListProps = {
   /** Enables MCP App cards to fetch their call's result envelope. */
   chatId?: string;
   folderAccessRequests: PendingFolderAccessRequest[];
+  outputWritebackRequests?: PendingOutputWritebackRequest[];
   userQuestionRequests?: PendingUserQuestions[];
   nativeHost: boolean;
   nativeBusy: boolean;
   resolvingFolderCalls: Set<string>;
   folderAccessErrors: Record<string, string>;
+  resolvingOutputWritebackCalls?: Set<string>;
+  outputWritebackErrors?: Record<string, string>;
   answeringQuestionCalls?: Set<string>;
   userQuestionErrors?: Record<string, string>;
   decidingApprovalCalls: Set<string>;
@@ -109,6 +117,11 @@ type MessageListProps = {
     decision: FolderAccessDecision,
   ) => void;
   onFolderAccessCancel: (callId: string, turnId: string) => void;
+  onOutputWritebackDecision?: (
+    callId: string,
+    decision: OutputWritebackDecision,
+  ) => void;
+  onOutputWritebackCancel?: (callId: string, turnId: string) => void;
   onAnswerUserQuestions?: (
     callId: string,
     answers: UserQuestionAnswer[],
@@ -123,11 +136,14 @@ export function MessageList({
   messages,
   chatId,
   folderAccessRequests,
+  outputWritebackRequests = [],
   userQuestionRequests = [],
   nativeHost,
   nativeBusy,
   resolvingFolderCalls,
   folderAccessErrors,
+  resolvingOutputWritebackCalls = new Set(),
+  outputWritebackErrors = {},
   answeringQuestionCalls = new Set(),
   userQuestionErrors = {},
   decidingApprovalCalls,
@@ -143,6 +159,8 @@ export function MessageList({
   onApproval,
   onFolderAccessDecision,
   onFolderAccessCancel,
+  onOutputWritebackDecision = () => undefined,
+  onOutputWritebackCancel = () => undefined,
   onAnswerUserQuestions = () => undefined,
   onUserQuestionsCancel = () => undefined,
   onSelectPrompt,
@@ -176,6 +194,7 @@ export function MessageList({
     hydrated &&
     messages.length === 0 &&
     folderAccessRequests.length === 0 &&
+    outputWritebackRequests.length === 0 &&
     userQuestionRequests.length === 0 &&
     !busy;
 
@@ -205,6 +224,21 @@ export function MessageList({
             onCancel={() => onFolderAccessCancel(request.callId, request.turnId)}
           />
         ))}
+        {outputWritebackRequests.map((request) => (
+          <OutputWritebackCard
+            key={request.callId}
+            request={request}
+            nativeHost={nativeHost}
+            working={resolvingOutputWritebackCalls.has(request.callId)}
+            error={outputWritebackErrors[request.callId]}
+            onDecision={(decision) =>
+              onOutputWritebackDecision(request.callId, decision)
+            }
+            onCancel={() =>
+              onOutputWritebackCancel(request.callId, request.turnId)
+            }
+          />
+        ))}
         {userQuestionRequests.map((request) => (
           <UserQuestionsCard
             key={request.callId}
@@ -220,7 +254,9 @@ export function MessageList({
         {shouldShowAssistantWorking(
           messages,
           busy,
-          folderAccessRequests.length + userQuestionRequests.length,
+          folderAccessRequests.length +
+            outputWritebackRequests.length +
+            userQuestionRequests.length,
         ) && <AssistantWorkingIndicator thinking={reasoningActive} />}
       </div>
     </div>

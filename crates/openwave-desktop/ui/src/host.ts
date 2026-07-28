@@ -7,6 +7,7 @@ export type ConnectedFolder = {
 };
 
 export type FolderAccessDecision = "allow" | "decline";
+export type OutputWritebackDecision = "allow" | "decline";
 
 export function hasNativeHost(): boolean {
   return isTauri();
@@ -53,6 +54,16 @@ export function resolveFolderAccessRequest(
   decision: FolderAccessDecision,
 ): Promise<void> {
   return invoke("resolve_folder_access_request", {
+    request: { chatId, callId, decision },
+  });
+}
+
+export function resolveOutputWritebackRequest(
+  chatId: string,
+  callId: string,
+  decision: OutputWritebackDecision,
+): Promise<void> {
+  return invoke("resolve_output_writeback_request", {
     request: { chatId, callId, decision },
   });
 }

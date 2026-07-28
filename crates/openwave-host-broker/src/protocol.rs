@@ -14,7 +14,7 @@ use crate::{
 };
 
 /// Current pre-v1 broker protocol. Bump this for incompatible wire changes.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Largest file the broker returns as opaque bytes.
 ///
@@ -175,6 +175,11 @@ pub enum OperationRequest {
     /// native code can move a file the agent cannot read as text into a
     /// product pipeline; the bytes are not agent-readable.
     ReadFileBinary(PathRequest),
+    /// Atomically publish caller-supplied, digest-bound bytes below an attached root.
+    ///
+    /// Only the trusted native output executor constructs this request. The
+    /// model supplies an output identity, never these bytes or approval data.
+    WriteFile(WriteFileRequest),
 }
 
 /// Strict root-relative payload shared by list and read operations.
@@ -183,6 +188,52 @@ pub enum OperationRequest {
 pub struct PathRequest {
     pub root_id: RootId,
     pub path: RelativePath,
+}
+
+/// Whether an output publication may replace an existing regular file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteFileMode {
+    Create,
+    Replace,
+}
+
+/// Fresh native consent bound to one replacement request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WriteApproval {
+    pub approval_id: Uuid,
+}
+
+/// Idempotent, bounded write request produced only by the trusted desktop.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WriteFileRequest {
+    pub operation_id: OperationId,
+    pub root_id: RootId,
+    pub path: RelativePath,
+    pub mode: WriteFileMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<WriteApproval>,
+    pub content_base64: String,
+    pub bytes: usize,
+    pub sha256: [u8; 32],
+}
+
+impl std::fmt::Debug for WriteFileRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WriteFileRequest")
+            .field("operation_id", &self.operation_id)
+            .field("root_id", &self.root_id)
+            .field("path", &self.path)
+            .field("mode", &self.mode)
+            .field("approval", &self.approval)
+            .field("content_base64", &"[redacted]")
+            .field("bytes", &self.bytes)
+            .field("sha256", &self.sha256)
+            .finish()
+    }
 }
 
 /// Correlated transport response. The broker version is returned on success and
@@ -218,6 +269,9 @@ pub enum ErrorCode {
     UnsupportedContent,
     HostIo,
     Internal,
+    AlreadyExists,
+    NotFound,
+    AmbiguousWrite,
 }
 
 /// Safe error payload; it never embeds an absolute path or raw OS error text.
@@ -256,6 +310,16 @@ pub enum OperationResult {
     ListDirectory { entries: Vec<DirectoryEntry> },
     ReadFile(ReadFileResult),
     ReadFileBinary(ReadFileBinaryResult),
+    WriteFile(WriteFileResult),
+}
+
+/// Durable terminal receipt for one exact connected-root write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WriteFileResult {
+    pub operation_id: OperationId,
+    pub bytes: usize,
+    pub replaced: bool,
 }
 
 /// Version handshake response.

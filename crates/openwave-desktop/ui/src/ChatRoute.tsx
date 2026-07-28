@@ -199,6 +199,9 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       case "refresh_folder_access":
         signalRefresh("folderAccess");
         return;
+      case "refresh_output_writebacks":
+        signalRefresh("outputWritebacks");
+        return;
       case "refresh_user_questions":
         signalRefresh("userQuestions");
         return;

@@ -24,6 +24,8 @@ pub enum Capability {
     ListRoots,
     /// List directories and read file bytes within a connected root.
     ReadFiles,
+    /// Create or explicitly approved replacement of files in a connected root.
+    WriteFiles,
 }
 
 /// Resource scope covered by one grant.
@@ -222,13 +224,20 @@ pub enum GrantError {
 
 fn validate_capability_scope(capability: Capability, scope: &Scope) -> Result<(), GrantError> {
     match (capability, scope) {
-        (Capability::ListRoots, Scope::Subject) | (Capability::ReadFiles, Scope::Root { .. }) => {
+        (Capability::ListRoots, Scope::Subject)
+        | (Capability::ReadFiles | Capability::WriteFiles, Scope::Root { .. }) => {
             Ok(())
         }
-        (Capability::ReadFiles, Scope::PathSubtree { relative, .. }) if !relative.is_root() => {
+        (
+            Capability::ReadFiles | Capability::WriteFiles,
+            Scope::PathSubtree { relative, .. },
+        ) if !relative.is_root() => {
             Ok(())
         }
-        (Capability::ReadFiles, Scope::PathSubtree { .. }) => Err(GrantError::EmptySubtree),
+        (
+            Capability::ReadFiles | Capability::WriteFiles,
+            Scope::PathSubtree { .. },
+        ) => Err(GrantError::EmptySubtree),
         _ => Err(GrantError::InvalidCapabilityScope),
     }
 }

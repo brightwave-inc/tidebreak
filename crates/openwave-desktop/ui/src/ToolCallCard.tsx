@@ -133,6 +133,12 @@ const TOOL_PRESENTATIONS: Record<
     complete: "Output ready",
     settled: "Created an output",
   },
+  write_output_to_connected_folder: {
+    label: "Publish an output",
+    active: "Publishing an output",
+    complete: "Output published",
+    settled: "Published an output",
+  },
   request_folder_access: {
     label: "Request folder access",
     active: "Requesting folder access",

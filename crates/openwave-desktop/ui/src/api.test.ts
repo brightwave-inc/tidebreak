@@ -3,6 +3,7 @@ import {
   ApiClient,
   parseFolderAccessRequest,
   parsePendingChatPrompt,
+  parseOutputWritebackRequest,
   parsePendingUserQuestions,
   parsePendingToolApproval,
   parseSandboxAgentCancellation,
@@ -107,6 +108,7 @@ describe("pending chat prompt summaries", () => {
     chat_id: "chat-1",
     question_call_ids: ["question-1"],
     folder_access_call_ids: ["folder-1"],
+    output_writeback_call_ids: ["writeback-1"],
   };
 
   it("accepts only opaque prompt identities", () => {
@@ -114,6 +116,7 @@ describe("pending chat prompt summaries", () => {
       chatId: "chat-1",
       questionCallIds: ["question-1"],
       folderAccessCallIds: ["folder-1"],
+      outputWritebackCallIds: ["writeback-1"],
     });
   });
 
@@ -127,6 +130,7 @@ describe("pending chat prompt summaries", () => {
         ...safe,
         question_call_ids: [],
         folder_access_call_ids: [],
+        output_writeback_call_ids: [],
       }),
     ).toBeNull();
   });
@@ -142,9 +146,38 @@ describe("pending chat prompt summaries", () => {
     const client = new ApiClient("http://127.0.0.1", "token");
 
     await expect(client.listPendingChatPrompts()).resolves.toEqual([
-      { chatId: "chat-1", questionCallIds: ["question-1"], folderAccessCallIds: ["folder-1"] },
+      {
+        chatId: "chat-1",
+        questionCallIds: ["question-1"],
+        folderAccessCallIds: ["folder-1"],
+        outputWritebackCallIds: ["writeback-1"],
+      },
     ]);
     expect(fetchMock.mock.calls[0][0]).toBe("http://127.0.0.1/chats/pending-prompts");
+  });
+});
+
+describe("parseOutputWritebackRequest", () => {
+  it("accepts only opaque identities and claimed state", () => {
+    expect(
+      parseOutputWritebackRequest({
+        call_id: "call-1",
+        turn_id: "turn-1",
+        claimed: false,
+      }),
+    ).toEqual({
+      callId: "call-1",
+      turnId: "turn-1",
+      claimedByDesktop: false,
+    });
+    expect(
+      parseOutputWritebackRequest({
+        call_id: "call-1",
+        turn_id: "turn-1",
+        claimed: false,
+        path: "private/file.txt",
+      }),
+    ).toBeNull();
   });
 });
 

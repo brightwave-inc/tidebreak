@@ -212,11 +212,11 @@ pub(in crate::db) async fn claim_client_tool_call(
     }
     if existing.client_executor_id == Some(executor_id)
         && existing.client_lease_token == Some(lease_token)
-        && existing
-            .client_lease_expires_at
-            .is_some_and(|expiry| expiry > now)
     {
-        let claim = client_claim_from_model(existing)?;
+        let mut active: entities::tool_call::ActiveModel = existing.into();
+        active.client_lease_expires_at = Set(Some(lease_expires_at));
+        let recovered = active.update(&transaction).await.map_err(store_err)?;
+        let claim = client_claim_from_model(recovered)?;
         transaction.commit().await.map_err(store_err)?;
         return Ok(ClaimClientToolCallOutcome::Existing(claim));
     }

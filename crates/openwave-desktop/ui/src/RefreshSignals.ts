@@ -3,7 +3,10 @@ import { create } from "zustand";
 /**
  * Server-side state the event stream can report as moved on.
  */
-export type RefreshTarget = "folderAccess" | "userQuestions";
+export type RefreshTarget =
+  | "folderAccess"
+  | "outputWritebacks"
+  | "userQuestions";
 
 /**
  * A revision counter per pollable target.
@@ -17,6 +20,7 @@ export type RefreshTarget = "folderAccess" | "userQuestions";
  */
 export type RefreshSignalStore = {
   folderAccess: number;
+  outputWritebacks: number;
   userQuestions: number;
   signal: (target: RefreshTarget) => void;
 };
@@ -24,6 +28,7 @@ export type RefreshSignalStore = {
 export function createRefreshSignalStore() {
   return create<RefreshSignalStore>()((set) => ({
     folderAccess: 0,
+    outputWritebacks: 0,
     userQuestions: 0,
     signal: (target) =>
       set((state) => ({ [target]: state[target] + 1 }) as Partial<RefreshSignalStore>),

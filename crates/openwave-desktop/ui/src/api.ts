@@ -31,6 +31,7 @@ import {
   type WebSearchCredentialReadiness as WireWebSearchCredentialReadiness,
   type WebSearchProviderKind as WireWebSearchProviderKind,
   type PendingFolderAccessRequest as WirePendingFolderAccessRequest,
+  type PendingOutputWritebackRequest as WirePendingOutputWritebackRequest,
   type PendingUserQuestions as WirePendingUserQuestions,
   type UserQuestion as WireUserQuestion,
   type UserQuestionOption as WireUserQuestionOption,
@@ -319,11 +320,19 @@ export type PendingFolderAccessRequest = {
   claimedByDesktop: boolean;
 };
 
+/** Renderer-safe replacement prompt. Canonical output, root, and path stay native. */
+export type PendingOutputWritebackRequest = {
+  callId: string;
+  turnId: string;
+  claimedByDesktop: boolean;
+};
+
 /** Opaque prompt state used to mark another chat as needing attention. */
 export type PendingChatPrompt = {
   chatId: string;
   questionCallIds: string[];
   folderAccessCallIds: string[];
+  outputWritebackCallIds: string[];
 };
 
 export type UserQuestionOption = {
@@ -890,6 +899,28 @@ export class ApiClient {
     return [...requests.values()];
   }
 
+  async listPendingOutputWritebackRequests(
+    chatId: string,
+  ): Promise<PendingOutputWritebackRequest[]> {
+    const body = await this.json<unknown>(
+      `/chats/${chatId}/output-writebacks/pending`,
+      { headers: this.headers() },
+    );
+    if (!Array.isArray(body)) {
+      throw new Error("pending output write-back response is not an array");
+    }
+
+    const requests = new Map<string, PendingOutputWritebackRequest>();
+    for (const item of body) {
+      const request = parseOutputWritebackRequest(item);
+      if (!request || requests.has(request.callId)) {
+        throw new Error("pending output write-back response contains invalid data");
+      }
+      requests.set(request.callId, request);
+    }
+    return [...requests.values()];
+  }
+
   async listPendingUserQuestions(
     chatId: string,
   ): Promise<PendingUserQuestions[]> {
@@ -988,6 +1019,29 @@ export function parseFolderAccessRequest(
   };
 }
 
+export function parseOutputWritebackRequest(
+  value: unknown,
+): PendingOutputWritebackRequest | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WirePendingOutputWritebackRequest>(value, [
+      "call_id",
+      "turn_id",
+      "claimed",
+    ]) ||
+    !nonEmptyBounded(value.call_id, 128) ||
+    !nonEmptyBounded(value.turn_id, 128) ||
+    typeof value.claimed !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    callId: value.call_id,
+    turnId: value.turn_id,
+    claimedByDesktop: value.claimed,
+  };
+}
+
 /**
  * Validate the intentionally small parked-chat summary before it reaches
  * shared shell state. Details belong to the selected chat's recovery route,
@@ -1000,22 +1054,47 @@ export function parsePendingChatPrompt(value: unknown): PendingChatPrompt | null
       chat_id: string;
       question_call_ids: string[];
       folder_access_call_ids: string[];
-    }>(value, ["chat_id", "question_call_ids", "folder_access_call_ids"]) ||
+      output_writeback_call_ids: string[];
+    }>(value, [
+      "chat_id",
+      "question_call_ids",
+      "folder_access_call_ids",
+      "output_writeback_call_ids",
+    ]) ||
     !nonEmptyBounded(value.chat_id, 128)
   ) {
     return null;
   }
   const questionCallIds = parseOpaqueCallIds(value.question_call_ids);
   const folderAccessCallIds = parseOpaqueCallIds(value.folder_access_call_ids);
+  const outputWritebackCallIds = parseOpaqueCallIds(
+    value.output_writeback_call_ids,
+  );
   if (
     !questionCallIds ||
     !folderAccessCallIds ||
-    questionCallIds.length + folderAccessCallIds.length === 0 ||
-    questionCallIds.some((callId) => folderAccessCallIds.includes(callId))
+    !outputWritebackCallIds ||
+    questionCallIds.length +
+        folderAccessCallIds.length +
+        outputWritebackCallIds.length ===
+      0 ||
+    new Set([
+      ...questionCallIds,
+      ...folderAccessCallIds,
+      ...outputWritebackCallIds,
+    ]).size !==
+      questionCallIds.length +
+        folderAccessCallIds.length +
+        outputWritebackCallIds.length
   ) {
     return null;
   }
-  return { chatId: value.chat_id, questionCallIds, folderAccessCallIds };
+  return {
+    chatId: value.chat_id,
+    questionCallIds,
+    folderAccessCallIds,
+    outputWritebackCallIds,
+  };
 }
 
 function parseOpaqueCallIds(value: unknown): string[] | null {
