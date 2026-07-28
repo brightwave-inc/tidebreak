@@ -37,6 +37,9 @@ vi.mock("./boot", () => ({
 
 vi.mock("./api", () => ({
   ApiClient: class {
+    // Unmanaged is the shape these shell tests model; the managed gate has
+    // its own DOM tests.
+    getPolicy = vi.fn(async () => ({ managed: false, source: "unmanaged" }));
     listModels = vi.fn(async () => ({ models: [], roles: [] }));
     listProviders = vi.fn(async () => ({ providers: [] }));
     listChats = listChats;
