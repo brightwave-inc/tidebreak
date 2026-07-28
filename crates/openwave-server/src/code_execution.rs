@@ -27,6 +27,14 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 20_000;
 pub const MIN_TIMEOUT_MS: u64 = 1_000;
 pub const MAX_TIMEOUT_MS: u64 = 120_000;
 
+/// The fixed managed providers this host can hold a credential for. Local needs
+/// none. Keeping the allow-list here means a local API route can never turn an
+/// arbitrary path segment into a keychain key.
+const CREDENTIAL_PROVIDERS: [CodeExecutionProviderKind; 2] = [
+    CodeExecutionProviderKind::E2b,
+    CodeExecutionProviderKind::Daytona,
+];
+
 /// Non-secret host selection. Local is usable by default because its mandatory
 /// sandbox denies network and outside-workspace writes. `None` explicitly
 /// removes execution from service without changing the stable tool contract.
@@ -85,6 +93,13 @@ pub struct CodeExecutionConfigInfo {
 pub struct CodeExecutionCredentialReadiness {
     pub provider: CodeExecutionProviderKind,
     pub has_credential: bool,
+}
+
+/// Credential readiness for every managed provider this host supports, so the
+/// renderer can offer a key field per provider without selecting one first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CodeExecutionCredentialsInfo {
+    pub credentials: Vec<CodeExecutionCredentialReadiness>,
 }
 
 /// Partial update accepted by `PUT /code-execution`. An explicit null disables
@@ -149,6 +164,19 @@ pub async fn config_info(
     })
 }
 
+/// Report readiness for every managed provider without reading or returning any
+/// key material.
+pub async fn credentials_info(secrets: &dyn SecretProvider) -> CodeExecutionCredentialsInfo {
+    let mut credentials = Vec::with_capacity(CREDENTIAL_PROVIDERS.len());
+    for provider in CREDENTIAL_PROVIDERS {
+        credentials.push(CodeExecutionCredentialReadiness {
+            provider,
+            has_credential: has_credential(secrets, provider).await,
+        });
+    }
+    CodeExecutionCredentialsInfo { credentials }
+}
+
 pub async fn update_config(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
@@ -200,13 +228,14 @@ pub async fn delete_credential(
 pub fn credential_provider(
     value: &str,
 ) -> std::result::Result<CodeExecutionProviderKind, ServerError> {
-    match value {
-        "e2b" => Ok(CodeExecutionProviderKind::E2b),
-        "daytona" => Ok(CodeExecutionProviderKind::Daytona),
-        _ => Err(ServerError::not_found(format!(
-            "unknown credentialed code execution provider kind: {value}"
-        ))),
-    }
+    CREDENTIAL_PROVIDERS
+        .into_iter()
+        .find(|provider| provider.as_str() == value)
+        .ok_or_else(|| {
+            ServerError::not_found(format!(
+                "unknown credentialed code execution provider kind: {value}"
+            ))
+        })
 }
 
 async fn has_credential(secrets: &dyn SecretProvider, provider: CodeExecutionProviderKind) -> bool {

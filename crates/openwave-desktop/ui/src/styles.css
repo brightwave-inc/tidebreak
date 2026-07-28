@@ -1882,7 +1882,7 @@ body {
   color: var(--ink);
 }
 
-.web-search-state {
+.settings-status {
   display: grid;
   gap: 0.18rem;
   padding: 0.65rem 0.7rem;
@@ -1893,16 +1893,16 @@ body {
   font-size: 0.82rem;
 }
 
-.web-search-state strong {
+.settings-status strong {
   color: var(--ink);
   font-size: 0.84rem;
 }
 
-.web-search-state.is-ready {
+.settings-status.is-ready {
   border-color: color-mix(in srgb, var(--success) 55%, var(--line));
 }
 
-.web-search-state.is-not-configured {
+.settings-status.is-not-configured {
   border-color: color-mix(in srgb, var(--danger) 30%, var(--line));
 }
 

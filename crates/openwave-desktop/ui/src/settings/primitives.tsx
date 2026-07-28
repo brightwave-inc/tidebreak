@@ -90,6 +90,29 @@ export function SettingsSection({
   );
 }
 
+/**
+ * The readiness line a settings surface leads with: a short verdict and the one
+ * sentence that says what to do about it. The tone carries the only colour —
+ * green for ready, red for something the user still has to supply — so a panel
+ * never has to reach for the class itself.
+ */
+export function SettingsStatus({
+  tone,
+  label,
+  description,
+}: {
+  tone: "ready" | "not-configured" | "disabled";
+  label: string;
+  description: ReactNode;
+}) {
+  return (
+    <div className={`settings-status is-${tone}`} role="status">
+      <strong>{label}</strong>
+      <span>{description}</span>
+    </div>
+  );
+}
+
 export function SettingsError({ children }: { children: ReactNode }) {
   return (
     <p className="text-sm text-destructive" role="alert">

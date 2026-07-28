@@ -81,6 +81,10 @@ describe("WebSearchPanel", () => {
       provider: "exa",
       timeout_ms: 30_000,
     });
+    // A provider must not go active in a pass that failed to store its key.
+    expect(putWebSearchCredential.mock.invocationCallOrder[0]).toBeLessThan(
+      putWebSearchConfig.mock.invocationCallOrder[0],
+    );
   });
 
   it("removes one provider's saved key without touching the other", async () => {

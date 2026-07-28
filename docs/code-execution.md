@@ -17,6 +17,7 @@ The authenticated local API owns provider selection and timeout policy:
 | --- | --- |
 | `GET /code-execution` | Return the selected provider, timeout, and host readiness |
 | `PUT /code-execution` | Select a fixed provider or disable execution, and update the bounded timeout |
+| `GET /code-execution/credentials` | Read readiness for the fixed E2B and Daytona key slots |
 | `PUT /code-execution/credentials/{e2b\|daytona}` | Store that provider's API key in its fixed host-secret slot |
 | `DELETE /code-execution/credentials/{e2b\|daytona}` | Remove only that provider's saved API key |
 
@@ -40,9 +41,23 @@ disables execution; sending `{"provider": "local"}` enables the local adapter.
 their fixed credential slot is populated. No executable, endpoint, environment
 value, or secret reference is accepted by the non-secret settings surface.
 
+`GET /code-execution` reports `has_credential` for the selected provider only,
+while `GET /code-execution/credentials` reports readiness for both managed slots
+independently. Local execution needs no credential and has no slot to report.
+
 The `exec` tool remains registered with a stable schema while settings change.
 The host resolves the selected provider immediately before execution, so a
 configuration update takes effect without restarting OpenWave.
+
+## Desktop setup
+
+The desktop sidebar's **Code execution** panel drives this same local API. It
+offers a key field per managed slot, so E2B and Daytona can both hold a key and
+switching between them needs no retyping, and a separate choice of which
+provider agents execute in — the local sandbox, one of the managed ones, or
+disabled. Saving writes every key the user typed before it writes selection, so
+a provider cannot become active in a pass that failed to store its key. Saved
+keys are never displayed or read into the renderer.
 
 ## Provider contract
 
