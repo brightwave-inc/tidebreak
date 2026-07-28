@@ -118,9 +118,6 @@ fn validated_gateway_url(gateway_url: &str) -> Result<String> {
 /// same gateway is idempotent, a conflicting one is refused. If re-pairing
 /// ever becomes a product flow, it belongs behind an explicit user
 /// confirmation in the deep-link slice, not in this write path.
-// The deep-link pairing flow is the intended production caller; until that
-// slice lands, only tests exercise this write path.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn provision(store: &dyn Store, gateway_url: &str) -> Result<()> {
     let gateway_url = validated_gateway_url(gateway_url)?;
     if let Some(value) = store.get_setting(SETTING_KEY).await? {
