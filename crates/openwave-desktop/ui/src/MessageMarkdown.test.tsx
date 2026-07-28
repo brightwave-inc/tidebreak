@@ -46,7 +46,7 @@ describe("MessageMarkdown", () => {
     expect(markup).not.toContain("javascript:");
   });
 
-  it("adds a table-level copy action without exposing Markdown attributes", () => {
+  it("renders a plain table without a frame or copy footer", () => {
     const markup = renderToStaticMarkup(
       <MessageMarkdown>
         {"| Name | Value |\n| --- | --- |\n| Alpha | **1** |"}
@@ -54,9 +54,11 @@ describe("MessageMarkdown", () => {
     );
 
     expect(markup).toContain("<table>");
-    expect(markup).toContain('aria-label="Copy table contents"');
     expect(markup).toContain("Alpha");
     expect(markup).toContain("<strong>1</strong>");
+    // Chat tables are plain: no framing wrapper, no copy control.
+    expect(markup).not.toContain("Copy table contents");
+    expect(markup).not.toContain("markdown-table-frame");
   });
 
   it("renders display math through KaTeX rather than as literal source", () => {

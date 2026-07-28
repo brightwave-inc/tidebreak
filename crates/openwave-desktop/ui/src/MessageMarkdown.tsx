@@ -8,7 +8,6 @@ import remarkMath from "remark-math";
 import rehypeHighlight from "rehype-highlight";
 import rehypeKatex from "rehype-katex";
 import { ClipboardCopyButton } from "./ClipboardCopyButton";
-import { MarkdownTable } from "./MarkdownTable";
 import { splitMarkdownBlocks } from "./markdownBlocks";
 import { escapeLatexText } from "./markdownLatex";
 
@@ -117,7 +116,6 @@ const components: Components = {
     );
   },
   blockquote: ({ children }) => <blockquote>{children}</blockquote>,
-  table: ({ children }) => <MarkdownTable>{children}</MarkdownTable>,
 };
 
 // `singleDollarTextMath: false` keeps a bare `$` (a price, a shell variable)
