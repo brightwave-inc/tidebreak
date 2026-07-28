@@ -230,6 +230,10 @@ export type ToolResultPreview =
       stderr: string;
     }
   | {
+      /** Web search is available after the reader configures a provider. */
+      tool: "web_search_provider_required";
+    }
+  | {
       /** A reference to an MCP Apps view — never markup. The document is
        * fetched separately and rendered only inside the sandboxed frame. */
       tool: "mcp_app";
@@ -1371,6 +1375,9 @@ export function parseToolResultPreview(
 ): ToolResultPreview | null {
   if (value === undefined || value === null) return null;
   if (!isRecord(value)) return null;
+  if (value.tool === "web_search_provider_required") {
+    return { tool: "web_search_provider_required" };
+  }
   if (value.tool === "mcp_app") {
     const { server, resource_uri }: UncheckedMcpAppResult = value;
     if (

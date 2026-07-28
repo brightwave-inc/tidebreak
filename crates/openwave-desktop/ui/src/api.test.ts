@@ -772,7 +772,13 @@ describe("sandbox agent cancellation", () => {
   });
 });
 
-describe("parseToolResultPreview mcp_app references", () => {
+describe("parseToolResultPreview closed results", () => {
+  it("accepts only the closed web-search setup signal", () => {
+    expect(
+      parseToolResultPreview({ tool: "web_search_provider_required" }),
+    ).toEqual({ tool: "web_search_provider_required" });
+  });
+
   it("accepts a validated reference and remaps it to the app shape", () => {
     expect(
       parseToolResultPreview({

@@ -768,6 +768,10 @@ fn tool_activity_from_call(call: ToolCallRecord) -> ChatToolActivitySnapshot {
     ChatToolActivitySnapshot {
         tool: crate::RendererToolName::from(call.name.as_str()),
         action: crate::preview::ToolActionPreview::build(&call.name, &call.arguments),
+        result: crate::preview::ToolResultPreview::from_stored_error(
+            &call.name,
+            call.error_code.as_deref(),
+        ),
         background_agent_run_id: (call.name == crate::agent_tools::SPAWN_SANDBOX_AGENT_TOOL)
             .then(|| crate::AgentRunId::sandbox_for_spawn_call(call.id)),
         status,

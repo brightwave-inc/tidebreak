@@ -167,6 +167,9 @@ pub enum ToolResultPreview {
         stdout: String,
         stderr: String,
     },
+    /// Web search is available after the reader chooses and configures a
+    /// provider. Carries no model- or provider-authored text.
+    WebSearchProviderRequired,
     /// An external MCP tool that declared an MCP Apps view for its results.
     ///
     /// This is a *reference*, never markup: the renderer asks the server for
@@ -185,12 +188,18 @@ pub enum ToolResultPreview {
 impl ToolResultPreview {
     /// Project the result of a call from the tool's own output.
     ///
-    /// A tool opts in by putting the enumerated fields in
-    /// [`ToolOutput::data`], or — for an external MCP tool — by carrying the
-    /// host-side [`ToolOutput::ui_view`] declaration. Everything else the
-    /// output carries stays behind the boundary.
+    /// A tool opts in through an enumerated error category, by putting the
+    /// enumerated fields in [`ToolOutput::data`], or — for an external MCP
+    /// tool — by carrying the host-side [`ToolOutput::ui_view`] declaration.
+    /// Everything else the output carries stays behind the boundary.
     #[must_use]
     pub fn build(tool_name: &str, output: &ToolOutput) -> Option<Self> {
+        if output.is_error
+            && output.error_category == Some(crate::ToolErrorCategory::ConfigurationRequired)
+            && tool_name == crate::WEB_SEARCH_TOOL
+        {
+            return Some(Self::WebSearchProviderRequired);
+        }
         match tool_name {
             "exec" => {
                 let data = output.data.as_ref()?;
@@ -231,11 +240,28 @@ impl ToolResultPreview {
         }
     }
 
+    /// Rebuild a closed result from the stable failure code stored on a
+    /// terminal tool-call row.
+    ///
+    /// Arbitrary result text stays behind the renderer boundary. Only an exact
+    /// enumerated category for a known tool can recover a result here.
+    #[must_use]
+    pub fn from_stored_error(tool_name: &str, error_code: Option<&str>) -> Option<Self> {
+        if error_code == Some(crate::ToolErrorCategory::ConfigurationRequired.as_str())
+            && tool_name == crate::WEB_SEARCH_TOOL
+        {
+            Some(Self::WebSearchProviderRequired)
+        } else {
+            None
+        }
+    }
+
     /// Whether this result has any captured output to show.
     #[must_use]
     pub fn has_output(&self) -> bool {
         match self {
             Self::Exec { stdout, stderr, .. } => !stdout.is_empty() || !stderr.is_empty(),
+            Self::WebSearchProviderRequired => true,
             Self::McpApp { .. } => true,
         }
     }
@@ -550,6 +576,36 @@ mod tests {
         .unwrap();
         assert!(!json.contains("200"));
         assert!(!json.contains("done"));
+    }
+
+    #[test]
+    fn an_unconfigured_web_search_projects_only_a_typed_setup_signal() {
+        let output = crate::ToolOutput::failed(
+            crate::ToolErrorCategory::ConfigurationRequired,
+            "private diagnostic that must not cross",
+        );
+        let result = ToolResultPreview::build(crate::WEB_SEARCH_TOOL, &output);
+        assert_eq!(result, Some(ToolResultPreview::WebSearchProviderRequired));
+        assert_eq!(
+            serde_json::to_value(result.unwrap()).unwrap(),
+            serde_json::json!({"tool": "web_search_provider_required"})
+        );
+
+        assert_eq!(
+            ToolResultPreview::from_stored_error(
+                crate::WEB_SEARCH_TOOL,
+                Some(crate::ToolErrorCategory::ConfigurationRequired.as_str()),
+            ),
+            Some(ToolResultPreview::WebSearchProviderRequired)
+        );
+        assert_eq!(
+            ToolResultPreview::from_stored_error("exec", Some("configuration_required")),
+            None
+        );
+        assert_eq!(
+            ToolResultPreview::from_stored_error(crate::WEB_SEARCH_TOOL, Some("tool_failed")),
+            None
+        );
     }
 
     #[test]

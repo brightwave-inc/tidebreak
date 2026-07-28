@@ -807,6 +807,48 @@ async fn transcript_tool_activity_is_allowlisted_and_redacts_canonical_tool_data
         openwave_core::ResolveToolCallOutcome::Resolved
     );
 
+    // A known, actionable failure may retain only its closed renderer signal.
+    // Its model-facing result and durable error code still stay server-side.
+    let configuration_call_id = CallId::new();
+    let configuration_private_result = "private host configuration detail";
+    store
+        .accept_tool_call(&ToolCallRecord {
+            id: configuration_call_id,
+            chat_id: chat.id,
+            turn_id: turn.id,
+            provider_id: "provider-web-search".into(),
+            name: openwave_core::WEB_SEARCH_TOOL.into(),
+            arguments: serde_json::json!({"query": "private web query"}),
+            execution: ToolCallExecution::Server,
+            status: ToolCallStatus::Pending,
+            result: None,
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
+            created_at: started_at + chrono::Duration::milliseconds(4),
+            resolved_at: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .resolve_server_tool_call(
+                configuration_call_id,
+                &ToolCallResolution::Failed {
+                    result: configuration_private_result.into(),
+                    error_code: openwave_core::ToolErrorCategory::ConfigurationRequired
+                        .as_str()
+                        .into(),
+                    error_detail: None,
+                },
+                started_at + chrono::Duration::seconds(1),
+            )
+            .await
+            .unwrap(),
+        openwave_core::ResolveToolCallOutcome::Resolved
+    );
+
     // An approval-in-flight call must stay on the event journal. Including it
     // in this durable snapshot could race its corresponding live event.
     store
@@ -891,12 +933,13 @@ async fn transcript_tool_activity_is_allowlisted_and_redacts_canonical_tool_data
         "/private/ignored",
         "declined by the user",
         "pending secret query",
+        configuration_private_result,
+        "configuration_required",
         "private_error_code",
         "private diagnostic detail",
         call_id_text.as_str(),
         "mcp__private_server__read_sensitive_path",
         "arguments",
-        "result",
         "provider_id",
         "execution",
         "error_code",
@@ -911,7 +954,7 @@ async fn transcript_tool_activity_is_allowlisted_and_redacts_canonical_tool_data
     }
     let transcript: serde_json::Value = serde_json::from_str(&body).unwrap();
     let activity = transcript["tool_activity"].as_array().unwrap();
-    assert_eq!(activity.len(), 3);
+    assert_eq!(activity.len(), 4);
     assert!(activity.iter().any(|card| {
         card["tool"] == "other"
             && card["status"] == "failed"
@@ -927,6 +970,11 @@ async fn transcript_tool_activity_is_allowlisted_and_redacts_canonical_tool_data
                 == serde_json::json!(openwave_core::AgentRunId::sandbox_for_spawn_call(
                     spawn_call_id
                 ))
+    }));
+    assert!(activity.iter().any(|card| {
+        card["tool"] == "web_search"
+            && card["status"] == "failed"
+            && card["result"] == serde_json::json!({"tool": "web_search_provider_required"})
     }));
 }
 

@@ -55,6 +55,31 @@ describe("terminal transcript presentation", () => {
     ]);
   });
 
+  it("retains an actionable web-search setup result after terminal hydration", () => {
+    const presented = presentChatTranscript({
+      messages: [],
+      tool_activity: [
+        {
+          tool: "web_search",
+          result: { tool: "web_search_provider_required" },
+          status: "failed",
+          started_at: "2026-07-27T12:00:00Z",
+          finished_at: "2026-07-27T12:00:01Z",
+        },
+      ],
+      last_event_seq: 4,
+    });
+
+    expect(presented.messages).toEqual([
+      expect.objectContaining({
+        role: "tool",
+        name: "web_search",
+        status: "failed",
+        result: { tool: "web_search_provider_required" },
+      }),
+    ]);
+  });
+
   it("replaces optimistic text with authoritative content and sources", async () => {
     const listChatMessages = vi.fn(async () => transcript);
     const presented = await loadCurrentTerminalTranscript(

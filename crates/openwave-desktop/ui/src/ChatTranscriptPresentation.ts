@@ -41,6 +41,7 @@ export function presentChatTranscript(
             backgroundAgentRunId: entry.backgroundAgentRunId,
             status: entry.status,
             preview: entry.preview,
+            result: entry.result,
           } satisfies ChatMessage,
         ];
       }
