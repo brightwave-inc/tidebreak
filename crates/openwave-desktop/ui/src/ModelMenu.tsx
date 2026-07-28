@@ -47,6 +47,26 @@ function groupByProvider(
 }
 
 /**
+ * The groups the composer picker actually shows: providers with at least one
+ * model that can run, plus — whatever its availability — the group holding the
+ * current selection, so an active override never vanishes from the menu that
+ * set it. A provider with nothing usable renders as no group at all rather
+ * than a run of disabled rows; discovery of the full registry belongs to the
+ * settings Models surface, not here.
+ */
+export function visibleModelGroups(
+  models: readonly ModelInfo[],
+  selectedKey: string | null,
+): { provider: ProviderKind; models: ModelInfo[] }[] {
+  return groupByProvider(models).filter(
+    (group) =>
+      group.models.some((model) => model.available) ||
+      (selectedKey !== null &&
+        group.models.some((model) => model.key === selectedKey)),
+  );
+}
+
+/**
  * The row that reads as a mode rather than another model.
  *
  * A picker that offers "default" as one more entry never says what picking it
@@ -179,7 +199,7 @@ export function ModelMenu({
             }}
           />
 
-          {groupByProvider(models).map((group) => (
+          {visibleModelGroups(models, canonical).map((group) => (
             <div key={group.provider}>
               <DropdownMenuSeparator />
               {group.models.map((model) => {

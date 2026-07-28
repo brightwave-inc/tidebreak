@@ -1,6 +1,11 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ModelMenu, ReasoningEffortMenu, reasoningEffortOptions } from "./ModelMenu";
+import {
+  ModelMenu,
+  ReasoningEffortMenu,
+  reasoningEffortOptions,
+  visibleModelGroups,
+} from "./ModelMenu";
 import { ProviderIcon } from "./ProviderIcons";
 import type { ModelInfo } from "./api";
 
@@ -72,6 +77,44 @@ describe("ModelMenu", () => {
       <ModelMenu models={MODELS} value={null} disabled onChange={() => {}} />,
     );
     expect(markup).toContain("disabled");
+  });
+});
+
+describe("visibleModelGroups", () => {
+  const withAvailability = (available: {
+    anthropic: boolean;
+    openai: boolean;
+  }): ModelInfo[] =>
+    MODELS.map((model) => ({
+      ...model,
+      available: available[model.provider as "anthropic" | "openai"],
+    }));
+
+  it("hides a provider whose models are all unavailable", () => {
+    const groups = visibleModelGroups(
+      withAvailability({ anthropic: true, openai: false }),
+      null,
+    );
+    expect(groups.map((group) => group.provider)).toEqual(["anthropic"]);
+  });
+
+  it("keeps the group holding the current selection even when unavailable", () => {
+    const groups = visibleModelGroups(
+      withAvailability({ anthropic: true, openai: false }),
+      "openai::gpt-4o",
+    );
+    expect(groups.map((group) => group.provider)).toEqual(["anthropic", "openai"]);
+  });
+
+  it("keeps a partially available provider intact", () => {
+    const models = withAvailability({ anthropic: true, openai: true }).map(
+      (model, index) => ({ ...model, available: index === 0 }),
+    );
+    const anthropic = visibleModelGroups(
+      [...models, { ...models[0], key: "anthropic::claude-haiku", id: "claude-haiku", available: false }],
+      null,
+    ).find((group) => group.provider === "anthropic");
+    expect(anthropic?.models).toHaveLength(2);
   });
 });
 
