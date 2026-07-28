@@ -1015,6 +1015,10 @@ pub mod tool_call {
         pub execution: String,
         pub status: String,
         pub result: Option<String>,
+        /// The closed renderer projection of what this call produced, as it
+        /// crossed the boundary live. `None` for a call that projected none.
+        #[sea_orm(column_type = "JsonBinary", nullable)]
+        pub result_preview: Option<Json>,
         pub error_code: Option<String>,
         pub error_detail: Option<String>,
         pub approval_status: Option<String>,

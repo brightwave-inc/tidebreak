@@ -33,7 +33,58 @@ impl MigratorTrait for Migrator {
             Box::new(AddStandingToolGrants),
             Box::new(AddContextCheckpointUsage),
             Box::new(AddAgentRunModel),
+            Box::new(AddToolResultPreviews),
         ]
+    }
+}
+
+/// Retains the renderer projection of what a tool call produced.
+///
+/// Terminal activity was rebuilt from the stored failure code alone, which
+/// recovers one enumerated setup signal and nothing else — so reopening a chat
+/// lost every result card, including a command's own output. The projection is
+/// already closed and clamped when it is built, so what lands here is exactly
+/// what crossed the boundary live and nothing more.
+///
+/// Deliberately the *projected* form rather than the tool output it was built
+/// from. Brightwave persists the internal result and projects on read, which
+/// lets the projection change without a migration; that trade needs a boundary
+/// that keeps arbitrary tool data out on the way *out*, and ours keeps it out
+/// on the way *in*. Storing only what already crossed means a later bug in the
+/// read path has nothing to leak.
+///
+/// Nullable because every call resolved before this migration has no projection
+/// to recover, and because most calls never project one at all.
+struct AddToolResultPreviews;
+
+impl MigrationName for AddToolResultPreviews {
+    fn name(&self) -> &str {
+        "m20260728_000020_add_tool_result_previews"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddToolResultPreviews {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(ToolCall::Table)
+                    .add_column(ColumnDef::new(ToolCall::ResultPreview).json_binary())
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(ToolCall::Table)
+                    .drop_column(ToolCall::ResultPreview)
+                    .to_owned(),
+            )
+            .await
     }
 }
 
@@ -6565,6 +6616,7 @@ enum ToolCall {
     Execution,
     Status,
     Result,
+    ResultPreview,
     ErrorCode,
     ErrorDetail,
     ApprovalStatus,

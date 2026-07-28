@@ -176,6 +176,17 @@ pub struct ChatToolActivitySnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub result: Option<crate::preview::ToolResultPreview>,
+    /// Set when this call retained a projection that no longer deserializes.
+    ///
+    /// The projection is a closed union that is allowed to move, and rows
+    /// written before a change may no longer parse against it. Distinguishing
+    /// that from "this call projected nothing" is the difference between a card
+    /// that says its result can no longer be shown and one that silently
+    /// vanishes — which would read as the call never having produced anything.
+    ///
+    /// A property of reading storage, not of the result: the live stream builds
+    /// its projection in memory and can never set this.
+    pub result_unreadable: bool,
     // Present only for the fixed `spawn_sandbox_agent` renderer tool. It lets
     // the transcript attach the durable child status without exposing a
     // canonical tool record, delegated task, or executor identity.
@@ -2610,6 +2621,26 @@ pub trait Store: Send + Sync {
             .await
     }
 
+    /// Resolve a server call, retaining its evidence and the renderer
+    /// projection of what it produced.
+    ///
+    /// Separate from [`Self::resolve_server_tool_call_with_evidence`] rather
+    /// than replacing it: most callers resolve a call that projects nothing,
+    /// and a store that cannot retain a projection should still resolve. The
+    /// default drops the projection, which costs the card on reload and
+    /// nothing else.
+    async fn resolve_server_tool_call_with_artifacts(
+        &self,
+        id: CallId,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+        evidence: &[crate::RetrievalEvidenceInput],
+        _preview: Option<&crate::ToolResultPreview>,
+    ) -> Result<ResolveToolCallOutcome> {
+        self.resolve_server_tool_call_with_evidence(id, resolution, resolved_at, evidence)
+            .await
+    }
+
     /// Resolve a server tool result and retain its evidence only if the same
     /// live turn lease that accepted the call still owns the turn. The result,
     /// evidence, and lease comparison commit atomically.
@@ -2626,6 +2657,34 @@ pub trait Store: Send + Sync {
         _evidence: &[crate::RetrievalEvidenceInput],
     ) -> Result<ResolveToolCallOutcome> {
         turn_storage_unavailable()
+    }
+
+    /// The claimed-lease counterpart of
+    /// [`Self::resolve_server_tool_call_with_artifacts`].
+    #[allow(clippy::too_many_arguments)]
+    async fn resolve_claimed_server_tool_call_with_artifacts(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        turn_id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+        evidence: &[crate::RetrievalEvidenceInput],
+        _preview: Option<&crate::ToolResultPreview>,
+    ) -> Result<ResolveToolCallOutcome> {
+        self.resolve_claimed_server_tool_call_with_evidence(
+            id,
+            chat_id,
+            turn_id,
+            lease_token,
+            now,
+            resolution,
+            resolved_at,
+            evidence,
+        )
+        .await
     }
 
     /// Resolve a pending server call recovered at worker startup without

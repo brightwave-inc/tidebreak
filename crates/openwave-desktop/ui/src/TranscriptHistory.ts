@@ -91,6 +91,10 @@ export function hydrateTranscriptHistory(
       // Arbitrary result text stays server-side. A tool can retain only a
       // closed renderer result such as an actionable configuration signal.
       result: parseToolResultPreview(activity.result),
+      // A projection the server retained but this build cannot read is a
+      // different fact from a call that projected nothing, and the card says so
+      // rather than silently showing no result at all.
+      resultUnreadable: activity.result_unreadable,
       createdAt: activity.started_at,
     })),
   ];

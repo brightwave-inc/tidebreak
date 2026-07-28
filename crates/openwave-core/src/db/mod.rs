@@ -2760,6 +2760,54 @@ impl Store for DbStore {
             resolution,
             resolved_at,
             evidence,
+            None,
+        )
+        .await
+    }
+
+    async fn resolve_server_tool_call_with_artifacts(
+        &self,
+        id: CallId,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<Utc>,
+        evidence: &[crate::RetrievalEvidenceInput],
+        preview: Option<&crate::ToolResultPreview>,
+    ) -> Result<ResolveToolCallOutcome> {
+        ops::client_execution::resolve_server_tool_call_with_evidence(
+            self,
+            id,
+            resolution,
+            resolved_at,
+            evidence,
+            preview,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn resolve_claimed_server_tool_call_with_artifacts(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        turn_id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<Utc>,
+        evidence: &[crate::RetrievalEvidenceInput],
+        preview: Option<&crate::ToolResultPreview>,
+    ) -> Result<ResolveToolCallOutcome> {
+        ops::client_execution::resolve_claimed_server_tool_call_with_evidence(
+            self,
+            id,
+            chat_id,
+            turn_id,
+            lease_token,
+            now,
+            resolution,
+            resolved_at,
+            evidence,
+            preview,
         )
         .await
     }
@@ -2786,6 +2834,7 @@ impl Store for DbStore {
             resolution,
             resolved_at,
             evidence,
+            None,
         )
         .await
     }

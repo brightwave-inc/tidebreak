@@ -74,6 +74,8 @@ export type ChatMessage =
       preview?: ToolActionPreview | null;
       /** What the call produced, once it has produced anything. */
       result?: ToolResultPreview | null;
+      /** Set when a retained projection no longer parses against this build. */
+      resultUnreadable?: boolean;
     }
   | {
       id: string;
@@ -524,6 +526,21 @@ function surfacedCards(
       continue;
     }
     if (entry.role !== "tool") continue;
+    // A call whose retained projection this build can no longer read. Saying so
+    // beats rendering nothing: the alternative reads as a call that produced
+    // no result, which is a different and untrue claim.
+    if (entry.resultUnreadable && !parked.has(entry.callId)) {
+      cards.push(
+        <p
+          key={entry.id}
+          className="text-muted-foreground bg-muted max-w-prose rounded-md px-3 py-2 text-xs"
+          role="status"
+        >
+          This tool completed, but its result can no longer be displayed.
+        </p>,
+      );
+      continue;
+    }
     if (
       entry.result?.tool === "web_search_provider_required" &&
       !parked.has(entry.callId)

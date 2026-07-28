@@ -1873,11 +1873,12 @@ impl Agent {
                 (self.run_tool(chat, turn_id, call, events, None).await, true)
             }
         };
+        let preview = ToolResultPreview::build(&call.name, &output);
         events.send(AgentEvent::ToolCallCompleted {
             call_id: call.call_id,
             output: self.tool_output_for_event(&output, call.call_id),
             action: call_action_preview(call),
-            result: ToolResultPreview::build(&call.name, &output),
+            result: preview.clone(),
         });
         if needs_resolution {
             let resolution = if output.is_error {
@@ -1902,6 +1903,7 @@ impl Agent {
                     call.call_id,
                     &resolution,
                     &output.private_evidence,
+                    preview.as_ref(),
                 )
                 .await?;
             if !matches!(
@@ -2213,18 +2215,25 @@ impl Agent {
         call_id: CallId,
         resolution: &ToolCallResolution,
         evidence: &[crate::RetrievalEvidenceInput],
+        preview: Option<&ToolResultPreview>,
     ) -> Result<ResolveToolCallOutcome> {
         let resolved_at = Utc::now();
         let Some(lease_token) = self.durable_steer_lease else {
             return self
                 .store
-                .resolve_server_tool_call_with_evidence(call_id, resolution, resolved_at, evidence)
+                .resolve_server_tool_call_with_artifacts(
+                    call_id,
+                    resolution,
+                    resolved_at,
+                    evidence,
+                    preview,
+                )
                 .await;
         };
         loop {
             match self
                 .store
-                .resolve_claimed_server_tool_call_with_evidence(
+                .resolve_claimed_server_tool_call_with_artifacts(
                     call_id,
                     chat_id,
                     turn_id,
@@ -2233,6 +2242,7 @@ impl Agent {
                     resolution,
                     resolved_at,
                     evidence,
+                    preview,
                 )
                 .await
             {
