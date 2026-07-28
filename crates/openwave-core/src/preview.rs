@@ -244,6 +244,13 @@ pub struct ResultFailure {
     /// provider-authored text and private diagnostics, and this is a message
     /// our own tool wrote for a person to act on. Clamped like every other
     /// field; a failure nobody can read is not a report.
+    ///
+    /// "Our own tool wrote" is the load-bearing part, and it is a habit rather
+    /// than something the type can enforce. Write the sentence — "file is not
+    /// valid UTF-8" — instead of forwarding a `std::io::Error`, a broker
+    /// failure, or any other error whose `Display` you do not control. Those
+    /// interpolate whatever they were handed, which is how a host path ends up
+    /// on a card nobody meant to put it on.
     pub error: String,
 }
 
