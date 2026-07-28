@@ -15,7 +15,21 @@ type Decoded<F extends FileDownloadFormat> = F extends "text"
 type StoredFile = { bytes: Uint8Array; contentType: string | null };
 
 /**
- * Source documents' original bytes, held for the life of the process.
+ * How many bytes of source documents may be held at once.
+ *
+ * The budget is on total bytes rather than on entries because the cost being
+ * bounded is memory: a cap of "ten documents" treats a 12 MB workbook and a
+ * 4 KB note as the same thing. A source cannot exceed 16 MB — the import limit
+ * both the server and the renderer enforce — so 64 MB holds four of the largest
+ * files a reader can open, or dozens of ordinary ones. That is generous for an
+ * access pattern of "the source I am reading, and the one before it", while
+ * still being small next to what a desktop renderer already occupies, and it no
+ * longer grows with the length of the session.
+ */
+const MAX_CACHED_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Source documents' original bytes, held across viewer mounts.
  *
  * A document's content is immutable once imported — replacing a file produces a
  * new document with a new id — so a cache hit can never be stale. It earns its
@@ -23,11 +37,67 @@ type StoredFile = { bytes: Uint8Array; contentType: string | null };
  * between the original and the extracted text: without the cache, every flip
  * back re-downloads the whole file and redraws from a spinner.
  *
- * Nothing is evicted, so a long session that opens many large sources holds
- * them all. That was already true of the workbook and PDF viewers, which cached
- * the biggest files of the seven.
+ * Eviction is least-recently-*read*, not least-recently-inserted: the document a
+ * reader keeps flipping back to is the one worth keeping, however long ago it
+ * was downloaded.
  */
-const byteCache = new Map<string, StoredFile>();
+export type ByteCache = {
+  get(key: string): StoredFile | undefined;
+  set(key: string, file: StoredFile): void;
+  clear(): void;
+};
+
+/**
+ * A byte cache bounded to `budgetBytes`, evicting least-recently-read first.
+ *
+ * Exported so the eviction policy can be exercised against a budget small
+ * enough to test; the hook uses the one below.
+ */
+export function createByteCache(budgetBytes: number): ByteCache {
+  // A Map iterates in insertion order, so re-inserting on every read leaves the
+  // first key as the least recently read one.
+  const entries = new Map<string, StoredFile>();
+  let heldBytes = 0;
+
+  return {
+    get(key) {
+      const file = entries.get(key);
+      if (!file) return undefined;
+      entries.delete(key);
+      entries.set(key, file);
+      return file;
+    },
+
+    set(key, file) {
+      const previous = entries.get(key);
+      if (previous) {
+        entries.delete(key);
+        heldBytes -= previous.bytes.byteLength;
+      }
+      // A file larger than the whole budget is not admitted. Taking it would
+      // mean evicting every other entry and still not fitting, so the reader
+      // would lose a working set they are using to make room for something the
+      // cache cannot keep anyway. Such a source re-downloads on each flip.
+      if (file.bytes.byteLength > budgetBytes) return;
+
+      entries.set(key, file);
+      heldBytes += file.bytes.byteLength;
+      // The new entry fits on its own, so this always stops before reaching it.
+      for (const [oldest, evicted] of entries) {
+        if (heldBytes <= budgetBytes) break;
+        entries.delete(oldest);
+        heldBytes -= evicted.bytes.byteLength;
+      }
+    },
+
+    clear() {
+      entries.clear();
+      heldBytes = 0;
+    },
+  };
+}
+
+const byteCache = createByteCache(MAX_CACHED_BYTES);
 
 /** Drop the cache so one test's bytes cannot answer another's download. */
 export function clearFileDownloadCache(): void {
@@ -73,7 +143,7 @@ export function useFileDownload<F extends FileDownloadFormat>(
     () => byteCache.get(key) ?? null,
   );
   const [error, setError] = useState<Error | null>(null);
-  const [isLoading, setIsLoading] = useState(!byteCache.has(key));
+  const [isLoading, setIsLoading] = useState(file === null);
   const [progress, setProgress] = useState<FileDownloadProgress | null>(null);
   const requestRef = useRef(0);
 
