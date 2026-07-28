@@ -178,6 +178,8 @@ pub fn run() {
             documents::import_dropped_library_documents,
             documents::list_library_documents,
             documents::search_library_documents,
+            documents::delete_library_document,
+            documents::retry_library_document,
             image_attachments::attach_chat_image,
             deliverables::list_deliverables,
             deliverables::read_deliverable,

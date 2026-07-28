@@ -11,10 +11,17 @@ export type LibraryDocument = {
   documentId: string;
   title: string | null;
   mediaType: string;
+  sizeBytes: number | null;
   processingStatus: DocumentProcessingStatus;
   /** Whether searching this conversation can actually match this source. */
   searchable: boolean;
+  failure: LibraryDocumentFailure | null;
   updatedAt: string;
+};
+
+export type LibraryDocumentFailure = {
+  message: string;
+  retriable: boolean;
 };
 
 export type ImportedDocument = {
@@ -67,6 +74,20 @@ export async function listLibraryDocuments(chatId: string): Promise<LibraryCatal
   return parseLibraryCatalog(
     await invoke("list_library_documents", { request: { chatId } }),
   );
+}
+
+export async function deleteLibraryDocument(
+  chatId: string,
+  documentId: string,
+): Promise<void> {
+  await invoke("delete_library_document", { request: { chatId, documentId } });
+}
+
+export async function retryLibraryDocument(
+  chatId: string,
+  documentId: string,
+): Promise<void> {
+  await invoke("retry_library_document", { request: { chatId, documentId } });
 }
 
 export async function importLibraryDocument(
@@ -260,8 +281,10 @@ function parseLibraryDocument(value: unknown): LibraryDocument {
       "documentId",
       "title",
       "mediaType",
+      "sizeBytes",
       "processingStatus",
       "searchable",
+      "failure",
       "updatedAt",
     ])
   ) {
@@ -275,8 +298,15 @@ function parseLibraryDocument(value: unknown): LibraryDocument {
     typeof value.mediaType !== "string" ||
     value.mediaType.length === 0 ||
     value.mediaType.length > 255 ||
+    (value.sizeBytes !== null &&
+      (typeof value.sizeBytes !== "number" ||
+        !Number.isSafeInteger(value.sizeBytes) ||
+        value.sizeBytes < 1 ||
+        value.sizeBytes > MAX_SOURCE_BYTES)) ||
     !isProcessingStatus(value.processingStatus) ||
     typeof value.searchable !== "boolean" ||
+    !isLibraryDocumentFailure(value.failure) ||
+    (value.processingStatus === "failed") !== (value.failure !== null) ||
     typeof value.updatedAt !== "string" ||
     !Number.isFinite(Date.parse(value.updatedAt))
   ) {
@@ -286,10 +316,25 @@ function parseLibraryDocument(value: unknown): LibraryDocument {
     documentId: value.documentId,
     title: value.title,
     mediaType: value.mediaType,
+    sizeBytes: value.sizeBytes,
     processingStatus: value.processingStatus,
     searchable: value.searchable,
+    failure: value.failure,
     updatedAt: value.updatedAt,
   };
+}
+
+function isLibraryDocumentFailure(
+  value: unknown,
+): value is LibraryDocumentFailure | null {
+  if (value === null) return true;
+  return (
+    isExactRecord(value, ["message", "retriable"]) &&
+    typeof value.message === "string" &&
+    value.message.length > 0 &&
+    isSafeRendererText(value.message, 500, false) &&
+    typeof value.retriable === "boolean"
+  );
 }
 
 function isProcessingStatus(value: unknown): value is DocumentProcessingStatus {
@@ -325,6 +370,7 @@ function isSafeRendererText(
 }
 
 const DISALLOWED_RENDERER_CATEGORY = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+const MAX_SOURCE_BYTES = 16 * 1024 * 1024;
 
 function isExactRecord(
   value: unknown,

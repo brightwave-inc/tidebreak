@@ -55,8 +55,10 @@ describe("document library renderer projections", () => {
             documentId,
             title: "notes.md",
             mediaType: "text/markdown",
+            sizeBytes: 1_024,
             processingStatus: "processing",
             searchable: false,
+            failure: null,
             updatedAt: "2026-07-18T12:00:00Z",
           },
         ],
@@ -93,8 +95,10 @@ describe("document library renderer projections", () => {
           documentId,
           title: "scan.pdf",
           mediaType: "application/pdf",
+          sizeBytes: 2_048,
           processingStatus: "ready",
           searchable: false,
+          failure: null,
           updatedAt: "2026-07-18T12:00:00Z",
         },
       ],
@@ -111,8 +115,54 @@ describe("document library renderer projections", () => {
             documentId,
             title: "scan.pdf",
             mediaType: "application/pdf",
+            sizeBytes: 2_048,
             processingStatus: "ready",
+            failure: null,
             updatedAt: "2026-07-18T12:00:00Z",
+          },
+        ],
+        truncated: false,
+      }),
+    ).toThrow("Invalid document library response");
+  });
+
+  it("accepts only bounded renderer-safe failures tied to failed state", () => {
+    const failed = {
+      documentId,
+      title: "report.pdf",
+      mediaType: "application/pdf",
+      sizeBytes: 4_096,
+      processingStatus: "failed",
+      searchable: false,
+      failure: {
+        message: "The local search index was unavailable. Retry preparing this source.",
+        retriable: true,
+      },
+      updatedAt: "2026-07-18T12:00:00Z",
+    };
+    expect(
+      parseLibraryCatalog({ documents: [failed], truncated: false }).documents[0]
+        ?.failure?.retriable,
+    ).toBe(true);
+
+    expect(() =>
+      parseLibraryCatalog({
+        documents: [{ ...failed, processingStatus: "ready" }],
+        truncated: false,
+      }),
+    ).toThrow("Invalid document library response");
+    expect(() =>
+      parseLibraryCatalog({
+        documents: [{ ...failed, failure: null }],
+        truncated: false,
+      }),
+    ).toThrow("Invalid document library response");
+    expect(() =>
+      parseLibraryCatalog({
+        documents: [
+          {
+            ...failed,
+            failure: { message: `unsafe\u202e`, retriable: true },
           },
         ],
         truncated: false,
@@ -137,8 +187,10 @@ describe("document library renderer projections", () => {
               documentId,
               title: "notes.md",
               mediaType: "text/markdown",
+              sizeBytes: 42,
               processingStatus: "ready",
               searchable: true,
+              failure: null,
               updatedAt: "2026-07-18T12:00:00Z",
               [field]: "private",
             },
