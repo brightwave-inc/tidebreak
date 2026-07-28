@@ -117,7 +117,7 @@ async fn authorize(
     State(gateway): State<Arc<FakeGateway>>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
-    if query.get("client_id").map(String::as_str) != Some("modelctl")
+    if query.get("client_id").map(String::as_str) != Some("openwave")
         || query.get("code_challenge_method").map(String::as_str) != Some("S256")
         || query.get("response_type").map(String::as_str) != Some("code")
     {
@@ -157,7 +157,7 @@ async fn token(
             let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
             if challenge != pending.challenge
                 || form.get("redirect_uri") != Some(&pending.redirect_uri)
-                || form.get("client_id").map(String::as_str) != Some("modelctl")
+                || form.get("client_id").map(String::as_str) != Some("openwave")
             {
                 return invalid_grant();
             }
@@ -221,7 +221,7 @@ async fn me(State(gateway): State<Arc<FakeGateway>>, headers: HeaderMap) -> Resp
         "user_id": USER,
         "email": "abaas@example.test",
         "display_name": "Abaas",
-        "client_name": "modelctl",
+        "client_name": "openwave",
         "session_id": SESSION,
         "installation_id": INSTALLATION,
     }))
@@ -272,8 +272,7 @@ async fn signed_in_connection() -> (Arc<FakeGateway>, GatewayConnection) {
     let gateway = Arc::new(FakeGateway::default());
     let address = serve_fake_gateway(gateway.clone()).await;
     let auth =
-        GatewayAuth::new(GatewayAuthConfig::modelctl_compat(&format!("http://{address}")).unwrap())
-            .unwrap();
+        GatewayAuth::new(GatewayAuthConfig::new(&format!("http://{address}")).unwrap()).unwrap();
 
     let pending = auth.start_sign_in().await.unwrap();
     let url = pending.authorization_url().to_string();
@@ -292,13 +291,12 @@ async fn full_sign_in_flow_verifies_pkce_installation_and_identity() {
     let gateway = Arc::new(FakeGateway::default());
     let address = serve_fake_gateway(gateway.clone()).await;
     let auth =
-        GatewayAuth::new(GatewayAuthConfig::modelctl_compat(&format!("http://{address}")).unwrap())
-            .unwrap();
+        GatewayAuth::new(GatewayAuthConfig::new(&format!("http://{address}")).unwrap()).unwrap();
 
     let pending = auth.start_sign_in().await.unwrap();
     assert_eq!(pending.meta().installation_id, INSTALLATION);
     let url = pending.authorization_url().to_string();
-    assert!(url.contains("client_id=modelctl"));
+    assert!(url.contains("client_id=openwave"));
     assert!(url.contains("code_challenge_method=S256"));
     assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A"));
 
@@ -351,8 +349,7 @@ async fn a_stale_refresh_token_reads_as_signed_out() {
     // …then simulate a vault that missed the rotation.
     let vault = CredentialVault::new(Arc::new(MockSecrets::default()));
     vault.save(&stale).await.unwrap();
-    let auth =
-        GatewayAuth::new(GatewayAuthConfig::modelctl_compat(&stale.base_url).unwrap()).unwrap();
+    let auth = GatewayAuth::new(GatewayAuthConfig::new(&stale.base_url).unwrap()).unwrap();
     let stale_connection = GatewayConnection::new(auth, vault);
 
     let error = stale_connection
@@ -368,8 +365,7 @@ async fn a_state_mismatch_never_reaches_the_token_endpoint() {
     gateway.corrupt_state.store(true, Ordering::SeqCst);
     let address = serve_fake_gateway(gateway.clone()).await;
     let auth =
-        GatewayAuth::new(GatewayAuthConfig::modelctl_compat(&format!("http://{address}")).unwrap())
-            .unwrap();
+        GatewayAuth::new(GatewayAuthConfig::new(&format!("http://{address}")).unwrap()).unwrap();
 
     let pending = auth.start_sign_in().await.unwrap();
     let url = pending.authorization_url().to_string();

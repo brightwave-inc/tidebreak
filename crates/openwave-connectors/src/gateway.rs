@@ -61,18 +61,10 @@ pub struct GatewayAuthConfig {
 }
 
 impl GatewayAuthConfig {
-    /// A first-class `openwave` client. Requires the gateway to know that
-    /// client id; use [`Self::modelctl_compat`] against deployments that
-    /// still hardcode `modelctl`.
+    /// The registered `openwave` public client: the gateway's client registry
+    /// names it on the consent page and attributes its sessions to OpenWave.
     pub fn new(base_url: &str) -> Result<Self> {
         Self::with_client(base_url, "openwave", None)
-    }
-
-    /// Development-only compatibility identity: authorize as `modelctl`,
-    /// leaving attribution to the gateway's default. Remove once the gateway
-    /// grows a client registry with an `openwave` entry.
-    pub fn modelctl_compat(base_url: &str) -> Result<Self> {
-        Self::with_client(base_url, "modelctl", None)
     }
 
     fn with_client(base_url: &str, client_id: &str, client_name: Option<String>) -> Result<Self> {
