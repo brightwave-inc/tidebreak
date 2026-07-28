@@ -1,6 +1,18 @@
 use openwave_core::{Chat, Config, KeychainSecretProvider};
 use openwave_server::bind;
 
+async fn serve_test_server() -> (std::net::SocketAddr, String, tempfile::TempDir) {
+    KeychainSecretProvider::use_mock();
+    let dir = tempfile::tempdir().unwrap();
+    let server = bind(Config::desktop(dir.path())).await.unwrap();
+    let addr = server.local_addr();
+    let token = server.token().to_string();
+    tokio::spawn(async move {
+        let _ = server.serve().await;
+    });
+    (addr, token, dir)
+}
+
 #[tokio::test]
 async fn bind_yields_a_loopback_addr_and_token() {
     KeychainSecretProvider::use_mock();
@@ -14,16 +26,7 @@ async fn bind_yields_a_loopback_addr_and_token() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn serve_answers_over_a_real_socket() {
-    KeychainSecretProvider::use_mock();
-    let dir = tempfile::tempdir().unwrap();
-    let server = bind(Config::desktop(dir.path())).await.unwrap();
-    let addr = server.local_addr();
-    let token = server.token().to_string();
-    // The listener is already bound, so connections queue immediately; drive
-    // the accept loop in the background for the duration of the test.
-    tokio::spawn(async move {
-        let _ = server.serve().await;
-    });
+    let (addr, token, _dir) = serve_test_server().await;
 
     let client = reqwest::Client::new();
     let health = client
@@ -89,6 +92,49 @@ async fn cors_preflight_allows_localhost_origin() {
                 .split(',')
                 .any(|header| header.trim().eq_ignore_ascii_case(expected)),
             "missing {expected} in {allow_headers}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn api_rejects_missing_and_wrong_tokens() {
+    let (addr, _token, _dir) = serve_test_server().await;
+    let client = reqwest::Client::new();
+
+    let missing = client
+        .get(format!("http://{addr}/chats"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let wrong = client
+        .get(format!("http://{addr}/chats"))
+        .bearer_auth("not-the-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retrieval_routes_require_a_token() {
+    let (addr, _token, _dir) = serve_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Both retrieval routes sit behind the bearer-token layer, not out in the
+    // open like /healthz — a request with no token is rejected before it runs.
+    for uri in ["/documents", "/search"] {
+        let response = client
+            .post(format!("http://{addr}{uri}"))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::UNAUTHORIZED,
+            "{uri} must require a token"
         );
     }
 }
