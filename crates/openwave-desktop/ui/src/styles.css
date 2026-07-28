@@ -525,9 +525,13 @@ body {
   padding: 1.1rem 1.25rem 3rem;
 }
 
+/* The panel slot the pane sits in is a plain block, so nothing stretches the
+   pane to the slot's height: without this the transcript — `flex: 1 1 0` —
+   resolves to nothing and the composer rides up over the messages. */
 .chat-pane {
   display: flex;
   flex-direction: column;
+  height: 100%;
   min-height: 0;
   min-width: 0;
   overflow: clip;
