@@ -55,6 +55,12 @@ pub(in crate::db) async fn save_context_checkpoint(
             return if existing.source_message_id == checkpoint.source_message_id.0
                 && existing.format_version == i32::from(checkpoint.format_version)
                 && existing.content == checkpoint.content
+                && existing.input_tokens == i64::from(checkpoint.usage.input_tokens)
+                && existing.output_tokens == i64::from(checkpoint.usage.output_tokens)
+                && existing.cache_read_input_tokens
+                    == i64::from(checkpoint.usage.cache_read_input_tokens)
+                && existing.cache_creation_input_tokens
+                    == i64::from(checkpoint.usage.cache_creation_input_tokens)
             {
                 Ok(SaveContextCheckpointOutcome::Existing(current))
             } else {
@@ -69,6 +75,10 @@ pub(in crate::db) async fn save_context_checkpoint(
         source_message_seq: Set(source.seq),
         format_version: Set(i32::from(checkpoint.format_version)),
         content: Set(checkpoint.content.clone()),
+        input_tokens: Set(i64::from(checkpoint.usage.input_tokens)),
+        output_tokens: Set(i64::from(checkpoint.usage.output_tokens)),
+        cache_read_input_tokens: Set(i64::from(checkpoint.usage.cache_read_input_tokens)),
+        cache_creation_input_tokens: Set(i64::from(checkpoint.usage.cache_creation_input_tokens)),
         created_at: Set(created_at),
     };
     if find_context_checkpoint_model_on(&transaction, checkpoint.chat_id)
@@ -138,8 +148,25 @@ fn context_checkpoint_from_model(
             AgentError::Store("stored context checkpoint format version is outside u16".into())
         })?,
         content: model.content,
+        usage: crate::provider::Usage {
+            input_tokens: checkpoint_tokens_from_db("input_tokens", model.input_tokens)?,
+            output_tokens: checkpoint_tokens_from_db("output_tokens", model.output_tokens)?,
+            cache_read_input_tokens: checkpoint_tokens_from_db(
+                "cache_read_input_tokens",
+                model.cache_read_input_tokens,
+            )?,
+            cache_creation_input_tokens: checkpoint_tokens_from_db(
+                "cache_creation_input_tokens",
+                model.cache_creation_input_tokens,
+            )?,
+        },
         created_at: model.created_at,
     };
     checkpoint.validate()?;
     Ok(checkpoint)
+}
+
+fn checkpoint_tokens_from_db(field: &str, value: i64) -> Result<u32> {
+    u32::try_from(value)
+        .map_err(|_| AgentError::Store(format!("stored context checkpoint {field} is outside u32")))
 }
