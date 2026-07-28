@@ -1842,7 +1842,7 @@ body {
      `@layer components`, which loses to the base `overflow-hidden` utility. */
   max-height: min(
     60vh,
-    calc(var(--radix-dropdown-menu-content-available-height) - 0.5rem)
+    calc(var(--radix-dropdown-menu-content-available-height, 100vh) - 0.5rem)
   );
   overflow-y: auto;
 }
