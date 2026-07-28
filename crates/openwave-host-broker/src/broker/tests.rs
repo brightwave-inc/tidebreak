@@ -1492,7 +1492,62 @@ fn failed_attachment_mutation_is_durable_and_cannot_widen_authority() {
             },
         )
         .unwrap(),
-        RootAttachmentMutationReceipt::Failed { error } if error == first
+        RootAttachmentMutationReceipt::Failed { error, currently_attached: false }
+            if error == first
+    ));
+}
+
+/// A rejected mutation changed nothing, but the broker still knows what it
+/// holds. Saying so is what lets a caller tell "nothing is attached" apart from
+/// "cannot say" — the product records that observation durably, and an
+/// unknowable one can never be settled afterwards.
+#[test]
+fn a_failed_mutation_reports_the_attachment_it_could_not_change() {
+    let (_temp, broker, path) = setup();
+    let conversation = Uuid::new_v4();
+    let owner = GrantSubject::project(Uuid::new_v4()).unwrap();
+    let registered = register(
+        &broker.controller(),
+        owner,
+        conversation,
+        path,
+        OperationId::new(),
+    );
+    let root_id = registered.root.root_id;
+
+    // The conversation itself holds no grant on this root, so detaching under
+    // that subject is denied while the attachment plainly still exists.
+    let ungranted = GrantSubject::conversation(conversation).unwrap();
+    let operation_id = OperationId::new();
+    assert_eq!(
+        mutate_attachment(
+            &broker.controller(),
+            operation_id,
+            ungranted,
+            conversation,
+            root_id,
+            RootAttachmentMutationKind::Detach,
+        )
+        .unwrap_err()
+        .code,
+        ErrorCode::Denied
+    );
+    assert!(matches!(
+        lookup_attachment_receipt(
+            &broker.controller(),
+            LookupRootAttachmentReceiptRequest {
+                operation_id,
+                subject: ungranted,
+                conversation_id: conversation,
+                root_id,
+                mutation: RootAttachmentMutationKind::Detach,
+            },
+        )
+        .unwrap(),
+        RootAttachmentMutationReceipt::Failed {
+            currently_attached: true,
+            ..
+        }
     ));
 }
 

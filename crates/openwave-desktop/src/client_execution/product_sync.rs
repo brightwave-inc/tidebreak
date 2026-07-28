@@ -533,10 +533,20 @@ fn attachment_receipt_terminal(
                 }))
             }
         }
+        // As in the server-owned path: a rejected attach still knows what the
+        // broker holds now, and recording that instead of "unknown" is what keeps
+        // this change conclusive rather than permanently unresolvable.
+        RootAttachmentMutationReceipt::Failed {
+            currently_attached: true,
+            ..
+        } => Ok(Some(RootAttachmentChangeTerminal::Completed {
+            broker_changed: false,
+            broker_currently_attached: true,
+        })),
         RootAttachmentMutationReceipt::Failed { .. } => {
             Ok(Some(RootAttachmentChangeTerminal::Failed {
-                broker_changed: None,
-                broker_currently_attached: None,
+                broker_changed: Some(false),
+                broker_currently_attached: Some(false),
                 failure: RootAttachmentChangeFailure {
                     code: "broker_attachment_failed".to_owned(),
                     message: "The host broker could not complete this folder attachment."
@@ -717,17 +727,49 @@ mod tests {
                     message: "private broker detail".to_owned(),
                     retryable: true,
                 },
+                currently_attached: false,
             },
             root_id,
         )
         .unwrap()
         .unwrap();
-        let RootAttachmentChangeTerminal::Failed { failure, .. } = terminal else {
+        let RootAttachmentChangeTerminal::Failed {
+            broker_currently_attached,
+            failure,
+            ..
+        } = terminal
+        else {
             panic!("expected failed product terminal")
         };
+        // Conclusive, not unknown: nothing re-drives a terminal change, so an
+        // unknown observation would keep the conversation undeletable for good.
+        assert_eq!(broker_currently_attached, Some(false));
         assert_eq!(failure.code, "broker_attachment_failed");
         assert!(!failure.message.contains("private broker detail"));
         assert!(!failure.retryable);
+
+        // Rejected, yet the folder is attached anyway: the product keeps it
+        // rather than rolling back authority the host is still granting.
+        let attached = attachment_receipt_terminal(
+            RootAttachmentMutationReceipt::Failed {
+                error: ErrorResponse {
+                    code: ErrorCode::HostIo,
+                    message: "private broker detail".to_owned(),
+                    retryable: true,
+                },
+                currently_attached: true,
+            },
+            root_id,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(matches!(
+            attached,
+            RootAttachmentChangeTerminal::Completed {
+                broker_currently_attached: true,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -783,6 +825,7 @@ mod tests {
                         message: "unknown root".to_owned(),
                         retryable: false,
                     },
+                    currently_attached: false,
                 },
                 root_id,
             )

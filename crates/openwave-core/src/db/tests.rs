@@ -10267,6 +10267,10 @@ async fn delete_chat_erases_quiesced_history_and_fails_closed_for_live_work_or_r
     );
     assert!(store.get_chat(rooted.id).await.unwrap().is_some());
 
+    // The store still refuses an unknown broker observation, even though the
+    // desktop no longer records one: a rejected mutation now settles on the
+    // state the broker reports. This keeps the gate honest for a row written by
+    // an older build, which nothing will ever re-drive.
     let ambiguous = sample_chat();
     store.create_chat(&ambiguous).await.unwrap();
     let change = BeginRootAttachmentChange {

@@ -14,7 +14,7 @@ use crate::{
 };
 
 /// Current pre-v1 broker protocol. Bump this for incompatible wire changes.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Largest file the broker returns as opaque bytes.
 ///
@@ -401,6 +401,11 @@ pub enum RootAttachmentMutationReceipt {
     },
     Failed {
         error: ErrorResponse,
+        /// Live state now, which a failed mutation does not describe. A rejected
+        /// attach usually leaves nothing attached, and a caller that cannot tell
+        /// that apart from "unknown" has to keep treating the folder as though
+        /// authority might still exist.
+        currently_attached: bool,
     },
 }
 

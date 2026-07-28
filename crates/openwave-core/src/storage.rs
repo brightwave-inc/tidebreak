@@ -118,6 +118,10 @@ pub enum DeleteChatOutcome {
     /// A root is still projected into the conversation's broker context.
     RootsAttached,
     /// Broker history cannot conclusively prove every detached root is gone.
+    ///
+    /// Every terminal change records what the broker held when it settled, so in
+    /// practice this means a change is still in flight — transient, and worth
+    /// retrying — rather than a permanently unknowable observation.
     RootAttachmentStateUnresolved,
 }
 
