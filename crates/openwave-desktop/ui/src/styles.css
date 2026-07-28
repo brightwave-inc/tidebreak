@@ -1958,9 +1958,8 @@ body {
   margin-top: 0.75rem;
 }
 
-/* ---------- Documents view ---------- */
+/* ---------- Folders view ---------- */
 
-.documents-view,
 .folders-view {
   min-width: 0;
   min-height: 0;
@@ -1968,7 +1967,6 @@ body {
   background: var(--bg-elevated);
 }
 
-.documents-header,
 .folders-header {
   display: flex;
   align-items: flex-start;
@@ -1978,18 +1976,11 @@ body {
   border-bottom: 1px solid var(--line);
 }
 
-.documents-header h1,
-.documents-header p,
 .folders-header h1,
-.folders-header p,
-.document-search h2,
-.document-search p,
-.document-catalog h2,
-.document-catalog p {
+.folders-header p {
   margin: 0;
 }
 
-.documents-header h1,
 .folders-header h1 {
   margin-top: 0.15rem;
   font-size: 1.65rem;
@@ -1997,14 +1988,12 @@ body {
   letter-spacing: -0.035em;
 }
 
-.documents-header > div > p:last-child,
 .folders-header > div > p:last-child {
   max-width: 41rem;
   margin-top: 0.45rem;
   color: var(--muted-foreground);
 }
 
-.documents-header-actions,
 .folders-header-actions {
   display: flex;
   flex: 0 0 auto;
@@ -2012,7 +2001,6 @@ body {
   gap: 0.55rem;
 }
 
-.documents-content,
 .folders-content {
   display: grid;
   width: min(100%, 68rem);
@@ -2074,360 +2062,19 @@ body {
   color: var(--muted-foreground);
 }
 
-.document-notice,
+/* Still worn by the folders view, which shared it with the sources view before
+   that one moved onto the shared primitives. */
 .document-error {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
   padding: 0.75rem 0.9rem;
-  border: 1px solid var(--line);
+  border: 1px solid color-mix(in srgb, var(--danger) 42%, var(--line));
   border-radius: 8px;
-  background: var(--bg-elevated);
-  font-size: 0.84rem;
-}
-
-.document-notice strong {
-  margin-right: 0.2rem;
-}
-
-.document-error {
-  border-color: color-mix(in srgb, var(--danger) 42%, var(--line));
   color: var(--danger);
   background: color-mix(in srgb, var(--danger) 5%, var(--bg-elevated));
-}
-
-.document-search,
-.document-catalog {
-  padding: 1.1rem;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--bg-elevated);
-  box-shadow: var(--shadow-sm);
-}
-
-.document-search h2,
-.document-catalog h2 {
-  font-size: 0.98rem;
-  font-weight: 600;
-}
-
-.document-search > div:first-child > p,
-.document-section-heading p {
-  margin-top: 0.2rem;
-  color: var(--muted-foreground);
-  font-size: 0.8rem;
-}
-
-.document-search form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 0.55rem;
-  margin-top: 0.85rem;
-}
-
-.document-search input {
-  min-width: 0;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 0.55rem 0.7rem;
-  background: var(--page-background);
-}
-
-.document-search input:focus {
-  outline: 2px solid var(--ring);
-  outline-offset: 1px;
-}
-
-.document-search-error {
-  margin-top: 0.65rem !important;
-  color: var(--danger);
-  font-size: 0.8rem;
-}
-
-.document-results {
-  display: grid;
-  gap: 0.55rem;
-  margin-top: 0.85rem;
-  padding-top: 0.85rem;
-  border-top: 1px solid var(--line);
-}
-
-.document-result {
-  display: grid;
-  gap: 0.4rem;
-  padding: 0.75rem;
-  border-radius: 8px;
-  background: var(--page-background);
-}
-
-.document-result-source {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.4rem;
-  font-size: 0.78rem;
-}
-
-.document-result-source span {
-  color: var(--muted-foreground);
-}
-
-.document-result p {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  color: color-mix(in srgb, var(--ink) 88%, var(--muted-foreground));
-  font-size: 0.85rem;
-  line-height: 1.55;
-}
-
-.document-section-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  padding-bottom: 0.85rem;
-}
-
-.document-refresh {
-  border: 0;
-  padding: 0.25rem;
-  color: var(--muted-foreground);
-  background: transparent;
-  font-size: 0.78rem;
-}
-
-.document-refresh:hover:not(:disabled) {
-  color: var(--ink);
-}
-
-.document-refresh:disabled {
-  cursor: wait;
-  opacity: 0.5;
-}
-
-.document-icon {
-  display: grid;
-  width: 2rem;
-  height: 2rem;
-  place-items: center;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  color: var(--muted-foreground);
-  background: var(--page-background);
-}
-
-.document-catalog-toolbar {
-  display: flex;
-  justify-content: flex-end;
-  padding: 0.7rem 0;
-  border-top: 1px solid var(--line);
-}
-
-.document-catalog-toolbar label {
-  width: min(100%, 20rem);
-}
-
-.document-catalog-toolbar input {
-  width: 100%;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  padding: 0.45rem 0.6rem;
-  background: var(--page-background);
-  font-size: 0.8rem;
-}
-
-.document-catalog-toolbar input:focus {
-  outline: 2px solid var(--ring);
-  outline-offset: 1px;
-}
-
-.document-table-wrap {
-  max-width: 100%;
-  overflow-x: auto;
-  border-top: 1px solid var(--line);
-}
-
-.document-table {
-  width: 100%;
-  min-width: 58rem;
-  border-collapse: collapse;
-  table-layout: fixed;
-  font-size: 0.78rem;
-}
-
-.document-table th,
-.document-table td {
-  padding: 0.7rem 0.55rem;
-  border-bottom: 1px solid var(--line);
-  text-align: left;
-  vertical-align: middle;
-}
-
-.document-table th {
-  color: var(--muted-foreground);
-  font-size: 0.7rem;
-  font-weight: 600;
-}
-
-.document-table th:first-child {
-  width: 25%;
-}
-
-.document-table th:nth-child(2) {
-  width: 9%;
-}
-
-.document-table th:nth-child(3) {
-  width: 8%;
-}
-
-.document-table th:nth-child(4) {
-  width: 13%;
-}
-
-.document-table th:nth-child(5) {
-  width: 29%;
-}
-
-.document-table th:last-child {
-  width: 16%;
-}
-
-.document-table th button {
-  border: 0;
-  padding: 0.15rem 0;
-  color: inherit;
-  background: transparent;
-  font: inherit;
-}
-
-.document-table th button:hover,
-.document-table th button:focus-visible {
-  color: var(--ink);
-}
-
-.document-table tbody tr:last-child td {
-  border-bottom: 0;
-}
-
-.document-table tbody tr[aria-current="true"] {
-  background: var(--accent);
-}
-
-.document-title-button {
-  display: flex;
-  width: 100%;
-  min-width: 0;
-  align-items: center;
-  gap: 0.55rem;
-  border: 0;
-  padding: 0;
-  color: var(--ink);
-  background: transparent;
-  text-align: left;
-}
-
-.document-title-button strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 0.82rem;
-  font-weight: 590;
-}
-
-.document-title-button:hover strong,
-.document-title-button:focus-visible strong {
-  text-decoration: underline;
-  text-underline-offset: 0.16rem;
-}
-
-.document-status-cell {
-  overflow-wrap: anywhere;
-}
-
-.document-processing {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.42rem;
-  color: var(--warning-foreground);
-  font-weight: 570;
-}
-
-.document-processing-pulse {
-  width: 0.48rem;
-  height: 0.48rem;
-  border-radius: 999px;
-  background: currentColor;
-  animation: document-processing-pulse 1.2s ease-in-out infinite;
-}
-
-@keyframes document-processing-pulse {
-  0%,
-  100% {
-    opacity: 0.35;
-    transform: scale(0.8);
-  }
-
-  50% {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .document-processing-pulse {
-    animation: none;
-  }
-}
-
-.document-failure,
-.document-unsearchable {
-  display: grid;
-  justify-items: start;
-  gap: 0.3rem;
-  color: var(--danger);
-  font-size: 0.72rem;
-  line-height: 1.4;
-}
-
-.document-unsearchable {
-  color: var(--muted-foreground);
-  font-weight: 570;
-}
-
-.document-unsearchable > span {
-  font-weight: 400;
-}
-
-.document-retry,
-.document-action {
-  border: 0;
-  padding: 0.15rem 0.2rem;
-  color: var(--ink);
-  background: transparent;
-  font-size: 0.72rem;
-  font-weight: 600;
-}
-
-.document-retry:hover:not(:disabled),
-.document-retry:focus-visible,
-.document-action:hover:not(:disabled),
-.document-action:focus-visible {
-  text-decoration: underline;
-  text-underline-offset: 0.15rem;
-}
-
-.document-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 0.35rem;
-}
-
-.document-action.is-danger {
-  color: var(--danger);
+  font-size: 0.84rem;
 }
 
 /* A transcript phase whose row threw while rendering. Deliberately quiet: the
@@ -2437,26 +2084,6 @@ body {
   padding: 0.5rem 0.75rem;
   color: var(--muted-foreground);
   font-size: 0.82rem;
-}
-
-.document-empty,
-.document-empty-small {
-  display: grid;
-  place-items: center;
-  gap: 0.25rem;
-  min-height: 8rem;
-  border-top: 1px solid var(--line);
-  color: var(--muted-foreground);
-  text-align: center;
-}
-
-.document-empty strong {
-  color: var(--ink);
-}
-
-.document-empty-small {
-  min-height: 3rem;
-  border-top: 0;
 }
 
 /* ---------- Outputs view ---------- */

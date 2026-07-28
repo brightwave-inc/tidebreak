@@ -28,7 +28,7 @@ import { useFirstMessage } from "./FirstMessage";
 import { ChatView } from "./ChatView";
 import { DeliverablesView } from "./DeliverablesView";
 import { DocumentDetailRoot } from "./document-detail/DocumentDetailRoot";
-import { DocumentsView } from "./DocumentsView";
+import { SourcesView } from "./sources/SourcesView";
 import { FoldersView } from "./FoldersView";
 import { hasNativeHost } from "./host";
 import { attachChatFiles } from "./attachments";
@@ -419,7 +419,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
           />
         ) : (
           <PanelFrame position={side} spaceBetween>
-            <DocumentsView
+            <SourcesView
               chatId={chatId}
               onOpen={(documentId) => openPanel({ type: "sources", documentId })}
             />
