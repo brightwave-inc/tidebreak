@@ -17,12 +17,14 @@ export function PanelFrame({
   breadcrumb,
   headerRightSlot,
   spaceBetween,
+  showBorder,
   children,
 }: {
   position: PanelPosition;
   breadcrumb?: ReactNode;
   headerRightSlot?: ReactNode;
   spaceBetween?: boolean;
+  showBorder?: boolean;
   children: ReactNode;
 }) {
   const { layout, closePanel, toggleFullscreen } = usePanelNav();
@@ -36,6 +38,7 @@ export function PanelFrame({
           breadcrumb={breadcrumb}
           rightSlot={headerRightSlot}
           spaceBetween={spaceBetween}
+          showBorder={showBorder}
           isFullscreen={isFullscreen}
           onToggleFullscreen={() => toggleFullscreen(position)}
           onClose={() => closePanel(position)}
