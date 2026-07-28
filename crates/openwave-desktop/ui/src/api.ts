@@ -704,6 +704,10 @@ export class ApiClient {
     return this.json("/chats", { headers: this.headers() });
   }
 
+  getChat(chatId: string): Promise<Chat> {
+    return this.json(`/chats/${chatId}`, { headers: this.headers() });
+  }
+
   async listPendingChatPrompts(): Promise<PendingChatPrompt[]> {
     const body = await this.json<unknown>("/chats/pending-prompts", {
       headers: this.headers(),
