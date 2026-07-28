@@ -77,17 +77,21 @@ export function DocumentDetails({
               client={client}
               documentId={info.document_id}
               mediaType={type}
-              className="grow"
+              className="bg-page-background grow p-4 pt-2"
             />
           ) : type.startsWith("image/") ? (
-            <ImageViewer chatId={chatId} documentID={info.document_id} className="grow" />
+            <ImageViewer
+              chatId={chatId}
+              documentID={info.document_id}
+              className="bg-page-background grow"
+            />
           ) : (
             <MarkdownViewer
               chatId={chatId}
               documentID={info.document_id}
               highlightRange={highlightRange}
               markdown={type === "text/markdown"}
-              className="grow"
+              className="bg-page-background grow"
             />
           )}
         </>

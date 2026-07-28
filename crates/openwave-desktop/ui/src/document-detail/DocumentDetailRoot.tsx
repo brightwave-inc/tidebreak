@@ -89,6 +89,7 @@ export function DocumentDetailRoot({
   return (
     <PanelFrame
       position={position}
+      showBorder
       breadcrumb={
         <DocumentDetailBreadcrumb
           documentName={documentName}
