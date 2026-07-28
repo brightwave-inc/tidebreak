@@ -17,6 +17,7 @@ import {
   SettingsField,
   SettingsPanel,
   SettingsSection,
+  SettingsStatus,
 } from "./primitives";
 
 const SIGN_IN_POLL_MS = 2_000;
@@ -295,15 +296,15 @@ export function GatewayPanel({
       <SettingsSection title="Connection">
         {status.signed_in ? (
           <>
-            <div className="web-search-state is-ready" role="status">
-              <strong>Signed in</strong>
-              <span>
-                {status.account_hint ?? "Connected"} ·{" "}
-                {status.model_count === 1
+            <SettingsStatus
+              tone="ready"
+              label="Signed in"
+              description={`${status.account_hint ?? "Connected"} · ${
+                status.model_count === 1
                   ? "1 model entitled"
-                  : `${status.model_count} models entitled`}
-              </span>
-            </div>
+                  : `${status.model_count} models entitled`
+              }`}
+            />
             {status.installation_id && (
               <p className="text-muted-foreground text-xs">
                 Installation {status.installation_id}
@@ -344,14 +345,15 @@ export function GatewayPanel({
           </>
         ) : (
           <>
-            <div className="web-search-state is-not-configured" role="status">
-              <strong>Not signed in</strong>
-              <span>
-                {status.configured
+            <SettingsStatus
+              tone="not-configured"
+              label="Not signed in"
+              description={
+                status.configured
                   ? "Connect to sign in with your browser."
-                  : "Save the gateway URL, then connect."}
-              </span>
-            </div>
+                  : "Save the gateway URL, then connect."
+              }
+            />
             {status.sign_in.state === "failed" && (
               <SettingsError>{status.sign_in.message}</SettingsError>
             )}

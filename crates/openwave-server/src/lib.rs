@@ -273,6 +273,10 @@ pub fn app(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(MAX_CODE_EXECUTION_CONFIG_BODY_BYTES)),
         )
         .route(
+            "/code-execution/credentials",
+            get(routes::get_code_execution_credentials),
+        )
+        .route(
             "/code-execution/credentials/{provider}",
             axum::routing::put(routes::put_code_execution_credential)
                 .delete(routes::delete_code_execution_credential)

@@ -175,6 +175,16 @@ pub async fn credentials_info(
     Ok(WebSearchCredentialsInfo { credentials })
 }
 
+/// Resolve a local API path segment to a provider that has a fixed credential
+/// slot. Deriving this from the allow-list keeps the set of addressable keychain
+/// entries in one place.
+pub fn credential_provider(value: &str) -> std::result::Result<WebSearchProviderKind, ServerError> {
+    CREDENTIAL_PROVIDERS
+        .into_iter()
+        .find(|provider| provider.as_str() == value)
+        .ok_or_else(|| ServerError::not_found(format!("unknown web search provider kind: {value}")))
+}
+
 /// Store a non-empty, already validated credential under the provider's fixed
 /// key. The provider kind is an enum rather than caller-controlled storage
 /// input, so this cannot address other application secrets.
