@@ -26,6 +26,7 @@ import {
 import { useFirstMessage } from "./FirstMessage";
 import { ChatView } from "./ChatView";
 import { DeliverablesView } from "./DeliverablesView";
+import { DocumentDetailRoot } from "./document-detail/DocumentDetailRoot";
 import { DocumentsView } from "./DocumentsView";
 import { FoldersView } from "./FoldersView";
 import { hasNativeHost } from "./host";
@@ -400,7 +401,15 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     const side = position === "right" ? "right" : "left";
     switch (panel.type) {
       case "sources":
-        return (
+        // A document id turns the list into the reader for that one source; the
+        // breadcrumb's way back clears the id and lands on the catalog again.
+        return panel.documentId ? (
+          <DocumentDetailRoot
+            chatId={chatId}
+            documentID={panel.documentId}
+            position={side}
+          />
+        ) : (
           <PanelFrame position={side} spaceBetween>
             <DocumentsView
               chatId={chatId}

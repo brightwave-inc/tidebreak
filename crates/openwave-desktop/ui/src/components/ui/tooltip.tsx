@@ -9,14 +9,14 @@ const TooltipTrigger = TooltipPrimitive.Trigger;
 const TooltipContent = React.forwardRef<
   React.ComponentRef<typeof TooltipPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof TooltipPrimitive.Content>
->(({ className, sideOffset = 6, children, ...props }, ref) => (
+>(({ className, sideOffset = 4, children, ...props }, ref) => (
   <TooltipPrimitive.Portal>
     <TooltipPrimitive.Content
       ref={ref}
       hideWhenDetached
       sideOffset={sideOffset}
       className={cn(
-        "z-50 max-w-xs rounded-md bg-neutral-900 px-2.5 py-1.5 text-xs font-medium text-neutral-50 shadow-md select-none dark:bg-neutral-100 dark:text-neutral-900 data-[state=delayed-open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=delayed-open]:fade-in-0 data-[state=delayed-open]:zoom-in-95 data-[state=closed]:zoom-out-95",
+        "z-50 max-w-xs rounded-lg bg-neutral-900 px-3 py-2.5 text-sm font-medium text-neutral-50 shadow-lg select-none dark:bg-neutral-100 dark:text-neutral-900 data-[state=delayed-open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=delayed-open]:fade-in-0 data-[state=delayed-open]:zoom-in-95 data-[state=closed]:zoom-out-95",
         className,
       )}
       {...props}

@@ -27,6 +27,7 @@ const createChat = vi.fn(async () => chats[0]);
 const listPendingUserQuestions = vi.fn(async () => [] as unknown[]);
 const listPendingFolderAccessRequests = vi.fn(async () => [] as unknown[]);
 const listPendingChatPrompts = vi.fn(async () => [] as unknown[]);
+const listPendingOutputWritebackRequests = vi.fn(async () => [] as unknown[]);
 const requestUserAttention = vi.fn(async () => {});
 const postMessage = vi.fn(async () => {});
 
@@ -43,6 +44,7 @@ vi.mock("./api", () => ({
     listPendingUserQuestions = listPendingUserQuestions;
     listPendingFolderAccessRequests = listPendingFolderAccessRequests;
     listPendingChatPrompts = listPendingChatPrompts;
+    listPendingOutputWritebackRequests = listPendingOutputWritebackRequests;
     postMessage = postMessage;
     openEvents = vi.fn(() => ({ close: vi.fn() }));
   },
@@ -129,6 +131,8 @@ beforeEach(() => {
   listPendingFolderAccessRequests.mockResolvedValue([]);
   listPendingChatPrompts.mockReset();
   listPendingChatPrompts.mockResolvedValue([]);
+  listPendingOutputWritebackRequests.mockReset();
+  listPendingOutputWritebackRequests.mockResolvedValue([]);
   requestUserAttention.mockClear();
   postMessage.mockClear();
   usePendingPrompts.setState({ chatId: null, userQuestions: [], folderAccess: [] });
@@ -159,7 +163,12 @@ describe("app shell", () => {
 
   it("marks a parked conversation other than the one that is open", async () => {
     listPendingChatPrompts.mockResolvedValue([
-      { chatId: "chat-2", questionCallIds: ["call-parked"], folderAccessCallIds: [] },
+      {
+        chatId: "chat-2",
+        questionCallIds: ["call-parked"],
+        folderAccessCallIds: [],
+        outputWritebackCallIds: [],
+      },
     ]);
     await mountApp({ at: "/c/chat-1" });
 
@@ -325,7 +334,12 @@ describe("app shell", () => {
     // settings has no chat, and the one being returned to rehydrates its own.
     const readsBefore = listPendingChatPrompts.mock.calls.length;
     listPendingChatPrompts.mockResolvedValue([
-      { chatId: "chat-1", questionCallIds: ["call-1"], folderAccessCallIds: [] },
+      {
+        chatId: "chat-1",
+        questionCallIds: ["call-1"],
+        folderAccessCallIds: [],
+        outputWritebackCallIds: [],
+      },
     ]);
     useRefreshSignals.getState().signal("userQuestions");
 

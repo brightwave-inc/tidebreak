@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 import { ExternalLink, LogOut, RefreshCw } from "lucide-react";
 import type { ApiClient, GatewayApps, GatewayStatus } from "../api";
 import { openExternal } from "../host";
@@ -117,6 +118,7 @@ export function GatewayPanel({
       setDirty(false);
       dirtyRef.current = false;
       onChanged();
+      toast.success("Saved gateway settings");
     });
   }
 
@@ -202,6 +204,7 @@ export function GatewayPanel({
                   void run(async () => {
                     await client.syncGatewayModels();
                     onChanged();
+                    toast.success("Refreshed entitled models");
                   })
                 }
               >
@@ -216,6 +219,7 @@ export function GatewayPanel({
                   void run(async () => {
                     await client.gatewaySignOut();
                     onChanged();
+                    toast.success("Disconnected from the gateway");
                   })
                 }
               >
