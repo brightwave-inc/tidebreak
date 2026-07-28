@@ -144,8 +144,9 @@ pub use provider::{
 };
 pub use renderer_tool::RendererToolName;
 pub use semantic_checkpoint::{
-    ContextCheckpoint, SaveContextCheckpointOutcome, CONTEXT_CHECKPOINT_FORMAT_V1,
-    MAX_CONTEXT_CHECKPOINT_BYTES,
+    ContextCheckpoint, ContextCheckpointPayloadV1, SaveContextCheckpointOutcome,
+    CONTEXT_CHECKPOINT_FORMAT_V1, MAX_CONTEXT_CHECKPOINT_BYTES, MAX_CONTEXT_CHECKPOINT_ITEMS,
+    MAX_CONTEXT_CHECKPOINT_ITEM_BYTES,
 };
 pub use steer::{SteerInbox, SteerMessage};
 pub use storage::{

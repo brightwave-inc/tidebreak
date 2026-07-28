@@ -31,7 +31,58 @@ impl MigratorTrait for Migrator {
             Box::new(AddOutputRevisionCitations),
             Box::new(AddContextCheckpoints),
             Box::new(AddStandingToolGrants),
+            Box::new(AddContextCheckpointUsage),
         ]
+    }
+}
+
+/// Keeps maintenance-model usage out of foreground turn accounting.
+struct AddContextCheckpointUsage;
+
+impl MigrationName for AddContextCheckpointUsage {
+    fn name(&self) -> &str {
+        "m20260728_000018_add_context_checkpoint_usage"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddContextCheckpointUsage {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        for column in [
+            ContextCheckpoint::InputTokens,
+            ContextCheckpoint::OutputTokens,
+            ContextCheckpoint::CacheReadInputTokens,
+            ContextCheckpoint::CacheCreationInputTokens,
+        ] {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(ContextCheckpoint::Table)
+                        .add_column(ColumnDef::new(column).big_integer().not_null().default(0))
+                        .to_owned(),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        for column in [
+            ContextCheckpoint::InputTokens,
+            ContextCheckpoint::OutputTokens,
+            ContextCheckpoint::CacheReadInputTokens,
+            ContextCheckpoint::CacheCreationInputTokens,
+        ] {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(ContextCheckpoint::Table)
+                        .drop_column(column)
+                        .to_owned(),
+                )
+                .await?;
+        }
+        Ok(())
     }
 }
 
@@ -6343,6 +6394,10 @@ enum ContextCheckpoint {
     SourceMessageSeq,
     FormatVersion,
     Content,
+    InputTokens,
+    OutputTokens,
+    CacheReadInputTokens,
+    CacheCreationInputTokens,
     CreatedAt,
 }
 
