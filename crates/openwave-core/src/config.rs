@@ -167,6 +167,12 @@ mod tests {
     }
 
     #[test]
+    fn legacy_config_without_keychain_service_defaults_to_none() {
+        let config = serde_json::from_str::<Config>(r#"{"data_dir":"/data"}"#).unwrap();
+        assert_eq!(config.keychain_service, None);
+    }
+
+    #[test]
     fn profile_defaults_to_desktop() {
         assert_eq!(Profile::default(), Profile::Desktop);
     }

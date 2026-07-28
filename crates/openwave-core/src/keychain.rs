@@ -44,8 +44,8 @@ impl KeychainSecretProvider {
     }
 
     /// Use a custom service name (useful to isolate profiles or tests).
-    /// Honors [`use_mock`](Self::new) and `OPENWAVE_KEYCHAIN_MOCK` the same
-    /// way [`new`](Self::new) does.
+    /// Honors [`use_mock`](Self::use_mock) and `OPENWAVE_KEYCHAIN_MOCK` the
+    /// same way [`new`](Self::new) does.
     pub fn with_service(service: impl Into<String>) -> Self {
         if std::env::var("OPENWAVE_KEYCHAIN_MOCK").is_ok_and(|v| !v.is_empty()) {
             Self::use_mock();
