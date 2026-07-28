@@ -775,6 +775,11 @@ impl Controller {
             }) if attachment_lookup_matches(existing, &expected) => {
                 RootAttachmentMutationReceipt::Failed {
                     error: error.clone(),
+                    currently_attached: has_root_attachment(
+                        &state,
+                        request.conversation_id,
+                        request.root_id,
+                    ),
                 }
             }
             Some(_) => return Err(error_response(BrokerError::OperationIdConflict)),

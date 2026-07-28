@@ -1335,7 +1335,7 @@ pub async fn delete_chat(
         )),
         DeleteChatOutcome::RootAttachmentStateUnresolved => Err(ServerError::conflict_kind(
             "chat_root_attachment_unresolved",
-            "reconcile connected-folder changes before deleting this conversation",
+            "a connected-folder change is still finishing; try deleting again in a moment",
         )),
     }
 }
