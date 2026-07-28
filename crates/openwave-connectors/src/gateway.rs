@@ -732,12 +732,75 @@ async fn callback(
         .into_response()
 }
 
+/// One-shot page served by the ephemeral loopback listener; it must stay
+/// fully self-contained (inline CSS, no external assets).
 fn callback_page(heading: &str, message: &str) -> String {
     format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
-         <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
-         <title>{heading}</title></head><body><main><h1>{heading}</h1>\
-         <p>{message}</p></main></body></html>"
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{heading}</title>
+<style>
+  :root {{
+    color-scheme: light dark;
+    --bg: #f4f4f5;
+    --card: #ffffff;
+    --border: #e4e4e7;
+    --text: #18181b;
+    --muted: #52525b;
+  }}
+  @media (prefers-color-scheme: dark) {{
+    :root {{
+      --bg: #18181b;
+      --card: #232326;
+      --border: #3f3f46;
+      --text: #fafafa;
+      --muted: #a1a1aa;
+    }}
+  }}
+  body {{
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+      "Helvetica Neue", Arial, sans-serif;
+  }}
+  main {{
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 2.5rem 3rem;
+    margin: 1rem;
+    max-width: 24rem;
+    text-align: center;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  }}
+  .product {{
+    font-size: 0.8125rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 1rem;
+  }}
+  h1 {{
+    font-size: 1.375rem;
+    font-weight: 600;
+    margin: 0 0 0.5rem;
+  }}
+  p {{
+    color: var(--muted);
+    font-size: 0.9375rem;
+    line-height: 1.5;
+    margin: 0;
+  }}
+</style></head><body><main>
+<p class="product">OpenWave</p>
+<h1>{heading}</h1>
+<p>{message}</p>
+</main></body></html>"#
     )
 }
 
