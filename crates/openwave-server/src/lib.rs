@@ -743,7 +743,7 @@ fn agent_deps(
         .with(Box::new(ReadFile))
         .with(Box::new(ListDir))
         .with(Box::new(WriteFile))
-        .with(Box::new(CreateDeliverable))
+        .with(Box::new(CreateDeliverable::new(source_store.clone())))
         .with(Box::new(ExecTool::new(code_execution)))
         .with(search)
         .with(Box::new(source_tools::ListSourcesTool::new(

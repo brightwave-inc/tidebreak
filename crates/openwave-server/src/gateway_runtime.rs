@@ -24,12 +24,6 @@ use crate::providers::{self, CustomModelConfig, ProviderKind};
 /// How long a browser sign-in may stay pending before it fails.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Development-only escape hatch: the gateway hardcodes its own CLI's client
-/// id until it grows a client registry, so that identity is the default. Set
-/// this variable to exactly `openwave` to use the first-class client id once
-/// the deployed gateway registers it; any other value is ignored.
-const CLIENT_ID_ENV: &str = "OPENWAVE_GATEWAY_CLIENT_ID";
-
 pub(crate) struct GatewayRuntime {
     store: Arc<dyn Store>,
     secrets: Arc<dyn SecretProvider>,
@@ -207,13 +201,7 @@ impl GatewayRuntime {
                 return Ok(Some(connection.clone()));
             }
         }
-        let auth_config = match std::env::var(CLIENT_ID_ENV)
-            .ok()
-            .filter(|id| id == "openwave")
-        {
-            Some(_) => GatewayAuthConfig::new(&base_url)?,
-            None => GatewayAuthConfig::modelctl_compat(&base_url)?,
-        };
+        let auth_config = GatewayAuthConfig::new(&base_url)?;
         let connection = Arc::new(GatewayConnection::new(
             GatewayAuth::new(auth_config)?,
             CredentialVault::new(self.secrets.clone()),
