@@ -52,6 +52,8 @@ futures = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Output-constraint schemas for the host's own model calls, e.g. chat titling.
+schemars = { workspace = true }
 uuid = { workspace = true }
 unicode-general-category = { workspace = true }
 chrono = { workspace = true }

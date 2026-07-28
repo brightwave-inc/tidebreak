@@ -35,6 +35,7 @@ use serde::de::DeserializeOwned;
 use tokio::sync::Notify;
 use tower::ServiceExt;
 
+mod chat_titling;
 mod configuration;
 mod conversations;
 mod documents;
@@ -1341,6 +1342,9 @@ impl Store for PauseTerminalStore {
     }
     async fn set_chat_title(&self, id: ChatId, title: Option<String>) -> Result<()> {
         self.inner.set_chat_title(id, title).await
+    }
+    async fn set_chat_title_if_unset(&self, id: ChatId, title: &str) -> Result<bool> {
+        self.inner.set_chat_title_if_unset(id, title).await
     }
     async fn update_chat_metadata(
         &self,

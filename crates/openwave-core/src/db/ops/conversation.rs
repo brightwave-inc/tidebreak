@@ -241,6 +241,29 @@ pub(in crate::db) async fn set_chat_title(
     Ok(())
 }
 
+/// Name a chat only while it is unnamed, reporting whether this call named it.
+///
+/// The `title IS NULL` predicate is the whole point: it runs in the database, so
+/// a user rename that commits first wins even when a derived title was already
+/// in flight, and two derived writes cannot both apply.
+pub(in crate::db) async fn set_chat_title_if_unset(
+    store: &DbStore,
+    id: ChatId,
+    title: &str,
+) -> Result<bool> {
+    let result = entities::chat::Entity::update_many()
+        .col_expr(
+            entities::chat::Column::Title,
+            sea_orm::sea_query::Expr::value(title),
+        )
+        .filter(entities::chat::Column::Id.eq(id.0))
+        .filter(entities::chat::Column::Title.is_null())
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(result.rows_affected == 1)
+}
+
 pub(in crate::db) async fn update_chat_metadata(
     store: &DbStore,
     id: ChatId,

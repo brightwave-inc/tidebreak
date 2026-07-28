@@ -290,6 +290,9 @@ fn mcp_request_error(error: AgentError) -> ServerError {
 
 /// Product-facing project names stay compact across desktop and API clients.
 pub const MAX_PROJECT_TITLE_CHARS: usize = 120;
+/// The same bound for conversation names, whether a user typed one or the
+/// product derived one. A sidebar row is a sidebar row either way.
+pub const MAX_CHAT_TITLE_CHARS: usize = MAX_PROJECT_TITLE_CHARS;
 /// Project metadata requests need only a compact JSON object.
 pub const MAX_PROJECT_METADATA_BODY_BYTES: usize = 1_024;
 
@@ -906,6 +909,26 @@ fn normalize_project_title(title: Option<String>) -> Result<Option<String>, Serv
     Ok(title)
 }
 
+/// Trim a client-supplied conversation title and hold it to the stored bound.
+///
+/// An empty title is the same as no title: the sidebar renders "New chat" for
+/// both, and storing `Some("")` would also read as "already named" to the
+/// derived-title path and suppress it forever.
+fn normalize_chat_title(title: Option<String>) -> Result<Option<String>, ServerError> {
+    let title = title
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if title
+        .as_ref()
+        .is_some_and(|value| value.chars().count() > MAX_CHAT_TITLE_CHARS)
+    {
+        return Err(ServerError::bad_request(format!(
+            "chat title must not exceed {MAX_CHAT_TITLE_CHARS} characters"
+        )));
+    }
+    Ok(title)
+}
+
 /// `POST /projects` — create a project and return it (`201 Created`).
 pub async fn create_project(
     State(state): State<AppState>,
@@ -1020,7 +1043,7 @@ pub async fn create_chat(
     let chat = Chat {
         id: ChatId::new(),
         project_id: body.project_id,
-        title: body.title,
+        title: normalize_chat_title(body.title)?,
         model: body.model,
         reasoning_effort: body.reasoning_effort,
         attachment_revision: 0,
@@ -1059,11 +1082,7 @@ pub async fn patch_chat(
     if let Some(Some(model)) = body.model.as_mut() {
         *model = validate_model_selection(&state, model, false).await?;
     }
-    let title = body.title.map(|title| {
-        title
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
-    });
+    let title = body.title.map(normalize_chat_title).transpose()?;
 
     let mut chat = state
         .store
