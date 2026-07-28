@@ -119,10 +119,13 @@ automatic.
    For the first release only, set `v0.1.0`, click **Generate release notes**,
    and curate the full-history result as described above.
 3. Complete the release-readiness review, then click **Publish release**.
-4. GitHub creates the tag and emits the `release.published` event. A short-lived
-   dispatcher starts the production build from the current `main` workflow and
-   passes only the tag. Running the build from `main` gives every release the
-   same trusted compiler-cache scope; the build still queries GitHub for the
+4. GitHub creates the tag and emits the `release.published` event. Confirm the
+   draft still has its proposed `vMAJOR.MINOR.PATCH` tag before publishing:
+   GitHub can otherwise publish an untagged release. A short-lived dispatcher
+   rejects an invalid tag before it queues a production build; for a valid tag,
+   it starts the production build from the current `main` workflow and passes
+   only that tag. Running the build from `main` gives every release the same
+   trusted compiler-cache scope; the build still queries GitHub for the
    published release, checks out that exact tag, rejects malformed tags,
    prereleases, drafts, or commits outside `main`, and pins all later jobs to
    the resolved commit SHA.

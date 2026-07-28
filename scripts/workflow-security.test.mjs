@@ -130,9 +130,20 @@ test("production secrets remain isolated to the release workflow", () => {
 
 test("release builds use the trusted shared main cache scope", () => {
   const release = workflows["release.yml"];
+  const dispatchJob = workflowJob(release, "dispatch");
   assert.match(release, /gh workflow run release\.yml/);
   assert.match(release, /--ref main/);
   assert.match(release, /actions: write/);
+  assert.match(dispatchJob, /contents: read/);
+  assert.match(
+    dispatchJob,
+    /node scripts\/check-release-tag\.mjs "\$RELEASE_TAG"/,
+  );
+  assert.ok(
+    dispatchJob.indexOf("Reject an invalid published release tag") <
+      dispatchJob.indexOf("gh workflow run release.yml"),
+    "published release tags must be validated before dispatching a production build",
+  );
   assert.match(
     release,
     /github\.event_name == 'workflow_dispatch' && github\.ref == 'refs\/heads\/main'/,
