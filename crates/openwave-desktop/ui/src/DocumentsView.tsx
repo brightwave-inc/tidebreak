@@ -272,8 +272,8 @@ export function DocumentsView({
         <div>
           <h1 id="documents-title">Sources</h1>
           <p>
-            Add files for OpenWave to use in this conversation. Supported sources
-            are prepared for search on this device.
+            Add files, folders, or ZIP archives for OpenWave to use in this
+            conversation. Supported sources are prepared for search on this device.
           </p>
         </div>
         <div className="documents-header-actions">
@@ -386,9 +386,10 @@ export function DocumentsView({
             <div className="document-empty">
               <strong>No sources yet</strong>
               <span>
-                Drop files of any type, up to 16 MB each. PDFs, Office documents,
-                Markdown, text, and supported images are prepared for search; other
-                formats remain available as conversation sources.
+                Drop files of any type, up to 16 MB each, or add folders and ZIP
+                archives. PDFs, Office documents, Markdown, text, and supported
+                images are prepared for search; other formats remain available as
+                conversation sources.
               </span>
               <span>This panel shows the newest 1,000 sources.</span>
             </div>

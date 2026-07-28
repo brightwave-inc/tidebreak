@@ -159,7 +159,11 @@ export function parseLibraryImportProgress(value: unknown): LibraryImportProgres
 
 export function parseLibraryImportBatch(value: unknown): LibraryImportBatch | null {
   if (value === null) return null;
-  if (!isExactRecord(value, ["results"]) || !Array.isArray(value.results)) {
+  if (
+    !isExactRecord(value, ["results"]) ||
+    !Array.isArray(value.results) ||
+    value.results.length > 1_000
+  ) {
     throw new Error("Invalid document import response");
   }
   return {

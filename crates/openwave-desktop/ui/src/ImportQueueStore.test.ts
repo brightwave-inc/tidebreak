@@ -82,4 +82,28 @@ describe("ImportQueueStore", () => {
       "streaming",
     ]);
   });
+
+  it("keeps an expanded archive's successes and failures independent", () => {
+    const store = createImportQueueStore();
+    store.getState().receive(queued);
+    store.getState().receive({
+      ...queued,
+      status: "imported",
+      documentId: "22222222-2222-4222-8222-222222222222",
+      processingStatus: "queued",
+    });
+    store.getState().receive({
+      ...queued,
+      importId: "55555555-5555-4555-8555-555555555555",
+      displayName: "oversized.pdf",
+      status: "failed",
+      message: "Archive entries are limited to 128 MiB",
+    });
+
+    expect(store.getState().entries).toHaveLength(2);
+    expect(sortedImportQueue(store.getState().entries).map((entry) => entry.status)).toEqual([
+      "failed",
+      "imported",
+    ]);
+  });
 });
