@@ -29,7 +29,6 @@
     "@univerjs/preset-docs-core": "0.25.1",
     "@univerjs/preset-sheets-core": "0.25.1",
     "@univerjs/presets": "0.25.1",
-    "@univerjs/sheets": "0.25.1",
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
     "jszip": "3.10.1",
