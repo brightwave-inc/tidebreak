@@ -485,11 +485,30 @@ fn parse_web_search_provider(
 }
 
 /// The configured model, if any.
-async fn read_model(store: &dyn Store) -> Result<Option<String>, ServerError> {
+async fn read_model(store: &dyn Store) -> openwave_core::Result<Option<String>> {
     Ok(store
         .get_setting(MODEL_SETTING)
         .await?
         .and_then(|value| value.as_str().map(str::to_owned)))
+}
+
+/// Resolve which model a new execution in `chat` should use.
+///
+/// The order is the chat's override, then the global `model` setting, then the
+/// boot default. A foreground turn freezes the result when its message is
+/// accepted; a sandbox child inherits its origin turn's frozen selection and
+/// only falls back here when it was admitted before that was recorded.
+pub(crate) async fn resolve_chat_model(
+    store: &dyn Store,
+    chat: &openwave_core::Chat,
+    boot_default: &str,
+) -> openwave_core::Result<String> {
+    match chat.model.clone() {
+        Some(model) => Ok(model),
+        None => Ok(read_model(store)
+            .await?
+            .unwrap_or_else(|| boot_default.to_owned())),
+    }
 }
 
 /// Resolve, canonicalize, and availability-check a model selection before it
@@ -1767,13 +1786,7 @@ pub async fn post_message(
         }
         existing.model
     } else {
-        // New-turn resolution order: chat override, global default, boot default.
-        let selected = match chat.model.clone() {
-            Some(model) => model,
-            None => read_model(&*state.store)
-                .await?
-                .unwrap_or_else(|| state.agent_config.model.clone()),
-        };
+        let selected = resolve_chat_model(&*state.store, &chat, &state.agent_config.model).await?;
         validate_model_selection(&state, &selected, true).await?
     };
     let images = resolve_message_attachments(&state, &body.attachments).await?;

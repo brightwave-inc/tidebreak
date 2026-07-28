@@ -412,6 +412,7 @@ pub mod agent_run {
         pub depth: i16,
         pub status: String,
         pub input: Option<String>,
+        pub model: Option<String>,
         pub attempt_count: i32,
         pub max_attempts: i32,
         pub claim_count: i32,

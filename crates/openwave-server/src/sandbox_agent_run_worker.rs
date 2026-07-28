@@ -466,31 +466,44 @@ impl SandboxAgentRunWorker {
             .store
             .list_sandbox_tool_calls_for_agent_run(run.id)
             .await?;
+        let chat = self.store.get_chat(run.chat_id).await?.ok_or_else(|| {
+            AgentError::msg(format!("claimed sandbox agent run {} has no chat", run.id))
+        })?;
         let delegated_file_available = if self.config.delegated_file_executor_enabled {
-            match (
-                self.store.get_sandbox_agent_admission(run.id).await?,
-                self.store.get_chat(run.chat_id).await?,
-            ) {
-                (Some(admission), Some(chat)) => {
-                    delegated_file_admission_matches(&run, &admission, &chat)
-                }
-                _ => false,
+            match self.store.get_sandbox_agent_admission(run.id).await? {
+                Some(admission) => delegated_file_admission_matches(&run, &admission, &chat),
+                None => false,
             }
         } else {
             false
         };
+        // A sandbox child runs the conversation's model, not the boot default.
+        // Admission froze the origin turn's selection on the run; only a run
+        // admitted before that was recorded resolves the chat's model here.
+        let model = match run.model.clone() {
+            Some(model) => model,
+            None => {
+                crate::routes::resolve_chat_model(&*self.store, &chat, &self.agent_config.model)
+                    .await?
+            }
+        };
         let mut agent_config = self.agent_config.clone();
-        if let Some(policy) = if self.resolver.enforces_model_registry() {
-            crate::providers::resolve_model_policy(&*self.store, &agent_config.model, true).await?
+        if self.resolver.enforces_model_registry() {
+            let Some(policy) =
+                crate::providers::resolve_model_policy(&*self.store, &model, true).await?
+            else {
+                return Err(AgentError::config(
+                    "sandbox model is not registered for its provider",
+                ));
+            };
+            crate::providers::apply_model_policy(
+                &mut agent_config,
+                &policy,
+                chat.reasoning_effort,
+            )?;
         } else {
-            None
-        } {
-            let reasoning_effort = agent_config.reasoning_effort;
-            crate::providers::apply_model_policy(&mut agent_config, &policy, reasoning_effort)?;
-        } else if self.resolver.enforces_model_registry() {
-            return Err(AgentError::config(
-                "sandbox model is not registered for its provider",
-            ));
+            agent_config.model = model;
+            agent_config.reasoning_effort = chat.reasoning_effort;
         }
         let request = sandbox_request(
             &agent_config,
@@ -1170,8 +1183,8 @@ mod tests {
     use futures::stream::{self, BoxStream};
     use openwave_core::{
         AcceptTurnOutcome, AgentRunInboxStatus, CallId, Chat, ChatId, ChatRequest, DbStore,
-        ModelProvider, ProviderId, Role, Store, ToolCallResolution, TurnCheckpointProgress, TurnId,
-        TurnRunStatus, Usage,
+        ModelProvider, ProviderId, ReasoningEffort, Role, Store, ToolCallResolution,
+        TurnCheckpointProgress, TurnId, TurnRunStatus, Usage,
     };
 
     use super::*;
@@ -1594,6 +1607,67 @@ mod tests {
             )]
         );
         assert_eq!(requests[0].system.as_deref(), Some(SANDBOX_SYSTEM_PROMPT));
+    }
+
+    /// Regression: a sandbox child used to run the boot default model and never
+    /// carried the chat's reasoning effort, so a conversation on a cheaper model
+    /// was silently billed for the default one.
+    #[tokio::test]
+    async fn sandbox_run_inherits_the_chat_model_and_reasoning_effort() {
+        let (worker, store, provider, _fixture_chat, _dir) = fixture().await;
+        let chat = Chat {
+            model: Some("chat-cheap-model".into()),
+            reasoning_effort: Some(ReasoningEffort::Low),
+            ..sandbox_chat()
+        };
+        store.create_chat(&chat).await.unwrap();
+
+        // Mirror message acceptance: the turn freezes the chat's resolved model.
+        let selected = crate::routes::resolve_chat_model(&*store, &chat, "boot-default-model")
+            .await
+            .unwrap();
+        assert_eq!(selected, "chat-cheap-model");
+        let turn_id = TurnId::new();
+        store
+            .accept_turn(turn_id, chat.id, &selected, "delegate")
+            .await
+            .unwrap();
+        let lease = uuid::Uuid::new_v4();
+        let now = Utc::now();
+        store
+            .claim_turn_run(lease, now, now + chrono::Duration::hours(1))
+            .await
+            .unwrap()
+            .turn
+            .expect("the delegating turn should claim");
+
+        let run = admit_sandbox(
+            &store,
+            chat.id,
+            CallId::new(),
+            "Investigate this in isolation.",
+        )
+        .await;
+        assert_eq!(run.model.as_deref(), Some("chat-cheap-model"));
+
+        assert_eq!(
+            worker.run_once().await.unwrap(),
+            SandboxAgentRunWorkerOutcome::Completed(run.id)
+        );
+        assert_eq!(
+            store
+                .get_agent_run(run.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("chat-cheap-model")
+        );
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].model, "chat-cheap-model");
+        assert_eq!(requests[0].reasoning_effort, Some(ReasoningEffort::Low));
     }
 
     #[tokio::test]

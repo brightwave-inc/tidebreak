@@ -243,6 +243,10 @@ async fn sandbox_spawn_and_foreground_checkpoint_commit_as_one_exact_transition(
         Some(AgentRunId::foreground_for_chat(chat.id))
     );
     assert_eq!(parked.0.status, AgentRunStatus::Queued);
+    // The child inherits the origin turn's model in the same transaction, so its
+    // executor never has to fall back to a boot default and the row records what
+    // the run used.
+    assert_eq!(parked.0.model.as_deref(), Some("gpt-5"));
     assert_eq!(parked.1.status, TurnRunStatus::WaitingForAgentRun);
     assert_eq!(parked.1.lease_token, None);
     assert_eq!(parked.2.turn_id, running.id);
@@ -1161,6 +1165,7 @@ async fn agent_run_schema_rejects_cross_chat_parentage() {
         depth: Set(1),
         status: Set(AgentRunStatus::Queued.as_str().into()),
         input: Set(Some("cross-chat raw insert".into())),
+        model: Set(None),
         attempt_count: Set(0),
         max_attempts: Set(crate::model::AgentRun::DEFAULT_MAX_ATTEMPTS),
         claim_count: Set(0),
@@ -1207,6 +1212,7 @@ async fn scheduler_never_claims_a_sandbox_row_without_an_admission_receipt() {
         depth: Set(1),
         status: Set(AgentRunStatus::Queued.as_str().into()),
         input: Set(Some("receiptless corruption".into())),
+        model: Set(None),
         attempt_count: Set(0),
         max_attempts: Set(AgentRun::DEFAULT_MAX_ATTEMPTS),
         claim_count: Set(0),
