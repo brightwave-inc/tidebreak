@@ -12,7 +12,7 @@ import {
 
 import { useApp } from "@/AppContext";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { BoxedLogomark } from "@/Logomark";
+import { Logomark } from "@/Logomark";
 import {
   Sidebar as SidebarRail,
   SidebarButton,
@@ -46,11 +46,11 @@ export function SidebarFrame({ children }: { children: ReactNode }) {
       <SidebarHeader>
         <button
           type="button"
-          className="inline-flex shrink-0 cursor-pointer items-center rounded-md p-1 transition-opacity hover:opacity-80"
+          className="inline-flex shrink-0 cursor-pointer items-center rounded-md p-1 text-foreground transition-opacity hover:opacity-70"
           aria-label="Home"
           onClick={() => void navigate({ to: "/" })}
         >
-          <BoxedLogomark />
+          <Logomark width="28" height="15" />
         </button>
         <span className="grow" />
         {!isCompact && (
