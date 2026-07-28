@@ -1,5 +1,5 @@
 import { Loader2Icon } from "lucide-react";
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef } from "react";
 
 import type { DocumentDetail } from "@/api";
 import { useApp } from "@/AppContext";
@@ -7,6 +7,7 @@ import {
   DocumentViewer,
   hasOriginalViewer,
 } from "@/document/DocumentViewer";
+import { charRangeForByteSpan, type CitationSpan } from "./citationSpan";
 import { DocumentError } from "./error";
 import { ImageViewer } from "./image-viewer";
 import { MarkdownViewer, type HighlightRange } from "./markdown-viewer";
@@ -73,6 +74,14 @@ type DocumentDetailsProps = {
    * dot-notation path for JSON, an XPath expression for XML.
    */
   highlightPath?: string;
+  /**
+   * Byte range in the extracted text to highlight and scroll to, when opened
+   * from a citation. Distinct from `highlightRange`, which addresses characters
+   * of the original file rather than bytes of the text read out of it.
+   */
+  citationSpan?: CitationSpan;
+  /** Page of a paginated original to open on, when opened from a citation. */
+  targetPage?: number;
 };
 
 /**
@@ -92,6 +101,8 @@ export function DocumentDetails({
   hasOriginalDocumentTab,
   highlightRange,
   highlightPath,
+  citationSpan,
+  targetPage,
 }: DocumentDetailsProps) {
   const { client } = useApp();
   const type = baseMediaType(info.media_type);
@@ -106,6 +117,7 @@ export function DocumentDetails({
               client={client}
               documentId={info.document_id}
               mediaType={type}
+              targetPage={targetPage}
               className="bg-page-background grow p-4 pt-2"
             />
           ) : type.startsWith("image/") ? (
@@ -143,7 +155,9 @@ export function DocumentDetails({
           )}
         </>
       )}
-      {view === "extracted_text" && <ExtractedText info={info} />}
+      {view === "extracted_text" && (
+        <ExtractedText info={info} citationSpan={citationSpan} />
+      )}
 
     </div>
   );
@@ -160,11 +174,36 @@ function ViewerLoading() {
 /**
  * The text of record, rendered as one contiguous run rather than paginated.
  *
- * That is deliberate: citation offsets index into this exact string, so the
- * day a citation has to be scrolled to and highlighted there is a single text
- * node to find the offset in.
+ * That is what makes a citation reachable: its offsets index into this exact
+ * string, so the cited passage is a slice of the rendered content rather than
+ * something to go looking for. A citation splits the run in three around the
+ * passage, which changes nothing about how it reads or wraps.
  */
-function ExtractedText({ info }: { info: DocumentDetail }) {
+function ExtractedText({
+  info,
+  citationSpan,
+}: {
+  info: DocumentDetail;
+  citationSpan?: CitationSpan;
+}) {
+  // The span is derived afresh from the transcript on every update it makes, so
+  // the offsets are what this depends on rather than the object holding them.
+  const spanStart = citationSpan?.start;
+  const spanEnd = citationSpan?.end;
+  const cited = useMemo(
+    () =>
+      spanStart != null && spanEnd != null
+        ? charRangeForByteSpan(info.content, { start: spanStart, end: spanEnd })
+        : null,
+    [info.content, spanStart, spanEnd],
+  );
+
+  const citedRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!cited) return;
+    citedRef.current?.scrollIntoView({ block: "center" });
+  }, [cited]);
+
   if (info.content.length === 0) {
     switch (info.processing_status) {
       case "failed":
@@ -183,7 +222,21 @@ function ExtractedText({ info }: { info: DocumentDetail }) {
   return (
     <div className="min-h-0 grow overflow-auto p-6">
       <pre className="mx-auto max-w-4xl font-sans text-sm leading-relaxed break-words whitespace-pre-wrap">
-        {info.content}
+        {cited ? (
+          <>
+            {info.content.slice(0, cited.start)}
+            <mark
+              ref={citedRef}
+              aria-label="Cited passage"
+              className="rounded bg-yellow-200/60 dark:bg-yellow-500/25"
+            >
+              {info.content.slice(cited.start, cited.end)}
+            </mark>
+            {info.content.slice(cited.end)}
+          </>
+        ) : (
+          info.content
+        )}
       </pre>
     </div>
   );

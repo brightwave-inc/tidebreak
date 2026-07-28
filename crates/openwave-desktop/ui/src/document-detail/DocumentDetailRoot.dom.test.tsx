@@ -5,15 +5,57 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { ApiClient, DocumentDetail } from "@/api";
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
+import type { AssistantSource } from "@/AssistantSources";
+import { useChatSessionStore } from "@/ChatSessionStore";
 import { renderWithRouter } from "../test/router";
 import { DocumentDetailRoot } from "./DocumentDetailRoot";
 
-afterEach(cleanup);
+// pdf.js draws to a canvas and runs a worker, neither of which jsdom has, so
+// the page targeting is observed through a stand-in that keeps the real page
+// state hook — the part the panel actually drives.
+vi.mock("@/document/PdfViewer", async () => {
+  const { usePdfPageState } = await import("@/document/usePdfPageState");
+  return {
+    PdfViewer: ({
+      documentId,
+      targetPage,
+    }: {
+      documentId: string;
+      targetPage?: number;
+    }) => {
+      const { currentPage, setCurrentPage } = usePdfPageState(documentId, {
+        numPages: 20,
+        targetPage,
+      });
+      return (
+        <div>
+          <span>Page {currentPage}</span>
+          <button type="button" onClick={() => setCurrentPage(currentPage + 1)}>
+            Next page
+          </button>
+        </div>
+      );
+    },
+  };
+});
+
+const scrolledTo: Element[] = [];
+
+afterEach(() => {
+  cleanup();
+  useChatSessionStore.getState().reset();
+  window.sessionStorage.clear();
+  scrolledTo.length = 0;
+});
 
 beforeAll(() => {
   // jsdom implements neither half of the object-URL API the image viewer uses.
   URL.createObjectURL = vi.fn(() => "blob:document");
   URL.revokeObjectURL = vi.fn();
+  // jsdom does not scroll, so the scrolled-to element is recorded instead.
+  Element.prototype.scrollIntoView = function (this: Element) {
+    scrolledTo.push(this);
+  };
 });
 
 function detail(overrides: Partial<DocumentDetail> = {}): DocumentDetail {
@@ -51,6 +93,60 @@ async function openPanel(
     { initialUrl: "/c/chat-1?left=sources.doc-1&right=chat" },
   );
   return { ...rendered, client: client as unknown as ApiClient & typeof client, download };
+}
+
+/**
+ * The transcript beside the panel, holding the citation the panel is opened
+ * from. This is where the panel resolves it: no request is made for it.
+ */
+function seedTranscript(source: Partial<AssistantSource> & { id: string }) {
+  useChatSessionStore.getState().update((session) => ({
+    ...session,
+    messages: [
+      {
+        id: "m1",
+        role: "assistant",
+        text: "Revenue rose in the second quarter.",
+        sources: [
+          {
+            ordinal: 1,
+            documentId: "doc-1",
+            span: { start: 0, end: 0 },
+            excerpt: "",
+            heading: null,
+            pages: [],
+            ...source,
+          },
+        ],
+      },
+    ],
+  }));
+}
+
+async function openCitation(info: DocumentDetail, citationId: string) {
+  const client = {
+    getChatDocument: vi.fn().mockResolvedValue(info),
+    getChatDocumentFile: vi.fn().mockResolvedValue(new Blob(["bytes"])),
+    getDocumentFileContent: vi.fn().mockResolvedValue(new Uint8Array()),
+  };
+  return renderWithRouter(
+    <AppContextProvider value={{ client } as unknown as AppContextValue}>
+      <DocumentDetailRoot
+        chatId="chat-1"
+        documentID="doc-1"
+        citationId={citationId}
+        position="left"
+      />
+    </AppContextProvider>,
+    { initialUrl: `/c/chat-1?left=sources.doc-1.${citationId}&right=chat` },
+  );
+}
+
+/** Byte offsets of a passage, which is how a citation reports its span. */
+function byteSpan(text: string, passage: string) {
+  const encoder = new TextEncoder();
+  const start = encoder.encode(text.slice(0, text.indexOf(passage))).length;
+  return { start, end: start + encoder.encode(passage).length };
 }
 
 describe("DocumentDetailRoot", () => {
@@ -148,6 +244,60 @@ describe("DocumentDetailRoot", () => {
       await screen.findByText(/Not a heading, just a line that starts with a hash/),
     ).toBeVisible();
     expect(screen.queryByRole("button", { name: "Document outline" })).toBeNull();
+  });
+
+  // The passage sits behind an accented character, so the byte offsets a
+  // citation carries no longer line up with JavaScript's string indices. An
+  // off-by-one conversion highlights the wrong words and this is what catches it.
+  const CITED_CONTENT = "Café notes\n\nRevenue rose 12% in the second quarter.\n";
+  const CITED_PASSAGE = "Revenue rose 12%";
+
+  it("opens a citation on the passage it quoted, highlighted and scrolled to", async () => {
+    seedTranscript({ id: "cite-1", span: byteSpan(CITED_CONTENT, CITED_PASSAGE) });
+    await openCitation(
+      // A source whose original view could be drawn, but cannot show a span:
+      // the citation lands on the extracted text, where the passage is.
+      detail({ media_type: "text/plain", title: "Notes.txt", content: CITED_CONTENT }),
+      "cite-1",
+    );
+
+    const cited = await screen.findByText(CITED_PASSAGE);
+    expect(cited.tagName).toBe("MARK");
+    expect(scrolledTo).toContain(cited);
+    // Split around the passage rather than reduced to it: the text of record
+    // still reads as one run, which is what the offsets index into.
+    expect(document.querySelector("pre")?.textContent).toBe(CITED_CONTENT);
+  });
+
+  it("opens the same source at the top when no citation led there", async () => {
+    await openPanel(
+      detail({ media_type: "text/plain", title: "Notes.txt", content: CITED_CONTENT }),
+    );
+
+    expect(
+      await screen.findByRole("tab", { name: "Original document", selected: true }),
+    ).toBeVisible();
+    expect(document.querySelector("mark")).toBeNull();
+  });
+
+  it("opens a paginated citation on its recorded page, then lets the reader leave", async () => {
+    const user = userEvent.setup();
+    seedTranscript({ id: "cite-2", pages: [4, 5], span: { start: 10, end: 20 } });
+    await openCitation(
+      detail({ media_type: "application/pdf", title: "Report.pdf", content: "text" }),
+      "cite-2",
+    );
+
+    // The span starts on page 4; the page remembered for this source is not it.
+    expect(await screen.findByText("Page 4")).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Next page" }));
+    expect(await screen.findByText("Page 5")).toBeVisible();
+
+    // The transcript keeps arriving while the panel is open, and the citation is
+    // re-resolved with it. The page it asked for must not be applied twice.
+    seedTranscript({ id: "cite-2", pages: [4, 5], span: { start: 10, end: 20 } });
+    expect(await screen.findByText("Page 5")).toBeVisible();
   });
 
   it("says so when a structured source will not parse", async () => {

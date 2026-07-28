@@ -52,6 +52,15 @@ export function hasOriginalViewer(mediaType: string): boolean {
   );
 }
 
+/**
+ * Whether this format's original view has pages, and so can be opened at the
+ * one a citation was recorded on. The others draw the source as a single run,
+ * where a page number means nothing.
+ */
+export function isPaginatedOriginalViewer(mediaType: string): boolean {
+  return normalizeMediaType(mediaType) === "application/pdf";
+}
+
 interface DocumentViewerProps {
   client: Pick<ApiClient, "getDocumentFileContent">;
   documentId: string;

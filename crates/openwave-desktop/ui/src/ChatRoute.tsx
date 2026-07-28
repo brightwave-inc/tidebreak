@@ -415,6 +415,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
           <DocumentDetailRoot
             chatId={chatId}
             documentID={panel.documentId}
+            citationId={panel.citationId}
             position={side}
           />
         ) : (
