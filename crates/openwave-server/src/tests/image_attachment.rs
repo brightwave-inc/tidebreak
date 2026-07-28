@@ -541,6 +541,7 @@ async fn a_turn_carrying_images_against_a_text_only_model_is_refused() {
         &providers::ProviderConfig {
             enabled: true,
             base_url: Some("http://127.0.0.1:1234/v1".into()),
+            vertex_location: None,
             models: vec![providers::CustomModelConfig {
                 id: "vendor/model".into(),
                 display_name: Some("Vendor Model".into()),
@@ -653,6 +654,7 @@ async fn a_curated_openai_model_answers_after_receiving_png_and_jpeg_attachments
         &providers::ProviderConfig {
             enabled: true,
             base_url: Some(format!("http://{address}/v1")),
+            vertex_location: None,
             models: Vec::new(),
         },
     )

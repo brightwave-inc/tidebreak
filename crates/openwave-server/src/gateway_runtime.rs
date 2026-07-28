@@ -467,6 +467,7 @@ mod tests {
             &providers::ProviderConfig {
                 enabled: true,
                 base_url: Some(base_url.to_string()),
+                vertex_location: None,
                 models: Vec::new(),
             },
         )
@@ -597,6 +598,7 @@ mod tests {
             &providers::ProviderConfig {
                 enabled: true,
                 base_url: Some("http://127.0.0.1:1".to_string()),
+                vertex_location: None,
                 models: Vec::new(),
             },
         )

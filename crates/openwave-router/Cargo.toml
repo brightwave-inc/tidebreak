@@ -17,7 +17,7 @@ anthropic = ["dep:reqwest", "dep:async-stream"]
 # OpenAI-compatible Chat Completions adapter (OpenAI, OpenRouter, vLLM, …).
 openai-compat = ["dep:reqwest", "dep:async-stream"]
 # Google Gemini Developer API adapter (native GenerateContent protocol).
-gemini = ["dep:reqwest", "dep:async-stream", "dep:uuid"]
+gemini = ["dep:reqwest", "dep:async-stream", "dep:ring", "dep:uuid"]
 
 [dependencies]
 openwave-core = { path = "../openwave-core", default-features = false }
@@ -27,8 +27,10 @@ futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true, optional = true }
+ring = { workspace = true, optional = true }
 async-stream = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true, features = ["net", "rt-multi-thread"] }

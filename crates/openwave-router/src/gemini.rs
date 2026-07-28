@@ -8,6 +8,7 @@
 //! silently accepting or dropping fields it does not understand.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -23,7 +24,9 @@ use openwave_core::provider::{
 };
 use openwave_core::{ImageAttachments, ReasoningEffort, Role};
 
+use crate::google_auth::{valid_resource_segment, valid_vertex_location};
 use crate::sse::{classify_provider_error, drain_frames, frame_data_raw, read_bounded_error_body};
+use crate::BearerTokenSource;
 
 const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
@@ -32,17 +35,30 @@ const DEFAULT_MAX_TOKENS: u32 = 4096;
 /// the bypass keeps their history portable across a per-chat model switch.
 const THOUGHT_SIGNATURE_BYPASS: &str = "skip_thought_signature_validator";
 
-fn provider_err(err: impl std::fmt::Display) -> AgentError {
-    AgentError::Provider(err.to_string())
+#[derive(Clone)]
+enum GeminiAuth {
+    ApiKey(String),
+    Bearer(Arc<dyn BearerTokenSource>),
 }
 
-/// A [`ModelProvider`] for the Gemini Developer API's native GenerateContent
-/// streaming endpoint.
+#[derive(Clone)]
+enum EndpointFamily {
+    DeveloperApi,
+    VertexAi {
+        project_id: String,
+        location: String,
+    },
+}
+
+/// A [`ModelProvider`] for native Gemini GenerateContent over either the
+/// Developer API or Vertex AI.
 #[derive(Clone)]
 pub struct GeminiProvider {
     client: reqwest::Client,
-    api_key: String,
+    auth: GeminiAuth,
+    endpoint_family: EndpointFamily,
     base_url: String,
+    base_url_overridden: bool,
 }
 
 impl GeminiProvider {
@@ -50,25 +66,103 @@ impl GeminiProvider {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             client: reqwest::Client::new(),
-            api_key: api_key.into(),
+            auth: GeminiAuth::ApiKey(api_key.into()),
+            endpoint_family: EndpointFamily::DeveloperApi,
             base_url: DEFAULT_BASE_URL.to_string(),
+            base_url_overridden: false,
         }
     }
 
-    /// Override the Gemini Developer API base URL. This is primarily useful
-    /// for controlled local test servers; Vertex AI uses a separate auth path.
+    /// Build a provider using Vertex AI and a short-lived Google OAuth token.
+    pub fn vertex(
+        project_id: impl Into<String>,
+        location: impl Into<String>,
+        token_source: Arc<dyn BearerTokenSource>,
+    ) -> Result<Self> {
+        let project_id = project_id.into();
+        let location = location.into();
+        if !valid_resource_segment(&project_id) {
+            return Err(AgentError::config("invalid Vertex AI project"));
+        }
+        if !valid_vertex_location(&location) {
+            return Err(AgentError::config("invalid Vertex AI location"));
+        }
+        let base_url = if location == "global" {
+            "https://aiplatform.googleapis.com".to_string()
+        } else {
+            format!("https://{location}-aiplatform.googleapis.com")
+        };
+        Ok(Self {
+            client: reqwest::Client::new(),
+            auth: GeminiAuth::Bearer(token_source),
+            endpoint_family: EndpointFamily::VertexAi {
+                project_id,
+                location,
+            },
+            base_url,
+            base_url_overridden: false,
+        })
+    }
+
+    /// Override the selected endpoint family's base URL. This is primarily
+    /// useful for controlled local test servers.
     #[must_use]
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
+        self.base_url_overridden = true;
         self
     }
 
-    fn endpoint(&self, model: &str) -> String {
-        format!(
-            "{}/v1beta/models/{model}:streamGenerateContent?alt=sse",
-            self.base_url.trim_end_matches('/')
-        )
+    fn endpoint(&self, model: &str) -> Result<String> {
+        if model.is_empty()
+            || model.len() > 128
+            || !model
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return Err(AgentError::config("invalid Gemini model id"));
+        }
+        match &self.endpoint_family {
+            EndpointFamily::DeveloperApi => {
+                let base = self.base_url.trim_end_matches('/');
+                Ok(format!(
+                    "{base}/v1beta/models/{model}:streamGenerateContent?alt=sse"
+                ))
+            }
+            EndpointFamily::VertexAi {
+                project_id,
+                location,
+            } => {
+                // Gemini 3 is global-only. Keep a regional setting useful for
+                // older/future regional models without sending a curated 3.x
+                // row to an endpoint Google cannot serve.
+                let location = if requires_global_vertex(model) {
+                    "global"
+                } else {
+                    location
+                };
+                let default_base;
+                let base = if self.base_url_overridden {
+                    self.base_url.trim_end_matches('/')
+                } else if location == "global" {
+                    "https://aiplatform.googleapis.com"
+                } else {
+                    default_base = format!("https://{location}-aiplatform.googleapis.com");
+                    &default_base
+                };
+                Ok(format!(
+                    "{base}/v1/projects/{project_id}/locations/{location}/publishers/google/models/{model}:streamGenerateContent?alt=sse"
+                ))
+            }
+        }
     }
+}
+
+fn requires_global_vertex(model: &str) -> bool {
+    model
+        .strip_prefix("gemini-")
+        .and_then(|version| version.split(['.', '-']).next())
+        == Some("3")
 }
 
 #[async_trait]
@@ -79,15 +173,21 @@ impl ModelProvider for GeminiProvider {
 
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
         let body = build_request_json(&req)?;
-        let response = self
+        let request = self
             .client
-            .post(self.endpoint(&req.model))
-            .header("x-goog-api-key", &self.api_key)
+            .post(self.endpoint(&req.model)?)
             .header("content-type", "application/json")
-            .json(&body)
+            .json(&body);
+        let request = match &self.auth {
+            GeminiAuth::ApiKey(api_key) => request.header("x-goog-api-key", api_key),
+            GeminiAuth::Bearer(source) => request.bearer_auth(source.bearer_token().await?),
+        };
+        let response = request
             .send()
             .await
-            .map_err(provider_err)?;
+            // reqwest's display includes the URL; a Vertex URL contains the
+            // project id extracted from the secret key file.
+            .map_err(|_| AgentError::Provider("gemini request failed".into()))?;
 
         let status = response.status();
         if !status.is_success() {
@@ -102,9 +202,9 @@ impl ModelProvider for GeminiProvider {
             while let Some(chunk) = bytes.next().await {
                 let chunk = match chunk {
                     Ok(chunk) => chunk,
-                    Err(error) => {
+                    Err(_) => {
                         yield ProviderEvent::Failed {
-                            message: format!("gemini stream ended early: {error}"),
+                            message: "gemini stream ended early".to_string(),
                         };
                         return;
                     }
@@ -815,8 +915,110 @@ mod tests {
     fn endpoint_uses_developer_api_streaming_route() {
         let provider = GeminiProvider::new("key").with_base_url("http://127.0.0.1:8080/");
         assert_eq!(
-            provider.endpoint("gemini-3.6-flash"),
+            provider.endpoint("gemini-3.6-flash").unwrap(),
             "http://127.0.0.1:8080/v1beta/models/gemini-3.6-flash:streamGenerateContent?alt=sse"
         );
+    }
+
+    struct StaticToken;
+
+    #[async_trait]
+    impl BearerTokenSource for StaticToken {
+        async fn bearer_token(&self) -> Result<String> {
+            Ok("vertex-bearer".into())
+        }
+    }
+
+    #[test]
+    fn vertex_endpoints_distinguish_global_and_regional_hosts() {
+        let global =
+            GeminiProvider::vertex("test-project", "global", Arc::new(StaticToken)).unwrap();
+        assert_eq!(
+            global.endpoint("gemini-3.6-flash").unwrap(),
+            "https://aiplatform.googleapis.com/v1/projects/test-project/locations/global/publishers/google/models/gemini-3.6-flash:streamGenerateContent?alt=sse"
+        );
+
+        let regional =
+            GeminiProvider::vertex("test-project", "us-central1", Arc::new(StaticToken)).unwrap();
+        assert_eq!(
+            regional.endpoint("gemini-2.5-flash").unwrap(),
+            "https://us-central1-aiplatform.googleapis.com/v1/projects/test-project/locations/us-central1/publishers/google/models/gemini-2.5-flash:streamGenerateContent?alt=sse"
+        );
+        assert_eq!(
+            regional.endpoint("gemini-3.6-flash").unwrap(),
+            "https://aiplatform.googleapis.com/v1/projects/test-project/locations/global/publishers/google/models/gemini-3.6-flash:streamGenerateContent?alt=sse"
+        );
+    }
+
+    #[tokio::test]
+    async fn endpoint_families_share_body_semantics_and_use_exclusive_auth_headers() {
+        use axum::extract::State;
+        use axum::http::{header, HeaderMap};
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use std::sync::Mutex;
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<(HeaderMap, Value)>>>);
+
+        async fn capture(
+            State(capture): State<Capture>,
+            headers: HeaderMap,
+            Json(body): Json<Value>,
+        ) -> impl IntoResponse {
+            capture.0.lock().unwrap().push((headers, body));
+            (
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                "data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n",
+            )
+        }
+
+        let capture_state = Capture::default();
+        let app = Router::new()
+            .fallback(post(capture))
+            .with_state(capture_state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let base_url = format!("http://{address}");
+
+        let developer = GeminiProvider::new("developer-key").with_base_url(&base_url);
+        let mut stream = developer
+            .stream(request(vec![ChatMessage::text(Role::User, "hi")]))
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        let vertex = GeminiProvider::vertex("test-project", "global", Arc::new(StaticToken))
+            .unwrap()
+            .with_base_url(&base_url);
+        let mut stream = vertex
+            .stream(request(vec![ChatMessage::text(Role::User, "hi")]))
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        let requests = capture_state.0.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].0.get("x-goog-api-key").unwrap(),
+            "developer-key"
+        );
+        assert!(requests[0].0.get(header::AUTHORIZATION).is_none());
+        assert_eq!(
+            requests[1].0.get(header::AUTHORIZATION).unwrap(),
+            "Bearer vertex-bearer"
+        );
+        assert!(requests[1].0.get("x-goog-api-key").is_none());
+        assert_eq!(requests[0].1, requests[1].1);
+        assert_eq!(requests[1].1["generationConfig"]["maxOutputTokens"], 65_536);
+        assert_eq!(
+            requests[1].1["tools"][0]["functionDeclarations"][0]["name"],
+            "read_file"
+        );
+        server.abort();
     }
 }

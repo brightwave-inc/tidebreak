@@ -125,4 +125,47 @@ describe("ProvidersPanel", () => {
       screen.queryByRole("button", { name: "Add model" }),
     ).not.toBeInTheDocument();
   });
+
+  it("configures Gemini service-account auth without projecting the secret", async () => {
+    const gemini: ProviderInfo = {
+      kind: "gemini",
+      enabled: false,
+      has_credential: false,
+      models: [],
+    };
+    const putProvider = vi.fn().mockResolvedValue(gemini);
+    const client = { putProvider } as unknown as ApiClient;
+
+    render(
+      <ProvidersPanel
+        providers={[gemini]}
+        client={client}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Gemini credential type"), {
+      target: { value: "service_account" },
+    });
+    fireEvent.change(screen.getByLabelText("Vertex AI location"), {
+      target: { value: "us-central1" },
+    });
+    fireEvent.change(screen.getByLabelText("Google service account JSON"), {
+      target: { value: '  {"type":"service_account","private_key":"secret"}  ' },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Save configuration" }),
+    );
+
+    await waitFor(() =>
+      expect(putProvider).toHaveBeenCalledWith("gemini", {
+        enabled: true,
+        vertex_location: "us-central1",
+        credential: {
+          type: "service_account",
+          json: '{"type":"service_account","private_key":"secret"}',
+        },
+      }),
+    );
+  });
 });

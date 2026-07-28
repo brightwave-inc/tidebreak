@@ -20,10 +20,18 @@ pub mod openai_compat;
 #[cfg(feature = "gemini")]
 pub mod gemini;
 
+#[cfg(feature = "gemini")]
+pub mod google_auth;
+
 #[cfg(feature = "anthropic")]
 pub use anthropic::AnthropicProvider;
 #[cfg(feature = "gemini")]
 pub use gemini::GeminiProvider;
+#[cfg(feature = "gemini")]
+pub use google_auth::{
+    valid_resource_segment as valid_google_resource_segment, valid_vertex_location,
+    GoogleServiceAccount, GoogleServiceAccountTokenSource,
+};
 #[cfg(feature = "openai-compat")]
 pub use openai_compat::OpenAiCompatProvider;
-pub use router::{BearerTokenSource, Route, RouteKind, Router};
+pub use router::{BearerTokenSource, Route, RouteKind, Router, VertexRoute};
