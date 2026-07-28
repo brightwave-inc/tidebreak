@@ -1,3 +1,14 @@
+/**
+ * `document/` is the heavy side of viewing a source: the media-type dispatcher
+ * below, the viewers built on a document engine of their own (pdf.js, Univer)
+ * with the parsing and control surfaces those need, and the download every
+ * viewer shares (`useFileDownload`).
+ *
+ * `components/document/` next to it is the reading side: the extracted text,
+ * the panel's view switcher, and the viewers that need nothing beyond the
+ * file's characters — image, text/markdown, JSON, XML. A new format goes
+ * wherever its viewer's weight puts it; both sides download the same way.
+ */
 import { lazy, Suspense } from "react";
 import { Loader2Icon } from "lucide-react";
 
@@ -62,7 +73,8 @@ export function isPaginatedOriginalViewer(mediaType: string): boolean {
 }
 
 interface DocumentViewerProps {
-  client: Pick<ApiClient, "getDocumentFileContent">;
+  client: Pick<ApiClient, "getChatDocumentFile">;
+  chatId: string;
   documentId: string;
   mediaType: string;
   /** Open on this page the first time it is requested for this document. */
@@ -72,6 +84,7 @@ interface DocumentViewerProps {
 
 export function DocumentViewer({
   client,
+  chatId,
   documentId,
   mediaType,
   targetPage,
@@ -84,6 +97,7 @@ export function DocumentViewer({
       <ViewerBoundary>
         <PdfViewer
           client={client}
+          chatId={chatId}
           documentId={documentId}
           targetPage={targetPage}
           className={className}
@@ -98,6 +112,7 @@ export function DocumentViewer({
         <UniverSpreadsheetViewer
           key={documentId}
           client={client}
+          chatId={chatId}
           documentId={documentId}
           isCsv={DELIMITED_TEXT_MEDIA_TYPES.has(type)}
           className={className}
@@ -112,6 +127,7 @@ export function DocumentViewer({
         <UniverDocumentViewer
           key={documentId}
           client={client}
+          chatId={chatId}
           documentId={documentId}
           className={className}
         />

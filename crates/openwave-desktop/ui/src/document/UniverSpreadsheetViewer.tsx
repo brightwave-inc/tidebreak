@@ -33,7 +33,8 @@ export interface SheetHighlightRange {
 }
 
 interface Props extends HTMLAttributes<HTMLDivElement> {
-  client: Pick<ApiClient, "getDocumentFileContent">;
+  client: Pick<ApiClient, "getChatDocumentFile">;
+  chatId: string;
   documentId: string;
   highlightRange?: SheetHighlightRange;
   /** When true, skip the XLSX-only style pass — a CSV has none. */
@@ -58,6 +59,7 @@ interface UniverInstance {
  */
 export default function UniverSpreadsheetViewer({
   client,
+  chatId,
   documentId,
   highlightRange,
   isCsv,
@@ -93,7 +95,9 @@ export default function UniverSpreadsheetViewer({
     };
   }, []);
 
-  const fileDownload = useFileDownload(client, documentId);
+  const fileDownload = useFileDownload(client, chatId, documentId, {
+    parseAs: "arrayBuffer",
+  });
 
   // Shortcuts the canvas does not handle itself.
   useEffect(() => {

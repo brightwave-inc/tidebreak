@@ -2,19 +2,29 @@ import { Loader2Icon } from "lucide-react";
 import type { HTMLAttributes } from "react";
 import { useEffect, useState } from "react";
 
+import type { ApiClient } from "@/api";
+import { useFileDownload } from "@/document/useFileDownload";
 import { cn } from "@/lib/utils";
 import { FileDownloadProgressIndicator } from "./FileDownloadProgress";
-import { useFileDownload } from "./useFileDownload";
 
 interface Props extends HTMLAttributes<HTMLDivElement> {
+  client: Pick<ApiClient, "getChatDocumentFile">;
   chatId: string;
   documentID: string;
 }
 
-export function ImageViewer({ chatId, documentID, className, ...restProps }: Props) {
+export function ImageViewer({
+  client,
+  chatId,
+  documentID,
+  className,
+  ...restProps
+}: Props) {
   const [imageError, setImageError] = useState(false);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
-  const fileDownload = useFileDownload(chatId, documentID, { parseAs: "blob" });
+  const fileDownload = useFileDownload(client, chatId, documentID, {
+    parseAs: "blob",
+  });
 
   useEffect(() => {
     if (!fileDownload.data) return;
@@ -47,7 +57,7 @@ export function ImageViewer({ chatId, documentID, className, ...restProps }: Pro
     );
   }
 
-  if (fileDownload.isError || imageError) {
+  if (fileDownload.error || imageError) {
     return (
       <div className={cn("relative overflow-auto", className)} {...restProps}>
         <div className="flex h-64 items-center justify-center text-muted-foreground">

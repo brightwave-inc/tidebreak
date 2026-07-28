@@ -16,15 +16,16 @@ import {
   useState,
 } from "react";
 
+import type { ApiClient } from "@/api";
 import { Button } from "@/components/ui/button";
 import {
   Popover,
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import { FileDownloadProgressIndicator } from "./FileDownloadProgress";
-import { useFileDownload } from "./useFileDownload";
+import { useFileDownload } from "@/document/useFileDownload";
 import { cn } from "@/lib/utils";
+import { FileDownloadProgressIndicator } from "./FileDownloadProgress";
 
 // ---------------------------------------------------------------------------
 // Collapse signaling
@@ -189,6 +190,7 @@ function getAttributes(el: Element): [string, string][] {
 // ---------------------------------------------------------------------------
 
 interface XmlViewerProps extends HTMLAttributes<HTMLDivElement> {
+  client: Pick<ApiClient, "getChatDocumentFile">;
   chatId: string;
   documentID: string;
   /** XPath expression to highlight, e.g. "/root/items/item[1]" */
@@ -196,13 +198,16 @@ interface XmlViewerProps extends HTMLAttributes<HTMLDivElement> {
 }
 
 export function XmlViewer({
+  client,
   chatId,
   documentID,
   highlightPath,
   className,
   ...props
 }: XmlViewerProps) {
-  const fileDownload = useFileDownload(chatId, documentID, { parseAs: "text" });
+  const fileDownload = useFileDownload(client, chatId, documentID, {
+    parseAs: "text",
+  });
 
   const xmlDoc = useMemo(() => {
     if (!fileDownload.data) return undefined;
@@ -278,7 +283,7 @@ export function XmlViewer({
     }
   }, [resolvedHighlightPath, xmlDoc]);
 
-  if (fileDownload.isError) {
+  if (fileDownload.error) {
     return (
       <div className={cn("relative overflow-auto", className)} {...props}>
         <div className="text-muted-foreground flex h-64 items-center justify-center">

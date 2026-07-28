@@ -876,16 +876,16 @@ describe("source download progress", () => {
     const client = new ApiClient("http://127.0.0.1", "token");
     const seen: number[] = [];
 
-    const blob = await client.getChatDocumentFile("chat-1", "doc-1", undefined, (p) =>
+    const file = await client.getChatDocumentFile("chat-1", "doc-1", undefined, (p) =>
       seen.push(p.loaded),
     );
 
     // Every chunk but the last may be swallowed by the throttle; the last must
     // not be, or the bar stops short of the end.
     expect(seen.at(-1)).toBe(3 * 1024 * 1024);
-    expect(blob.size).toBe(3 * 1024 * 1024);
+    expect(file.bytes.length).toBe(3 * 1024 * 1024);
     // The stored media type has to survive being reassembled from chunks.
-    expect(blob.type).toBe("text/markdown");
+    expect(file.contentType).toBe("text/markdown");
   });
 
   it("stays quiet for a small file, whose bar would only flash", async () => {
@@ -898,7 +898,12 @@ describe("source download progress", () => {
     const client = new ApiClient("http://127.0.0.1", "token");
     const onProgress = vi.fn();
 
-    const bytes = await client.getDocumentFileContent("doc-1", undefined, onProgress);
+    const { bytes } = await client.getChatDocumentFile(
+      "chat-1",
+      "doc-1",
+      undefined,
+      onProgress,
+    );
 
     expect(onProgress).not.toHaveBeenCalled();
     expect(new TextDecoder().decode(bytes)).toBe("small");
@@ -912,7 +917,12 @@ describe("source download progress", () => {
     const client = new ApiClient("http://127.0.0.1", "token");
     const onProgress = vi.fn();
 
-    const bytes = await client.getDocumentFileContent("doc-1", undefined, onProgress);
+    const { bytes } = await client.getChatDocumentFile(
+      "chat-1",
+      "doc-1",
+      undefined,
+      onProgress,
+    );
 
     expect(onProgress).not.toHaveBeenCalled();
     expect(bytes.length).toBe(3 * 1024 * 1024);
@@ -929,7 +939,7 @@ describe("source download progress", () => {
     );
     const client = new ApiClient("http://127.0.0.1", "token");
 
-    await expect(client.getDocumentFileContent("doc-1")).rejects.toThrow(
+    await expect(client.getChatDocumentFile("chat-1", "doc-1")).rejects.toThrow(
       "410: source has been deleted",
     );
   });
