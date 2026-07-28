@@ -16,6 +16,7 @@ import { useChatListStore } from "./ChatListStore";
 import { useConfirm } from "./components/ConfirmDialog";
 import { hasMacOverlayTitlebar } from "./host";
 import { Logomark } from "./Logomark";
+import { resolvedRoleKey } from "./ModelSelection";
 import { useTheme } from "./theme";
 import { useActiveChatId } from "./useActiveChatId";
 import { useChatPromptWatcher } from "./useChatPromptWatcher";
@@ -93,7 +94,7 @@ export function AppShell() {
         ]);
         if (cancelled) return;
         setModels(catalog.models);
-        setDefaultModelKey(catalog.default_key);
+        setDefaultModelKey(resolvedRoleKey(catalog.roles, "chat"));
         setProviders(providerList.providers);
         chatListActions.setChats(existingChats);
       } catch (err) {
@@ -112,7 +113,7 @@ export function AppShell() {
       client.listProviders(),
     ]);
     setModels(catalog.models);
-    setDefaultModelKey(catalog.default_key);
+    setDefaultModelKey(resolvedRoleKey(catalog.roles, "chat"));
     setProviders(providerList.providers);
   }
 

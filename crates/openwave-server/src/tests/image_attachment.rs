@@ -127,6 +127,7 @@ fn spawn_turn_worker_with_image_blobs(state: &AppState) {
     let worker = crate::turn_worker::TurnWorker::new(
         state.store.clone(),
         state.resolver.clone(),
+        state.secrets.clone(),
         state.tools.clone(),
         state.approvals.clone(),
         state.events.clone(),

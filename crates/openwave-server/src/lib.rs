@@ -30,6 +30,7 @@ mod foreground_prompt;
 mod gateway_runtime;
 mod mcp_config;
 mod model_registry;
+mod model_roles;
 mod provider;
 mod providers;
 mod resolver;
@@ -254,6 +255,10 @@ pub fn app(state: AppState) -> Router {
                 )),
         )
         .route("/models", get(routes::list_models))
+        .route(
+            "/models/roles/{role}",
+            axum::routing::put(routes::put_model_role),
+        )
         .route(
             "/web-search",
             get(routes::get_web_search_config).put(routes::put_web_search_config),
@@ -659,6 +664,7 @@ async fn bind_inner(
     let turn_worker = turn_worker::TurnWorker::new(
         state.store.clone(),
         state.resolver.clone(),
+        state.secrets.clone(),
         state.tools.clone(),
         state.approvals.clone(),
         state.events.clone(),

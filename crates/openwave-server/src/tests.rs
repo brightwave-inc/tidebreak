@@ -2143,6 +2143,7 @@ fn spawn_turn_worker_with_config(state: &AppState, config: turn_worker::TurnWork
     let worker = turn_worker::TurnWorker::new(
         state.store.clone(),
         state.resolver.clone(),
+        state.secrets.clone(),
         state.tools.clone(),
         state.approvals.clone(),
         state.events.clone(),
@@ -10921,6 +10922,183 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
     }
 }
 
+/// Roles resolve on read, against whatever the user has credentialed: the
+/// ordered defaults skip providers that cannot serve a request, a pin overrides
+/// them, and enabling a provider changes the answer without a restart.
+#[tokio::test]
+async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("model-roles.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
+    let (retrieval, _search) = build_retrieval(
+        Arc::new(HashEmbedder::default()),
+        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+    );
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(resolver::ConfiguredResolver::new(
+            store.clone(),
+            secrets.clone(),
+            crate::gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone()),
+        )),
+        secrets,
+        Arc::new(ToolRegistry::new()),
+        retrieval,
+        AgentConfig {
+            model: "gpt-5.6-sol".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let bearer = format!("Bearer {}", state.token);
+    let router = app(state);
+
+    let configure_provider = |kind: &'static str, body: serde_json::Value| {
+        let router = router.clone();
+        let bearer = bearer.clone();
+        async move {
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/providers/{kind}"))
+                        .header(header::AUTHORIZATION, &bearer)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+    };
+    let put_role = |role: &'static str, body: serde_json::Value| {
+        let router = router.clone();
+        let bearer = bearer.clone();
+        async move {
+            router
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/models/roles/{role}"))
+                        .header(header::AUTHORIZATION, &bearer)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        }
+    };
+    let role_rows = || {
+        let router = router.clone();
+        let bearer = bearer.clone();
+        async move {
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .uri("/models")
+                        .header(header::AUTHORIZATION, &bearer)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let catalog: serde_json::Value = json_body(response).await;
+            catalog["roles"].clone()
+        }
+    };
+    let role_row = |roles: &serde_json::Value, role: &str| {
+        roles
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["role"] == role)
+            .cloned()
+            .unwrap_or_else(|| panic!("the catalog reports the {role} role"))
+    };
+
+    // Nothing credentialed: no utility model, so its consumers skip their work
+    // rather than borrowing the conversation's model.
+    let roles = role_rows().await;
+    assert_eq!(
+        role_row(&roles, "utility")["resolved_key"],
+        serde_json::Value::Null
+    );
+
+    configure_provider(
+        "openai",
+        serde_json::json!({
+            "enabled": true,
+            "credential": {"type": "api_key", "key": "sk-openai"}
+        }),
+    )
+    .await;
+
+    // No restart between the two reads: credentialing OpenAI is enough for the
+    // ordered defaults to land on its cheapest row.
+    let roles = role_rows().await;
+    let utility = role_row(&roles, "utility");
+    assert_eq!(utility["selection"], serde_json::Value::Null);
+    assert_eq!(utility["resolved_key"], "openai::gpt-5.4-nano");
+    // The chat role is unchanged: its last resort is still the boot default.
+    assert_eq!(
+        role_row(&roles, "chat")["resolved_key"],
+        "openai::gpt-5.6-sol"
+    );
+
+    // A pin wins over the defaults, and only a model that could actually run is
+    // accepted.
+    let pinned = put_role(
+        "utility",
+        serde_json::json!({"selection": "openai::gpt-5.4-mini"}),
+    )
+    .await;
+    assert_eq!(pinned.status(), StatusCode::OK);
+    let pinned: serde_json::Value = json_body(pinned).await;
+    assert_eq!(pinned["resolved_key"], "openai::gpt-5.4-mini");
+    assert_eq!(
+        role_row(&role_rows().await, "utility")["selection"],
+        "openai::gpt-5.4-mini"
+    );
+
+    let unavailable = put_role(
+        "utility",
+        serde_json::json!({"selection": "anthropic::claude-haiku-4-5-20251001"}),
+    )
+    .await;
+    assert_eq!(unavailable.status(), StatusCode::CONFLICT);
+
+    let unknown_role = put_role("titling", serde_json::json!({"selection": null})).await;
+    assert_eq!(unknown_role.status(), StatusCode::NOT_FOUND);
+
+    // Cleared, then OpenAI turned off and Gemini turned on: the walk moves to
+    // the next entry it can serve.
+    let cleared = put_role("utility", serde_json::json!({"selection": null})).await;
+    assert_eq!(cleared.status(), StatusCode::OK);
+    configure_provider("openai", serde_json::json!({"enabled": false})).await;
+    configure_provider(
+        "gemini",
+        serde_json::json!({
+            "enabled": true,
+            "credential": {"type": "api_key", "key": "gemini-key"}
+        }),
+    )
+    .await;
+    assert_eq!(
+        role_row(&role_rows().await, "utility")["resolved_key"],
+        "gemini::gemini-3.5-flash-lite"
+    );
+}
+
 #[tokio::test]
 async fn custom_models_live_under_openai_compatible_with_conservative_capabilities() {
     let (router, token, _store, _dir) = test_app().await;
@@ -12029,6 +12207,7 @@ async fn worker_renews_a_near_expiry_ambiguous_claim_before_execution() {
     let worker = turn_worker::TurnWorker::new(
         state.store.clone(),
         state.resolver.clone(),
+        state.secrets.clone(),
         state.tools.clone(),
         state.approvals.clone(),
         state.events.clone(),
@@ -12124,6 +12303,7 @@ async fn worker_heartbeats_while_event_journaling_is_blocked() {
     let worker = turn_worker::TurnWorker::new(
         state.store.clone(),
         state.resolver.clone(),
+        state.secrets.clone(),
         state.tools.clone(),
         state.approvals.clone(),
         state.events.clone(),

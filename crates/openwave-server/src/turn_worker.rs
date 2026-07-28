@@ -19,9 +19,9 @@ use openwave_core::{
     AgentRunWaitSetCheckpointRequest, AgentTurnOutcome, BlobStore, CheckpointSandboxSpawnOutcome,
     ClaimedAgentEvent, CompleteTurnRunOutcome, ForegroundAgentWaitRequest, MessageId,
     ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome, RecordTurnFailureOutcome,
-    Result, SandboxAgentSpawnRequest, SandboxSpawnCheckpointRequest, SequencedEvent, Store,
-    ToolRegistry, ToolScratch, TurnCheckpointProgress, TurnFailureRetry, TurnId, TurnRun,
-    TurnRunStatus, SPAWN_SANDBOX_AGENT_TOOL, WAIT_FOR_AGENTS_TOOL,
+    Result, SandboxAgentSpawnRequest, SandboxSpawnCheckpointRequest, SecretProvider,
+    SequencedEvent, Store, ToolRegistry, ToolScratch, TurnCheckpointProgress, TurnFailureRetry,
+    TurnId, TurnRun, TurnRunStatus, SPAWN_SANDBOX_AGENT_TOOL, WAIT_FOR_AGENTS_TOOL,
 };
 use tokio::sync::Notify;
 
@@ -71,6 +71,7 @@ pub(crate) enum TurnWorkerOutcome {
 pub(crate) struct TurnWorker {
     store: Arc<dyn Store>,
     resolver: Arc<dyn ProviderResolver>,
+    secrets: Arc<dyn SecretProvider>,
     tools: Arc<ToolRegistry>,
     blobs: Option<Arc<dyn BlobStore>>,
     mcp: Option<Arc<McpRuntime>>,
@@ -272,6 +273,7 @@ impl TurnWorker {
     pub(crate) fn new(
         store: Arc<dyn Store>,
         resolver: Arc<dyn ProviderResolver>,
+        secrets: Arc<dyn SecretProvider>,
         tools: Arc<ToolRegistry>,
         approvals: Arc<ApprovalBroker>,
         events: Arc<EventBus>,
@@ -290,6 +292,7 @@ impl TurnWorker {
         Self {
             store,
             resolver,
+            secrets,
             tools,
             blobs: None,
             mcp: None,
@@ -486,6 +489,14 @@ impl TurnWorker {
                 )
                 .await;
         }
+        // Resolved per turn, not at boot, so enabling a provider takes effect on
+        // the next turn. `None` is not a failure: background maintenance is
+        // skipped rather than run on the model the user picked for talking.
+        let utility_model = if self.resolver.enforces_model_registry() {
+            crate::model_roles::resolve_utility_model(&*self.store, &*self.secrets).await?
+        } else {
+            None
+        };
         let active = loop {
             if let Some(active) = self.signals.register(turn.chat_id, turn.id, lease_token) {
                 break active;
@@ -546,6 +557,7 @@ impl TurnWorker {
                 config.model = turn.model.clone();
                 config.reasoning_effort = chat.reasoning_effort;
             }
+            config.utility_model = utility_model.clone();
             config.max_steps = remaining_steps;
             config.tool_scratch = self.private_scratch_root.as_deref().and_then(|root| {
                 match private_chat_scratch(root, chat.id) {
