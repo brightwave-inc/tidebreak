@@ -27,8 +27,10 @@ type PolicyState =
 
 /** ApiClient throws `Error("<status>: <detail>")` for an HTTP error response;
  * everything else — a rejected fetch, the timeout — is transport-level. */
-function isHttpErrorResponse(err: unknown): boolean {
-  return err instanceof Error && /^\d{3}: /.test(err.message);
+function httpStatusOf(err: unknown): number | null {
+  if (!(err instanceof Error)) return null;
+  const match = /^(\d{3}): /.exec(err.message);
+  return match ? Number(match[1]) : null;
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
@@ -97,7 +99,11 @@ export function ManagedGate({
   });
   const [status, setStatus] = useState<GatewayStatus | null>(null);
   const [working, setWorking] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // Two error channels on purpose: the watch clears its own stale fetch
+  // errors on a successful poll, which must not wipe a Connect failure the
+  // reader is still looking at.
+  const [statusError, setStatusError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const policy = policyState.kind === "resolved" ? policyState.policy : null;
   const managed = policy?.managed === true;
@@ -112,7 +118,18 @@ export function ManagedGate({
         if (!cancelled) setPolicyState({ kind: "resolved", policy: next });
       } catch (err) {
         if (cancelled) return;
-        if (isHttpErrorResponse(err)) {
+        const httpStatus = httpStatusOf(err);
+        if (httpStatus === 404) {
+          // No policy layer at all — a renderer newer than its server (the
+          // browser dev path). There is no policy to enforce, so the open
+          // product is correct, not a dead end.
+          setPolicyState({
+            kind: "resolved",
+            policy: { managed: false, source: "unmanaged" },
+          });
+          return;
+        }
+        if (httpStatus !== null) {
           setPolicyState({ kind: "blocked" });
           return;
         }
@@ -131,7 +148,7 @@ export function ManagedGate({
   const reload = useCallback(async () => {
     const next = await client.getGatewayStatus();
     setStatus(next);
-    setError(null);
+    setStatusError(null);
     return next;
   }, [client]);
 
@@ -139,7 +156,7 @@ export function ManagedGate({
     if (!managed) return;
     let cancelled = false;
     reload().catch((err) => {
-      if (!cancelled) setError(String(err));
+      if (!cancelled) setStatusError(String(err));
     });
     return () => {
       cancelled = true;
@@ -165,7 +182,7 @@ export function ManagedGate({
   async function connect() {
     if (!policy) return;
     setWorking(true);
-    setError(null);
+    setActionError(null);
     try {
       // Converge the provider config to the policy's locked gateway before
       // starting the flow: begin_sign_in refuses without a configured
@@ -175,7 +192,9 @@ export function ManagedGate({
       const target = policy.gateway_url;
       if (
         target &&
-        (!status?.configured || !sameGateway(status.base_url, target))
+        (!status?.configured ||
+          !status.enabled ||
+          !sameGateway(status.base_url, target))
       ) {
         await client.putProvider("model_gateway", {
           enabled: true,
@@ -186,7 +205,7 @@ export function ManagedGate({
       await openSignInPage(started.authorization_url);
       await reload();
     } catch (err) {
-      setError(String(err));
+      setActionError(String(err));
     } finally {
       setWorking(false);
     }
@@ -194,7 +213,17 @@ export function ManagedGate({
 
   if (policyState.kind === "loading") return <BootScreen>starting…</BootScreen>;
 
-  if (policyState.kind === "blocked") {
+  // A managed policy without a gateway URL has nothing the gate could ever
+  // be satisfied against, so it blocks rather than lifting on any session.
+  // `misconfigured` is read defensively: the MDM-readers slice adds it to
+  // the wire type, and a renderer running ahead of that must already honor
+  // it rather than fail open.
+  const policyMisconfigured =
+    policy !== null &&
+    ((policy as { misconfigured?: boolean }).misconfigured === true ||
+      (policy.managed && !policy.gateway_url));
+
+  if (policyState.kind === "blocked" || policyMisconfigured) {
     return (
       <div className="boot" aria-label="Managed policy unavailable">
         <div className="boot-brand">
@@ -221,18 +250,16 @@ export function ManagedGate({
 
   if (!managed) return <>{children}</>;
 
-  if (status === null && error === null) {
+  if (status === null && statusError === null) {
     return <BootScreen>starting…</BootScreen>;
   }
 
   // The gate lifts only for a session on the policy's own gateway: signed_in
   // reflects whatever provider URL is configured, which nothing pins to the
-  // policy yet. A session on any other deployment stays gated. A policy that
-  // carries no URL has nothing to pin to, so any session satisfies it.
+  // policy yet. A session on any other deployment stays gated.
   const lockedUrl = policy?.gateway_url ?? null;
   const sessionSatisfiesPolicy =
-    status?.signed_in === true &&
-    (lockedUrl === null || sameGateway(status.base_url, lockedUrl));
+    status?.signed_in === true && sameGateway(status.base_url, lockedUrl);
   if (sessionSatisfiesPolicy) return <>{children}</>;
 
   // The device's managed gateway is the policy's URL, wherever the provider
@@ -292,7 +319,8 @@ export function ManagedGate({
           Connect
         </Button>
       )}
-      {error && <p className="boot-error-detail">{error}</p>}
+      {actionError && <p className="boot-error-detail">{actionError}</p>}
+      {statusError && <p className="boot-error-detail">{statusError}</p>}
       <p className="text-muted-foreground max-w-md text-xs leading-relaxed">
         Sign-in happens in your browser against the gateway itself; OpenWave
         never sees your identity provider credentials.

@@ -199,6 +199,66 @@ describe("ManagedGate", () => {
     expect(await screen.findByText("Sign in to continue")).toBeInTheDocument();
   });
 
+  it("a transport failure never opens the app: boot holds until the policy answers", async () => {
+    // The server is not up yet. Rejected fetches and timeouts are not an
+    // answer, so nothing may be concluded from them — least of all
+    // "unmanaged". The read retries behind the boot screen until it lands.
+    const getPolicy = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("fetch failed"))
+      .mockRejectedValueOnce(new TypeError("fetch failed"))
+      .mockResolvedValue(managed);
+    const getGatewayStatus = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("503: starting"))
+      .mockResolvedValue(signedOut);
+    const client = api({ getPolicy, getGatewayStatus });
+    vi.useFakeTimers();
+    mount(client);
+
+    // First attempt fails at the transport level: still booting.
+    await act(async () => {});
+    expect(screen.getByText("starting…")).toBeInTheDocument();
+    expect(screen.queryByText("the open product")).not.toBeInTheDocument();
+
+    // Through the first retry (1s backoff): still failing, still booting.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_100);
+    });
+    expect(screen.getByText("starting…")).toBeInTheDocument();
+    expect(screen.queryByText("the open product")).not.toBeInTheDocument();
+
+    // The second retry (2s backoff) resolves managed. The first status fetch
+    // fails too, so the gate rises carrying that error.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_100);
+    });
+    expect(screen.getByText("Sign in to continue")).toBeInTheDocument();
+    expect(screen.getByText(/503: starting/)).toBeInTheDocument();
+    expect(screen.queryByText("the open product")).not.toBeInTheDocument();
+
+    // The watch's next tick recovers the status and clears the stale error.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_100);
+    });
+    expect(screen.queryByText(/503: starting/)).not.toBeInTheDocument();
+    expect(screen.getByText("Sign in to continue")).toBeInTheDocument();
+    expect(screen.queryByText("the open product")).not.toBeInTheDocument();
+  });
+
+  it("a managed policy without a gateway URL blocks instead of lifting on any session", async () => {
+    const client = api({
+      getPolicy: vi.fn().mockResolvedValue({ managed: true, source: "os" }),
+      getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
+    });
+    mount(client);
+
+    expect(
+      await screen.findByText(/Contact your administrator/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("the open product")).not.toBeInTheDocument();
+  });
+
   it("surfaces a failed browser sign-in and offers to try again", async () => {
     const client = api({
       getGatewayStatus: vi.fn().mockResolvedValue({
