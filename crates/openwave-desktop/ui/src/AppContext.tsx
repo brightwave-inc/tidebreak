@@ -20,6 +20,12 @@ import type { DesktopUpdateState } from "./updates";
 export type AppContextValue = {
   client: ApiClient;
   models: ModelInfo[];
+  /**
+   * The catalog key a chat without an override runs against, so the picker can
+   * name its default rather than merely offering it. `null` when the server's
+   * fallback is nothing the catalog names.
+   */
+  defaultModelKey: string | null;
   providers: ProviderInfo[];
   refreshCatalog: () => Promise<void>;
   status: string;

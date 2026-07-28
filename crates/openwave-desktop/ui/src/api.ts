@@ -428,7 +428,12 @@ export class ApiClient {
     });
   }
 
-  listModels(): Promise<{ models: ModelInfo[] }> {
+  /**
+   * The selectable catalog, plus the key a turn falls back to when its chat
+   * carries no override — which is the only way a client can name what
+   * "default" means.
+   */
+  listModels(): Promise<{ models: ModelInfo[]; default_key: string | null }> {
     return this.json("/models", { headers: this.headers() });
   }
 

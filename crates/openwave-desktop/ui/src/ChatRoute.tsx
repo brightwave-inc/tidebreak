@@ -86,7 +86,7 @@ const { signal: signalTurnLifecycle } = useTurnLifecycle.getState();
  */
 export function ChatRoute({ chatId }: { chatId: string }) {
   const navigate = useNavigate();
-  const { client, models, status, setStatus } = useApp();
+  const { client, models, defaultModelKey, status, setStatus } = useApp();
   const { layout, openPanel } = usePanelNav();
   const chats = useChatListStore((state) => state.chats);
   const deletingChatId = useChatListStore((state) => state.deletingChatId);
@@ -358,6 +358,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
                 <ModelMenu
                   models={models}
                   value={chat!.model}
+                  defaultKey={defaultModelKey}
                   disabled={deletingChatId !== null}
                   onChange={onModelChange}
                 />

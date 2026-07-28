@@ -1,13 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import {
-  ModelCapabilities,
-  ModelMenu,
-  ProviderIcon,
-  ReasoningEffortMenu,
-  formatContextWindow,
-  reasoningEffortOptions,
-} from "./ModelMenu";
+import { ModelMenu, ReasoningEffortMenu, reasoningEffortOptions } from "./ModelMenu";
+import { ProviderIcon } from "./ProviderIcons";
 import type { ModelInfo } from "./api";
 
 const MODELS: ModelInfo[] = [
@@ -39,17 +33,26 @@ const MODELS: ModelInfo[] = [
   },
 ];
 
-function triggerMarkup(value: string | null): string {
+function triggerMarkup(value: string | null, defaultKey?: string | null): string {
   return renderToStaticMarkup(
-    <ModelMenu models={MODELS} value={value} onChange={() => {}} />,
+    <ModelMenu
+      models={MODELS}
+      value={value}
+      defaultKey={defaultKey ?? null}
+      onChange={() => {}}
+    />,
   );
 }
 
 describe("ModelMenu", () => {
-  it("labels the trigger 'Default' when no override is set", () => {
-    const markup = triggerMarkup(null);
-    expect(markup).toContain('aria-label="Model: Default"');
+  it("names the model the default resolves to", () => {
+    const markup = triggerMarkup(null, "anthropic::claude-sonnet-4");
+    expect(markup).toContain('aria-label="Model: Default (Claude Sonnet 4)"');
     expect(markup).toContain(">Default<");
+  });
+
+  it("promises nothing when the server names no default", () => {
+    expect(triggerMarkup(null)).toContain('aria-label="Model: Default"');
   });
 
   it("labels the trigger with a selected model's display name", () => {
@@ -60,9 +63,7 @@ describe("ModelMenu", () => {
 
   it("labels the trigger with an unknown (custom) override verbatim", () => {
     const markup = triggerMarkup("local-model:latest");
-    expect(markup).toContain(
-      'aria-label="Model: local-model:latest (unavailable)"',
-    );
+    expect(markup).toContain('aria-label="Model: local-model:latest (unavailable)"');
     expect(markup).toContain(">local-model:latest (unavailable)<");
   });
 
@@ -74,56 +75,26 @@ describe("ModelMenu", () => {
   });
 });
 
-describe("formatContextWindow", () => {
-  it("renders thousands with a K suffix", () => {
-    expect(formatContextWindow(128_000)).toBe("128K");
-    expect(formatContextWindow(200_000)).toBe("200K");
-  });
-
-  it("renders millions with an M suffix", () => {
-    expect(formatContextWindow(1_000_000)).toBe("1M");
-    expect(formatContextWindow(1_500_000)).toBe("1.5M");
-  });
-
-  it("truncates millions so a limit never reads larger than it is", () => {
-    expect(formatContextWindow(1_050_000)).toBe("1M");
-    expect(formatContextWindow(1_990_000)).toBe("1.9M");
-  });
-
-  it("renders small counts verbatim", () => {
-    expect(formatContextWindow(512)).toBe("512");
-  });
-});
-
 describe("ProviderIcon", () => {
-  it("renders a brand mark for a known provider", () => {
-    const markup = renderToStaticMarkup(<ProviderIcon provider="anthropic" />);
-    expect(markup).toContain("<svg");
-    expect(markup).toContain("<path");
+  it("gives each vendor its own mark", () => {
+    const anthropic = renderToStaticMarkup(<ProviderIcon provider="anthropic" />);
+    const openai = renderToStaticMarkup(<ProviderIcon provider="openai" />);
+    const gemini = renderToStaticMarkup(<ProviderIcon provider="gemini" />);
+    expect(new Set([anthropic, openai, gemini]).size).toBe(3);
   });
 
-  it("falls back to a generic glyph for unknown providers", () => {
-    const known = renderToStaticMarkup(<ProviderIcon provider="openai" />);
-    const unknown = renderToStaticMarkup(
-      <ProviderIcon provider="openai_compatible" />,
+  it("keeps an open model's vendor mark whatever endpoint serves it", () => {
+    const throughGateway = renderToStaticMarkup(
+      <ProviderIcon provider="model_gateway" modelId="kimi-k2.5" />,
     );
-    expect(known).not.toBe(unknown);
-  });
-});
-
-describe("ModelCapabilities", () => {
-  it("shows the context window and both capability markers when supported", () => {
-    const markup = renderToStaticMarkup(<ModelCapabilities model={MODELS[0]} />);
-    expect(markup).toContain("200K");
-    expect(markup).toContain("Accepts image input");
-    expect(markup).toContain("Adjustable reasoning effort");
-  });
-
-  it("hides the reasoning marker when the model does not support it", () => {
-    const markup = renderToStaticMarkup(<ModelCapabilities model={MODELS[1]} />);
-    expect(markup).toContain("128K");
-    expect(markup).toContain("Accepts image input");
-    expect(markup).not.toContain("Adjustable reasoning effort");
+    const throughCompatible = renderToStaticMarkup(
+      <ProviderIcon provider="openai_compatible" modelId="accounts/x/models/kimi-k2" />,
+    );
+    const unbranded = renderToStaticMarkup(
+      <ProviderIcon provider="model_gateway" modelId="some-model" />,
+    );
+    expect(throughGateway).toBe(throughCompatible);
+    expect(throughGateway).not.toBe(unbranded);
   });
 });
 
@@ -145,11 +116,9 @@ describe("reasoningEffortOptions", () => {
 
   it("drops a level this build cannot label", () => {
     expect(
-      reasoningEffortOptions([
-        "low",
-        "ultra" as never,
-        "max",
-      ]).map((option) => option.value),
+      reasoningEffortOptions(["low", "ultra" as never, "max"]).map(
+        (option) => option.value,
+      ),
     ).toEqual(["low", "max"]);
   });
 
@@ -181,7 +150,7 @@ describe("ReasoningEffortMenu", () => {
     const markup = renderToStaticMarkup(
       <ReasoningEffortMenu levels={LEVELS} value="xhigh" onChange={() => {}} />,
     );
-    expect(markup).toContain('aria-label="Reasoning effort: Extra High"');
+    expect(markup).toContain('aria-label="Reasoning effort: X-high"');
   });
 
   it("still labels a stored level the current model no longer accepts", () => {
@@ -197,12 +166,7 @@ describe("ReasoningEffortMenu", () => {
 
   it("disables the trigger when asked", () => {
     const markup = renderToStaticMarkup(
-      <ReasoningEffortMenu
-        levels={LEVELS}
-        value={null}
-        disabled
-        onChange={() => {}}
-      />,
+      <ReasoningEffortMenu levels={LEVELS} value={null} disabled onChange={() => {}} />,
     );
     expect(markup).toContain("disabled");
   });
