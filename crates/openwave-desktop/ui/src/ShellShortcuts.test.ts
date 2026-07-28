@@ -50,6 +50,23 @@ describe("shell shortcut resolution", () => {
     }
   });
 
+  it("reaches zoom whether or not shift is held for the key", () => {
+    // Cmd+= and Cmd+Shift+= are the same intent on a US keyboard, and the
+    // reader has no way to know which one the app is listening for.
+    for (const [key, shiftKey] of [
+      ["=", false],
+      ["+", true],
+      ["-", false],
+      ["_", true],
+    ] as Array<[string, boolean]>) {
+      const resolved = resolveShellShortcut(keyEvent({ key, shiftKey }), {
+        editable: true,
+        modalOpen: false,
+      });
+      expect(resolved?.id).toBe(key === "=" || key === "+" ? "zoom-in" : "zoom-out");
+    }
+  });
+
   it("stays out of the way of plain typing", () => {
     const resolved = resolveShellShortcut(
       keyEvent({ key: "n", metaKey: false, ctrlKey: false }),

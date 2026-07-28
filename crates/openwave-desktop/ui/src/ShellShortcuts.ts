@@ -8,16 +8,29 @@ import { useEffect, useRef } from "react";
  * component handlers, so a future shortcuts-help dialog can read the same list
  * the listener acts on and stay honest about what the keys actually do.
  */
-export type ShellShortcutAction = "toggle-sidebar" | "new-chat" | "focus-composer";
+export type ShellShortcutAction =
+  | "toggle-sidebar"
+  | "new-chat"
+  | "focus-composer"
+  | "zoom-in"
+  | "zoom-out"
+  | "zoom-reset";
 
 export type ShellShortcutDef = {
   id: ShellShortcutAction;
-  /** A single character, matched case-insensitively against `event.key`. */
-  key: string;
+  /**
+   * The characters that trigger it, matched case-insensitively against
+   * `event.key`. More than one because a keyboard can reach the same intent
+   * through more than one glyph — zooming in is `=` unshifted and `+` shifted.
+   */
+  keys: readonly string[];
   /** Requires the platform command modifier — Cmd on macOS, Ctrl elsewhere. */
   mod: boolean;
-  /** Whether shift must be held (defaults to must-not). */
-  shift?: boolean;
+  /**
+   * Whether shift must be held (defaults to must-not). `"any"` for shortcuts
+   * whose key is reachable both ways.
+   */
+  shift?: boolean | "any";
   /** What the shortcut does, phrased for a help dialog. */
   description: string;
   /**
@@ -31,23 +44,46 @@ export type ShellShortcutDef = {
 export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
   {
     id: "toggle-sidebar",
-    key: "b",
+    keys: ["b"],
     mod: true,
     description: "Show or hide the sidebar",
     allowInEditable: true,
   },
   {
     id: "new-chat",
-    key: "n",
+    keys: ["n"],
     mod: true,
     description: "Start a new chat",
     allowInEditable: true,
   },
   {
     id: "focus-composer",
-    key: "k",
+    keys: ["k"],
     mod: true,
     description: "Focus the message composer",
+    allowInEditable: true,
+  },
+  {
+    id: "zoom-in",
+    keys: ["=", "+"],
+    mod: true,
+    shift: "any",
+    description: "Make the interface larger",
+    allowInEditable: true,
+  },
+  {
+    id: "zoom-out",
+    keys: ["-", "_"],
+    mod: true,
+    shift: "any",
+    description: "Make the interface smaller",
+    allowInEditable: true,
+  },
+  {
+    id: "zoom-reset",
+    keys: ["0"],
+    mod: true,
+    description: "Reset the interface size",
     allowInEditable: true,
   },
 ];
@@ -63,8 +99,8 @@ export function matchesShellShortcut(
   def: ShellShortcutDef,
 ): boolean {
   if (event.altKey) return false;
-  if (event.key.toLowerCase() !== def.key) return false;
-  if (event.shiftKey !== (def.shift ?? false)) return false;
+  if (!def.keys.includes(event.key.toLowerCase())) return false;
+  if (def.shift !== "any" && event.shiftKey !== (def.shift ?? false)) return false;
   const hasMod = event.metaKey || event.ctrlKey;
   return def.mod ? hasMod : !hasMod;
 }
