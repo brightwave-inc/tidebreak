@@ -20,8 +20,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use openwave_core::{
-    format_source_reference, ApprovalClass, AssistantCitationReference, Result,
-    RetrievalEvidenceInput, RetrievalEvidenceSource, Tool, ToolCtx, ToolOutput, ToolSpec,
+    format_source_reference, ApprovalClass, AssistantCitationReference, Result, ResultEntry,
+    ResultEntryKind, RetrievalEvidenceInput, RetrievalEvidenceSource, Tool, ToolCtx, ToolOutput,
+    ToolSpec,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -207,7 +208,10 @@ impl Tool for SearchTool {
 
         let mut citations: Vec<Citation> = hits.into_iter().map(Citation::from).collect();
         if citations.is_empty() {
-            return Ok(ToolOutput::text("No matching passages found."));
+            // An empty list, not an absent one: "searched and found nothing" is
+            // the useful thing to show, and it is what the rail alone cannot
+            // distinguish from "searched".
+            return Ok(ToolOutput::text("No matching passages found.").with_entries(Vec::new()));
         }
         let mut source_tokens = citations
             .iter()
@@ -255,9 +259,43 @@ impl Tool for SearchTool {
             })
             .collect::<std::result::Result<Vec<_>, _>>();
         match evidence {
-            Ok(evidence) => Ok(ToolOutput::text(content).with_private_evidence(evidence)),
+            Ok(evidence) => Ok(ToolOutput::text(content)
+                .with_entries(citations.iter().map(passage_entry).collect())
+                .with_private_evidence(evidence)),
             Err(output) => Ok(output),
         }
+    }
+}
+
+/// One matched passage as a card row.
+///
+/// The section heading leads when the document has one, because it says where
+/// in the document the match is — which is what someone scanning the card wants
+/// and what a relevance score is not. Without headings the passage has to speak
+/// for itself, so the row falls back to its opening line.
+///
+/// That fallback is the one place this projection carries document text, and it
+/// is deliberate: what the renderer boundary keeps out is model- and
+/// provider-authored text and private diagnostics, and a passage is neither —
+/// it is a span of the reader's own source, which is the entire thing they
+/// asked to be shown. It crosses clamped to one bounded line like every other
+/// row, and the snippet the model works from stays behind the boundary.
+fn passage_entry(citation: &Citation) -> ResultEntry {
+    let label = if citation.heading_path.is_empty() {
+        citation
+            .snippet
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("Matched passage")
+            .to_owned()
+    } else {
+        citation.heading_path.join(" › ")
+    };
+    let entry = ResultEntry::new(ResultEntryKind::Passage, label);
+    match render_pages(citation).trim_start().to_owned() {
+        pages if pages.is_empty() => entry,
+        pages => entry.with_detail(pages),
     }
 }
 
@@ -577,7 +615,19 @@ mod tests {
             out.content
         );
 
-        assert!(out.data.is_none());
+        // The passage is offered to the renderer as one row, and the row is the
+        // whole of what crosses: the snippet the model reads stays behind the
+        // boundary unless the passage has no heading to name it by.
+        assert_eq!(
+            openwave_core::ToolResultPreview::build("search", &out),
+            Some(openwave_core::ToolResultPreview::Entries {
+                entries: vec![openwave_core::ResultEntry::new(
+                    openwave_core::ResultEntryKind::Passage,
+                    "Jupiter is the largest planet in the Solar System, a gas giant.",
+                )],
+                elided: 0,
+            })
+        );
         assert_eq!(out.private_evidence.len(), 1);
         assert!(out.private_evidence[0].snippet.contains("Jupiter"));
         assert_eq!(out.private_evidence[0].rank, 1);

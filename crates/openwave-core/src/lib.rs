@@ -140,7 +140,10 @@ pub use model::{
     TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer, TurnSteerStatus, MAX_ATTACHMENT_REVISION,
     MAX_MESSAGE_ATTACHMENTS, MAX_ROOT_ATTACHMENTS,
 };
-pub use preview::{ToolActionPreview, ToolResultPreview};
+pub use preview::{
+    format_bytes, ResultEntry, ResultEntryKind, ToolActionPreview, ToolResultPreview,
+    MAX_RESULT_ENTRIES, MAX_RESULT_ENTRY_CHARS,
+};
 pub use provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId,
     RefusalDetails, RefusalOutcome, ResponseFormat, StopReason, ToolChoice, Usage,

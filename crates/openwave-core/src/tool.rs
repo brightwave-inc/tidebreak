@@ -476,6 +476,25 @@ impl ToolOutput {
         self
     }
 
+    /// Offer the renderer a list of what this call surfaced.
+    ///
+    /// The tool's own output text is what the model reads and is written for
+    /// the model; these rows are what a person reads. Attached here rather than
+    /// hand-built into `data` so a tool cannot get the key wrong and silently
+    /// project nothing — see [`crate::ToolResultPreview::Entries`], which
+    /// clamps every row before it crosses.
+    #[must_use]
+    pub fn with_entries(mut self, entries: Vec<crate::ResultEntry>) -> Self {
+        let entries = serde_json::json!(entries);
+        match self.data.as_mut().and_then(Value::as_object_mut) {
+            Some(data) => {
+                data.insert("entries".into(), entries);
+            }
+            None => self.data = Some(serde_json::json!({ "entries": entries })),
+        }
+        self
+    }
+
     /// Attach bounded evidence that never serializes into events or renderer DTOs.
     #[must_use]
     pub fn with_private_evidence(mut self, evidence: Vec<crate::RetrievalEvidenceInput>) -> Self {

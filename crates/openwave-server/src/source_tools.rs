@@ -135,12 +135,30 @@ impl Tool for ListSourcesTool {
             }
         };
         if records.is_empty() {
-            return Ok(ToolOutput::text(
-                "No sources have been added to this conversation.",
-            ));
+            return Ok(
+                ToolOutput::text("No sources have been added to this conversation.")
+                    // Projected empty rather than not projected: "no sources" and "the
+                    // renderer was told nothing" are different facts, and only the card
+                    // can tell them apart.
+                    .with_entries(Vec::new()),
+            );
         }
 
         let truncated = records.len() > MAX_LISTED_SOURCES as usize;
+        // The readiness word is the one thing a reader has to see here: a
+        // source that is still processing, or that holds no searchable text,
+        // is a source the next answer will quietly fail to use.
+        let entries = records
+            .iter()
+            .take(MAX_LISTED_SOURCES as usize)
+            .map(|record| {
+                openwave_core::ResultEntry::new(
+                    openwave_core::ResultEntryKind::Source,
+                    record.title.as_deref().unwrap_or("Untitled source"),
+                )
+                .with_meta(readiness_label(record.readiness().as_str()))
+            })
+            .collect();
         let visible = records
             .into_iter()
             .take(MAX_LISTED_SOURCES as usize)
@@ -165,7 +183,8 @@ impl Tool for ListSourcesTool {
         Ok(ToolOutput::text(format!(
             "Sources in this conversation:\n{}",
             serde_json::to_string_pretty(&body).expect("bounded source metadata always serializes")
-        )))
+        ))
+        .with_entries(entries))
     }
 }
 
@@ -312,7 +331,34 @@ impl Tool for ReadSourceTool {
             source_regions,
             source,
         };
-        Ok(ToolOutput::text(content).with_private_evidence(vec![evidence]))
+        Ok(ToolOutput::text(content)
+            .with_entries(vec![openwave_core::ResultEntry::new(
+                openwave_core::ResultEntryKind::Source,
+                title,
+            )
+            // Which slice of the source was read, because a source read in
+            // twelve-thousand-character windows produces twelve identical rail
+            // lines and the range is the only thing telling them apart.
+            .with_meta(format!(
+                "characters {}–{} of {}",
+                window.start_character, window.end_character, window.total_characters
+            ))])
+            .with_private_evidence(vec![evidence]))
+    }
+}
+
+/// The readiness word a source row shows.
+///
+/// Mapped rather than passed through: the tool's vocabulary is written for the
+/// model and says so — `stored_not_searchable` is a contract term, not
+/// something to put in front of a reader.
+fn readiness_label(readiness: &str) -> &'static str {
+    match readiness {
+        "searchable" => "Searchable",
+        "processing" => "Processing",
+        "stored_not_searchable" => "No text",
+        "failed" => "Failed",
+        _ => "Unknown",
     }
 }
 

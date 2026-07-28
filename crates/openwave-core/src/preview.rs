@@ -29,6 +29,12 @@ pub const MAX_RESULT_STREAM_CHARS: usize = 40_000;
 /// at all, because a truncated URI is a different URI.
 pub const MAX_RESULT_VIEW_URI_CHARS: usize = 2 * 1024;
 
+/// Longest label, detail, or meta string one listed result row carries.
+pub const MAX_RESULT_ENTRY_CHARS: usize = 200;
+
+/// Most rows a result preview lists before it counts the rest instead.
+pub const MAX_RESULT_ENTRIES: usize = 50;
+
 /// The action a call will take, in a form a human can inspect.
 ///
 /// Approval cards need this because consent to an action you cannot see is not
@@ -150,6 +156,96 @@ impl ToolActionPreview {
     }
 }
 
+/// What one row of a listed result is, which is what picks its icon.
+///
+/// A closed vocabulary rather than an icon name: the renderer chooses how to
+/// draw a folder, and a tool must not be able to name a glyph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultEntryKind {
+    /// A file, in the chat's scratch or in a connected folder.
+    File,
+    /// A directory.
+    Folder,
+    /// A document added to this conversation as a source.
+    Source,
+    /// A passage matched inside a source.
+    Passage,
+    /// A page on the public web.
+    Link,
+    /// An output this conversation published.
+    Output,
+}
+
+/// One thing a call surfaced.
+///
+/// Three fields because a row reads as three: what it is, where it came from,
+/// and how big or how many. A tool that wants to say more than that is
+/// describing something this projection does not cover.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ResultEntry {
+    pub kind: ResultEntryKind,
+    /// The row's name — a file name, a source title, a page title.
+    pub label: String,
+    /// A secondary hint beside the name — a path, a domain, a section.
+    pub detail: Option<String>,
+    /// Trailing meta — a size, a count, a status word.
+    pub meta: Option<String>,
+}
+
+impl ResultEntry {
+    /// A row that is only its name.
+    #[must_use]
+    pub fn new(kind: ResultEntryKind, label: impl Into<String>) -> Self {
+        Self {
+            kind,
+            label: label.into(),
+            detail: None,
+            meta: None,
+        }
+    }
+
+    /// Add the secondary hint beside the name.
+    #[must_use]
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
+    }
+
+    /// Add the trailing meta.
+    #[must_use]
+    pub fn with_meta(mut self, meta: impl Into<String>) -> Self {
+        self.meta = Some(meta.into());
+        self
+    }
+}
+
+/// A byte count as a card should read it.
+///
+/// Ported from Brightwave's local-file result rows, which is where this reads
+/// as "12.4 KB" rather than as a number nobody scans.
+#[must_use]
+pub fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    const UNITS: [&str; 3] = ["KB", "MB", "GB"];
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    // One decimal only where it says something: "1.4 MB" is worth the digit,
+    // "512.0 KB" and "340.0 MB" are not.
+    let unit = UNITS[unit];
+    if value >= 10.0 || (value.fract() * 10.0).round() == 0.0 {
+        format!("{} {unit}", value.round())
+    } else {
+        format!("{value:.1} {unit}")
+    }
+}
+
 /// What a call produced, in a form a human can read.
 ///
 /// A command's output is the whole reason to run it. Withholding it leaves the
@@ -183,7 +279,37 @@ pub enum ToolResultPreview {
         /// The validated `ui://` document reference.
         resource_uri: String,
     },
+    /// What a call found, read, or wrote, as the list of things it was.
+    ///
+    /// One shape for every tool whose result is a list, because what
+    /// distinguishes those tools on screen — the icon, the headline, the verb —
+    /// already comes from the tool's name. Forty tools do not need forty
+    /// variants to say "here is what I found".
+    Entries {
+        entries: Vec<ResultEntry>,
+        /// Rows past [`MAX_RESULT_ENTRIES`], counted rather than shown. A card
+        /// that silently lists the first fifty of two hundred results is
+        /// telling the reader something false.
+        elided: u32,
+    },
 }
+
+/// The tools that may project a list of entries.
+///
+/// Still an allowlist, on the same terms as every other variant: `entries` in a
+/// tool's output data is an opt-in, and a tool not named here does not have
+/// one. An external MCP tool in particular can write whatever it likes into its
+/// data, and must not thereby acquire a card.
+const ENTRY_TOOLS: &[&str] = &[
+    "search",
+    crate::WEB_SEARCH_TOOL,
+    "list_sources",
+    "read_source",
+    "read_file",
+    "list_dir",
+    "write_file",
+    "create_deliverable",
+];
 
 impl ToolResultPreview {
     /// Project the result of a call from the tool's own output.
@@ -236,6 +362,25 @@ impl ToolResultPreview {
                     resource_uri: view.resource_uri.clone(),
                 })
             }
+            // A failed call has no list to show — whatever partial data it left
+            // behind describes work that did not happen.
+            name if ENTRY_TOOLS.contains(&name) && !output.is_error => {
+                let listed = output.data.as_ref()?.get("entries")?.as_array()?;
+                let entries: Vec<_> = listed
+                    .iter()
+                    .take(MAX_RESULT_ENTRIES)
+                    .filter_map(result_entry)
+                    .collect();
+                // A row the clamp rejected is dropped, not counted: `elided`
+                // means "there were more", and folding unreadable rows into it
+                // would make the card claim results the tool never returned.
+                let elided = u32::try_from(listed.len().saturating_sub(MAX_RESULT_ENTRIES))
+                    .unwrap_or(u32::MAX);
+                // An empty list is a result, not the absence of one: a search
+                // that matched nothing and a search that was never projected
+                // look identical in the rail, and only one of them is true.
+                Some(Self::Entries { entries, elided })
+            }
             _ => None,
         }
     }
@@ -261,10 +406,31 @@ impl ToolResultPreview {
     pub fn has_output(&self) -> bool {
         match self {
             Self::Exec { stdout, stderr, .. } => !stdout.is_empty() || !stderr.is_empty(),
-            Self::WebSearchProviderRequired => true,
-            Self::McpApp { .. } => true,
+            Self::WebSearchProviderRequired | Self::McpApp { .. } => true,
+            // An empty list is still something to show, and saying so is the
+            // point: the card reports that the call found nothing.
+            Self::Entries { .. } => true,
         }
     }
+}
+
+/// Bound one listed row, or drop it.
+///
+/// A row without a readable label is not a row — it would render as an empty
+/// line the reader cannot interpret. `detail` and `meta` are genuinely
+/// optional, so one that clamps away to nothing simply goes missing rather than
+/// taking its row with it.
+fn result_entry(value: &Value) -> Option<ResultEntry> {
+    Some(ResultEntry {
+        kind: serde_json::from_value(value.get("kind")?.clone()).ok()?,
+        label: clamp(value.get("label")?.as_str()?, MAX_RESULT_ENTRY_CHARS)?,
+        detail: entry_field(value.get("detail")),
+        meta: entry_field(value.get("meta")),
+    })
+}
+
+fn entry_field(value: Option<&Value>) -> Option<String> {
+    clamp(value?.as_str()?, MAX_RESULT_ENTRY_CHARS)
 }
 
 /// Bound a captured stream, keeping its newlines: output without line breaks
@@ -540,17 +706,111 @@ mod tests {
             );
         }
 
-        // The searches project an *action* so their query can be reviewed, and
-        // deliberately no *result*: what a search returned is the answer the
-        // model works from, not something the transcript restates.
-        for tool in ["search", "web_search"] {
-            let arguments = serde_json::json!({ "query": "private" });
-            assert!(ToolActionPreview::build(tool, &arguments).is_some());
+        // A tool on the entries allowlist still projects nothing until it opts
+        // in: the allowlist says who *may* have a card, and the `entries` key
+        // in the tool's own output is the opt-in.
+        for tool in ["search", "web_search", "write_file"] {
             assert_eq!(
-                ToolResultPreview::build(tool, &output_with_data(arguments.clone())),
+                ToolResultPreview::build(
+                    tool,
+                    &output_with_data(serde_json::json!({ "query": "private" }))
+                ),
                 None
             );
         }
+    }
+
+    #[test]
+    fn only_an_allowlisted_tool_gets_a_card_from_its_own_output() {
+        // `entries` is a projection a tool opts into, not a channel anything
+        // can write to. An external MCP tool controls its structured data
+        // outright, so the allowlist — not the key — is what grants the card.
+        let output = ToolOutput::text("done")
+            .with_entries(vec![ResultEntry::new(ResultEntryKind::File, "notes.md")]);
+        assert_eq!(
+            ToolResultPreview::build("mcp__gateway__tool", &output),
+            None
+        );
+        assert_eq!(ToolResultPreview::build("read_tool_result", &output), None);
+        assert!(ToolResultPreview::build("read_file", &output).is_some());
+
+        // Nor does a call that failed: whatever rows it left behind describe
+        // work that did not happen.
+        let mut failed = output.clone();
+        failed.is_error = true;
+        assert_eq!(ToolResultPreview::build("read_file", &failed), None);
+    }
+
+    #[test]
+    fn a_listed_result_is_bounded_row_by_row_and_counts_what_it_dropped() {
+        let long = "a".repeat(MAX_RESULT_ENTRY_CHARS * 2);
+        let mut rows: Vec<_> = (0..MAX_RESULT_ENTRIES + 7)
+            .map(|index| serde_json::json!({ "kind": "file", "label": index.to_string() }))
+            .collect();
+        rows[0] = serde_json::json!({
+            "kind": "file",
+            "label": long,
+            // Control characters could otherwise forge row structure.
+            "detail": "reports/\nq3.md",
+            "meta": 7,
+        });
+        let Some(ToolResultPreview::Entries { entries, elided }) = ToolResultPreview::build(
+            "list_dir",
+            &ToolOutput::text("listing").with_data(serde_json::json!({ "entries": rows })),
+        ) else {
+            panic!("list_dir projects a list");
+        };
+        assert_eq!(entries.len(), MAX_RESULT_ENTRIES);
+        assert_eq!(elided, 7);
+        assert_eq!(entries[0].label.chars().count(), MAX_RESULT_ENTRY_CHARS);
+        assert_eq!(entries[0].detail.as_deref(), Some("reports/q3.md"));
+        // A hint that is not a string is dropped; the row survives without it.
+        assert_eq!(entries[0].meta, None);
+    }
+
+    #[test]
+    fn a_call_that_found_nothing_says_so_rather_than_projecting_nothing() {
+        // "Searched and matched nothing" and "searched" are the same muted rail
+        // line, and only the first is a fact. An empty list is the difference.
+        assert_eq!(
+            ToolResultPreview::build(
+                "search",
+                &ToolOutput::text("No matching passages found.").with_entries(Vec::new()),
+            ),
+            Some(ToolResultPreview::Entries {
+                entries: Vec::new(),
+                elided: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn a_listed_result_carries_only_the_three_fields_a_row_reads_as() {
+        // The projection is closed the same way every other variant is: the
+        // tool's output text and its other structured data stay behind it.
+        let output = ToolOutput::text("Published output 41ff revision 3 (900 bytes).")
+            .with_data(serde_json::json!({ "output_id": "41ff", "revision_count": 3 }))
+            .with_entries(vec![
+                ResultEntry::new(ResultEntryKind::Output, "q3.md").with_meta(format_bytes(900))
+            ]);
+        let json = serde_json::to_string(
+            &ToolResultPreview::build("create_deliverable", &output).unwrap(),
+        )
+        .unwrap();
+        assert!(json.contains(r#""label":"q3.md""#));
+        assert!(json.contains(r#""meta":"900 B""#));
+        assert!(!json.contains("41ff"));
+        assert!(!json.contains("revision_count"));
+    }
+
+    #[test]
+    fn byte_counts_read_as_sizes_and_keep_a_digit_only_where_it_says_something() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(900), "900 B");
+        assert_eq!(format_bytes(1024), "1 KB");
+        assert_eq!(format_bytes(1536), "1.5 KB");
+        assert_eq!(format_bytes(20 * 1024), "20 KB");
+        assert_eq!(format_bytes(3 * 1024 * 1024 + 512 * 1024), "3.5 MB");
     }
 
     #[test]

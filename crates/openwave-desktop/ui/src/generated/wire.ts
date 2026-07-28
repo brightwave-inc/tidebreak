@@ -693,6 +693,35 @@ export type RendererToolStatus = "completed" | "failed";
 export type RequestedFolderHint = "documents" | "downloads";
 
 /**
+ * One thing a call surfaced.
+ *
+ * Three fields because a row reads as three: what it is, where it came from,
+ * and how big or how many. A tool that wants to say more than that is
+ * describing something this projection does not cover.
+ */
+export type ResultEntry = { kind: ResultEntryKind, 
+/**
+ * The row's name — a file name, a source title, a page title.
+ */
+label: string, 
+/**
+ * A secondary hint beside the name — a path, a domain, a section.
+ */
+detail: string | null, 
+/**
+ * Trailing meta — a size, a count, a status word.
+ */
+meta: string | null, };
+
+/**
+ * What one row of a listed result is, which is what picks its icon.
+ *
+ * A closed vocabulary rather than an icon name: the renderer chooses how to
+ * draw a folder, and a tool must not be able to name a glyph.
+ */
+export type ResultEntryKind = "file" | "folder" | "source" | "passage" | "link" | "output";
+
+/**
  * Why a root appears in one conversation's exact ordered projection.
  */
 export type RootAttachmentOrigin = "project_default" | "conversation";
@@ -788,7 +817,13 @@ server: string,
 /**
  * The validated `ui://` document reference.
  */
-resource_uri: string, };
+resource_uri: string, } | { "tool": "entries", entries: Array<ResultEntry>, 
+/**
+ * Rows past [`MAX_RESULT_ENTRIES`], counted rather than shown. A card
+ * that silently lists the first fifty of two hundred results is
+ * telling the reader something false.
+ */
+elided: number, };
 
 /**
  * One renderer-safe image identity attached to a historical user message.
