@@ -96,8 +96,14 @@ function formatCategory(lines) {
     if (formatted.length > 0) formatted.push("");
     formatted.push(`#### ${scopeHeading(scope)}`, ...scopeChanges);
   }
-  if (flatLines.length > 0 && formatted.length > 0) formatted.push("");
-  formatted.push(...flatLines);
+  if (flatLines.length > 0 && formatted.length > 0) {
+    // A bare blank line between two bullet runs makes GitHub render both as
+    // one loose list. A heading closes the grouped list before the compact
+    // inline scope changes begin.
+    formatted.push("", "#### Other", ...flatLines);
+  } else {
+    formatted.push(...flatLines);
+  }
   return [...formatted, ...trailingLines];
 }
 

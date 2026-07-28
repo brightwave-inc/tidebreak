@@ -36,6 +36,8 @@ pub enum ProviderKind {
     Anthropic,
     /// OpenAI Chat Completions (api.openai.com).
     Openai,
+    /// Google Gemini Developer API (generativelanguage.googleapis.com).
+    Gemini,
     /// Any OpenAI-compatible Chat Completions gateway (OpenRouter, vLLM, …).
     OpenaiCompatible,
     /// A signed-in model-gateway deployment: entitled models synced from the
@@ -49,6 +51,7 @@ impl ProviderKind {
     pub const ALL: &'static [ProviderKind] = &[
         ProviderKind::Anthropic,
         ProviderKind::Openai,
+        ProviderKind::Gemini,
         ProviderKind::OpenaiCompatible,
         ProviderKind::ModelGateway,
     ];
@@ -58,6 +61,7 @@ impl ProviderKind {
         match self {
             ProviderKind::Anthropic => "anthropic",
             ProviderKind::Openai => "openai",
+            ProviderKind::Gemini => "gemini",
             ProviderKind::OpenaiCompatible => "openai_compatible",
             ProviderKind::ModelGateway => "model_gateway",
         }
@@ -68,6 +72,7 @@ impl ProviderKind {
         match s {
             "anthropic" => Some(Self::Anthropic),
             "openai" => Some(Self::Openai),
+            "gemini" => Some(Self::Gemini),
             "openai_compatible" => Some(Self::OpenaiCompatible),
             "model_gateway" => Some(Self::ModelGateway),
             _ => None,
@@ -487,7 +492,7 @@ pub async fn delete_credential(secrets: &dyn SecretProvider, kind: ProviderKind)
     Ok(())
 }
 
-/// Whether `kind` has a usable credential — stored, or (for Anthropic/OpenAI)
+/// Whether `kind` has a usable credential — stored, or (for direct API-key providers)
 /// the matching env fallback the resolver also honors.
 pub async fn has_credential(secrets: &dyn SecretProvider, kind: ProviderKind) -> bool {
     if matches!(
@@ -499,6 +504,7 @@ pub async fn has_credential(secrets: &dyn SecretProvider, kind: ProviderKind) ->
     match kind {
         ProviderKind::Anthropic => std::env::var("ANTHROPIC_API_KEY").is_ok_and(|k| !k.is_empty()),
         ProviderKind::Openai => std::env::var("OPENAI_API_KEY").is_ok_and(|k| !k.is_empty()),
+        ProviderKind::Gemini => std::env::var("GEMINI_API_KEY").is_ok_and(|k| !k.is_empty()),
         ProviderKind::OpenaiCompatible => false,
         // The gateway's credential is its stored OAuth session, not a key.
         ProviderKind::ModelGateway => openwave_connectors::has_stored_credentials(secrets).await,
@@ -685,6 +691,9 @@ pub async fn resolve_api_key(secrets: &dyn SecretProvider, kind: ProviderKind) -
         ProviderKind::Openai => std::env::var("OPENAI_API_KEY")
             .ok()
             .filter(|k| !k.is_empty()),
+        ProviderKind::Gemini => std::env::var("GEMINI_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty()),
         ProviderKind::OpenaiCompatible => None,
         // Gateway tokens rotate; they are supplied per request by the route's
         // token source, never resolved into a static key.
@@ -703,6 +712,7 @@ pub fn route_kind(kind: ProviderKind) -> openwave_router::RouteKind {
     match kind {
         ProviderKind::Anthropic => openwave_router::RouteKind::Anthropic,
         ProviderKind::Openai => openwave_router::RouteKind::Openai,
+        ProviderKind::Gemini => openwave_router::RouteKind::Gemini,
         ProviderKind::OpenaiCompatible => openwave_router::RouteKind::OpenaiCompatible,
         ProviderKind::ModelGateway => openwave_router::RouteKind::ModelGateway,
     }

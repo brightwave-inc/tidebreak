@@ -2,7 +2,7 @@
 //!
 //! Builds a composite [`openwave_router::Router`] from every enabled,
 //! credentialed provider so the turn's model selects the right adapter
-//! (Anthropic / OpenAI / openai_compatible). The router is rebuilt when the
+//! (Anthropic / OpenAI / Gemini / openai_compatible). The router is rebuilt when the
 //! route set changes (enable/disable, key, base_url); otherwise the cached
 //! instance — and its connection pools — is reused.
 //!

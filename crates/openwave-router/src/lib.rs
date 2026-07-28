@@ -17,8 +17,13 @@ pub mod anthropic;
 #[cfg(feature = "openai-compat")]
 pub mod openai_compat;
 
+#[cfg(feature = "gemini")]
+pub mod gemini;
+
 #[cfg(feature = "anthropic")]
 pub use anthropic::AnthropicProvider;
+#[cfg(feature = "gemini")]
+pub use gemini::GeminiProvider;
 #[cfg(feature = "openai-compat")]
 pub use openai_compat::OpenAiCompatProvider;
 pub use router::{BearerTokenSource, Route, RouteKind, Router};

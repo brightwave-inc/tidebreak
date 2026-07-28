@@ -36,10 +36,25 @@ re-trigger the access prompt on every rebuild. To prevent that, `cargo run`
 and `cargo test` launch through
 [`scripts/macos-dev-sign-runner.sh`](scripts/macos-dev-sign-runner.sh), which
 signs the binary with your `openwave-dev` or `Apple Development` certificate
-(whichever exists) before running it. Click **Always Allow** once per binary
-and the prompt won't return. With no certificate in the keychain the wrapper
-is a no-op; you can also set `OPENWAVE_DEV_SIGNING_IDENTITY` to pick an
-identity explicitly, or set it empty to opt out.
+(whichever exists) before running it. Every binary is signed with the same
+fixed identifier, so clicking **Always Allow** once covers all dev binaries —
+including test executables, whose hashed file names change between builds.
+With no certificate in the keychain the wrapper is a no-op; you can also set
+`OPENWAVE_DEV_SIGNING_IDENTITY` to pick an identity explicitly, or set it
+empty to opt out.
+
+If the prompt asks for your **login keychain password** (instead of a plain
+Allow/Deny), the keychain item was created by an older ad-hoc-signed build
+and its partition list doesn't include your signing certificate's team.
+Repair it once per secret, then Always Allow sticks:
+
+```sh
+security set-generic-password-partition-list \
+  -S "apple-tool:,apple:,teamid:<YOUR_TEAM_ID>" -s openwave -a <account>
+```
+
+(`security find-identity -v -p codesigning` shows the team id in parentheses;
+`security find-generic-password -s openwave` lists the accounts.)
 
 ### Desktop UI
 

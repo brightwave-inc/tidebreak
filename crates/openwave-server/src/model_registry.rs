@@ -59,6 +59,14 @@ const EFFORT_NONE_TO_XHIGH: &[ReasoningEffort] = &[
     ReasoningEffort::High,
     ReasoningEffort::XHigh,
 ];
+/// Gemini 3 maps OpenWave's `none` to its `minimal` thinking level and has no
+/// separate levels above `high`.
+const EFFORT_NONE_TO_HIGH: &[ReasoningEffort] = &[
+    ReasoningEffort::None,
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+];
 const EFFORT_LOW_TO_MAX: &[ReasoningEffort] = &[
     ReasoningEffort::Low,
     ReasoningEffort::Medium,
@@ -259,6 +267,50 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         supports_reasoning: true,
         reasoning_efforts: EFFORT_NONE_TO_XHIGH,
     },
+    // Gemini rows are intentionally limited to ids currently published by
+    // Google. All four accept images, expose thinking levels through `high`,
+    // and have 1,048,576 input / 65,536 output token limits; the native
+    // adapter owns the corresponding GenerateContent wire shape.
+    ModelSpec {
+        id: "gemini-3.6-flash",
+        display_name: "Gemini 3.6 Flash",
+        provider: ProviderKind::Gemini,
+        context_window: 1_048_576,
+        max_output_tokens: 65_536,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        reasoning_efforts: EFFORT_NONE_TO_HIGH,
+    },
+    ModelSpec {
+        id: "gemini-3.5-flash",
+        display_name: "Gemini 3.5 Flash",
+        provider: ProviderKind::Gemini,
+        context_window: 1_048_576,
+        max_output_tokens: 65_536,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        reasoning_efforts: EFFORT_NONE_TO_HIGH,
+    },
+    ModelSpec {
+        id: "gemini-3.5-flash-lite",
+        display_name: "Gemini 3.5 Flash-Lite",
+        provider: ProviderKind::Gemini,
+        context_window: 1_048_576,
+        max_output_tokens: 65_536,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        reasoning_efforts: EFFORT_NONE_TO_HIGH,
+    },
+    ModelSpec {
+        id: "gemini-3.1-pro-preview",
+        display_name: "Gemini 3.1 Pro Preview",
+        provider: ProviderKind::Gemini,
+        context_window: 1_048_576,
+        max_output_tokens: 65_536,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        reasoning_efforts: EFFORT_NONE_TO_HIGH,
+    },
 ];
 
 /// Curated entries belonging to `provider`, preserving registry display order.
@@ -387,6 +439,7 @@ mod tests {
         match provider {
             ProviderKind::Anthropic => true,
             ProviderKind::Openai => true,
+            ProviderKind::Gemini => true,
             ProviderKind::OpenaiCompatible => false,
             ProviderKind::ModelGateway => true,
         }
@@ -434,6 +487,7 @@ mod tests {
         }
         assert_eq!(models_for(ProviderKind::Anthropic).count(), 7);
         assert_eq!(models_for(ProviderKind::Openai).count(), 6);
+        assert_eq!(models_for(ProviderKind::Gemini).count(), 4);
         assert_eq!(models_for(ProviderKind::OpenaiCompatible).count(), 0);
     }
 
@@ -524,6 +578,18 @@ mod tests {
             find("gpt-5.4-nano").unwrap().reasoning_efforts,
             EFFORT_NONE_TO_XHIGH
         );
+    }
+
+    #[test]
+    fn every_gemini_entry_has_the_native_adapter_contract() {
+        let gemini: Vec<_> = models_for(ProviderKind::Gemini).collect();
+        assert_eq!(gemini.len(), 4);
+        for spec in gemini {
+            assert_eq!(spec.context_window, 1_048_576, "{}", spec.id);
+            assert_eq!(spec.max_output_tokens, 65_536, "{}", spec.id);
+            assert!(spec.supports_reasoning, "{}", spec.id);
+            assert_eq!(spec.reasoning_efforts, EFFORT_NONE_TO_HIGH, "{}", spec.id);
+        }
     }
 
     #[test]

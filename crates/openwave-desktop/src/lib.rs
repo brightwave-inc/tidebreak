@@ -140,6 +140,16 @@ fn home_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg_attr(not(debug_assertions), allow(unused_mut))]
+    let mut context = tauri::generate_context!();
+    // Debug builds run under a distinct identifier so `cargo tauri dev` holds its
+    // own single-instance lock and app-data dir instead of colliding with an
+    // installed release build.
+    #[cfg(debug_assertions)]
+    {
+        context.config_mut().identifier = "io.brightwave.openwave.dev".into();
+    }
+
     let (info_tx, info_rx) = watch::channel(None);
     let state = Arc::new(AppState { info_rx });
 
@@ -198,7 +208,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building OpenWave");
     app.run(|app, event| match event {
         tauri::RunEvent::WindowEvent { label, event, .. } => {

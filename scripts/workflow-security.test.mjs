@@ -8,6 +8,10 @@ const workflows = Object.fromEntries(
     .filter((name) => name.endsWith(".yml") || name.endsWith(".yaml"))
     .map((name) => [name, readFileSync(new URL(name, workflowDirectory), "utf8")]),
 );
+const releaseDrafterConfig = readFileSync(
+  new URL("../.github/release-drafter.yml", import.meta.url),
+  "utf8",
+);
 const tauriConfig = JSON.parse(
   readFileSync(
     new URL("../crates/openwave-desktop/tauri.conf.json", import.meta.url),
@@ -56,6 +60,22 @@ test("third-party workflow actions use immutable commit SHAs", () => {
       );
     }
   }
+});
+
+test("release-drafter retains a stable draft tag after formatting", () => {
+  assert.match(releaseDrafterConfig, /tag-template: "v\$RESOLVED_VERSION"/);
+  assert.match(releaseDrafterConfig, /^tag-prefix: "v"$/m);
+
+  const draftJob = workflowJob(workflows["release-draft.yml"], "draft");
+  assert.match(draftJob, /id: release_drafter/);
+  assert.match(
+    draftJob,
+    /RELEASE_TAG: v\$\{\{ steps\.release_drafter\.outputs\.resolved_version \}\}/,
+  );
+  assert.match(
+    draftJob,
+    /\{tag_name: \$tag, body: \$body\}/,
+  );
 });
 
 test("workflow container images are pinned by digest", () => {

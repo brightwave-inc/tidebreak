@@ -31,6 +31,16 @@ pub(super) fn relative_path(rel: &str) -> std::result::Result<PathBuf, String> {
 }
 
 pub(super) fn read_utf8_file(workspace: &Dir, path: &Path) -> std::result::Result<String, String> {
+    let bytes = read_regular_file_bytes(workspace, path, MAX_READ_FILE_BYTES)?;
+    String::from_utf8(bytes).map_err(|_| "file is not valid UTF-8".into())
+}
+
+/// Read a bounded regular file without following a caller-controlled path.
+pub(super) fn read_regular_file_bytes(
+    workspace: &Dir,
+    path: &Path,
+    max_bytes: usize,
+) -> std::result::Result<Vec<u8>, String> {
     let mut options = OpenOptions::new();
     options.read(true).nonblock(true);
     let file = workspace
@@ -40,22 +50,18 @@ pub(super) fn read_utf8_file(workspace: &Dir, path: &Path) -> std::result::Resul
     if !metadata.is_file() {
         return Err("path is not a regular file".into());
     }
-    if metadata.len() > MAX_READ_FILE_BYTES as u64 {
-        return Err(format!(
-            "file is too large (maximum {MAX_READ_FILE_BYTES} bytes)"
-        ));
+    if metadata.len() > max_bytes as u64 {
+        return Err(format!("file is too large (maximum {max_bytes} bytes)"));
     }
 
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take((MAX_READ_FILE_BYTES + 1) as u64)
+    file.take((max_bytes + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
-    if bytes.len() > MAX_READ_FILE_BYTES {
-        return Err(format!(
-            "file is too large (maximum {MAX_READ_FILE_BYTES} bytes)"
-        ));
+    if bytes.len() > max_bytes {
+        return Err(format!("file is too large (maximum {max_bytes} bytes)"));
     }
-    String::from_utf8(bytes).map_err(|_| "file is not valid UTF-8".into())
+    Ok(bytes)
 }
 
 pub(super) fn list_directory(workspace: &Dir, path: &Path) -> std::result::Result<String, String> {
@@ -142,4 +148,90 @@ pub(super) fn write_utf8_file(workspace: &Dir, path: &Path, content: &[u8]) -> s
         let _ = parent.remove_file(&temp_name);
     }
     result
+}
+
+/// Publish bytes at a write-once path without replacing an earlier revision.
+///
+/// A hard link gives the temporary file an atomic, no-replace final name. If a
+/// previous attempt already published that name, accepting it only when its
+/// exact bytes match makes an interrupted store response safe to retry.
+pub(super) fn publish_immutable_file(
+    workspace: &Dir,
+    path: &Path,
+    content: &[u8],
+) -> std::result::Result<(), String> {
+    let parent_path = path.parent().unwrap_or_else(|| Path::new(""));
+    workspace
+        .create_dir_all(parent_path)
+        .map_err(|error| error.to_string())?;
+    let parent = if parent_path.as_os_str().is_empty() {
+        workspace.try_clone()
+    } else {
+        workspace.open_dir(parent_path)
+    }
+    .map_err(|error| error.to_string())?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| "path must name a file".to_string())?;
+    let temp_name = format!(".openwave-{}.tmp", uuid::Uuid::new_v4());
+
+    let write_temp = || -> std::io::Result<()> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true).nonblock(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = parent.open_with(&temp_name, &options)?;
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "temporary path is not a regular file",
+            ));
+        }
+        file.write_all(content)?;
+        file.sync_all()?;
+        Ok(())
+    };
+
+    if let Err(error) = write_temp() {
+        let _ = parent.remove_file(&temp_name);
+        return Err(error.to_string());
+    }
+
+    match parent.hard_link(&temp_name, &parent, file_name) {
+        Ok(()) => {
+            let _ = parent.remove_file(&temp_name);
+            #[cfg(unix)]
+            parent
+                .open(".")
+                .and_then(|directory| directory.sync_all())
+                .map_err(|error| format!("could not sync immutable revision directory: {error}"))?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = parent.remove_file(&temp_name);
+            let metadata = parent
+                .symlink_metadata(file_name)
+                .map_err(|read_error| read_error.to_string())?;
+            if !metadata.file_type().is_file() || metadata.len() != content.len() as u64 {
+                return Err("immutable revision path already exists with different content".into());
+            }
+            let mut options = OpenOptions::new();
+            options.read(true).nonblock(true);
+            let mut file = parent
+                .open_with(file_name, &options)
+                .map_err(|read_error| read_error.to_string())?;
+            let mut existing = Vec::with_capacity(content.len());
+            file.read_to_end(&mut existing)
+                .map_err(|read_error| read_error.to_string())?;
+            if existing == content {
+                Ok(())
+            } else {
+                Err("immutable revision path already exists with different content".into())
+            }
+        }
+        Err(error) => {
+            let _ = parent.remove_file(&temp_name);
+            Err(error.to_string())
+        }
+    }
 }
