@@ -144,7 +144,7 @@ export function ModelMenu({
       <DropdownMenuContent
         align="start"
         side="top"
-        className="model-menu-content"
+        className="model-menu-content overflow-y-auto"
       >
         <DropdownMenuItem
           onSelect={() => {
@@ -276,7 +276,7 @@ export function ReasoningEffortMenu({
       <DropdownMenuContent
         align="start"
         side="top"
-        className="model-menu-content"
+        className="model-menu-content overflow-y-auto"
       >
         <DropdownMenuItem
           onSelect={() => {

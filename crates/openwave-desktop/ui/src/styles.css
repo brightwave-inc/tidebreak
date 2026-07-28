@@ -1836,7 +1836,14 @@ body {
 
 .model-menu-content {
   min-width: 15rem;
-  max-height: 60vh;
+  /* Bounded by the space Radix measured between the trigger and the viewport
+     edge, so the tail of the list is always reachable by scrolling. The
+     overflow override lives on the element as a utility class: this rule is in
+     `@layer components`, which loses to the base `overflow-hidden` utility. */
+  max-height: min(
+    60vh,
+    calc(var(--radix-dropdown-menu-content-available-height) - 0.5rem)
+  );
   overflow-y: auto;
 }
 
