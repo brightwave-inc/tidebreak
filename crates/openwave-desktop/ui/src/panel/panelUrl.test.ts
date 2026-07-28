@@ -23,12 +23,12 @@ describe("parsePanelSegment", () => {
     });
   });
 
-  it("keeps the dots inside an output filename", () => {
-    // Splitting on every separator would read this as an output named
-    // "report" with a stray "md" hanging off it.
-    expect(parsePanelSegment("outputs.quarterly report.md")).toEqual({
+  it("carries an opaque output identity", () => {
+    expect(
+      parsePanelSegment("outputs.550062d4-2528-5cc6-90f8-a788e119bf36"),
+    ).toEqual({
       type: "outputs",
-      filename: "quarterly report.md",
+      outputId: "550062d4-2528-5cc6-90f8-a788e119bf36",
     });
   });
 
@@ -48,7 +48,10 @@ describe("parsePanelSegment", () => {
       { type: "sources" },
       { type: "sources", documentId: "doc-1" },
       { type: "outputs" },
-      { type: "outputs", filename: "notes.md" },
+      {
+        type: "outputs",
+        outputId: "550062d4-2528-5cc6-90f8-a788e119bf36",
+      },
       { type: "folders" },
     ] as const) {
       expect(parsePanelSegment(encodePanelSegment(panel))).toEqual(panel);

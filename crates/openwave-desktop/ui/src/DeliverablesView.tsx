@@ -6,6 +6,7 @@ import {
   readDeliverable,
   type DeliverablePreview,
   type DeliverablesCatalog,
+  type OutputExportResult,
 } from "./deliverables";
 import { MessageMarkdown } from "./MessageMarkdown";
 import {
@@ -16,8 +17,8 @@ import {
 
 type DeliverableApis = {
   list: (chatId: string) => Promise<DeliverablesCatalog>;
-  read: (chatId: string, filename: string) => Promise<DeliverablePreview>;
-  export: (chatId: string, filename: string) => Promise<boolean>;
+  read: (chatId: string, outputId: string) => Promise<DeliverablePreview>;
+  export: (chatId: string, outputId: string) => Promise<OutputExportResult>;
 };
 
 const defaultApis: DeliverableApis = {
@@ -28,12 +29,12 @@ const defaultApis: DeliverableApis = {
 
 export function DeliverablesView({
   chatId,
-  initialFilename,
+  initialOutputId,
   apis = defaultApis,
 }: {
   chatId: string;
-  /** Output to preview on arrival; ignored when this chat has no such file. */
-  initialFilename?: string;
+  /** Opaque output to preview on arrival; ignored when this chat does not own it. */
+  initialOutputId?: string;
   apis?: DeliverableApis;
 }) {
   const [catalog, setCatalog] = useState<DeliverablesCatalog>({
@@ -54,7 +55,7 @@ export function DeliverablesView({
   const [previewVersion, setPreviewVersion] = useState(0);
   const catalogGenerationRef = useRef(0);
   const previewGenerationRef = useRef(0);
-  const pendingFilenameRef = useRef<string | null>(initialFilename ?? null);
+  const pendingOutputIdRef = useRef<string | null>(initialOutputId ?? null);
 
   async function refresh(showLoading = false) {
     const generation = ++catalogGenerationRef.current;
@@ -67,17 +68,17 @@ export function DeliverablesView({
       // or a choice from the list must not snap back to where the caller
       // pointed. Resolving here rather than after the fact means an output the
       // chat does not own never gets read.
-      const target = pendingFilenameRef.current;
-      pendingFilenameRef.current = null;
-      const owns = (filename: string | null | undefined) =>
-        !!filename && next.deliverables.some((item) => item.filename === filename);
+      const target = pendingOutputIdRef.current;
+      pendingOutputIdRef.current = null;
+      const owns = (outputId: string | null | undefined) =>
+        !!outputId && next.deliverables.some((item) => item.outputId === outputId);
       setCatalog(next);
       setSelected((current) =>
         owns(target)
           ? target
           : owns(current)
             ? current
-            : (next.deliverables[0]?.filename ?? null),
+            : (next.deliverables[0]?.outputId ?? null),
       );
       setPreviewVersion((current) => current + 1);
     } catch (caught) {
@@ -95,11 +96,11 @@ export function DeliverablesView({
     setError(null);
     setPreviewError(null);
     setExportStatus(null);
-    // The requested filename belongs to the conversation that asked for it. Its
+    // The requested opaque identity belongs to the conversation that asked for it. Its
     // only other clear sits after the stale-generation bail, which a chat switch
     // always takes — so without resetting here the next conversation opens on
     // the file the previous one wanted.
-    pendingFilenameRef.current = initialFilename ?? null;
+    pendingOutputIdRef.current = initialOutputId ?? null;
     void refresh(true);
     return () => {
       catalogGenerationRef.current += 1;
@@ -110,17 +111,17 @@ export function DeliverablesView({
   // Being pointed somewhere new while the surface is already open resolves
   // against the catalog in hand, and otherwise waits for the next one.
   useEffect(() => {
-    if (!initialFilename) return;
-    if (catalog.deliverables.some((item) => item.filename === initialFilename)) {
-      pendingFilenameRef.current = null;
-      setSelected(initialFilename);
+    if (!initialOutputId) return;
+    if (catalog.deliverables.some((item) => item.outputId === initialOutputId)) {
+      pendingOutputIdRef.current = null;
+      setSelected(initialOutputId);
     } else {
-      pendingFilenameRef.current = initialFilename;
+      pendingOutputIdRef.current = initialOutputId;
     }
     // `catalog` is read here, so it belongs in the dependencies: a target set
     // before the list arrived has to re-resolve when it does, by any path and
     // not only through an explicit refresh.
-  }, [initialFilename, catalog]);
+  }, [initialOutputId, catalog]);
 
   useEffect(() => {
     if (!selected) {
@@ -157,9 +158,17 @@ export function DeliverablesView({
     setExporting(true);
     setExportStatus(null);
     try {
-      const saved = await apis.export(chatId, selected);
-      if (saved) {
-        setExportStatus({ message: `${selected} was saved.`, error: false });
+      const result = await apis.export(chatId, selected);
+      const filename =
+        catalog.deliverables.find((item) => item.outputId === selected)?.filename ??
+        "Output";
+      if (result.status === "completed") {
+        setExportStatus({ message: `${filename} was saved.`, error: false });
+      } else if (result.status === "failed") {
+        setExportStatus({
+          message: exportFailureMessage(result.reason),
+          error: true,
+        });
       }
     } catch (caught) {
       setExportStatus({
@@ -234,10 +243,10 @@ export function DeliverablesView({
                 {catalog.deliverables.map((item) => (
                   <button
                     type="button"
-                    className={`deliverable-row${selected === item.filename ? " is-selected" : ""}`}
-                    aria-current={selected === item.filename ? "true" : undefined}
-                    key={item.filename}
-                    onClick={() => setSelected(item.filename)}
+                    className={`deliverable-row${selected === item.outputId ? " is-selected" : ""}`}
+                    aria-current={selected === item.outputId ? "true" : undefined}
+                    key={item.outputId}
+                    onClick={() => setSelected(item.outputId)}
                   >
                     <span className="deliverable-icon" aria-hidden="true">
                       <FileOutput size={16} />
@@ -245,7 +254,11 @@ export function DeliverablesView({
                     <span className="deliverable-copy">
                       <strong>{item.filename}</strong>
                       <small>
-                        {formatBytes(item.sizeBytes)} · {formatDate(item.updatedAt)}
+                        {formatBytes(item.sizeBytes)} ·{" "}
+                        {item.revisionCount === 1
+                          ? "1 revision"
+                          : `${item.revisionCount} revisions`}{" "}
+                        · {formatDate(item.updatedAt)}
                       </small>
                     </span>
                   </button>
@@ -256,7 +269,7 @@ export function DeliverablesView({
             <section className="deliverable-preview-panel" aria-label="Output preview">
               <div className="deliverable-preview-heading">
                 <div>
-                  <h2>{selected ?? "Preview"}</h2>
+                  <h2>{preview?.filename ?? "Preview"}</h2>
                   {preview && <p>{mediaTypeLabel(preview.mediaType)}</p>}
                 </div>
                 <button
@@ -333,6 +346,19 @@ function mediaTypeLabel(mediaType: DeliverablePreview["mediaType"]): string {
       return "HTML";
     default:
       return "Plain text";
+  }
+}
+
+function exportFailureMessage(
+  reason: Extract<OutputExportResult, { status: "failed" }>["reason"],
+): string {
+  switch (reason) {
+    case "source_unavailable":
+      return "That output revision is no longer available.";
+    case "destination_unavailable":
+      return "The selected save destination is no longer available.";
+    case "ambiguous_native_failure":
+      return "OpenWave could not confirm whether the output was saved. Check the selected destination before trying again.";
   }
 }
 

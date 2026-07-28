@@ -392,7 +392,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       case "outputs":
         return (
           <PanelFrame position={side} spaceBetween>
-            <DeliverablesView chatId={chatId} initialFilename={panel.filename} />
+            <DeliverablesView chatId={chatId} initialOutputId={panel.outputId} />
           </PanelFrame>
         );
       case "folders":
