@@ -19,6 +19,8 @@ use openwave_core::provider::{ChatRequest, ModelProvider, ProviderEvent, Provide
 
 #[cfg(feature = "anthropic")]
 use crate::AnthropicProvider;
+#[cfg(feature = "gemini")]
+use crate::GeminiProvider;
 #[cfg(feature = "openai-compat")]
 use crate::OpenAiCompatProvider;
 
@@ -44,6 +46,8 @@ pub enum RouteKind {
     Openai,
     /// Any OpenAI-compatible Chat Completions gateway.
     OpenaiCompatible,
+    /// Google Gemini Developer API (native GenerateContent protocol).
+    Gemini,
     /// A model-gateway deployment's Anthropic-compatible surface, authenticated
     /// with short-lived resource-scoped tokens instead of a static key.
     ModelGateway,
@@ -56,6 +60,7 @@ impl RouteKind {
             RouteKind::Anthropic => "anthropic",
             RouteKind::Openai => "openai",
             RouteKind::OpenaiCompatible => "openai_compatible",
+            RouteKind::Gemini => "gemini",
             RouteKind::ModelGateway => "model_gateway",
         }
     }
@@ -65,6 +70,7 @@ impl RouteKind {
             "anthropic" => Some(Self::Anthropic),
             "openai" => Some(Self::Openai),
             "openai_compatible" => Some(Self::OpenaiCompatible),
+            "gemini" => Some(Self::Gemini),
             "model_gateway" => Some(Self::ModelGateway),
             _ => None,
         }
@@ -157,6 +163,7 @@ impl Router {
         for kind in [
             RouteKind::Anthropic,
             RouteKind::Openai,
+            RouteKind::Gemini,
             RouteKind::ModelGateway,
             RouteKind::OpenaiCompatible,
         ] {
@@ -176,7 +183,7 @@ impl Router {
 
     /// Select the exact provider requested by the host model registry.
     ///
-    /// Curated Anthropic/OpenAI routes must claim the model. A custom
+    /// Curated Anthropic/OpenAI/Gemini routes must claim the model. A custom
     /// OpenAI-compatible route accepts a legacy free-form model id so existing
     /// pre-registry settings continue to work; new API writes require an
     /// explicit configured custom entry before they can reach this boundary.
@@ -281,6 +288,16 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
                 base.to_string(),
             )))
         }
+        #[cfg(feature = "gemini")]
+        RouteKind::Gemini => {
+            let mut p = GeminiProvider::new(route.api_key.clone());
+            if let Some(base) = &route.base_url {
+                p = p.with_base_url(base.clone());
+            }
+            Some(Arc::new(p))
+        }
+        #[cfg(not(feature = "gemini"))]
+        RouteKind::Gemini => None,
         #[cfg(not(feature = "openai-compat"))]
         RouteKind::Openai | RouteKind::OpenaiCompatible => None,
     }

@@ -11,11 +11,13 @@ authors.workspace = true
 workspace = true
 
 [features]
-default = ["anthropic", "openai-compat"]
+default = ["anthropic", "openai-compat", "gemini"]
 # The Anthropic (Messages API) provider adapter.
 anthropic = ["dep:reqwest", "dep:async-stream"]
 # OpenAI-compatible Chat Completions adapter (OpenAI, OpenRouter, vLLM, …).
 openai-compat = ["dep:reqwest", "dep:async-stream"]
+# Google Gemini Developer API adapter (native GenerateContent protocol).
+gemini = ["dep:reqwest", "dep:async-stream", "dep:uuid"]
 
 [dependencies]
 openwave-core = { path = "../openwave-core", default-features = false }
@@ -26,7 +28,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true, optional = true }
 async-stream = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
-uuid = { workspace = true }
