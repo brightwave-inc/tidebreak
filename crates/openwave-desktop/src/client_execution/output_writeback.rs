@@ -9,8 +9,8 @@ use std::collections::HashSet;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use openwave_core::{
-    CallId, ChatId, HostRootId, OutputWriteMode, ToolCallRecord,
-    WriteOutputToConnectedFolderArgs, WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
+    CallId, ChatId, HostRootId, OutputWriteMode, ToolCallRecord, WriteOutputToConnectedFolderArgs,
+    WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
 };
 use openwave_host_broker::{
     ErrorCode, OperationEnvelope, OperationRequest, OperationResult, RelativePath, RootId,
@@ -188,14 +188,13 @@ async fn recover_once(app: &AppHandle) -> bool {
                     continue;
                 }
             };
-            let claimed =
-                match canonical_arguments(&claim.call, summary.chat_id, call_id) {
-                    Ok(claimed) if claimed == arguments => claimed,
-                    _ => {
-                        failed = true;
-                        continue;
-                    }
-                };
+            let claimed = match canonical_arguments(&claim.call, summary.chat_id, call_id) {
+                Ok(claimed) if claimed == arguments => claimed,
+                _ => {
+                    failed = true;
+                    continue;
+                }
+            };
             let receipt =
                 match prepare_receipt(&state, claim.call, claim.lease_token, claimed, None).await {
                     Ok(receipt) => receipt,
@@ -207,10 +206,7 @@ async fn recover_once(app: &AppHandle) -> bool {
                         continue;
                     }
                 };
-            if state
-                .receipts
-                .save_output_writeback(&receipt)
-                .is_err()
+            if state.receipts.save_output_writeback(&receipt).is_err()
                 || execute_receipt(app, &state, receipt).await.is_err()
             {
                 failed = true;
@@ -358,12 +354,7 @@ async fn execute_receipt(
         let output = output.clone();
         let revision = revision.clone();
         tauri::async_runtime::spawn_blocking(move || {
-            read_output_revision_bytes(
-                &scratch_root,
-                receipt.chat_id,
-                &output,
-                &revision,
-            )
+            read_output_revision_bytes(&scratch_root, receipt.chat_id, &output, &revision)
         })
         .await
         .map_err(|_| "could not read immutable output revision".to_owned())??
@@ -376,7 +367,9 @@ async fn execute_receipt(
         OutputWriteMode::Create => WriteFileMode::Create,
         OutputWriteMode::Replace => WriteFileMode::Replace,
     };
-    let approval = receipt.approval_id.map(|approval_id| WriteApproval { approval_id });
+    let approval = receipt
+        .approval_id
+        .map(|approval_id| WriteApproval { approval_id });
 
     client
         .heartbeat(receipt.chat_id, receipt.call_id, receipt.lease_token)

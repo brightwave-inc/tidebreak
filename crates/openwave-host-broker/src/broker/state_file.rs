@@ -438,10 +438,9 @@ pub(super) fn validate_loaded_state(state: &State) -> Result<(), BrokerError> {
             } if result.bytes != request.byte_len
                 || result.replaced != matches!(request.mode, crate::WriteFileMode::Replace) =>
             {
-                return Err(invalid_data(
-                    "successful write receipt does not match its request",
-                )
-                .into());
+                return Err(
+                    invalid_data("successful write receipt does not match its request").into(),
+                );
             }
             MutationRecord::Write {
                 outcome: super::MutationOutcome::Pending,

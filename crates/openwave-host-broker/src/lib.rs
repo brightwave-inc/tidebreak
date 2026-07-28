@@ -37,8 +37,7 @@ pub use protocol::{
     OperationResponseEnvelope, OperationResult, PathRequest, ReadFileBinaryResult, ReadFileResult,
     RegisterRootReceipt, RegisterRootRequest, RegisterRootResult, Response, ResponseEnvelope,
     RevokeRootRequest, RevokeRootResult, RootAttachmentMutationKind, RootAttachmentMutationReceipt,
-    RootAttachmentMutationRequest, RootAttachmentMutationResult, RootSummary,
-    WriteApproval, WriteFileMode, WriteFileRequest, WriteFileResult, MAX_READ_FILE_BINARY_BYTES,
-    PROTOCOL_VERSION,
+    RootAttachmentMutationRequest, RootAttachmentMutationResult, RootSummary, WriteApproval,
+    WriteFileMode, WriteFileRequest, WriteFileResult, MAX_READ_FILE_BINARY_BYTES, PROTOCOL_VERSION,
 };
 pub use relative_path::{RelativePath, RelativePathError};

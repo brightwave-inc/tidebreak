@@ -8,8 +8,8 @@ use crate::error::Result;
 use crate::model::{ToolCallExecution, ToolCallStatus, TurnClientWaitStatus, TurnRunStatus};
 use crate::storage::PendingChatPrompt;
 use crate::{
-    validate_request_folder_access_arguments, CallId, ChatId, ASK_USER_QUESTIONS_TOOL,
-    validate_write_output_to_connected_folder_arguments, REQUEST_FOLDER_ACCESS_TOOL,
+    validate_request_folder_access_arguments, validate_write_output_to_connected_folder_arguments,
+    CallId, ChatId, ASK_USER_QUESTIONS_TOOL, REQUEST_FOLDER_ACCESS_TOOL,
     WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
 };
 
@@ -127,9 +127,7 @@ pub(in crate::db) async fn list_pending_chat_prompts(
     }
 
     let writeback_calls = entities::tool_call::Entity::find()
-        .filter(
-            entities::tool_call::Column::Name.eq(WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL),
-        )
+        .filter(entities::tool_call::Column::Name.eq(WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL))
         .filter(entities::tool_call::Column::Execution.eq(ToolCallExecution::Client.as_str()))
         .filter(entities::tool_call::Column::Status.eq(ToolCallStatus::Pending.as_str()))
         .order_by_asc(entities::tool_call::Column::ChatId)

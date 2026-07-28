@@ -907,8 +907,7 @@ impl Operator {
                     Ok(result)
                 }
                 OperationRequest::WriteFile(request) => {
-                    let (result, authorized_by) =
-                        self.write_file(envelope.context, request)?;
+                    let (result, authorized_by) = self.write_file(envelope.context, request)?;
                     grant_id = authorized_by;
                     Ok(OperationResult::WriteFile(result))
                 }
@@ -1052,12 +1051,7 @@ impl Operator {
             .try_clone()?;
 
         let terminal = if recovering {
-            if destination_matches(
-                &directory,
-                &request.path,
-                request.bytes,
-                request.sha256,
-            ) {
+            if destination_matches(&directory, &request.path, request.bytes, request.sha256) {
                 Ok(WriteFileResult {
                     operation_id: request.operation_id,
                     bytes: request.bytes,
@@ -1269,11 +1263,9 @@ fn error_response(error: BrokerError) -> ErrorResponse {
             "write destination does not exist",
             false,
         ),
-        BrokerError::ReplacementApprovalRequired | BrokerError::InvalidWriteContent => (
-            ErrorCode::InvalidRequest,
-            "write request is invalid",
-            false,
-        ),
+        BrokerError::ReplacementApprovalRequired | BrokerError::InvalidWriteContent => {
+            (ErrorCode::InvalidRequest, "write request is invalid", false)
+        }
         BrokerError::AmbiguousWrite => (
             ErrorCode::AmbiguousWrite,
             "write outcome is ambiguous and will not be replayed",
@@ -1652,9 +1644,7 @@ fn atomic_write_connected_file(
     match directory.symlink_metadata(&filename) {
         Ok(metadata) => match mode {
             WriteFileMode::Create => return Err(BrokerError::DestinationExists),
-            WriteFileMode::Replace
-                if !metadata.is_file() || metadata.file_type().is_symlink() =>
-            {
+            WriteFileMode::Replace if !metadata.is_file() || metadata.file_type().is_symlink() => {
                 return Err(BrokerError::NotRegularFile);
             }
             WriteFileMode::Replace => {}
@@ -1709,12 +1699,7 @@ fn atomic_write_connected_file(
     result
 }
 
-fn destination_matches(
-    root: &Dir,
-    path: &RelativePath,
-    byte_len: usize,
-    sha256: [u8; 32],
-) -> bool {
+fn destination_matches(root: &Dir, path: &RelativePath, byte_len: usize, sha256: [u8; 32]) -> bool {
     if byte_len == 0 || byte_len > MAX_WRITE_FILE_BYTES {
         return false;
     }
@@ -1724,9 +1709,7 @@ fn destination_matches(
     let Ok(metadata) = directory.symlink_metadata(&filename) else {
         return false;
     };
-    if !metadata.is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.len() != byte_len as u64
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() != byte_len as u64
     {
         return false;
     }
