@@ -34,6 +34,7 @@ use openwave_core::{
     ProviderEvent, ResponseFormat, Result, Role, StopReason, Store, UtilityModel,
 };
 
+use crate::bus::{ChatMetadataNotice, EventBus};
 use crate::resolver::ProviderResolver;
 use crate::routes::MAX_CHAT_TITLE_CHARS;
 
@@ -118,6 +119,7 @@ Answer {{"title":null}} when there is nothing to name yet — a greeting, a test
 pub(crate) struct ChatTitler {
     store: Arc<dyn Store>,
     resolver: Arc<dyn ProviderResolver>,
+    events: Arc<EventBus>,
     /// Conversations with a titling call in flight.
     ///
     /// Every turn on an untitled chat would otherwise start another call: a
@@ -127,12 +129,17 @@ pub(crate) struct ChatTitler {
 }
 
 impl ChatTitler {
-    /// A titler reading conversations from `store` and reaching providers
-    /// through `resolver`.
-    pub(crate) fn new(store: Arc<dyn Store>, resolver: Arc<dyn ProviderResolver>) -> Self {
+    /// A titler reading conversations from `store`, reaching providers through
+    /// `resolver`, and announcing a stored name on `events`.
+    pub(crate) fn new(
+        store: Arc<dyn Store>,
+        resolver: Arc<dyn ProviderResolver>,
+        events: Arc<EventBus>,
+    ) -> Self {
         Self {
             store,
             resolver,
+            events,
             in_flight: Mutex::new(HashSet::new()),
         }
     }
@@ -151,8 +158,20 @@ impl ChatTitler {
             // Held for the duration, released on drop, so a call that returns
             // early — or panics — does not lock the chat out of a later attempt.
             let _claim = claim;
-            if let Err(error) = titler.derive_title(chat_id, &utility).await {
-                eprintln!("openwave: could not derive a title for chat {chat_id}: {error}");
+            // Logged either way. The work is invisible by design — no event, no
+            // turn outcome — so without a line here the only way to tell a
+            // declined title from a broken one is to read the database.
+            match titler.derive_title(chat_id, &utility).await {
+                Ok(Some(title)) => {
+                    eprintln!(
+                        "openwave: titled chat {chat_id} on {}: {title}",
+                        utility.model
+                    )
+                }
+                Ok(None) => eprintln!("openwave: left chat {chat_id} untitled"),
+                Err(error) => {
+                    eprintln!("openwave: could not derive a title for chat {chat_id}: {error}")
+                }
             }
         });
     }
@@ -191,6 +210,14 @@ impl ChatTitler {
         if !self.store.set_chat_title_if_unset(chat_id, &title).await? {
             return Ok(None);
         }
+        // Announced only once the write applied, so a client is never shown a
+        // name the conversation does not actually have.
+        self.events.publish_metadata(
+            chat_id,
+            ChatMetadataNotice::Titled {
+                title: title.clone(),
+            },
+        );
         Ok(Some(title))
     }
 }

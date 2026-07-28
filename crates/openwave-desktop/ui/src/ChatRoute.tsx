@@ -27,7 +27,6 @@ import {
 import { useFirstMessage } from "./FirstMessage";
 import { ChatView } from "./ChatView";
 import { DeliverablesView } from "./DeliverablesView";
-import { lookUpDerivedTitle } from "./DerivedChatTitle";
 import { DocumentDetailRoot } from "./document-detail/DocumentDetailRoot";
 import { DocumentsView } from "./DocumentsView";
 import { FoldersView } from "./FoldersView";
@@ -179,14 +178,21 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   useEffect(() => {
     if (!hydrated) return;
     const controller = new ChatSessionController({
-      openSocket: (after, onEvent) => client.openEvents(chatId, after, onEvent),
+      openSocket: (after, onFrame) => client.openEvents(chatId, after, onFrame),
       getAfter: () => useChatSessionStore.getState().lastSeq,
       onEvent: (event) => handleEventRef.current(event),
+      onMetadata: (metadata) =>
+        chatListActions.applyDerivedTitle(chatId, metadata.title),
       onConnectionState: (connectionState) =>
         setStatus((current) => `${withoutConnectionState(current)} · ${connectionState}`),
     });
     controller.start();
-    return () => controller.dispose();
+    return () => {
+      controller.dispose();
+      // Leaving the conversation settles its name: coming back to it should show
+      // the title, not type it out a second time.
+      chatListActions.clearDerivedTitle();
+    };
   }, [client, chatId, hydrated, setStatus]);
 
   function updateSession(update: (state: ChatSessionState) => ChatSessionState) {
@@ -215,7 +221,6 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         return;
       case "turn_resolved":
         signalTurnLifecycle("resolved");
-        void adoptDerivedTitle();
         return;
       case "invalidate_terminal_hydration":
         terminalHydrationGenerationRef.current += 1;
@@ -226,20 +231,6 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         return;
       }
     }
-  }
-
-  /** Show a title the server derived for this chat while the turn ran. */
-  async function adoptDerivedTitle() {
-    const named = await lookUpDerivedTitle(
-      client,
-      chatId,
-      () =>
-        useChatListStore
-          .getState()
-          .chats.find((candidate) => candidate.id === chatId),
-      (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-    );
-    if (named) chatListActions.replaceChat(named);
   }
 
   async function refreshTerminalTranscript(generation: number) {

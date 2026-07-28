@@ -303,9 +303,10 @@ mod tests {
     fn event_declarations() -> BTreeMap<String, String> {
         let cfg = generate::config();
         let mut out = BTreeMap::new();
-        // One root. Everything the event stream can carry is reachable from it,
-        // including the shared preview and approval types the REST surface uses.
-        generate::collect_from::<crate::event_projection::RendererSequencedEvent>(&cfg, &mut out);
+        // One root. Everything the socket can carry is reachable from it — both
+        // frame kinds, and the shared preview and approval types the REST surface
+        // uses.
+        generate::collect_from::<crate::event_projection::RendererChatFrame>(&cfg, &mut out);
         // The terminal tool card rebuilt from the journal. Shares the tool
         // vocabulary and the action preview with the live stream, which is why
         // it belongs with them rather than with the rest of the REST surface.

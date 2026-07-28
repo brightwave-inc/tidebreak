@@ -624,6 +624,23 @@ action?: ToolActionPreview,
 result?: ToolResultPreview, } | { "type": "turn_completed" } | { "type": "turn_refused", refusal: RendererRefusal, } | { "type": "turn_failed" } | { "type": "turn_cancelled" } | { "type": "user_steered", message_id: MessageId, text: string, } | { "type": "context_truncated" } | { "type": "event_omitted" };
 
 /**
+ * One frame on a chat's event socket.
+ *
+ * Untagged, so a journaled event frame is byte-identical to what it has always
+ * been: the sequence is the client's resume cursor and its dedup key, and every
+ * consumer of it — replay, hydration, the session reducer — reads `seq` as the
+ * only ordering there is. A metadata frame carries no sequence because it is
+ * not part of that order, and a client tells the two apart by the `metadata`
+ * discriminator rather than by a sequence it would have to invent.
+ */
+export type RendererChatFrame = RendererSequencedEvent | RendererChatMetadata;
+
+/**
+ * Chat metadata pushed to an open client, outside the turn journal.
+ */
+export type RendererChatMetadata = { "metadata": "titled", title: string, };
+
+/**
  * Bounded refusal metadata safe to present in the desktop transcript.
  */
 export type RendererRefusal = { category: string | null, partial_output: boolean, };

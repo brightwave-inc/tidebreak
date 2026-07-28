@@ -12,6 +12,41 @@ use openwave_core::{
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+/// One frame on a chat's event socket.
+///
+/// Untagged, so a journaled event frame is byte-identical to what it has always
+/// been: the sequence is the client's resume cursor and its dedup key, and every
+/// consumer of it — replay, hydration, the session reducer — reads `seq` as the
+/// only ordering there is. A metadata frame carries no sequence because it is
+/// not part of that order, and a client tells the two apart by the `metadata`
+/// discriminator rather than by a sequence it would have to invent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(untagged)]
+pub(crate) enum RendererChatFrame {
+    /// A journaled turn event at its sequence.
+    Event(RendererSequencedEvent),
+    /// Chat state that changed outside the journal.
+    Metadata(RendererChatMetadata),
+}
+
+/// Chat metadata pushed to an open client, outside the turn journal.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(tag = "metadata", rename_all = "snake_case")]
+pub(crate) enum RendererChatMetadata {
+    /// The chat was named — by titling, for a chat that had no name.
+    Titled { title: String },
+}
+
+impl From<&crate::bus::ChatMetadataNotice> for RendererChatMetadata {
+    fn from(value: &crate::bus::ChatMetadataNotice) -> Self {
+        match value {
+            crate::bus::ChatMetadataNotice::Titled { title } => Self::Titled {
+                title: title.clone(),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub(crate) struct RendererSequencedEvent {
     pub seq: i64,

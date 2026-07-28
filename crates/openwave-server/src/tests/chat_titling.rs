@@ -304,6 +304,7 @@ async fn one_titling_call_runs_per_chat_at_a_time() {
     let titler = Arc::new(ChatTitler::new(
         store.clone(),
         Arc::new(FixedResolver(provider.clone())),
+        Arc::new(crate::bus::EventBus::default()),
     ));
     let utility = UtilityModel {
         provider: None,
@@ -324,4 +325,117 @@ async fn one_titling_call_runs_per_chat_at_a_time() {
         Some("Q3 revenue reconciliation"),
     );
     assert_eq!(provider.0.load(Ordering::SeqCst) - turn_calls, 1);
+}
+
+/// The name reaches an open client over the socket, on the frame shape the
+/// renderer discriminates on, without disturbing the sequenced stream beside it.
+///
+/// This is the delivery half of the feature, and it is the half a client cannot
+/// work around: a name written durably but never announced leaves every open
+/// window showing "New chat" until it is reloaded.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_derived_name_arrives_on_the_open_socket() {
+    use tokio_tungstenite::connect_async;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let (router, bearer, _store, _stub, _dir) =
+        titling_app(r#"{"title":"Q3 revenue reconciliation"}"#).await;
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    let token = bearer.trim_start_matches("Bearer ").to_owned();
+    let http = reqwest::Client::new();
+    let chat: Chat = http
+        .post(format!("http://{address}/chats"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let mut request = format!("ws://{address}/chats/{}/events?after=0", chat.id)
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", bearer.parse().unwrap());
+    let (mut socket, _response) = connect_async(request).await.unwrap();
+
+    assert_eq!(
+        http.post(format!("http://{address}/chats/{}/messages", chat.id))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({
+                "turn_id": TurnId::new(),
+                "content": "Reconcile Q3 revenue for me",
+            }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::ACCEPTED,
+    );
+
+    let mut titled = None;
+    let mut sequences = Vec::new();
+    let read = async {
+        while let Some(frame) = socket.next().await {
+            let WsMessage::Text(text) = frame.unwrap() else {
+                continue;
+            };
+            let frame: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+            if frame.get("metadata").is_some() {
+                titled = Some(frame);
+                break;
+            }
+            sequences.push(
+                frame["seq"]
+                    .as_i64()
+                    .expect("an event frame carries its seq"),
+            );
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), read)
+        .await
+        .expect("no title arrived on the socket");
+
+    assert_eq!(
+        titled.unwrap(),
+        serde_json::json!({"metadata": "titled", "title": "Q3 revenue reconciliation"}),
+        "the metadata frame is what the renderer discriminates on",
+    );
+    assert!(
+        sequences.windows(2).all(|pair| pair[1] > pair[0]),
+        "the metadata frame must not disturb the sequenced stream: {sequences:?}",
+    );
+
+    // Nothing retains a notice, and a new chat's first turn can name it before
+    // the renderer finishes connecting. Opening a socket therefore has to state
+    // the name the chat already has, or that client never learns it.
+    let mut request = format!("ws://{address}/chats/{}/events?after=0", chat.id)
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", bearer.parse().unwrap());
+    let (mut reconnected, _response) = connect_async(request).await.unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(5), reconnected.next())
+        .await
+        .expect("a reconnecting client heard nothing")
+        .expect("the socket stayed open")
+        .unwrap();
+    let WsMessage::Text(text) = first else {
+        panic!("the first frame is text");
+    };
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(text.as_str()).unwrap(),
+        serde_json::json!({"metadata": "titled", "title": "Q3 revenue reconciliation"}),
+    );
 }

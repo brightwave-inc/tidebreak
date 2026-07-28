@@ -29,7 +29,7 @@ use crate::code_execution::{
     self, CodeExecutionConfigInfo, CodeExecutionConfigUpdate, CodeExecutionCredentialReadiness,
 };
 use crate::error::ServerError;
-use crate::event_projection::RendererSequencedEvent;
+use crate::event_projection::{RendererChatFrame, RendererChatMetadata, RendererSequencedEvent};
 use crate::extract::{Json, Path, Query};
 use crate::mcp_config::{McpServersConfig, McpServersInfo};
 use crate::model_roles::{self, ModelRole};
@@ -2354,22 +2354,48 @@ pub async fn chat_events(
     headers: axum::http::HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Result<Response, ServerError> {
-    if state.store.get_chat(id).await?.is_none() {
+    let Some(chat) = state.store.get_chat(id).await? else {
         return Err(ServerError::not_found(format!("chat {id} not found")));
-    }
+    };
     let upgrade = if offered_handshake_subprotocol(&headers) {
         upgrade.protocols([WS_HANDSHAKE_SUBPROTOCOL])
     } else {
         upgrade
     };
-    Ok(upgrade.on_upgrade(move |socket| stream_events(socket, state, id, query.after)))
+    Ok(upgrade.on_upgrade(move |socket| stream_events(socket, state, id, query.after, chat.title)))
 }
 
 /// Serve one client's event stream for `chat`: replay from the journal, then live.
-async fn stream_events(mut socket: WebSocket, state: AppState, chat: ChatId, after: i64) {
+async fn stream_events(
+    mut socket: WebSocket,
+    state: AppState,
+    chat: ChatId,
+    after: i64,
+    title: Option<String>,
+) {
     // Subscribe before replaying, so an event emitted during replay is buffered on
     // the live channel rather than lost in the gap between the two.
     let mut live = state.events.subscribe(chat);
+    // Metadata rides the same socket but not the same order: it has no sequence
+    // and nothing replays it.
+    let mut metadata = state.events.subscribe_metadata(chat);
+
+    // The name is state rather than an event, so the socket opens by stating it
+    // and every reconnect restates it. Nothing retains a notice for a client that
+    // was not listening yet, and the common case is exactly that: a new chat's
+    // first turn can name it before the renderer finishes connecting. A client
+    // that already knows this name does nothing with it.
+    if let Some(title) = title {
+        if send_frame(
+            &mut socket,
+            &RendererChatFrame::Metadata(RendererChatMetadata::Titled { title }),
+        )
+        .await
+        .is_err()
+        {
+            return;
+        }
+    }
 
     // Replay everything the client hasn't seen yet from the durable journal.
     let mut last_seq = after;
@@ -2386,6 +2412,18 @@ async fn stream_events(mut socket: WebSocket, state: AppState, chat: ChatId, aft
             incoming = socket.recv() => match incoming {
                 None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
                 _ => {}
+            },
+            notice = metadata.recv() => match notice {
+                Ok(notice) => {
+                    let frame = RendererChatFrame::Metadata((&notice).into());
+                    if send_frame(&mut socket, &frame).await.is_err() {
+                        break;
+                    }
+                }
+                // Nothing to catch up on: the durable value is what a fresh read
+                // returns, so a dropped notice costs a client nothing but motion.
+                Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Closed) => break,
             },
             live_event = live.recv() => match live_event {
                 Ok(event) => {
@@ -2444,10 +2482,19 @@ async fn replay_after(
     Ok(())
 }
 
-/// Send one event as a JSON text frame. An event that fails to serialize is
-/// skipped rather than sent as an empty frame (which a client couldn't decode).
+/// Send one journaled event as a frame.
 async fn send_event(socket: &mut WebSocket, event: &SequencedEvent) -> Result<(), axum::Error> {
-    let Ok(json) = serde_json::to_string(&RendererSequencedEvent::from(event)) else {
+    send_frame(
+        socket,
+        &RendererChatFrame::Event(RendererSequencedEvent::from(event)),
+    )
+    .await
+}
+
+/// Send one frame as JSON text. A frame that fails to serialize is skipped
+/// rather than sent empty (which a client couldn't decode).
+async fn send_frame(socket: &mut WebSocket, frame: &RendererChatFrame) -> Result<(), axum::Error> {
+    let Ok(json) = serde_json::to_string(frame) else {
         return Ok(());
     };
     socket.send(Message::Text(json.into())).await
