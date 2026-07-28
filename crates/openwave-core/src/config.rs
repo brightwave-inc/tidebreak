@@ -38,6 +38,13 @@ pub struct Config {
     pub profile: Profile,
     /// Directory holding the app's data (database, blobs, …).
     pub data_dir: PathBuf,
+    /// Keychain service name secrets are stored under; `None` uses the
+    /// default (`openwave`). Embedders whose builds must not share secret
+    /// state — a dev build running beside an installed release — set a
+    /// distinct service here, mirroring the app-identifier and data-dir
+    /// split.
+    #[serde(default)]
+    pub keychain_service: Option<String>,
 }
 
 impl Config {
@@ -46,6 +53,7 @@ impl Config {
         Self {
             profile: Profile::Desktop,
             data_dir: data_dir.into(),
+            keychain_service: None,
         }
     }
 
@@ -79,7 +87,11 @@ impl Config {
                 .map_err(|e| AgentError::config(format!("no working directory: {e}")))?
                 .join(".openwave"),
         };
-        Ok(Self { profile, data_dir })
+        Ok(Self {
+            profile,
+            data_dir,
+            keychain_service: None,
+        })
     }
 
     /// The default `Store` connection URL for this config.
@@ -152,6 +164,12 @@ mod tests {
         let config = Config::desktop("/data");
         let json = serde_json::to_string(&config).unwrap();
         assert_eq!(serde_json::from_str::<Config>(&json).unwrap(), config);
+    }
+
+    #[test]
+    fn legacy_config_without_keychain_service_defaults_to_none() {
+        let config = serde_json::from_str::<Config>(r#"{"data_dir":"/data"}"#).unwrap();
+        assert_eq!(config.keychain_service, None);
     }
 
     #[test]
