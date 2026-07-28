@@ -52,11 +52,6 @@ category-template: "### $TITLE"
 change-template: "- $TITLE ([#$NUMBER]($URL)) by @$AUTHOR"
 change-title-escapes: '\<*_&'
 no-changes-template: "- No user-facing changes."
-replacers:
-  # Category headings already communicate the change type, so remove the
-  # Conventional Commit prefix from each rendered PR title.
-  - search: '/- (?:feat|fix|perf|deps|revert)(?:\([^)]+\))?!?: /g'
-    replace: "- "
 template: |
   ## What's Changed
 

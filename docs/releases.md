@@ -67,8 +67,11 @@ without asking authors to classify a PR twice:
 | Any `!`    | Breaking Changes            |
 
 Documentation and other maintenance-only types remain excluded. In the rendered
-notes, the section heading supplies the type, so Release Drafter removes the
-redundant Conventional Commit prefix from each PR title.
+notes, the section heading supplies the type, so the draft formatter removes the
+redundant Conventional Commit prefix from each PR title. A user-facing change
+with a scope is placed beneath a matching third-level heading: for example,
+`feat(desktop): add document search` is rendered under **New Features**, then
+under **Desktop**. Unscoped changes remain directly under their section.
 
 For historical or imported pull requests, the **Release draft** workflow has a
 manual `workflow_dispatch` backfill. Its default dry run reports the exact
@@ -88,7 +91,9 @@ The release-draft workflow keeps exactly one draft GitHub Release up to date:
    before merge.
 2. After the PR is squash-merged to `main`, Release Drafter adds it to the
    native draft, groups the release notes into the sections above, and suggests
-   the next tag. Breaking changes are always shown first.
+   the next tag. The draft formatter then groups scoped Conventional Commit
+   titles beneath scope subheadings within those sections. Breaking changes are
+   always shown first.
 3. Maintenance-only PRs are omitted. The largest release effect among included
    PRs chooses the proposed version; the category labels do not independently
    change the version.
@@ -97,9 +102,11 @@ The first release has no previous published release to use as a comparison
 baseline, so Release Drafter intentionally leaves that draft as a manual
 starting point. For `v0.1.0`, set the tag deliberately and click **Generate
 release notes** in GitHub; `.github/release.yml` applies the same sections to
-GitHub's native output. Curate that one-time full-history result before
-publishing. From then on, the last published tag and the managed PR labels make
-the maintained draft and its proposed version automatic.
+GitHub's native output. GitHub's native generator cannot create dynamic scope
+subheadings, so add those manually if desired for that one-time full-history
+release. Curate that result before publishing. From then on, the last published
+tag and the managed PR labels make the maintained draft and its proposed version
+automatic.
 
 ## Publishing a release
 
