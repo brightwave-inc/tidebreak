@@ -407,8 +407,8 @@ pub async fn put_code_execution_config(
 
 const MAX_CODE_EXECUTION_CREDENTIAL_BYTES: usize = 8 * 1024;
 
-/// Body of `PUT /code-execution/credentials/e2b`. Debug output always redacts
-/// the credential.
+/// Body of `PUT /code-execution/credentials/{provider}`. Debug output always
+/// redacts the credential.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CodeExecutionCredentialUpdate {
@@ -424,46 +424,38 @@ impl std::fmt::Debug for CodeExecutionCredentialUpdate {
     }
 }
 
-/// Store E2B's key in its fixed host-secret slot without changing selection.
+/// Store a managed provider key in its fixed slot without changing selection.
 pub async fn put_code_execution_credential(
     State(state): State<AppState>,
     Path(provider): Path<String>,
     Json(body): Json<CodeExecutionCredentialUpdate>,
 ) -> Result<Json<CodeExecutionCredentialReadiness>, ServerError> {
-    require_e2b_provider(&provider)?;
+    let provider = code_execution::credential_provider(&provider)?;
     if body.api_key.len() > MAX_CODE_EXECUTION_CREDENTIAL_BYTES {
         return Err(ServerError::bad_request(format!(
-            "E2B api_key must be at most {MAX_CODE_EXECUTION_CREDENTIAL_BYTES} bytes"
+            "{provider} api_key must be at most {MAX_CODE_EXECUTION_CREDENTIAL_BYTES} bytes"
         )));
     }
     let api_key = body.api_key.trim();
     if api_key.is_empty() {
-        return Err(ServerError::bad_request("E2B api_key must not be empty"));
+        return Err(ServerError::bad_request(format!(
+            "{provider} api_key must not be empty"
+        )));
     }
     Ok(Json(
-        code_execution::write_credential(&*state.secrets, api_key).await?,
+        code_execution::write_credential(&*state.secrets, provider, api_key).await?,
     ))
 }
 
-/// Remove only E2B's fixed credential; provider selection remains unchanged.
+/// Remove only the requested provider's credential; selection remains unchanged.
 pub async fn delete_code_execution_credential(
     State(state): State<AppState>,
     Path(provider): Path<String>,
 ) -> Result<Json<CodeExecutionCredentialReadiness>, ServerError> {
-    require_e2b_provider(&provider)?;
+    let provider = code_execution::credential_provider(&provider)?;
     Ok(Json(
-        code_execution::delete_credential(&*state.secrets).await?,
+        code_execution::delete_credential(&*state.secrets, provider).await?,
     ))
-}
-
-fn require_e2b_provider(value: &str) -> std::result::Result<(), ServerError> {
-    if value == "e2b" {
-        Ok(())
-    } else {
-        Err(ServerError::not_found(format!(
-            "unknown credentialed code execution provider kind: {value}"
-        )))
-    }
 }
 
 /// Maximum API-key size accepted by the local credential endpoint. This is

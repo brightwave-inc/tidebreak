@@ -1,6 +1,6 @@
 [package]
 name = "openwave-code-execution"
-description = "OpenWave code execution: a bounded provider contract with local and E2B sandboxes."
+description = "OpenWave code execution: one bounded contract for local and managed sandboxes."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

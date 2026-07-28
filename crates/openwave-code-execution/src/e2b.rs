@@ -1,20 +1,22 @@
 use std::collections::HashMap;
 use std::path::{Component, Path};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use base64::Engine as _;
 use futures::StreamExt as _;
 use openwave_core::SecretProvider;
 use reqwest::{Client, Response, StatusCode};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use tokio::sync::Mutex;
+use serde::{Deserialize, Serialize};
 
+use crate::credential::SecretCredential;
+use crate::http::decode_bounded_json;
+use crate::output::{Capture, StreamKind};
+use crate::remote::{
+    execute_remote, RemoteSandboxAdapter, RemoteSession, RemoteSessionError, RemoteSessionPool,
+};
 use crate::{
     CodeExecutionError, CodeExecutionProvider, CodeExecutionProviderKind, CodeExecutionRequest,
-    CodeExecutionResponse, MAX_CAPTURE_BYTES,
+    CodeExecutionResponse,
 };
 
 const E2B_API_BASE: &str = "https://api.e2b.app";
@@ -34,7 +36,7 @@ pub const E2B_CREDENTIAL_KEY: &str = "code_execution.e2b.api_key";
 
 /// Non-serializable, redacted E2B API credential.
 #[derive(Clone)]
-pub struct E2BCredential(String);
+pub struct E2BCredential(SecretCredential);
 
 impl std::fmt::Debug for E2BCredential {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -47,160 +49,22 @@ impl std::fmt::Debug for E2BCredential {
 
 impl E2BCredential {
     pub fn parse(value: impl Into<String>) -> Result<Self, CodeExecutionError> {
-        let value = value.into();
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            return Err(CodeExecutionError::InvalidRequest(
-                "E2B API key must not be empty".into(),
-            ));
-        }
-        Ok(Self(trimmed.to_owned()))
+        SecretCredential::parse("E2B", value).map(Self)
     }
 
     /// Resolve the credential without exposing it through serializable config.
     pub async fn load(secrets: &dyn SecretProvider) -> Result<Option<Self>, CodeExecutionError> {
-        let value = secrets.get_secret(E2B_CREDENTIAL_KEY).await.map_err(|_| {
-            CodeExecutionError::Unavailable("E2B credential storage is unavailable".into())
-        })?;
-        value
-            .filter(|value| !value.trim().is_empty())
-            .map(Self::parse)
-            .transpose()
+        SecretCredential::load(secrets, E2B_CREDENTIAL_KEY, "E2B")
+            .await
+            .map(|credential| credential.map(Self))
     }
 
     fn as_str(&self) -> &str {
-        &self.0
+        self.0.expose()
     }
 
     fn fingerprint(&self) -> [u8; 32] {
-        Sha256::digest(self.0.as_bytes()).into()
-    }
-}
-
-/// Shared process-local E2B sessions and idempotency receipts.
-///
-/// A configured host keeps one pool for its lifetime, while individual adapter
-/// values can still be rebuilt when timeout policy or credentials change.
-#[derive(Clone, Default)]
-pub struct E2BSessionPool {
-    state: Arc<Mutex<PoolState>>,
-}
-
-#[derive(Default)]
-struct PoolState {
-    sessions: HashMap<SessionKey, Arc<Mutex<Option<E2BSession>>>>,
-    receipts: HashMap<String, ExecutionReceipt>,
-}
-
-#[derive(Clone, PartialEq, Eq, Hash)]
-struct SessionKey {
-    credential: [u8; 32],
-    workspace_id: String,
-}
-
-#[derive(Clone)]
-struct E2BSession {
-    sandbox_id: String,
-    access_token: String,
-}
-
-#[derive(Clone)]
-enum ExecutionReceipt {
-    Running {
-        fingerprint: String,
-    },
-    Completed {
-        fingerprint: String,
-        response: CodeExecutionResponse,
-    },
-    Failed {
-        fingerprint: String,
-        message: String,
-    },
-}
-
-enum BeginExecution {
-    Started,
-    Cached(CodeExecutionResponse),
-}
-
-impl E2BSessionPool {
-    async fn begin_execution(
-        &self,
-        request: &CodeExecutionRequest,
-    ) -> Result<BeginExecution, CodeExecutionError> {
-        let fingerprint = request_fingerprint(request)?;
-        let mut state = self.state.lock().await;
-        match state.receipts.get(request.execution_id.as_str()) {
-            None => {
-                state.receipts.insert(
-                    request.execution_id.as_str().to_owned(),
-                    ExecutionReceipt::Running { fingerprint },
-                );
-                Ok(BeginExecution::Started)
-            }
-            Some(ExecutionReceipt::Running {
-                fingerprint: existing,
-            }) => {
-                ensure_same_fingerprint(existing, &fingerprint)?;
-                Err(CodeExecutionError::AmbiguousExecution)
-            }
-            Some(ExecutionReceipt::Completed {
-                fingerprint: existing,
-                response,
-            }) => {
-                ensure_same_fingerprint(existing, &fingerprint)?;
-                Ok(BeginExecution::Cached(response.clone()))
-            }
-            Some(ExecutionReceipt::Failed {
-                fingerprint: existing,
-                message,
-            }) => {
-                ensure_same_fingerprint(existing, &fingerprint)?;
-                Err(CodeExecutionError::Unavailable(message.clone()))
-            }
-        }
-    }
-
-    async fn finish_execution(
-        &self,
-        request: &CodeExecutionRequest,
-        outcome: &Result<CodeExecutionResponse, CodeExecutionError>,
-    ) -> Result<(), CodeExecutionError> {
-        let fingerprint = request_fingerprint(request)?;
-        let receipt = match outcome {
-            Ok(response) => ExecutionReceipt::Completed {
-                fingerprint,
-                response: response.clone(),
-            },
-            Err(error) => ExecutionReceipt::Failed {
-                fingerprint,
-                message: error.to_string(),
-            },
-        };
-        self.state
-            .lock()
-            .await
-            .receipts
-            .insert(request.execution_id.as_str().to_owned(), receipt);
-        Ok(())
-    }
-
-    async fn session(
-        &self,
-        credential: &E2BCredential,
-        workspace_id: &str,
-    ) -> Arc<Mutex<Option<E2BSession>>> {
-        let key = SessionKey {
-            credential: credential.fingerprint(),
-            workspace_id: workspace_id.to_owned(),
-        };
-        let mut state = self.state.lock().await;
-        state
-            .sessions
-            .entry(key)
-            .or_insert_with(|| Arc::new(Mutex::new(None)))
-            .clone()
+        self.0.fingerprint()
     }
 }
 
@@ -208,7 +72,7 @@ impl E2BSessionPool {
 pub struct E2BExecutionProvider {
     credential: E2BCredential,
     timeout: Duration,
-    pool: E2BSessionPool,
+    pool: RemoteSessionPool,
     client: Client,
     endpoints: E2BEndpoints,
 }
@@ -230,13 +94,13 @@ impl Default for E2BEndpoints {
 
 impl E2BExecutionProvider {
     pub fn new(credential: E2BCredential, timeout: Duration) -> Result<Self, CodeExecutionError> {
-        Self::with_session_pool(credential, timeout, E2BSessionPool::default())
+        Self::with_session_pool(credential, timeout, RemoteSessionPool::default())
     }
 
     pub fn with_session_pool(
         credential: E2BCredential,
         timeout: Duration,
-        pool: E2BSessionPool,
+        pool: RemoteSessionPool,
     ) -> Result<Self, CodeExecutionError> {
         Self::with_endpoints(credential, timeout, pool, E2BEndpoints::default())
     }
@@ -244,7 +108,7 @@ impl E2BExecutionProvider {
     fn with_endpoints(
         credential: E2BCredential,
         timeout: Duration,
-        pool: E2BSessionPool,
+        pool: RemoteSessionPool,
         endpoints: E2BEndpoints,
     ) -> Result<Self, CodeExecutionError> {
         if timeout.is_zero() {
@@ -271,41 +135,10 @@ impl E2BExecutionProvider {
         })
     }
 
-    async fn execute_uncached(
+    async fn create_sandbox(
         &self,
-        request: &CodeExecutionRequest,
-    ) -> Result<CodeExecutionResponse, CodeExecutionError> {
-        let session = self
-            .pool
-            .session(&self.credential, request.workspace_id.as_str())
-            .await;
-        // Commands for one chat are serialized so workspace mutations have a
-        // deterministic order and session replacement cannot race execution.
-        let mut session = session.lock().await;
-        let active = match session.as_ref() {
-            Some(existing) => match self.connect_sandbox(&existing.sandbox_id).await {
-                Ok(connected) => connected,
-                Err(ManagementError::NotFound) => {
-                    self.create_sandbox(request.workspace_id.as_str()).await?
-                }
-                Err(ManagementError::Provider(error)) => return Err(error),
-            },
-            None => self.create_sandbox(request.workspace_id.as_str()).await?,
-        };
-        *session = Some(active.clone());
-
-        let result = self.run_command(&active, request).await;
-        if matches!(
-            result,
-            Err(CodeExecutionError::Unavailable(ref message))
-                if message == "E2B sandbox is no longer available"
-        ) {
-            *session = None;
-        }
-        result
-    }
-
-    async fn create_sandbox(&self, workspace_id: &str) -> Result<E2BSession, CodeExecutionError> {
+        workspace_id: &str,
+    ) -> Result<RemoteSession, CodeExecutionError> {
         let url = format!(
             "{}/sandboxes",
             self.endpoints.api_base.trim_end_matches('/')
@@ -327,8 +160,11 @@ impl E2BExecutionProvider {
         decode_session(response).await
     }
 
-    async fn connect_sandbox(&self, sandbox_id: &str) -> Result<E2BSession, ManagementError> {
-        validate_sandbox_id(sandbox_id).map_err(ManagementError::Provider)?;
+    async fn connect_sandbox(
+        &self,
+        sandbox_id: &str,
+    ) -> Result<Option<RemoteSession>, CodeExecutionError> {
+        validate_sandbox_id(sandbox_id)?;
         let url = format!(
             "{}/sandboxes/{sandbox_id}/connect",
             self.endpoints.api_base.trim_end_matches('/')
@@ -342,25 +178,22 @@ impl E2BExecutionProvider {
             })
             .send()
             .await
-            .map_err(|_| {
-                ManagementError::Provider(CodeExecutionError::Unavailable(
-                    "could not reach the E2B API".into(),
-                ))
-            })?;
+            .map_err(|_| CodeExecutionError::Unavailable("could not reach the E2B API".into()))?;
         if response.status() == StatusCode::NOT_FOUND {
-            return Err(ManagementError::NotFound);
+            return Ok(None);
         }
-        decode_session(response)
-            .await
-            .map_err(ManagementError::Provider)
+        decode_session(response).await.map(Some)
     }
 
-    async fn run_command(
+    async fn run_e2b_command(
         &self,
-        session: &E2BSession,
+        session: &RemoteSession,
         request: &CodeExecutionRequest,
-    ) -> Result<CodeExecutionResponse, CodeExecutionError> {
+    ) -> Result<CodeExecutionResponse, RemoteSessionError> {
         validate_sandbox_id(&session.sandbox_id)?;
+        let access_token = session.access_token.as_deref().ok_or_else(|| {
+            CodeExecutionError::Unavailable("E2B sandbox token is unavailable".into())
+        })?;
         let started = Instant::now();
         let request_json = serde_json::to_vec(&StartRequest {
             process: ProcessConfig {
@@ -388,7 +221,7 @@ impl E2BExecutionProvider {
             .header("Connect-Timeout-Ms", timeout_ms)
             .header("E2b-Sandbox-Id", &session.sandbox_id)
             .header("E2b-Sandbox-Port", E2B_ENVD_PORT)
-            .header("X-Access-Token", &session.access_token)
+            .header("X-Access-Token", access_token)
             .body(body)
             .send()
             .await
@@ -396,15 +229,48 @@ impl E2BExecutionProvider {
         if response.status() == StatusCode::NOT_FOUND
             || response.status() == StatusCode::BAD_GATEWAY
         {
-            return Err(CodeExecutionError::Unavailable(
-                "E2B sandbox is no longer available".into(),
-            ));
+            return Err(RemoteSessionError::Missing);
         }
         if !response.status().is_success() {
-            return Err(provider_status_error(response.status()));
+            return Err(provider_status_error(response.status()).into());
         }
 
-        decode_command_response(response, started).await
+        decode_command_response(response, started)
+            .await
+            .map_err(RemoteSessionError::Provider)
+    }
+}
+
+#[async_trait]
+impl RemoteSandboxAdapter for E2BExecutionProvider {
+    fn kind(&self) -> CodeExecutionProviderKind {
+        CodeExecutionProviderKind::E2b
+    }
+
+    fn credential_fingerprint(&self) -> [u8; 32] {
+        self.credential.fingerprint()
+    }
+
+    async fn create_session(
+        &self,
+        workspace_id: &str,
+    ) -> Result<RemoteSession, CodeExecutionError> {
+        self.create_sandbox(workspace_id).await
+    }
+
+    async fn reconnect_session(
+        &self,
+        session: &RemoteSession,
+    ) -> Result<Option<RemoteSession>, CodeExecutionError> {
+        self.connect_sandbox(&session.sandbox_id).await
+    }
+
+    async fn run_command(
+        &self,
+        session: &RemoteSession,
+        request: &CodeExecutionRequest,
+    ) -> Result<CodeExecutionResponse, RemoteSessionError> {
+        self.run_e2b_command(session, request).await
     }
 }
 
@@ -414,20 +280,8 @@ impl CodeExecutionProvider for E2BExecutionProvider {
         &self,
         request: CodeExecutionRequest,
     ) -> Result<CodeExecutionResponse, CodeExecutionError> {
-        request.validate()?;
-        match self.pool.begin_execution(&request).await? {
-            BeginExecution::Cached(response) => return Ok(response),
-            BeginExecution::Started => {}
-        }
-        let outcome = self.execute_uncached(&request).await;
-        self.pool.finish_execution(&request, &outcome).await?;
-        outcome
+        execute_remote(self, &self.pool, request).await
     }
-}
-
-enum ManagementError {
-    NotFound,
-    Provider(CodeExecutionError),
 }
 
 #[derive(Serialize)]
@@ -453,11 +307,13 @@ struct SandboxResponse {
     access_token: Option<String>,
 }
 
-async fn decode_session(response: Response) -> Result<E2BSession, CodeExecutionError> {
+async fn decode_session(response: Response) -> Result<RemoteSession, CodeExecutionError> {
     if !response.status().is_success() {
         return Err(provider_status_error(response.status()));
     }
-    let body = decode_bounded_json::<SandboxResponse>(response).await?;
+    let body =
+        decode_bounded_json::<SandboxResponse>(response, "E2B", MAX_MANAGEMENT_RESPONSE_BYTES)
+            .await?;
     validate_sandbox_id(&body.sandbox_id)?;
     let access_token = body
         .access_token
@@ -465,30 +321,11 @@ async fn decode_session(response: Response) -> Result<E2BSession, CodeExecutionE
         .ok_or_else(|| {
             CodeExecutionError::Unavailable("E2B did not return a secure sandbox token".into())
         })?;
-    Ok(E2BSession {
+    Ok(RemoteSession {
         sandbox_id: body.sandbox_id,
-        access_token,
+        endpoint: None,
+        access_token: Some(access_token),
     })
-}
-
-async fn decode_bounded_json<T: DeserializeOwned>(
-    response: Response,
-) -> Result<T, CodeExecutionError> {
-    let mut bytes = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| {
-            CodeExecutionError::Unavailable("E2B returned an incomplete response".into())
-        })?;
-        if bytes.len().saturating_add(chunk.len()) > MAX_MANAGEMENT_RESPONSE_BYTES {
-            return Err(CodeExecutionError::Unavailable(
-                "E2B returned an oversized response".into(),
-            ));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    serde_json::from_slice(&bytes)
-        .map_err(|_| CodeExecutionError::Unavailable("E2B returned an invalid response".into()))
 }
 
 fn provider_status_error(status: StatusCode) -> CodeExecutionError {
@@ -622,10 +459,10 @@ async fn decode_command_response(
             };
             if let Some(data) = event.data {
                 if let Some(stdout) = data.stdout {
-                    capture.append_base64(&stdout, StreamKind::Stdout)?;
+                    capture.append_base64(&stdout, StreamKind::Stdout, "E2B")?;
                 }
                 if let Some(stderr) = data.stderr {
-                    capture.append_base64(&stderr, StreamKind::Stderr)?;
+                    capture.append_base64(&stderr, StreamKind::Stderr, "E2B")?;
                 }
             }
             if let Some(end) = event.end {
@@ -656,15 +493,12 @@ fn command_response(
     exit_code: Option<i32>,
     timed_out: bool,
 ) -> CodeExecutionResponse {
-    CodeExecutionResponse {
-        provider: CodeExecutionProviderKind::E2b,
+    capture.response(
+        CodeExecutionProviderKind::E2b,
+        started,
         exit_code,
-        stdout: String::from_utf8_lossy(&capture.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&capture.stderr).into_owned(),
         timed_out,
-        output_truncated: capture.truncated,
-        duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-    }
+    )
 }
 
 #[derive(Default)]
@@ -770,69 +604,17 @@ struct ConnectStreamError {
     code: String,
 }
 
-#[derive(Clone, Copy)]
-enum StreamKind {
-    Stdout,
-    Stderr,
-}
-
-#[derive(Default)]
-struct Capture {
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-    total: usize,
-    truncated: bool,
-}
-
-impl Capture {
-    fn append_base64(&mut self, value: &str, kind: StreamKind) -> Result<(), CodeExecutionError> {
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(value)
-            .map_err(|_| {
-                CodeExecutionError::Unavailable("E2B returned invalid command output".into())
-            })?;
-        self.append(&decoded, kind);
-        Ok(())
-    }
-
-    fn append(&mut self, value: &[u8], kind: StreamKind) {
-        let available = MAX_CAPTURE_BYTES.saturating_sub(self.total);
-        let kept = available.min(value.len());
-        let target = match kind {
-            StreamKind::Stdout => &mut self.stdout,
-            StreamKind::Stderr => &mut self.stderr,
-        };
-        target.extend_from_slice(&value[..kept]);
-        self.total += kept;
-        self.truncated |= kept < value.len();
-    }
-}
-
-fn request_fingerprint(request: &CodeExecutionRequest) -> Result<String, CodeExecutionError> {
-    let bytes = serde_json::to_vec(request)
-        .map_err(|_| CodeExecutionError::InvalidRequest("request is not serializable".into()))?;
-    let digest = Sha256::digest(bytes);
-    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
-}
-
-fn ensure_same_fingerprint(existing: &str, expected: &str) -> Result<(), CodeExecutionError> {
-    if existing == expected {
-        Ok(())
-    } else {
-        Err(CodeExecutionError::IdentityConflict)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Mutex as StdMutex;
+    use std::sync::{Arc, Mutex as StdMutex};
 
     use axum::body::Bytes;
     use axum::extract::{Path as AxumPath, State};
     use axum::http::{header, HeaderMap};
     use axum::routing::post;
     use axum::{Json, Router};
+    use base64::Engine as _;
     use serde_json::{json, Value};
 
     use super::*;
@@ -893,7 +675,7 @@ mod tests {
         let provider = E2BExecutionProvider::with_endpoints(
             E2BCredential::parse("test-e2b-key").unwrap(),
             Duration::from_secs(2),
-            E2BSessionPool::default(),
+            RemoteSessionPool::default(),
             E2BEndpoints {
                 api_base: base.clone(),
                 sandbox_base: base,

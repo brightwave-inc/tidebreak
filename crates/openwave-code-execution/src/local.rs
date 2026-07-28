@@ -14,18 +14,19 @@ use std::time::Duration;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 #[cfg(target_os = "macos")]
 use tokio::io::{AsyncRead, AsyncReadExt};
 #[cfg(target_os = "macos")]
 use tokio::process::Command;
 
+#[cfg(target_os = "macos")]
+use crate::output::{Capture, StreamKind};
+use crate::receipt::{request_fingerprint, BeginExecution, ExecutionReceipt};
+#[cfg(target_os = "macos")]
+use crate::CodeExecutionProviderKind;
 use crate::{
     CodeExecutionError, CodeExecutionProvider, CodeExecutionRequest, CodeExecutionResponse,
 };
-#[cfg(target_os = "macos")]
-use crate::{CodeExecutionProviderKind, MAX_CAPTURE_BYTES};
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 const RECEIPT_DIR: &str = ".code-execution-receipts";
@@ -146,31 +147,8 @@ impl CodeExecutionProvider for LocalExecutionProvider {
     }
 }
 
-enum BeginExecution {
-    Started,
-    Cached(CodeExecutionResponse),
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-enum ExecutionReceipt {
-    Running {
-        fingerprint: String,
-    },
-    Completed {
-        fingerprint: String,
-        response: CodeExecutionResponse,
-    },
-    Failed {
-        fingerprint: String,
-        message: String,
-    },
-}
-
 fn begin_execution(path: &Path, fingerprint: &str) -> Result<BeginExecution, CodeExecutionError> {
-    let receipt = ExecutionReceipt::Running {
-        fingerprint: fingerprint.into(),
-    };
+    let receipt = ExecutionReceipt::running(fingerprint);
     let bytes = serde_json::to_vec(&receipt)
         .map_err(|_| CodeExecutionError::Sandbox("could not encode receipt".into()))?;
     begin_execution_with_persistence(path, fingerprint, |file| {
@@ -203,28 +181,7 @@ fn begin_execution_with_persistence(
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             let receipt = read_receipt(path)?;
-            match receipt {
-                ExecutionReceipt::Running {
-                    fingerprint: existing,
-                } => {
-                    ensure_same_fingerprint(&existing, fingerprint)?;
-                    Err(CodeExecutionError::AmbiguousExecution)
-                }
-                ExecutionReceipt::Completed {
-                    fingerprint: existing,
-                    response,
-                } => {
-                    ensure_same_fingerprint(&existing, fingerprint)?;
-                    Ok(BeginExecution::Cached(response))
-                }
-                ExecutionReceipt::Failed {
-                    fingerprint: existing,
-                    message,
-                } => {
-                    ensure_same_fingerprint(&existing, fingerprint)?;
-                    Err(CodeExecutionError::Sandbox(message))
-                }
-            }
+            receipt.replay(fingerprint, CodeExecutionError::Sandbox)
         }
         Err(_) => Err(CodeExecutionError::Sandbox(
             "could not create execution receipt".into(),
@@ -245,14 +202,6 @@ fn discard_unstarted_receipt(path: &Path, parent: &Path) -> Result<(), CodeExecu
     sync_dir(parent).map_err(|_| {
         CodeExecutionError::Sandbox("could not clean up incomplete execution receipt".into())
     })
-}
-
-fn ensure_same_fingerprint(existing: &str, expected: &str) -> Result<(), CodeExecutionError> {
-    if existing == expected {
-        Ok(())
-    } else {
-        Err(CodeExecutionError::IdentityConflict)
-    }
 }
 
 fn read_receipt(path: &Path) -> Result<ExecutionReceipt, CodeExecutionError> {
@@ -327,13 +276,6 @@ fn secure_dir(path: &Path) -> Result<(), CodeExecutionError> {
         CodeExecutionError::Sandbox("could not secure private receipt storage".into())
     })?;
     Ok(())
-}
-
-fn request_fingerprint(request: &CodeExecutionRequest) -> Result<String, CodeExecutionError> {
-    let bytes = serde_json::to_vec(request)
-        .map_err(|_| CodeExecutionError::InvalidRequest("request is not serializable".into()))?;
-    let digest = Sha256::digest(bytes);
-    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 #[cfg(target_os = "macos")]
@@ -418,16 +360,13 @@ async fn run_native(
     finish_reader(stdout_reader).await;
     finish_reader(stderr_reader).await;
 
-    let capture = capture.lock().unwrap();
-    Ok(CodeExecutionResponse {
-        provider: CodeExecutionProviderKind::Local,
-        exit_code: status.code(),
-        stdout: String::from_utf8_lossy(&capture.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&capture.stderr).into_owned(),
+    let capture = std::mem::take(&mut *capture.lock().unwrap());
+    Ok(capture.response(
+        CodeExecutionProviderKind::Local,
+        started,
+        status.code(),
         timed_out,
-        output_truncated: capture.truncated,
-        duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-    })
+    ))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -484,22 +423,6 @@ fn signal_group(group: i32, signal: i32) {
 }
 
 #[cfg(target_os = "macos")]
-#[derive(Clone, Copy)]
-enum StreamKind {
-    Stdout,
-    Stderr,
-}
-
-#[cfg(target_os = "macos")]
-#[derive(Default)]
-struct Capture {
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-    total: usize,
-    truncated: bool,
-}
-
-#[cfg(target_os = "macos")]
 async fn drain_output<R>(mut reader: R, capture: Arc<Mutex<Capture>>, kind: StreamKind)
 where
     R: AsyncRead + Unpin,
@@ -511,15 +434,7 @@ where
             Ok(read) => read,
         };
         let mut capture = capture.lock().unwrap();
-        let available = MAX_CAPTURE_BYTES.saturating_sub(capture.total);
-        let kept = available.min(read);
-        let target = match kind {
-            StreamKind::Stdout => &mut capture.stdout,
-            StreamKind::Stderr => &mut capture.stderr,
-        };
-        target.extend_from_slice(&chunk[..kept]);
-        capture.total += kept;
-        capture.truncated |= kept < read;
+        capture.append(&chunk[..read], kind);
     }
 }
 
