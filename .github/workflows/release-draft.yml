@@ -66,7 +66,23 @@ jobs:
       contents: write
       pull-requests: read
     steps:
-      - uses: release-drafter/release-drafter@eada3c96a64734dd381cfbda23511034e328ddb0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - id: release_drafter
+        uses: release-drafter/release-drafter@eada3c96a64734dd381cfbda23511034e328ddb0 # v7
+      - name: Group release notes by Conventional Commit scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_BODY: ${{ steps.release_drafter.outputs.body }}
+          RELEASE_ID: ${{ steps.release_drafter.outputs.id }}
+        run: |
+          original="$RUNNER_TEMP/release-body.md"
+          formatted="$RUNNER_TEMP/formatted-release-body.md"
+          printf '%s' "$RELEASE_BODY" > "$original"
+          node scripts/format-release-notes.mjs < "$original" > "$formatted"
+          cmp --silent "$original" "$formatted" && exit 0
+          jq -n --rawfile body "$formatted" '{body: $body}' | gh api \
+            --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            --input - >/dev/null
 
   backfill:
     name: backfill release labels
