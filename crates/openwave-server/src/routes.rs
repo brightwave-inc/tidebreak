@@ -25,7 +25,9 @@ use openwave_core::{
 };
 
 use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
-use crate::code_execution::{self, CodeExecutionConfigInfo, CodeExecutionConfigUpdate};
+use crate::code_execution::{
+    self, CodeExecutionConfigInfo, CodeExecutionConfigUpdate, CodeExecutionCredentialReadiness,
+};
 use crate::error::ServerError;
 use crate::event_projection::RendererSequencedEvent;
 use crate::extract::{Json, Path, Query};
@@ -381,11 +383,13 @@ pub async fn put_web_search_config(
 }
 
 /// `GET /code-execution` — read host-owned provider selection, timeout policy,
-/// and native readiness. No executable or provider endpoint is accepted here.
+/// and readiness. No executable or provider endpoint is accepted here.
 pub async fn get_code_execution_config(
     State(state): State<AppState>,
 ) -> Result<Json<CodeExecutionConfigInfo>, ServerError> {
-    Ok(Json(code_execution::config_info(&*state.store).await?))
+    Ok(Json(
+        code_execution::config_info(&*state.store, &*state.secrets).await?,
+    ))
 }
 
 /// `PUT /code-execution` — select a fixed provider and bounded host timeout.
@@ -394,8 +398,69 @@ pub async fn put_code_execution_config(
     Json(body): Json<CodeExecutionConfigUpdate>,
 ) -> Result<Json<CodeExecutionConfigInfo>, ServerError> {
     Ok(Json(
-        code_execution::update_config(&*state.store, body).await?,
+        code_execution::update_config(&*state.store, &*state.secrets, body).await?,
     ))
+}
+
+const MAX_CODE_EXECUTION_CREDENTIAL_BYTES: usize = 8 * 1024;
+
+/// Body of `PUT /code-execution/credentials/e2b`. Debug output always redacts
+/// the credential.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CodeExecutionCredentialUpdate {
+    pub api_key: String,
+}
+
+impl std::fmt::Debug for CodeExecutionCredentialUpdate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CodeExecutionCredentialUpdate")
+            .field("api_key", &"***")
+            .finish()
+    }
+}
+
+/// Store E2B's key in its fixed host-secret slot without changing selection.
+pub async fn put_code_execution_credential(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    Json(body): Json<CodeExecutionCredentialUpdate>,
+) -> Result<Json<CodeExecutionCredentialReadiness>, ServerError> {
+    require_e2b_provider(&provider)?;
+    if body.api_key.len() > MAX_CODE_EXECUTION_CREDENTIAL_BYTES {
+        return Err(ServerError::bad_request(format!(
+            "E2B api_key must be at most {MAX_CODE_EXECUTION_CREDENTIAL_BYTES} bytes"
+        )));
+    }
+    let api_key = body.api_key.trim();
+    if api_key.is_empty() {
+        return Err(ServerError::bad_request("E2B api_key must not be empty"));
+    }
+    Ok(Json(
+        code_execution::write_credential(&*state.secrets, api_key).await?,
+    ))
+}
+
+/// Remove only E2B's fixed credential; provider selection remains unchanged.
+pub async fn delete_code_execution_credential(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+) -> Result<Json<CodeExecutionCredentialReadiness>, ServerError> {
+    require_e2b_provider(&provider)?;
+    Ok(Json(
+        code_execution::delete_credential(&*state.secrets).await?,
+    ))
+}
+
+fn require_e2b_provider(value: &str) -> std::result::Result<(), ServerError> {
+    if value == "e2b" {
+        Ok(())
+    } else {
+        Err(ServerError::not_found(format!(
+            "unknown credentialed code execution provider kind: {value}"
+        )))
+    }
 }
 
 /// Maximum API-key size accepted by the local credential endpoint. This is
