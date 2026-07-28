@@ -48,6 +48,10 @@ function parseChangeLine(line) {
   };
 }
 
+function inlineScope(scope, line) {
+  return `- **${scopeHeading(scope)}:** ${line.slice(2)}`;
+}
+
 function formatCategory(lines) {
   let contentLength = lines.length;
   while (contentLength > 0 && lines[contentLength - 1] === "") {
@@ -72,13 +76,28 @@ function formatCategory(lines) {
     scopedChanges.set(change.scope, group);
   }
 
-  if (scopedChanges.size === 0) return [...unscopedLines, ...trailingLines];
-
-  const formatted = unscopedLines.filter((line) => line !== "");
+  const groupedScopes = [];
+  const singletonLines = [];
   for (const scope of [...scopedChanges.keys()].sort()) {
-    if (formatted.length > 0) formatted.push("");
-    formatted.push(`#### ${scopeHeading(scope)}`, ...scopedChanges.get(scope));
+    const scopeChanges = scopedChanges.get(scope);
+    if (scopeChanges.length === 1) {
+      singletonLines.push(inlineScope(scope, scopeChanges[0]));
+      continue;
+    }
+    groupedScopes.push([scope, scopeChanges]);
   }
+
+  const flatLines = [
+    ...unscopedLines.filter((line) => line !== ""),
+    ...singletonLines,
+  ];
+  const formatted = [];
+  for (const [scope, scopeChanges] of groupedScopes) {
+    if (formatted.length > 0) formatted.push("");
+    formatted.push(`#### ${scopeHeading(scope)}`, ...scopeChanges);
+  }
+  if (flatLines.length > 0 && formatted.length > 0) formatted.push("");
+  formatted.push(...flatLines);
   return [...formatted, ...trailingLines];
 }
 
