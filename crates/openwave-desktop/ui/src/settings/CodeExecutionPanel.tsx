@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 import type {
   ApiClient,
   CodeExecutionConfigInfo,
@@ -73,6 +74,7 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
       setConfig(nextConfig);
       setProvider(nextConfig.provider ?? "");
       setTimeoutMs(String(nextConfig.timeout_ms));
+      toast.success("Saved code-execution configuration");
     } catch (err) {
       setError(String(err));
     } finally {

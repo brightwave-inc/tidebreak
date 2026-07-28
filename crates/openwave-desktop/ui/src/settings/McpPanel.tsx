@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { toast } from "sonner";
 import { Plus, RefreshCw, Trash2 } from "lucide-react";
 import type {
   ApiClient,
@@ -113,6 +114,7 @@ export function McpPanel({ client }: { client: ApiClient }) {
       const result = await client.putMcpServers(servers.map(definition));
       setServers(result.servers);
       setDirty(false);
+      toast.success("Saved MCP servers");
     } catch (err) {
       setError(String(err));
     } finally {

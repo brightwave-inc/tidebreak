@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { toast } from "sonner";
 import type {
   ApiClient,
   CustomModelConfig,
@@ -98,6 +99,7 @@ function ProviderRow({
       setKey("");
       setServiceAccountJson("");
       onChanged();
+      toast.success(`Saved ${providerLabel(info.kind)} settings`);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -111,6 +113,7 @@ function ProviderRow({
     try {
       await client.deleteCredential(info.kind as ProviderKind);
       onChanged();
+      toast.success(`Removed the saved ${providerLabel(info.kind)} credential`);
     } catch (err) {
       setError(String(err));
     } finally {
