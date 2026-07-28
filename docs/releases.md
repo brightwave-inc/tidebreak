@@ -131,23 +131,22 @@ automatic.
    the resolved commit SHA.
 5. The dispatched workflow first checks whether that exact tag, commit, and
    publication date already have a complete immutable release on S3. A
-   credential-free Apple Silicon and Intel prerequisite otherwise compiles the
-   tag with its product version and saves unsigned Cargo outputs before any
-   signing or notarization can fail.
-6. The production jobs restore those exact prepared outputs, sign the apps with
-   the Developer ID identity, notarize and staple the app and DMG, verify them
-   with Apple tooling, and create signed Tauri updater archives.
-7. Only after both architectures pass does the publisher upload immutable
-   versioned files, advance the public manifests, invalidate their CDN paths,
-   and smoke-test the hosted release. If a prior attempt already uploaded the
+   credential-free prerequisite otherwise compiles the tag with its product
+   version and saves unsigned Cargo outputs before any signing or notarization
+   can fail.
+6. The production job restores those exact prepared outputs, signs the app with
+   the Developer ID identity, notarizes and staples the app and DMG, verifies
+   them with Apple tooling, and creates a signed Tauri updater archive.
+7. Only after the build passes does the publisher upload immutable versioned
+   files, advance the public manifests, invalidate their CDN paths, and
+   smoke-test the hosted release. If a prior attempt already uploaded the
    complete immutable prefix, a new dispatch validates and reuses those bytes,
-   skips both desktop builds, and resumes only mutable metadata publication,
+   skips the desktop build, and resumes only mutable metadata publication,
    CDN invalidation, and smoke testing.
-8. A final job downloads both notarized disk images back from the CDN, checks
-   them against the immutable manifest digests, and attaches them to the GitHub
-   Release as `OpenWave-macos-apple-silicon.dmg` and `OpenWave-macos-intel.dmg`
-   with `.sha256` sidecars. It holds no signing or AWS credentials. The names
-   omit the version so that
+8. A final job downloads the notarized disk image back from the CDN, checks it
+   against the immutable manifest digests, and attaches it to the GitHub
+   Release as `OpenWave-macos-apple-silicon.dmg` with a `.sha256` sidecar. It
+   holds no signing or AWS credentials. The name omits the version so that
    `https://github.com/brightwave-inc/openwave/releases/latest/download/<name>`
    stays a permanent download link for the README; the release page and the
    app's own version string identify which build it is.
@@ -159,6 +158,28 @@ release** build completes successfully; the initial dispatch run is not the
 shipping signal.
 
 ## Public macOS delivery
+
+### Apple Silicon only, for now
+
+A release ships one `aarch64` build. Intel is paused while the product is in
+active development. Cross-compiling `x86_64` on GitHub's arm64 macOS runners
+takes roughly two and a half times as long as the native build for the
+identical crate set — about 18 minutes against 7 on a recent release — so the
+Intel job, not the one anybody installs, set the length of every release and
+cache-warm run. No one on the team or in early testing uses an Intel Mac.
+
+`MACOS_ARCHITECTURES` in `scripts/create-release-manifests.mjs` is the single
+source of truth for what a release contains: it drives the manifest, the
+`latest.json` platform keys, and the immutable prefix below. Restoring Intel
+means adding `x86_64` there and adding its row back to the two `release.yml`
+build matrices and the `cache-macos.yml` warm matrix.
+
+Two consequences worth knowing. `latest.json` advertises only
+`darwin-aarch64`, so an Intel install finds no update rather than a broken one.
+And the preflight that resumes an already-hosted release validates it against
+the current architecture set, so a release published before this change cannot
+be re-dispatched; it fails on the artifact count instead of silently
+republishing.
 
 The public download contract is rooted at:
 
@@ -172,8 +193,7 @@ Each release has an immutable prefix:
 openwave/releases/vMAJOR.MINOR.PATCH/
 ├── manifest.json
 └── macos/
-    ├── aarch64/
-    └── x86_64/
+    └── aarch64/
 ```
 
 Each architecture directory contains a notarized DMG, a zip of the notarized
@@ -196,8 +216,8 @@ releases can advance automatically.
 
 **Warm macOS release cache** runs independently after relevant changes land on
 `main`. A short prerequisite job saves Cargo dependency downloads before the
-two architecture jobs compile the desktop app with `--no-bundle`. This keeps a
-later UI setup or compilation failure from also losing newly downloaded Cargo
+build job compiles the desktop app with `--no-bundle`. This keeps a later UI
+setup or compilation failure from also losing newly downloaded Cargo
 dependencies. Each architecture then saves one unsigned archive containing
 Cargo fingerprints, build-script outputs, compiled dependency files, and the
 credential-free Rust products produced by `--no-bundle`: the desktop
