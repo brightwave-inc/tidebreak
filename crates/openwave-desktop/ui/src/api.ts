@@ -21,6 +21,7 @@ import {
   type GatewayStatus as WireGatewayStatus,
   type SignInProgress,
   type McpServerInfo as WireMcpServerInfo,
+  type ManagedPolicy as WireManagedPolicy,
   type McpServersInfo as WireMcpServersInfo,
   type ModelInfo as WireModelInfo,
   type ModelRole as WireModelRole,
@@ -158,6 +159,9 @@ export type McpServerDefinition = WireMcpServerDefinition;
 export type McpServerInfo = WireMcpServerInfo;
 
 export type McpServersInfo = WireMcpServersInfo;
+
+/** The resolved managed-mode policy; read-only for the renderer. */
+export type ManagedPolicy = WireManagedPolicy;
 
 export type Chat = WireChat;
 
@@ -613,6 +617,10 @@ export class ApiClient {
       headers: this.headers(true),
       body: JSON.stringify({ uri }),
     });
+  }
+
+  getPolicy(): Promise<ManagedPolicy> {
+    return this.json("/policy", { headers: this.headers() });
   }
 
   getGatewayStatus(): Promise<GatewayStatus> {

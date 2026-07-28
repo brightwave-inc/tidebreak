@@ -332,6 +332,17 @@ export type HostRootId = string;
 export type InputModality = "text" | "image";
 
 /**
+ * Renderer-safe resolved policy. Carries only what surfaces need to render
+ * managed state: the verdict, the locked gateway URL, and its authority.
+ */
+export type ManagedPolicy = { managed: boolean, gateway_url?: string, source: ManagedPolicySource, };
+
+/**
+ * Which authority asserted the active policy.
+ */
+export type ManagedPolicySource = "os" | "provisioned" | "unmanaged";
+
+/**
  * Renderer-safe connection lifecycle.
  */
 export type McpHealth = "initializing" | "healthy" | "degraded" | "reconnecting" | "disabled";

@@ -29,6 +29,7 @@ mod event_projection;
 mod extract;
 mod foreground_prompt;
 mod gateway_runtime;
+mod managed_policy;
 mod mcp_config;
 mod model_registry;
 mod model_roles;
@@ -297,6 +298,7 @@ pub fn app(state: AppState) -> Router {
             "/chats/{chat_id}/calls/{call_id}/mcp-app-payload",
             get(routes::get_mcp_app_payload),
         )
+        .route("/policy", get(routes::get_policy))
         .route("/gateway/status", get(routes::get_gateway_status))
         .route("/gateway/apps", get(routes::get_gateway_apps))
         .route("/gateway/sign-in", post(routes::post_gateway_sign_in))
