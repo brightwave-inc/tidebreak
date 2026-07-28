@@ -50,6 +50,12 @@ Rust host boots the in-process API; the webview calls `server_info` to learn the
 base URL and token. The Tauri pre-dev command builds and stages the broker
 sidecar for the current target automatically.
 
+Debug builds run under the identifier `io.brightwave.openwave.dev` (instead of
+`io.brightwave.openwave`), so `cargo tauri dev` keeps its own single-instance
+lock and app-data directory and can run alongside an installed release build.
+This means dev and release profiles do not share state: the first dev run after
+this change starts from an empty data directory.
+
 A dev build leaves out `vec-lance`, so document search runs on an in-memory
 index that is discarded when the app exits — the LanceDB tree it replaces is
 about 330 crates of build time. Add `--features vec-lance` when you are working
