@@ -19,8 +19,16 @@ import { Logomark } from "./Logomark";
 import { useTheme } from "./theme";
 import { useActiveChatId } from "./useActiveChatId";
 import { useChatPromptWatcher } from "./useChatPromptWatcher";
+import { useShellShortcuts } from "./ShellShortcuts";
 import { useUiStore } from "./UiStore";
 import { useDesktopUpdates } from "./updates";
+
+/** Move focus to whichever composer the current route has on screen. */
+function focusComposer(): void {
+  document
+    .querySelector<HTMLTextAreaElement>("[data-composer-input]")
+    ?.focus();
+}
 
 // Store actions are stable for the store's lifetime; these handles are for
 // calling actions only — never read state fields from them.
@@ -62,6 +70,15 @@ export function AppShell() {
   // Watched here rather than in the conversation, so that the agent parking a
   // turn on a question is noticed whatever screen the reader is on.
   useChatPromptWatcher(client, openChatId);
+
+  // Shell shortcuts live here because these actions outlive any one route:
+  // toggling the frame, starting a chat, and reaching the composer all work
+  // wherever the reader is.
+  useShellShortcuts({
+    "toggle-sidebar": () => useUiStore.getState().toggleSidebar(),
+    "new-chat": () => void onNewChat(),
+    "focus-composer": focusComposer,
+  });
 
   useEffect(() => {
     let cancelled = false;
