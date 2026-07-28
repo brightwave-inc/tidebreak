@@ -6699,6 +6699,7 @@ dependencies = [
  "cap-fs-ext",
  "cap-std",
  "chrono",
+ "futures",
  "infer",
  "openwave-core",
  "openwave-host-broker",

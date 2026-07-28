@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   parseImportedDocument,
+  parseLibraryImportBatch,
+  parseLibraryImportProgress,
   parseLibraryCatalog,
   parseLibrarySearchResults,
 } from "./documents";
@@ -8,6 +10,43 @@ import {
 const documentId = "6c3df6af-bc62-4a66-a34e-29f327eaef41";
 
 describe("document library renderer projections", () => {
+  it("parses native batch results and rejects invalid progress", () => {
+    expect(
+      parseLibraryImportBatch({
+        results: [
+          {
+            status: "imported",
+            documentId,
+            displayName: "notes.md",
+            processingStatus: "queued",
+          },
+        ],
+      }),
+    ).toEqual({
+      results: [
+        {
+          status: "imported",
+          document: {
+            documentId,
+            displayName: "notes.md",
+            processingStatus: "queued",
+          },
+        },
+      ],
+    });
+
+    expect(() =>
+      parseLibraryImportProgress({
+        importId: "not-an-id",
+        displayName: "notes.md",
+        status: "streaming",
+        documentId: null,
+        processingStatus: null,
+        message: null,
+      }),
+    ).toThrow("Invalid document import progress");
+  });
+
   it("accepts the closed catalog and import shapes", () => {
     expect(
       parseLibraryCatalog({

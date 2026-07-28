@@ -158,12 +158,14 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state)
+        .manage(documents::PendingLibraryDrop::default())
         .manage(updater::UpdateManager::default())
         .invoke_handler(tauri::generate_handler![
             server_info,
             request_user_attention,
             documents::import_library_document,
             documents::import_library_documents,
+            documents::import_dropped_library_documents,
             documents::list_library_documents,
             documents::search_library_documents,
             image_attachments::attach_chat_image,
@@ -198,10 +200,14 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building OpenWave");
-    app.run(|app, event| {
-        if matches!(event, tauri::RunEvent::Exit) {
+    app.run(|app, event| match event {
+        tauri::RunEvent::WindowEvent { label, event, .. } => {
+            documents::handle_window_drag_drop(app, &label, &event);
+        }
+        tauri::RunEvent::Exit => {
             tauri::async_runtime::block_on(app.state::<host_access::HostAccess>().shutdown());
         }
+        _ => {}
     });
 }
 

@@ -30,7 +30,13 @@ import { DeliverablesView } from "./DeliverablesView";
 import { DocumentsView } from "./DocumentsView";
 import { FoldersView } from "./FoldersView";
 import { hasNativeHost } from "./host";
-import { importLibraryDocument, type ImportedDocument } from "./documents";
+import {
+  importLibraryDocuments,
+  type ImportedDocument,
+  type LibraryImportSuccess,
+} from "./documents";
+import { DocumentDropTarget } from "./DocumentDropTarget";
+import { ImportQueue } from "./ImportQueue";
 import {
   readyImageAttachmentIds,
   readyTranscriptImageAttachments,
@@ -298,8 +304,9 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     setAttachingSource(true);
     setSourceAttachmentError(null);
     try {
-      const source = await importLibraryDocument(chatId);
-      if (source) setRecentSource(source);
+      const batch = await importLibraryDocuments(chatId);
+      const source = batch?.results.find(isImportedDocument);
+      if (source) setRecentSource(source.document);
     } catch (err) {
       setSourceAttachmentError(friendlySourceAttachmentError(err));
     } finally {
@@ -426,6 +433,8 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         </div>
       </header>
       <PanelLayout layout={layout} renderPanel={renderPanel} />
+      <ImportQueue />
+      <DocumentDropTarget chatId={chatId} />
     </div>
   );
 }
@@ -452,4 +461,10 @@ function textOnlyModelLabel(
 function friendlySourceAttachmentError(error: unknown): string {
   const message = String(error).replace(/^Error:\s*/, "").trim();
   return message && message.length <= 240 ? message : "Could not add that file.";
+}
+
+function isImportedDocument(
+  result: { status: string },
+): result is LibraryImportSuccess {
+  return result.status === "imported" || result.status === "already_present";
 }

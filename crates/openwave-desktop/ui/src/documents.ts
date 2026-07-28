@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 export type DocumentProcessingStatus =
   | "queued"
@@ -21,6 +22,35 @@ export type ImportedDocument = {
   displayName: string;
   processingStatus: DocumentProcessingStatus;
 };
+
+export type LibraryImportState =
+  | "queued"
+  | "streaming"
+  | "imported"
+  | "already_present"
+  | "failed";
+
+export type LibraryImportProgress = {
+  importId: string;
+  displayName: string;
+  status: LibraryImportState;
+  documentId: string | null;
+  processingStatus: DocumentProcessingStatus | null;
+  message: string | null;
+};
+
+export type LibraryImportBatch = {
+  results: LibraryImportResult[];
+};
+
+export type LibraryImportSuccess = {
+  status: "imported" | "already_present";
+  document: ImportedDocument;
+};
+
+export type LibraryImportResult =
+  | LibraryImportSuccess
+  | { status: "failed"; displayName: string; message: string };
 
 export type LibrarySearchResult = {
   documentId: string;
@@ -45,6 +75,111 @@ export async function importLibraryDocument(
   return parseImportedDocument(
     await invoke("import_library_document", { request: { chatId } }),
   );
+}
+
+/** Select several sources in one native picker and receive progress by event. */
+export async function importLibraryDocuments(
+  chatId: string,
+): Promise<LibraryImportBatch | null> {
+  return parseLibraryImportBatch(
+    await invoke("import_library_documents", { request: { chatId } }),
+  );
+}
+
+/** Claim one just-dropped native file set without ever serializing its paths. */
+export async function importDroppedLibraryDocuments(
+  chatId: string,
+): Promise<LibraryImportBatch | null> {
+  return parseLibraryImportBatch(
+    await invoke("import_dropped_library_documents", { request: { chatId } }),
+  );
+}
+
+export async function listenForLibraryImportProgress(
+  listener: (progress: LibraryImportProgress) => void,
+): Promise<() => void> {
+  return listen<unknown>("library-import-progress", (event) => {
+    listener(parseLibraryImportProgress(event.payload));
+  });
+}
+
+export function parseLibraryImportProgress(value: unknown): LibraryImportProgress {
+  if (
+    !isExactRecord(value, [
+      "importId",
+      "displayName",
+      "status",
+      "documentId",
+      "processingStatus",
+      "message",
+    ]) ||
+    !isUuid(value.importId) ||
+    typeof value.displayName !== "string" ||
+    value.displayName.length === 0 ||
+    !isSafeRendererText(value.displayName, 255, false) ||
+    !isLibraryImportState(value.status) ||
+    (value.documentId !== null && !isUuid(value.documentId)) ||
+    (value.processingStatus !== null && !isProcessingStatus(value.processingStatus)) ||
+    (value.message !== null &&
+      (typeof value.message !== "string" ||
+        !isSafeRendererText(value.message, 500, false)))
+  ) {
+    throw new Error("Invalid document import progress");
+  }
+  return {
+    importId: value.importId,
+    displayName: value.displayName,
+    status: value.status,
+    documentId: value.documentId,
+    processingStatus: value.processingStatus,
+    message: value.message,
+  };
+}
+
+export function parseLibraryImportBatch(value: unknown): LibraryImportBatch | null {
+  if (value === null) return null;
+  if (!isExactRecord(value, ["results"]) || !Array.isArray(value.results)) {
+    throw new Error("Invalid document import response");
+  }
+  return {
+    results: value.results.map((result) => {
+      if (typeof result !== "object" || result === null || Array.isArray(result)) {
+        throw new Error("Invalid document import response");
+      }
+      const record = result as Record<string, unknown>;
+      if (
+        (record.status === "imported" || record.status === "already_present") &&
+        isExactRecord(record, ["status", "documentId", "displayName", "processingStatus"])
+      ) {
+        const document = parseImportedDocument({
+          documentId: record.documentId,
+          displayName: record.displayName,
+          processingStatus: record.processingStatus,
+        });
+        if (!document) throw new Error("Invalid document import response");
+        return {
+          status: record.status,
+          document,
+        };
+      }
+      if (
+        record.status === "failed" &&
+        isExactRecord(record, ["status", "displayName", "message"]) &&
+        typeof record.displayName === "string" &&
+        record.displayName.length > 0 &&
+        isSafeRendererText(record.displayName, 255, false) &&
+        typeof record.message === "string" &&
+        isSafeRendererText(record.message, 500, false)
+      ) {
+        return {
+          status: "failed",
+          displayName: record.displayName,
+          message: record.message,
+        };
+      }
+      throw new Error("Invalid document import response");
+    }),
+  };
 }
 
 export async function searchLibraryDocuments(
@@ -159,6 +294,12 @@ function parseLibraryDocument(value: unknown): LibraryDocument {
 
 function isProcessingStatus(value: unknown): value is DocumentProcessingStatus {
   return ["queued", "processing", "ready", "failed"].includes(String(value));
+}
+
+function isLibraryImportState(value: unknown): value is LibraryImportState {
+  return ["queued", "streaming", "imported", "already_present", "failed"].includes(
+    String(value),
+  );
 }
 
 function isUuid(value: unknown): value is string {
