@@ -664,6 +664,34 @@ export class ApiClient {
     return response.blob();
   }
 
+  /**
+   * The original bytes of a source document, as stored.
+   *
+   * Returned as bytes rather than a URL because the renderer authenticates
+   * with a bearer header the webview cannot attach to an `<embed>` or `<img>`
+   * source, and because pdf.js wants a buffer anyway.
+   */
+  async getDocumentFileContent(
+    documentId: string,
+    signal?: AbortSignal,
+  ): Promise<Uint8Array> {
+    const response = await fetch(
+      `${this.baseUrl}/documents/${encodeURIComponent(documentId)}/file-content`,
+      { headers: this.headers(), signal },
+    );
+    if (!response.ok) {
+      let detail = response.statusText;
+      try {
+        const body = (await response.json()) as { message?: string };
+        if (body.message) detail = body.message;
+      } catch {
+        /* ignore */
+      }
+      throw new Error(`${response.status}: ${detail}`);
+    }
+    return new Uint8Array(await response.arrayBuffer());
+  }
+
   patchChatTitle(chatId: string, title: string | null): Promise<Chat> {
     return this.json(`/chats/${chatId}`, {
       method: "PATCH",
