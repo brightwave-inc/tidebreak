@@ -16,8 +16,10 @@ use serde_json::{json, Value};
 
 use openwave_core::error::{AgentError, Result};
 use openwave_core::provider::{
-    ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, StopReason, Usage,
+    ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, ResponseFormat,
+    StopReason, ToolChoice, Usage,
 };
+use openwave_core::tool::{strict_json_schema, OptionalProperties};
 use openwave_core::{ImageAttachments, Role};
 
 use crate::sse::{classify_provider_error, drain_frames, frame_data, read_bounded_error_body};
@@ -197,26 +199,82 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
     }
 
     if !req.tools.is_empty() {
-        body["tools"] = Value::Array(
-            req.tools
-                .iter()
-                .map(|tool| {
-                    json!({
-                        "type": "function",
-                        "function": {
-                            "name": tool.name,
-                            "description": tool.description,
-                            "parameters": tool.input_schema,
-                        }
-                    })
-                })
-                .collect(),
-        );
+        body["tools"] = Value::Array(req.tools.iter().map(openai_tool).collect());
+    }
+    if let Some(choice) = &req.tool_choice {
+        body["tool_choice"] = openai_tool_choice(choice)?;
+    }
+    match &req.response_format {
+        Some(ResponseFormat::JsonSchema { name, schema }) => {
+            // Without `strict` the schema is a strong suggestion; with it the
+            // provider constrains decoding. Refuse the turn rather than send the
+            // loose form: a caller that asked for a shape it can parse would
+            // otherwise get prose back and no way to tell why.
+            let schema =
+                strict_json_schema(schema, OptionalProperties::AcceptNull).ok_or_else(|| {
+                    AgentError::Provider(format!(
+                        "response format {name} has no strict JSON Schema form"
+                    ))
+                })?;
+            body["response_format"] = json!({
+                "type": "json_schema",
+                "json_schema": { "name": name, "strict": true, "schema": schema },
+            });
+        }
+        None => {}
+        // `ResponseFormat` is open. A format this adapter has not learned must
+        // fail the request rather than stream an unconstrained answer that only
+        // looks like a success.
+        Some(other) => {
+            return Err(AgentError::Provider(format!(
+                "openai-compat cannot enforce response format {other:?}"
+            )))
+        }
     }
     if let Some(temperature) = req.temperature {
         body["temperature"] = json!(temperature);
     }
     Ok(body)
+}
+
+/// Shape one advertised tool as a Chat Completions function tool.
+///
+/// `strict` is what makes the arguments conform to `parameters` rather than
+/// merely resemble it, but it is only offered for a schema that already
+/// enumerates every property as required. Widening an optional property to
+/// accept `null` — the usual way to satisfy strict mode — would start feeding
+/// `null` to tools whose argument types take a `#[serde(default)]` non-`Option`
+/// field, turning working calls into deserialization errors. A schema that needs
+/// widening therefore goes out unconstrained, exactly as it does today.
+fn openai_tool(tool: &openwave_core::tool::ToolSpec) -> Value {
+    let mut function = json!({
+        "name": tool.name,
+        "description": tool.description,
+        "parameters": tool.input_schema,
+    });
+    if let Some(schema) = strict_json_schema(&tool.input_schema, OptionalProperties::Reject) {
+        function["parameters"] = schema;
+        function["strict"] = json!(true);
+    }
+    json!({ "type": "function", "function": function })
+}
+
+fn openai_tool_choice(choice: &ToolChoice) -> Result<Value> {
+    Ok(match choice {
+        ToolChoice::Auto => json!("auto"),
+        ToolChoice::Required => json!("required"),
+        ToolChoice::None => json!("none"),
+        ToolChoice::Tool { name } => json!({ "type": "function", "function": { "name": name } }),
+        // `ToolChoice` is open so a provider-neutral mode can be added without
+        // a breaking change. Silently substituting the model's own judgement
+        // for a mode this adapter has not learned would turn "must not call a
+        // tool" into "may".
+        other => {
+            return Err(AgentError::Provider(format!(
+                "openai-compat cannot express tool choice {other:?}"
+            )))
+        }
+    })
 }
 
 /// Append one normalized message as one or more OpenAI Chat Completions messages.
@@ -518,6 +576,7 @@ mod tests {
             temperature: Some(0.2),
             reasoning_effort: Some(ReasoningEffort::High),
             images: ImageAttachments::new(),
+            ..Default::default()
         };
         let body = build_request_json(&req).unwrap();
         assert_eq!(body["model"], "gpt-4o");
@@ -535,6 +594,70 @@ mod tests {
     }
 
     #[test]
+    fn strict_is_offered_only_where_the_schema_already_allows_it() {
+        let req = ChatRequest {
+            model: "gpt-4o".into(),
+            messages: vec![ChatMessage::text(Role::User, "hi")],
+            tools: vec![
+                ToolSpec {
+                    name: "write_file".into(),
+                    description: "write a file".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": { "path": { "type": "string" } },
+                        "required": ["path"],
+                    }),
+                },
+                ToolSpec {
+                    name: "read_source".into(),
+                    description: "read a source".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "document_id": { "type": "string" },
+                            "offset": { "type": "integer", "minimum": 0 },
+                        },
+                        "required": ["document_id"],
+                    }),
+                },
+            ],
+            response_format: Some(ResponseFormat::JsonSchema {
+                name: "note".into(),
+                schema: json!({
+                    "type": "object",
+                    "properties": { "body": { "type": "string" } },
+                    "required": ["body"],
+                }),
+            }),
+            ..Default::default()
+        };
+        let body = build_request_json(&req).unwrap();
+        let format = &body["response_format"];
+        assert_eq!(format["type"], "json_schema");
+        assert_eq!(format["json_schema"]["name"], "note");
+        assert_eq!(format["json_schema"]["strict"], true);
+        assert_eq!(
+            format["json_schema"]["schema"]["additionalProperties"],
+            false
+        );
+
+        // A schema that already requires every property is constrained.
+        assert_eq!(body["tools"][0]["function"]["strict"], true);
+        assert_eq!(
+            body["tools"][0]["function"]["parameters"]["additionalProperties"],
+            false
+        );
+        // One with an optional property is not: strict mode would require it,
+        // and the `null` that makes that safe for the model is not safe for
+        // every argument type on our side. It goes out as it does today.
+        assert!(body["tools"][1]["function"].get("strict").is_none());
+        assert_eq!(
+            body["tools"][1]["function"]["parameters"],
+            req.tools[1].input_schema
+        );
+    }
+
+    #[test]
     fn reasoning_models_use_max_completion_tokens() {
         let req = ChatRequest {
             provider: Some(ProviderId::new("openai")),
@@ -547,6 +670,7 @@ mod tests {
             temperature: None,
             reasoning_effort: None,
             images: ImageAttachments::new(),
+            ..Default::default()
         };
         let body = build_request_json(&req).unwrap();
         assert_eq!(body["max_completion_tokens"], 1024);
@@ -568,6 +692,7 @@ mod tests {
             temperature: None,
             reasoning_effort: Some(ReasoningEffort::Low),
             images: ImageAttachments::new(),
+            ..Default::default()
         };
         let body = build_request_json(&req).unwrap();
         assert_eq!(body["reasoning_effort"], "low");

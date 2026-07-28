@@ -143,7 +143,7 @@ pub use model::{
 pub use preview::{ToolActionPreview, ToolResultPreview};
 pub use provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId,
-    RefusalDetails, RefusalOutcome, StopReason, Usage,
+    RefusalDetails, RefusalOutcome, ResponseFormat, StopReason, ToolChoice, Usage,
 };
 pub use renderer_tool::RendererToolName;
 pub use semantic_checkpoint::{
@@ -175,8 +175,8 @@ pub use storage::{
     MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
 };
 pub use tool::{
-    input_schema_for, ApprovalClass, Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolScratch,
-    ToolSpec, ToolUiView,
+    input_schema_for, strict_json_schema, ApprovalClass, OptionalProperties, Tool, ToolCtx,
+    ToolErrorCategory, ToolOutput, ToolScratch, ToolSpec, ToolUiView,
 };
 #[cfg(feature = "tools")]
 pub use tools::{CreateDeliverable, ListDir, ReadFile, WriteFile};

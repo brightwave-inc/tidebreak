@@ -1203,6 +1203,7 @@ impl Agent {
                     temperature: self.config.temperature,
                     reasoning_effort: self.config.reasoning_effort,
                     images,
+                    ..Default::default()
                 };
 
                 progress.model_steps = step + 1;
@@ -3026,7 +3027,13 @@ impl Agent {
             // the set of models that can create a checkpoint.
             temperature: None,
             reasoning_effort: self.config.reasoning_effort,
+            // Constrain the answer to the payload schema. Without this the
+            // model's shape is a request, the parse below is a coin toss, and a
+            // lost toss abandons this prefix for the rest of the conversation —
+            // the boundary is fenced above before the call is made.
+            response_format: Some(ContextCheckpointPayloadV1::response_format()),
             images: ImageAttachments::new(),
+            ..Default::default()
         };
         let mut stream = self.provider.stream(request).await.ok()?;
         let mut content = String::new();
@@ -7618,6 +7625,21 @@ mod tests {
             .expect("one maintenance request");
         assert!(maintenance.tools.is_empty());
         assert!(maintenance.images.is_empty());
+        // The call constrains its own output, and the schema it sends has to
+        // survive the conversion every adapter runs it through — a payload field
+        // that cannot be expressed strictly would fail every checkpoint call
+        // rather than degrade to prose.
+        let Some(crate::provider::ResponseFormat::JsonSchema { name, schema }) =
+            &maintenance.response_format
+        else {
+            panic!("the checkpoint call asks for a constrained payload");
+        };
+        assert_eq!(name, "context_checkpoint");
+        assert!(
+            crate::tool::strict_json_schema(schema, crate::tool::OptionalProperties::AcceptNull)
+                .is_some(),
+            "the checkpoint payload schema has a strict form: {schema}"
+        );
         let maintenance_debug = format!("{:?}", maintenance.messages);
         assert!(maintenance_debug.contains("OLD PREFIX"));
         assert!(!maintenance_debug.contains("RECENT USER"));

@@ -991,6 +991,7 @@ async fn sandbox_request(
         // Sandbox runs replay text and tool blocks from checkpoints; no path
         // puts an image block in this transcript.
         images: openwave_core::ImageAttachments::new(),
+        ..Default::default()
     })
 }
 
@@ -1754,6 +1755,7 @@ mod tests {
             temperature: None,
             reasoning_effort: None,
             images: openwave_core::ImageAttachments::new(),
+            ..Default::default()
         };
         for events in [
             vec![
@@ -1831,6 +1833,7 @@ mod tests {
             temperature: None,
             reasoning_effort: None,
             images: openwave_core::ImageAttachments::new(),
+            ..Default::default()
         };
 
         let bare = match complete_sandbox_task(
@@ -2805,6 +2808,7 @@ mod tests {
             temperature: Some(0.0),
             reasoning_effort: None,
             images: openwave_core::ImageAttachments::new(),
+            ..Default::default()
         };
         let provider = Arc::new(EventProvider(vec![
             ProviderEvent::ToolCallStarted {

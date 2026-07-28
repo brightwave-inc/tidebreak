@@ -7,11 +7,13 @@
 //! as untrusted historical context.
 
 use chrono::{DateTime, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AgentError, Result};
 use crate::id::{ChatId, MessageId};
-use crate::provider::Usage;
+use crate::provider::{ResponseFormat, Usage};
+use crate::tool::input_schema_for;
 
 /// The only checkpoint payload format this build can read and write.
 ///
@@ -39,7 +41,7 @@ pub const MAX_CONTEXT_CHECKPOINT_ITEM_BYTES: usize = 1_024;
 /// capability, instruction, or attachment-bytes field: source/output values
 /// are identities only, and projection wraps the whole payload as untrusted
 /// historical context.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ContextCheckpointPayloadV1 {
     /// Payload schema version, independently explicit inside the stored JSON.
@@ -58,12 +60,38 @@ pub struct ContextCheckpointPayloadV1 {
     pub conclusions: Vec<String>,
 }
 
+/// Name the checkpoint's output constraint carries on the wire.
+///
+/// The Anthropic adapter turns it into a tool name, so it stays within
+/// `^[a-zA-Z0-9_-]{1,64}$`.
+const CONTEXT_CHECKPOINT_SCHEMA_NAME: &str = "context_checkpoint";
+
 impl ContextCheckpointPayloadV1 {
+    /// The output constraint the checkpoint's maintenance call sends.
+    ///
+    /// The system prompt still spells the shape out in prose. That is not
+    /// redundancy for its own sake: this adapter layer covers any
+    /// OpenAI-compatible endpoint, including local runtimes that accept
+    /// `response_format` and then ignore it, and the prompt is what those
+    /// runtimes have to go on.
+    pub(crate) fn response_format() -> ResponseFormat {
+        ResponseFormat::JsonSchema {
+            name: CONTEXT_CHECKPOINT_SCHEMA_NAME.to_owned(),
+            schema: input_schema_for::<Self>(),
+        }
+    }
+
     /// Parse untrusted model output and return canonical, bounded JSON.
     ///
     /// The producer fails open when this rejects an answer; it never stores a
     /// partial or vaguely-shaped summary merely because the model returned
     /// something readable.
+    ///
+    /// A constrained completion arrives as bare JSON, so the fence strip below
+    /// is dead weight against a provider that honored the schema. It stays for
+    /// the ones that do not — an OpenAI-compatible runtime that accepts
+    /// `response_format` and ignores it still answers the prompt, in a fenced
+    /// block, and there is no reason to throw that away.
     pub(crate) fn parse_and_canonicalize(content: &str) -> Result<String> {
         let content = strip_json_fence(content.trim());
         let payload: Self = serde_json::from_str(content).map_err(|error| {
