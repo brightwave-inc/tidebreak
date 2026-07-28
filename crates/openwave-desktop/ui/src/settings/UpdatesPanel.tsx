@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 import { RefreshCw, RotateCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ClipboardCopyButton } from "../ClipboardCopyButton";
+import { hasNativeHost } from "../host";
 import type { DesktopUpdateState } from "../updates";
 import { SettingsError, SettingsPanel, SettingsSection } from "./primitives";
 
@@ -34,7 +37,23 @@ export function UpdatesPanel({
   onRestart: () => Promise<void>;
 }) {
   const [manualResult, setManualResult] = useState<string | null>(null);
+  const [version, setVersion] = useState<string | null>(null);
   const busy = state.status === "checking" || state.status === "downloading";
+
+  // Only the packaged desktop host can report its version; a browser dev build
+  // has none, so the line falls back to a plain note there.
+  useEffect(() => {
+    if (!hasNativeHost()) return;
+    let cancelled = false;
+    void getVersion()
+      .then((value) => {
+        if (!cancelled) setVersion(value);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (busy || state.status === "ready" || state.error) {
@@ -86,6 +105,25 @@ export function UpdatesPanel({
                   ? "Downloading…"
                   : "Check for updates"}
             </Button>
+          )}
+        </div>
+      </SettingsSection>
+
+      <SettingsSection title="About">
+        <div className="flex items-center justify-between gap-4">
+          <p className="text-sm text-muted-foreground">
+            {version
+              ? `OpenWave ${version}`
+              : "Version is reported by the desktop app."}
+          </p>
+          {version && (
+            <ClipboardCopyButton
+              value={version}
+              label="Copy version"
+              copiedAnnouncement="Version copied to clipboard."
+              failedAnnouncement="Version could not be copied."
+              className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden"
+            />
           )}
         </div>
       </SettingsSection>

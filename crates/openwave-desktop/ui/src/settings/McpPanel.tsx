@@ -8,6 +8,7 @@ import type {
 } from "../api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import {
   SettingsError,
   SettingsField,
@@ -189,17 +190,22 @@ export function McpPanel({ client }: { client: ApiClient }) {
                 </span>
               </div>
 
-              <label className="flex items-center gap-2 text-sm font-medium">
-                <input
-                  type="checkbox"
+              <div className="flex items-center justify-between gap-4">
+                <div className="flex-1">
+                  <p className="text-sm font-bold">Enabled</p>
+                  <p className="text-xs text-muted-foreground">
+                    Off keeps the server configured but out of new turns.
+                  </p>
+                </div>
+                <Switch
+                  aria-label="Enabled"
                   checked={server.enabled}
                   disabled={working}
-                  onChange={(event) =>
-                    update(index, { enabled: event.target.checked })
+                  onCheckedChange={(checked) =>
+                    update(index, { enabled: checked })
                   }
                 />
-                Enabled
-              </label>
+              </div>
 
               <SettingsField
                 label="Namespace"

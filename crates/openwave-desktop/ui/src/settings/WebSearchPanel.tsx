@@ -9,7 +9,13 @@ import type {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
-  SETTINGS_SELECT_CLASS,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   SettingsError,
   SettingsField,
   SettingsPanel,
@@ -18,6 +24,10 @@ import {
 
 const MIN_WEB_SEARCH_TIMEOUT_MS = 1_000;
 const MAX_WEB_SEARCH_TIMEOUT_MS = 60_000;
+
+// Radix Select reserves the empty string, so "Disabled" (no provider) rides on
+// a sentinel value the wire never carries.
+const NO_PROVIDER = "__disabled__";
 
 export function WebSearchPanel({ client }: { client: ApiClient }) {
   const [config, setConfig] = useState<WebSearchConfigInfo | null>(null);
@@ -160,18 +170,26 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
 
           <SettingsSection>
             <SettingsField label="Provider">
-              <select
-                className={SETTINGS_SELECT_CLASS}
-                value={provider}
+              <Select
+                value={provider === "" ? NO_PROVIDER : provider}
                 disabled={working}
-                onChange={(event) =>
-                  setProvider(event.target.value as WebSearchProviderKind | "")
+                onValueChange={(value) =>
+                  setProvider(
+                    value === NO_PROVIDER
+                      ? ""
+                      : (value as WebSearchProviderKind),
+                  )
                 }
               >
-                <option value="">Disabled</option>
-                <option value="exa">Exa</option>
-                <option value="tavily">Tavily</option>
-              </select>
+                <SelectTrigger aria-label="Provider">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NO_PROVIDER}>Disabled</SelectItem>
+                  <SelectItem value="exa">Exa</SelectItem>
+                  <SelectItem value="tavily">Tavily</SelectItem>
+                </SelectContent>
+              </Select>
             </SettingsField>
 
             <SettingsField

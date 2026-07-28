@@ -8,6 +8,8 @@ import type {
 } from "../api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
+import { useConfirm } from "../components/ConfirmDialog";
 import { SettingsError, SettingsPanel, SettingsSection } from "./primitives";
 import { providerLabel } from "../ModelSelection";
 
@@ -58,6 +60,7 @@ function ProviderRow({
   const [models, setModels] = useState<CustomModelConfig[]>(info.models);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { confirm, dialog } = useConfirm();
 
   async function save(enabled: boolean) {
     setSaving(true);
@@ -108,6 +111,15 @@ function ProviderRow({
   }
 
   async function clearCredential() {
+    const accepted = await confirm({
+      title: "Remove the saved credential?",
+      description: `This deletes the stored ${providerLabel(
+        info.kind,
+      )} credential from this machine's keychain. You can add it again at any time.`,
+      confirmLabel: "Remove credential",
+      destructive: true,
+    });
+    if (!accepted) return;
     setSaving(true);
     setError(null);
     try {
@@ -123,20 +135,19 @@ function ProviderRow({
 
   return (
     <SettingsSection title={providerLabel(info.kind)}>
-      <div className="flex items-center justify-between gap-3">
-        <label className="flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            className="size-4 accent-[var(--primary)]"
-            checked={info.enabled}
-            disabled={saving}
-            onChange={(e) => void save(e.target.checked)}
-          />
-          Enabled
-        </label>
-        <span className="text-xs text-muted-foreground">
-          {info.has_credential ? "credential set" : "no credential"}
-        </span>
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex-1">
+          <p className="text-sm font-bold">Enabled</p>
+          <p className="text-xs text-muted-foreground">
+            {info.has_credential ? "Credential set" : "No credential"}
+          </p>
+        </div>
+        <Switch
+          aria-label="Enabled"
+          checked={info.enabled}
+          disabled={saving}
+          onCheckedChange={(checked) => void save(checked)}
+        />
       </div>
       {info.kind === "openai_compatible" && (
         <>
@@ -348,7 +359,7 @@ function ProviderRow({
         {info.has_credential && (
           <Button
             type="button"
-            variant="outline"
+            variant="destructive"
             disabled={saving}
             onClick={() => void clearCredential()}
           >
@@ -357,6 +368,7 @@ function ProviderRow({
         )}
       </div>
       {error && <SettingsError>{error}</SettingsError>}
+      {dialog}
     </SettingsSection>
   );
 }
