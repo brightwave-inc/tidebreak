@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, DragDropEvent, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::oneshot;
 use tokio_util::io::ReaderStream;
 use unicode_general_category::{get_general_category, GeneralCategory};
@@ -340,6 +341,11 @@ pub(crate) struct LibraryDocumentRequest {
     document_id: Uuid,
 }
 
+#[derive(Debug, Deserialize)]
+struct DocumentTitle {
+    title: Option<String>,
+}
+
 #[tauri::command]
 pub(crate) async fn list_library_documents(
     state: State<'_, Arc<AppState>>,
@@ -595,6 +601,187 @@ pub(crate) async fn import_dropped_library_documents(
         )
         .await,
     ))
+}
+
+/// Save one source's original bytes wherever the reader chooses.
+///
+/// The renderer names the document by id and nothing else. The suggested
+/// filename is derived from the stored title here, the destination is chosen
+/// through the native dialog, and neither the path nor the bytes are ever
+/// handed back across the boundary. Returns false when the dialog was
+/// dismissed without picking a destination.
+#[tauri::command]
+pub(crate) async fn export_library_document(
+    app: AppHandle,
+    app_state: State<'_, Arc<AppState>>,
+    host_access: State<'_, HostAccess>,
+    request: LibraryDocumentRequest,
+) -> Result<bool, String> {
+    let (chat_id, document_id) =
+        resolve_document_scope(&host_access, request.chat_id, request.document_id).await?;
+    let _picker = host_access
+        .picker
+        .try_lock()
+        .map_err(|_| "A file or folder picker is already open".to_owned())?;
+    let info = wait_server_info(app_state.inner()).await?;
+    let response = native_auth(
+        local_client().get(format!(
+            "{}{}",
+            info.base_url,
+            document_path(chat_id, document_id)
+        )),
+        &info,
+    )
+    .send()
+    .await
+    .map_err(|_| "Could not open that source".to_owned())?;
+    if !response.status().is_success() {
+        return Err("Could not open that source".to_owned());
+    }
+    let detail = response
+        .json::<DocumentTitle>()
+        .await
+        .map_err(|_| "That source returned an invalid response".to_owned())?;
+
+    let Some(destination) = pick_export_path(
+        &app,
+        "Save source",
+        &export_file_name(detail.title.as_deref()),
+    )
+    .await?
+    else {
+        return Ok(false);
+    };
+    // The dialog may stay open long enough for the conversation to be deleted.
+    // Revalidate before the one host write the reader authorized.
+    let (chat_id, document_id) =
+        resolve_document_scope(&host_access, request.chat_id, request.document_id).await?;
+    let response = native_auth(
+        streaming_local_client().get(format!(
+            "{}{}",
+            info.base_url,
+            document_file_content_path(chat_id, document_id)
+        )),
+        &info,
+    )
+    .send()
+    .await
+    .map_err(|_| "Could not read that source".to_owned())?;
+    if !response.status().is_success() {
+        return Err("Could not read that source".to_owned());
+    }
+    write_exported_document(&destination, response).await?;
+    Ok(true)
+}
+
+/// Stream a response body into `destination`, replacing it only once complete.
+///
+/// The bytes go straight from the loopback response to disk rather than being
+/// buffered: a source is whatever the reader imported, and some of them are
+/// far larger than a copy we would want to hold in memory. The write lands in
+/// a sibling temporary first, so an interrupted save cannot leave a truncated
+/// file where a whole one used to be.
+async fn write_exported_document(
+    destination: &Path,
+    mut response: reqwest::Response,
+) -> Result<(), String> {
+    if !destination.is_absolute() {
+        return Err("The save destination is invalid".to_owned());
+    }
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "The save destination is invalid".to_owned())?;
+    let filename = destination
+        .file_name()
+        .ok_or_else(|| "The save destination is invalid".to_owned())?;
+    let directory = Dir::open_ambient_dir(parent, ambient_authority())
+        .map_err(|_| "Could not open the selected folder".to_owned())?;
+    let permissions = match directory.symlink_metadata(filename) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            Some(metadata.permissions())
+        }
+        Ok(_) => return Err("The selected destination is not a regular file".to_owned()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return Err("Could not inspect the selected destination".to_owned()),
+    };
+    let temporary = format!(".openwave-export-{}.tmp", Uuid::new_v4());
+    let result =
+        stream_into_temporary(&directory, &temporary, filename, permissions, &mut response).await;
+    if result.is_err() {
+        let _ = directory.remove_file(&temporary);
+    }
+    result
+}
+
+async fn stream_into_temporary(
+    directory: &Dir,
+    temporary: &str,
+    filename: &std::ffi::OsStr,
+    permissions: Option<cap_std::fs::Permissions>,
+    response: &mut reqwest::Response,
+) -> Result<(), String> {
+    let mut options = OpenOptions::new();
+    options
+        .write(true)
+        .create_new(true)
+        .follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let file = directory
+        .open_with(temporary, &options)
+        .map_err(|_| "Could not save that source".to_owned())?;
+    if let Some(permissions) = permissions {
+        file.set_permissions(permissions)
+            .map_err(|_| "Could not save that source".to_owned())?;
+    }
+    let mut file = tokio::fs::File::from_std(file.into_std());
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| "Could not read that source".to_owned())?
+    {
+        file.write_all(&chunk)
+            .await
+            .map_err(|_| "Could not save that source".to_owned())?;
+    }
+    file.sync_all()
+        .await
+        .map_err(|_| "Could not save that source".to_owned())?;
+    drop(file);
+    directory
+        .rename(temporary, directory, filename)
+        .map_err(|_| "Could not save that source".to_owned())?;
+    #[cfg(unix)]
+    directory
+        .open(".")
+        .and_then(|handle| handle.sync_all())
+        .map_err(|_| "Could not save that source".to_owned())?;
+    Ok(())
+}
+
+/// A filename to suggest in the save dialog, derived from the stored title.
+///
+/// Only a name, never a path: separators and anything that could climb out of
+/// the folder the reader picks are dropped rather than escaped, and a title
+/// that survives none of that falls back to a fixed name.
+fn export_file_name(title: Option<&str>) -> String {
+    let cleaned = title
+        .unwrap_or_default()
+        .chars()
+        .filter(|character| {
+            is_safe_title_char(*character) && !matches!(*character, '/' | '\\' | ':' | '\0')
+        })
+        .take(200)
+        .collect::<String>();
+    let cleaned = cleaned.trim().trim_start_matches('.').trim();
+    if cleaned.is_empty() {
+        "document".to_owned()
+    } else {
+        cleaned.to_owned()
+    }
 }
 
 /// Turn native drag events into a small renderer-safe state signal while
@@ -946,6 +1133,10 @@ fn streamed_raw_documents_path(chat_id: ChatId) -> String {
     format!("{}/raw-stream", documents_path(chat_id))
 }
 
+fn document_file_content_path(chat_id: ChatId, document_id: DocumentId) -> String {
+    format!("{}/file-content", document_path(chat_id, document_id))
+}
+
 fn search_path(chat_id: ChatId) -> String {
     format!("/chats/{chat_id}/search")
 }
@@ -1013,6 +1204,34 @@ pub(crate) async fn pick_documents(app: &AppHandle) -> Result<Option<Vec<PathBuf
         })
         .transpose()
         .map_err(|_| "The document picker returned an invalid file".to_owned())
+}
+
+/// Ask the reader where to write a file the app is handing back to them.
+///
+/// `filename` is only a suggestion the dialog opens on; the destination the
+/// reader confirms is what gets written.
+pub(crate) async fn pick_export_path(
+    app: &AppHandle,
+    dialog_title: &str,
+    filename: &str,
+) -> Result<Option<PathBuf>, String> {
+    let (tx, rx) = oneshot::channel();
+    let mut picker = app
+        .dialog()
+        .file()
+        .set_title(dialog_title)
+        .set_file_name(filename);
+    if let Some(window) = app.get_webview_window("main") {
+        picker = picker.set_parent(&window);
+    }
+    picker.save_file(move |path| {
+        let _ = tx.send(path);
+    });
+    rx.await
+        .map_err(|_| "The save dialog closed unexpectedly".to_owned())?
+        .map(tauri_plugin_dialog::FilePath::into_path)
+        .transpose()
+        .map_err(|_| "The save dialog returned an invalid destination".to_owned())
 }
 
 fn import_display_name(path: &Path) -> Result<String, String> {
@@ -1384,12 +1603,27 @@ mod tests {
             search_path(standalone.id),
             format!("/chats/{}/search", standalone.id)
         );
+        // Original bytes are reachable only through the owning conversation.
+        let document_id = DocumentId::new();
+        assert_eq!(
+            document_file_content_path(standalone.id, document_id),
+            format!(
+                "/chats/{}/documents/{document_id}/file-content",
+                standalone.id
+            )
+        );
 
         let injected = serde_json::json!({
             "chatId": standalone.id,
             "projectId": project.id,
         });
         assert!(serde_json::from_value::<LibraryRequest>(injected).is_err());
+        let injected_document = serde_json::json!({
+            "chatId": standalone.id,
+            "documentId": Uuid::new_v4(),
+            "projectId": project.id,
+        });
+        assert!(serde_json::from_value::<LibraryDocumentRequest>(injected_document).is_err());
         let injected_search = serde_json::json!({
             "chatId": standalone.id,
             "projectId": project.id,
@@ -1402,6 +1636,28 @@ mod tests {
             "projectId": project.id,
         });
         assert!(serde_json::from_value::<LibraryDocumentRequest>(injected_document).is_err());
+    }
+
+    #[test]
+    fn export_file_name_suggests_a_name_and_never_a_path() {
+        assert_eq!(
+            export_file_name(Some("Quarterly report.pdf")),
+            "Quarterly report.pdf"
+        );
+        // A title is stored text, not a filename. Anything that could steer the
+        // save dialog out of the folder the reader picked is dropped outright,
+        // as are the characters filtered everywhere else on this boundary.
+        assert_eq!(
+            export_file_name(Some("../../.ssh/authorized_keys")),
+            "sshauthorized_keys"
+        );
+        assert_eq!(
+            export_file_name(Some("C:\\Windows\\system32")),
+            "CWindowssystem32"
+        );
+        assert_eq!(export_file_name(Some("plan\u{202e}.md")), "plan.md");
+        assert_eq!(export_file_name(Some("  ..  ")), "document");
+        assert_eq!(export_file_name(None), "document");
     }
 
     #[test]

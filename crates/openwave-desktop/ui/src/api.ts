@@ -46,6 +46,7 @@ import {
   type ToolApprovalKind,
   type ToolResultPreview as WireToolResultPreview,
 } from "./generated/wire";
+import type { DocumentProcessingStatus } from "./documents";
 
 export type {
   ApprovalClass,
@@ -68,6 +69,16 @@ export type AgentEvent = RendererAgentEvent;
 
 /** Generated from `ToolApprovalKind`. */
 export type RendererApprovalKind = ToolApprovalKind;
+
+export type DocumentDetail = {
+  document_id: string;
+  media_type: string;
+  title: string | null;
+  processing_status: DocumentProcessingStatus;
+  searchable: boolean;
+  updated_at: string;
+  content: string;
+};
 
 /** Connection details from the Tauri host (`server_info` command). */
 export type ServerInfo = {
@@ -642,15 +653,11 @@ export class ApiClient {
     });
   }
 
-  async getChatImageAttachment(
-    chatId: string,
-    attachmentId: string,
-    signal?: AbortSignal,
-  ): Promise<Blob> {
-    const response = await fetch(
-      `${this.baseUrl}/chats/${encodeURIComponent(chatId)}/attachments/images/${encodeURIComponent(attachmentId)}`,
-      { headers: this.headers(), signal },
-    );
+  private async blob(path: string, signal?: AbortSignal): Promise<Blob> {
+    const response = await fetch(`${this.baseUrl}${path}`, {
+      headers: this.headers(),
+      signal,
+    });
     if (!response.ok) {
       let detail = response.statusText;
       try {
@@ -662,6 +669,17 @@ export class ApiClient {
       throw new Error(`${response.status}: ${detail}`);
     }
     return response.blob();
+  }
+
+  getChatImageAttachment(
+    chatId: string,
+    attachmentId: string,
+    signal?: AbortSignal,
+  ): Promise<Blob> {
+    return this.blob(
+      `/chats/${encodeURIComponent(chatId)}/attachments/images/${encodeURIComponent(attachmentId)}`,
+      signal,
+    );
   }
 
   /**
@@ -690,6 +708,32 @@ export class ApiClient {
       throw new Error(`${response.status}: ${detail}`);
     }
     return new Uint8Array(await response.arrayBuffer());
+  }
+
+  /** One source's extracted text and catalog metadata. */
+  getChatDocument(chatId: string, documentId: string): Promise<DocumentDetail> {
+    return this.json(
+      `/chats/${encodeURIComponent(chatId)}/documents/${encodeURIComponent(documentId)}`,
+      { headers: this.headers() },
+    );
+  }
+
+  /**
+   * The original bytes of one source, exactly as they were imported.
+   *
+   * Bytes are addressed by document id and never by a host path, so a viewer
+   * can show the file the reader gave us without the renderer learning where
+   * on disk it came from.
+   */
+  getChatDocumentFile(
+    chatId: string,
+    documentId: string,
+    signal?: AbortSignal,
+  ): Promise<Blob> {
+    return this.blob(
+      `/chats/${encodeURIComponent(chatId)}/documents/${encodeURIComponent(documentId)}/file-content`,
+      signal,
+    );
   }
 
   patchChatTitle(chatId: string, title: string | null): Promise<Chat> {
