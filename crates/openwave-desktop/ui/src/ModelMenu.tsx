@@ -67,6 +67,23 @@ export function visibleModelGroups(
 }
 
 /**
+ * The model turning the Default switch off should land on: the first
+ * available row *as the menu renders them*, so the selection visibly lands
+ * at the top of the list rather than on whatever the catalog happened to
+ * order first. `null` when nothing can run.
+ */
+export function firstAvailableModel(
+  models: readonly ModelInfo[],
+  selectedKey: string | null,
+): ModelInfo | null {
+  return (
+    visibleModelGroups(models, selectedKey)
+      .flatMap((group) => group.models)
+      .find((model) => model.available) ?? null
+  );
+}
+
+/**
  * The row that reads as a mode rather than another model.
  *
  * A picker that offers "default" as one more entry never says what picking it
@@ -136,6 +153,7 @@ export function ModelMenu({
   const canonical = canonicalModelSelection(models, value);
   const isDefault = value === null;
   const resolvedDefault = modelForSelection(models, defaultKey);
+  const anyAvailable = models.some((model) => model.available);
 
   const label = isDefault ? "Default" : (known?.display_name ?? `${value} (unavailable)`);
   // The pill names the default's resolution too: the reader is hovering the
@@ -186,18 +204,31 @@ export function ModelMenu({
           <DefaultRow
             isDefault={isDefault}
             tooltip={defaultTooltip}
-            disabled={Boolean(disabled)}
+            // With nothing available, turning the default off has nowhere to
+            // land — freeze the switch instead of letting it snap back;
+            // flipping back *to* the default must always stay possible.
+            disabled={Boolean(disabled) || (isDefault && !anyAvailable)}
             onToggle={(useDefault) => {
               if (useDefault) {
                 void onChange(null);
                 return;
               }
               // Turning the default off has to land on something; the first
-              // model that can actually run is the only sane candidate.
-              const first = models.find((model) => model.available);
+              // model as the menu renders them, so the check appears at the
+              // top of the list rather than mid-scroll.
+              const first = firstAvailableModel(models, canonical);
               if (first) void onChange(first.key);
             }}
           />
+
+          {!anyAvailable && (
+            <div>
+              <DropdownMenuSeparator />
+              <p className="text-muted-foreground px-2 py-2 text-sm">
+                Configure a provider in Settings to choose a model.
+              </p>
+            </div>
+          )}
 
           {visibleModelGroups(models, canonical).map((group) => (
             <div key={group.provider}>
