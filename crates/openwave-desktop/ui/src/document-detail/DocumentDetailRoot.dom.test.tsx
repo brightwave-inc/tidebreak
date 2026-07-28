@@ -62,10 +62,12 @@ describe("DocumentDetailRoot", () => {
       "src",
       "blob:document",
     );
+    // Addressed by document id inside its conversation, never by a host path.
     expect(client.getChatDocumentFile).toHaveBeenCalledWith(
       "chat-1",
       "doc-1",
       expect.anything(),
+      expect.any(Function),
     );
 
     await user.click(screen.getByRole("button", { name: "Download" }));

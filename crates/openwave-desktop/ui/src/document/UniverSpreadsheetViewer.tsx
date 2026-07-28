@@ -20,6 +20,7 @@ import { resolveTheme } from "@/theme";
 import UniverFormulaWorker from "@/workers/univer-formula.worker?worker&inline";
 import { SpreadsheetShortcutsInfoBar } from "./SpreadsheetShortcutsInfo";
 import { parseCellAddress } from "./spreadsheet";
+import { FileDownloadProgressIndicator } from "@/components/document/FileDownloadProgress";
 import { useFileDownload } from "./useFileDownload";
 import { useUniverWorker } from "./useUniverWorker";
 
@@ -360,7 +361,11 @@ export default function UniverSpreadsheetViewer({
   if (fileDownload.isLoading) {
     return (
       <div className={cn("relative overflow-auto", className)} {...restProps}>
-        <ViewerMessage spinner>Loading spreadsheet…</ViewerMessage>
+        {fileDownload.progress ? (
+          <FileDownloadProgressIndicator progress={fileDownload.progress} />
+        ) : (
+          <ViewerMessage spinner>Loading spreadsheet…</ViewerMessage>
+        )}
       </div>
     );
   }

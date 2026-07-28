@@ -14,7 +14,8 @@ import { Document, Page, pdfjs } from "react-pdf";
 // security policy. Vite emits the file and rewrites this to its final URL.
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
-import type { ApiClient } from "@/api";
+import type { ApiClient, FileDownloadProgress } from "@/api";
+import { FileDownloadProgressIndicator } from "@/components/document/FileDownloadProgress";
 import { Button } from "@/components/ui/button";
 import { useRegisterPdfControls } from "@/document/PdfControlsContext";
 import { usePdfPageState } from "@/document/usePdfPageState";
@@ -77,6 +78,7 @@ export function PdfViewer({
   const [bytes, setBytes] = useState<Uint8Array | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [numPages, setNumPages] = useState(0);
+  const [progress, setProgress] = useState<FileDownloadProgress | null>(null);
 
   // Reset scale, error state and page count on document change.
   useEffect(() => {
@@ -88,13 +90,20 @@ export function PdfViewer({
   useEffect(() => {
     const abort = new AbortController();
     setBytes(null);
+    setProgress(null);
     void client
-      .getDocumentFileContent(documentId, abort.signal)
+      .getDocumentFileContent(documentId, abort.signal, (next) => {
+        if (!abort.signal.aborted) setProgress(next);
+      })
       .then((data) => {
-        if (!abort.signal.aborted) setBytes(data);
+        if (abort.signal.aborted) return;
+        setBytes(data);
+        setProgress(null);
       })
       .catch(() => {
-        if (!abort.signal.aborted) setLoadFailed(true);
+        if (abort.signal.aborted) return;
+        setLoadFailed(true);
+        setProgress(null);
       });
     return () => abort.abort();
   }, [client, documentId]);
@@ -304,10 +313,14 @@ export function PdfViewer({
             }
           }}
           noData={
-            <div className="flex items-center justify-center gap-2">
-              Fetching document…
-              <Loader2Icon className="size-4 animate-spin" />
-            </div>
+            progress ? (
+              <FileDownloadProgressIndicator progress={progress} />
+            ) : (
+              <div className="flex items-center justify-center gap-2">
+                Fetching document…
+                <Loader2Icon className="size-4 animate-spin" />
+              </div>
+            )
           }
           loading={
             <div className="flex justify-center">

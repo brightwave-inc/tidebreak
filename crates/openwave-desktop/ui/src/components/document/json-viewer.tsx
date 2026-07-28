@@ -23,6 +23,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import { FileDownloadProgressIndicator } from "./FileDownloadProgress";
 import { useFileDownload } from "./useFileDownload";
 import { cn } from "@/lib/utils";
 
@@ -204,7 +205,11 @@ export function JsonViewer({
         className={cn("flex items-center justify-center", className)}
         {...props}
       >
-        <Loader2Icon className="text-muted-foreground size-6 animate-spin" />
+        {fileDownload.progress ? (
+          <FileDownloadProgressIndicator progress={fileDownload.progress} />
+        ) : (
+          <Loader2Icon className="text-muted-foreground size-6 animate-spin" />
+        )}
       </div>
     );
   }

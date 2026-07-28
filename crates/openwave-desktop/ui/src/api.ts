@@ -416,6 +416,59 @@ export const RENDERER_FOLDER_ACCESS_REASON =
 const WS_HANDSHAKE = "openwave-v1";
 const WS_TOKEN_PREFIX = "openwave-token.";
 
+/** How far a source download has got, when its length is known. */
+export type FileDownloadProgress = {
+  loaded: number;
+  total: number;
+  /** `loaded` over `total`, as 0–100. */
+  percentage: number;
+};
+
+/**
+ * The size below which a transfer is not worth reporting on.
+ *
+ * A bar that appears and vanishes is worse than no bar, and a source under this
+ * arrives in a couple of chunks — most of them from a sidecar on this machine.
+ * Well under the 16 MB a source may be, so the files big enough to wait on do
+ * still report.
+ */
+const PROGRESS_MIN_BYTES = 2 * 1024 * 1024;
+
+/** Progress updates are worth at most one re-render per frame budget. */
+const PROGRESS_THROTTLE_MS = 100;
+
+/**
+ * Rate-limit progress callbacks, always letting the last one through.
+ *
+ * Without the trailing call the bar can stop short of the end: the final chunk
+ * usually lands inside the throttle window of the one before it.
+ */
+function throttle(
+  report: (progress: FileDownloadProgress) => void,
+): (progress: FileDownloadProgress) => void {
+  let last = 0;
+  return (progress) => {
+    const now = Date.now();
+    if (progress.loaded >= progress.total || now - last >= PROGRESS_THROTTLE_MS) {
+      last = now;
+      report(progress);
+    }
+  };
+}
+
+/** The server's own message for a failed response, or its status text. */
+async function throwIfNotOk(response: Response): Promise<void> {
+  if (response.ok) return;
+  let detail = response.statusText;
+  try {
+    const body = (await response.json()) as { message?: string };
+    if (body.message) detail = body.message;
+  } catch {
+    /* ignore */
+  }
+  throw new Error(`${response.status}: ${detail}`);
+}
+
 export class ApiClient {
   constructor(
     readonly baseUrl: string,
@@ -762,17 +815,65 @@ export class ApiClient {
       headers: this.headers(),
       signal,
     });
-    if (!response.ok) {
-      let detail = response.statusText;
-      try {
-        const body = (await response.json()) as { message?: string };
-        if (body.message) detail = body.message;
-      } catch {
-        /* ignore */
-      }
-      throw new Error(`${response.status}: ${detail}`);
-    }
+    await throwIfNotOk(response);
     return response.blob();
+  }
+
+  /**
+   * Bytes read as they arrive, reporting how much has landed.
+   *
+   * Reading the body as a stream rather than awaiting it whole is the only way
+   * to say anything about a transfer while it is still running. It costs an
+   * extra copy — the chunks are joined once at the end — which is why the
+   * callers that have nothing to report progress to still use {@link blob}.
+   *
+   * `onProgress` is only ever called when the response declares its length:
+   * without a total there is no fraction to report, and a byte count climbing
+   * toward an unknown end is not worth a progress bar.
+   */
+  private async streamBytes(
+    path: string,
+    signal?: AbortSignal,
+    onProgress?: (progress: FileDownloadProgress) => void,
+  ): Promise<{ bytes: Uint8Array; contentType: string | null }> {
+    const response = await fetch(`${this.baseUrl}${path}`, {
+      headers: this.headers(),
+      signal,
+    });
+    await throwIfNotOk(response);
+
+    const contentType = response.headers.get("Content-Type");
+    const declared = Number(response.headers.get("Content-Length"));
+    const total = Number.isSafeInteger(declared) && declared > 0 ? declared : 0;
+
+    // No reader to stream from (an old runtime, or a mocked response in a
+    // test): take the whole body and skip straight to the finished state.
+    if (!response.body) {
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      return { bytes, contentType };
+    }
+
+    const report =
+      onProgress && total > PROGRESS_MIN_BYTES ? throttle(onProgress) : null;
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let loaded = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      loaded += value.length;
+      report?.({ loaded, total, percentage: (loaded / total) * 100 });
+    }
+
+    const bytes = new Uint8Array(loaded);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return { bytes, contentType };
   }
 
   getChatImageAttachment(
@@ -796,22 +897,14 @@ export class ApiClient {
   async getDocumentFileContent(
     documentId: string,
     signal?: AbortSignal,
+    onProgress?: (progress: FileDownloadProgress) => void,
   ): Promise<Uint8Array> {
-    const response = await fetch(
-      `${this.baseUrl}/documents/${encodeURIComponent(documentId)}/file-content`,
-      { headers: this.headers(), signal },
+    const { bytes } = await this.streamBytes(
+      `/documents/${encodeURIComponent(documentId)}/file-content`,
+      signal,
+      onProgress,
     );
-    if (!response.ok) {
-      let detail = response.statusText;
-      try {
-        const body = (await response.json()) as { message?: string };
-        if (body.message) detail = body.message;
-      } catch {
-        /* ignore */
-      }
-      throw new Error(`${response.status}: ${detail}`);
-    }
-    return new Uint8Array(await response.arrayBuffer());
+    return bytes;
   }
 
   /** One source's extracted text and catalog metadata. */
@@ -829,15 +922,20 @@ export class ApiClient {
    * can show the file the reader gave us without the renderer learning where
    * on disk it came from.
    */
-  getChatDocumentFile(
+  async getChatDocumentFile(
     chatId: string,
     documentId: string,
     signal?: AbortSignal,
+    onProgress?: (progress: FileDownloadProgress) => void,
   ): Promise<Blob> {
-    return this.blob(
+    const { bytes, contentType } = await this.streamBytes(
       `/chats/${encodeURIComponent(chatId)}/documents/${encodeURIComponent(documentId)}/file-content`,
       signal,
+      onProgress,
     );
+    // The stored media type is what the viewers dispatch on, so it has to
+    // survive being reassembled from chunks.
+    return new Blob([bytes], contentType ? { type: contentType } : undefined);
   }
 
   patchChatTitle(chatId: string, title: string | null): Promise<Chat> {

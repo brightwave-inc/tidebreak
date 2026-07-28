@@ -10,6 +10,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ApiClient } from "@/api";
 import { cn } from "@/lib/utils";
 import { docxToUniver } from "./docx-to-univer";
+import { FileDownloadProgressIndicator } from "@/components/document/FileDownloadProgress";
 import { useFileDownload } from "./useFileDownload";
 
 // The MODERN flavor hardcodes page width to 595/0.75 ≈ 793px. To fill the
@@ -154,14 +155,18 @@ export default function UniverDocumentViewer({
       <style dangerouslySetInnerHTML={{ __html: UNIVER_VIEWER_STYLES }} />
       {isLoading && (
         <div className="bg-background/80 absolute inset-0 z-10 flex items-center justify-center">
-          <div className="text-muted-foreground flex flex-col items-center gap-2">
-            <Loader2Icon className="size-6 animate-spin" />
-            <p>
-              {fileDownload.isLoading
-                ? "Loading document…"
-                : "Reading document…"}
-            </p>
-          </div>
+          {fileDownload.progress ? (
+            <FileDownloadProgressIndicator progress={fileDownload.progress} />
+          ) : (
+            <div className="text-muted-foreground flex flex-col items-center gap-2">
+              <Loader2Icon className="size-6 animate-spin" />
+              <p>
+                {fileDownload.isLoading
+                  ? "Loading document…"
+                  : "Reading document…"}
+              </p>
+            </div>
+          )}
         </div>
       )}
       <div

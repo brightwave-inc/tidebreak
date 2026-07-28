@@ -3,6 +3,7 @@ import type { HTMLAttributes } from "react";
 import { useEffect, useState } from "react";
 
 import { cn } from "@/lib/utils";
+import { FileDownloadProgressIndicator } from "./FileDownloadProgress";
 import { useFileDownload } from "./useFileDownload";
 
 interface Props extends HTMLAttributes<HTMLDivElement> {
@@ -32,12 +33,16 @@ export function ImageViewer({ chatId, documentID, className, ...restProps }: Pro
   if (fileDownload.isLoading) {
     return (
       <div className={cn("relative overflow-auto", className)} {...restProps}>
-        <div className="flex h-64 items-center justify-center text-muted-foreground">
-          <div className="flex flex-col items-center gap-2">
-            <Loader2Icon className="size-6 animate-spin" />
-            <p>Loading image…</p>
+        {fileDownload.progress ? (
+          <FileDownloadProgressIndicator progress={fileDownload.progress} />
+        ) : (
+          <div className="flex h-64 items-center justify-center text-muted-foreground">
+            <div className="flex flex-col items-center gap-2">
+              <Loader2Icon className="size-6 animate-spin" />
+              <p>Loading image…</p>
+            </div>
           </div>
-        </div>
+        )}
       </div>
     );
   }
