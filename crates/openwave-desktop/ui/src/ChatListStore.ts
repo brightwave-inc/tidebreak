@@ -27,9 +27,22 @@ export type ChatListStore = {
   renamingChatId: string | null;
   renameChatDraft: string;
   savingTitle: boolean;
+  /**
+   * The chat whose name arrived from the server while this window watched, so
+   * the surfaces that show it can type it out once instead of blinking it in.
+   *
+   * A chat id rather than a boolean because the name belongs to one row, and it
+   * is cleared on leaving that conversation so returning to it later shows the
+   * settled name rather than replaying the animation.
+   */
+  derivedTitleChatId: string | null;
   setChats: (chats: Chat[]) => void;
   /** Replace a chat in the list by id. */
   replaceChat: (chat: Chat) => void;
+  /** Take a title the server derived, and mark it as newly arrived. */
+  applyDerivedTitle: (chatId: string, title: string) => void;
+  /** Forget the arrival, so the name is just the name from here on. */
+  clearDerivedTitle: () => void;
   prependChat: (chat: Chat) => void;
   setChatsError: (error: string | null) => void;
   setCreatingChat: (creating: boolean) => void;
@@ -50,11 +63,28 @@ export function createChatListStore() {
     renamingChatId: null,
     renameChatDraft: "",
     savingTitle: false,
+    derivedTitleChatId: null,
     setChats: (chats) => set({ chats, chatsLoaded: true }),
     replaceChat: (chat) =>
       set((state) => ({
         chats: state.chats.map((item) => (item.id === chat.id ? chat : item)),
       })),
+    applyDerivedTitle: (chatId, title) =>
+      set((state) => {
+        const known = state.chats.find((item) => item.id === chatId);
+        // A name this window already shows is not news. The socket restates the
+        // current name on every connect — that is what covers a title stored
+        // before the renderer was listening — so without this, reconnecting
+        // would replay the animation for a name that has been there all along.
+        if (!known || known.title === title) return {};
+        return {
+          chats: state.chats.map((item) =>
+            item.id === chatId ? { ...item, title } : item,
+          ),
+          derivedTitleChatId: chatId,
+        };
+      }),
+    clearDerivedTitle: () => set({ derivedTitleChatId: null }),
     prependChat: (chat) => set((state) => ({ chats: [chat, ...state.chats] })),
     setChatsError: (chatsError) => set({ chatsError }),
     setCreatingChat: (creatingChat) => set({ creatingChat }),

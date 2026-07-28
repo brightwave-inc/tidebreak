@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { SequencedEvent } from "./api";
+import type { ChatFrame, ChatMetadataFrame, SequencedEvent } from "./api";
 import {
   ChatSessionController,
   INITIAL_RECONNECT_DELAY_MS,
@@ -15,7 +15,7 @@ class FakeSocket {
   closed = false;
   constructor(
     public readonly after: number,
-    public readonly emit: (event: SequencedEvent) => void,
+    public readonly emit: (frame: ChatFrame) => void,
   ) {}
   close() {
     this.closed = true;
@@ -28,27 +28,30 @@ class FakeSocket {
 function harness() {
   const sockets: FakeSocket[] = [];
   const events: SequencedEvent[] = [];
+  const metadata: ChatMetadataFrame[] = [];
   const states: ChatConnectionState[] = [];
   let after = 0;
   let failNextOpen = false;
   const controller = new ChatSessionController({
-    openSocket: (cursor, onEvent) => {
+    openSocket: (cursor, onFrame) => {
       if (failNextOpen) {
         failNextOpen = false;
         throw new Error("boom");
       }
-      const socket = new FakeSocket(cursor, onEvent);
+      const socket = new FakeSocket(cursor, onFrame);
       sockets.push(socket);
       return socket as unknown as WebSocket;
     },
     getAfter: () => after,
     onEvent: (event) => events.push(event),
+    onMetadata: (notice) => metadata.push(notice),
     onConnectionState: (state) => states.push(state),
   });
   return {
     controller,
     sockets,
     events,
+    metadata,
     states,
     setAfter: (value: number) => (after = value),
     failNext: () => (failNextOpen = true),
@@ -195,5 +198,31 @@ describe("frame validation", () => {
       event: { type: "future_thing" },
     } as unknown as SequencedEvent);
     expect(h.events).toHaveLength(1);
+  });
+
+  /**
+   * A metadata frame has no sequence, so the sequenced-frame check would call it
+   * malformed and drop it. Routing it separately is what keeps the chat's name
+   * off the cursor the reducer resumes from.
+   */
+  it("routes a metadata frame away from the sequenced stream", () => {
+    const h = harness();
+    h.controller.start();
+    h.latest().emit({ metadata: "titled", title: "Q3 revenue reconciliation" });
+
+    expect(h.metadata).toEqual([
+      { metadata: "titled", title: "Q3 revenue reconciliation" },
+    ]);
+    expect(h.events).toEqual([]);
+  });
+
+  it("drops a metadata frame that carries no title", () => {
+    const h = harness();
+    h.controller.start();
+    h.latest().emit({ metadata: "titled" } as unknown as ChatFrame);
+    h.latest().emit({ metadata: "titled", title: 7 } as unknown as ChatFrame);
+
+    expect(h.metadata).toEqual([]);
+    expect(h.events).toEqual([]);
   });
 });

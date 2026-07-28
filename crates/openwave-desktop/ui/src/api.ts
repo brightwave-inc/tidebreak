@@ -41,6 +41,8 @@ import {
   type ChatToolActivitySnapshot,
   type ChatToolActivityStatus,
   type RendererAgentEvent,
+  type RendererChatFrame,
+  type RendererChatMetadata,
   type RendererRefusal,
   type RendererSequencedEvent,
   type RendererToolName,
@@ -70,6 +72,15 @@ export type {
  */
 export type SequencedEvent = RendererSequencedEvent;
 export type AgentEvent = RendererAgentEvent;
+
+/**
+ * Anything the chat socket can deliver: a journaled event at its sequence, or
+ * chat metadata that changed outside the journal.
+ */
+export type ChatFrame = RendererChatFrame;
+
+/** A metadata frame — today only a title the server derived for this chat. */
+export type ChatMetadataFrame = RendererChatMetadata;
 
 /** Generated from `ToolApprovalKind`. */
 export type RendererApprovalKind = ToolApprovalKind;
@@ -693,12 +704,6 @@ export class ApiClient {
     return this.json("/chats", { headers: this.headers() });
   }
 
-  getChat(chatId: string): Promise<Chat> {
-    return this.json(`/chats/${encodeURIComponent(chatId)}`, {
-      headers: this.headers(),
-    });
-  }
-
   async listPendingChatPrompts(): Promise<PendingChatPrompt[]> {
     const body = await this.json<unknown>("/chats/pending-prompts", {
       headers: this.headers(),
@@ -1032,13 +1037,13 @@ export class ApiClient {
   }
 
   /** Open the chat event stream; auth via Sec-WebSocket-Protocol. */
-  openEvents(chatId: string, after: number, onEvent: (e: SequencedEvent) => void): WebSocket {
+  openEvents(chatId: string, after: number, onFrame: (frame: ChatFrame) => void): WebSocket {
     const url = `${this.baseUrl.replace(/^http/, "ws")}/chats/${chatId}/events?after=${after}`;
     const protocols = [WS_HANDSHAKE, `${WS_TOKEN_PREFIX}${this.token}`];
     const socket = new WebSocket(url, protocols);
     socket.onmessage = (msg) => {
       try {
-        onEvent(JSON.parse(String(msg.data)) as SequencedEvent);
+        onFrame(JSON.parse(String(msg.data)) as ChatFrame);
       } catch (err) {
         console.error("bad event frame", err);
       }

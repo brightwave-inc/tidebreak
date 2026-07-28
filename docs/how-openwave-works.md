@@ -218,9 +218,16 @@ reads that chat's user messages only, and a constrained answer either names the
 conversation or reports that there is nothing to name yet. The name is written
 only while the title is still unset, so a rename by hand always wins and is also
 how a user opts out of being renamed for. A failed or skipped call leaves the
-chat untitled for the next turn to retry. Because the title is chat metadata
-rather than turn history, it is not journaled and does not reach the event
-socket; the client picks it up by re-reading the chat when a turn resolves.
+chat untitled for the next turn to retry.
+
+The name is chat metadata rather than turn history, so it is not journaled. It
+reaches an open client as a second kind of frame on the chat's event socket: a
+metadata frame, carrying no sequence, which nothing replays and which never
+advances the cursor a client resumes from. Because nothing is retained for a
+client that was not yet listening — and a new chat's first turn can name it
+before the renderer finishes connecting — opening a socket restates the name the
+chat currently has. A client that already shows that name does nothing with it;
+one that does not types it out.
 
 ### 3. The agent drives model and tool steps
 

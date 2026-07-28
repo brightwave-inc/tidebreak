@@ -1,6 +1,8 @@
 import { CircleAlert, Ellipsis, Pencil, Trash2 } from "lucide-react";
 
 import type { Chat } from "@/api";
+import { useChatListStore } from "@/ChatListStore";
+import { useTypewriterOnce } from "@/useTypewriterOnce";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -40,6 +42,13 @@ export function RecentChatRow({
   onDelete: () => void;
 }) {
   const title = chat.title?.trim() || "New chat";
+  // A name the server just derived is typed out, so the row visibly stops being
+  // "New chat" instead of silently having always been something else. A name that
+  // was already there when this mounted appears at once.
+  const justNamed = useChatListStore(
+    (state) => state.derivedTitleChatId === chat.id,
+  );
+  const displayTitle = useTypewriterOnce(title, justNamed);
 
   if (renaming) {
     return (
@@ -78,7 +87,7 @@ export function RecentChatRow({
         disabled={mutating}
         onClick={onOpen}
       >
-        {title}
+        {displayTitle}
       </button>
       {needsAttention && (
         <span

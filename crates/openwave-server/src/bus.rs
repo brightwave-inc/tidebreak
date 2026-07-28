@@ -18,10 +18,32 @@ use openwave_core::{ChatId, SequencedEvent};
 /// journal with an `after` cursor, so this only bounds memory, not correctness.
 const LIVE_BUFFER: usize = 256;
 
-/// Per-chat broadcast channels for live turn events.
+/// How many metadata notices a chat buffers for its subscribers.
+///
+/// Far smaller than the event buffer because these are rare — a conversation
+/// gets named once — and losing one is not a correctness problem: the value is
+/// already durable, so a client that misses the notice sees it in the chat's
+/// next read.
+const METADATA_BUFFER: usize = 8;
+
+/// Chat state that changed without being turn history.
+///
+/// These are deliberately not [`SequencedEvent`]s. The journal records what
+/// happened inside a turn, in an order a client resumes from; a conversation's
+/// name is neither — it is written beside a turn, sometimes after it ends, by
+/// work that holds no lease. Carrying it here keeps chat metadata out of the
+/// journal while still letting an open client see it the moment it changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatMetadataNotice {
+    /// The chat was given a name it did not have.
+    Titled { title: String },
+}
+
+/// Per-chat broadcast channels for live turn events and metadata notices.
 #[derive(Default)]
 pub struct EventBus {
     channels: Mutex<HashMap<ChatId, broadcast::Sender<SequencedEvent>>>,
+    metadata: Mutex<HashMap<ChatId, broadcast::Sender<ChatMetadataNotice>>>,
 }
 
 impl EventBus {
@@ -40,5 +62,28 @@ impl EventBus {
     /// delivered; a client pairs this with a journal replay to cover the past.
     pub fn subscribe(&self, chat: ChatId) -> broadcast::Receiver<SequencedEvent> {
         self.sender(chat).subscribe()
+    }
+
+    /// Subscribe to a chat's metadata notices.
+    pub fn subscribe_metadata(&self, chat: ChatId) -> broadcast::Receiver<ChatMetadataNotice> {
+        self.metadata_sender(chat).subscribe()
+    }
+
+    /// Announce a metadata change to whoever is watching this chat right now.
+    ///
+    /// Nothing is retained for a client that connects later, and no caller checks
+    /// the result: the durable write already happened, and this is only how an
+    /// open window learns about it without asking.
+    pub fn publish_metadata(&self, chat: ChatId, notice: ChatMetadataNotice) {
+        let _ = self.metadata_sender(chat).send(notice);
+    }
+
+    fn metadata_sender(&self, chat: ChatId) -> broadcast::Sender<ChatMetadataNotice> {
+        self.metadata
+            .lock()
+            .unwrap()
+            .entry(chat)
+            .or_insert_with(|| broadcast::channel(METADATA_BUFFER).0)
+            .clone()
     }
 }

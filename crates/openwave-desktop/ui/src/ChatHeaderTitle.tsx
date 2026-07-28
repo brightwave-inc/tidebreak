@@ -3,6 +3,7 @@ import { Ellipsis, Pencil, Trash2 } from "lucide-react";
 import type { Chat } from "./api";
 import { useApp } from "./AppContext";
 import { useChatListStore } from "./ChatListStore";
+import { useTypewriterOnce } from "./useTypewriterOnce";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -28,7 +29,13 @@ export function ChatHeaderTitle({ chat }: { chat: Chat }) {
   const savingTitle = useChatListStore((state) => state.savingTitle);
   const setRenameDraft = useChatListStore((state) => state.setRenameDraft);
   const deletingChatId = useChatListStore((state) => state.deletingChatId);
+  const justNamed = useChatListStore(
+    (state) => state.derivedTitleChatId === chat.id,
+  );
   const title = chat.title?.trim() || "New chat";
+  // Typed out only when the name arrived just now, in step with the sidebar row
+  // showing the same conversation.
+  const displayTitle = useTypewriterOnce(title, justNamed);
 
   if (renaming) {
     return (
@@ -64,7 +71,7 @@ export function ChatHeaderTitle({ chat }: { chat: Chat }) {
         title="Rename chat"
         onClick={() => startRename(chat)}
       >
-        {title}
+        {displayTitle}
       </button>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>

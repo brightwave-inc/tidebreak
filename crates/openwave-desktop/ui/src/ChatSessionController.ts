@@ -1,4 +1,4 @@
-import type { SequencedEvent } from "./api";
+import type { ChatFrame, ChatMetadataFrame, SequencedEvent } from "./api";
 
 export const INITIAL_RECONNECT_DELAY_MS = 250;
 export const MAX_RECONNECT_DELAY_MS = 5_000;
@@ -17,11 +17,18 @@ export type ChatSessionControllerOptions = {
    */
   openSocket: (
     after: number,
-    onEvent: (event: SequencedEvent) => void,
+    onFrame: (frame: ChatFrame) => void,
   ) => WebSocket;
   /** Read the resume cursor freshly on every (re)connect attempt. */
   getAfter: () => number;
   onEvent: (event: SequencedEvent) => void;
+  /**
+   * Chat metadata that arrived on the socket without being turn history.
+   *
+   * Separate from `onEvent` because it carries no sequence: it is not resumed,
+   * not deduplicated, and never advances the cursor the session reducer keeps.
+   */
+  onMetadata: (metadata: ChatMetadataFrame) => void;
   onConnectionState: (state: ChatConnectionState) => void;
 };
 
@@ -32,7 +39,7 @@ export type ChatSessionControllerOptions = {
  * stale sockets and timers (no generation counters, no borrowed refs).
  */
 /**
- * Minimal envelope check for an incoming frame: a finite seq and an event
+ * Minimal envelope check for a sequenced frame: a finite seq and an event
  * object with a string type. Event payloads are typed downstream; unknown
  * types are tolerated there, but a frame without this shape is undecodable.
  */
@@ -45,6 +52,21 @@ function isWellFormedFrame(frame: SequencedEvent): boolean {
     frame.event !== null &&
     typeof (frame.event as { type?: unknown }).type === "string"
   );
+}
+
+/**
+ * Whether a frame is a metadata notice rather than a journaled event.
+ *
+ * The two are told apart by the `metadata` discriminator, which is the only
+ * thing they have in common with each other: a metadata frame has no sequence,
+ * so any check based on one would classify it as malformed.
+ */
+function metadataFrame(frame: ChatFrame): ChatMetadataFrame | null {
+  if (typeof frame !== "object" || frame === null) return null;
+  const metadata = (frame as { metadata?: unknown }).metadata;
+  if (metadata !== "titled") return null;
+  const { title } = frame as { title?: unknown };
+  return typeof title === "string" ? { metadata, title } : null;
 }
 
 export class ChatSessionController {
@@ -87,8 +109,14 @@ export class ChatSessionController {
     if (this.disposed) return;
     let socket: WebSocket;
     try {
-      socket = this.options.openSocket(this.options.getAfter(), (event) => {
+      socket = this.options.openSocket(this.options.getAfter(), (frame) => {
         if (this.disposed || this.socket !== socket) return;
+        const metadata = metadataFrame(frame);
+        if (metadata) {
+          this.options.onMetadata(metadata);
+          return;
+        }
+        const event = frame as SequencedEvent;
         if (!isWellFormedFrame(event)) {
           console.error("dropping malformed event frame", event);
           return;

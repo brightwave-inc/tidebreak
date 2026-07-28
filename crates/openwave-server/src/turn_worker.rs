@@ -291,7 +291,11 @@ impl TurnWorker {
         assert!(!config.steer_poll.is_zero());
         assert!(config.heartbeat < config.lease);
         assert!(config.max_concurrency > 0);
-        let titler = Arc::new(ChatTitler::new(store.clone(), resolver.clone()));
+        let titler = Arc::new(ChatTitler::new(
+            store.clone(),
+            resolver.clone(),
+            events.clone(),
+        ));
         Self {
             store,
             resolver,
