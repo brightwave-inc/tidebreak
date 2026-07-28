@@ -5,7 +5,7 @@
 //! `server_info` command. The UI talks to that local API over HTTP and
 //! WebSocket (subprotocol auth for the browser upgrade).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -238,10 +238,11 @@ pub fn run() {
     });
 }
 
-/// Append a boot failure to `boot-failures.log` under the app-data dir, so a
+/// Append a server failure — a boot that never bound, or a later death of
+/// the accept loop — to `boot-failures.log` under the app-data dir, so a
 /// GUI-launched app leaves a diagnosable trace without a terminal relaunch.
 /// Best-effort: logging must never mask the failure being logged.
-fn log_boot_failure(data_dir: &std::path::Path, error: &str) {
+fn log_boot_failure(data_dir: &Path, error: &str) {
     use std::io::Write;
     let line = format!("{} {error}\n", chrono::Local::now().to_rfc3339());
     let _ = std::fs::OpenOptions::new()
@@ -317,6 +318,19 @@ async fn boot_server(
 #[cfg(test)]
 mod server_info_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn wait_server_info_returns_the_published_boot_error() {
+        let (tx, rx) = watch::channel(None);
+        let state = Arc::new(AppState { info_rx: rx });
+        tx.send(Some(Err("store error: migration file missing".to_string())))
+            .unwrap();
+        let error = wait_server_info(&state)
+            .await
+            .err()
+            .expect("the published boot error reaches the renderer");
+        assert_eq!(error, "store error: migration file missing");
+    }
 
     #[test]
     fn renderer_server_info_never_contains_native_credential() {
