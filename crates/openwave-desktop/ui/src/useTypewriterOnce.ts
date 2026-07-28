@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 
-const TYPE_INTERVAL_MS = 30;
+/** How long a whole label takes to type, however long the label is. */
+const TYPE_DURATION_MS = 360;
+
+/** One tick per frame; longer labels advance further per tick, not slower. */
+const TYPE_INTERVAL_MS = 16;
 
 /**
  * Types a label out once, the first time it appears while the phase is active,
@@ -10,7 +14,9 @@ const TYPE_INTERVAL_MS = 30;
  * calls settles and nudges the wording.
  */
 export function useTypewriterOnce(text: string, active: boolean): string {
-  const [displayed, setDisplayed] = useState(() => (active ? "" : text));
+  const [displayed, setDisplayed] = useState(() =>
+    active ? text.slice(0, 1) : text,
+  );
   const timerRef = useRef<number | null>(null);
   const mountedRef = useRef(false);
   const hasTypedRef = useRef(false);
@@ -35,10 +41,23 @@ export function useTypewriterOnce(text: string, active: boolean): string {
         setDisplayed(target);
         return;
       }
-      let i = 0;
-      setDisplayed("");
+      // Never a blank frame. The first character lands synchronously, because
+      // an empty row that is also pulsing does not read as text arriving — it
+      // reads as something that failed to load.
+      let i = 1;
+      setDisplayed(target.slice(0, 1));
+      if (target.length === 1) return;
+      // Paced by the whole label rather than per character, so a phase line
+      // that grows — "Checking connected folders and 1 other task" — takes the
+      // same moment to appear as a short one instead of crawling. A longer
+      // label advances further each tick; slowing the tick instead would just
+      // trade a crawl for a stutter.
+      const step = Math.max(
+        1,
+        Math.ceil(target.length / (TYPE_DURATION_MS / TYPE_INTERVAL_MS)),
+      );
       timerRef.current = window.setInterval(() => {
-        i += 1;
+        i += step;
         setDisplayed(target.slice(0, i));
         if (i >= target.length) stop();
       }, TYPE_INTERVAL_MS);
