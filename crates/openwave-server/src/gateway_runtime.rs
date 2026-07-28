@@ -578,16 +578,16 @@ mod tests {
         runtime.sign_out().await.unwrap();
         let status = runtime.status().await.unwrap();
         assert!(!status.signed_in);
-        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
-            .await
-            .unwrap();
-        assert!(policy.managed);
         assert_eq!(status.model_count, 0);
         assert!(status.account_hint.is_none());
         let config = providers::read_config(&*store, ProviderKind::ModelGateway)
             .await
             .unwrap();
         assert!(config.models.is_empty());
+        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+            .await
+            .unwrap();
+        assert!(policy.managed, "sign-out must not deprovision the profile");
     }
 
     #[tokio::test]

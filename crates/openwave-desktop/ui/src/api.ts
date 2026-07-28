@@ -22,6 +22,7 @@ import {
   type SignInProgress,
   type McpServerInfo as WireMcpServerInfo,
   type ManagedPolicy as WireManagedPolicy,
+  type ManagedPolicySource as WireManagedPolicySource,
   type McpServersInfo as WireMcpServersInfo,
   type ModelInfo as WireModelInfo,
   type ModelRole as WireModelRole,
@@ -162,6 +163,7 @@ export type McpServersInfo = WireMcpServersInfo;
 
 /** The resolved managed-mode policy; read-only for the renderer. */
 export type ManagedPolicy = WireManagedPolicy;
+export type ManagedPolicySource = WireManagedPolicySource;
 
 export type Chat = WireChat;
 
