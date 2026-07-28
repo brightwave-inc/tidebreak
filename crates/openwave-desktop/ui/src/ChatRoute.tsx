@@ -26,7 +26,8 @@ import {
 } from "./ChatTranscriptPresentation";
 import { useFirstMessage } from "./FirstMessage";
 import { ChatView } from "./ChatView";
-import { DeliverablesView } from "./DeliverablesView";
+import { OutputDetailRoot } from "./outputs/OutputDetailRoot";
+import { OutputsView } from "./outputs/OutputsView";
 import { DocumentDetailRoot } from "./document-detail/DocumentDetailRoot";
 import { SourcesView } from "./sources/SourcesView";
 import { FoldersView } from "./FoldersView";
@@ -426,9 +427,20 @@ export function ChatRoute({ chatId }: { chatId: string }) {
           </PanelFrame>
         );
       case "outputs":
-        return (
+        // An output id turns the list into the reader for that one output, the
+        // same way a document id does for sources.
+        return panel.outputId ? (
+          <OutputDetailRoot
+            chatId={chatId}
+            outputId={panel.outputId}
+            position={side}
+          />
+        ) : (
           <PanelFrame position={side} spaceBetween>
-            <DeliverablesView chatId={chatId} initialOutputId={panel.outputId} />
+            <OutputsView
+              chatId={chatId}
+              onOpen={(outputId) => openPanel({ type: "outputs", outputId })}
+            />
           </PanelFrame>
         );
       case "folders":

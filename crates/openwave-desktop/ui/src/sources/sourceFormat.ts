@@ -1,4 +1,5 @@
 import type { LibraryDocument } from "@/documents";
+import { formatBytes } from "@/lib/formatBytes";
 
 /**
  * How a source is named, typed, sized and dated for the catalog.
@@ -46,13 +47,4 @@ export function statusLabel(document: LibraryDocument): string {
   }
 }
 
-export function formatSize(value: number | null): string {
-  if (value === null) return "—";
-  if (value < 1_024) return `${value} B`;
-  if (value < 1_048_576) return `${formatNumber(value / 1_024)} KB`;
-  return `${formatNumber(value / 1_048_576)} MB`;
-}
-
-function formatNumber(value: number): string {
-  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(value);
-}
+export { formatBytes as formatSize };
