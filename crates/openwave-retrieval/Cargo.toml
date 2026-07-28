@@ -67,7 +67,7 @@ reqwest = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 # The LanceDB vector backend (vec-lance feature only). arrow-array/-schema are
 # pinned to the exact major LanceDB uses (58) so RecordBatch types are compatible.
-lancedb = { version = "=0.31.0", optional = true }
+lancedb = { version = "=0.33.0", optional = true }
 arrow-array = { version = "=58.3.0", optional = true }
 arrow-schema = { version = "=58.4.0", optional = true }
 arrow-select = { version = "=58.3.0", optional = true }
