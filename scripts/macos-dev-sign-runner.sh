@@ -11,6 +11,13 @@
 # stable identity gives the binary a stable designated requirement, so one
 # approval per binary persists across rebuilds.
 #
+# Every binary is signed with the same fixed identifier (`openwave-dev`)
+# rather than codesign's default (the file name). The keychain ACL matches on
+# the designated requirement — identifier + certificate — so with a shared
+# identifier one "Always Allow" covers every dev binary, including test
+# executables, whose hashed file names would otherwise produce a fresh
+# designated requirement (and a fresh prompt) on every rebuild.
+#
 # Identity, in order of preference:
 #   1. $OPENWAVE_DEV_SIGNING_IDENTITY (set to opt out with an empty value)
 #   2. an "openwave-dev" self-signed certificate, if one exists
@@ -38,12 +45,14 @@ find_identity() {
 
 identity="${OPENWAVE_DEV_SIGNING_IDENTITY-$(find_identity)}"
 
+identifier="openwave-dev"
+
 if [[ -n "$identity" ]]; then
   # Unchanged binaries keep their signature from the previous run; re-signing
-  # only when the identity differs leaves them untouched.
+  # only when the identity or identifier differs leaves them untouched.
   current="$(codesign --display --verbose=2 "$bin" 2>&1 || true)"
-  if [[ "$current" != *"Authority=$identity"* ]]; then
-    codesign --force --sign "$identity" "$bin" 2>/dev/null ||
+  if [[ "$current" != *"Authority=$identity"* || "$current" != *"Identifier=$identifier"* ]]; then
+    codesign --force --sign "$identity" --identifier "$identifier" "$bin" 2>/dev/null ||
       echo "warning: codesign with '$identity' failed; running unsigned" >&2
   fi
 fi
