@@ -164,6 +164,11 @@ async fn token(
             Json(gateway.mint("control")).into_response()
         }
         Some("refresh_token") => {
+            // Attribution rides the refresh grant: every minted access token
+            // must carry the client name, or usage reads as `generic`.
+            if form.get("client_name").map(String::as_str) != Some("openwave") {
+                return invalid_grant();
+            }
             let Some(refresh) = form.get("refresh_token") else {
                 return StatusCode::BAD_REQUEST.into_response();
             };

@@ -63,8 +63,11 @@ pub struct GatewayAuthConfig {
 impl GatewayAuthConfig {
     /// The registered `openwave` public client: the gateway's client registry
     /// names it on the consent page and attributes its sessions to OpenWave.
+    /// The name is also declared on every refresh, because usage attribution
+    /// reads the access token's client name — omitting it there would leave
+    /// inference calls attributed `generic` despite the registered client id.
     pub fn new(base_url: &str) -> Result<Self> {
-        Self::with_client(base_url, "openwave", None)
+        Self::with_client(base_url, "openwave", Some("openwave".to_string()))
     }
 
     fn with_client(base_url: &str, client_id: &str, client_name: Option<String>) -> Result<Self> {
