@@ -5,7 +5,7 @@
 //! `server_info` command. The UI talks to that local API over HTTP and
 //! WebSocket (subprotocol auth for the browser upgrade).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -50,9 +50,17 @@ impl NativeServerInfo {
     }
 }
 
+/// What booting the embedded server produced: the bound server info, or the
+/// boot error. Delivered over the same channel the success case uses so the
+/// renderer can display the actual cause — a GUI launch has no visible
+/// stderr, and every failure (store error, keychain, instance lock) used to
+/// collapse into a bare "server failed to start".
+type BootOutcome = Result<NativeServerInfo, String>;
+
 struct AppState {
-    /// Filled once the accept loop is bound; awaited by `server_info`.
-    info_rx: watch::Receiver<Option<NativeServerInfo>>,
+    /// Filled once the accept loop is bound or boot has failed; awaited by
+    /// `server_info`.
+    info_rx: watch::Receiver<Option<BootOutcome>>,
 }
 
 /// Return the bound server address and token (waits until bind completes).
@@ -76,8 +84,8 @@ fn request_user_attention(window: tauri::WebviewWindow) {
 async fn wait_server_info(state: &Arc<AppState>) -> Result<NativeServerInfo, String> {
     let mut rx = state.info_rx.clone();
     loop {
-        if let Some(info) = rx.borrow().clone() {
-            return Ok(info);
+        if let Some(outcome) = rx.borrow().clone() {
+            return outcome;
         }
         rx.changed()
             .await
@@ -207,8 +215,12 @@ pub fn run() {
             app.manage(host_access);
 
             tauri::async_runtime::spawn(async move {
-                if let Err(error) = boot_server(handle, info_tx, data).await {
+                if let Err(error) = boot_server(handle, &info_tx, data.clone()).await {
+                    // stderr for terminal launches, the app-data log for
+                    // GUI launches, and the watch channel for the window.
                     eprintln!("openwave-desktop: {error}");
+                    log_boot_failure(&data, &error);
+                    let _ = info_tx.send(Some(Err(error)));
                 }
             });
             Ok(())
@@ -226,10 +238,24 @@ pub fn run() {
     });
 }
 
+/// Append a server failure — a boot that never bound, or a later death of
+/// the accept loop — to `boot-failures.log` under the app-data dir, so a
+/// GUI-launched app leaves a diagnosable trace without a terminal relaunch.
+/// Best-effort: logging must never mask the failure being logged.
+fn log_boot_failure(data_dir: &Path, error: &str) {
+    use std::io::Write;
+    let line = format!("{} {error}\n", chrono::Local::now().to_rfc3339());
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(data_dir.join("boot-failures.log"))
+        .and_then(|mut file| file.write_all(line.as_bytes()));
+}
+
 /// Bind the local API and park the accept loop for the life of the process.
 async fn boot_server(
     app: tauri::AppHandle,
-    info_tx: watch::Sender<Option<NativeServerInfo>>,
+    info_tx: &watch::Sender<Option<BootOutcome>>,
     data_dir: PathBuf,
 ) -> Result<(), String> {
     let client_executor_id = app.state::<host_access::HostAccess>().client_executor_id();
@@ -258,7 +284,7 @@ async fn boot_server(
         token,
         executor_token,
     };
-    let _ = info_tx.send(Some(info));
+    let _ = info_tx.send(Some(Ok(info)));
     let recovery_app = app.clone();
     tauri::async_runtime::spawn(async move {
         client_execution::recover_folder_access_receipts(recovery_app).await;
@@ -292,6 +318,19 @@ async fn boot_server(
 #[cfg(test)]
 mod server_info_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn wait_server_info_returns_the_published_boot_error() {
+        let (tx, rx) = watch::channel(None);
+        let state = Arc::new(AppState { info_rx: rx });
+        tx.send(Some(Err("store error: migration file missing".to_string())))
+            .unwrap();
+        let error = wait_server_info(&state)
+            .await
+            .err()
+            .expect("the published boot error reaches the renderer");
+        assert_eq!(error, "store error: migration file missing");
+    }
 
     #[test]
     fn renderer_server_info_never_contains_native_credential() {
