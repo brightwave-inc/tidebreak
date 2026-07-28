@@ -626,6 +626,36 @@ async fn resolve_tool_call(
         active.approval_decided_at = Set(Some(resolved_at.max(requested_at)));
     }
     let resolved = active.update(&transaction).await.map_err(store_err)?;
+    // A client call is executed and resolved outside the agent loop, so nothing
+    // else ever announces that it finished: the loop reads the result straight
+    // into the model transcript on resume and never revisits the call, and the
+    // only event this transition journaled was a cancellation. The renderer
+    // showed the row running from `ToolCallStarted` until the chat was reopened
+    // and the terminal transcript finally settled it.
+    //
+    // Journaled here, in the transaction that makes the row terminal, so the
+    // event cannot disagree with the row it describes. An exact retry returns
+    // above as `Existing` without reaching this, so the call announces itself
+    // once.
+    // Journaled chat-scoped rather than against the turn: a non-terminal
+    // turn-scoped event has to name the attempt lease that produced it, and a
+    // client call resolves precisely while the turn is parked with no lease.
+    // The attempt that started the call is over and the one that resumes is a
+    // different attempt, so there is no attempt this belongs to. Readers stream
+    // by chat and sequence, which is all this event needs.
+    if authority.is_client() {
+        let event = client_completion_event(&resolved, resolution, preview);
+        super::conversation::append_event_on(
+            &transaction,
+            ChatId(resolved.chat_id),
+            None,
+            None,
+            None,
+            None,
+            &event,
+        )
+        .await?;
+    }
     let transition = if authority.is_client() {
         super::turn::advance_turn_after_client_resolution_on(&transaction, &resolved, resolved_at)
             .await?
@@ -638,6 +668,36 @@ async fn resolve_tool_call(
         turn: transition.as_ref().map(|item| item.turn.clone()),
         terminal_event: transition.and_then(|item| item.terminal_event),
     })
+}
+
+/// The completion a client-executed call announces for itself.
+///
+/// Rebuilt from the row rather than carried in from the caller so it can only
+/// ever describe what was actually committed. The action is projected from the
+/// call's own stored arguments, the same way history rebuilds it, so a client
+/// card names its action identically live and after a reload.
+fn client_completion_event(
+    resolved: &entities::tool_call::Model,
+    resolution: &ToolCallResolution,
+    preview: Option<&crate::ToolResultPreview>,
+) -> crate::AgentEvent {
+    crate::AgentEvent::ToolCallCompleted {
+        call_id: CallId(resolved.id),
+        output: crate::ToolOutput {
+            content: resolution.result().to_owned(),
+            data: None,
+            // The renderer reads only this from the output, and it is what
+            // separates a finished call from a failed one.
+            is_error: resolution.status() != ToolCallStatus::Completed,
+            // Already recorded on the row; re-deriving one here would be a
+            // guess about a category the resolution never named.
+            error_category: None,
+            ui_view: None,
+            private_evidence: Vec::new(),
+        },
+        action: crate::ToolActionPreview::build(&resolved.name, &resolved.arguments),
+        result: preview.cloned(),
+    }
 }
 
 fn journaled_call_outcome(outcome: ResolveToolCallOutcome) -> JournaledClientToolCallOutcome {
