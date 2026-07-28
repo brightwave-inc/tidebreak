@@ -10984,56 +10984,66 @@ async fn resolver_builds_a_router_from_enabled_providers() {
 }
 
 #[tokio::test]
-async fn resolver_includes_openai_when_enabled() {
-    let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
-            "sqlite://{}/test.db?mode=rwc",
-            dir.path().display()
-        ))
+async fn resolver_includes_configured_curated_api_key_providers() {
+    for (kind, model, route_kind) in [
+        (
+            providers::ProviderKind::Openai,
+            "gpt-5.6-sol",
+            openwave_router::RouteKind::Openai,
+        ),
+        (
+            providers::ProviderKind::Gemini,
+            "gemini-3.6-flash",
+            openwave_router::RouteKind::Gemini,
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}/test.db?mode=rwc",
+                dir.path().display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
+        providers::write_credential(
+            &*secrets,
+            kind,
+            &providers::ProviderCredential::api_key("test-api-key"),
+        )
         .await
-        .unwrap(),
-    );
-    let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
-    providers::write_credential(
-        &*secrets,
-        providers::ProviderKind::Openai,
-        &providers::ProviderCredential::api_key("sk-openai"),
-    )
-    .await
-    .unwrap();
-    providers::write_config(
-        &*store,
-        providers::ProviderKind::Openai,
-        &providers::ProviderConfig {
-            enabled: true,
-            base_url: None,
-            models: Vec::new(),
-        },
-    )
-    .await
-    .unwrap();
+        .unwrap();
+        providers::write_config(
+            &*store,
+            kind,
+            &providers::ProviderConfig {
+                enabled: true,
+                base_url: None,
+                models: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
 
-    let routes = providers::collect_routes(&*store, &*secrets, None).await;
-    assert_eq!(routes.len(), 1);
-    assert_eq!(routes[0].kind, openwave_router::RouteKind::Openai);
+        let routes = providers::collect_routes(&*store, &*secrets, None).await;
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].kind, route_kind);
 
-    let resolver = resolver::KeyedResolver::new(
-        store.clone(),
-        secrets.clone(),
-        crate::gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone()),
-    );
-    let provider = resolver.resolve().await;
-    assert_eq!(provider.id().0, "router");
+        let resolver = resolver::KeyedResolver::new(
+            store.clone(),
+            secrets.clone(),
+            crate::gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone()),
+        );
+        let provider = resolver.resolve().await;
+        assert_eq!(provider.id().0, "router");
 
-    // A curated openai model is selectable; an anthropic model is not
-    // (no anthropic route, no openai_compatible fallback).
-    let router = openwave_router::Router::build(routes);
-    assert_eq!(
-        router.select("gpt-5.6-sol"),
-        Some(openwave_router::RouteKind::Openai)
-    );
-    assert_eq!(router.select("claude-opus-4-8"), None);
+        // Curated models stay on their explicitly configured native route;
+        // the absence of a compatibility fallback must not cross providers.
+        let router = openwave_router::Router::build(routes);
+        assert_eq!(router.select(model), Some(route_kind));
+        assert_eq!(router.select("claude-opus-4-8"), None);
+    }
 }
 
 #[tokio::test]

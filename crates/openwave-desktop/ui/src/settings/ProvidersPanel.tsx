@@ -8,6 +8,7 @@ import type {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SettingsError, SettingsPanel, SettingsSection } from "./primitives";
+import { providerLabel } from "../ModelSelection";
 
 export function ProvidersPanel({
   providers,
@@ -98,7 +99,7 @@ function ProviderRow({
   }
 
   return (
-    <SettingsSection title={info.kind.replaceAll("_", " ")}>
+    <SettingsSection title={providerLabel(info.kind)}>
       <div className="flex items-center justify-between gap-3">
         <label className="flex items-center gap-2 text-sm">
           <input
