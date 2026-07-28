@@ -39,6 +39,8 @@ mod resolver;
 mod routes;
 mod sandbox_agent_run_worker;
 mod sandbox_web_search_worker;
+/// Rewriting stored credentials so the running binary owns their keychain items.
+pub mod secret_rehome;
 mod source_tools;
 mod state;
 mod turn_worker;
@@ -579,6 +581,22 @@ pub async fn bind_configured_with_desktop_executor(
     bind_inner(config, Some(client_executor_id), mcp_servers).await
 }
 
+/// The secret store the configured profile keeps its credentials in.
+fn secret_provider(config: &Config) -> Arc<dyn SecretProvider> {
+    Arc::new(match &config.keychain_service {
+        Some(service) => KeychainSecretProvider::with_service(service),
+        None => KeychainSecretProvider::new(),
+    })
+}
+
+/// Re-home the configured profile's credentials — see [`secret_rehome`]. Does
+/// not open the data directory, so it runs without the daemon's instance lock.
+pub async fn rehome_configured_secrets(
+    config: &Config,
+) -> Vec<(String, secret_rehome::RehomeOutcome)> {
+    secret_rehome::rehome_secrets(&*secret_provider(config)).await
+}
+
 async fn bind_inner(
     config: Config,
     client_executor_id: Option<Uuid>,
@@ -589,10 +607,7 @@ async fn bind_inner(
     // directory and its worker set.
     let instance_lock = InstanceLock::acquire(&config)?;
     let store = connect_store(&config).await?;
-    let secrets: Arc<dyn SecretProvider> = Arc::new(match &config.keychain_service {
-        Some(service) => KeychainSecretProvider::with_service(service),
-        None => KeychainSecretProvider::new(),
-    });
+    let secrets = secret_provider(&config);
     // Pre-providers installs may only have an env/legacy key — enable Anthropic
     // so `KeyedResolver`'s enabled check doesn't fail-closed on upgrade.
     providers::migrate_legacy_anthropic(&*store, &*secrets).await?;
