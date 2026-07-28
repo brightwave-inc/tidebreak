@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { Chat } from "./api";
-import { matchesChatSearch } from "./ChatsPanel";
+import { matchesChatSearch } from "./ChatExplorer";
 
 function chat(title: string | null): Chat {
   return { id: "chat-1", title } as unknown as Chat;

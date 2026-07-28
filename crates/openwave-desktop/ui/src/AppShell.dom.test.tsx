@@ -118,6 +118,7 @@ async function mountApp({ at }: { at?: string } = {}) {
 }
 
 beforeEach(() => {
+  window.localStorage.clear();
   window.location.hash = "";
   listChats.mockClear();
   listChats.mockResolvedValue(chats);
@@ -133,7 +134,7 @@ beforeEach(() => {
   usePendingPrompts.setState({ chatId: null, userQuestions: [], folderAccess: [] });
   // The stores outlive a test file's renders, so a chat list left behind would
   // decide the next test's routing before its own boot ever ran.
-  useChatListStore.setState({ chats: [], chatsLoaded: false, selected: null });
+  useChatListStore.setState({ chats: [], chatsLoaded: false });
   useUiStore.setState({ sidebarCollapsed: false });
 });
 afterEach(cleanup);
@@ -162,7 +163,11 @@ describe("app shell", () => {
     ]);
     await mountApp({ at: "/c/chat-1" });
 
-    expect(await screen.findByLabelText("New chat needs attention")).toBeInTheDocument();
+    // The conversation's own rail carries no chat list, so the way back to the
+    // others is what reports that one of them is waiting.
+    expect(
+      await screen.findByLabelText("Another chat needs attention"),
+    ).toBeInTheDocument();
     expect(requestUserAttention).toHaveBeenCalledOnce();
   });
 
@@ -178,7 +183,12 @@ describe("app shell", () => {
     const { router } = await mountApp();
     await screen.findByText("What are we working on?");
 
-    await user.type(screen.getByRole("textbox"), "summarise the filing");
+    // Home also carries the chat explorer's search field, so the composer has
+    // to be picked out by name rather than by being the only input.
+    await user.type(
+      screen.getByRole("textbox", { name: "Message" }),
+      "summarise the filing",
+    );
     await user.click(screen.getByRole("button", { name: "Send message" }));
 
     await waitFor(() => expect(createChat).toHaveBeenCalledOnce());
@@ -244,12 +254,15 @@ describe("app shell", () => {
     expect(await screen.findByTestId("outputs")).toBeInTheDocument();
   });
 
-  it("finds a conversation through the chats panel's search", async () => {
+  it("leaves a conversation to find another one, and searches for it there", async () => {
     const user = userEvent.setup();
-    await mountApp({ at: "/c/chat-1" });
+    const { router } = await mountApp({ at: "/c/chat-1" });
     await screen.findByTestId("transcript");
 
+    // Finding a chat is something done between conversations, so the way out
+    // of one is what leads to it.
     await user.click(screen.getByRole("button", { name: "All chats" }));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/"));
     const search = await screen.findByRole("textbox", { name: "Search chats" });
 
     await user.type(search, "roadmap");
@@ -258,6 +271,39 @@ describe("app shell", () => {
     await user.clear(search);
     await user.type(search, "nothing matches this");
     expect(await screen.findByText("No matches")).toBeInTheDocument();
+  });
+
+  it("gives each route only the controls that route can act on", async () => {
+    const conversationOnly = ["Sources", "Outputs", "Folders"];
+
+    await mountApp();
+    await screen.findByText("What are we working on?");
+    // Not disabled — absent. Home has no conversation for these to describe,
+    // and offering them here is what let the rail navigate into whichever
+    // chat happened to have been open last.
+    for (const label of conversationOnly) {
+      expect(screen.queryByRole("button", { name: label })).not.toBeInTheDocument();
+    }
+    cleanup();
+
+    await mountApp({ at: "/c/chat-1" });
+    await screen.findByTestId("transcript");
+    for (const label of conversationOnly) {
+      expect(screen.getByRole("button", { name: label })).toBeEnabled();
+    }
+    // And the conversation's rail is not a place to browse the others from.
+    expect(screen.queryByLabelText("Chats")).not.toBeInTheDocument();
+  });
+
+  it("remembers the collapsed rail across a restart", async () => {
+    const user = userEvent.setup();
+    await mountApp();
+    await screen.findByText("What are we working on?");
+
+    await user.click(screen.getByRole("button", { name: "Collapse sidebar" }));
+
+    expect(useUiStore.getState().sidebarCollapsed).toBe(true);
+    expect(window.localStorage.getItem("openwave.sidebar-collapsed")).toBe("true");
   });
 
   it("keeps watching for the agent's questions while settings is open", async () => {
@@ -274,11 +320,10 @@ describe("app shell", () => {
     expect(screen.queryByTestId("transcript")).not.toBeInTheDocument();
 
     // What must not stop is being told the agent has parked a turn on a
-    // question. The watcher belongs to the shell, so it is still running.
+    // question. The summary watcher belongs to the shell, so it is still
+    // running with no conversation open. Prompt detail is not fetched here —
+    // settings has no chat, and the one being returned to rehydrates its own.
     const readsBefore = listPendingChatPrompts.mock.calls.length;
-    listPendingUserQuestions.mockResolvedValue([
-      { callId: "call-1", turnId: "turn-1", askedAt: "2026-07-27T00:00:00Z", questions: [] },
-    ]);
     listPendingChatPrompts.mockResolvedValue([
       { chatId: "chat-1", questionCallIds: ["call-1"], folderAccessCallIds: [] },
     ]);
@@ -286,9 +331,6 @@ describe("app shell", () => {
 
     await waitFor(() =>
       expect(listPendingChatPrompts.mock.calls.length).toBeGreaterThan(readsBefore),
-    );
-    await waitFor(() =>
-      expect(usePendingPrompts.getState().userQuestions).toHaveLength(1),
     );
     // And the dock still gets told, which is the whole point.
     await waitFor(() => expect(requestUserAttention).toHaveBeenCalled());

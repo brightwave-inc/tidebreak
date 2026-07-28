@@ -6,7 +6,6 @@
  */
 export type PanelContent =
   | { type: "chat" }
-  | { type: "chats" }
   | { type: "sources"; documentId?: string }
   | { type: "outputs"; filename?: string }
   | { type: "folders" };
@@ -42,7 +41,6 @@ export function areSamePanelType(a: PanelContent, b: PanelContent): boolean {
 export function isContentPanel(panel: PanelContent): boolean {
   switch (panel.type) {
     case "chat":
-    case "chats":
     case "sources":
     case "outputs":
     case "folders":

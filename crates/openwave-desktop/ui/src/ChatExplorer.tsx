@@ -5,8 +5,6 @@ import { CircleAlert, MessageCircleMore, Search } from "lucide-react";
 import type { Chat } from "./api";
 import { useChatAttention } from "./ChatAttention";
 import { useChatListStore } from "./ChatListStore";
-import { PanelSecondaryHeader } from "./components/PanelHeader";
-import { Button } from "./components/ui/button";
 import {
   Empty,
   EmptyDescription,
@@ -25,22 +23,19 @@ export function matchesChatSearch(chat: Chat, query: string): boolean {
 }
 
 /**
- * Every conversation, searchable. The sidebar shows only the most recent few,
- * so this is where a chat that has scrolled off it is found again.
+ * Every conversation, searchable.
+ *
+ * This lives on home rather than beside a conversation. Finding a chat is
+ * something you do between conversations, not inside one — offering it from
+ * within a chat is what made the rail there a general-purpose list that
+ * happened to be mounted next to a specific conversation.
  */
-export function ChatsPanel({
-  activeChatId,
-  onNewChat,
-}: {
-  activeChatId: string | null;
-  onNewChat: () => void;
-}) {
+export function ChatExplorer() {
   const navigate = useNavigate();
   const chats = useChatListStore((state) => state.chats);
   const chatIdsWithPendingPrompts = useChatAttention(
     (state) => state.chatIdsWithPendingPrompts,
   );
-  const creatingChat = useChatListStore((state) => state.creatingChat);
   const deletingChatId = useChatListStore((state) => state.deletingChatId);
   const [query, setQuery] = useState("");
 
@@ -50,18 +45,8 @@ export function ChatsPanel({
   );
 
   return (
-    <>
-      <PanelSecondaryHeader className="px-4">
-        <h1 className="text-lg font-medium">Chats</h1>
-        <span className="text-sm text-muted-foreground">{chats.length}</span>
-        <span className="grow" />
-        <Button size="sm" onClick={onNewChat} disabled={creatingChat}>
-          New chat
-        </Button>
-      </PanelSecondaryHeader>
-
-      <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
-        <div className="relative">
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
+      <div className="relative">
           <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input
             className="pl-8"
@@ -73,7 +58,9 @@ export function ChatsPanel({
         </div>
 
         {matches.length === 0 ? (
-          <Empty className="border">
+          // `flex-1` by default, which on a page this tall reads as a huge
+          // empty box rather than a note.
+          <Empty className="flex-none border">
             <EmptyHeader>
               <EmptyMedia variant="icon">
                 <MessageCircleMore />
@@ -90,19 +77,15 @@ export function ChatsPanel({
           <ul className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto">
             {matches.map((chat) => {
               const title = chat.title?.trim() || "New chat";
-              const isActive = chat.id === activeChatId;
               return (
                 <li key={chat.id}>
                   <button
                     type="button"
-                    aria-current={isActive ? "page" : undefined}
                     disabled={deletingChatId !== null}
                     onClick={() =>
                       void navigate({ to: "/c/$chatId", params: { chatId: chat.id } })
                     }
-                    className={`flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-left text-sm transition-colors hover:bg-muted disabled:pointer-events-none disabled:opacity-50 ${
-                      isActive ? "bg-muted" : ""
-                    }`}
+                    className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-left text-sm transition-colors hover:bg-muted disabled:pointer-events-none disabled:opacity-50"
                   >
                     <MessageCircleMore className="size-4 shrink-0 text-muted-foreground" />
                     <span className="min-w-0 truncate">{title}</span>
@@ -121,7 +104,6 @@ export function ChatsPanel({
             })}
           </ul>
         )}
-      </div>
-    </>
+    </div>
   );
 }

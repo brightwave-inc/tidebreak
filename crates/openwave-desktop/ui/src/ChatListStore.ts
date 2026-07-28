@@ -3,9 +3,15 @@ import type { Chat } from "./api";
 
 /**
  * The chat list and its mutation progress. State only — the async mutations
- * (create/delete/rename/select orchestration with the confirm dialog, fences,
- * and session lifecycle) stay with the caller, which reads and writes here so
- * the sidebar can subscribe directly instead of receiving drilled props.
+ * (create/delete/rename orchestration with the confirm dialog, fences, and
+ * session lifecycle) stay with the caller, which reads and writes here so the
+ * rails can subscribe directly instead of receiving drilled props.
+ *
+ * Which conversation is open is deliberately absent: that lives in the URL and
+ * is read with {@link useActiveChatId}. A second copy here would be a copy that
+ * can disagree, and the one it replaced did — it was written on entering a chat
+ * and never cleared on the way out, so the shell went on believing a chat was
+ * open while the reader stood on home.
  */
 export type ChatListStore = {
   chats: Chat[];
@@ -15,8 +21,6 @@ export type ChatListStore = {
    * asked yet" — and the home route has to tell them apart.
    */
   chatsLoaded: boolean;
-  /** The selected chat; `null` only before the first chat resolves at boot. */
-  selected: Chat | null;
   chatsError: string | null;
   creatingChat: boolean;
   deletingChatId: string | null;
@@ -24,8 +28,7 @@ export type ChatListStore = {
   renameChatDraft: string;
   savingTitle: boolean;
   setChats: (chats: Chat[]) => void;
-  setSelected: (chat: Chat | null) => void;
-  /** Replace a chat everywhere it appears (list and selection) by id. */
+  /** Replace a chat in the list by id. */
   replaceChat: (chat: Chat) => void;
   prependChat: (chat: Chat) => void;
   setChatsError: (error: string | null) => void;
@@ -41,7 +44,6 @@ export function createChatListStore() {
   return create<ChatListStore>()((set) => ({
     chats: [],
     chatsLoaded: false,
-    selected: null,
     chatsError: null,
     creatingChat: false,
     deletingChatId: null,
@@ -49,11 +51,9 @@ export function createChatListStore() {
     renameChatDraft: "",
     savingTitle: false,
     setChats: (chats) => set({ chats, chatsLoaded: true }),
-    setSelected: (selected) => set({ selected }),
     replaceChat: (chat) =>
       set((state) => ({
         chats: state.chats.map((item) => (item.id === chat.id ? chat : item)),
-        selected: state.selected?.id === chat.id ? chat : state.selected,
       })),
     prependChat: (chat) => set((state) => ({ chats: [chat, ...state.chats] })),
     setChatsError: (chatsError) => set({ chatsError }),
