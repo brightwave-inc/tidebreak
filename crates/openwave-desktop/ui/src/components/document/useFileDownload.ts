@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import type { FileDownloadProgress } from "@/api";
 import { useApp } from "@/AppContext";
 
 export type ParseAsType = "text" | "blob";
@@ -23,6 +24,11 @@ export interface FileDownloadResult<T extends ParseAsType> {
   isError: boolean;
   /** The stored media type, once the response has arrived. */
   contentType: string | null;
+  /**
+   * How far the transfer has got, or null when there is nothing to report —
+   * a small file, or a response that never declared its length.
+   */
+  progress: FileDownloadProgress | null;
 }
 
 /**
@@ -49,9 +55,14 @@ export function useFileDownload<T extends ParseAsType = "blob">(
       return;
     }
     const controller = new AbortController();
-    setResult({ data: null, isLoading: true, isError: false, contentType: null });
+    setResult({ ...idle, isLoading: true });
     void client
-      .getChatDocumentFile(chatId, documentID, controller.signal)
+      .getChatDocumentFile(chatId, documentID, controller.signal, (progress) => {
+        if (controller.signal.aborted) return;
+        setResult((current) =>
+          current.isLoading ? { ...current, progress } : current,
+        );
+      })
       .then(async (blob) => {
         const data = (parseAs === "text" ? await blob.text() : blob) as ParsedData<T>;
         if (controller.signal.aborted) return;
@@ -60,11 +71,12 @@ export function useFileDownload<T extends ParseAsType = "blob">(
           isLoading: false,
           isError: false,
           contentType: blob.type || null,
+          progress: null,
         });
       })
       .catch(() => {
         if (controller.signal.aborted) return;
-        setResult({ data: null, isLoading: false, isError: true, contentType: null });
+        setResult({ ...idle, isError: true });
       });
     return () => controller.abort();
   }, [client, chatId, documentID, parseAs, enabled]);
@@ -77,4 +89,5 @@ const idle = {
   isLoading: false,
   isError: false,
   contentType: null,
+  progress: null,
 } as const;

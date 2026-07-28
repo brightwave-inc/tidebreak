@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import type { ApiClient } from "@/api";
+import type { ApiClient, FileDownloadProgress } from "@/api";
 
 /**
  * A source document's original bytes, held for the life of the process.
@@ -16,6 +16,12 @@ export type FileDownload = {
   data: ArrayBuffer | null;
   isLoading: boolean;
   error: Error | null;
+  /**
+   * How far the transfer has got, or null when there is nothing to report — a
+   * small file, a response that never declared its length, or a cache hit,
+   * which is instant and has no transfer to report on.
+   */
+  progress: FileDownloadProgress | null;
 };
 
 export function useFileDownload(
@@ -27,6 +33,7 @@ export function useFileDownload(
   );
   const [error, setError] = useState<Error | null>(null);
   const [isLoading, setIsLoading] = useState(!byteCache.has(documentId));
+  const [progress, setProgress] = useState<FileDownloadProgress | null>(null);
   const requestRef = useRef(0);
 
   useEffect(() => {
@@ -36,6 +43,7 @@ export function useFileDownload(
       setBytes(cached);
       setError(null);
       setIsLoading(false);
+      setProgress(null);
       return;
     }
 
@@ -43,12 +51,18 @@ export function useFileDownload(
     setBytes(null);
     setError(null);
     setIsLoading(true);
+    setProgress(null);
 
     void (async () => {
       try {
         const downloaded = await client.getDocumentFileContent(
           documentId,
           controller.signal,
+          (next) => {
+            if (!controller.signal.aborted && request === requestRef.current) {
+              setProgress(next);
+            }
+          },
         );
         if (request !== requestRef.current) return;
         byteCache.set(documentId, downloaded);
@@ -57,7 +71,10 @@ export function useFileDownload(
         if (controller.signal.aborted || request !== requestRef.current) return;
         setError(err instanceof Error ? err : new Error(String(err)));
       } finally {
-        if (request === requestRef.current) setIsLoading(false);
+        if (request === requestRef.current) {
+          setIsLoading(false);
+          setProgress(null);
+        }
       }
     })();
 
@@ -72,5 +89,5 @@ export function useFileDownload(
     ) as ArrayBuffer;
   }, [bytes]);
 
-  return { data, isLoading, error };
+  return { data, isLoading, error, progress };
 }

@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { extractHeadings } from "@/markdownHeadings";
 import { MessageMarkdown } from "@/MessageMarkdown";
+import { FileDownloadProgressIndicator } from "./FileDownloadProgress";
 import { MarkdownOutline } from "./MarkdownOutline";
 import { useFileDownload } from "./useFileDownload";
 
@@ -181,7 +182,11 @@ export function MarkdownViewer({
   if (fileDownload.isLoading) {
     return (
       <div className={cn("flex items-center justify-center", className)} {...props}>
-        <Loader2Icon className="size-6 animate-spin" />
+        {fileDownload.progress ? (
+          <FileDownloadProgressIndicator progress={fileDownload.progress} />
+        ) : (
+          <Loader2Icon className="size-6 animate-spin" />
+        )}
       </div>
     );
   }
