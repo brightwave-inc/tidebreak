@@ -12,21 +12,22 @@ use chrono::{DateTime, Utc};
 use crate::citation::AssistantCitationReference;
 use crate::id::{ChatId, OutputCitationId, OutputId, OutputRevisionId, TurnId};
 
-/// Private-scratch directory holding the output files in use today.
+/// Private-scratch directory holding legacy filename-addressed output files.
 ///
-/// This is what `create_deliverable` writes and what the desktop Outputs view
-/// reads, so it is the only catalog the shipped product has. Identity here is
-/// the filename, and rewriting a file destroys the bytes it replaced.
+/// The desktop catalog still reads this compatibility surface.
+/// `create_deliverable` writes it first, validates those bytes at the
+/// publication boundary, then snapshots them under [`OUTPUTS_DIRECTORY`].
+/// Identity here is the filename, and rewriting a file destroys the bytes it
+/// replaced.
 ///
-/// The durable record layer below is the intended replacement and nothing
-/// writes it yet; see [`OUTPUTS_DIRECTORY`].
+/// The durable record layer below is the intended replacement; see
+/// [`OUTPUTS_DIRECTORY`].
 pub const DELIVERABLES_DIRECTORY: &str = "artifacts";
 /// Private-scratch directory holding immutable revision bytes.
 ///
 /// Paired with the `output` and `output_revision` tables. The store layer is
-/// complete and has no callers outside this crate: the cutover from
-/// [`DELIVERABLES_DIRECTORY`] is a separate slice. Anything reasoning about
-/// what a user can actually see today should look there, not here.
+/// complete and owns every new text-deliverable publication. Projecting these
+/// records through the desktop catalog is a separate slice.
 pub const OUTPUTS_DIRECTORY: &str = "outputs";
 /// Largest text artifact the foreground agent may create.
 pub const MAX_DELIVERABLE_BYTES: usize = 512 * 1024;

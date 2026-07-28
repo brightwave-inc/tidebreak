@@ -384,10 +384,31 @@ id_type!(
     /// encodes a filename or a host path.
     OutputId
 );
+
+impl OutputId {
+    const NAMESPACE: Uuid = Uuid::from_u128(0x5500_62d4_2528_4cc6_90f8_a788_e119_bf36);
+
+    /// Derive the retry-stable output identity for one canonical tool call.
+    #[must_use]
+    pub fn for_call(call_id: CallId) -> Self {
+        Self(Uuid::new_v5(&Self::NAMESPACE, call_id.as_uuid().as_bytes()))
+    }
+}
+
 id_type!(
     /// Identifies one immutable revision of an output.
     OutputRevisionId
 );
+
+impl OutputRevisionId {
+    const NAMESPACE: Uuid = Uuid::from_u128(0x72cb_0277_5a3c_45ee_bda8_4353_4f74_feb2);
+
+    /// Derive the retry-stable revision identity for one canonical tool call.
+    #[must_use]
+    pub fn for_call(call_id: CallId) -> Self {
+        Self(Uuid::new_v5(&Self::NAMESPACE, call_id.as_uuid().as_bytes()))
+    }
+}
 
 #[cfg(test)]
 mod tests {
