@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { formatReleaseNotes } from "./format-release-notes.mjs";
 
-test("groups repeated scopes and keeps singleton scopes compact at the end", () => {
+test("separates grouped and singleton scopes into tight Markdown lists", () => {
   const notes = `## What's Changed
 
 ### New Features
@@ -27,6 +27,7 @@ test("groups repeated scopes and keeps singleton scopes compact at the end", () 
 - add document search ([#12](https://example.com/12)) by @octo
 - add keyboard shortcuts ([#15](https://example.com/15)) by @octo
 
+#### Other
 - add a default workspace ([#13](https://example.com/13)) by @octo
 - **Core:** add saved searches ([#14](https://example.com/14)) by @octo
 
