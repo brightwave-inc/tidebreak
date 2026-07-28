@@ -18,6 +18,7 @@ import {
 import { useChatListStore } from "./ChatListStore";
 import { useConfirm } from "./components/ConfirmDialog";
 import { hasMacOverlayTitlebar } from "./host";
+import { useInterfaceZoom } from "./InterfaceZoom";
 import { Logomark } from "./Logomark";
 import { resolvedRoleKey } from "./ModelSelection";
 import { useTheme } from "./theme";
@@ -70,18 +71,22 @@ export function AppShell() {
   const { confirm, dialog: confirmDialog } = useConfirm();
   const { mode: themeMode, cycle: cycleTheme, setMode: setThemeMode } = useTheme();
   const desktopUpdates = useDesktopUpdates();
+  const zoom = useInterfaceZoom();
 
   // Watched here rather than in the conversation, so that the agent parking a
   // turn on a question is noticed whatever screen the reader is on.
   useChatPromptWatcher(client, openChatId);
 
   // Shell shortcuts live here because these actions outlive any one route:
-  // toggling the frame, starting a chat, and reaching the composer all work
-  // wherever the reader is.
+  // toggling the frame, starting a chat, reaching the composer, and scaling the
+  // window all work wherever the reader is.
   useShellShortcuts({
     "toggle-sidebar": () => useUiStore.getState().toggleSidebar(),
     "new-chat": () => void onNewChat(),
     "focus-composer": focusComposer,
+    "zoom-in": zoom.zoomIn,
+    "zoom-out": zoom.zoomOut,
+    "zoom-reset": zoom.resetZoom,
   });
 
   useEffect(() => {
