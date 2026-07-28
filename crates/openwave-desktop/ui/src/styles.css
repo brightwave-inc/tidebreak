@@ -1431,7 +1431,7 @@ body {
 .composer {
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
+  gap: 0.25rem;
   max-width: 48rem;
   margin: 0 auto;
   border: 1px solid var(--line);
@@ -1495,7 +1495,7 @@ body {
   height: 2rem;
   flex: 0 0 auto;
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: 6px;
   padding: 0;
   color: var(--muted-foreground);
   background: transparent;
@@ -1718,7 +1718,7 @@ body {
   gap: 0.3rem;
   max-width: 14rem;
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: 6px;
   padding: 0.25rem 0.6rem;
   background: transparent;
   color: var(--muted-foreground);
@@ -1760,6 +1760,8 @@ body {
   overflow-y: auto;
 }
 
+/* A rounded square rather than a circle: the same footprint as the icon
+   buttons everywhere else in the app, so the action row reads as one set. */
 .composer-icon-btn {
   display: inline-flex;
   align-items: center;
@@ -1768,7 +1770,7 @@ body {
   height: 2rem;
   flex: 0 0 auto;
   border: 0;
-  border-radius: 999px;
+  border-radius: 6px;
   padding: 0;
   transition: background-color 120ms ease, opacity 120ms ease;
 }

@@ -9,7 +9,7 @@ import {
   useState,
 } from "react";
 import {
-  ArrowUp,
+  ArrowUpRight,
   FileText,
   Image as ImageIcon,
   Paperclip,
@@ -376,7 +376,7 @@ export function Composer({
                     disabled={disabled || cancelPending}
                     onClick={() => void onStop()}
                   >
-                    <Square size={15} fill="currentColor" strokeWidth={0} />
+                    <Square size={14} fill="currentColor" strokeWidth={0} />
                   </button>
                 </WithTooltip>
               </>
@@ -388,7 +388,7 @@ export function Composer({
                   aria-label="Send message"
                   disabled={!canSubmit}
                 >
-                  <ArrowUp size={18} />
+                  <ArrowUpRight size={16} />
                 </button>
               </WithTooltip>
             )}
