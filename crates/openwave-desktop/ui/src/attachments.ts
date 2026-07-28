@@ -1,7 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import { parseLibraryImportBatch, type LibraryImportBatch } from "./documents";
-import { parseAttachedImage, type PickedImage } from "./ImageAttachments";
+import {
+  parseAttachedImage,
+  parseHostPublishedImage,
+  type PickedImage,
+  type PublishedImage,
+} from "./ImageAttachments";
 
 /** One file the host could not attach as an image, named so it can be reported. */
 export type FailedImage = {
@@ -26,6 +31,40 @@ export type AttachedFiles = {
 /** Attach any files through one native picker. `null` if the reader dismissed it. */
 export async function attachChatFiles(chatId: string): Promise<AttachedFiles | null> {
   return parseAttachedFiles(await invoke("attach_chat_files", { request: { chatId } }));
+}
+
+/**
+ * Publish an image the renderer is already holding, from the host.
+ *
+ * A pasted or dropped image has no path, so it cannot go through the picker
+ * route — but it cannot go straight to the server either. Under a native host
+ * the publish endpoint is mounted behind the client-executor token, which the
+ * renderer does not have, and a bearer-authenticated POST from here comes back
+ * `401` with an empty body. So the bytes take the same last mile as every other
+ * attachment: the host posts them and hands back the identity it was given.
+ */
+export async function publishChatImage(
+  chatId: string,
+  file: Blob,
+): Promise<PublishedImage> {
+  const contentBase64 = encodeBase64(await file.arrayBuffer());
+  return parseHostPublishedImage(
+    await invoke("publish_chat_image", { request: { chatId, contentBase64 } }),
+  );
+}
+
+/**
+ * Base64 in chunks, because spreading 16 MB of bytes into one call to
+ * `String.fromCharCode` overflows the argument stack.
+ */
+function encodeBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
 }
 
 export function parseAttachedFiles(value: unknown): AttachedFiles | null {

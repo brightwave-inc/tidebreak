@@ -183,6 +183,7 @@ pub fn run() {
             server_info,
             request_user_attention,
             attachments::attach_chat_files,
+            image_attachments::publish_chat_image,
             documents::import_library_document,
             documents::import_library_documents,
             documents::import_dropped_library_documents,
