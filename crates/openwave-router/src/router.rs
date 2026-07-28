@@ -605,6 +605,7 @@ mod tests {
                 temperature: None,
                 reasoning_effort: None,
                 images: ImageAttachments::new(),
+                ..Default::default()
             })
             .await;
         match result {

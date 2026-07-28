@@ -15,8 +15,9 @@ use base64::Engine as _;
 use openwave_core::error::{AgentError, Result};
 use openwave_core::provider::{
     ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, RefusalDetails,
-    StopReason, Usage,
+    ResponseFormat, StopReason, ToolChoice, Usage,
 };
+use openwave_core::tool::{strict_json_schema, OptionalProperties};
 use openwave_core::{ImageAttachments, Role};
 
 use crate::sse::{classify_provider_error, drain_frames, frame_data, read_bounded_error_body};
@@ -24,6 +25,15 @@ use crate::sse::{classify_provider_error, drain_frames, frame_data, read_bounded
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
+
+/// Description for the synthetic tool that carries a constrained response.
+///
+/// The model is told what the call is for, because a forced tool with an opaque
+/// name reads to it as an unexplained side quest and it starts narrating around
+/// the call.
+const STRUCTURED_OUTPUT_TOOL_DESCRIPTION: &str =
+    "Return the result of this request. Call this once, with the whole answer in \
+     its arguments, and write nothing else.";
 
 fn provider_err(err: impl std::fmt::Display) -> AgentError {
     AgentError::Provider(err.to_string())
@@ -79,6 +89,11 @@ impl ModelProvider for AnthropicProvider {
 
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
         let body = build_request_json(&req)?;
+        // `build_request_json` has already rejected a format it cannot enforce.
+        let output_tool = match &req.response_format {
+            Some(ResponseFormat::JsonSchema { name, .. }) => Some(name.clone()),
+            _ => None,
+        };
         let url = format!("{}/v1/messages", self.base_url);
         let api_key = match &self.token_source {
             Some(source) => source.bearer_token().await?,
@@ -113,7 +128,7 @@ impl ModelProvider for AnthropicProvider {
             // Accumulate raw BYTES, not a String: a chunk may split a multi-byte
             // UTF-8 character, so we only decode once a whole frame is buffered.
             let mut buffer: Vec<u8> = Vec::new();
-            let mut state = StreamState::default();
+            let mut state = StreamState { output_tool, ..StreamState::default() };
             while let Some(chunk) = bytes.next().await {
                 // A mid-stream transport error must not read as a clean end:
                 // the accumulated tool-call arguments may be truncated
@@ -198,10 +213,55 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
                 .collect(),
         );
     }
+    match &req.response_format {
+        Some(ResponseFormat::JsonSchema { name, schema }) => {
+            // The Messages API constrains output through a forced tool call, so
+            // the schema becomes a tool nothing above the adapter ever sees: the
+            // stream re-reads its arguments as text (see `normalize`), which is
+            // the channel every other provider delivers structured output on.
+            let schema =
+                strict_json_schema(schema, OptionalProperties::AcceptNull).ok_or_else(|| {
+                    AgentError::Provider(format!(
+                        "response format {name} has no strict JSON Schema form"
+                    ))
+                })?;
+            let output_tool = json!({
+                "name": name,
+                "description": STRUCTURED_OUTPUT_TOOL_DESCRIPTION,
+                "input_schema": schema,
+            });
+            match body["tools"].as_array_mut() {
+                Some(tools) => tools.push(output_tool),
+                None => body["tools"] = json!([output_tool]),
+            }
+            // Forcing the output tool is what makes the constraint a
+            // constraint. It also takes the one tool-choice slot on the wire, so
+            // an explicit `tool_choice` loses to it — see
+            // `ChatRequest::tool_choice`.
+            body["tool_choice"] = json!({ "type": "tool", "name": name });
+        }
+        None => {
+            if let Some(choice) = &req.tool_choice {
+                body["tool_choice"] = anthropic_tool_choice(choice)?;
+            }
+        }
+        // `ResponseFormat` is open. A format this adapter has not learned must
+        // fail the request rather than stream an unconstrained answer that only
+        // looks like a success.
+        Some(other) => {
+            return Err(AgentError::Provider(format!(
+                "anthropic cannot enforce response format {other:?}"
+            )))
+        }
+    }
     if let Some(temperature) = req.temperature {
         body["temperature"] = json!(temperature);
     }
-    if req.reasoning_model && takes_adaptive_thinking(&req.model) {
+    // Extended thinking and a forced tool are mutually exclusive on the Messages
+    // API: with thinking on, `tool_choice` may only be `auto` or `none`. The
+    // output constraint is the caller's explicit ask and reasoning is a quality
+    // preference, so the constraint wins and this request does not think.
+    if req.reasoning_model && req.response_format.is_none() && takes_adaptive_thinking(&req.model) {
         // An omitted `thinking` means thinking is *off* on Opus 4.7 and later,
         // so a reasoning model only reasons when the request says so.
         //
@@ -215,6 +275,24 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         }
     }
     Ok(body)
+}
+
+fn anthropic_tool_choice(choice: &ToolChoice) -> Result<Value> {
+    Ok(match choice {
+        ToolChoice::Auto => json!({ "type": "auto" }),
+        ToolChoice::Required => json!({ "type": "any" }),
+        ToolChoice::None => json!({ "type": "none" }),
+        ToolChoice::Tool { name } => json!({ "type": "tool", "name": name }),
+        // `ToolChoice` is open so a provider-neutral mode can be added without
+        // a breaking change. Silently substituting the model's own judgement
+        // for a mode this adapter has not learned would turn "must not call a
+        // tool" into "may".
+        other => {
+            return Err(AgentError::Provider(format!(
+                "anthropic cannot express tool choice {other:?}"
+            )))
+        }
+    })
 }
 
 /// Whether `model` takes the adaptive-thinking request shape.
@@ -326,6 +404,13 @@ struct StreamState {
     input_tokens: u32,
     cache_read_input_tokens: u32,
     cache_creation_input_tokens: u32,
+    /// Name of the synthetic tool carrying a constrained response, when the
+    /// request set a [`ResponseFormat`].
+    output_tool: Option<String>,
+    /// Content-block index that tool occupied, once it starts.
+    output_block: Option<u32>,
+    /// Whether any *other* tool call was announced this stream.
+    saw_other_tool_call: bool,
 }
 
 fn u32_at(value: &Value, key: &str) -> u32 {
@@ -348,10 +433,19 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
             let block = data.get("content_block");
             if block.and_then(|b| b.get("type")).and_then(Value::as_str) == Some("tool_use") {
                 let block = block.unwrap();
+                let name = str_at(block, "name");
+                // The synthetic output tool is the request's own scaffolding.
+                // Announcing it as a tool call would hand consumers a call they
+                // never advertised and cannot answer.
+                if state.output_tool.as_deref() == Some(name.as_str()) {
+                    state.output_block = Some(index);
+                    return Vec::new();
+                }
+                state.saw_other_tool_call = true;
                 vec![ProviderEvent::ToolCallStarted {
                     index,
                     id: str_at(block, "id"),
-                    name: str_at(block, "name"),
+                    name,
                 }]
             } else {
                 Vec::new()
@@ -370,6 +464,14 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                 Some("thinking_delta") => vec![ProviderEvent::ReasoningDelta {
                     text: str_at(delta, "thinking"),
                 }],
+                // A constrained response is JSON in a tool call's arguments;
+                // every other provider streams it as text, so it becomes text
+                // here too and consumers stay provider-blind.
+                Some("input_json_delta") if state.output_block == Some(index) => {
+                    vec![ProviderEvent::TextDelta {
+                        text: str_at(delta, "partial_json"),
+                    }]
+                }
                 Some("input_json_delta") => vec![ProviderEvent::ToolCallArgsDelta {
                     index,
                     fragment: str_at(delta, "partial_json"),
@@ -392,7 +494,16 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                 .and_then(|d| d.get("stop_reason"))
                 .and_then(Value::as_str)
             {
-                let reason = map_stop_reason(reason);
+                let mut reason = map_stop_reason(reason);
+                // The forced output tool is not a tool call the consumer has to
+                // answer; the model said everything it had to say. Reporting
+                // `ToolUse` here would read as a turn waiting on a tool result.
+                if reason == StopReason::ToolUse
+                    && state.output_block.is_some()
+                    && !state.saw_other_tool_call
+                {
+                    reason = StopReason::EndTurn;
+                }
                 if reason == StopReason::Refusal {
                     let category = data
                         .get("delta")
@@ -456,6 +567,7 @@ mod tests {
             temperature: Some(0.5),
             reasoning_effort: None,
             images: ImageAttachments::new(),
+            ..Default::default()
         };
         let body = build_request_json(&req).unwrap();
         assert_eq!(body["model"], "claude-opus-4-8");
@@ -484,6 +596,7 @@ mod tests {
             temperature: None,
             reasoning_effort: effort,
             images: ImageAttachments::new(),
+            ..Default::default()
         }
     }
 
@@ -497,6 +610,67 @@ mod tests {
         assert_eq!(body["thinking"]["display"], "summarized");
         // Absent a per-chat override the provider's own effort default holds.
         assert!(body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn a_constrained_response_is_a_forced_tool_read_back_as_text() {
+        let mut req = reasoning_request("claude-opus-5", Some(ReasoningEffort::Low));
+        req.response_format = Some(ResponseFormat::JsonSchema {
+            name: "note".into(),
+            schema: json!({
+                "type": "object",
+                "properties": { "body": { "type": "string" } },
+                "required": ["body"],
+            }),
+        });
+        let body = build_request_json(&req).unwrap();
+        assert_eq!(
+            body["tool_choice"],
+            json!({ "type": "tool", "name": "note" })
+        );
+        assert_eq!(body["tools"][0]["name"], "note");
+        assert_eq!(
+            body["tools"][0]["input_schema"]["additionalProperties"],
+            false
+        );
+        // With extended thinking on, this API accepts only `auto` or `none` for
+        // `tool_choice`, so a constrained request cannot also think.
+        assert!(body.get("thinking").is_none());
+
+        // The constrained value arrives on the text channel, and the turn ends
+        // rather than reading as one waiting on a tool result. Both consumers of
+        // this stream reject a tool call they never advertised.
+        let mut state = StreamState {
+            output_tool: Some("note".into()),
+            ..StreamState::default()
+        };
+        let events: Vec<ProviderEvent> = [
+            json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": { "type": "tool_use", "id": "toolu_1", "name": "note" },
+            }),
+            json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": { "type": "input_json_delta", "partial_json": "{\"body\":\"hi\"}" },
+            }),
+            json!({ "type": "message_delta", "delta": { "stop_reason": "tool_use" } }),
+        ]
+        .iter()
+        .flat_map(|frame| normalize(frame, &mut state))
+        .collect();
+        assert_eq!(
+            events,
+            vec![
+                ProviderEvent::TextDelta {
+                    text: "{\"body\":\"hi\"}".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -733,6 +907,7 @@ mod tests {
             temperature: None,
             reasoning_effort: None,
             images,
+            ..Default::default()
         }
     }
 
