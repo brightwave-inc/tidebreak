@@ -38,7 +38,15 @@ picker is a normal decline, and paths remain confined to app-private native stat
 
 ## Run locally (native window)
 
-From this directory:
+From anywhere in the repo:
+
+```sh
+scripts/dev.sh
+```
+
+That installs the UI dependencies and opens the window. Arguments are forwarded
+to `cargo tauri dev`, so `scripts/dev.sh --features vec-lance` works. The long
+way, from this directory, is the same two steps:
 
 ```sh
 pnpm --dir ui install
