@@ -6,7 +6,7 @@ import {
 
 export function ImportQueue() {
   const entries = useImportQueueStore((state) => state.entries);
-  const dismissCleanRun = useImportQueueStore((state) => state.dismissCleanRun);
+  const dismiss = useImportQueueStore((state) => state.dismiss);
   if (entries.length === 0) return null;
 
   const sorted = sortedImportQueue(entries);
@@ -22,8 +22,8 @@ export function ImportQueue() {
           </h2>
           <p>{active ? "OpenWave is preparing your files for this conversation." : null}</p>
         </div>
-        {!active && !failed && (
-          <button type="button" className="btn" onClick={dismissCleanRun}>
+        {!active && (
+          <button type="button" className="btn" onClick={dismiss}>
             Dismiss
           </button>
         )}

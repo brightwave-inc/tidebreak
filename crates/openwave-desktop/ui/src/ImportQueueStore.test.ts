@@ -34,7 +34,7 @@ describe("ImportQueueStore", () => {
     ]);
   });
 
-  it("only dismisses a completed run with no failures", () => {
+  it("automatically dismisses only a completed run with no failures", () => {
     const store = createImportQueueStore();
     store.getState().receive({ ...queued, status: "streaming" });
     store.getState().dismissCleanRun();
@@ -57,6 +57,22 @@ describe("ImportQueueStore", () => {
     });
     clean.getState().dismissCleanRun();
     expect(clean.getState().entries).toEqual([]);
+  });
+
+  it("lets the reader manually dismiss a finished run even after a failure", () => {
+    const store = createImportQueueStore();
+    store.getState().receive({ ...queued, status: "streaming" });
+    // Nothing to dismiss while the run is still working.
+    store.getState().dismiss();
+    expect(store.getState().entries).toHaveLength(1);
+
+    store.getState().receive({
+      ...queued,
+      status: "failed",
+      message: "The file is empty",
+    });
+    store.getState().dismiss();
+    expect(store.getState().entries).toEqual([]);
   });
 
   it("puts failures before active and completed imports", () => {
