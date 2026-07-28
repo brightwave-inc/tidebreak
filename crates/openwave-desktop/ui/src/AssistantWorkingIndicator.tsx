@@ -15,7 +15,14 @@ export function AssistantWorkingIndicator({
       aria-atomic="true"
     >
       <Logomark className="assistant-working-mark" />
-      <span>{thinking ? "Thinking…" : "Working"}</span>
+      {/* The default working state is carried by the animated logomark alone;
+          its label stays available to assistive tech without crowding the
+          transcript. The thinking state keeps a visible label. */}
+      {thinking ? (
+        <span>Thinking…</span>
+      ) : (
+        <span className="sr-only">Working</span>
+      )}
     </div>
   );
 }

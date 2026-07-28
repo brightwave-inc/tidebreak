@@ -7,10 +7,12 @@ import {
 } from "./MessageList";
 
 describe("AssistantWorkingIndicator", () => {
-  it("renders fixed visible copy as one polite atomic status", () => {
+  it("carries the default status for assistive tech without a visible label", () => {
     const markup = renderToStaticMarkup(<AssistantWorkingIndicator />);
 
+    // The label is announced but visually hidden — the logomark stands alone.
     expect(markup).toContain("Working");
+    expect(markup).toContain('class="sr-only"');
     expect(markup).toContain('role="status"');
     expect(markup).toContain('aria-live="polite"');
     expect(markup).toContain('aria-atomic="true"');
