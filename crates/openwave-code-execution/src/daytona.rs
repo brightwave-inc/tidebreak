@@ -7,14 +7,17 @@ use reqwest::{Client, Response, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 
 use crate::credential::SecretCredential;
-use crate::http::decode_bounded_json;
+use crate::http::{decode_bounded_json, download_bounded_file, multipart_file};
 use crate::output::{Capture, StreamKind};
 use crate::remote::{
-    execute_remote, RemoteSandboxAdapter, RemoteSession, RemoteSessionError, RemoteSessionPool,
+    connect_remote_workspace, create_remote_workspace, destroy_remote_workspace, execute_remote,
+    with_remote_session, RemoteSandboxAdapter, RemoteSession, RemoteSessionError,
+    RemoteSessionPool, RemoteWorkspaceAdapter,
 };
 use crate::{
     CodeExecutionError, CodeExecutionProvider, CodeExecutionProviderKind, CodeExecutionRequest,
-    CodeExecutionResponse,
+    CodeExecutionResponse, ExecutionWorkspaceId, WorkspaceFileEntry, WorkspaceFilePath,
+    WorkspaceLifecycle, WorkspaceListing, MAX_WORKSPACE_FILE_BYTES, MAX_WORKSPACE_LIST_ENTRIES,
 };
 
 const DAYTONA_API_BASE: &str = "https://app.daytona.io/api";
@@ -260,10 +263,11 @@ impl DaytonaExecutionProvider {
         let endpoint = session.endpoint.as_deref().ok_or_else(|| {
             CodeExecutionError::Unavailable("Daytona toolbox endpoint is unavailable".into())
         })?;
-        let url = toolbox_execute_url(
+        let url = toolbox_url(
             endpoint,
             &session.sandbox_id,
             self.endpoints.allow_insecure_toolbox,
+            "process/execute",
         )?;
         let started = Instant::now();
         let response = self
@@ -327,6 +331,22 @@ impl DaytonaExecutionProvider {
         ))
     }
 
+    fn toolbox_file_url(
+        &self,
+        session: &RemoteSession,
+        suffix: &str,
+    ) -> Result<Url, CodeExecutionError> {
+        let endpoint = session.endpoint.as_deref().ok_or_else(|| {
+            CodeExecutionError::Unavailable("Daytona toolbox endpoint is unavailable".into())
+        })?;
+        toolbox_url(
+            endpoint,
+            &session.sandbox_id,
+            self.endpoints.allow_insecure_toolbox,
+            suffix,
+        )
+    }
+
     async fn decode_sandbox(
         &self,
         response: Response,
@@ -379,12 +399,222 @@ impl RemoteSandboxAdapter for DaytonaExecutionProvider {
 }
 
 #[async_trait]
+impl RemoteWorkspaceAdapter for DaytonaExecutionProvider {
+    async fn upload_file(
+        &self,
+        session: &RemoteSession,
+        path: &WorkspaceFilePath,
+        content: &[u8],
+    ) -> Result<(), RemoteSessionError> {
+        let url = self.toolbox_file_url(session, "files/upload")?;
+        let multipart = multipart_file(path.file_name(), content);
+        let response = self
+            .client
+            .post(url)
+            .bearer_auth(self.credential.as_str())
+            .query(&[("path", path.as_str())])
+            .header("Content-Type", multipart.content_type)
+            .body(multipart.body)
+            .send()
+            .await
+            .map_err(|_| CodeExecutionError::Unavailable("could not reach Daytona".into()))?;
+        if matches!(
+            response.status(),
+            StatusCode::NOT_FOUND | StatusCode::GONE | StatusCode::BAD_GATEWAY
+        ) {
+            return Err(RemoteSessionError::Missing);
+        }
+        if !response.status().is_success() {
+            return Err(provider_status_error(response.status()).into());
+        }
+        Ok(())
+    }
+
+    async fn download_file(
+        &self,
+        session: &RemoteSession,
+        path: &WorkspaceFilePath,
+    ) -> Result<Vec<u8>, RemoteSessionError> {
+        let url = self.toolbox_file_url(session, "files/download")?;
+        let response = self
+            .client
+            .get(url)
+            .bearer_auth(self.credential.as_str())
+            .query(&[("path", path.as_str())])
+            .send()
+            .await
+            .map_err(|_| CodeExecutionError::Unavailable("could not reach Daytona".into()))?;
+        // The session was reconciled immediately before this call, so a 404
+        // here is the file rather than the sandbox.
+        if response.status() == StatusCode::NOT_FOUND {
+            return Err(CodeExecutionError::WorkspaceFileNotFound.into());
+        }
+        if matches!(
+            response.status(),
+            StatusCode::GONE | StatusCode::BAD_GATEWAY
+        ) {
+            return Err(RemoteSessionError::Missing);
+        }
+        if !response.status().is_success() {
+            return Err(provider_status_error(response.status()).into());
+        }
+        download_bounded_file(response, "Daytona", MAX_WORKSPACE_FILE_BYTES)
+            .await
+            .map_err(RemoteSessionError::Provider)
+    }
+
+    async fn list_directory(
+        &self,
+        session: &RemoteSession,
+        path: Option<&WorkspaceFilePath>,
+    ) -> Result<WorkspaceListing, RemoteSessionError> {
+        let url = self.toolbox_file_url(session, "files")?;
+        let listed = path.map_or(".", WorkspaceFilePath::as_str);
+        let response = self
+            .client
+            .get(url)
+            .bearer_auth(self.credential.as_str())
+            .query(&[("path", listed)])
+            .send()
+            .await
+            .map_err(|_| CodeExecutionError::Unavailable("could not reach Daytona".into()))?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Err(CodeExecutionError::WorkspaceFileNotFound.into());
+        }
+        if matches!(
+            response.status(),
+            StatusCode::GONE | StatusCode::BAD_GATEWAY
+        ) {
+            return Err(RemoteSessionError::Missing);
+        }
+        if !response.status().is_success() {
+            return Err(provider_status_error(response.status()).into());
+        }
+        let files = decode_bounded_json::<Vec<DaytonaFileInfo>>(
+            response,
+            "Daytona",
+            MAX_DAYTONA_RESPONSE_BYTES,
+        )
+        .await
+        .map_err(RemoteSessionError::Provider)?;
+        let mut entries = Vec::new();
+        for file in files {
+            if file.name.is_empty() {
+                continue;
+            }
+            let relative = match path {
+                None => file.name,
+                Some(path) => format!("{}/{}", path.as_str(), file.name),
+            };
+            entries.push(WorkspaceFileEntry {
+                path: relative,
+                directory: file.is_dir,
+                size_bytes: (!file.is_dir).then_some(file.size).flatten(),
+            });
+        }
+        entries.sort_by(|left, right| left.path.cmp(&right.path));
+        let truncated = entries.len() > MAX_WORKSPACE_LIST_ENTRIES;
+        entries.truncate(MAX_WORKSPACE_LIST_ENTRIES);
+        Ok(WorkspaceListing { entries, truncated })
+    }
+
+    async fn destroy_sandbox(&self, session: &RemoteSession) -> Result<(), CodeExecutionError> {
+        validate_sandbox_id(&session.sandbox_id)?;
+        let response = self
+            .client
+            .delete(self.api_url(&format!("/sandbox/{}", session.sandbox_id)))
+            .bearer_auth(self.credential.as_str())
+            .send()
+            .await
+            .map_err(|_| CodeExecutionError::Unavailable("could not reach Daytona".into()))?;
+        if response.status() == StatusCode::NOT_FOUND || response.status().is_success() {
+            return Ok(());
+        }
+        Err(provider_status_error(response.status()))
+    }
+}
+
+#[async_trait]
+impl WorkspaceLifecycle for DaytonaExecutionProvider {
+    async fn create_workspace(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+    ) -> Result<(), CodeExecutionError> {
+        create_remote_workspace(self, &self.pool, workspace.as_str()).await
+    }
+
+    async fn connect_workspace(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+    ) -> Result<bool, CodeExecutionError> {
+        connect_remote_workspace(self, &self.pool, workspace.as_str()).await
+    }
+
+    async fn destroy_workspace(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+    ) -> Result<(), CodeExecutionError> {
+        destroy_remote_workspace(self, &self.pool, workspace.as_str()).await
+    }
+
+    async fn put_workspace_file(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+        path: &WorkspaceFilePath,
+        content: &[u8],
+    ) -> Result<(), CodeExecutionError> {
+        if content.len() > MAX_WORKSPACE_FILE_BYTES {
+            return Err(CodeExecutionError::WorkspaceFileTooLarge);
+        }
+        with_remote_session(
+            self,
+            &self.pool,
+            workspace.as_str(),
+            |adapter, session| async move { adapter.upload_file(&session, path, content).await },
+        )
+        .await
+    }
+
+    async fn get_workspace_file(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+        path: &WorkspaceFilePath,
+    ) -> Result<Vec<u8>, CodeExecutionError> {
+        with_remote_session(
+            self,
+            &self.pool,
+            workspace.as_str(),
+            |adapter, session| async move { adapter.download_file(&session, path).await },
+        )
+        .await
+    }
+
+    async fn list_workspace_files(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+        path: Option<&WorkspaceFilePath>,
+    ) -> Result<WorkspaceListing, CodeExecutionError> {
+        with_remote_session(
+            self,
+            &self.pool,
+            workspace.as_str(),
+            |adapter, session| async move { adapter.list_directory(&session, path).await },
+        )
+        .await
+    }
+}
+
+#[async_trait]
 impl CodeExecutionProvider for DaytonaExecutionProvider {
     async fn execute(
         &self,
         request: CodeExecutionRequest,
     ) -> Result<CodeExecutionResponse, CodeExecutionError> {
         execute_remote(self, &self.pool, request).await
+    }
+
+    fn workspace_lifecycle(&self) -> Option<&dyn WorkspaceLifecycle> {
+        Some(self)
     }
 }
 
@@ -435,6 +665,17 @@ struct DaytonaErrorResponse {
     code: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DaytonaFileInfo {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    is_dir: bool,
+    #[serde(default)]
+    size: Option<u64>,
+}
+
 /// Preserve the provider-neutral direct argv contract over Daytona's shell-text
 /// transport. Quoting every element keeps metacharacters as argument data; the
 /// shell is only the protocol bridge and is replaced by the requested process.
@@ -468,17 +709,15 @@ fn timeout_seconds(timeout: Duration) -> u32 {
         .max(1)
 }
 
-fn toolbox_execute_url(
+fn toolbox_url(
     endpoint: &str,
     sandbox_id: &str,
     allow_insecure: bool,
+    suffix: &str,
 ) -> Result<Url, CodeExecutionError> {
     validate_sandbox_id(sandbox_id)?;
     let mut url = validate_toolbox_base(endpoint, allow_insecure)?;
-    let path = format!(
-        "{}/{sandbox_id}/process/execute",
-        url.path().trim_end_matches('/')
-    );
+    let path = format!("{}/{sandbox_id}/{suffix}", url.path().trim_end_matches('/'));
     url.set_path(&path);
     Ok(url)
 }
@@ -537,9 +776,11 @@ fn provider_status_error(status: StatusCode) -> CodeExecutionError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap as StdHashMap;
     use std::sync::{Arc, Mutex, OnceLock};
 
-    use axum::extract::{Path, State};
+    use axum::body::Bytes;
+    use axum::extract::{Path, Query, State};
     use axum::http::{HeaderMap, StatusCode};
     use axum::routing::{get, post};
     use axum::{Json, Router};
@@ -552,14 +793,18 @@ mod tests {
     struct MockState {
         base: Arc<OnceLock<String>>,
         requests: Arc<Mutex<Vec<(String, HeaderMap, Value)>>>,
+        files: Arc<Mutex<StdHashMap<String, Vec<u8>>>>,
     }
 
     async fn spawn_mock() -> (String, MockState, tokio::task::JoinHandle<()>) {
         let state = MockState::default();
         let app = Router::new()
+            .route("/api/sandbox/{id}", get(get_sandbox).delete(delete_sandbox))
             .route("/api/sandbox", post(create_sandbox))
-            .route("/api/sandbox/{id}", get(get_sandbox))
             .route("/toolbox/{id}/process/execute", post(execute))
+            .route("/toolbox/{id}/files", get(list_files))
+            .route("/toolbox/{id}/files/upload", post(upload_file))
+            .route("/toolbox/{id}/files/download", get(download_file))
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -633,6 +878,90 @@ mod tests {
                 Json(json!({"exitCode": 0, "result": "ok\n"})),
             )
         }
+    }
+
+    async fn delete_sandbox(
+        State(state): State<MockState>,
+        Path(id): Path<String>,
+        headers: HeaderMap,
+    ) -> StatusCode {
+        state
+            .requests
+            .lock()
+            .unwrap()
+            .push(("delete".into(), headers, json!({"id": id})));
+        StatusCode::OK
+    }
+
+    async fn upload_file(
+        State(state): State<MockState>,
+        Path(id): Path<String>,
+        Query(query): Query<StdHashMap<String, String>>,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> StatusCode {
+        assert_eq!(id, "sandbox-123");
+        let content = multipart_content(&headers, &body);
+        state.requests.lock().unwrap().push((
+            "upload".into(),
+            headers,
+            json!({"path": query["path"]}),
+        ));
+        state
+            .files
+            .lock()
+            .unwrap()
+            .insert(query["path"].clone(), content);
+        StatusCode::OK
+    }
+
+    async fn download_file(
+        State(state): State<MockState>,
+        Path(id): Path<String>,
+        Query(query): Query<StdHashMap<String, String>>,
+    ) -> Result<Vec<u8>, StatusCode> {
+        assert_eq!(id, "sandbox-123");
+        state
+            .files
+            .lock()
+            .unwrap()
+            .get(&query["path"])
+            .cloned()
+            .ok_or(StatusCode::NOT_FOUND)
+    }
+
+    async fn list_files(
+        State(state): State<MockState>,
+        Path(id): Path<String>,
+        Query(query): Query<StdHashMap<String, String>>,
+    ) -> Json<Value> {
+        assert_eq!(id, "sandbox-123");
+        assert_eq!(query["path"], ".");
+        let files = state.files.lock().unwrap();
+        let entries: Vec<Value> = files
+            .iter()
+            .map(|(path, content)| {
+                json!({
+                    "name": path.rsplit('/').next().unwrap(),
+                    "isDir": false,
+                    "size": content.len(),
+                    "modTime": "2026-07-28T00:00:00Z",
+                })
+            })
+            .collect();
+        Json(json!(entries))
+    }
+
+    fn multipart_content(headers: &HeaderMap, body: &[u8]) -> Vec<u8> {
+        let content_type = headers
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap();
+        let boundary = content_type.split("boundary=").nth(1).unwrap().to_owned();
+        let start = body.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        let tail = format!("\r\n--{boundary}--\r\n");
+        assert!(body.ends_with(tail.as_bytes()));
+        body[start..body.len() - tail.len()].to_vec()
     }
 
     fn request(execution_id: &str) -> CodeExecutionRequest {
@@ -740,6 +1069,80 @@ mod tests {
         );
         assert_eq!(execute_body["cwd"], ".");
         assert_eq!(execute_body["timeout"], 5);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn daytona_workspace_lifecycle_round_trips_files_over_the_toolbox_api() {
+        let (base, state, server) = spawn_mock().await;
+        let provider = DaytonaExecutionProvider::with_endpoints(
+            DaytonaCredential::parse("test-daytona-key").unwrap(),
+            Duration::from_secs(5),
+            RemoteSessionPool::default(),
+            DaytonaEndpoints {
+                api_base: format!("{base}/api"),
+                allow_insecure_toolbox: true,
+            },
+        )
+        .unwrap();
+        let workspace = ExecutionWorkspaceId::parse("chat-files").unwrap();
+
+        assert!(!provider.connect_workspace(&workspace).await.unwrap());
+        provider.create_workspace(&workspace).await.unwrap();
+        assert!(provider.connect_workspace(&workspace).await.unwrap());
+
+        let path = WorkspaceFilePath::parse("data/report.bin").unwrap();
+        let content = b"\x00daytona\xff".to_vec();
+        provider
+            .put_workspace_file(&workspace, &path, &content)
+            .await
+            .unwrap();
+        assert_eq!(
+            provider
+                .get_workspace_file(&workspace, &path)
+                .await
+                .unwrap(),
+            content
+        );
+        assert!(matches!(
+            provider
+                .get_workspace_file(&workspace, &WorkspaceFilePath::parse("missing").unwrap())
+                .await,
+            Err(CodeExecutionError::WorkspaceFileNotFound)
+        ));
+
+        let listing = provider
+            .list_workspace_files(&workspace, None)
+            .await
+            .unwrap();
+        assert_eq!(listing.entries.len(), 1);
+        assert_eq!(listing.entries[0].path, "report.bin");
+        assert_eq!(listing.entries[0].size_bytes, Some(content.len() as u64));
+
+        provider.destroy_workspace(&workspace).await.unwrap();
+        assert!(!provider.connect_workspace(&workspace).await.unwrap());
+
+        let requests = state.requests.lock().unwrap();
+        let upload = requests
+            .iter()
+            .find(|(kind, _, _)| kind == "upload")
+            .map(|(_, headers, body)| (headers.clone(), body.clone()))
+            .unwrap();
+        assert_eq!(upload.1["path"], "data/report.bin");
+        assert_eq!(
+            upload
+                .0
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer test-daytona-key")
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(kind, _, _)| kind == "delete")
+                .count(),
+            1
+        );
         server.abort();
     }
 

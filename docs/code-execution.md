@@ -93,6 +93,34 @@ code, stdout, stderr, timeout and truncation flags, and duration. Provider-nativ
 responses, credentials, absolute host paths, and unbounded logs do not cross
 the contract.
 
+## Workspace lifecycle
+
+Beside `execute`, a provider may offer an optional durable-workspace
+capability: create/connect/destroy a chat's workspace, put one file, get one
+file, and list one directory. The capability is flagged — a provider that has
+no durable session reports none, and callers degrade instead of failing. It is
+host-internal only: no model-facing tool is registered over it, and gating any
+model-facing surface is a separate step in the
+[sandbox providers](sandbox-providers.md) delivery sequence.
+
+The same rules as `execute` bound the surface. Paths are workspace-relative
+with only normal components (no traversal, no absolute host paths), file
+transfers are capped in both directions, listings are capped with an explicit
+truncation flag, and errors are normalized — a missing file, an oversized
+transfer, and an unreachable backend are distinct outcomes. No credential or
+provider-native response crosses the contract.
+
+The local provider implements it directly over private per-chat scratch,
+rejecting symlinked files and symlinked intermediate directories, and offers
+it even on hosts where the native confinement primitive for `execute` is
+unavailable, because managing scratch files executes nothing. E2B and Daytona
+implement it over their session and toolbox file APIs through the same shared
+remote-session layer as commands, so file operations serialize with command
+execution per chat and reconcile the remote sandbox first. Connect reports
+reachable only for a sandbox the host holds a live handle to; destroy releases
+the handle only after the backend acknowledges, so a failed teardown stays
+retryable.
+
 ## Local native sandbox
 
 The initial adapter is deliberately fail-closed and macOS-first:
