@@ -8,6 +8,12 @@ import remarkMath from "remark-math";
 import rehypeHighlight from "rehype-highlight";
 import rehypeKatex from "rehype-katex";
 import { ClipboardCopyButton } from "./ClipboardCopyButton";
+import {
+  pieceStartOffsets,
+  rangeWithinPiece,
+  rehypeHighlightRange,
+  type HighlightRange,
+} from "./components/document/citationMark";
 import { splitMarkdownBlocks } from "./markdownBlocks";
 import { escapeLatexText } from "./markdownLatex";
 import { slugify } from "./markdownHeadings";
@@ -26,17 +32,62 @@ import { slugify } from "./markdownHeadings";
  * indentation no longer leaks and the parsed block structure renders cleanly.
  */
 export function preserveLineBreaks(input: string): string {
-  // Fenced code is source text: hard-break spaces would corrupt what the
-  // block renders and what the copy control yields. The `$` alternative keeps
-  // a still-streaming, unclosed fence untouched too.
-  return input
-    .split(/(```[\s\S]*?(?:```|$))/)
-    .map((segment) =>
-      segment.startsWith("```")
-        ? segment
-        : segment.replace(/([^\n])\n(?!\n)/g, "$1  \n"),
-    )
-    .join("");
+  const points = hardBreakInsertions(input);
+  if (points.length === 0) return input;
+
+  let result = "";
+  let from = 0;
+  for (const point of points) {
+    result += input.slice(from, point) + "  ";
+    from = point;
+  }
+  return result + input.slice(from);
+}
+
+/**
+ * The offsets in `input` that {@link preserveLineBreaks} inserts two spaces
+ * before — every single newline outside a fence.
+ *
+ * The rewrite is defined in terms of these positions rather than the other way
+ * round, so a caller that needs to know where a source offset ended up after it
+ * — placing a citation's mark in the parsed tree — asks the same scan instead of
+ * modelling the transform a second time and drifting from it.
+ */
+function hardBreakInsertions(input: string): number[] {
+  const points: number[] = [];
+  let offset = 0;
+  // Fenced code is source text: hard-break spaces would corrupt what the block
+  // renders and what the copy control yields. The `$` alternative keeps a
+  // still-streaming, unclosed fence untouched too.
+  for (const segment of input.split(/(```[\s\S]*?(?:```|$))/)) {
+    if (!segment.startsWith("```")) {
+      const singleNewline = /[^\n]\n(?!\n)/g;
+      let match: RegExpExecArray | null;
+      while ((match = singleNewline.exec(segment)) !== null) {
+        points.push(offset + match.index + 1);
+      }
+    }
+    offset += segment.length;
+  }
+  return points;
+}
+
+/**
+ * Where an offset in the Markdown source lands in the string the parser is
+ * handed — the same offset plus the hard breaks inserted ahead of it.
+ *
+ * Only the line-break rewrite shifts anything: {@link escapeLatexText} rewrites
+ * LaTeX delimiters, so a caller that means to address the parsed tree has to
+ * establish that it left the source alone before this arithmetic means
+ * anything.
+ */
+export function hardBreakOffset(input: string, offset: number): number {
+  let shift = 0;
+  for (const point of hardBreakInsertions(input)) {
+    if (point >= offset) break;
+    shift += 2;
+  }
+  return offset + shift;
 }
 
 /**
@@ -159,7 +210,7 @@ const remarkPlugins: Options["remarkPlugins"] = [
   [remarkMath, { singleDollarTextMath: false }],
 ];
 
-const rehypePlugins: Options["rehypePlugins"] = [
+const rehypePlugins: NonNullable<Options["rehypePlugins"]> = [
   // Highlight only fence-tagged languages; auto-detection on unlabeled blocks
   // guesses wrong too often to be worth it.
   [rehypeHighlight, { detect: false }],
@@ -186,15 +237,24 @@ export function processMarkdownContent(input: string): string {
 const MarkdownBlock = memo(function MarkdownBlock({
   block,
   headingIds,
+  highlightStart,
+  highlightEnd,
 }: {
   block: string;
   headingIds: boolean;
+  /** Range to mark, in this block's own source. Primitives, so memo compares. */
+  highlightStart?: number;
+  highlightEnd?: number;
 }) {
   const processed = useMemo(() => processMarkdownContent(block), [block]);
+  const plugins = useMemo(
+    () => blockRehypePlugins(block, highlightStart, highlightEnd),
+    [block, highlightStart, highlightEnd],
+  );
   return (
     <ReactMarkdown
       remarkPlugins={remarkPlugins}
-      rehypePlugins={rehypePlugins}
+      rehypePlugins={plugins}
       components={headingIds ? componentsWithHeadingIds : components}
       skipHtml
       urlTransform={(url) => safeMarkdownUrl(url) ?? ""}
@@ -204,6 +264,40 @@ const MarkdownBlock = memo(function MarkdownBlock({
   );
 });
 
+/**
+ * The pipeline for one block, with the citation's mark added when the block
+ * holds one.
+ *
+ * The marker runs before the rest because it is the only pass that depends on
+ * text nodes still standing where they were read from: syntax highlighting and
+ * math rewrite their subtrees and drop those positions, so a passage inside a
+ * code fence or a formula goes unmarked rather than marked by guesswork.
+ *
+ * A block whose LaTeX delimiters the pipeline rewrites is left alone for the
+ * same reason — the rewrite moves text the offsets were measured against, and
+ * only the hard-break insertion can be accounted for.
+ */
+function blockRehypePlugins(
+  block: string,
+  start: number | undefined,
+  end: number | undefined,
+): NonNullable<Options["rehypePlugins"]> {
+  if (start == null || end == null || end <= start) return rehypePlugins;
+  if (escapeLatexText(block) !== block) return rehypePlugins;
+  return [
+    [
+      rehypeHighlightRange,
+      {
+        range: {
+          start: hardBreakOffset(block, start),
+          end: hardBreakOffset(block, end),
+        },
+      },
+    ],
+    ...rehypePlugins,
+  ];
+}
+
 interface MessageMarkdownProps {
   children: string;
   /**
@@ -211,21 +305,43 @@ interface MessageMarkdownProps {
    * Off for transcripts, where headings from separate messages would collide.
    */
   headingIds?: boolean;
+  /**
+   * Half-open character range of `children` to mark as the cited passage.
+   *
+   * Addresses the source rather than the rendering, which is what makes it
+   * answerable: the range is carried down to whichever blocks it covers and
+   * placed against the offsets the parser recorded for each of them.
+   */
+  highlightRange?: HighlightRange;
 }
 
 export const MessageMarkdown = memo(function MessageMarkdown({
   children,
   headingIds = false,
+  highlightRange,
 }: MessageMarkdownProps) {
   const blocks = useMemo(() => splitMarkdownBlocks(children), [children]);
+  const blockStarts = useMemo(() => pieceStartOffsets(blocks), [blocks]);
+
   return (
     <div className="message-markdown">
-      {blocks.map((block, index) => (
-        // Blocks are append-only while streaming: the prefix is immutable and
-        // only the tail grows, so the array index is a stable identity that
-        // keeps the growing block mounted across ticks.
-        <MarkdownBlock key={index} block={block} headingIds={headingIds} />
-      ))}
+      {blocks.map((block, index) => {
+        const inBlock = highlightRange
+          ? rangeWithinPiece(highlightRange, blockStarts[index]!, block.length)
+          : null;
+        return (
+          // Blocks are append-only while streaming: the prefix is immutable and
+          // only the tail grows, so the array index is a stable identity that
+          // keeps the growing block mounted across ticks.
+          <MarkdownBlock
+            key={index}
+            block={block}
+            headingIds={headingIds}
+            highlightStart={inBlock?.start}
+            highlightEnd={inBlock?.end}
+          />
+        );
+      })}
     </div>
   );
 });
