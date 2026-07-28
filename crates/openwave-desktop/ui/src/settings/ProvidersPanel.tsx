@@ -22,7 +22,7 @@ export function ProvidersPanel({
   return (
     <SettingsPanel
       title="Providers"
-      description="Keys stay on this machine. Enable a provider, then save a credential."
+      description="Credentials stay on this machine. Enable a provider, then save a credential."
     >
       {providers
         // The gateway signs in with OAuth, not a pasted key; its whole
@@ -46,6 +46,13 @@ function ProviderRow({
   onChanged: () => void;
 }) {
   const [key, setKey] = useState("");
+  const [credentialType, setCredentialType] = useState<
+    "api_key" | "service_account"
+  >("api_key");
+  const [serviceAccountJson, setServiceAccountJson] = useState("");
+  const [vertexLocation, setVertexLocation] = useState(
+    info.vertex_location ?? "global",
+  );
   const [baseUrl, setBaseUrl] = useState(info.base_url ?? "");
   const [models, setModels] = useState<CustomModelConfig[]>(info.models);
   const [saving, setSaving] = useState(false);
@@ -58,7 +65,10 @@ function ProviderRow({
       const body: {
         enabled: boolean;
         base_url?: string | null;
-        credential?: { type: "api_key"; key: string };
+        vertex_location?: string | null;
+        credential?:
+          | { type: "api_key"; key: string }
+          | { type: "service_account"; json: string };
         models?: CustomModelConfig[];
       } = { enabled };
       if (info.kind === "openai_compatible") {
@@ -75,8 +85,18 @@ function ProviderRow({
       if (key.trim()) {
         body.credential = { type: "api_key", key: key.trim() };
       }
+      if (info.kind === "gemini" && credentialType === "service_account") {
+        body.vertex_location = vertexLocation.trim() || "global";
+        if (serviceAccountJson.trim()) {
+          body.credential = {
+            type: "service_account",
+            json: serviceAccountJson.trim(),
+          };
+        }
+      }
       await client.putProvider(info.kind as ProviderKind, body);
       setKey("");
+      setServiceAccountJson("");
       onChanged();
     } catch (err) {
       setError(String(err));
@@ -249,19 +269,72 @@ function ProviderRow({
           </div>
         </>
       )}
-      <Input
-        type="password"
-        placeholder="API key"
-        value={key}
-        onChange={(e) => setKey(e.target.value)}
-        autoComplete="off"
-      />
+      {info.kind === "gemini" && (
+        <label className="grid gap-1 text-xs text-muted-foreground">
+          Credential type
+          <select
+            aria-label="Gemini credential type"
+            className="h-9 rounded-md border border-input bg-background px-3 text-sm text-foreground"
+            value={credentialType}
+            disabled={saving}
+            onChange={(event) =>
+              setCredentialType(
+                event.target.value as "api_key" | "service_account",
+              )
+            }
+          >
+            <option value="api_key">Gemini API key</option>
+            <option value="service_account">Google Cloud service account</option>
+          </select>
+        </label>
+      )}
+      {credentialType === "api_key" && (
+        <Input
+          type="password"
+          placeholder="API key"
+          value={key}
+          onChange={(e) => setKey(e.target.value)}
+          autoComplete="off"
+        />
+      )}
+      {info.kind === "gemini" && credentialType === "service_account" && (
+        <>
+          <Input
+            type="text"
+            aria-label="Vertex AI location"
+            placeholder="Vertex AI location"
+            value={vertexLocation}
+            onChange={(event) => setVertexLocation(event.target.value)}
+            autoComplete="off"
+          />
+          <p className="text-xs text-muted-foreground">
+            Gemini 3 models always use Google&apos;s global endpoint. This
+            location applies to models that support regional Vertex endpoints.
+          </p>
+          <textarea
+            aria-label="Google service account JSON"
+            className="min-h-28 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm text-foreground"
+            placeholder="Paste the Google service-account JSON key file"
+            value={serviceAccountJson}
+            onChange={(event) => setServiceAccountJson(event.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+          />
+        </>
+      )}
       <div className="flex flex-wrap gap-2">
         <Button
           type="button"
           disabled={
             saving ||
-            (info.kind !== "openai_compatible" && !key.trim()) ||
+            (!info.has_credential &&
+              credentialType === "api_key" &&
+              info.kind !== "openai_compatible" &&
+              !key.trim()) ||
+            (!info.has_credential &&
+              info.kind === "gemini" &&
+              credentialType === "service_account" &&
+              !serviceAccountJson.trim()) ||
             (info.kind === "openai_compatible" &&
               models.some((model) => !model.id.trim()))
           }

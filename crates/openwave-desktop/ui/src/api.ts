@@ -399,7 +399,10 @@ export class ApiClient {
     body: {
       enabled?: boolean;
       base_url?: string | null;
-      credential?: { type: "api_key"; key: string };
+      vertex_location?: string | null;
+      credential?:
+        | { type: "api_key"; key: string }
+        | { type: "service_account"; json: string };
       models?: CustomModelConfig[];
     },
   ): Promise<ProviderInfo> {

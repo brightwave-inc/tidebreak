@@ -11,6 +11,7 @@
 //! credential in the new blob shape.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use openwave_core::{AgentConfig, ProviderId, ReasoningEffort, Result, SecretProvider, Store};
 
@@ -93,12 +94,10 @@ impl ProviderKind {
     }
 
     /// Whether this provider can use `credential` today.
-    ///
-    /// Service-account storage is provider-neutral, but no current provider
-    /// has a request path for it yet. Keep the public settings route honest
-    /// until a provider adds that path.
     fn accepts_credential(self, credential: &ProviderCredential) -> bool {
         matches!(credential, ProviderCredential::ApiKey { .. })
+            || (self == ProviderKind::Gemini
+                && matches!(credential, ProviderCredential::ServiceAccount { .. }))
     }
 }
 
@@ -146,6 +145,14 @@ impl ProviderCredential {
             Self::ApiKey { key } => Some(key.as_str()),
             Self::Oauth {} => None,
             Self::ServiceAccount { .. } => None,
+        }
+    }
+
+    /// The raw service-account key file, if this credential carries one.
+    fn as_service_account(&self) -> Option<&str> {
+        match self {
+            Self::ServiceAccount { json } => Some(json),
+            Self::ApiKey { .. } | Self::Oauth {} => None,
         }
     }
 
@@ -225,6 +232,10 @@ pub struct ProviderConfig {
     /// Optional base URL override (required for `openai_compatible`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    /// Vertex AI location used only when Gemini has a service-account
+    /// credential. An absent value defaults to `global`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertex_location: Option<String>,
     /// Explicit model ids served by a custom OpenAI-compatible endpoint.
     ///
     /// Curated providers ignore this field and obtain their models from the
@@ -240,6 +251,7 @@ impl ProviderConfig {
         Self {
             enabled: false,
             base_url: None,
+            vertex_location: None,
             models: Vec::new(),
         }
     }
@@ -387,6 +399,10 @@ pub struct ProviderInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub base_url: Option<String>,
+    /// Vertex AI location. Never includes the project id from the credential.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub vertex_location: Option<String>,
     /// Whether a credential is stored (never the credential itself).
     pub has_credential: bool,
     /// Explicit custom model entries for this endpoint.
@@ -404,14 +420,16 @@ where
 }
 
 /// Body of `PUT /providers/{kind}`. Absent fields are left unchanged; an
-/// explicit `null` `base_url` clears it; `credential` replaces the stored blob
-/// when present (omit to leave the credential alone).
+/// explicit `null` clears a nullable config field; `credential` replaces the
+/// stored blob when present (omit to leave the credential alone).
 #[derive(Debug, Deserialize)]
 pub struct ProviderUpdate {
     #[serde(default)]
     pub enabled: Option<bool>,
     #[serde(default, deserialize_with = "double_option")]
     pub base_url: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub vertex_location: Option<Option<String>>,
     #[serde(default)]
     pub credential: Option<ProviderCredential>,
     /// Replacement custom-model list. Only valid for `openai_compatible`.
@@ -495,20 +513,22 @@ pub async fn delete_credential(secrets: &dyn SecretProvider, kind: ProviderKind)
 /// Whether `kind` has a usable credential — stored, or (for direct API-key providers)
 /// the matching env fallback the resolver also honors.
 pub async fn has_credential(secrets: &dyn SecretProvider, kind: ProviderKind) -> bool {
-    if matches!(
-        read_credential(secrets, kind).await,
-        Ok(Some(cred)) if cred.as_api_key().is_some_and(|k| !k.is_empty())
-    ) {
-        return true;
+    match read_credential(secrets, kind).await {
+        Ok(Some(credential)) => {
+            return credential.as_api_key().is_some_and(|key| !key.is_empty())
+                || (kind == ProviderKind::Gemini
+                    && credential.as_service_account().is_some_and(|json| {
+                        openwave_router::GoogleServiceAccount::from_json(json).is_ok()
+                    }));
+        }
+        Err(_) => return false,
+        Ok(None) => {}
     }
-    match kind {
-        ProviderKind::Anthropic => std::env::var("ANTHROPIC_API_KEY").is_ok_and(|k| !k.is_empty()),
-        ProviderKind::Openai => std::env::var("OPENAI_API_KEY").is_ok_and(|k| !k.is_empty()),
-        ProviderKind::Gemini => std::env::var("GEMINI_API_KEY").is_ok_and(|k| !k.is_empty()),
-        ProviderKind::OpenaiCompatible => false,
+    if kind == ProviderKind::ModelGateway {
         // The gateway's credential is its stored OAuth session, not a key.
-        ProviderKind::ModelGateway => openwave_connectors::has_stored_credentials(secrets).await,
+        return openwave_connectors::has_stored_credentials(secrets).await;
     }
+    env_api_key(kind).is_some()
 }
 
 /// Build the public [`ProviderInfo`] for every known kind.
@@ -523,6 +543,7 @@ pub async fn list_providers(
             kind,
             enabled: config.enabled,
             base_url: config.base_url.clone(),
+            vertex_location: config.vertex_location.clone(),
             has_credential: has_credential(secrets, kind).await,
             models: config.models,
         });
@@ -550,6 +571,23 @@ pub async fn update_provider(
                 return Err(ServerError::bad_request("base_url must not be empty"));
             }
             config.base_url = Some(url);
+        }
+    }
+    match update.vertex_location {
+        None => {}
+        Some(_) if kind != ProviderKind::Gemini => {
+            return Err(ServerError::bad_request(
+                "vertex_location is only supported by gemini",
+            ));
+        }
+        Some(None) => config.vertex_location = None,
+        Some(Some(location)) => {
+            if location.trim() != location || !openwave_router::valid_vertex_location(&location) {
+                return Err(ServerError::bad_request(
+                    "vertex_location must be a valid Google Cloud location",
+                ));
+            }
+            config.vertex_location = Some(location);
         }
     }
     if let Some(models) = update.models {
@@ -580,12 +618,15 @@ pub async fn update_provider(
                 "model_gateway signs in with OAuth; api keys are not accepted",
             ));
         }
-        if matches!(credential, ProviderCredential::ServiceAccount { .. })
-            && !kind.accepts_credential(&credential)
-        {
-            return Err(ServerError::bad_request(format!(
-                "{kind} does not support service_account credentials"
-            )));
+        if let Some(json) = credential.as_service_account() {
+            if !kind.accepts_credential(&credential) {
+                return Err(ServerError::bad_request(format!(
+                    "{kind} does not support service_account credentials"
+                )));
+            }
+            openwave_router::GoogleServiceAccount::from_json(json).map_err(|_| {
+                ServerError::bad_request("invalid Google service-account credential")
+            })?;
         }
         write_credential(secrets, kind, &credential).await?;
     }
@@ -596,6 +637,7 @@ pub async fn update_provider(
         kind,
         enabled: config.enabled,
         base_url: config.base_url.clone(),
+        vertex_location: config.vertex_location.clone(),
         has_credential: has_credential(secrets, kind).await,
         models: config.models,
     })
@@ -677,13 +719,20 @@ fn validate_custom_models_against(
 /// Resolve an API-key credential for `kind`: stored blob (or Anthropic legacy),
 /// then the matching env fallback.
 pub async fn resolve_api_key(secrets: &dyn SecretProvider, kind: ProviderKind) -> Option<String> {
-    if let Ok(Some(cred)) = read_credential(secrets, kind).await {
-        if let Some(key) = cred.as_api_key() {
-            if !key.is_empty() {
-                return Some(key.to_string());
-            }
+    match read_credential(secrets, kind).await {
+        Ok(Some(credential)) => {
+            return credential
+                .as_api_key()
+                .filter(|key| !key.is_empty())
+                .map(str::to_owned);
         }
+        Err(_) => return None,
+        Ok(None) => {}
     }
+    env_api_key(kind)
+}
+
+fn env_api_key(kind: ProviderKind) -> Option<String> {
     match kind {
         ProviderKind::Anthropic => std::env::var("ANTHROPIC_API_KEY")
             .ok()
@@ -720,9 +769,10 @@ pub fn route_kind(kind: ProviderKind) -> openwave_router::RouteKind {
 
 /// Collect enabled, credentialed routes for the composite router.
 ///
-/// A kind with no usable API key is skipped. `openai_compatible` also requires
-/// a `base_url`. Store-read failures for a single kind skip that kind (fail
-/// closed for it) rather than aborting the whole list.
+/// A kind with no usable credential is skipped. Gemini service accounts become
+/// Vertex routes; API keys remain Developer API routes. Store-read failures for
+/// a single kind skip that kind (fail closed for it) rather than aborting the
+/// whole list.
 pub async fn collect_routes(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
@@ -755,10 +805,54 @@ pub async fn collect_routes(
                 base_url: Some(format!("{}/compat/anthropic", base.trim_end_matches('/'))),
                 curated_models: config.models.into_iter().map(|model| model.id).collect(),
                 token_source: Some(source),
+                vertex: None,
             });
             continue;
         }
-        let Some(api_key) = resolve_api_key(secrets, kind).await else {
+
+        let stored_credential = match read_credential(secrets, kind).await {
+            Ok(credential) => credential,
+            Err(_) => continue,
+        };
+        if kind == ProviderKind::Gemini {
+            if let Some(ProviderCredential::ServiceAccount { json }) = stored_credential.as_ref() {
+                let Ok(account) = openwave_router::GoogleServiceAccount::from_json(json) else {
+                    continue;
+                };
+                let location = config.vertex_location.as_deref().unwrap_or("global");
+                if !openwave_router::valid_vertex_location(location) {
+                    continue;
+                }
+                let project_id = account.project_id().to_owned();
+                let credential_fingerprint: [u8; 32] = Sha256::digest(json.as_bytes()).into();
+                let source = std::sync::Arc::new(
+                    openwave_router::GoogleServiceAccountTokenSource::new(account),
+                );
+                routes.push(openwave_router::Route {
+                    kind: route_kind(kind),
+                    api_key: String::new(),
+                    // Production Vertex hosts are derived by the adapter.
+                    // Never let stored config redirect a bearer token.
+                    base_url: None,
+                    curated_models: model_registry::models_for(kind)
+                        .map(|spec| spec.id.to_string())
+                        .collect(),
+                    token_source: Some(source),
+                    vertex: Some(openwave_router::VertexRoute::new(
+                        project_id,
+                        location,
+                        credential_fingerprint,
+                    )),
+                });
+                continue;
+            }
+        }
+        let api_key = match stored_credential {
+            Some(ProviderCredential::ApiKey { key }) if !key.is_empty() => Some(key),
+            Some(_) => None,
+            None => env_api_key(kind),
+        };
+        let Some(api_key) = api_key else {
             continue;
         };
         if kind == ProviderKind::OpenaiCompatible && config.base_url.is_none() {
@@ -773,12 +867,16 @@ pub async fn collect_routes(
         routes.push(openwave_router::Route {
             kind: route_kind(kind),
             api_key,
-            base_url: config.base_url,
+            // Gemini's curated Developer API endpoint is fixed in production.
+            base_url: (kind != ProviderKind::Gemini)
+                .then_some(config.base_url)
+                .flatten(),
             curated_models: model_registry::models_for(kind)
                 .map(|spec| spec.id.to_string())
                 .chain(config.models.into_iter().map(|model| model.id))
                 .collect(),
             token_source: None,
+            vertex: None,
         });
     }
     routes
@@ -808,6 +906,7 @@ pub async fn migrate_legacy_anthropic(
             &ProviderConfig {
                 enabled: true,
                 base_url: None,
+                vertex_location: None,
                 models: Vec::new(),
             },
         )
@@ -872,6 +971,14 @@ pub async fn provider_is_usable(
 ) -> Result<bool> {
     let config = read_config(store, kind).await?;
     if !config.enabled || !has_credential(secrets, kind).await {
+        return Ok(false);
+    }
+    if kind == ProviderKind::Gemini
+        && config
+            .vertex_location
+            .as_deref()
+            .is_some_and(|location| !openwave_router::valid_vertex_location(location))
+    {
         return Ok(false);
     }
     if matches!(

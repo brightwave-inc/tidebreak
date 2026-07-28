@@ -36,6 +36,41 @@ pub trait BearerTokenSource: Send + Sync {
     async fn bearer_token(&self) -> Result<String>;
 }
 
+/// Vertex-specific route data. The credential fingerprint is already an
+/// irreversible digest and exists only to invalidate a cached router after a
+/// service-account key rotates.
+#[derive(Clone)]
+pub struct VertexRoute {
+    project_id: String,
+    location: String,
+    credential_fingerprint: [u8; 32],
+}
+
+impl VertexRoute {
+    /// Build Vertex routing metadata.
+    pub fn new(
+        project_id: impl Into<String>,
+        location: impl Into<String>,
+        credential_fingerprint: [u8; 32],
+    ) -> Self {
+        Self {
+            project_id: project_id.into(),
+            location: location.into(),
+            credential_fingerprint,
+        }
+    }
+}
+
+impl std::fmt::Debug for VertexRoute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VertexRoute")
+            .field("project_id", &"***")
+            .field("location", &self.location)
+            .field("credential_fingerprint", &"***")
+            .finish()
+    }
+}
+
 /// Which concrete adapter a [`Route`] builds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -92,6 +127,9 @@ pub struct Route {
     /// Per-request credential supplier for short-lived tokens. Takes
     /// precedence over `api_key` when present.
     pub token_source: Option<Arc<dyn BearerTokenSource>>,
+    /// Vertex resource/auth metadata. Present only for a Gemini route backed
+    /// by a Google service account.
+    pub vertex: Option<VertexRoute>,
 }
 
 impl std::fmt::Debug for Route {
@@ -102,6 +140,7 @@ impl std::fmt::Debug for Route {
             .field("base_url", &self.base_url)
             .field("curated_models", &self.curated_models)
             .field("token_source", &self.token_source.is_some())
+            .field("vertex", &self.vertex)
             .finish()
     }
 }
@@ -290,7 +329,20 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
         }
         #[cfg(feature = "gemini")]
         RouteKind::Gemini => {
-            let mut p = GeminiProvider::new(route.api_key.clone());
+            let mut p = match &route.vertex {
+                Some(vertex) => GeminiProvider::vertex(
+                    vertex.project_id.clone(),
+                    vertex.location.clone(),
+                    route.token_source.clone()?,
+                )
+                .ok()?,
+                None => {
+                    if route.api_key.is_empty() || route.token_source.is_some() {
+                        return None;
+                    }
+                    GeminiProvider::new(route.api_key.clone())
+                }
+            };
             if let Some(base) = &route.base_url {
                 p = p.with_base_url(base.clone());
             }
@@ -310,7 +362,7 @@ fn fingerprint_routes(routes: &[Route]) -> String {
         .iter()
         .map(|r| {
             format!(
-                "{}|{}|{}|{}",
+                "{}|{}|{}|{}|{}",
                 r.kind.as_str(),
                 // A rotating token must not thrash the cached router; the
                 // fingerprint tracks *whether* a live source exists, and the
@@ -325,7 +377,15 @@ fn fingerprint_routes(routes: &[Route]) -> String {
                     let mut models = r.curated_models.clone();
                     models.sort();
                     models.join(",")
-                }
+                },
+                r.vertex.as_ref().map_or_else(String::new, |vertex| {
+                    let credential = vertex
+                        .credential_fingerprint
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>();
+                    format!("{}:{credential}", vertex.location)
+                })
             )
         })
         .collect();
@@ -356,6 +416,7 @@ mod tests {
             base_url: base.map(str::to_owned),
             curated_models: models.iter().map(|m| (*m).to_string()).collect(),
             token_source: None,
+            vertex: None,
         }
     }
 
@@ -491,6 +552,25 @@ mod tests {
         let a = Router::build(vec![route(RouteKind::Anthropic, "sk-1", &[], None)]);
         let b = Router::build(vec![route(RouteKind::Anthropic, "sk-2", &[], None)]);
         assert_ne!(a.fingerprint(), b.fingerprint());
+    }
+
+    #[test]
+    fn vertex_fingerprint_changes_with_location_or_service_account() {
+        let build = |location: &str, credential: u8| {
+            let mut route = route(RouteKind::Gemini, "", &["gemini-3.6-flash"], None);
+            route.token_source = Some(Arc::new(StaticSource("vertex-token")));
+            route.vertex = Some(VertexRoute::new("test-project", location, [credential; 32]));
+            Router::build(vec![route])
+        };
+
+        assert_ne!(
+            build("global", 1).fingerprint(),
+            build("us-central1", 1).fingerprint()
+        );
+        assert_ne!(
+            build("global", 1).fingerprint(),
+            build("global", 2).fingerprint()
+        );
     }
 
     #[test]

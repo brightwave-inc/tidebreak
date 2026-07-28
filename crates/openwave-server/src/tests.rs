@@ -7547,6 +7547,7 @@ async fn resolve_embedder_uses_openai_only_when_enabled_and_keyed() {
         &providers::ProviderConfig {
             enabled: true,
             base_url: None,
+            vertex_location: None,
             models: Vec::new(),
         },
     )
@@ -7565,6 +7566,7 @@ async fn resolve_embedder_uses_openai_only_when_enabled_and_keyed() {
         &providers::ProviderConfig {
             enabled: false,
             base_url: None,
+            vertex_location: None,
             models: Vec::new(),
         },
     )
@@ -10618,6 +10620,55 @@ async fn providers_never_echo_an_unsupported_service_account() {
 }
 
 #[tokio::test]
+async fn gemini_vertex_location_is_validated_and_public_info_never_grows_a_project_field() {
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let put = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/providers/gemini")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "enabled": true,
+                        "vertex_location": "us-central1",
+                        "credential": {"type": "api_key", "key": "gemini-secret"}
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+    let body: serde_json::Value = json_body(put).await;
+    assert_eq!(body["vertex_location"], "us-central1");
+    assert_eq!(body["has_credential"], true);
+    assert!(body.get("credential").is_none());
+    assert!(body.get("project_id").is_none());
+    assert!(!body.to_string().contains("gemini-secret"));
+
+    let rejected = router
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/providers/gemini")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"vertex_location": "../global"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn openai_compatible_requires_base_url_when_enabled() {
     let (router, token, _store, _dir) = test_app().await;
     let response = router
@@ -10715,6 +10766,7 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
         &providers::ProviderConfig {
             enabled: true,
             base_url: None,
+            vertex_location: None,
             models: Vec::new(),
         },
     )
@@ -10937,6 +10989,7 @@ async fn resolver_builds_a_router_from_enabled_providers() {
         &providers::ProviderConfig {
             enabled: true,
             base_url: None,
+            vertex_location: None,
             models: Vec::new(),
         },
     )
@@ -10975,6 +11028,7 @@ async fn resolver_builds_a_router_from_enabled_providers() {
         &providers::ProviderConfig {
             enabled: false,
             base_url: None,
+            vertex_location: None,
             models: Vec::new(),
         },
     )
@@ -11020,6 +11074,7 @@ async fn resolver_includes_configured_curated_api_key_providers() {
             &providers::ProviderConfig {
                 enabled: true,
                 base_url: None,
+                vertex_location: None,
                 models: Vec::new(),
             },
         )
@@ -11047,6 +11102,56 @@ async fn resolver_includes_configured_curated_api_key_providers() {
 }
 
 #[tokio::test]
+async fn malformed_gemini_service_account_never_advertises_or_builds_a_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}/test.db?mode=rwc",
+            dir.path().display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
+    providers::write_credential(
+        &*secrets,
+        providers::ProviderKind::Gemini,
+        &providers::ProviderCredential::ServiceAccount {
+            json: r#"{"type":"service_account","client_email":"service@example.test","private_key":"not-a-private-key","project_id":"test-project"}"#.into(),
+        },
+    )
+    .await
+    .unwrap();
+    providers::write_config(
+        &*store,
+        providers::ProviderKind::Gemini,
+        &providers::ProviderConfig {
+            enabled: true,
+            base_url: None,
+            vertex_location: Some("global".into()),
+            models: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        !providers::provider_is_usable(&*store, &*secrets, providers::ProviderKind::Gemini,)
+            .await
+            .unwrap()
+    );
+    assert!(providers::collect_routes(&*store, &*secrets, None)
+        .await
+        .is_empty());
+    assert!(providers::catalog_models(&*store, &*secrets)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|model| model.policy.provider == providers::ProviderKind::Gemini)
+        .all(|model| !model.available));
+}
+
+#[tokio::test]
 async fn openai_compatible_route_is_free_form_fallback() {
     let dir = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
@@ -11071,6 +11176,7 @@ async fn openai_compatible_route_is_free_form_fallback() {
         &providers::ProviderConfig {
             enabled: true,
             base_url: Some("http://127.0.0.1:1234/v1".into()),
+            vertex_location: None,
             models: Vec::new(),
         },
     )

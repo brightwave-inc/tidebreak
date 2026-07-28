@@ -461,6 +461,10 @@ enabled: boolean,
  */
 base_url?: string, 
 /**
+ * Vertex AI location. Never includes the project id from the credential.
+ */
+vertex_location?: string, 
+/**
  * Whether a credential is stored (never the credential itself).
  */
 has_credential: boolean, 
