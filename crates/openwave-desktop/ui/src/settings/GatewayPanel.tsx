@@ -8,7 +8,7 @@ import type {
   McpServerDefinition,
   McpServerInfo,
 } from "../api";
-import { openExternal } from "../host";
+import { openSignInPage } from "../openSignInPage";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -77,13 +77,6 @@ function mountDefinition(slug: string, name: string): McpServerDefinition {
     request_timeout_ms: DEFAULT_MOUNT_TIMEOUT_MS,
     enabled: true,
   };
-}
-
-/** Native opener first; `window.open` only works in a plain browser tab. */
-async function openSignInPage(url: string) {
-  if (!(await openExternal(url).catch(() => false))) {
-    window.open(url, "_blank", "noreferrer,noopener");
-  }
 }
 
 /**
