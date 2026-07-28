@@ -792,26 +792,83 @@ body {
   }
 }
 
-.new-activity {
+/* An icon-only affordance centered just above the composer. It stays mounted
+   and fades on opacity so scrolling away and back doesn't pop it in and out. */
+.scroll-to-latest {
   position: absolute;
   z-index: 1;
-  right: clamp(1rem, 7vw, 7rem);
-  bottom: 1rem;
+  left: 50%;
+  bottom: 0.75rem;
+  transform: translateX(-50%);
   display: inline-flex;
   align-items: center;
-  gap: 0.3rem;
+  justify-content: center;
   border: 1px solid var(--line);
   border-radius: 999px;
-  padding: 0.38rem 0.7rem 0.38rem 0.85rem;
+  padding: 0.5rem;
   color: var(--ink);
   background: var(--bg-elevated);
   box-shadow: var(--shadow);
-  font-size: 0.78rem;
-  font-weight: 500;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 150ms ease, background-color 120ms ease;
 }
 
-.new-activity:hover {
-  background: var(--accent);
+.scroll-to-latest.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.scroll-to-latest:hover {
+  background: var(--muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scroll-to-latest {
+    transition: none;
+  }
+}
+
+/* The trailing exchange, held at least a screenful tall on send so the
+   just-sent message rises near the top with room below for its reply, rather
+   than being nudged up a line at a time as the answer streams in. */
+.message-turn {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.message-turn:not(:first-child) {
+  margin-top: 1rem;
+}
+
+.message-turn.is-pinned {
+  min-height: calc(var(--transcript-viewport, 100dvh) - 8rem);
+}
+
+/* Scroll-edge fades: soften whichever edges have more content beyond them, so
+   the transcript reads as continuing past the frame rather than clipped. */
+.messages.is-faded-top {
+  mask-image: linear-gradient(180deg, transparent, #000 2rem, #000);
+}
+
+.messages.is-faded-bottom {
+  mask-image: linear-gradient(
+    180deg,
+    #000,
+    #000 calc(100% - 2rem),
+    transparent
+  );
+}
+
+.messages.is-faded-both {
+  mask-image: linear-gradient(
+    180deg,
+    transparent,
+    #000 2rem,
+    #000 calc(100% - 2rem),
+    transparent
+  );
 }
 
 .message {
