@@ -10,6 +10,9 @@ React/TypeScript under `crates/openwave-desktop/ui`.
 
 ## Workflow
 
+- **Do not use the `bw` CLI in OpenWave.** It is tooling for the separate Alpha
+  repository, not this one; use this repository's documented Cargo, pnpm, and
+  GitHub commands instead.
 - **Land work as small, focused PRs — one logical change each.** Don't accumulate
   a large multi-slice diff on a working branch. Ship a slice, open the PR, move
   on. Small and reviewable beats big and sprawling.
