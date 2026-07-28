@@ -297,6 +297,7 @@ pub(in crate::db) async fn resolve_server_tool_call(
         resolution,
         None,
         None,
+        None,
     )
     .await?
     .outcome)
@@ -318,6 +319,7 @@ pub(in crate::db) async fn resolve_server_tool_call_with_evidence(
         resolution,
         Some(evidence),
         preview,
+        None,
     )
     .await?
     .outcome)
@@ -350,6 +352,7 @@ pub(in crate::db) async fn resolve_claimed_server_tool_call_with_evidence(
         resolution,
         Some(evidence),
         preview,
+        None,
     )
     .await?
     .outcome)
@@ -380,6 +383,7 @@ pub(in crate::db) async fn abandon_inherited_server_tool_call(
         resolution,
         None,
         None,
+        None,
     )
     .await?
     .outcome)
@@ -396,6 +400,7 @@ pub(in crate::db) async fn list_retrieval_evidence(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::db) async fn resolve_client_tool_call_and_append_event(
     store: &DbStore,
     id: CallId,
@@ -404,6 +409,7 @@ pub(in crate::db) async fn resolve_client_tool_call_and_append_event(
     now: DateTime<Utc>,
     resolution: &ToolCallResolution,
     resolved_at: DateTime<Utc>,
+    rows: Option<&serde_json::Value>,
 ) -> Result<JournaledClientToolCallOutcome> {
     if lease_token.is_nil() {
         return Err(AgentError::Store(
@@ -422,10 +428,12 @@ pub(in crate::db) async fn resolve_client_tool_call_and_append_event(
         resolution,
         None,
         None,
+        rows,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::db) async fn resolve_expired_client_tool_call_and_append_event(
     store: &DbStore,
     id: CallId,
@@ -434,6 +442,7 @@ pub(in crate::db) async fn resolve_expired_client_tool_call_and_append_event(
     now: DateTime<Utc>,
     resolution: &ToolCallResolution,
     resolved_at: DateTime<Utc>,
+    rows: Option<&serde_json::Value>,
 ) -> Result<JournaledClientToolCallOutcome> {
     if lease_token.is_nil() {
         return Err(AgentError::Store(
@@ -452,6 +461,7 @@ pub(in crate::db) async fn resolve_expired_client_tool_call_and_append_event(
         resolution,
         None,
         None,
+        rows,
     )
     .await
 }
@@ -471,6 +481,7 @@ pub(in crate::db) async fn list_pending_client_tool_calls(
     models.into_iter().map(tool_call_from_model).collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn resolve_tool_call(
     store: &DbStore,
     id: CallId,
@@ -479,6 +490,7 @@ async fn resolve_tool_call(
     resolution: &ToolCallResolution,
     evidence: Option<&[RetrievalEvidenceInput]>,
     preview: Option<&crate::ToolResultPreview>,
+    rows: Option<&serde_json::Value>,
 ) -> Result<JournaledClientToolCallOutcome> {
     validate_resolution(resolution)?;
     let resolved_at = canonical_db_timestamp(resolved_at)?;
@@ -604,6 +616,7 @@ async fn resolve_tool_call(
     }
 
     let (error_code, error_detail) = resolution_error(resolution);
+    let resolved_name = existing.name.clone();
     let approval_status = existing.approval_status.clone();
     let approval_requested_at = existing.approval_requested_at;
     let mut active: entities::tool_call::ActiveModel = existing.into();
@@ -612,6 +625,25 @@ async fn resolve_tool_call(
     // Serialization of a closed, already-clamped projection cannot fail in
     // practice; a store write is the wrong place to panic if it ever did, and
     // losing the card is the whole cost.
+    // A server call hands in a projection it already built. A client call hands
+    // in the *rows it reported*, and the projection is built here — against the
+    // name on the row rather than anything the executor claimed, so the
+    // allowlist decides whether this tool may have a card at all and every row
+    // goes through the same clamp a server-side one does.
+    let projected = rows.and_then(|rows| {
+        crate::ToolResultPreview::build(
+            &resolved_name,
+            &crate::ToolOutput {
+                content: String::new(),
+                data: Some(rows.clone()),
+                is_error: resolution.status() != ToolCallStatus::Completed,
+                error_category: None,
+                ui_view: None,
+                private_evidence: Vec::new(),
+            },
+        )
+    });
+    let preview = preview.or(projected.as_ref());
     active.result_preview = Set(preview.and_then(|preview| serde_json::to_value(preview).ok()));
     active.error_code = Set(error_code);
     active.error_detail = Set(error_detail);

@@ -2751,6 +2751,37 @@ pub trait Store: Send + Sync {
         resolved_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<JournaledClientToolCallOutcome>;
 
+    /// Resolve a live client call, retaining the rows it reported.
+    ///
+    /// `rows` is the executor's *unvalidated* `{entries, failures}` payload, not
+    /// a projection. The store builds the projection from it against the call's
+    /// own stored name, so the allowlist and every clamp are applied here rather
+    /// than trusted from the executor — a client cannot award itself a card for
+    /// a tool that has none, nor an unbounded row.
+    ///
+    /// The default drops the rows, which costs the card and nothing else.
+    #[allow(clippy::too_many_arguments)]
+    async fn resolve_client_tool_call_and_append_event_with_rows(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+        _rows: Option<&serde_json::Value>,
+    ) -> Result<JournaledClientToolCallOutcome> {
+        self.resolve_client_tool_call_and_append_event(
+            id,
+            chat_id,
+            lease_token,
+            now,
+            resolution,
+            resolved_at,
+        )
+        .await
+    }
+
     /// Resolve a known outcome after the exact client lease expired.
     ///
     /// This is the explicit recovery path for an ambiguous native interaction;
@@ -2788,6 +2819,30 @@ pub trait Store: Send + Sync {
         resolution: &ToolCallResolution,
         resolved_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<JournaledClientToolCallOutcome>;
+
+    /// The expired-lease counterpart of
+    /// [`Self::resolve_client_tool_call_and_append_event_with_rows`].
+    #[allow(clippy::too_many_arguments)]
+    async fn resolve_expired_client_tool_call_and_append_event_with_rows(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+        _rows: Option<&serde_json::Value>,
+    ) -> Result<JournaledClientToolCallOutcome> {
+        self.resolve_expired_client_tool_call_and_append_event(
+            id,
+            chat_id,
+            lease_token,
+            now,
+            resolution,
+            resolved_at,
+        )
+        .await
+    }
 
     /// List unclaimed and claimed client work for authoritative recovery.
     async fn list_pending_client_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>>;

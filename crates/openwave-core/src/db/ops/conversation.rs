@@ -1317,6 +1317,7 @@ mod tests {
 
     /// Calls that resolved before projections were retained still rebuild the
     /// one enumerated signal history could always recover.
+    ///
     #[test]
     fn a_call_with_no_retained_projection_falls_back_to_its_stored_signal() {
         let activity = tool_activity_from_call(
