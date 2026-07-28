@@ -1,11 +1,11 @@
 import { useNavigate } from "@tanstack/react-router";
-import { SquarePen } from "lucide-react";
 
 import { useApp } from "@/AppContext";
 import { useChatAttention } from "@/ChatAttention";
 import { useChatListStore } from "@/ChatListStore";
+import { NewChatButton } from "./NewChatButton";
 import { RecentChatRow } from "./RecentChatRow";
-import { SidebarButton, SidebarSectionTitle, useSidebarWidth } from "./primitives";
+import { SidebarSectionTitle, useSidebarWidth } from "./primitives";
 import { SidebarFrame } from "./SidebarFrame";
 
 /** How many conversations the rail shows before deferring to the home list. */
@@ -39,13 +39,11 @@ export function HomeSidebar() {
 
   return (
     <SidebarFrame>
-      <SidebarButton
+      <NewChatButton
         onClick={newChat}
         disabled={creatingChat || deletingChatId !== null}
-      >
-        <SquarePen />
-        <span>{creatingChat ? "Starting…" : "New chat"}</span>
-      </SidebarButton>
+        creating={creatingChat}
+      />
 
       {recentChats.length > 0 && (
         <SidebarSectionTitle className="mt-4">Recent</SidebarSectionTitle>
