@@ -824,6 +824,7 @@ async fn worker_renews_a_near_expiry_ambiguous_claim_before_execution() {
     let worker = turn_worker::TurnWorker::new(
         state.store.clone(),
         state.resolver.clone(),
+        state.secrets.clone(),
         state.tools.clone(),
         state.approvals.clone(),
         state.events.clone(),
@@ -919,6 +920,7 @@ async fn worker_heartbeats_while_event_journaling_is_blocked() {
     let worker = turn_worker::TurnWorker::new(
         state.store.clone(),
         state.resolver.clone(),
+        state.secrets.clone(),
         state.tools.clone(),
         state.approvals.clone(),
         state.events.clone(),

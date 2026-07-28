@@ -22,6 +22,8 @@ import {
   type McpServerInfo as WireMcpServerInfo,
   type McpServersInfo as WireMcpServersInfo,
   type ModelInfo as WireModelInfo,
+  type ModelRole as WireModelRole,
+  type ModelRoleInfo as WireModelRoleInfo,
   type Project as WireProject,
   type ProviderInfo as WireProviderInfo,
   type ProviderKind as WireProviderKind,
@@ -108,6 +110,17 @@ export type CustomModelConfig = WireCustomModelConfig;
  */
 export type ModelInfo = Omit<WireModelInfo, "key"> & {
   key: ModelSelectionKey;
+};
+
+export type ModelRole = WireModelRole;
+
+/** A named model role, its pinned selection, and what it resolves to now. */
+export type ModelRoleInfo = WireModelRoleInfo;
+
+/** The catalog plus what each role resolves to (`GET /models`). */
+export type ModelCatalog = {
+  models: ModelInfo[];
+  roles: ModelRoleInfo[];
 };
 
 /** Global runtime settings (`GET/PUT /settings`). */
@@ -449,12 +462,27 @@ export class ApiClient {
   }
 
   /**
-   * The selectable catalog, plus the key a turn falls back to when its chat
-   * carries no override — which is the only way a client can name what
-   * "default" means.
+   * The selectable catalog, plus one row per model role: what the user pinned
+   * it to, and what it resolves to right now — the only way a client can name
+   * what "default" or "automatic" means for a role.
    */
-  listModels(): Promise<{ models: ModelInfo[]; default_key: string | null }> {
+  listModels(): Promise<ModelCatalog> {
     return this.json("/models", { headers: this.headers() });
+  }
+
+  /**
+   * Pin a model role to one model, or pass `null` to return it to automatic
+   * resolution against the role's ordered defaults.
+   */
+  putModelRole(
+    role: ModelRole,
+    selection: ModelSelectionKey | null,
+  ): Promise<ModelRoleInfo> {
+    return this.json(`/models/roles/${role}`, {
+      method: "PUT",
+      headers: this.headers(true),
+      body: JSON.stringify({ selection }),
+    });
   }
 
   getSettings(): Promise<RuntimeSettings> {

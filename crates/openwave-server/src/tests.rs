@@ -2152,6 +2152,7 @@ fn spawn_turn_worker_with_config(state: &AppState, config: turn_worker::TurnWork
     let worker = turn_worker::TurnWorker::new(
         state.store.clone(),
         state.resolver.clone(),
+        state.secrets.clone(),
         state.tools.clone(),
         state.approvals.clone(),
         state.events.clone(),

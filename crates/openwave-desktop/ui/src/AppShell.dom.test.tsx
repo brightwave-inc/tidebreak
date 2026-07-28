@@ -37,7 +37,7 @@ vi.mock("./boot", () => ({
 
 vi.mock("./api", () => ({
   ApiClient: class {
-    listModels = vi.fn(async () => ({ models: [] }));
+    listModels = vi.fn(async () => ({ models: [], roles: [] }));
     listProviders = vi.fn(async () => ({ providers: [] }));
     listChats = listChats;
     createChat = createChat;

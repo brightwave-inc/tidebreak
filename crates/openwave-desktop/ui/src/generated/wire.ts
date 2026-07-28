@@ -442,6 +442,38 @@ reasoning_efforts: Array<ReasoningEffort>,
 multimodal: boolean, };
 
 /**
+ * The roles the product resolves a model for.
+ *
+ * `#[non_exhaustive]` so a new role can land without breaking wire clients that
+ * match on the string form.
+ */
+export type ModelRole = "chat" | "utility";
+
+/**
+ * One named model role and what it resolves to right now.
+ */
+export type ModelRoleInfo = { 
+/**
+ * The role this row describes.
+ */
+role: ModelRole, 
+/**
+ * The catalog key the user selected for this role, or `None` when the role
+ * is left automatic.
+ */
+selection: string | null, 
+/**
+ * The catalog key this role resolves to right now, selection or not.
+ *
+ * A selector that offers "automatic" as a choice can only say what that
+ * choice means if the server says which model it lands on. `None` when the
+ * role resolves to nothing the catalog can name, which leaves the client
+ * with nothing to promise rather than a guess — and, for `utility`, means
+ * the work that depends on it is skipped.
+ */
+resolved_key: string | null, };
+
+/**
  * Closed renderer-safe pending approval projection. Canonical arguments,
  * model-authored summaries, and unknown tool names never cross this boundary;
  * only a tool's own closed preview of the action under review does.
