@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { FileText } from "lucide-react";
 import {
-  importLibraryDocument,
+  importLibraryDocuments,
   listLibraryDocuments,
   searchLibraryDocuments,
   type ImportedDocument,
   type LibraryDocument,
+  type LibraryImportSuccess,
   type LibrarySearchResult,
 } from "./documents";
 import {
@@ -90,9 +91,10 @@ export function DocumentsView({
     setError(null);
     setImported(null);
     try {
-      const accepted = await importLibraryDocument(chatId);
+      const batch = await importLibraryDocuments(chatId);
+      const accepted = batch?.results.find(isImportedDocument);
       if (!mountedRef.current || !accepted) return;
-      setImported(accepted);
+      setImported(accepted.document);
       await refreshCatalog();
     } catch (err) {
       if (mountedRef.current) {
@@ -149,7 +151,7 @@ export function DocumentsView({
             disabled={importing}
             onClick={() => void onImport()}
           >
-            {importing ? "Adding…" : "Add source…"}
+            {importing ? "Adding…" : "Add sources…"}
           </button>
         </div>
       </header>
@@ -309,6 +311,12 @@ function formatDate(value: string): string {
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(
     new Date(value),
   );
+}
+
+function isImportedDocument(
+  result: { status: string },
+): result is LibraryImportSuccess {
+  return result.status === "imported" || result.status === "already_present";
 }
 
 function friendlyError(error: unknown, fallback: string): string {

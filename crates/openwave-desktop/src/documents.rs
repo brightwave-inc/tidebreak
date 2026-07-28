@@ -4,17 +4,20 @@
 //! small catalog/search projection and never sees source locations, indexing
 //! identities, generation metadata, or canonical document payloads.
 
+use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
+use futures::{stream, StreamExt};
 use openwave_core::{ChatId, DocumentProcessingStatus, DocumentSourceBlob, Store};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, DragDropEvent, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::oneshot;
 use tokio_util::io::ReaderStream;
@@ -30,7 +33,11 @@ const DOCUMENT_PAGE_SIZE: usize = 200;
 const MAX_LIBRARY_DOCUMENTS: usize = 1_000;
 const CLIENT_EXECUTOR_HEADER: &str = "x-openwave-client-executor";
 const IMPORT_PROGRESS_EVENT: &str = "library-import-progress";
+const IMPORT_DROP_EVENT: &str = "library-import-drop-state";
 const IMPORT_HASH_CHUNK_BYTES: usize = 64 * 1024;
+const MAX_CONCURRENT_IMPORTS: usize = 2;
+const IMPORT_RETRY_DELAYS: [Duration; 2] = [Duration::from_millis(250), Duration::from_secs(1)];
+const DROPPED_PATH_TTL: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Deserialize)]
 struct CatalogPage {
@@ -161,11 +168,76 @@ enum LibraryImportProgressStatus {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LibraryImportProgress {
+    import_id: String,
     display_name: String,
     status: LibraryImportProgressStatus,
     document_id: Option<String>,
     processing_status: Option<DocumentProcessingStatus>,
     message: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum LibraryImportDropPhase {
+    Enter,
+    Leave,
+    Dropped,
+}
+
+/// A path set by an operating-system drag operation. The renderer never
+/// receives these paths: it can only claim the most recent drop for its own
+/// window, and only once.
+#[derive(Default)]
+pub(crate) struct PendingLibraryDrop {
+    paths: std::sync::Mutex<HashMap<String, PendingDrop>>,
+}
+
+struct PendingDrop {
+    paths: Vec<PathBuf>,
+    received_at: Instant,
+}
+
+impl PendingLibraryDrop {
+    fn record(&self, window_label: &str, paths: Vec<PathBuf>) {
+        let mut pending = self.paths.lock().expect("dropped-path lock poisoned");
+        pending.insert(
+            window_label.to_owned(),
+            PendingDrop {
+                paths,
+                received_at: Instant::now(),
+            },
+        );
+    }
+
+    fn clear(&self, window_label: &str) {
+        self.paths
+            .lock()
+            .expect("dropped-path lock poisoned")
+            .remove(window_label);
+    }
+
+    fn take(&self, window_label: &str) -> Option<Vec<PathBuf>> {
+        let pending = self
+            .paths
+            .lock()
+            .expect("dropped-path lock poisoned")
+            .remove(window_label)?;
+        (pending.received_at.elapsed() <= DROPPED_PATH_TTL).then_some(pending.paths)
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LibraryImportDropState {
+    phase: LibraryImportDropPhase,
+    accepted: bool,
+    file_count: usize,
+}
+
+struct PendingDocumentImport {
+    import_id: Uuid,
+    path: PathBuf,
+    display_name: String,
 }
 
 struct PreparedDocumentImport {
@@ -178,6 +250,19 @@ struct PreparedDocumentImport {
 struct CompletedDocumentImport {
     document: ImportedDocument,
     already_present: bool,
+}
+
+enum ImportFailure {
+    Retryable(String),
+    Permanent(String),
+}
+
+impl ImportFailure {
+    fn message(self) -> String {
+        match self {
+            Self::Retryable(message) | Self::Permanent(message) => message,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -291,7 +376,34 @@ pub(crate) async fn import_library_document(
         return Ok(None);
     };
     let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
-    let completed = import_selected_document(&app, app_state.inner(), chat_id, path).await?;
+    let import_id = Uuid::new_v4();
+    let display_name =
+        import_display_name(&path).unwrap_or_else(|_| "Selected document".to_owned());
+    emit_import_progress(
+        &app,
+        LibraryImportProgress {
+            import_id: import_id.to_string(),
+            display_name,
+            status: LibraryImportProgressStatus::Queued,
+            document_id: None,
+            processing_status: None,
+            message: None,
+        },
+    );
+    let completed =
+        import_selected_document(&app, app_state.inner(), chat_id, path, import_id).await?;
+    emit_import_progress(
+        &app,
+        completed_progress(
+            import_id,
+            &completed.document,
+            if completed.already_present {
+                LibraryImportProgressStatus::AlreadyPresent
+            } else {
+                LibraryImportProgressStatus::Imported
+            },
+        ),
+    );
     Ok(Some(completed.document))
 }
 
@@ -313,20 +425,124 @@ pub(crate) async fn import_library_documents(
     let Some(paths) = pick_documents(&app).await? else {
         return Ok(None);
     };
+    Ok(Some(
+        import_document_paths(
+            &app,
+            app_state.inner(),
+            &host_access,
+            request.chat_id,
+            paths,
+        )
+        .await,
+    ))
+}
 
+/// Claim the most recent operating-system drop for this window and import it.
+/// The renderer submits only its conversation id; the native event loop keeps
+/// the source paths out of the webview and makes the grant single-use.
+#[tauri::command]
+pub(crate) async fn import_dropped_library_documents(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    app_state: State<'_, Arc<AppState>>,
+    host_access: State<'_, HostAccess>,
+    request: LibraryRequest,
+) -> Result<Option<LibraryImportBatch>, String> {
+    resolve_conversation_scope(&host_access, request.chat_id).await?;
+    let paths = app
+        .state::<PendingLibraryDrop>()
+        .take(window.label())
+        .ok_or_else(|| "Drop the files into OpenWave again".to_owned())?;
+    Ok(Some(
+        import_document_paths(
+            &app,
+            app_state.inner(),
+            &host_access,
+            request.chat_id,
+            paths,
+        )
+        .await,
+    ))
+}
+
+/// Turn native drag events into a small renderer-safe state signal while
+/// retaining the actual paths in process until the drop is claimed.
+pub(crate) fn handle_window_drag_drop(app: &AppHandle, window_label: &str, event: &WindowEvent) {
+    let WindowEvent::DragDrop(event) = event else {
+        return;
+    };
+    let pending = app.state::<PendingLibraryDrop>();
+    let state = match event {
+        DragDropEvent::Enter { paths, .. } => {
+            pending.clear(window_label);
+            drop_state(LibraryImportDropPhase::Enter, paths)
+        }
+        DragDropEvent::Drop { paths, .. } => {
+            let state = drop_state(LibraryImportDropPhase::Dropped, paths);
+            if state.accepted {
+                pending.record(window_label, paths.clone());
+            } else {
+                pending.clear(window_label);
+            }
+            state
+        }
+        DragDropEvent::Leave => {
+            pending.clear(window_label);
+            LibraryImportDropState {
+                phase: LibraryImportDropPhase::Leave,
+                accepted: false,
+                file_count: 0,
+            }
+        }
+        DragDropEvent::Over { .. } => return,
+        _ => return,
+    };
+    if let Some(window) = app.get_webview_window(window_label) {
+        if let Err(error) = window.emit(IMPORT_DROP_EVENT, state) {
+            eprintln!("openwave-desktop: could not emit import drop state: {error}");
+        }
+    }
+}
+
+fn drop_state(phase: LibraryImportDropPhase, paths: &[PathBuf]) -> LibraryImportDropState {
+    // The host accepts every regular file type. A folder (or a symlink, which
+    // is intentionally rejected later by the capability-safe opener) cannot
+    // be imported as a document and gets an immediate reject state instead.
+    let accepted = !paths.is_empty()
+        && paths.iter().all(|path| {
+            std::fs::symlink_metadata(path)
+                .map(|metadata| metadata.file_type().is_file())
+                .unwrap_or(false)
+        });
+    LibraryImportDropState {
+        phase,
+        accepted,
+        file_count: paths.len(),
+    }
+}
+
+async fn import_document_paths(
+    app: &AppHandle,
+    app_state: &Arc<AppState>,
+    host_access: &HostAccess,
+    chat_id: Uuid,
+    paths: Vec<PathBuf>,
+) -> LibraryImportBatch {
     let pending = paths
         .into_iter()
-        .map(|path| {
-            let display_name =
-                import_display_name(&path).unwrap_or_else(|_| "Selected document".to_owned());
-            (path, display_name)
+        .map(|path| PendingDocumentImport {
+            import_id: Uuid::new_v4(),
+            display_name: import_display_name(&path)
+                .unwrap_or_else(|_| "Selected document".to_owned()),
+            path,
         })
         .collect::<Vec<_>>();
-    for (_, display_name) in &pending {
+    for import in &pending {
         emit_import_progress(
-            &app,
+            app,
             LibraryImportProgress {
-                display_name: display_name.clone(),
+                import_id: import.import_id.to_string(),
+                display_name: import.display_name.clone(),
                 status: LibraryImportProgressStatus::Queued,
                 document_id: None,
                 processing_status: None,
@@ -335,43 +551,67 @@ pub(crate) async fn import_library_documents(
         );
     }
 
-    let mut results = Vec::with_capacity(pending.len());
-    for (path, display_name) in pending {
-        let result = match resolve_conversation_scope(&host_access, request.chat_id).await {
-            Ok(chat_id) => {
-                match import_selected_document(&app, app_state.inner(), chat_id, path).await {
-                    Ok(completed) if completed.already_present => {
-                        emit_import_progress(
-                            &app,
-                            completed_progress(
-                                &completed.document,
-                                LibraryImportProgressStatus::AlreadyPresent,
-                            ),
-                        );
-                        LibraryImportResult::AlreadyPresent {
-                            document: completed.document,
+    let mut results = stream::iter(pending.into_iter().enumerate().map(
+        |(index, import)| async move {
+            let result = match resolve_conversation_scope(host_access, chat_id).await {
+                Ok(chat_id) => {
+                    match import_selected_document(
+                        app,
+                        app_state,
+                        chat_id,
+                        import.path,
+                        import.import_id,
+                    )
+                    .await
+                    {
+                        Ok(completed) if completed.already_present => {
+                            emit_import_progress(
+                                app,
+                                completed_progress(
+                                    import.import_id,
+                                    &completed.document,
+                                    LibraryImportProgressStatus::AlreadyPresent,
+                                ),
+                            );
+                            LibraryImportResult::AlreadyPresent {
+                                document: completed.document,
+                            }
                         }
-                    }
-                    Ok(completed) => {
-                        emit_import_progress(
-                            &app,
-                            completed_progress(
-                                &completed.document,
-                                LibraryImportProgressStatus::Imported,
-                            ),
-                        );
-                        LibraryImportResult::Imported {
-                            document: completed.document,
+                        Ok(completed) => {
+                            emit_import_progress(
+                                app,
+                                completed_progress(
+                                    import.import_id,
+                                    &completed.document,
+                                    LibraryImportProgressStatus::Imported,
+                                ),
+                            );
+                            LibraryImportResult::Imported {
+                                document: completed.document,
+                            }
                         }
+                        Err(message) => failed_import_result(
+                            app,
+                            import.import_id,
+                            import.display_name,
+                            message,
+                        ),
                     }
-                    Err(message) => failed_import_result(&app, display_name, message),
                 }
-            }
-            Err(message) => failed_import_result(&app, display_name, message),
-        };
-        results.push(result);
+                Err(message) => {
+                    failed_import_result(app, import.import_id, import.display_name, message)
+                }
+            };
+            (index, result)
+        },
+    ))
+    .buffer_unordered(MAX_CONCURRENT_IMPORTS)
+    .collect::<Vec<_>>()
+    .await;
+    results.sort_by_key(|(index, _)| *index);
+    LibraryImportBatch {
+        results: results.into_iter().map(|(_, result)| result).collect(),
     }
-    Ok(Some(LibraryImportBatch { results }))
 }
 
 pub(crate) async fn resolve_conversation_scope(
@@ -552,13 +792,43 @@ async fn import_selected_document(
     app_state: &Arc<AppState>,
     chat_id: ChatId,
     path: PathBuf,
+    import_id: Uuid,
 ) -> Result<CompletedDocumentImport, String> {
+    for delay in IMPORT_RETRY_DELAYS
+        .iter()
+        .copied()
+        .map(Some)
+        .chain(std::iter::once(None))
+    {
+        match import_selected_document_once(app, app_state, chat_id, path.clone(), import_id).await
+        {
+            Ok(completed) => return Ok(completed),
+            Err(ImportFailure::Retryable(_)) if delay.is_some() => {
+                // Retrying only a transport or overloaded-server failure is
+                // safe: the server deduplicates by the verified source blob.
+                tokio::time::sleep(delay.expect("retry delay is present")).await;
+            }
+            Err(error) => return Err(error.message()),
+        }
+    }
+    unreachable!("the final import attempt always returns")
+}
+
+async fn import_selected_document_once(
+    app: &AppHandle,
+    app_state: &Arc<AppState>,
+    chat_id: ChatId,
+    path: PathBuf,
+    import_id: Uuid,
+) -> Result<CompletedDocumentImport, ImportFailure> {
     let prepared = tauri::async_runtime::spawn_blocking(move || prepare_selected_document(&path))
         .await
-        .map_err(|_| "Could not read the selected document".to_owned())??;
+        .map_err(|_| ImportFailure::Permanent("Could not read the selected document".to_owned()))?
+        .map_err(ImportFailure::Permanent)?;
     emit_import_progress(
         app,
         LibraryImportProgress {
+            import_id: import_id.to_string(),
             display_name: prepared.display_name.clone(),
             status: LibraryImportProgressStatus::Streaming,
             document_id: None,
@@ -566,7 +836,9 @@ async fn import_selected_document(
             message: None,
         },
     );
-    let info = wait_server_info(app_state).await?;
+    let info = wait_server_info(app_state)
+        .await
+        .map_err(ImportFailure::Permanent)?;
     let sha256 = encode_sha256(prepared.source_blob.sha256);
     let byte_len = prepared.source_blob.byte_len.to_string();
     let body = reqwest::Body::wrap_stream(ReaderStream::with_capacity(
@@ -590,14 +862,23 @@ async fn import_selected_document(
     .body(body)
     .send()
     .await
-    .map_err(|_| "Could not import the selected document".to_owned())?;
+    .map_err(|_| ImportFailure::Retryable("Could not import the selected document".to_owned()))?;
     if !response.status().is_success() {
-        return Err("Could not import the selected document".to_owned());
+        let message = "Could not import the selected document".to_owned();
+        return if response.status().is_server_error()
+            || response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+        {
+            Err(ImportFailure::Retryable(message))
+        } else {
+            Err(ImportFailure::Permanent(message))
+        };
     }
     let accepted = response
         .json::<StreamedIngestResponse>()
         .await
-        .map_err(|_| "Document import returned an invalid response".to_owned())?;
+        .map_err(|_| {
+            ImportFailure::Permanent("Document import returned an invalid response".to_owned())
+        })?;
     Ok(CompletedDocumentImport {
         document: ImportedDocument {
             document_id: accepted.document_id.to_string(),
@@ -613,10 +894,12 @@ fn encode_sha256(sha256: [u8; 32]) -> String {
 }
 
 fn completed_progress(
+    import_id: Uuid,
     document: &ImportedDocument,
     status: LibraryImportProgressStatus,
 ) -> LibraryImportProgress {
     LibraryImportProgress {
+        import_id: import_id.to_string(),
         display_name: document.display_name.clone(),
         status,
         document_id: Some(document.document_id.clone()),
@@ -627,12 +910,14 @@ fn completed_progress(
 
 fn failed_import_result(
     app: &AppHandle,
+    import_id: Uuid,
     display_name: String,
     message: String,
 ) -> LibraryImportResult {
     emit_import_progress(
         app,
         LibraryImportProgress {
+            import_id: import_id.to_string(),
             display_name: display_name.clone(),
             status: LibraryImportProgressStatus::Failed,
             document_id: None,
@@ -824,6 +1109,23 @@ mod tests {
         assert_eq!(json["results"][1]["displayName"], "archive.bin");
         assert!(json.to_string().contains("notes.md"));
         assert!(!json.to_string().contains("/Users/"));
+    }
+
+    #[test]
+    fn dropped_paths_are_scoped_to_one_window_and_consumed_once() {
+        let pending = PendingLibraryDrop::default();
+        pending.record("main", vec![PathBuf::from("/Users/private/notes.md")]);
+        pending.record("secondary", vec![PathBuf::from("/Users/private/other.md")]);
+
+        assert_eq!(
+            pending.take("main"),
+            Some(vec![PathBuf::from("/Users/private/notes.md")])
+        );
+        assert_eq!(pending.take("main"), None);
+        assert_eq!(
+            pending.take("secondary"),
+            Some(vec![PathBuf::from("/Users/private/other.md")])
+        );
     }
 
     #[cfg(unix)]
