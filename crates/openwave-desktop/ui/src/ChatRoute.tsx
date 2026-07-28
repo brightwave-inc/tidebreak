@@ -86,7 +86,7 @@ const { signal: signalTurnLifecycle } = useTurnLifecycle.getState();
 export function ChatRoute({ chatId }: { chatId: string }) {
   const navigate = useNavigate();
   const { client, models, status, setStatus, newChat } = useApp();
-  const { layout } = usePanelNav();
+  const { layout, openPanel } = usePanelNav();
   const chats = useChatListStore((state) => state.chats);
   const deletingChatId = useChatListStore((state) => state.deletingChatId);
   const busy = useChatSessionStore((session) => session.busy);
@@ -398,7 +398,12 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       case "sources":
         return (
           <PanelFrame position={side} spaceBetween>
-            <DocumentsView chatId={chatId} />
+            <DocumentsView
+              chatId={chatId}
+              onOpenDocument={(documentId) =>
+                openPanel({ type: "sources", documentId })
+              }
+            />
           </PanelFrame>
         );
       case "outputs":

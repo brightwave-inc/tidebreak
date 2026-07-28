@@ -50,9 +50,18 @@ struct CatalogDocument {
     document_id: Uuid,
     title: Option<String>,
     media_type: String,
+    size_bytes: Option<u64>,
     processing_status: DocumentProcessingStatus,
+    failure: Option<CatalogFailure>,
     searchable: bool,
+    created_at: String,
     updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CatalogFailure {
+    code: String,
+    retriable: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -61,9 +70,23 @@ pub(crate) struct LibraryDocument {
     document_id: String,
     title: Option<String>,
     media_type: String,
+    size_bytes: Option<u64>,
     processing_status: DocumentProcessingStatus,
+    failure: Option<LibraryDocumentFailure>,
     searchable: bool,
+    created_at: String,
     updated_at: String,
+}
+
+/// Why a source could not be prepared, in terms the renderer can explain.
+///
+/// Only the worker's failure category crosses this boundary — the diagnostic
+/// detail recorded beside it is free text from the pipeline and stays native.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LibraryDocumentFailure {
+    reason: String,
+    retriable: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -81,10 +104,32 @@ impl From<CatalogDocument> for LibraryDocument {
                 .title
                 .and_then(|title| is_safe_renderer_text(&title, 255, false).then_some(title)),
             media_type: document.media_type,
+            size_bytes: document.size_bytes,
             processing_status: document.processing_status,
+            failure: document.failure.map(|failure| LibraryDocumentFailure {
+                reason: safe_failure_reason(&failure.code),
+                retriable: failure.retriable,
+            }),
             searchable: document.searchable,
+            created_at: document.created_at,
             updated_at: document.updated_at,
         }
+    }
+}
+
+/// Keep the renderer's failure vocabulary to a shape it can switch on. The
+/// codes the worker records are lowercase identifiers; anything else becomes
+/// the generic reason so an unfamiliar category still renders an explanation.
+fn safe_failure_reason(code: &str) -> String {
+    let usable = !code.is_empty()
+        && code.len() <= 64
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'_');
+    if usable {
+        code.to_owned()
+    } else {
+        "unknown".to_owned()
     }
 }
 
@@ -278,6 +323,13 @@ pub(crate) struct LibraryRequest {
     chat_id: Uuid,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct LibraryDocumentRequest {
+    chat_id: Uuid,
+    document_id: Uuid,
+}
+
 #[tauri::command]
 pub(crate) async fn list_library_documents(
     state: State<'_, Arc<AppState>>,
@@ -322,6 +374,72 @@ pub(crate) async fn list_library_documents(
         documents,
         truncated,
     })
+}
+
+/// Retire one source from this conversation. The server publishes the tombstone
+/// asynchronously, so a just-deleted source can still match a search briefly.
+#[tauri::command]
+pub(crate) async fn delete_library_document(
+    state: State<'_, Arc<AppState>>,
+    host_access: State<'_, HostAccess>,
+    request: LibraryDocumentRequest,
+) -> Result<(), String> {
+    let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
+    let document_id = resolve_document_id(request.document_id)?;
+    let info = wait_server_info(state.inner()).await?;
+    let response = native_auth(
+        local_client().delete(format!(
+            "{}{}",
+            info.base_url,
+            document_path(chat_id, document_id)
+        )),
+        &info,
+    )
+    .send()
+    .await
+    .map_err(|_| "Could not remove that source".to_owned())?;
+    if !response.status().is_success() {
+        return Err("Could not remove that source".to_owned());
+    }
+    Ok(())
+}
+
+/// Queue the failed source's current processing job again. The server refuses
+/// with `409` when nothing about the failure is worth repeating.
+#[tauri::command]
+pub(crate) async fn retry_library_document(
+    state: State<'_, Arc<AppState>>,
+    host_access: State<'_, HostAccess>,
+    request: LibraryDocumentRequest,
+) -> Result<(), String> {
+    let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
+    let document_id = resolve_document_id(request.document_id)?;
+    let info = wait_server_info(state.inner()).await?;
+    let response = native_auth(
+        local_client().post(format!(
+            "{}{}",
+            info.base_url,
+            retry_document_path(chat_id, document_id)
+        )),
+        &info,
+    )
+    .send()
+    .await
+    .map_err(|_| "Could not prepare that source again".to_owned())?;
+    if response.status() == reqwest::StatusCode::CONFLICT {
+        return Err("This source cannot be prepared again".to_owned());
+    }
+    if !response.status().is_success() {
+        return Err("Could not prepare that source again".to_owned());
+    }
+    Ok(())
+}
+
+fn resolve_document_id(document_id: Uuid) -> Result<Uuid, String> {
+    if document_id.is_nil() {
+        return Err("Invalid source".to_owned());
+    }
+    Ok(document_id)
 }
 
 #[tauri::command]
@@ -650,6 +768,14 @@ pub(crate) fn raw_documents_path(chat_id: ChatId) -> String {
 
 fn streamed_raw_documents_path(chat_id: ChatId) -> String {
     format!("{}/raw-stream", documents_path(chat_id))
+}
+
+fn document_path(chat_id: ChatId, document_id: Uuid) -> String {
+    format!("{}/{document_id}", documents_path(chat_id))
+}
+
+fn retry_document_path(chat_id: ChatId, document_id: Uuid) -> String {
+    format!("{}/retry", document_path(chat_id, document_id))
 }
 
 fn search_path(chat_id: ChatId) -> String {
@@ -1046,6 +1172,15 @@ mod tests {
             search_path(standalone.id),
             format!("/chats/{}/search", standalone.id)
         );
+        let document_id = Uuid::new_v4();
+        assert_eq!(
+            document_path(standalone.id, document_id),
+            format!("/chats/{}/documents/{document_id}", standalone.id)
+        );
+        assert_eq!(
+            retry_document_path(standalone.id, document_id),
+            format!("/chats/{}/documents/{document_id}/retry", standalone.id)
+        );
 
         let injected = serde_json::json!({
             "chatId": standalone.id,
@@ -1180,8 +1315,11 @@ mod tests {
             document_id: Uuid::nil(),
             title: Some("notes.md".to_owned()),
             media_type: "text/markdown".to_owned(),
+            size_bytes: Some(2_048),
             processing_status: DocumentProcessingStatus::Ready,
+            failure: None,
             searchable: true,
+            created_at: "2026-07-17T00:00:00Z".to_owned(),
             updated_at: "2026-07-18T00:00:00Z".to_owned(),
         });
         let json = serde_json::to_value(document).unwrap();
@@ -1194,10 +1332,13 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "createdAt",
                 "documentId",
+                "failure",
                 "mediaType",
                 "processingStatus",
                 "searchable",
+                "sizeBytes",
                 "title",
                 "updatedAt"
             ]
@@ -1205,6 +1346,22 @@ mod tests {
         let serialized = json.to_string();
         for forbidden in ["uri", "revision", "fingerprint", "content", "token", "path"] {
             assert!(!serialized.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn failure_reasons_reaching_the_renderer_stay_a_switchable_vocabulary() {
+        assert_eq!(safe_failure_reason("parse_failed"), "parse_failed");
+        // Anything that is not a bare lowercase identifier — free text, a
+        // path, an oversized string — collapses rather than reaching the
+        // renderer as a reason it would have to display verbatim.
+        for hostile in [
+            "",
+            "Parse failed: /Users/private/notes.md",
+            "<script>",
+            &"x".repeat(65),
+        ] {
+            assert_eq!(safe_failure_reason(hostile), "unknown");
         }
     }
 }

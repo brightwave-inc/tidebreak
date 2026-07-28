@@ -85,6 +85,19 @@ pub struct StreamedIngestResult {
     pub already_present: bool,
 }
 
+/// Why a document's processing stopped, and whether asking again could help.
+///
+/// The code is the worker's stable failure category; the detail it records
+/// alongside is diagnostic text for local operators and deliberately stays out
+/// of this projection.
+#[derive(Debug, Serialize)]
+pub struct DocumentFailure {
+    /// Stable machine-readable failure category.
+    pub code: String,
+    /// Whether running the same job again could reach a different outcome.
+    pub retriable: bool,
+}
+
 /// Catalog metadata returned by document listings.
 #[derive(Debug, Serialize)]
 pub struct DocumentSummary {
@@ -100,10 +113,15 @@ pub struct DocumentSummary {
     pub media_type: String,
     /// Optional human-facing title.
     pub title: Option<String>,
+    /// Byte length of the retained source, or `None` when the document was
+    /// supplied as canonical text with no original file behind it.
+    pub size_bytes: Option<u64>,
     /// Current authoritative source revision.
     pub content_revision: i64,
     /// Processing lifecycle of the current source revision.
     pub processing_status: openwave_core::DocumentProcessingStatus,
+    /// Why processing stopped, for a `failed` document. `None` otherwise.
+    pub failure: Option<DocumentFailure>,
     /// Whether a search of this conversation can actually match this source.
     ///
     /// A `ready` source with `searchable: false` was stored and can be opened
@@ -131,8 +149,10 @@ impl From<DocumentSummaryRecord> for DocumentSummary {
             uri: document.source_uri,
             media_type: document.media_type,
             title: document.title,
+            size_bytes: document.size_bytes,
             content_revision: document.content_revision,
             processing_status: document.processing_status,
+            failure: None,
             searchable: document.searchable,
             indexed_revision: document.indexed_revision,
             index_fingerprint: document.index_fingerprint,
@@ -152,8 +172,10 @@ impl From<&DocumentRecord> for DocumentSummary {
             uri: document.source_uri.clone(),
             media_type: document.media_type.clone(),
             title: document.title.clone(),
+            size_bytes: document.source_blob.as_ref().map(|blob| blob.byte_len),
             content_revision: document.content_revision,
             processing_status: document.processing_status,
+            failure: None,
             searchable: document.is_searchable(),
             indexed_revision: document.indexed_revision,
             index_fingerprint: document.index_fingerprint.clone(),
@@ -753,10 +775,61 @@ async fn list_documents_in_scope(
             id: last.id,
         })
     });
+    let mut documents = records
+        .into_iter()
+        .map(DocumentSummary::from)
+        .collect::<Vec<_>>();
+    attach_document_failures(state, &mut documents).await?;
     Ok(Json(DocumentListPage {
-        documents: records.into_iter().map(DocumentSummary::from).collect(),
+        documents,
         next_cursor,
     }))
+}
+
+/// Fill in why processing stopped for every failed summary in `summaries`.
+///
+/// The reason is recorded on the semantic job rather than the document row, so
+/// it is read one document at a time — but only for documents that actually
+/// failed, which in a healthy catalog is none of them.
+async fn attach_document_failures(
+    state: &AppState,
+    summaries: &mut [DocumentSummary],
+) -> Result<(), ServerError> {
+    for summary in summaries {
+        if summary.processing_status != openwave_core::DocumentProcessingStatus::Failed {
+            continue;
+        }
+        summary.failure = state
+            .store
+            .list_document_jobs(summary.document_id)
+            .await?
+            .into_iter()
+            .filter(|job| {
+                job.status == openwave_core::DocumentJobStatus::Failed
+                    && job.content_revision == summary.content_revision
+            })
+            .max_by_key(|job| job.updated_at)
+            .and_then(|job| job.last_error_code)
+            .map(|code| DocumentFailure {
+                retriable: crate::document_worker::document_failure_is_retriable(&code),
+                code,
+            });
+    }
+    Ok(())
+}
+
+/// Answer a single-document request, or `404` when the scope filter rejected it.
+async fn document_detail(
+    state: &AppState,
+    document: Option<DocumentRecord>,
+    id: DocumentId,
+) -> Result<Json<DocumentDetail>, ServerError> {
+    let Some(document) = document else {
+        return Err(ServerError::not_found(format!("document {id} not found")));
+    };
+    let mut detail = DocumentDetail::from(document);
+    attach_document_failures(state, std::slice::from_mut(&mut detail.summary)).await?;
+    Ok(Json(detail))
 }
 
 /// `GET /documents/{id}` — fetch canonical source and catalog metadata, or `404`.
@@ -764,14 +837,12 @@ pub async fn get_document(
     State(state): State<AppState>,
     Path(id): Path<DocumentId>,
 ) -> Result<Json<DocumentDetail>, ServerError> {
-    state
+    let document = state
         .store
         .get_document(id)
         .await?
-        .filter(|document| document.chat_id.is_none() && document.project_id.is_none())
-        .map(DocumentDetail::from)
-        .map(Json)
-        .ok_or_else(|| ServerError::not_found(format!("document {id} not found")))
+        .filter(|document| document.chat_id.is_none() && document.project_id.is_none());
+    document_detail(&state, document, id).await
 }
 
 /// `GET /projects/{project_id}/documents/{document_id}` — fetch an owned document.
@@ -780,14 +851,12 @@ pub async fn get_project_document(
     Path((project_id, document_id)): Path<(ProjectId, DocumentId)>,
 ) -> Result<Json<DocumentDetail>, ServerError> {
     require_project(&state, project_id).await?;
-    state
+    let document = state
         .store
         .get_document(document_id)
         .await?
-        .filter(|document| document.chat_id.is_none() && document.project_id == Some(project_id))
-        .map(DocumentDetail::from)
-        .map(Json)
-        .ok_or_else(|| ServerError::not_found(format!("document {document_id} not found")))
+        .filter(|document| document.chat_id.is_none() && document.project_id == Some(project_id));
+    document_detail(&state, document, document_id).await
 }
 
 /// `GET /chats/{chat_id}/documents/{document_id}` — fetch a source only when
@@ -797,14 +866,12 @@ pub async fn get_chat_document(
     Path((chat_id, document_id)): Path<(ChatId, DocumentId)>,
 ) -> Result<Json<DocumentDetail>, ServerError> {
     require_chat(&state, chat_id).await?;
-    state
+    let document = state
         .store
         .get_document(document_id)
         .await?
-        .filter(|document| document.chat_id == Some(chat_id) && document.project_id.is_none())
-        .map(DocumentDetail::from)
-        .map(Json)
-        .ok_or_else(|| ServerError::not_found(format!("document {document_id} not found")))
+        .filter(|document| document.chat_id == Some(chat_id) && document.project_id.is_none());
+    document_detail(&state, document, document_id).await
 }
 
 /// `GET /documents/{id}/file-content` — serve the original bytes for one

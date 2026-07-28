@@ -9,6 +9,21 @@ import {
 
 const documentId = "6c3df6af-bc62-4a66-a34e-29f327eaef41";
 
+function catalogRow(overrides: Record<string, unknown> = {}) {
+  return {
+    documentId,
+    title: "notes.md",
+    mediaType: "text/markdown",
+    sizeBytes: 2048,
+    processingStatus: "ready",
+    failure: null,
+    searchable: true,
+    createdAt: "2026-07-17T12:00:00Z",
+    updatedAt: "2026-07-18T12:00:00Z",
+    ...overrides,
+  };
+}
+
 describe("document library renderer projections", () => {
   it("parses native batch results and rejects invalid progress", () => {
     expect(
@@ -50,16 +65,7 @@ describe("document library renderer projections", () => {
   it("accepts the closed catalog and import shapes", () => {
     expect(
       parseLibraryCatalog({
-        documents: [
-          {
-            documentId,
-            title: "notes.md",
-            mediaType: "text/markdown",
-            processingStatus: "processing",
-            searchable: false,
-            updatedAt: "2026-07-18T12:00:00Z",
-          },
-        ],
+        documents: [catalogRow({ processingStatus: "processing", searchable: false })],
         truncated: false,
       }).documents,
     ).toHaveLength(1);
@@ -89,14 +95,11 @@ describe("document library renderer projections", () => {
   it("keeps searchability distinct from having finished processing", () => {
     const stored = parseLibraryCatalog({
       documents: [
-        {
-          documentId,
+        catalogRow({
           title: "scan.pdf",
           mediaType: "application/pdf",
-          processingStatus: "ready",
           searchable: false,
-          updatedAt: "2026-07-18T12:00:00Z",
-        },
+        }),
       ],
       truncated: false,
     }).documents[0];
@@ -104,20 +107,38 @@ describe("document library renderer projections", () => {
     expect(stored?.searchable).toBe(false);
 
     // Omitting the flag must not silently read as searchable.
+    const { searchable: _searchable, ...withoutFlag } = catalogRow();
     expect(() =>
-      parseLibraryCatalog({
-        documents: [
-          {
-            documentId,
-            title: "scan.pdf",
-            mediaType: "application/pdf",
-            processingStatus: "ready",
-            updatedAt: "2026-07-18T12:00:00Z",
-          },
-        ],
-        truncated: false,
-      }),
+      parseLibraryCatalog({ documents: [withoutFlag], truncated: false }),
     ).toThrow("Invalid document library response");
+  });
+
+  it("carries a failure reason only as a category the reader can be told about", () => {
+    const failed = parseLibraryCatalog({
+      documents: [
+        catalogRow({
+          processingStatus: "failed",
+          searchable: false,
+          failure: { reason: "parse_failed", retriable: false },
+        }),
+      ],
+      truncated: false,
+    }).documents[0];
+    expect(failed?.failure).toEqual({ reason: "parse_failed", retriable: false });
+
+    // Free text would end up rendered verbatim, and a missing verdict would
+    // have to be guessed at. Neither is allowed through.
+    for (const failure of [
+      { reason: "Parse failed: /Users/private/notes.md", retriable: false },
+      { reason: "parse_failed" },
+    ]) {
+      expect(() =>
+        parseLibraryCatalog({
+          documents: [catalogRow({ processingStatus: "failed", failure })],
+          truncated: false,
+        }),
+      ).toThrow("Invalid document library response");
+    }
   });
 
   it("rejects catalog fields that could reveal native or indexing details", () => {
@@ -132,17 +153,7 @@ describe("document library renderer projections", () => {
     ]) {
       expect(() =>
         parseLibraryCatalog({
-          documents: [
-            {
-              documentId,
-              title: "notes.md",
-              mediaType: "text/markdown",
-              processingStatus: "ready",
-              searchable: true,
-              updatedAt: "2026-07-18T12:00:00Z",
-              [field]: "private",
-            },
-          ],
+          documents: [catalogRow({ [field]: "private" })],
           truncated: false,
         }),
       ).toThrow("Invalid document library response");

@@ -6178,6 +6178,89 @@ async fn failed_indexing_leaves_authoritative_source_stale_for_retry() {
 }
 
 #[tokio::test]
+async fn catalog_names_a_failure_and_says_whether_retrying_could_help() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let ingested: serde_json::Value = json_body(
+        post_json(
+            &router,
+            &bearer,
+            "/documents",
+            serde_json::json!({
+                "uri": "file:///explained-failure.txt",
+                "content": "a source whose processing stopped"
+            }),
+        )
+        .await,
+    )
+    .await;
+    let job_id: openwave_core::DocumentJobId =
+        ingested["job_id"].as_str().unwrap().parse().unwrap();
+
+    // A source that failed on something the pipeline could get past next time,
+    // then on something it never will. The catalog is where a reader learns the
+    // difference, so an explicit retry is offered only for the first.
+    for (code, retriable) in [("vector_store_failed", true), ("parse_failed", false)] {
+        let now = chrono::Utc::now();
+        let claimed = store
+            .claim_document_job(now, now + chrono::Duration::minutes(1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.id, job_id);
+        store
+            .record_document_job_failure(
+                job_id,
+                claimed.lease_token.unwrap(),
+                now,
+                None,
+                code,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let listed = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/documents")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let listed: serde_json::Value = json_body(listed).await;
+        let document = &listed["documents"][0];
+        assert_eq!(document["processing_status"], "failed");
+        assert_eq!(document["failure"]["code"], code);
+        assert_eq!(document["failure"]["retriable"], retriable);
+
+        if retriable {
+            let retried = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "/documents/{}/retry",
+                            ingested["document_id"].as_str().unwrap()
+                        ))
+                        .header(header::AUTHORIZATION, &bearer)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(retried.status(), StatusCode::ACCEPTED);
+        }
+    }
+}
+
+#[tokio::test]
 async fn explicit_retry_revives_the_exact_terminal_job() {
     let (router, token, store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");

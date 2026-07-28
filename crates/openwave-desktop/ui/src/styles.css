@@ -504,7 +504,6 @@ body {
  * Surface padding is sized against the viewport, which is too generous once a
  * surface is only part of the width. Scale it to the slot instead.
  */
-.workspace-panel.is-sharing .documents-header,
 .workspace-panel.is-sharing .folders-header,
 .workspace-panel.is-sharing .deliverables-header {
   flex-direction: column;
@@ -512,14 +511,12 @@ body {
   padding: 1.4rem 1.25rem 1.1rem;
 }
 
-.workspace-panel.is-sharing .documents-header h1,
 .workspace-panel.is-sharing .folders-header h1,
 .workspace-panel.is-sharing .deliverables-header h1 {
   font-size: 1.2rem;
   letter-spacing: -0.02em;
 }
 
-.workspace-panel.is-sharing .documents-content,
 .workspace-panel.is-sharing .folders-content,
 .workspace-panel.is-sharing .deliverables-content {
   padding: 1.1rem 1.25rem 3rem;
@@ -2133,9 +2130,8 @@ body {
   margin-top: 0.75rem;
 }
 
-/* ---------- Documents view ---------- */
+/* ---------- Folders view ---------- */
 
-.documents-view,
 .folders-view {
   min-width: 0;
   min-height: 0;
@@ -2143,7 +2139,6 @@ body {
   background: var(--bg-elevated);
 }
 
-.documents-header,
 .folders-header {
   display: flex;
   align-items: flex-start;
@@ -2153,18 +2148,11 @@ body {
   border-bottom: 1px solid var(--line);
 }
 
-.documents-header h1,
-.documents-header p,
 .folders-header h1,
-.folders-header p,
-.document-search h2,
-.document-search p,
-.document-catalog h2,
-.document-catalog p {
+.folders-header p {
   margin: 0;
 }
 
-.documents-header h1,
 .folders-header h1 {
   margin-top: 0.15rem;
   font-size: 1.65rem;
@@ -2172,14 +2160,12 @@ body {
   letter-spacing: -0.035em;
 }
 
-.documents-header > div > p:last-child,
 .folders-header > div > p:last-child {
   max-width: 41rem;
   margin-top: 0.45rem;
   color: var(--muted-foreground);
 }
 
-.documents-header-actions,
 .folders-header-actions {
   display: flex;
   flex: 0 0 auto;
@@ -2187,7 +2173,6 @@ body {
   gap: 0.55rem;
 }
 
-.documents-content,
 .folders-content {
   display: grid;
   width: min(100%, 68rem);
@@ -2249,184 +2234,17 @@ body {
   color: var(--muted-foreground);
 }
 
-.document-notice,
 .document-error {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
   padding: 0.75rem 0.9rem;
-  border: 1px solid color-mix(in srgb, var(--color-openwave) 48%, var(--line));
+  border: 1px solid color-mix(in srgb, var(--danger) 42%, var(--line));
   border-radius: 8px;
-  background: color-mix(in srgb, var(--color-openwave) 7%, var(--bg-elevated));
-  font-size: 0.84rem;
-}
-
-.document-notice strong {
-  margin-right: 0.2rem;
-}
-
-.document-error {
-  border-color: color-mix(in srgb, var(--danger) 42%, var(--line));
   color: var(--danger);
   background: color-mix(in srgb, var(--danger) 5%, var(--bg-elevated));
-}
-
-.document-search,
-.document-catalog {
-  padding: 1.1rem;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--bg-elevated);
-  box-shadow: var(--shadow-sm);
-}
-
-.document-search h2,
-.document-catalog h2 {
-  font-size: 0.98rem;
-  font-weight: 600;
-}
-
-.document-search > div:first-child > p,
-.document-section-heading p {
-  margin-top: 0.2rem;
-  color: var(--muted-foreground);
-  font-size: 0.8rem;
-}
-
-.document-search form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 0.55rem;
-  margin-top: 0.85rem;
-}
-
-.document-search input {
-  min-width: 0;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 0.55rem 0.7rem;
-  background: var(--page-background);
-}
-
-.document-search input:focus {
-  outline: 2px solid color-mix(in srgb, var(--color-openwave) 40%, transparent);
-  outline-offset: 1px;
-}
-
-.document-search-error {
-  margin-top: 0.65rem !important;
-  color: var(--danger);
-  font-size: 0.8rem;
-}
-
-.document-results {
-  display: grid;
-  gap: 0.55rem;
-  margin-top: 0.85rem;
-  padding-top: 0.85rem;
-  border-top: 1px solid var(--line);
-}
-
-.document-result {
-  display: grid;
-  gap: 0.4rem;
-  padding: 0.75rem;
-  border-radius: 8px;
-  background: var(--page-background);
-}
-
-.document-result-source {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.4rem;
-  font-size: 0.78rem;
-}
-
-.document-result-source span {
-  color: var(--muted-foreground);
-}
-
-.document-result p {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  color: color-mix(in srgb, var(--ink) 88%, var(--muted-foreground));
-  font-size: 0.85rem;
-  line-height: 1.55;
-}
-
-.document-section-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  padding-bottom: 0.85rem;
-}
-
-.document-refresh {
-  border: 0;
-  padding: 0.25rem;
-  color: var(--muted-foreground);
-  background: transparent;
-  font-size: 0.78rem;
-}
-
-.document-refresh:hover:not(:disabled) {
-  color: var(--ink);
-}
-
-.document-refresh:disabled {
-  cursor: wait;
-  opacity: 0.5;
-}
-
-.document-list {
-  display: grid;
-  border-top: 1px solid var(--line);
-}
-
-.document-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 0.75rem;
-  min-height: 4.25rem;
-  border-bottom: 1px solid var(--line);
-}
-
-.document-row:last-child {
-  border-bottom: 0;
-}
-
-.document-icon {
-  display: grid;
-  width: 2rem;
-  height: 2rem;
-  place-items: center;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  color: var(--muted-foreground);
-  background: var(--page-background);
-}
-
-.document-copy {
-  display: grid;
-  min-width: 0;
-  gap: 0.15rem;
-}
-
-.document-copy strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 0.86rem;
-  font-weight: 590;
-}
-
-.document-copy span {
-  color: var(--muted-foreground);
-  font-size: 0.74rem;
+  font-size: 0.84rem;
 }
 
 /* A transcript phase whose row threw while rendering. Deliberately quiet: the
@@ -2436,57 +2254,6 @@ body {
   padding: 0.5rem 0.75rem;
   color: var(--muted-foreground);
   font-size: 0.82rem;
-}
-
-.document-status {
-  padding: 0.2rem 0.5rem;
-  border-radius: 999px;
-  color: var(--muted-foreground);
-  background: var(--muted);
-  font-size: 0.72rem;
-  font-weight: 570;
-}
-
-.document-status.is-ready {
-  color: var(--success-foreground);
-  background: var(--success-background);
-}
-
-.document-status.is-processing,
-.document-status.is-queued {
-  color: var(--warning-foreground);
-  background: var(--warning-background);
-}
-
-.document-status.is-failed {
-  color: var(--danger);
-  background: color-mix(in srgb, var(--danger) 9%, var(--page-background));
-}
-
-/* Stored but with nothing to search: neither a success nor a failure, so it
-   keeps the neutral base and only hints that an explanation is available. */
-.document-status.is-unsearchable {
-  cursor: help;
-}
-
-.document-empty,
-.document-empty-small {
-  display: grid;
-  place-items: center;
-  gap: 0.25rem;
-  min-height: 8rem;
-  border-top: 1px solid var(--line);
-  color: var(--muted-foreground);
-  text-align: center;
-}
-
-.document-empty strong {
-  color: var(--ink);
-}
-
-.document-empty-small {
-  min-height: 3rem;
-  border-top: 0;
 }
 
 /* ---------- Outputs view ---------- */
@@ -2810,20 +2577,16 @@ body {
     max-width: none;
   }
 
-  .documents-header,
   .folders-header {
     flex-direction: column;
     padding: 1.25rem;
   }
 
-  .documents-header-actions,
-  .documents-header-actions .btn,
   .folders-header-actions,
   .folders-header-actions .btn {
     width: 100%;
   }
 
-  .documents-content,
   .folders-content {
     padding: 1rem 0.75rem 2rem;
   }
@@ -2853,16 +2616,6 @@ body {
 
   .deliverables-list {
     max-height: 14rem;
-  }
-
-  .document-row {
-    grid-template-columns: auto minmax(0, 1fr);
-  }
-
-  .document-status {
-    grid-column: 2;
-    justify-self: start;
-    margin-top: -0.5rem;
   }
 }
 

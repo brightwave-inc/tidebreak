@@ -88,6 +88,7 @@ struct DocumentSummaryRow {
     source_uri: Option<String>,
     media_type: String,
     title: Option<String>,
+    source_byte_len: Option<i64>,
     content_revision: i64,
     processing_status: String,
     /// Emptiness of the canonical text, evaluated in the database so a listing
@@ -366,6 +367,7 @@ impl Store for DbStore {
                 entities::document::Column::SourceUri,
                 entities::document::Column::MediaType,
                 entities::document::Column::Title,
+                entities::document::Column::SourceByteLen,
                 entities::document::Column::ContentRevision,
                 entities::document::Column::ProcessingStatus,
                 entities::document::Column::IndexedRevision,
@@ -3773,6 +3775,7 @@ fn document_summary_from_row(row: DocumentSummaryRow) -> Result<DocumentSummaryR
         source_uri: row.source_uri,
         media_type: row.media_type,
         title: row.title,
+        size_bytes: row.source_byte_len.and_then(|len| u64::try_from(len).ok()),
         content_revision: row.content_revision,
         processing_status,
         searchable: processing_status == DocumentProcessingStatus::Ready && row.has_canonical_text,

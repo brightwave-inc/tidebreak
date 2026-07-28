@@ -276,7 +276,6 @@ impl DocumentWorker {
                 self.record_failure(
                     &job,
                     lease_token,
-                    false,
                     "unsupported_job_kind",
                     "document worker does not support this semantic job kind",
                 )
@@ -296,7 +295,6 @@ impl DocumentWorker {
                 .record_failure(
                     &job,
                     lease_token,
-                    false,
                     "invalid_document_stage",
                     "parse job does not own a document with published canonical output",
                 )
@@ -306,13 +304,7 @@ impl DocumentWorker {
             Ok(fingerprint) => fingerprint,
             Err(error) => {
                 return self
-                    .record_failure(
-                        &job,
-                        lease_token,
-                        false,
-                        "parser_unavailable",
-                        &error.to_string(),
-                    )
+                    .record_failure(&job, lease_token, "parser_unavailable", &error.to_string())
                     .await;
             }
         };
@@ -321,7 +313,6 @@ impl DocumentWorker {
                 .record_failure(
                     &job,
                     lease_token,
-                    false,
                     "pipeline_changed",
                     "job parser fingerprint does not match the active parser",
                 )
@@ -332,7 +323,6 @@ impl DocumentWorker {
                 .record_failure(
                     &job,
                     lease_token,
-                    false,
                     "source_blob_missing",
                     "parse job has no retained source descriptor",
                 )
@@ -350,7 +340,6 @@ impl DocumentWorker {
                     .record_failure(
                         &job,
                         lease_token,
-                        false,
                         "source_blob_missing",
                         "retained source blob does not exist",
                     )
@@ -361,7 +350,6 @@ impl DocumentWorker {
                     .record_failure(
                         &job,
                         lease_token,
-                        true,
                         "source_blob_read_failed",
                         &error.to_string(),
                     )
@@ -373,7 +361,6 @@ impl DocumentWorker {
                 .record_failure(
                     &job,
                     lease_token,
-                    false,
                     "source_blob_length_mismatch",
                     "retained source byte length does not match its descriptor",
                 )
@@ -385,7 +372,6 @@ impl DocumentWorker {
                 .record_failure(
                     &job,
                     lease_token,
-                    false,
                     "source_blob_digest_mismatch",
                     "retained source digest does not match its descriptor",
                 )
@@ -407,9 +393,9 @@ impl DocumentWorker {
             Supervised::LeaseLost => return Ok(WorkerOutcome::LeaseLost(job.id)),
             Supervised::Completed(Ok(parsed)) => parsed,
             Supervised::Completed(Err(error)) => {
-                let (retryable, code) = classify_retrieval_error(&error);
+                let code = classify_retrieval_error(&error);
                 return self
-                    .record_failure(&job, lease_token, retryable, code, &error.to_string())
+                    .record_failure(&job, lease_token, code, &error.to_string())
                     .await;
             }
         };
@@ -445,7 +431,6 @@ impl DocumentWorker {
                 .record_failure(
                     &job,
                     lease_token,
-                    false,
                     "invalid_document_stage",
                     "index job cannot consume canonical output that is still pending",
                 )
@@ -469,7 +454,6 @@ impl DocumentWorker {
                 .record_failure(
                     &job,
                     lease_token,
-                    false,
                     "pipeline_changed",
                     "job pipeline fingerprint does not match the active retrieval pipeline",
                 )
@@ -489,9 +473,9 @@ impl DocumentWorker {
             Supervised::LeaseLost => return Ok(WorkerOutcome::LeaseLost(job.id)),
             Supervised::Completed(Ok(staged)) => staged,
             Supervised::Completed(Err(error)) => {
-                let (retryable, code) = classify_retrieval_error(&error);
+                let code = classify_retrieval_error(&error);
                 return self
-                    .record_failure(&job, lease_token, retryable, code, &error.to_string())
+                    .record_failure(&job, lease_token, code, &error.to_string())
                     .await;
             }
         };
@@ -503,7 +487,6 @@ impl DocumentWorker {
                 .record_failure(
                     &job,
                     lease_token,
-                    false,
                     "generation_fenced",
                     &format!(
                         "vector generation {} fenced requested revision {}",
@@ -533,9 +516,9 @@ impl DocumentWorker {
             Supervised::LeaseLost => return Ok(WorkerOutcome::LeaseLost(job.id)),
             Supervised::Completed(Ok(activated)) => activated,
             Supervised::Completed(Err(error)) => {
-                let (retryable, code) = classify_retrieval_error(&error);
+                let code = classify_retrieval_error(&error);
                 return self
-                    .record_failure(&job, lease_token, retryable, code, &error.to_string())
+                    .record_failure(&job, lease_token, code, &error.to_string())
                     .await;
             }
         };
@@ -547,7 +530,6 @@ impl DocumentWorker {
                 .record_failure(
                     &job,
                     lease_token,
-                    false,
                     "activation_fenced",
                     "exact staged vector generation was no longer activatable",
                 )
@@ -604,16 +586,16 @@ impl DocumentWorker {
         &self,
         job: &DocumentJob,
         lease_token: uuid::Uuid,
-        retryable: bool,
         code: &str,
         detail: &str,
     ) -> Result<WorkerOutcome> {
         let failed_at = Utc::now();
-        let retry_at = if retryable && job.attempt_count < job.max_attempts {
-            Some(failed_at + chrono_duration(self.retry_delay(job))?)
-        } else {
-            None
-        };
+        let retry_at =
+            if document_failure_is_retriable(code) && job.attempt_count < job.max_attempts {
+                Some(failed_at + chrono_duration(self.retry_delay(job))?)
+            } else {
+                None
+            };
         let detail = truncate_detail(detail);
         let status = self
             .store
@@ -673,17 +655,47 @@ fn canonical_document(record: &openwave_core::DocumentRecord) -> Document {
     document.with_source_regions(record.source_regions.clone())
 }
 
-fn classify_retrieval_error(error: &RetrievalError) -> (bool, &'static str) {
+fn classify_retrieval_error(error: &RetrievalError) -> &'static str {
     match error {
-        RetrievalError::Parse(_) => (false, "parse_failed"),
-        RetrievalError::DimensionMismatch { .. } => (false, "dimension_mismatch"),
+        RetrievalError::Parse(_) => "parse_failed",
+        RetrievalError::DimensionMismatch { .. } => "dimension_mismatch",
         RetrievalError::VectorStore(message) if message.contains("conflicting revision tokens") => {
-            (false, "generation_conflict")
+            "generation_conflict"
         }
-        RetrievalError::Embed(_) => (true, "embedding_failed"),
-        RetrievalError::VectorStore(_) => (true, "vector_store_failed"),
-        _ => (true, "index_failed"),
+        RetrievalError::Embed(_) => "embedding_failed",
+        RetrievalError::VectorStore(_) => "vector_store_failed",
+        _ => "index_failed",
     }
+}
+
+/// Failure codes describing a condition that running the same job again cannot
+/// change: the wrong stage, a source that does not match its descriptor, a
+/// pipeline that has moved on, or content this host has no parser for.
+const TERMINAL_DOCUMENT_FAILURE_CODES: &[&str] = &[
+    "activation_fenced",
+    "dimension_mismatch",
+    "generation_conflict",
+    "generation_fenced",
+    "invalid_document_stage",
+    "parse_failed",
+    "parser_unavailable",
+    "pipeline_changed",
+    "source_blob_digest_mismatch",
+    "source_blob_length_mismatch",
+    "source_blob_missing",
+    "unsupported_job_kind",
+];
+
+/// Whether a recorded failure is worth attempting again.
+///
+/// This is the single place the distinction lives. The worker consults it to
+/// decide whether to schedule its own backoff, and the catalog consults it to
+/// decide whether to offer a reader an explicit retry — so the button appears
+/// exactly when pressing it could reach a different outcome. An unrecognised
+/// code is treated as retriable: a new transient failure should cost a wasted
+/// attempt rather than silently stranding a source.
+pub(crate) fn document_failure_is_retriable(code: &str) -> bool {
+    !TERMINAL_DOCUMENT_FAILURE_CODES.contains(&code)
 }
 
 fn truncate_detail(detail: &str) -> String {

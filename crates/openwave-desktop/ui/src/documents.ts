@@ -7,13 +7,30 @@ export type DocumentProcessingStatus =
   | "ready"
   | "failed";
 
+/**
+ * Why a source could not be prepared.
+ *
+ * `retriable` is the pipeline's own judgement, not a guess made here: a source
+ * that failed on something repeating the job cannot change — content with no
+ * parser on this host, bytes that no longer match what was stored — never
+ * offers a retry, because pressing it would only reach the same conclusion.
+ */
+export type LibraryDocumentFailure = {
+  reason: string;
+  retriable: boolean;
+};
+
 export type LibraryDocument = {
   documentId: string;
   title: string | null;
   mediaType: string;
+  /** Size of the original file, or null for content with no file behind it. */
+  sizeBytes: number | null;
   processingStatus: DocumentProcessingStatus;
+  failure: LibraryDocumentFailure | null;
   /** Whether searching this conversation can actually match this source. */
   searchable: boolean;
+  createdAt: string;
   updatedAt: string;
 };
 
@@ -75,6 +92,20 @@ export async function importLibraryDocument(
   return parseImportedDocument(
     await invoke("import_library_document", { request: { chatId } }),
   );
+}
+
+export async function deleteLibraryDocument(
+  chatId: string,
+  documentId: string,
+): Promise<void> {
+  await invoke("delete_library_document", { request: { chatId, documentId } });
+}
+
+export async function retryLibraryDocument(
+  chatId: string,
+  documentId: string,
+): Promise<void> {
+  await invoke("retry_library_document", { request: { chatId, documentId } });
 }
 
 /** Select several sources in one native picker and receive progress by event. */
@@ -260,8 +291,11 @@ function parseLibraryDocument(value: unknown): LibraryDocument {
       "documentId",
       "title",
       "mediaType",
+      "sizeBytes",
       "processingStatus",
+      "failure",
       "searchable",
+      "createdAt",
       "updatedAt",
     ])
   ) {
@@ -275,8 +309,14 @@ function parseLibraryDocument(value: unknown): LibraryDocument {
     typeof value.mediaType !== "string" ||
     value.mediaType.length === 0 ||
     value.mediaType.length > 255 ||
+    (value.sizeBytes !== null &&
+      (typeof value.sizeBytes !== "number" ||
+        !Number.isSafeInteger(value.sizeBytes) ||
+        value.sizeBytes < 0)) ||
     !isProcessingStatus(value.processingStatus) ||
     typeof value.searchable !== "boolean" ||
+    typeof value.createdAt !== "string" ||
+    !Number.isFinite(Date.parse(value.createdAt)) ||
     typeof value.updatedAt !== "string" ||
     !Number.isFinite(Date.parse(value.updatedAt))
   ) {
@@ -286,10 +326,28 @@ function parseLibraryDocument(value: unknown): LibraryDocument {
     documentId: value.documentId,
     title: value.title,
     mediaType: value.mediaType,
+    sizeBytes: value.sizeBytes,
     processingStatus: value.processingStatus,
+    failure: parseLibraryDocumentFailure(value.failure),
     searchable: value.searchable,
+    createdAt: value.createdAt,
     updatedAt: value.updatedAt,
   };
+}
+
+function parseLibraryDocumentFailure(
+  value: unknown,
+): LibraryDocumentFailure | null {
+  if (value === null || value === undefined) return null;
+  if (
+    !isExactRecord(value, ["reason", "retriable"]) ||
+    typeof value.reason !== "string" ||
+    !/^[a-z_]{1,64}$/.test(value.reason) ||
+    typeof value.retriable !== "boolean"
+  ) {
+    throw new Error("Invalid document library response");
+  }
+  return { reason: value.reason, retriable: value.retriable };
 }
 
 function isProcessingStatus(value: unknown): value is DocumentProcessingStatus {
