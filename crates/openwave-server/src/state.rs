@@ -133,8 +133,12 @@ impl AppState {
         }
         let blobs: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(config.data_dir.join("blobs")));
         let blob_writes = Arc::new(BlobWriteGuard::new(config.data_dir.join("blob-locks")));
-        let mcp = Arc::new(McpRuntime::new(tools.clone(), store.clone()));
         let gateway = crate::gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone());
+        let mcp = Arc::new(McpRuntime::new(
+            tools.clone(),
+            store.clone(),
+            gateway.clone(),
+        ));
         Ok(Self {
             config: Arc::new(config),
             store: store.clone(),

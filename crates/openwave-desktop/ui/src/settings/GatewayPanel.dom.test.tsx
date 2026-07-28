@@ -31,6 +31,8 @@ function api(overrides: Partial<Record<keyof ApiClient, unknown>> = {}) {
     gatewaySignOut: vi.fn().mockResolvedValue(signedOut),
     syncGatewayModels: vi.fn().mockResolvedValue(signedIn),
     getGatewayApps: vi.fn().mockResolvedValue({ supported: true, apps: [] }),
+    listMcpServers: vi.fn().mockResolvedValue({ servers: [] }),
+    putMcpServers: vi.fn().mockResolvedValue({ servers: [] }),
     putProvider: vi.fn().mockResolvedValue({}),
     ...overrides,
   } as unknown as ApiClient;
@@ -157,7 +159,7 @@ describe("GatewayPanel", () => {
     render(<GatewayPanel client={client} onChanged={() => undefined} />);
 
     expect(await screen.findByText("Incident API")).toBeInTheDocument();
-    expect(screen.getByText(/example-security-tools/)).toBeInTheDocument();
+    expect(screen.getByText(/via example-security-tools/)).toBeInTheDocument();
 
     cleanup();
     // A gateway that predates the JSON apps surface: no section, no error.
@@ -170,6 +172,100 @@ describe("GatewayPanel", () => {
     render(<GatewayPanel client={older} onChanged={() => undefined} />);
     expect(await screen.findByText("Signed in")).toBeInTheDocument();
     expect(screen.queryByText("Connected apps")).not.toBeInTheDocument();
+  });
+
+  it("mounts a gateway endpoint with a session-bound definition", async () => {
+    const putMcpServers = vi.fn().mockResolvedValue({
+      servers: [
+        {
+          name: "example-security-tools",
+          command: null,
+          args: [],
+          env: {},
+          env_from: [],
+          cwd: null,
+          url: null,
+          bearer_token_env: null,
+          gateway_endpoint: "example-security-tools",
+          request_timeout_ms: 60_000,
+          enabled: true,
+          health: "healthy",
+          tool_count: 3,
+          diagnostic: null,
+        },
+      ],
+    });
+    const client = api({
+      getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
+      getGatewayApps: vi.fn().mockResolvedValue({
+        supported: true,
+        apps: [
+          {
+            id: "app-1",
+            name: "Incident API",
+            app_kind: "rest_api",
+            enabled: true,
+            mcp_endpoint_slugs: ["example-security-tools"],
+          },
+        ],
+      }),
+      putMcpServers,
+    });
+    const user = userEvent.setup();
+    render(<GatewayPanel client={client} onChanged={() => undefined} />);
+
+    await user.click(
+      await screen.findByRole("switch", {
+        name: "Mount example-security-tools",
+      }),
+    );
+    await waitFor(() =>
+      expect(putMcpServers).toHaveBeenCalledWith([
+        expect.objectContaining({
+          name: "example-security-tools",
+          gateway_endpoint: "example-security-tools",
+          url: null,
+          bearer_token_env: null,
+        }),
+      ]),
+    );
+    // The saved mount reports its health inline.
+    expect(await screen.findByText(/3 tools available/)).toBeInTheDocument();
+  });
+
+  it("derives a mount name that fits the namespace limit for long slugs", async () => {
+    const longSlug = "a-very-long-endpoint-slug-that-exceeds-the-name-limit";
+    const putMcpServers = vi.fn().mockResolvedValue({ servers: [] });
+    const client = api({
+      getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
+      getGatewayApps: vi.fn().mockResolvedValue({
+        supported: true,
+        apps: [
+          {
+            id: "app-1",
+            name: "Incident API",
+            app_kind: "rest_api",
+            enabled: true,
+            mcp_endpoint_slugs: [longSlug],
+          },
+        ],
+      }),
+      putMcpServers,
+    });
+    const user = userEvent.setup();
+    render(<GatewayPanel client={client} onChanged={() => undefined} />);
+
+    await user.click(
+      await screen.findByRole("switch", { name: `Mount ${longSlug}` }),
+    );
+    await waitFor(() =>
+      expect(putMcpServers).toHaveBeenCalledWith([
+        expect.objectContaining({
+          name: longSlug.slice(0, 32),
+          gateway_endpoint: longSlug,
+        }),
+      ]),
+    );
   });
 
   it("surfaces a failed sign-in with its bounded message", async () => {

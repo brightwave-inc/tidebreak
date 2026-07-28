@@ -306,6 +306,23 @@ impl GatewayRuntime {
     }
 }
 
+#[async_trait]
+impl crate::mcp_config::GatewayEndpoints for GatewayRuntime {
+    /// Resolve a gateway MCP endpoint from the signed-in session: its URL
+    /// under the configured base, and a fresh `mcp:<slug>` bearer minted (or
+    /// served from cache) inside the connector's rotation lock.
+    async fn endpoint(&self, slug: &str) -> Result<crate::mcp_config::GatewayEndpointAccess> {
+        let connection = self
+            .connection()
+            .await?
+            .ok_or_else(|| AgentError::config("no model gateway is configured"))?;
+        Ok(crate::mcp_config::GatewayEndpointAccess {
+            url: connection.mcp_endpoint_url(slug)?,
+            bearer_token: connection.mcp_access_token(slug).await?,
+        })
+    }
+}
+
 fn clamp_u32(value: Option<i64>, default: u32) -> u32 {
     value
         .and_then(|value| u32::try_from(value).ok())
@@ -419,10 +436,39 @@ mod tests {
         .into_response()
     }
 
+    /// Minimal Streamable HTTP MCP endpoint that requires an `mcp:tools`
+    /// session bearer, exactly as the gateway's `/mcp/{slug}` route does.
+    async fn mcp_endpoint(headers: HeaderMap, body: String) -> Response {
+        let bearer = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert!(bearer.starts_with("Bearer mg_at_mcp:tools_"), "{bearer}");
+        let request: Value = serde_json::from_str(&body).unwrap();
+        let id = request.get("id").cloned().unwrap_or_default();
+        let result = match request["method"].as_str().unwrap_or_default() {
+            "initialize" => json!({
+                "protocolVersion": openwave_mcp::PROTOCOL_VERSION,
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "gateway-fixture", "version": "1"}
+            }),
+            "tools/list" => json!({
+                "tools": [{
+                    "name": "lookup",
+                    "description": "Look something up",
+                    "inputSchema": {"type": "object"}
+                }]
+            }),
+            _ => json!({}),
+        };
+        Json(json!({"jsonrpc": "2.0", "id": id, "result": result})).into_response()
+    }
+
     async fn serve(gateway: Arc<FakeGateway>) -> std::net::SocketAddr {
         let app = AxumRouter::new()
             .route("/oauth/token", post(token))
             .route("/api/v1/cli/models", get(models))
+            .route("/mcp/{slug}", post(mcp_endpoint))
             .with_state(gateway);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -578,6 +624,66 @@ mod tests {
             .await
             .unwrap();
         assert!(config.models.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mounts_a_gateway_endpoint_from_the_signed_in_session() {
+        let address = serve(Arc::new(FakeGateway::default())).await;
+        let base = format!("http://{address}");
+        let (runtime, store, _directory) = signed_in_runtime(&base).await;
+
+        let mcp = Arc::new(crate::mcp_config::McpRuntime::new(
+            Arc::new(openwave_core::ToolRegistry::new()),
+            store.clone(),
+            runtime.clone(),
+        ));
+        let definition = crate::mcp_config::McpServerDefinition {
+            name: "tools".to_string(),
+            command: None,
+            args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            env_from: Vec::new(),
+            cwd: None,
+            url: None,
+            bearer_token_env: None,
+            gateway_endpoint: Some("tools".to_string()),
+            request_timeout_ms: 60_000,
+            enabled: true,
+        };
+        // No environment variable anywhere: the URL and bearer come from the
+        // stored session via a resource-scoped refresh (asserted inside the
+        // fixture endpoint).
+        let info = mcp
+            .replace(crate::mcp_config::McpServersConfig {
+                servers: vec![definition],
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            info.servers[0].health,
+            crate::mcp_config::McpHealth::Healthy
+        );
+        assert!(mcp.snapshot().get("mcp__tools__lookup").is_some());
+
+        // Sign-out degrades the mount to a secret-free sign-in diagnostic and
+        // keeps the definition; the tool leaves the registry.
+        runtime.sign_out().await.unwrap();
+        let error = mcp.reconnect("tools").await.err().unwrap();
+        assert!(!error.to_string().contains("mg_at_"), "{error}");
+        let info = mcp.info().await;
+        assert_eq!(
+            info.servers[0].health,
+            crate::mcp_config::McpHealth::Degraded
+        );
+        assert_eq!(
+            info.servers[0].diagnostic.as_deref(),
+            Some("Sign in to the model gateway to reconnect this server.")
+        );
+        assert_eq!(
+            info.servers[0].definition.gateway_endpoint.as_deref(),
+            Some("tools")
+        );
+        assert!(mcp.snapshot().get("mcp__tools__lookup").is_none());
     }
 
     #[tokio::test]

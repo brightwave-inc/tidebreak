@@ -16,6 +16,7 @@ const healthy: McpServersInfo = {
       cwd: "/tmp/docs",
       url: null,
       bearer_token_env: null,
+      gateway_endpoint: null,
       request_timeout_ms: 60_000,
       enabled: true,
       health: "healthy",
@@ -151,6 +152,7 @@ describe("McpPanel", () => {
           cwd: null,
           url: "http://127.0.0.1:28081/mcp/tools",
           bearer_token_env: "MY_GATEWAY_TOKEN",
+          gateway_endpoint: null,
         }),
       ]),
     );
@@ -185,6 +187,7 @@ describe("McpPanel", () => {
           command: "/opt/mcp/docs",
           url: null,
           bearer_token_env: null,
+          gateway_endpoint: null,
         }),
       ]),
     );
@@ -205,6 +208,7 @@ describe("McpPanel", () => {
               cwd: null,
               url: "http://127.0.0.1:28081/mcp/tools",
               bearer_token_env: "GATEWAY_TOKEN",
+              gateway_endpoint: null,
               tool_count: 1,
             },
           ],

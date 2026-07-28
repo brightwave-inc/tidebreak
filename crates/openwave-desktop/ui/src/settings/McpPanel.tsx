@@ -29,6 +29,7 @@ function emptyServer(index: number): McpServerInfo {
     cwd: null,
     url: null,
     bearer_token_env: null,
+    gateway_endpoint: null,
     request_timeout_ms: DEFAULT_TIMEOUT_MS,
     enabled: true,
     health: "initializing",
@@ -37,15 +38,16 @@ function emptyServer(index: number): McpServerInfo {
   };
 }
 
-type Transport = "stdio" | "http";
+type Transport = "stdio" | "http" | "gateway";
 
 function transportOf(server: McpServerInfo): Transport {
+  if (server.gateway_endpoint !== null) return "gateway";
   return server.url !== null ? "http" : "stdio";
 }
 
-/** Switching transports clears the other transport's fields so a saved
- * definition can never carry both. */
-function transportFields(transport: Transport): Partial<McpServerInfo> {
+/** Switching transports clears the other transports' fields so a saved
+ * definition can never carry more than one. */
+function transportFields(transport: "stdio" | "http"): Partial<McpServerInfo> {
   return transport === "http"
     ? {
         command: null,
@@ -55,11 +57,13 @@ function transportFields(transport: Transport): Partial<McpServerInfo> {
         cwd: null,
         url: "",
         bearer_token_env: null,
+        gateway_endpoint: null,
       }
     : {
         command: "",
         url: null,
         bearer_token_env: null,
+        gateway_endpoint: null,
       };
 }
 
@@ -222,6 +226,16 @@ export function McpPanel({ client }: { client: ApiClient }) {
                 />
               </SettingsField>
 
+              {transportOf(server) === "gateway" && (
+                <p className="text-sm text-muted-foreground">
+                  Managed by the Model Gateway (endpoint{" "}
+                  <code>{server.gateway_endpoint}</code>). Its URL and
+                  short-lived credentials come from the signed-in gateway
+                  session; mount or unmount it from the Model Gateway panel.
+                </p>
+              )}
+
+              {transportOf(server) !== "gateway" && (
               <FieldGroup label="Transport">
                 <div className="flex gap-4" role="radiogroup" aria-label="Transport">
                   {(["stdio", "http"] as const).map((transport) => (
@@ -245,6 +259,7 @@ export function McpPanel({ client }: { client: ApiClient }) {
                   ))}
                 </div>
               </FieldGroup>
+              )}
 
               {transportOf(server) === "stdio" && (
                 <>
