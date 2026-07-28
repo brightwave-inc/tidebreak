@@ -325,40 +325,6 @@ body {
   background: var(--page-background);
 }
 
-/* The settings sidebar is still hand-styled; the app rail moved to the
-   Tailwind primitives in `sidebar/primitives.tsx`. */
-.sidebar-action {
-  display: flex;
-  align-items: center;
-  gap: 0.55rem;
-  width: 100%;
-  padding: 0.4rem 0.55rem;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--muted-foreground);
-  font-size: 0.85rem;
-  text-align: left;
-  cursor: pointer;
-}
-
-.sidebar-action.is-active,
-.sidebar-action:hover {
-  background: var(--sidebar-active);
-  color: var(--ink);
-}
-
-.sidebar-action svg {
-  flex: 0 0 auto;
-  color: var(--muted-foreground);
-}
-
-.sidebar-action.is-active svg,
-.sidebar-action:hover svg {
-  color: var(--ink);
-}
-
-
 /* ---------- Buttons ---------- */
 
 .btn {
@@ -2045,55 +2011,6 @@ body {
   border: 0;
 }
 
-/* ---------- Settings panel ---------- */
-
-/* A single settings surface, used on the full settings page. */
-.settings-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-  max-width: 44rem;
-}
-
-/* ---------- Full-page settings ---------- */
-
-.settings-page {
-  display: flex;
-  min-width: 0;
-  min-height: 0;
-  height: 100%;
-  overflow: hidden;
-}
-
-.settings-nav {
-  display: flex;
-  flex: 0 0 auto;
-  flex-direction: column;
-  gap: 2px;
-  width: 220px;
-  padding: 0.85rem 0.6rem;
-  border-right: 1px solid var(--line);
-  overflow-y: auto;
-}
-
-.settings-nav-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin-top: 0.35rem;
-}
-
-.settings-back {
-  color: var(--muted-foreground);
-}
-
-.settings-page-content {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow-y: auto;
-  padding: 1.5rem clamp(1rem, 4vw, 2.5rem);
-}
-
 /* ---------- Appearance ---------- */
 
 .theme-options {
@@ -2995,15 +2912,6 @@ body {
     margin: 0;
     border: 0;
     border-radius: 0;
-  }
-
-  .settings-nav {
-    width: 160px;
-    padding: 0.6rem 0.4rem;
-  }
-
-  .settings-page-content {
-    padding: 1.25rem 1rem;
   }
 
   .messages {
