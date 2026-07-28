@@ -74,13 +74,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_BODY: ${{ steps.release_drafter.outputs.body }}
           RELEASE_ID: ${{ steps.release_drafter.outputs.id }}
+          RELEASE_TAG: v${{ steps.release_drafter.outputs.resolved_version }}
         run: |
           original="$RUNNER_TEMP/release-body.md"
           formatted="$RUNNER_TEMP/formatted-release-body.md"
           printf '%s' "$RELEASE_BODY" > "$original"
           node scripts/format-release-notes.mjs < "$original" > "$formatted"
           cmp --silent "$original" "$formatted" && exit 0
-          jq -n --rawfile body "$formatted" '{body: $body}' | gh api \
+          jq -n --arg tag "$RELEASE_TAG" --rawfile body "$formatted" \
+            '{tag_name: $tag, body: $body}' | gh api \
             --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
             --input - >/dev/null
 
