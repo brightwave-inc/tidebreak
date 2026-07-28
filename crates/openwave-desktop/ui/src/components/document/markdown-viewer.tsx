@@ -1,9 +1,11 @@
 import { FileIcon, Loader2Icon } from "lucide-react";
 import type { HTMLAttributes } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { cn } from "@/lib/utils";
+import { extractHeadings } from "@/markdownHeadings";
 import { MessageMarkdown } from "@/MessageMarkdown";
+import { MarkdownOutline } from "./MarkdownOutline";
 import { useFileDownload } from "./useFileDownload";
 
 /** A character range in the raw file, as a citation reports it. */
@@ -102,6 +104,17 @@ export function MarkdownViewer({
     [fullContent],
   );
 
+  const headings = useMemo(
+    () => (markdown ? extractHeadings(fullContent) : []),
+    [markdown, fullContent],
+  );
+
+  const scrollToHeading = useCallback((id: string) => {
+    containerRef.current
+      ?.querySelector(`#${CSS.escape(id)}`)
+      ?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
+
   // For citation mode: locate the chunk containing the highlight
   const citationInfo = useMemo(() => {
     if (!highlightRange || !fullContent) return null;
@@ -190,12 +203,23 @@ export function MarkdownViewer({
 
   return (
     <div className={cn("relative flex min-h-0 flex-1 flex-col", className)} {...props}>
+      {headings.length > 0 && (
+        <div className="absolute top-2 right-2 z-10">
+          <MarkdownOutline
+            headings={headings}
+            onNavigate={scrollToHeading}
+            triggerClassName="bg-background/80 backdrop-blur-sm"
+          />
+        </div>
+      )}
       <div ref={containerRef} className="min-h-0 flex-1 overflow-auto p-6">
         <div className="mx-auto max-w-4xl">
           <div ref={anchorRef} />
           {visibleChunks.map((chunk, i) =>
             markdown ? (
-              <MessageMarkdown key={startChunkIndex + i}>{chunk}</MessageMarkdown>
+              <MessageMarkdown key={startChunkIndex + i} headingIds>
+                {chunk}
+              </MessageMarkdown>
             ) : (
               <pre
                 key={startChunkIndex + i}

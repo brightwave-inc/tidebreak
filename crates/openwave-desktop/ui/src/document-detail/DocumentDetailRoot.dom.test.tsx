@@ -112,6 +112,42 @@ describe("DocumentDetailRoot", () => {
     expect(screen.queryByText(body)).toBeNull();
   });
 
+  // The outline slugs the raw markdown and the renderer slugs the rendered
+  // heading, independently. This is the only test that puts the two together,
+  // so it is what would catch them drifting apart.
+  it("lists a markdown source's headings and scrolls to one", async () => {
+    const user = userEvent.setup();
+    await openPanel(
+      detail({ media_type: "text/markdown", title: "Report.md" }),
+      vi.fn(),
+      new Blob(["# Quarterly report\n\nBody.\n\n## Revenue by **segment**\n\nMore.\n"]),
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Document outline" }));
+    const entry = await screen.findByRole("button", { name: "Revenue by segment" });
+
+    const scrollIntoView = vi.fn();
+    const heading = document.querySelector("#revenue-by-segment");
+    expect(heading).not.toBeNull();
+    heading!.scrollIntoView = scrollIntoView;
+
+    await user.click(entry);
+    expect(scrollIntoView).toHaveBeenCalled();
+  });
+
+  it("offers no outline for a source that is text rather than markdown", async () => {
+    await openPanel(
+      detail({ media_type: "text/plain", title: "Notes.txt" }),
+      vi.fn(),
+      new Blob(["# Not a heading, just a line that starts with a hash\n"]),
+    );
+
+    expect(
+      await screen.findByText(/Not a heading, just a line that starts with a hash/),
+    ).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Document outline" })).toBeNull();
+  });
+
   it("says so when a structured source will not parse", async () => {
     await openPanel(
       detail({ media_type: "application/json", title: "Truncated.json" }),
