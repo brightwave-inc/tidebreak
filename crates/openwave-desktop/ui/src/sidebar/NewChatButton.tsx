@@ -5,9 +5,10 @@ import { SidebarButton, useSidebarWidth } from "./primitives";
 
 /**
  * Starting a chat is the rail's primary action, so an expanded rail gives it a
- * prominent full-width button rather than another nav row. A compact rail has
- * no room for that, so it falls back to the icon-only row with its label in a
- * tooltip — the same treatment every other compact control gets.
+ * filled full-width button rather than another nav row — the one solid control
+ * in a rail of quiet ones. A compact rail has no room for that, so it falls
+ * back to the icon-only row with its label in a tooltip, the same treatment
+ * every other compact control gets.
  */
 export function NewChatButton({
   onClick,
@@ -32,9 +33,8 @@ export function NewChatButton({
 
   return (
     <Button
-      variant="outline"
       size="sm"
-      className="w-full justify-start gap-2"
+      className="w-full gap-2"
       onClick={onClick}
       disabled={disabled}
     >
