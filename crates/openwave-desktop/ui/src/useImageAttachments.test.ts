@@ -63,12 +63,26 @@ class FakeUpload {
 
 const client = { baseUrl: "http://127.0.0.1:9", token: "t" } as ApiClient;
 
+const hasNativeHost = vi.hoisted(() => vi.fn(() => false));
+const publishChatImage = vi.hoisted(() => vi.fn());
+
+vi.mock("./host", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./host")>()),
+  hasNativeHost,
+}));
+vi.mock("./attachments", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./attachments")>()),
+  publishChatImage,
+}));
+
 function png(name = "chart.png"): File {
   return new File([new Uint8Array([1, 2, 3, 4])], name, { type: "image/png" });
 }
 
 beforeEach(() => {
   FakeUpload.opened = [];
+  hasNativeHost.mockReturnValue(false);
+  publishChatImage.mockReset();
   vi.stubGlobal("XMLHttpRequest", FakeUpload);
   URL.createObjectURL = vi.fn((): string => "blob:preview");
   URL.revokeObjectURL = vi.fn();
@@ -170,6 +184,32 @@ describe("useImageAttachments", () => {
     expect(result.current.error).toMatch(/PNG, JPEG, WebP, or GIF/);
     expect(result.current.attachments).toEqual([]);
     expect(FakeUpload.opened).toHaveLength(0);
+  });
+
+  // Regression: the packaged app has no bearer for the publish endpoint, so a
+  // pasted image posted from the renderer came back 401 with an empty body and
+  // reached the reader as the generic "Could not attach that image".
+  it("publishes through the host rather than the renderer when there is one", async () => {
+    hasNativeHost.mockReturnValue(true);
+    publishChatImage.mockResolvedValue({
+      attachmentId: ATTACHMENT_ID,
+      mediaType: "image/png",
+      width: 800,
+      height: 600,
+      byteLen: 4,
+    });
+    const { result } = renderHook(() => useImageAttachments(client, "chat-1"));
+
+    act(() => result.current.attachFiles([png()]));
+    await waitFor(() =>
+      expect(result.current.attachments[0]).toMatchObject({
+        status: "ready",
+        attachmentId: ATTACHMENT_ID,
+        width: 800,
+      }),
+    );
+    expect(FakeUpload.opened).toHaveLength(0);
+    expect(publishChatImage).toHaveBeenCalledWith("chat-1", expect.any(File));
   });
 
   it("forgets everything once a turn has carried it", async () => {

@@ -1,10 +1,16 @@
 //! Native image attachment bridge.
 //!
-//! Image bytes terminate here. The read and the upload happen in the host
-//! process; the webview receives an opaque attachment id and a few bounded
-//! numbers, and never sees the pixels or the path they came from. That is what
-//! keeps a compromised or merely buggy renderer from being able to exfiltrate
-//! the contents of a file the user only meant to show the model.
+//! Every image publish happens in the host process, and the webview receives an
+//! opaque attachment id and a few bounded numbers back. For a picked file that
+//! also means the pixels and the path never cross into the renderer at all,
+//! which is what keeps a compromised or merely buggy renderer from being able to
+//! exfiltrate the contents of a file the user only meant to show the model.
+//!
+//! A pasted or dropped image is the one case where the renderer already holds
+//! the bytes — it has no path to hand over, and it drew a preview from them — so
+//! it sends them here instead. The publish still has to happen in the host: in a
+//! native embedding the server mounts the publish endpoint behind the
+//! client-executor token, which the renderer deliberately does not have.
 //!
 //! Choosing the file is [`crate::attachments`]'s job, because one picker serves
 //! both images and documents and only the bytes can say which a file is.
@@ -13,11 +19,14 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
 use openwave_core::{ChatId, MAX_IMAGE_BYTES};
 use serde::{Deserialize, Serialize};
+use tauri::State;
 use uuid::Uuid;
 
 use crate::documents::resolve_conversation_scope;
@@ -42,8 +51,15 @@ pub(crate) struct AttachedImage {
     byte_len: u64,
 }
 
-#[derive(Debug, Deserialize)]
-struct PublishedImageAttachment {
+/// What the server said about one published image.
+///
+/// Deserialized from the server's snake_case wire shape and serialized back out
+/// in the camelCase every other host command uses, because for a renderer-held
+/// image this is the whole answer — there is no file name to add, the renderer
+/// named the paste itself.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all(serialize = "camelCase"))]
+pub(crate) struct PublishedImageAttachment {
     attachment_id: Uuid,
     media_type: String,
     width: u32,
@@ -106,7 +122,64 @@ pub(crate) async fn publish_image_at(
     let bytes = tauri::async_runtime::spawn_blocking(move || read_selected_image(&path))
         .await
         .map_err(|_| "Could not read the selected image".to_owned())??;
+    let published = publish_image_bytes(app_state, host_access, requested_chat, bytes).await?;
+    Ok(AttachedImage::new(published, file_name))
+}
 
+/// One image the renderer already holds, published from the host on its behalf.
+///
+/// Base64 rather than a raw IPC body so the bytes travel as one argument
+/// alongside the conversation they belong to. The renderer makes no claim about
+/// the format: the media type is derived here from the bytes, as it is for a
+/// picked file, so a renderer that lied could only mislabel its own paste.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct PublishImageRequest {
+    chat_id: Uuid,
+    content_base64: String,
+}
+
+/// Publish a pasted or dropped image, which arrives as bytes because it has no
+/// path for the host to read.
+#[tauri::command]
+pub(crate) async fn publish_chat_image(
+    app_state: State<'_, Arc<AppState>>,
+    host_access: State<'_, HostAccess>,
+    request: PublishImageRequest,
+) -> Result<PublishedImageAttachment, String> {
+    let bytes = decode_image_payload(&request.content_base64)?;
+    publish_image_bytes(app_state.inner(), &host_access, request.chat_id, bytes).await
+}
+
+/// The longest base64 payload that could still decode to an attachable image.
+///
+/// Checked before decoding so an oversized paste is refused without first
+/// allocating what it decodes to.
+const MAX_IMAGE_BASE64_CHARS: usize = (MAX_IMAGE_BYTES as usize).div_ceil(3) * 4;
+
+fn decode_image_payload(encoded: &str) -> Result<Vec<u8>, String> {
+    if encoded.len() > MAX_IMAGE_BASE64_CHARS {
+        return Err("Images must be 16 MB or smaller".to_owned());
+    }
+    let bytes = BASE64
+        .decode(encoded)
+        .map_err(|_| "Could not attach that image".to_owned())?;
+    if bytes.is_empty() {
+        return Err("That image file is empty".to_owned());
+    }
+    if bytes.len() as u64 > MAX_IMAGE_BYTES {
+        return Err("Images must be 16 MB or smaller".to_owned());
+    }
+    Ok(bytes)
+}
+
+/// Hand one image's bytes to the server and return what it minted for them.
+async fn publish_image_bytes(
+    app_state: &Arc<AppState>,
+    host_access: &HostAccess,
+    requested_chat: Uuid,
+    bytes: Vec<u8>,
+) -> Result<PublishedImageAttachment, String> {
     let chat_id = resolve_conversation_scope(host_access, requested_chat).await?;
     let info = wait_server_info(app_state).await?;
     // The declared type is derived from the bytes, not the file name, so the
@@ -135,11 +208,10 @@ pub(crate) async fn publish_image_at(
             .unwrap_or_default();
         return Err(refusal_message(&kind));
     }
-    let published = response
+    response
         .json::<PublishedImageAttachment>()
         .await
-        .map_err(|_| "Attaching the image returned an invalid response".to_owned())?;
-    Ok(AttachedImage::new(published, file_name))
+        .map_err(|_| "Attaching the image returned an invalid response".to_owned())
 }
 
 /// Whether this file should be attached as an image rather than imported as a
@@ -372,6 +444,26 @@ mod tests {
                 "a known refusal fell through to the generic message"
             );
         }
+    }
+
+    #[test]
+    fn a_pasted_payload_is_bounded_before_it_is_decoded() {
+        // The ceiling is checked on the encoded string, so a renderer cannot
+        // make the host allocate 100 MB to find out the image was too large.
+        let oversized = "A".repeat(MAX_IMAGE_BASE64_CHARS + 1);
+        assert_eq!(
+            decode_image_payload(&oversized).unwrap_err(),
+            "Images must be 16 MB or smaller"
+        );
+        assert_eq!(
+            decode_image_payload("").unwrap_err(),
+            "That image file is empty"
+        );
+        assert!(decode_image_payload("not base64!").is_err());
+        assert_eq!(
+            decode_image_payload(&BASE64.encode(b"PNG")).unwrap(),
+            b"PNG"
+        );
     }
 
     #[cfg(unix)]

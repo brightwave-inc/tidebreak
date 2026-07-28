@@ -301,7 +301,11 @@ export function describeImageAttachment(attachment: ImageAttachment): string {
     case "queued":
       return "Waiting to upload";
     case "uploading":
-      return `Uploading ${imageUploadPercent(attachment)}%`;
+      // A host publish moves the bytes over IPC in one step and has no progress
+      // to report, so quoting 0% would read as a stall rather than as work.
+      return attachment.uploadedBytes === 0
+        ? "Uploading"
+        : `Uploading ${imageUploadPercent(attachment)}%`;
     case "ready":
       return attachment.width && attachment.height
         ? `${attachment.width} × ${attachment.height}`
@@ -467,7 +471,7 @@ export function uploadImageAttachment(
     };
     request.onload = () => {
       if (request.status !== 201) {
-        reject(new Error(refusalFromBody(request.responseText)));
+        reject(new Error(refusalFromBody(request.status, request.responseText)));
         return;
       }
       try {
@@ -486,7 +490,7 @@ export function uploadImageAttachment(
   });
 }
 
-function refusalFromBody(body: string): string {
+function refusalFromBody(status: number, body: string): string {
   try {
     const parsed: unknown = JSON.parse(body);
     if (isRecord(parsed) && typeof parsed.kind === "string") {
@@ -494,6 +498,13 @@ function refusalFromBody(body: string): string {
     }
   } catch {
     /* An unparseable body is just an unknown refusal. */
+  }
+  // The auth middleware answers with a bare status and no body, so this is the
+  // one refusal that carries no `kind` to explain itself. Saying so is what
+  // separates "this build cannot publish from the renderer" from a dead
+  // network — the two used to arrive as the same sentence.
+  if (status === 401 || status === 403) {
+    return "This build cannot attach images from the composer";
   }
   return imageAttachmentRefusal("");
 }
@@ -546,6 +557,34 @@ function isSafeRendererText(value: string, maxCodePoints: number): boolean {
   return characters.every(
     (character) => !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(character),
   );
+}
+
+/**
+ * The host's publish result for an image the renderer already held.
+ *
+ * Same five numbers as the endpoint's own answer, in the camelCase every host
+ * command uses. There is no file name here: the renderer named the paste before
+ * any bytes moved, and the host has no better name to offer for one.
+ */
+export function parseHostPublishedImage(value: unknown): PublishedImage {
+  if (
+    !isExactRecord(value, [
+      "attachmentId",
+      "mediaType",
+      "width",
+      "height",
+      "byteLen",
+    ])
+  ) {
+    throw new Error("Invalid image attachment response");
+  }
+  return checkedPublishedImage({
+    attachmentId: value.attachmentId,
+    mediaType: value.mediaType,
+    width: value.width,
+    height: value.height,
+    byteLen: value.byteLen,
+  });
 }
 
 /** The publish endpoint's result, which uses the server's snake_case shape. */
