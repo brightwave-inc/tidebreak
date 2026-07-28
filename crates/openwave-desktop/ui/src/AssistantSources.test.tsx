@@ -6,6 +6,8 @@ function source(overrides: Partial<AssistantSource> = {}): AssistantSource {
   return {
     id: "private-source-id",
     ordinal: 1,
+    documentId: "document-1",
+    span: { start: 0, end: 26 },
     excerpt: "A short supporting excerpt.",
     heading: "Project notes",
     pages: [2, 3],

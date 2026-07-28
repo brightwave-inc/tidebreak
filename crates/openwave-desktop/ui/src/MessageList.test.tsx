@@ -267,6 +267,8 @@ describe("MessageBubble", () => {
           {
             id: "private-citation-id",
             ordinal: 1,
+            documentId: "document-1",
+            span: { start: 0, end: 20 },
             excerpt: "First source excerpt",
             heading: "First source",
             pages: [4],

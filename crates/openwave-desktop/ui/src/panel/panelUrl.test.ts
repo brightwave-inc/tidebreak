@@ -23,6 +23,21 @@ describe("parsePanelSegment", () => {
     });
   });
 
+  it("reads the citation a source panel should open at", () => {
+    expect(parsePanelSegment("sources.0e5b1c3a.7f21b904")).toEqual({
+      type: "sources",
+      documentId: "0e5b1c3a",
+      citationId: "7f21b904",
+    });
+  });
+
+  it("rejects a citation target that addresses nothing", () => {
+    // Half an address, or one segment more than the grammar has.
+    expect(parsePanelSegment("sources..7f21b904")).toBeNull();
+    expect(parsePanelSegment("sources.0e5b1c3a.")).toBeNull();
+    expect(parsePanelSegment("sources.0e5b1c3a.7f21b904.extra")).toBeNull();
+  });
+
   it("carries an opaque output identity", () => {
     expect(
       parsePanelSegment("outputs.550062d4-2528-5cc6-90f8-a788e119bf36"),
@@ -47,6 +62,7 @@ describe("parsePanelSegment", () => {
       { type: "chat" },
       { type: "sources" },
       { type: "sources", documentId: "doc-1" },
+      { type: "sources", documentId: "doc-1", citationId: "cite-1" },
       { type: "outputs" },
       {
         type: "outputs",

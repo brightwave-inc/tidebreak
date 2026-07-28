@@ -156,6 +156,8 @@ describe("hydrateTranscriptHistory", () => {
             {
               id: "citation-1",
               ordinal: 1,
+              document_id: "document-1",
+              span: { start: 0, end: 12 },
               excerpt: "safe excerpt",
               heading: "Safe heading",
               pages: [2],

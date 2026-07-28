@@ -80,7 +80,7 @@ pub use blob::FsBlobStore;
 pub use cancel::{CancelToken, Cancelled};
 pub use citation::{
     format_source_reference, parse_assistant_citations, AssistantCitationReference,
-    AssistantCitationSnapshot, ParsedAssistantCitations, MAX_ASSISTANT_CITATIONS,
+    AssistantCitationSnapshot, CitationSpan, ParsedAssistantCitations, MAX_ASSISTANT_CITATIONS,
     MAX_CITATION_EXCERPT_CHARS, MAX_CITATION_HEADING_CHARS, MAX_CITATION_PAGES,
 };
 pub use client_tools::{

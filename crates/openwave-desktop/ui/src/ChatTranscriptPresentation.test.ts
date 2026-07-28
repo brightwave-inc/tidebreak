@@ -17,6 +17,8 @@ const transcript: ChatTranscript = {
         {
           id: "citation-private-id",
           ordinal: 1,
+          document_id: "document-1",
+          span: { start: 0, end: 22 },
           excerpt: "Bounded source excerpt",
           heading: null,
           pages: [],
@@ -72,6 +74,8 @@ describe("terminal transcript presentation", () => {
           {
             id: "citation-private-id",
             ordinal: 1,
+            documentId: "document-1",
+            span: { start: 0, end: 22 },
             excerpt: "Bounded source excerpt",
             heading: null,
             pages: [],
@@ -162,6 +166,8 @@ describe("terminal transcript presentation", () => {
             {
               id: "citation-second",
               ordinal: 2,
+              document_id: "document-2",
+              span: { start: 30, end: 52 },
               excerpt: "Second bounded excerpt",
               heading: "Heading",
               pages: [4],
@@ -181,6 +187,8 @@ describe("terminal transcript presentation", () => {
           {
             id: "citation-private-id",
             ordinal: 1,
+            documentId: "document-1",
+            span: { start: 0, end: 22 },
             excerpt: "Bounded source excerpt",
             heading: null,
             pages: [],
@@ -188,6 +196,8 @@ describe("terminal transcript presentation", () => {
           {
             id: "citation-second",
             ordinal: 2,
+            documentId: "document-2",
+            span: { start: 30, end: 52 },
             excerpt: "Second bounded excerpt",
             heading: "Heading",
             pages: [4],

@@ -26,6 +26,7 @@ import { UserQuestionsCard } from "./UserQuestionsCard";
 import type { TranscriptImageAttachment } from "./ImageAttachments";
 import { TranscriptImageAttachments } from "./TranscriptImageAttachments";
 import { BackgroundAgentList } from "./BackgroundAgentList";
+import { useSourceNav } from "./panel/SourceNav";
 
 export type ChatMessage =
   | {
@@ -464,6 +465,8 @@ function MessageBubbleImpl({
   imageClient?: Pick<ApiClient, "getChatImageAttachment">;
   chatId?: string;
 }) {
+  const sourceNav = useSourceNav();
+
   if (message.role === "assistant") {
     if (!message.text && message.sources.length === 0) return null;
 
@@ -481,7 +484,18 @@ function MessageBubbleImpl({
     return (
       <article className="message message-assistant" aria-label="Assistant">
         {message.text && <MessageMarkdown>{message.text}</MessageMarkdown>}
-        <AssistantSources sources={message.sources} />
+        <AssistantSources
+          sources={message.sources}
+          onOpenSource={
+            sourceNav
+              ? (source) =>
+                  sourceNav.openCitation({
+                    documentId: source.documentId,
+                    citationId: source.id,
+                  })
+              : undefined
+          }
+        />
         <MessageFooter
           role="assistant"
           text={message.text}

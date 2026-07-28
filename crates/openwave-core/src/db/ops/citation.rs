@@ -6,7 +6,7 @@ use sea_orm::{
 };
 
 use crate::citation::{
-    parse_assistant_citations, AssistantCitationReference, AssistantCitationSnapshot,
+    parse_assistant_citations, AssistantCitationReference, AssistantCitationSnapshot, CitationSpan,
     MAX_ASSISTANT_CITATIONS, MAX_CITATION_EXCERPT_CHARS, MAX_CITATION_HEADING_CHARS,
     MAX_CITATION_PAGES,
 };
@@ -383,11 +383,19 @@ where
                 .take(MAX_CITATION_HEADING_CHARS)
                 .collect()
         });
+        let span = CitationSpan {
+            start: u32::try_from(evidence.evidence.span.start)
+                .map_err(|_| AgentError::Store("citation span exceeds the wire range".into()))?,
+            end: u32::try_from(evidence.evidence.span.end)
+                .map_err(|_| AgentError::Store("citation span exceeds the wire range".into()))?,
+        };
         snapshots.push(AssistantCitationSnapshot {
             id: AssistantCitationId(row.id),
             message_id: MessageId(row.message_id),
             ordinal: u16::try_from(row.ordinal)
                 .map_err(|_| AgentError::Store("invalid assistant citation ordinal".into()))?,
+            document_id: evidence.evidence.document_id,
+            span,
             excerpt: evidence
                 .evidence
                 .snippet

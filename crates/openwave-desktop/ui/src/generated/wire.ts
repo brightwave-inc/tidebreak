@@ -87,8 +87,24 @@ export type AssistantCitationId = string;
 
 /**
  * Renderer-safe historical citation projected from immutable evidence.
+ *
+ * The source identity and canonical-text span travel with the excerpt because
+ * a citation is a position in a document, not just a quotation of one: without
+ * them a reader can only be shown the words again, never where they came from.
+ * Neither is a capability — the document id already addresses the source panel,
+ * and the span only means anything against text the same client can already
+ * read.
  */
-export type AssistantCitationSnapshot = { id: AssistantCitationId, ordinal: number, excerpt: string, heading: string | null, pages: Array<number>, };
+export type AssistantCitationSnapshot = { id: AssistantCitationId, ordinal: number, 
+/**
+ * The cited source, addressable as a document panel.
+ */
+document_id: DocumentId, 
+/**
+ * Half-open byte range of the cited passage in that document's canonical
+ * text, which is the text the extracted-text view renders.
+ */
+span: CitationSpan, excerpt: string, heading: string | null, pages: Array<number>, };
 
 /**
  * Identifies one tool call, stable across its request/approval/result.
@@ -209,6 +225,22 @@ export type ChatTranscript = { messages: Array<ChatMessageSnapshot>,
 tool_activity: Array<ChatToolActivitySnapshot>, last_event_seq: number, };
 
 /**
+ * A citation's byte range, projected for the renderer.
+ *
+ * [`crate::ByteSpan`] is `usize`, which is a host-width detail rather than part
+ * of a wire contract; canonical text is bounded well inside `u32`.
+ */
+export type CitationSpan = { 
+/**
+ * Inclusive start byte offset.
+ */
+start: number, 
+/**
+ * Exclusive end byte offset.
+ */
+end: number, };
+
+/**
  * Renderer-safe configuration and readiness.
  */
 export type CodeExecutionConfigInfo = { provider?: CodeExecutionProviderKind, timeout_ms: number, available: boolean, };
@@ -239,6 +271,14 @@ context_window: number,
  * Maximum output sent to the endpoint.
  */
 max_output_tokens: number, };
+
+/**
+ * Identifies an authoritative source document.
+ *
+ * Usually minted fresh with [`DocumentId::new`], but [`DocumentId::derive`]
+ * preserves the existing stable URI identity used by retrieval ingestion.
+ */
+export type DocumentId = string;
 
 /**
  * One entitled connected app, with the slugs of the MCP endpoints that

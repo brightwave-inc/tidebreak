@@ -60,6 +60,8 @@ describe("AssistantWorkingIndicator", () => {
               {
                 id: "source",
                 ordinal: 1,
+                documentId: "document-1",
+                span: { start: 0, end: 16 },
                 excerpt: "Visible evidence",
                 heading: null,
                 pages: [],
