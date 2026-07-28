@@ -432,7 +432,7 @@ consent surface follows the broker capability model in
 durable `Sensitive` boundary in [tools](tools.md) — egress grants do not
 replace tool approvals or vice versa.
 
-Two honesty rules keep this from becoming a label:
+Three honesty rules keep this from becoming a label:
 
 - Enforcement is tiered and the tier is stated. Policy enforced from
   outside the sandbox — the local adapter's network denial, a firewall the
@@ -445,10 +445,21 @@ Two honesty rules keep this from becoming a label:
   a local container) or one compiled into an adapter the host ships for a
   managed vendor — never a declaration a backend makes about itself, so a
   self-hosted backend is not eligible for third-party credentials on its
-  own say-so. Both current managed adapters permit open internet access
-  inside the sandbox (disclosed in settings), so until a vendor exposes
-  per-sandbox egress enforcement, those providers run credential-free
-  workloads only.
+  own say-so.
+- The declared capability describes what the enforcement actually blocks,
+  not a vendor feature name. Both managed vendors expose per-sandbox egress
+  enforcement today — block-all switches and IP or domain allowlists,
+  settable at creation — but the shipped adapters do not configure it yet:
+  they create open-internet sandboxes, disclosed in settings, so those
+  providers run credential-free workloads until the egress step wires the
+  vendor controls into admission. Vendor allowlists also carry
+  vendor-specific exceptions — always-reachable registries and services
+  (public git hosting among them, a ready exfiltration channel), protocol
+  coverage limits, plan-tier gating — and an enforcement surface whose
+  exceptions leave a general-purpose destination reachable does not satisfy
+  the external tier for credential-bearing runs: the admission check runs
+  against the honest declaration, exceptions included, never the feature
+  name.
 
 For an unattached run, policy is the snapshot delivered at admission.
 Revoking a grant while its run is unattached takes effect at reattachment
