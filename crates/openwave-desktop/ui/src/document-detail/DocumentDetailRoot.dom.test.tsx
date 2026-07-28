@@ -29,10 +29,14 @@ function detail(overrides: Partial<DocumentDetail> = {}): DocumentDetail {
   };
 }
 
-async function openPanel(info: DocumentDetail, download = vi.fn()) {
+async function openPanel(
+  info: DocumentDetail,
+  download = vi.fn(),
+  bytes: Blob = new Blob(["bytes"]),
+) {
   const client = {
     getChatDocument: vi.fn().mockResolvedValue(info),
-    getChatDocumentFile: vi.fn().mockResolvedValue(new Blob(["bytes"])),
+    getChatDocumentFile: vi.fn().mockResolvedValue(bytes),
   };
   const rendered = await renderWithRouter(
     <AppContextProvider value={{ client } as unknown as AppContextValue}>
@@ -87,5 +91,34 @@ describe("DocumentDetailRoot", () => {
     expect(screen.queryByRole("tab", { name: "Original document" })).toBeNull();
     // Nothing is going to draw those bytes, so nothing should pull them over.
     expect(client.getChatDocumentFile).not.toHaveBeenCalled();
+  });
+
+  // The tree viewers are reached by media type, and two of these four used to
+  // land on the plain-text viewer instead: `text/xml` because it is a text type,
+  // and the suffixed types because only the base types were recognised.
+  const JSON_BODY = '{"invoice":{"total":42}}';
+  const XML_BODY = "<invoice><total>42</total></invoice>";
+
+  it.each([
+    ["application/json", JSON_BODY],
+    ["application/ld+json", JSON_BODY],
+    ["application/xml", XML_BODY],
+    ["text/xml", XML_BODY],
+  ])("draws %s as a tree rather than as raw text", async (mediaType, body) => {
+    await openPanel(detail({ media_type: mediaType, title: "Data" }), vi.fn(), new Blob([body]));
+
+    expect(await screen.findByRole("button", { name: "Collapse all" })).toBeVisible();
+    // Decomposed into nodes, so the file's own text never appears as one run.
+    expect(screen.queryByText(body)).toBeNull();
+  });
+
+  it("says so when a structured source will not parse", async () => {
+    await openPanel(
+      detail({ media_type: "application/json", title: "Truncated.json" }),
+      vi.fn(),
+      new Blob(['{"invoice": ']),
+    );
+
+    expect(await screen.findByText("Unable to parse JSON")).toBeVisible();
   });
 });
