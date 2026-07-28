@@ -46,6 +46,10 @@ pub struct AppState {
     /// this with the resolver's instance — refresh rotation is serialized
     /// per instance, so routes and resolver must share one.
     pub(crate) gateway: Arc<crate::gateway_runtime::GatewayRuntime>,
+    /// The OS-managed policy reader for managed-mode resolution. The default
+    /// asserts nothing; the platform-readers slice selects the real source
+    /// here when it lands.
+    pub(crate) os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     /// The retrieval pipeline used by the durable document worker and the
     /// agent's shared `search` tool.
     pub retrieval: Arc<Retriever>,
@@ -148,6 +152,7 @@ impl AppState {
             tools,
             mcp,
             gateway,
+            os_policy: Arc::new(crate::managed_policy::NoOsPolicy),
             retrieval,
             document_job_wake: Arc::new(Notify::new()),
             turn_job_wake: Arc::new(Notify::new()),

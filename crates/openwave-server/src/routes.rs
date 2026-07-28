@@ -143,6 +143,17 @@ fn mcp_app_payload_from_events(
     })
 }
 
+/// `GET /policy` — the resolved managed-mode policy. Read-only by design:
+/// provisioning has no renderer-writable route, which is what keeps the
+/// state sticky.
+pub async fn get_policy(
+    State(state): State<AppState>,
+) -> Result<Json<crate::managed_policy::ManagedPolicy>, ServerError> {
+    Ok(Json(
+        crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?,
+    ))
+}
+
 /// `GET /gateway/status` — renderer-safe model-gateway connection state.
 pub async fn get_gateway_status(
     State(state): State<AppState>,

@@ -615,6 +615,12 @@ mod tests {
         assert!(!json.contains("mg_at_"));
         assert!(!json.contains("mg_rt_"));
 
+        // Managed policy is a separate layer with a separate lifecycle:
+        // disconnecting the session must never deprovision the profile.
+        crate::managed_policy::provision(&*store, &base)
+            .await
+            .unwrap();
+
         runtime.sign_out().await.unwrap();
         let status = runtime.status().await.unwrap();
         assert!(!status.signed_in);
@@ -624,6 +630,10 @@ mod tests {
             .await
             .unwrap();
         assert!(config.models.is_empty());
+        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+            .await
+            .unwrap();
+        assert!(policy.managed, "sign-out must not deprovision the profile");
     }
 
     #[tokio::test]
