@@ -10,7 +10,7 @@ describe("DocumentsView", () => {
 
     expect(markup).toContain(">Sources<");
     expect(markup).toContain(
-      "Add files for OpenWave to use in this conversation.",
+      "Add files, folders, or ZIP archives for OpenWave to use in this",
     );
     expect(markup).toContain("Conversation sources");
     expect(markup).toContain("Loading sources for this conversation");

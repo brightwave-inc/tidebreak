@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -28,6 +29,8 @@ use uuid::Uuid;
 
 use crate::host_access::HostAccess;
 use crate::{wait_server_info, AppState};
+
+mod expansion;
 
 const MAX_SEARCH_QUERY_CHARS: usize = 500;
 const MAX_RENDERER_SNIPPET_CHARS: usize = 4_000;
@@ -251,8 +254,19 @@ struct LibraryImportDropState {
 
 struct PendingDocumentImport {
     import_id: Uuid,
-    path: PathBuf,
     display_name: String,
+    source: PendingDocumentSource,
+}
+
+enum PendingDocumentSource {
+    File(DocumentImportSource),
+    Failed(String),
+}
+
+#[derive(Clone)]
+enum DocumentImportSource {
+    Path(PathBuf),
+    Open(Arc<std::fs::File>),
 }
 
 struct PreparedDocumentImport {
@@ -265,6 +279,32 @@ struct PreparedDocumentImport {
 struct CompletedDocumentImport {
     document: ImportedDocument,
     already_present: bool,
+}
+
+struct CancelExpansionOnDrop {
+    cancelled: Arc<AtomicBool>,
+    armed: bool,
+}
+
+impl CancelExpansionOnDrop {
+    fn new(cancelled: Arc<AtomicBool>) -> Self {
+        Self {
+            cancelled,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CancelExpansionOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancelled.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 enum ImportFailure {
@@ -468,15 +508,22 @@ pub(crate) async fn import_library_document(
         &app,
         LibraryImportProgress {
             import_id: import_id.to_string(),
-            display_name,
+            display_name: display_name.clone(),
             status: LibraryImportProgressStatus::Queued,
             document_id: None,
             processing_status: None,
             message: None,
         },
     );
-    let completed =
-        import_selected_document(&app, app_state.inner(), chat_id, path, import_id).await?;
+    let completed = import_selected_document(
+        &app,
+        app_state.inner(),
+        chat_id,
+        DocumentImportSource::Path(path),
+        display_name,
+        import_id,
+    )
+    .await?;
     emit_import_progress(
         &app,
         completed_progress(
@@ -590,13 +637,15 @@ pub(crate) fn handle_window_drag_drop(app: &AppHandle, window_label: &str, event
 }
 
 fn drop_state(phase: LibraryImportDropPhase, paths: &[PathBuf]) -> LibraryImportDropState {
-    // The host accepts every regular file type. A folder (or a symlink, which
-    // is intentionally rejected later by the capability-safe opener) cannot
-    // be imported as a document and gets an immediate reject state instead.
+    // Folder contents are expanded natively after the drop is claimed. A
+    // symlink is never accepted as a shortcut to a file or directory.
     let accepted = !paths.is_empty()
         && paths.iter().all(|path| {
             std::fs::symlink_metadata(path)
-                .map(|metadata| metadata.file_type().is_file())
+                .map(|metadata| {
+                    let file_type = metadata.file_type();
+                    !file_type.is_symlink() && (file_type.is_file() || file_type.is_dir())
+                })
                 .unwrap_or(false)
         });
     LibraryImportDropState {
@@ -613,13 +662,63 @@ pub(crate) async fn import_document_paths(
     chat_id: Uuid,
     paths: Vec<PathBuf>,
 ) -> LibraryImportBatch {
-    let pending = paths
+    let root_names = paths
+        .iter()
+        .map(|path| import_display_name(path).unwrap_or_else(|_| "Selected source".to_owned()))
+        .collect::<Vec<_>>();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let task_cancelled = Arc::clone(&cancelled);
+    let mut cancel_on_drop = CancelExpansionOnDrop::new(cancelled);
+    let expansion = tauri::async_runtime::spawn_blocking(move || {
+        expansion::expand_import_paths(paths, &|| task_cancelled.load(Ordering::Relaxed))
+    })
+    .await;
+    cancel_on_drop.disarm();
+    let (expanded, _temp_dir) = match expansion {
+        Ok(Ok(expanded)) => expanded.into_parts(),
+        Ok(Err(_)) => {
+            return LibraryImportBatch {
+                results: Vec::new(),
+            }
+        }
+        Err(_) => (
+            root_names
+                .into_iter()
+                .map(|display_name| expansion::ExpandedImportItem::Failure {
+                    display_name,
+                    message: "Could not inspect the selected source".to_owned(),
+                })
+                .collect(),
+            None,
+        ),
+    };
+    let pending = expanded
         .into_iter()
-        .map(|path| PendingDocumentImport {
-            import_id: Uuid::new_v4(),
-            display_name: import_display_name(&path)
-                .unwrap_or_else(|_| "Selected document".to_owned()),
-            path,
+        .map(|item| {
+            let import_id = Uuid::new_v4();
+            match item {
+                expansion::ExpandedImportItem::File {
+                    source,
+                    display_name,
+                } => PendingDocumentImport {
+                    import_id,
+                    display_name,
+                    source: PendingDocumentSource::File(match source {
+                        expansion::ExpandedFile::Path(path) => DocumentImportSource::Path(path),
+                        expansion::ExpandedFile::Open(file) => {
+                            DocumentImportSource::Open(Arc::new(file))
+                        }
+                    }),
+                },
+                expansion::ExpandedImportItem::Failure {
+                    display_name,
+                    message,
+                } => PendingDocumentImport {
+                    import_id,
+                    display_name,
+                    source: PendingDocumentSource::Failed(message),
+                },
+            }
         })
         .collect::<Vec<_>>();
     for import in &pending {
@@ -638,14 +737,29 @@ pub(crate) async fn import_document_paths(
 
     let mut results = stream::iter(pending.into_iter().enumerate().map(
         |(index, import)| async move {
+            let PendingDocumentImport {
+                import_id,
+                display_name,
+                source,
+            } = import;
+            let path = match source {
+                PendingDocumentSource::File(path) => path,
+                PendingDocumentSource::Failed(message) => {
+                    return (
+                        index,
+                        failed_import_result(app, import_id, display_name, message),
+                    )
+                }
+            };
             let result = match resolve_conversation_scope(host_access, chat_id).await {
                 Ok(chat_id) => {
                     match import_selected_document(
                         app,
                         app_state,
                         chat_id,
-                        import.path,
-                        import.import_id,
+                        path,
+                        display_name.clone(),
+                        import_id,
                     )
                     .await
                     {
@@ -653,7 +767,7 @@ pub(crate) async fn import_document_paths(
                             emit_import_progress(
                                 app,
                                 completed_progress(
-                                    import.import_id,
+                                    import_id,
                                     &completed.document,
                                     LibraryImportProgressStatus::AlreadyPresent,
                                 ),
@@ -666,7 +780,7 @@ pub(crate) async fn import_document_paths(
                             emit_import_progress(
                                 app,
                                 completed_progress(
-                                    import.import_id,
+                                    import_id,
                                     &completed.document,
                                     LibraryImportProgressStatus::Imported,
                                 ),
@@ -675,17 +789,10 @@ pub(crate) async fn import_document_paths(
                                 document: completed.document,
                             }
                         }
-                        Err(message) => failed_import_result(
-                            app,
-                            import.import_id,
-                            import.display_name,
-                            message,
-                        ),
+                        Err(message) => failed_import_result(app, import_id, display_name, message),
                     }
                 }
-                Err(message) => {
-                    failed_import_result(app, import.import_id, import.display_name, message)
-                }
+                Err(message) => failed_import_result(app, import_id, display_name, message),
             };
             (index, result)
         },
@@ -921,27 +1028,47 @@ fn import_display_name(path: &Path) -> Result<String, String> {
         .ok_or_else(|| "The selected document has an invalid name".to_owned())
 }
 
-fn prepare_selected_document(path: &Path) -> Result<PreparedDocumentImport, String> {
-    let display_name = import_display_name(path)?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| "The document picker returned an invalid file".to_owned())?;
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| "The document picker returned an invalid file".to_owned())?;
-    let directory = Dir::open_ambient_dir(parent, ambient_authority())
-        .map_err(|_| "Could not read the selected document".to_owned())?;
-    let mut options = OpenOptions::new();
-    options.read(true).follow(FollowSymlinks::No);
-    let mut file = directory
-        .open_with(file_name, &options)
-        .map_err(|_| "Could not read the selected document".to_owned())?;
+fn prepare_selected_document(
+    source: DocumentImportSource,
+    display_name: String,
+) -> Result<PreparedDocumentImport, String> {
+    if !is_safe_renderer_text(&display_name, 255, false) {
+        return Err("The selected document has an invalid name".to_owned());
+    }
+    // Extension policy is decided before any bytes are read or media-sniffed:
+    // an executable renamed to look like a PDF internally is still refused.
+    if expansion::has_blocked_import_extension(Path::new(&display_name)) {
+        return Err("This file type cannot be imported".to_owned());
+    }
+    let mut file = match source {
+        DocumentImportSource::Path(path) => {
+            let parent = path
+                .parent()
+                .ok_or_else(|| "The document picker returned an invalid file".to_owned())?;
+            let file_name = path
+                .file_name()
+                .ok_or_else(|| "The document picker returned an invalid file".to_owned())?;
+            let directory = Dir::open_ambient_dir(parent, ambient_authority())
+                .map_err(|_| "Could not read the selected document".to_owned())?;
+            let mut options = OpenOptions::new();
+            options.read(true).follow(FollowSymlinks::No);
+            directory
+                .open_with(file_name, &options)
+                .map_err(|_| "Could not read the selected document".to_owned())?
+                .into_std()
+        }
+        DocumentImportSource::Open(file) => file
+            .try_clone()
+            .map_err(|_| "Could not read the selected document".to_owned())?,
+    };
     let metadata = file
         .metadata()
         .map_err(|_| "Could not read the selected document".to_owned())?;
     if !metadata.is_file() {
         return Err("Choose a file to import".to_owned());
     }
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| "Could not read the selected document".to_owned())?;
     let mut digest = Sha256::new();
     let mut byte_len = 0_u64;
     let mut sniff_bytes = Vec::with_capacity(8_192);
@@ -967,10 +1094,13 @@ fn prepare_selected_document(path: &Path) -> Result<PreparedDocumentImport, Stri
         .map_err(|_| "Could not read the selected document".to_owned())?;
     let sha256: [u8; 32] = digest.finalize().into();
     Ok(PreparedDocumentImport {
+        media_type: crate::media_type::sniff_media_type_for_path(
+            &sniff_bytes,
+            Path::new(&display_name),
+        ),
         display_name,
-        media_type: crate::media_type::sniff_media_type_for_path(&sniff_bytes, path),
         source_blob: DocumentSourceBlob::from_digest(sha256, byte_len),
-        file: file.into_std(),
+        file,
     })
 }
 
@@ -978,7 +1108,8 @@ async fn import_selected_document(
     app: &AppHandle,
     app_state: &Arc<AppState>,
     chat_id: ChatId,
-    path: PathBuf,
+    source: DocumentImportSource,
+    display_name: String,
     import_id: Uuid,
 ) -> Result<CompletedDocumentImport, String> {
     for delay in IMPORT_RETRY_DELAYS
@@ -987,7 +1118,15 @@ async fn import_selected_document(
         .map(Some)
         .chain(std::iter::once(None))
     {
-        match import_selected_document_once(app, app_state, chat_id, path.clone(), import_id).await
+        match import_selected_document_once(
+            app,
+            app_state,
+            chat_id,
+            source.clone(),
+            display_name.clone(),
+            import_id,
+        )
+        .await
         {
             Ok(completed) => return Ok(completed),
             Err(ImportFailure::Retryable(_)) if delay.is_some() => {
@@ -1005,13 +1144,16 @@ async fn import_selected_document_once(
     app: &AppHandle,
     app_state: &Arc<AppState>,
     chat_id: ChatId,
-    path: PathBuf,
+    source: DocumentImportSource,
+    display_name: String,
     import_id: Uuid,
 ) -> Result<CompletedDocumentImport, ImportFailure> {
-    let prepared = tauri::async_runtime::spawn_blocking(move || prepare_selected_document(&path))
-        .await
-        .map_err(|_| ImportFailure::Permanent("Could not read the selected document".to_owned()))?
-        .map_err(ImportFailure::Permanent)?;
+    let prepared = tauri::async_runtime::spawn_blocking(move || {
+        prepare_selected_document(source, display_name)
+    })
+    .await
+    .map_err(|_| ImportFailure::Permanent("Could not read the selected document".to_owned()))?
+    .map_err(ImportFailure::Permanent)?;
     emit_import_progress(
         app,
         LibraryImportProgress {
@@ -1332,6 +1474,21 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn drop_state_accepts_directories_but_not_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let folder = directory.path().join("sources");
+        std::fs::create_dir(&folder).unwrap();
+        let link = directory.path().join("sources-link");
+        symlink(&folder, &link).unwrap();
+
+        assert!(drop_state(LibraryImportDropPhase::Enter, &[folder]).accepted);
+        assert!(!drop_state(LibraryImportDropPhase::Enter, &[link]).accepted);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn selected_document_preparation_rejects_symlinks_and_keeps_large_files_streamable() {
         use std::os::unix::fs::symlink;
 
@@ -1340,18 +1497,39 @@ mod tests {
         std::fs::write(&target, "private").unwrap();
         let link = directory.path().join("link.md");
         symlink(&target, &link).unwrap();
-        assert!(prepare_selected_document(&link).is_err());
+        assert!(
+            prepare_selected_document(DocumentImportSource::Path(link), "link.md".to_owned())
+                .is_err()
+        );
 
         let large = directory.path().join("large.md");
         let file = std::fs::File::create(&large).unwrap();
         let large_len = 16 * 1024 * 1024 + 1;
         file.set_len(large_len).unwrap();
-        let prepared = prepare_selected_document(&large).unwrap();
+        let prepared =
+            prepare_selected_document(DocumentImportSource::Path(large), "large.md".to_owned())
+                .unwrap();
         assert_eq!(
             prepared.source_blob.byte_len, large_len,
             "preparation hashes the file but leaves its bytes on disk for the upload stream"
         );
         assert_eq!(prepared.file.metadata().unwrap().len(), large_len);
+    }
+
+    #[test]
+    fn executable_extension_is_rejected_before_pdf_bytes_are_sniffed() {
+        let directory = tempfile::tempdir().unwrap();
+        let disguised = directory.path().join("invoice.exe");
+        std::fs::write(&disguised, b"%PDF-1.7\nnot an executable").unwrap();
+        assert_eq!(
+            prepare_selected_document(
+                DocumentImportSource::Path(disguised),
+                "invoice.exe".to_owned(),
+            )
+            .err()
+            .unwrap(),
+            "This file type cannot be imported"
+        );
     }
 
     #[test]

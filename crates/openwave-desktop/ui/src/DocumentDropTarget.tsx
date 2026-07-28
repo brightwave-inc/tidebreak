@@ -49,19 +49,19 @@ export function DocumentDropTarget({ chatId }: { chatId: string }) {
     >
       <strong>
         {state.accepted
-          ? `Add ${fileCountCopy(state.fileCount)} to this conversation`
-          : "Only files can be added as sources"}
+          ? `Add ${dropItemCountCopy(state.fileCount)} to this conversation`
+          : "Only files and folders can be added as sources"}
       </strong>
       <span>
         {state.accepted
-          ? "Release to add them in the background."
-          : "Drop files, not folders or aliases."}
+          ? "Release to add their documents in the background."
+          : "Aliases and unavailable items cannot be imported."}
       </span>
     </div>
   );
 }
 
-function parseDropState(value: unknown): DropState | null {
+export function parseDropState(value: unknown): DropState | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const state = value as Record<string, unknown>;
   if (
@@ -80,6 +80,6 @@ function parseDropState(value: unknown): DropState | null {
   };
 }
 
-function fileCountCopy(count: number): string {
-  return count === 1 ? "this file" : `${count} files`;
+export function dropItemCountCopy(count: number): string {
+  return count === 1 ? "this file or folder" : `${count} files or folders`;
 }

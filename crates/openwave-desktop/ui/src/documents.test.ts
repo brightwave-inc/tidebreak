@@ -45,6 +45,16 @@ describe("document library renderer projections", () => {
         message: null,
       }),
     ).toThrow("Invalid document import progress");
+
+    expect(() =>
+      parseLibraryImportBatch({
+        results: Array.from({ length: 1_001 }, () => ({
+          status: "failed",
+          displayName: "entry.md",
+          message: "Could not import",
+        })),
+      }),
+    ).toThrow("Invalid document import response");
   });
 
   it("accepts the closed catalog and import shapes", () => {
