@@ -9,6 +9,10 @@ const host = process.env.TAURI_DEV_HOST;
 
 export default defineConfig(async () => ({
   plugins: [react(), tailwindcss()],
+  // The spreadsheet and word-document viewers parse off the main thread, and
+  // their workers are large enough to be split into chunks themselves — which
+  // the default IIFE worker format cannot express.
+  worker: { format: "es" as const },
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),

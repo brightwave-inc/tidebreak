@@ -15,7 +15,10 @@ export function useStreamingTypewriter(text: string, live: boolean): string {
   const targetRef = useRef(text);
   const liveRef = useRef(live);
   const mountedRef = useRef(false);
-  const timerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+  // Spelled out rather than inferred from `window.setTimeout`: a dependency
+  // that references Node's types puts a competing `setTimeout` declaration in
+  // scope, and the inferred return type then picks the wrong one.
+  const timerRef = useRef<number | null>(null);
 
   const showImmediately = useCallback((value: string) => {
     displayedRef.current = value;
