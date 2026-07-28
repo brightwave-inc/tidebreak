@@ -38,9 +38,6 @@
   --destructive: oklch(0.577 0.245 27.325);
   --destructive-foreground: oklch(0.984 0.003 247.858);
 
-  --color-openwave: oklch(0.87 0.2 102);
-  --color-openwave-light: oklch(0.966 0.155 102);
-
   /* Semantic status */
   --success: oklch(0.627 0.194 149.214);
   --success-foreground: oklch(0.393 0.095 152.535);
@@ -140,9 +137,6 @@
   --destructive: oklch(0.68 0.22 27.325);
   --destructive-foreground: oklch(0.95 0.005 247.858);
 
-  --color-openwave: oklch(0.87 0.2 102);
-  --color-openwave-light: oklch(0.68 0.14 102);
-
   /* Semantic status — dark */
   --success: oklch(0.792 0.209 151.711);
   --success-foreground: oklch(0.962 0.044 156.743);
@@ -176,9 +170,6 @@
 }
 
 @theme inline {
-  --color-openwave: var(--color-openwave);
-  --color-openwave-light: var(--color-openwave-light);
-
   --color-page-background: var(--page-background);
   --color-border: var(--border);
   --color-input: var(--input);
@@ -750,7 +741,7 @@ body {
 }
 
 .welcome-prompt:hover svg {
-  color: var(--color-openwave);
+  color: var(--ink);
 }
 
 @media (max-width: 720px) {
@@ -2088,9 +2079,9 @@ body {
   justify-content: space-between;
   gap: 1rem;
   padding: 0.75rem 0.9rem;
-  border: 1px solid color-mix(in srgb, var(--color-openwave) 48%, var(--line));
+  border: 1px solid var(--line);
   border-radius: 8px;
-  background: color-mix(in srgb, var(--color-openwave) 7%, var(--bg-elevated));
+  background: var(--bg-elevated);
   font-size: 0.84rem;
 }
 
@@ -2142,7 +2133,7 @@ body {
 }
 
 .document-search input:focus {
-  outline: 2px solid color-mix(in srgb, var(--color-openwave) 40%, transparent);
+  outline: 2px solid var(--ring);
   outline-offset: 1px;
 }
 
@@ -2245,7 +2236,7 @@ body {
 }
 
 .document-catalog-toolbar input:focus {
-  outline: 2px solid color-mix(in srgb, var(--color-openwave) 40%, transparent);
+  outline: 2px solid var(--ring);
   outline-offset: 1px;
 }
 
@@ -2319,7 +2310,7 @@ body {
 }
 
 .document-table tbody tr[aria-current="true"] {
-  background: color-mix(in srgb, var(--color-openwave) 6%, transparent);
+  background: var(--accent);
 }
 
 .document-title-button {
@@ -2411,7 +2402,7 @@ body {
 .document-action {
   border: 0;
   padding: 0.15rem 0.2rem;
-  color: var(--color-openwave);
+  color: var(--ink);
   background: transparent;
   font-size: 0.72rem;
   font-weight: 600;
@@ -2918,8 +2909,8 @@ body {
   justify-content: center;
   gap: 0.45rem;
   pointer-events: none;
-  border: 3px dashed color-mix(in srgb, var(--color-openwave) 72%, var(--line));
-  background: color-mix(in srgb, var(--color-openwave) 12%, transparent);
+  border: 3px dashed color-mix(in srgb, var(--ink) 40%, var(--line));
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
   color: var(--ink);
   text-align: center;
 }

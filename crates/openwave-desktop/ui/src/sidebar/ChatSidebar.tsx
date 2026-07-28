@@ -55,7 +55,7 @@ export function ChatSidebar({ chat }: { chat: Chat }) {
         <span>All chats</span>
         {elsewhereNeedsAttention && (
           <span
-            className="ml-auto shrink-0 text-amber-600 dark:text-amber-400"
+            className="text-warning ml-auto shrink-0"
             aria-label="Another chat needs attention"
             title="Another chat needs attention"
           >

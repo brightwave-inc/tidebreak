@@ -1,10 +1,17 @@
 import { useId } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { Globe } from "lucide-react";
 
+import { AttentionCard } from "./AttentionCard";
 import { Button } from "@/components/ui/button";
 
-/** An actionable, renderer-owned explanation of an unconfigured web search. */
+/**
+ * An actionable, renderer-owned explanation of an unconfigured web search.
+ *
+ * It wears the shared attention-card chrome, so a result that needs a decision
+ * reads the same as a consent prompt or a clarifying question. The tool group
+ * above already names and labels the search, so the card carries no icon of its
+ * own.
+ */
 export function WebSearchProviderRequiredCard() {
   const titleId = useId();
   const navigate = useNavigate();
@@ -13,32 +20,20 @@ export function WebSearchProviderRequiredCard() {
   const settingsPath: string = "/settings/web-search";
 
   return (
-    <section
-      className="bg-background flex max-w-prose items-start gap-3 rounded-lg border p-4"
-      aria-labelledby={titleId}
+    <AttentionCard
+      title="Web search needs a provider"
+      titleId={titleId}
+      subtitle="Choose a web search provider and add its API key in Settings."
     >
-      <Globe
-        className="text-muted-foreground mt-0.5 size-5 shrink-0"
-        aria-hidden="true"
-      />
-      <div className="flex min-w-0 flex-1 flex-col items-start gap-3">
-        <div className="space-y-1">
-          <h2 id={titleId} className="text-sm font-medium">
-            Web search needs a provider
-          </h2>
-          <p className="text-muted-foreground text-sm">
-            Choose a web search provider and add its API key in Settings.
-          </p>
-        </div>
+      <div className="flex flex-wrap gap-2">
         <Button
           type="button"
-          variant="primary"
           size="sm"
           onClick={() => void navigate({ to: settingsPath })}
         >
           Configure web search
         </Button>
       </div>
-    </section>
+    </AttentionCard>
   );
 }

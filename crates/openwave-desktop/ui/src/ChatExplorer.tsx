@@ -91,7 +91,7 @@ export function ChatExplorer() {
                     <span className="min-w-0 truncate">{title}</span>
                     {chatIdsWithPendingPrompts.has(chat.id) && (
                       <span
-                        className="ml-auto shrink-0 text-amber-600 dark:text-amber-400"
+                        className="text-warning ml-auto shrink-0"
                         aria-label={`${title} needs attention`}
                         title="Needs attention"
                       >
