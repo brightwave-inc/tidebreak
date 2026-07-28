@@ -23,6 +23,8 @@ const MAX_ID_BYTES: usize = 128;
 pub enum CodeExecutionProviderKind {
     /// The host's native process sandbox.
     Local,
+    /// A managed E2B cloud sandbox.
+    E2b,
 }
 
 impl CodeExecutionProviderKind {
@@ -30,6 +32,7 @@ impl CodeExecutionProviderKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Local => "local",
+            Self::E2b => "e2b",
         }
     }
 }

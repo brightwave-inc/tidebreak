@@ -248,12 +248,17 @@ end: number, };
 /**
  * Renderer-safe configuration and readiness.
  */
-export type CodeExecutionConfigInfo = { provider?: CodeExecutionProviderKind, timeout_ms: number, available: boolean, };
+export type CodeExecutionConfigInfo = { provider?: CodeExecutionProviderKind, timeout_ms: number, available: boolean, has_credential: boolean, };
+
+/**
+ * Renderer-safe readiness for E2B's fixed credential slot.
+ */
+export type CodeExecutionCredentialReadiness = { provider: CodeExecutionProviderKind, has_credential: boolean, };
 
 /**
  * A configured code-execution backend.
  */
-export type CodeExecutionProviderKind = "local";
+export type CodeExecutionProviderKind = "local" | "e2b";
 
 /**
  * Conservative, user-inspectable capabilities for one model served by an

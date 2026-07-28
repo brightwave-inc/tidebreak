@@ -395,7 +395,7 @@ async fn put_empty_api_key_is_rejected() {
 
 #[tokio::test]
 async fn web_search_credential_routes_are_authenticated_and_never_return_keys() {
-    let (router, token, secrets, _dir) = test_app_with_web_search_secrets().await;
+    let (router, token, secrets, _dir) = test_app_with_secrets().await;
     let bearer = format!("Bearer {token}");
 
     let unauthenticated = router
@@ -493,7 +493,7 @@ async fn web_search_credential_routes_are_authenticated_and_never_return_keys() 
 
 #[tokio::test]
 async fn web_search_credential_write_validates_fixed_provider_and_key_bounds() {
-    let (router, token, secrets, _dir) = test_app_with_web_search_secrets().await;
+    let (router, token, secrets, _dir) = test_app_with_secrets().await;
     let bearer = format!("Bearer {token}");
 
     for body in [
@@ -538,7 +538,7 @@ async fn web_search_credential_write_validates_fixed_provider_and_key_bounds() {
 
 #[tokio::test]
 async fn code_execution_config_route_is_authenticated_and_preserves_explicit_disable() {
-    let (router, token, _store, _dir) = test_app().await;
+    let (router, token, secrets, _dir) = test_app_with_secrets().await;
     let bearer = format!("Bearer {token}");
 
     let unauthenticated = router
@@ -572,6 +572,7 @@ async fn code_execution_config_route_is_authenticated_and_preserves_explicit_dis
         crate::code_execution::DEFAULT_TIMEOUT_MS
     );
     assert!(initial["available"].is_boolean());
+    assert_eq!(initial["has_credential"], false);
 
     let disabled = router
         .clone()
@@ -598,10 +599,12 @@ async fn code_execution_config_route_is_authenticated_and_preserves_explicit_dis
         serde_json::json!({
             "timeout_ms": crate::code_execution::MIN_TIMEOUT_MS,
             "available": false,
+            "has_credential": false,
         })
     );
 
-    let invalid = router
+    let e2b = router
+        .clone()
         .oneshot(
             Request::builder()
                 .method("PUT")
@@ -619,7 +622,79 @@ async fn code_execution_config_route_is_authenticated_and_preserves_explicit_dis
         )
         .await
         .unwrap();
-    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(e2b.status(), StatusCode::OK);
+    assert_eq!(
+        json_body::<serde_json::Value>(e2b).await,
+        serde_json::json!({
+            "provider": "e2b",
+            "timeout_ms": crate::code_execution::DEFAULT_TIMEOUT_MS,
+            "available": false,
+            "has_credential": false,
+        })
+    );
+
+    let unknown_credential = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/code-execution/credentials/arbitrary-secret-name")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"api_key": "must-not-be-stored"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unknown_credential.status(), StatusCode::NOT_FOUND);
+    assert!(secrets.0.lock().unwrap().is_empty());
+
+    let key = "test-e2b-key";
+    let saved = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/code-execution/credentials/e2b")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::json!({"api_key": key}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(saved.status(), StatusCode::OK);
+    let saved_body = to_bytes(saved.into_body(), usize::MAX).await.unwrap();
+    assert!(!std::str::from_utf8(&saved_body).unwrap().contains(key));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&saved_body).unwrap(),
+        serde_json::json!({"provider": "e2b", "has_credential": true})
+    );
+    assert_eq!(
+        secrets
+            .get_secret(openwave_code_execution::E2B_CREDENTIAL_KEY)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(key)
+    );
+
+    let ready = router
+        .oneshot(
+            Request::builder()
+                .uri("/code-execution")
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let ready: serde_json::Value = json_body(ready).await;
+    assert_eq!(ready["provider"], "e2b");
+    assert_eq!(ready["available"], true);
+    assert_eq!(ready["has_credential"], true);
 }
 
 #[tokio::test]

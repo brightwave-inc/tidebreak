@@ -85,6 +85,7 @@ pub use state::AppState;
 const MAX_RAW_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_WEB_SEARCH_CREDENTIAL_BODY_BYTES: usize = 16 * 1024;
 const MAX_CODE_EXECUTION_CONFIG_BODY_BYTES: usize = 1_024;
+const MAX_CODE_EXECUTION_CREDENTIAL_BODY_BYTES: usize = 16 * 1024;
 
 /// Build the router: unauthenticated health check plus the token-guarded API.
 pub fn app(state: AppState) -> Router {
@@ -268,6 +269,14 @@ pub fn app(state: AppState) -> Router {
             get(routes::get_code_execution_config)
                 .put(routes::put_code_execution_config)
                 .layer(DefaultBodyLimit::max(MAX_CODE_EXECUTION_CONFIG_BODY_BYTES)),
+        )
+        .route(
+            "/code-execution/credentials/{provider}",
+            axum::routing::put(routes::put_code_execution_credential)
+                .delete(routes::delete_code_execution_credential)
+                .layer(DefaultBodyLimit::max(
+                    MAX_CODE_EXECUTION_CREDENTIAL_BODY_BYTES,
+                )),
         )
         .route(
             "/mcp/servers",
@@ -594,6 +603,7 @@ async fn bind_inner(
     let vector_store = connect_vector_store(&config, embedder.dimensions()).await?;
     let code_execution = Arc::new(code_execution::ConfiguredCodeExecutionProvider::new(
         store.clone(),
+        secrets.clone(),
         config.data_dir.join("scratch"),
     ));
     let foreground_web_search =

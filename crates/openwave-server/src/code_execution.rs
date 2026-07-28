@@ -3,8 +3,7 @@
 //! The model cannot select a provider or timeout. The foreground `exec` tool
 //! calls [`ConfiguredCodeExecutionProvider`], which reads the current host
 //! setting at the last possible boundary and delegates to the selected adapter.
-//! Today the only adapter is the local native sandbox; future managed adapters
-//! (for example E2B) can implement the same provider contract without changing
+//! Local and E2B adapters implement the same provider contract without changing
 //! the tool schema or persisted tool-call arguments.
 
 use std::path::PathBuf;
@@ -14,9 +13,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use openwave_code_execution::{
     CodeExecutionError, CodeExecutionProvider, CodeExecutionProviderKind, CodeExecutionRequest,
-    CodeExecutionResponse, LocalExecutionProvider,
+    CodeExecutionResponse, E2BCredential, E2BExecutionProvider, E2BSessionPool,
+    LocalExecutionProvider, E2B_CREDENTIAL_KEY,
 };
-use openwave_core::{Result, Store};
+use openwave_core::{Result, SecretProvider, Store};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ServerError;
@@ -76,6 +76,14 @@ pub struct CodeExecutionConfigInfo {
     pub provider: Option<CodeExecutionProviderKind>,
     pub timeout_ms: u64,
     pub available: bool,
+    pub has_credential: bool,
+}
+
+/// Renderer-safe readiness for E2B's fixed credential slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
+pub struct CodeExecutionCredentialReadiness {
+    pub provider: CodeExecutionProviderKind,
+    pub has_credential: bool,
 }
 
 /// Partial update accepted by `PUT /code-execution`. An explicit null disables
@@ -117,19 +125,31 @@ async fn write_config(store: &dyn Store, config: &CodeExecutionConfig) -> Result
         .await
 }
 
-pub async fn config_info(store: &dyn Store) -> Result<CodeExecutionConfigInfo> {
+pub async fn config_info(
+    store: &dyn Store,
+    secrets: &dyn SecretProvider,
+) -> Result<CodeExecutionConfigInfo> {
     let config = read_config(store).await?;
-    let available = matches!(config.provider, Some(CodeExecutionProviderKind::Local))
-        && LocalExecutionProvider::is_supported();
+    let e2b_has_credential = E2BCredential::load(secrets).await.ok().flatten().is_some();
+    let has_credential =
+        matches!(config.provider, Some(CodeExecutionProviderKind::E2b)) && e2b_has_credential;
+    let available = match config.provider {
+        Some(CodeExecutionProviderKind::Local) => LocalExecutionProvider::is_supported(),
+        Some(CodeExecutionProviderKind::E2b) => e2b_has_credential,
+        None => false,
+        _ => false,
+    };
     Ok(CodeExecutionConfigInfo {
         provider: config.provider,
         timeout_ms: config.timeout_ms,
         available,
+        has_credential,
     })
 }
 
 pub async fn update_config(
     store: &dyn Store,
+    secrets: &dyn SecretProvider,
     update: CodeExecutionConfigUpdate,
 ) -> std::result::Result<CodeExecutionConfigInfo, ServerError> {
     let mut config = read_config(store).await?;
@@ -141,21 +161,56 @@ pub async fn update_config(
     }
     config.validate()?;
     write_config(store, &config).await?;
-    config_info(store).await.map_err(Into::into)
+    config_info(store, secrets).await.map_err(Into::into)
+}
+
+pub async fn write_credential(
+    secrets: &dyn SecretProvider,
+    api_key: &str,
+) -> std::result::Result<CodeExecutionCredentialReadiness, ServerError> {
+    secrets
+        .set_secret(E2B_CREDENTIAL_KEY, api_key)
+        .await
+        .map_err(|_| ServerError::internal("E2B credential storage is unavailable"))?;
+    Ok(CodeExecutionCredentialReadiness {
+        provider: CodeExecutionProviderKind::E2b,
+        has_credential: true,
+    })
+}
+
+pub async fn delete_credential(
+    secrets: &dyn SecretProvider,
+) -> std::result::Result<CodeExecutionCredentialReadiness, ServerError> {
+    secrets
+        .delete_secret(E2B_CREDENTIAL_KEY)
+        .await
+        .map_err(|_| ServerError::internal("E2B credential storage is unavailable"))?;
+    Ok(CodeExecutionCredentialReadiness {
+        provider: CodeExecutionProviderKind::E2b,
+        has_credential: false,
+    })
 }
 
 /// Late-binding provider used by the stable foreground tool registration.
 pub struct ConfiguredCodeExecutionProvider {
     store: Arc<dyn Store>,
+    secrets: Arc<dyn SecretProvider>,
     scratch_root: PathBuf,
+    e2b_sessions: E2BSessionPool,
 }
 
 impl ConfiguredCodeExecutionProvider {
     #[must_use]
-    pub fn new(store: Arc<dyn Store>, scratch_root: impl Into<PathBuf>) -> Self {
+    pub fn new(
+        store: Arc<dyn Store>,
+        secrets: Arc<dyn SecretProvider>,
+        scratch_root: impl Into<PathBuf>,
+    ) -> Self {
         Self {
             store,
+            secrets,
             scratch_root: scratch_root.into(),
+            e2b_sessions: E2BSessionPool::default(),
         }
     }
 }
@@ -180,6 +235,17 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
                 )?;
                 provider.execute(request).await
             }
+            CodeExecutionProviderKind::E2b => {
+                let credential = E2BCredential::load(&*self.secrets)
+                    .await?
+                    .ok_or(CodeExecutionError::NotConfigured)?;
+                let provider = E2BExecutionProvider::with_session_pool(
+                    credential,
+                    Duration::from_millis(config.timeout_ms),
+                    self.e2b_sessions.clone(),
+                )?;
+                provider.execute(request).await
+            }
             _ => Err(CodeExecutionError::Unavailable(
                 "selected provider is not supported by this build".into(),
             )),
@@ -190,7 +256,24 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openwave_core::DbStore;
+    use openwave_core::{AgentError, DbStore};
+
+    struct NoSecrets;
+
+    #[async_trait]
+    impl SecretProvider for NoSecrets {
+        async fn get_secret(&self, _key: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+
+        async fn set_secret(&self, _key: &str, _value: &str) -> Result<()> {
+            Err(AgentError::Secret("read only test secrets".into()))
+        }
+
+        async fn delete_secret(&self, _key: &str) -> Result<()> {
+            Err(AgentError::Secret("read only test secrets".into()))
+        }
+    }
 
     async fn test_store() -> (DbStore, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -228,8 +311,10 @@ mod tests {
     #[tokio::test]
     async fn configuration_can_disable_and_reenable_local_execution() {
         let (store, _dir) = test_store().await;
+        let secrets = NoSecrets;
         let disabled = update_config(
             &store,
+            &secrets,
             CodeExecutionConfigUpdate {
                 provider: Some(None),
                 timeout_ms: Some(MIN_TIMEOUT_MS),
@@ -245,6 +330,7 @@ mod tests {
 
         let local = update_config(
             &store,
+            &secrets,
             CodeExecutionConfigUpdate {
                 provider: Some(Some(CodeExecutionProviderKind::Local)),
                 timeout_ms: Some(MAX_TIMEOUT_MS),

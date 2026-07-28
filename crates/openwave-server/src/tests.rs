@@ -2250,8 +2250,7 @@ async fn admit_sandbox_for_test(
 
 /// A normal authenticated local API plus a handle to its test-only secret
 /// store, for asserting web-search credential routes never touch other keys.
-async fn test_app_with_web_search_secrets() -> (Router, Arc<str>, Arc<MemSecrets>, tempfile::TempDir)
-{
+async fn test_app_with_secrets() -> (Router, Arc<str>, Arc<MemSecrets>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
         DbStore::connect(&format!(

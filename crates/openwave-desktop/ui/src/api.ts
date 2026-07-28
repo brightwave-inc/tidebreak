@@ -10,6 +10,7 @@ import {
   type Chat as WireChat,
   type ChatTranscript as WireChatTranscript,
   type CodeExecutionConfigInfo as WireCodeExecutionConfigInfo,
+  type CodeExecutionCredentialReadiness as WireCodeExecutionCredentialReadiness,
   type CodeExecutionProviderKind as WireCodeExecutionProviderKind,
   type CustomModelConfig as WireCustomModelConfig,
   type McpHealth as WireMcpHealth,
@@ -143,6 +144,10 @@ export type CodeExecutionProviderKind = WireCodeExecutionProviderKind;
 
 /** Non-secret code-execution selection, timeout policy, and host readiness. */
 export type CodeExecutionConfigInfo = WireCodeExecutionConfigInfo;
+
+/** Readiness only: the API never returns the saved E2B key. */
+export type CodeExecutionCredentialReadiness =
+  WireCodeExecutionCredentialReadiness;
 
 export type McpHealth = WireMcpHealth;
 
@@ -559,6 +564,26 @@ export class ApiClient {
       method: "PUT",
       headers: this.headers(true),
       body: JSON.stringify(body),
+    });
+  }
+
+  putCodeExecutionCredential(
+    provider: CodeExecutionProviderKind,
+    apiKey: string,
+  ): Promise<CodeExecutionCredentialReadiness> {
+    return this.json(`/code-execution/credentials/${provider}`, {
+      method: "PUT",
+      headers: this.headers(true),
+      body: JSON.stringify({ api_key: apiKey }),
+    });
+  }
+
+  deleteCodeExecutionCredential(
+    provider: CodeExecutionProviderKind,
+  ): Promise<CodeExecutionCredentialReadiness> {
+    return this.json(`/code-execution/credentials/${provider}`, {
+      method: "DELETE",
+      headers: this.headers(),
     });
   }
 
