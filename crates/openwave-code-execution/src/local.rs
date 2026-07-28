@@ -68,6 +68,15 @@ impl LocalExecutionProvider {
         cfg!(target_os = "macos") && Path::new(SANDBOX_EXEC).is_file()
     }
 
+    /// Host knowledge about the local adapter's egress enforcement: the
+    /// Seatbelt profile denies network outright, from outside the workload,
+    /// with no exceptions. The one shipped surface that qualifies as a
+    /// boundary for third-party-credential-bearing work.
+    #[must_use]
+    pub fn egress_enforcement() -> openwave_egress::EgressEnforcement {
+        openwave_egress::EgressEnforcement::external(Vec::new())
+    }
+
     fn resolve_paths(
         &self,
         request: &CodeExecutionRequest,

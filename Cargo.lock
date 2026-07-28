@@ -6643,6 +6643,7 @@ dependencies = [
  "futures",
  "libc",
  "openwave-core",
+ "openwave-egress",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -6727,6 +6728,10 @@ dependencies = [
  "windows-sys 0.61.2",
  "zip",
 ]
+
+[[package]]
+name = "openwave-egress"
+version = "0.0.0"
 
 [[package]]
 name = "openwave-host-broker"
