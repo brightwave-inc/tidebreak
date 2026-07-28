@@ -115,14 +115,21 @@ is the whole rule, and it is coarse on purpose:
 - Any changed file outside `*.md`, `docs/`, `assets/`, `LICENSE`, `NOTICE`, and
   `crates/openwave-desktop/ui/` marks the change **Rust** — including
   `Cargo.toml` and `Cargo.lock`. That runs rustfmt, clippy (`--all-targets
-  -D warnings`), the desktop tests, the headless workspace tests, the
-  LanceDB-backed lane, and the PostgreSQL turn-state lane. Every cargo
-  invocation passes `--locked`, so a lockfile drift fails there too.
+  -D warnings`), the desktop tests, the headless workspace tests, and the
+  PostgreSQL turn-state lane. Every cargo invocation passes `--locked`, so a
+  lockfile drift fails there too.
 - Any file under `crates/openwave-desktop/ui/` marks it **UI**, which runs
   `pnpm test` and `pnpm build`.
 - The aggregate `fmt · clippy · build · test` check asserts each lane either
   succeeded or was legitimately skipped, and branch protection requires it. A
   lane is skipped only when the change could not have affected it.
+- **One exception, and it is a real coverage gap:** the `durable vector store`
+  lane no longer runs on pull requests. LanceDB is the most expensive thing in
+  CI and the durable store is parked, so it runs only on merges to `main` and on
+  `workflow_dispatch`. If you touch `openwave-retrieval`, the `vec-lance`
+  feature, or the release guard in `openwave-server`'s build script, run
+  `cargo test -p openwave-retrieval --features vec-lance` locally — a PR going
+  green says nothing about it. Tracked in #760.
 
 So a scoped skip is not a coverage hole, and duplicating those lanes locally is
 wasted time. Run a cheap subset for fast feedback on what you actually touched —
