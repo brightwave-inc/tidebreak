@@ -212,6 +212,16 @@ The turn worker can process up to four different chats concurrently. A turn is
 currently configured for one execution attempt because arbitrary tool side
 effects are not yet checkpointed well enough to replay safely after a crash.
 
+Claiming a turn on a chat that has no title also starts a background titling
+call on the `utility` model, deduplicated per chat and awaited by nothing: it
+reads that chat's user messages only, and a constrained answer either names the
+conversation or reports that there is nothing to name yet. The name is written
+only while the title is still unset, so a rename by hand always wins and is also
+how a user opts out of being renamed for. A failed or skipped call leaves the
+chat untitled for the next turn to retry. Because the title is chat metadata
+rather than turn history, it is not journaled and does not reach the event
+socket; the client picks it up by re-reading the chat when a turn resolves.
+
 ### 3. The agent drives model and tool steps
 
 The agent rebuilds a provider transcript from persisted messages and structured

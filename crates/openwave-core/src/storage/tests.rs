@@ -1393,6 +1393,17 @@ impl Store for MemStore {
         }
         Ok(())
     }
+    async fn set_chat_title_if_unset(&self, id: ChatId, title: &str) -> Result<bool> {
+        let mut chats = self.chats.lock().unwrap();
+        let Some(chat) = chats.get_mut(&id) else {
+            return Ok(false);
+        };
+        if chat.title.is_some() {
+            return Ok(false);
+        }
+        chat.title = Some(title.to_owned());
+        Ok(true)
+    }
     async fn update_chat_metadata(
         &self,
         id: ChatId,

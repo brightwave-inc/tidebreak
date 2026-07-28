@@ -101,8 +101,14 @@ async fn capture_openai_image_request(
     axum::extract::State(capture): axum::extract::State<OpenAiRequestCapture>,
     axum::Json(request): axum::Json<serde_json::Value>,
 ) -> impl axum::response::IntoResponse {
-    if let Some(sender) = capture.lock().unwrap().take() {
-        let _ = sender.send(request);
+    // The turn is not the only call this endpoint serves: a chat with no title
+    // also gets a background titling call, on a different model, which can
+    // arrive first. It is identifiable by its output constraint — the turn has
+    // none — and it is not what this test is capturing.
+    if request.get("response_format").is_none() {
+        if let Some(sender) = capture.lock().unwrap().take() {
+            let _ = sender.send(request);
+        }
     }
     (
         [(axum::http::header::CONTENT_TYPE, "text/event-stream")],

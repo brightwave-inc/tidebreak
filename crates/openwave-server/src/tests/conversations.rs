@@ -514,7 +514,7 @@ async fn patch_chat_sets_and_clears_the_model() {
 }
 
 #[tokio::test]
-async fn patch_chat_sets_and_clears_a_trimmed_title() {
+async fn chat_title_patch_is_trimmed_bounded_and_clearable() {
     let (router, token, _store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");
     let chat = make_chat(&router, &bearer).await;
@@ -540,6 +540,16 @@ async fn patch_chat_sets_and_clears_a_trimmed_title() {
     )
     .await;
     assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+
+    let too_long = patch_chat(
+        &router,
+        &bearer,
+        chat.id,
+        serde_json::json!({"title": "t".repeat(routes::MAX_CHAT_TITLE_CHARS + 1)}),
+    )
+    .await;
+    assert_eq!(too_long.status(), StatusCode::BAD_REQUEST);
+
     let fetched: Chat = json_body(
         router
             .clone()

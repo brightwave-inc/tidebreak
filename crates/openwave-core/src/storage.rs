@@ -1442,6 +1442,15 @@ pub trait Store: Send + Sync {
     /// chat doesn't exist.
     async fn set_chat_title(&self, id: ChatId, title: Option<String>) -> Result<()>;
 
+    /// Set a chat's title only while it has none, reporting whether it applied.
+    ///
+    /// This is the write a derived title must use. A user rename is the
+    /// authoritative one, and it can land while a derived title is still being
+    /// produced; an unconditional write would replace the name the user just
+    /// typed with a guess. Whoever names the conversation first keeps it, which
+    /// also makes renaming a chat the way to opt out of ever being renamed for.
+    async fn set_chat_title_if_unset(&self, id: ChatId, title: &str) -> Result<bool>;
+
     /// Atomically update whichever user-editable chat metadata fields are
     /// present. An outer `None` leaves that field alone; an inner `None`
     /// clears it. Returns `false` if the chat does not exist.

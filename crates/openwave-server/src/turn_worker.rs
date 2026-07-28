@@ -27,6 +27,7 @@ use tokio::sync::Notify;
 
 use crate::approvals::ApprovalBroker;
 use crate::bus::EventBus;
+use crate::chat_titling::ChatTitler;
 use crate::mcp_config::McpRuntime;
 use crate::resolver::ProviderResolver;
 use crate::state::TurnGuard;
@@ -78,6 +79,7 @@ pub(crate) struct TurnWorker {
     approvals: Arc<ApprovalBroker>,
     events: Arc<EventBus>,
     signals: Arc<TurnGuard>,
+    titler: Arc<ChatTitler>,
     wake: Arc<Notify>,
     sandbox_agent_wake: Arc<Notify>,
     agent_config: AgentConfig,
@@ -289,6 +291,7 @@ impl TurnWorker {
         assert!(!config.steer_poll.is_zero());
         assert!(config.heartbeat < config.lease);
         assert!(config.max_concurrency > 0);
+        let titler = Arc::new(ChatTitler::new(store.clone(), resolver.clone()));
         Self {
             store,
             resolver,
@@ -299,6 +302,7 @@ impl TurnWorker {
             approvals,
             events,
             signals,
+            titler,
             wake,
             sandbox_agent_wake,
             agent_config,
@@ -497,6 +501,14 @@ impl TurnWorker {
         } else {
             None
         };
+        // Named from the front of the turn rather than from its completion arms:
+        // one hook point instead of two, and the title usually lands while the
+        // assistant is still streaming its first answer.
+        if chat.title.is_none() {
+            if let Some(utility) = utility_model.clone() {
+                self.titler.spawn(chat.id, utility);
+            }
+        }
         let active = loop {
             if let Some(active) = self.signals.register(turn.chat_id, turn.id, lease_token) {
                 break active;
