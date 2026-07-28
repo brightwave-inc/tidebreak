@@ -630,9 +630,19 @@ impl GatewayConnection {
     }
 
     /// Whether stored credentials were minted against this connection's
-    /// configured gateway.
+    /// configured gateway. Trailing slashes are normalized the same way
+    /// [`GatewayAuth::endpoint`] does, so a subpath deployment retyped with
+    /// or without one never reads as a different gateway.
     fn matches_deployment(&self, credentials: &GatewayCredentials) -> bool {
-        reqwest::Url::parse(&credentials.base_url).is_ok_and(|url| url == self.auth.config.base_url)
+        fn normalized(url: &reqwest::Url) -> String {
+            let mut base = url.to_string();
+            if !base.ends_with('/') {
+                base.push('/');
+            }
+            base
+        }
+        reqwest::Url::parse(&credentials.base_url)
+            .is_ok_and(|url| normalized(&url) == normalized(&self.auth.config.base_url))
     }
 
     /// The stored (offline) identity, if signed in to this connection's
