@@ -7,18 +7,21 @@ import type {
   CodeExecutionProviderKind,
 } from "../api";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { ActiveProviderField, ProviderCredentialField } from "./ProviderFields";
+import {
+  ActiveProviderField,
+  ProviderCredentialField,
+  TimeoutSecondsField,
+  timeoutMsFromSeconds,
+} from "./ProviderFields";
 import {
   SettingsError,
-  SettingsField,
   SettingsPanel,
   SettingsSection,
   SettingsStatus,
 } from "./primitives";
 
-const MIN_CODE_EXECUTION_TIMEOUT_MS = 1_000;
-const MAX_CODE_EXECUTION_TIMEOUT_MS = 120_000;
+const MIN_CODE_EXECUTION_TIMEOUT_SECONDS = 1;
+const MAX_CODE_EXECUTION_TIMEOUT_SECONDS = 120;
 
 /** The local sandbox needs no credential, so it never appears in the key list. */
 const LOCAL_PROVIDER: CodeExecutionProviderKind = "local";
@@ -29,7 +32,7 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
     CodeExecutionCredentialReadiness[]
   >([]);
   const [provider, setProvider] = useState<CodeExecutionProviderKind | "">("");
-  const [timeoutMs, setTimeoutMs] = useState("");
+  const [timeoutSeconds, setTimeoutSeconds] = useState("");
   // One draft key per managed provider, so E2B and Daytona can be configured
   // together and switching the active provider discards neither.
   const [apiKeys, setApiKeys] = useState<
@@ -56,7 +59,7 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
         setConfig(nextConfig);
         setCredentials(nextCredentials.credentials);
         setProvider(nextConfig.provider ?? "");
-        setTimeoutMs(String(nextConfig.timeout_ms));
+        setTimeoutSeconds(String(nextConfig.timeout_ms / 1000));
       } catch (err) {
         if (!cancelled) setError(String(err));
       } finally {
@@ -72,15 +75,13 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
   const state = codeExecutionState(config);
 
   async function save() {
-    const parsedTimeout = Number(timeoutMs);
-    if (
-      !Number.isInteger(parsedTimeout) ||
-      parsedTimeout < MIN_CODE_EXECUTION_TIMEOUT_MS ||
-      parsedTimeout > MAX_CODE_EXECUTION_TIMEOUT_MS
-    ) {
-      setError(
-        `Timeout must be a whole number between ${MIN_CODE_EXECUTION_TIMEOUT_MS.toLocaleString()} and ${MAX_CODE_EXECUTION_TIMEOUT_MS.toLocaleString()} ms.`,
-      );
+    const timeout = timeoutMsFromSeconds(
+      timeoutSeconds,
+      MIN_CODE_EXECUTION_TIMEOUT_SECONDS,
+      MAX_CODE_EXECUTION_TIMEOUT_SECONDS,
+    );
+    if ("error" in timeout) {
+      setError(timeout.error);
       return;
     }
 
@@ -97,13 +98,13 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
       }
       const nextConfig = await client.putCodeExecutionConfig({
         provider: provider || null,
-        timeout_ms: parsedTimeout,
+        timeout_ms: timeout.timeoutMs,
       });
       const nextCredentials = await client.listCodeExecutionCredentials();
       setConfig(nextConfig);
       setCredentials(nextCredentials.credentials);
       setProvider(nextConfig.provider ?? "");
-      setTimeoutMs(String(nextConfig.timeout_ms));
+      setTimeoutSeconds(String(nextConfig.timeout_ms / 1000));
       toast.success("Saved code-execution settings");
     } catch (err) {
       setError(String(err));
@@ -195,21 +196,14 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
               ]}
             />
 
-            <SettingsField
-              label="Execution timeout (ms)"
-              hint={`Between ${MIN_CODE_EXECUTION_TIMEOUT_MS.toLocaleString()} and ${MAX_CODE_EXECUTION_TIMEOUT_MS.toLocaleString()} ms.`}
-            >
-              <Input
-                type="number"
-                inputMode="numeric"
-                min={MIN_CODE_EXECUTION_TIMEOUT_MS}
-                max={MAX_CODE_EXECUTION_TIMEOUT_MS}
-                step="1000"
-                value={timeoutMs}
-                disabled={working}
-                onChange={(event) => setTimeoutMs(event.target.value)}
-              />
-            </SettingsField>
+            <TimeoutSecondsField
+              label="Execution timeout"
+              minSeconds={MIN_CODE_EXECUTION_TIMEOUT_SECONDS}
+              maxSeconds={MAX_CODE_EXECUTION_TIMEOUT_SECONDS}
+              value={timeoutSeconds}
+              disabled={working}
+              onChange={setTimeoutSeconds}
+            />
           </SettingsSection>
 
           {/* One save for the whole surface: it stores every key typed above
