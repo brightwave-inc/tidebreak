@@ -6,6 +6,19 @@ export type ConnectedFolder = {
   displayName: string;
 };
 
+/** What the agent may do inside one connected folder. */
+export type FolderCapability = "read" | "write";
+
+/**
+ * A connected folder and the access the host broker reports for it, checked
+ * against the same authorization the agent's own operations go through. The app
+ * must not substitute an assumption for this — a folder's access state is what
+ * the broker would allow, not what the app asked for.
+ */
+export type ConnectedFolderAccess = ConnectedFolder & {
+  capabilities: FolderCapability[];
+};
+
 export type FolderAccessDecision = "allow" | "decline";
 export type OutputWritebackDecision = "allow" | "decline";
 
@@ -19,7 +32,9 @@ export async function requestUserAttention(): Promise<void> {
   await invoke("request_user_attention");
 }
 
-export function listConnectedFolders(chat: Chat): Promise<ConnectedFolder[]> {
+export function listConnectedFolders(
+  chat: Chat,
+): Promise<ConnectedFolderAccess[]> {
   return invoke("list_connected_folders", { chatId: chat.id });
 }
 

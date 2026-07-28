@@ -22,6 +22,8 @@ import {
   listApprovedFolders,
   listConnectedFolders,
   type ConnectedFolder,
+  type ConnectedFolderAccess,
+  type FolderCapability,
 } from "./host";
 import {
   PICKER_BUSY_MESSAGE,
@@ -30,8 +32,9 @@ import {
 } from "./NativePickerLatch";
 
 /**
- * A chat's connected folders: the directories the native host may read on this
- * conversation's behalf.
+ * A chat's connected folders: the directories the native host may reach on this
+ * conversation's behalf, each shown with the access the broker actually grants
+ * it.
  *
  * Two sections rather than one. The first is what this conversation can reach.
  * The second is what this device has already approved and can be reattached
@@ -40,7 +43,7 @@ import {
  * a list.
  */
 export function FoldersView({ chat }: { chat: Chat }) {
-  const [folders, setFolders] = useState<ConnectedFolder[]>([]);
+  const [folders, setFolders] = useState<ConnectedFolderAccess[]>([]);
   const [approvedFolders, setApprovedFolders] = useState<ConnectedFolder[]>([]);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -176,8 +179,9 @@ export function FoldersView({ chat }: { chat: Chat }) {
               </EmptyMedia>
               <EmptyTitle>No folders connected</EmptyTitle>
               <EmptyDescription>
-                Connect a folder to let OpenWave read files from your computer in
-                this conversation. It can read only the folders you attach here.
+                Connect a folder to let OpenWave work with files on your
+                computer in this conversation. It can reach only the folders you
+                attach here, and each one shows what it allows.
               </EmptyDescription>
             </EmptyHeader>
             <EmptyContent>{connectButton}</EmptyContent>
@@ -190,7 +194,7 @@ export function FoldersView({ chat }: { chat: Chat }) {
                   <FolderRow
                     key={folder.rootId}
                     name={folder.displayName}
-                    badge={<Badge variant="secondary" size="sm">Read access</Badge>}
+                    badge={<AccessBadge capabilities={folder.capabilities} />}
                     action={
                       <Button
                         variant="outline"
@@ -236,6 +240,32 @@ export function FoldersView({ chat }: { chat: Chat }) {
       </div>
       {confirmDialog}
     </div>
+  );
+}
+
+/**
+ * The folder's access state, read off what the broker reports rather than
+ * assumed from what the app requested.
+ *
+ * Connecting a folder currently grants reading and writing together, so this
+ * renders "Read and write" in practice. It is derived anyway: the moment the
+ * grant ladder narrows, a badge computed from a constant would keep claiming
+ * access the agent no longer has, which is the failure worth designing out.
+ */
+function AccessBadge({ capabilities }: { capabilities: FolderCapability[] }) {
+  const read = capabilities.includes("read");
+  const write = capabilities.includes("write");
+  const label = read
+    ? write
+      ? "Read and write"
+      : "Read only"
+    : write
+      ? "Write only"
+      : "No access";
+  return (
+    <Badge variant={read || write ? "secondary" : "outline"} size="sm">
+      {label}
+    </Badge>
   );
 }
 
