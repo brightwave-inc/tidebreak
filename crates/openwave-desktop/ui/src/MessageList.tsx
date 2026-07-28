@@ -31,6 +31,7 @@ import { UserQuestionsCard } from "./UserQuestionsCard";
 import type { TranscriptImageAttachment } from "./ImageAttachments";
 import { TranscriptImageAttachments } from "./TranscriptImageAttachments";
 import { BackgroundAgentList } from "./BackgroundAgentList";
+import { WebSearchProviderRequiredCard } from "./WebSearchProviderRequiredCard";
 import { useSourceNav } from "./panel/SourceNav";
 import { useStreamingTypewriter } from "./useStreamingTypewriter";
 import { Skeleton } from "./components/ui/skeleton";
@@ -522,6 +523,13 @@ function surfacedCards(
       continue;
     }
     if (entry.role !== "tool") continue;
+    if (
+      entry.result?.tool === "web_search_provider_required" &&
+      !parked.has(entry.callId)
+    ) {
+      cards.push(<WebSearchProviderRequiredCard key={entry.id} />);
+      continue;
+    }
     // An MCP App view is keyed on the *result*: the tool has no action
     // preview, and its card exists to show what the server's declared view
     // renders — inside the sandbox — not to restate arguments or output.

@@ -1,9 +1,10 @@
-import { parseToolActionPreview } from "./api";
+import { parseToolActionPreview, parseToolResultPreview } from "./api";
 import type {
   ChatMessage,
   ChatToolActivity,
   RendererRefusal,
   ToolActionPreview,
+  ToolResultPreview,
 } from "./api";
 import type { AssistantSource } from "./AssistantSources";
 import type { TranscriptImageAttachment } from "./ImageAttachments";
@@ -27,6 +28,7 @@ export type HydratedTranscriptEntry =
       /** Opaque child correlation for a historical sandbox spawn. */
       backgroundAgentRunId?: string;
       preview: ToolActionPreview | null;
+      result: ToolResultPreview | null;
       status: ToolCallStatus;
       createdAt: string;
     };
@@ -85,9 +87,10 @@ export function hydrateTranscriptHistory(
       name: activity.tool,
       backgroundAgentRunId: activity.background_agent_run_id,
       status: activity.status,
-      // History carries what the call did but not what it produced: results
-      // are not persisted, so a reloaded command card shows its command alone.
       preview: parseToolActionPreview(activity.action),
+      // Arbitrary result text stays server-side. A tool can retain only a
+      // closed renderer result such as an actionable configuration signal.
+      result: parseToolResultPreview(activity.result),
       createdAt: activity.started_at,
     })),
   ];

@@ -355,6 +355,8 @@ pub enum ToolErrorCategory {
     UserDeclined,
     /// The model named a tool this turn does not advertise.
     NotFound,
+    /// The capability is available after the reader configures it.
+    ConfigurationRequired,
     /// The tool ran and reported a failure of its own.
     ToolFailed,
 }
@@ -367,6 +369,7 @@ impl ToolErrorCategory {
             Self::UserCancelled => "user_cancelled",
             Self::UserDeclined => "user_declined",
             Self::NotFound => "not_found",
+            Self::ConfigurationRequired => "configuration_required",
             Self::ToolFailed => "tool_failed",
         }
     }
@@ -376,7 +379,10 @@ impl ToolErrorCategory {
     #[must_use]
     pub const fn is_product_failure(self) -> bool {
         match self {
-            Self::UserCancelled | Self::UserDeclined | Self::NotFound => false,
+            Self::UserCancelled
+            | Self::UserDeclined
+            | Self::NotFound
+            | Self::ConfigurationRequired => false,
             Self::ToolFailed => true,
         }
     }
@@ -731,6 +737,7 @@ mod tests {
             ToolErrorCategory::UserCancelled,
             ToolErrorCategory::UserDeclined,
             ToolErrorCategory::NotFound,
+            ToolErrorCategory::ConfigurationRequired,
         ] {
             assert!(!category.is_product_failure(), "{}", category.as_str());
         }
@@ -741,6 +748,7 @@ mod tests {
             ToolErrorCategory::UserCancelled,
             ToolErrorCategory::UserDeclined,
             ToolErrorCategory::NotFound,
+            ToolErrorCategory::ConfigurationRequired,
             ToolErrorCategory::ToolFailed,
         ]
         .map(ToolErrorCategory::as_str);

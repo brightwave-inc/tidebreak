@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use openwave_core::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolSpec, WebSearchArgs};
+use openwave_core::{
+    ApprovalClass, Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolSpec, WebSearchArgs,
+};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -75,7 +77,8 @@ impl Tool for WebSearchTool {
         let provider = match self.resolver.resolve().await {
             Ok(Some(provider)) => provider,
             Ok(None) => {
-                return Ok(ToolOutput::error(
+                return Ok(ToolOutput::failed(
+                    ToolErrorCategory::ConfigurationRequired,
                     "Web search is not configured for this host.",
                 ))
             }
@@ -209,6 +212,10 @@ mod tests {
         assert_eq!(
             output.content,
             "Web search is not configured for this host."
+        );
+        assert_eq!(
+            output.error_category,
+            Some(ToolErrorCategory::ConfigurationRequired)
         );
     }
 
