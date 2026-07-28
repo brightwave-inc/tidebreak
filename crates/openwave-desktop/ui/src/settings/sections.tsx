@@ -42,8 +42,14 @@ function GatewaySection() {
 }
 
 function ModelsSection() {
-  const { client, models } = useApp();
-  return <ModelsPanel client={client} models={models} />;
+  const { client, models, refreshCatalog } = useApp();
+  return (
+    <ModelsPanel
+      client={client}
+      models={models}
+      onChanged={() => void refreshCatalog()}
+    />
+  );
 }
 
 function WebSearchSection() {

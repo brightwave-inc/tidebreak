@@ -347,6 +347,31 @@ Return JSON only, with exactly this shape:
 {"version":1,"confirmed_decisions":[],"unresolved_questions":[],"task_state":[],"source_identities":[],"output_identities":[],"conclusions":[]}
 Include only facts explicit in the supplied prefix. Preserve opaque source, citation, output, and revision identities exactly; never infer identities, permissions, capabilities, attachment bytes, or actions. Put at most 16 concise strings in each array, each at most 1024 UTF-8 bytes. Do not use markdown or add fields."#;
 
+/// The model background maintenance work runs on.
+///
+/// Maintenance work is work the user did not ask for — compacting a transcript,
+/// for instance — so it must not be billed at the model and effort the user
+/// chose for the conversation. The host resolves this from its own model
+/// configuration before the turn starts; the agent only carries it. An absent
+/// value means the host has no model for that work, and the work is skipped
+/// rather than quietly moved back onto the foreground model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UtilityModel {
+    /// Explicit provider route for this model.
+    pub provider: Option<crate::provider::ProviderId>,
+    /// Provider model identifier (e.g. `claude-haiku-4-5-20251001`).
+    pub model: String,
+    /// Whether this model uses the provider's reasoning request shape.
+    pub reasoning_model: bool,
+    /// Reasoning effort to request, already reconciled with what this model
+    /// accepts. `None` leaves the parameter off the request.
+    pub reasoning_effort: Option<crate::model::ReasoningEffort>,
+    /// This model's context window in tokens, which bounds a maintenance
+    /// request. It is not the foreground model's window: a cheaper maintenance
+    /// model usually holds less.
+    pub context_window: usize,
+}
+
 /// Per-turn tuning for an [`Agent`].
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
@@ -377,6 +402,9 @@ pub struct AgentConfig {
     /// tools. It is derived by the embedding server and never persisted in a
     /// project or conversation.
     pub tool_scratch: Option<ToolScratch>,
+    /// Model for background maintenance calls this turn may make. `None` means
+    /// the host has none, and that work is skipped.
+    pub utility_model: Option<UtilityModel>,
 }
 
 /// Default context window: 200k tokens (Claude Opus/Sonnet).
@@ -396,6 +424,7 @@ impl Default for AgentConfig {
             max_tool_result_bytes: DEFAULT_MAX_TOOL_RESULT_BYTES,
             context_window: DEFAULT_CONTEXT_WINDOW,
             tool_scratch: None,
+            utility_model: None,
         }
     }
 }
@@ -2933,10 +2962,13 @@ impl Agent {
     /// Create the next semantic checkpoint immediately before a model-specific
     /// fit would discard its eligible raw prefix.
     ///
-    /// The call is maintenance work: it receives no foreground tools or
+    /// The call is maintenance work: it runs on the host's utility model rather
+    /// than the conversation's, it receives no foreground tools or
     /// capabilities, its usage is stored on the checkpoint rather than added
     /// to the turn, and every failure returns `None` so deterministic context
-    /// reduction remains available.
+    /// reduction remains available. With no utility model configured there is
+    /// nothing to compact with, and the turn proceeds on deterministic
+    /// reduction alone rather than spending the user's conversation model here.
     async fn maybe_create_context_checkpoint(
         &self,
         chat_id: ChatId,
@@ -2946,6 +2978,7 @@ impl Agent {
         reduction_level: u32,
         attempted_boundary: &mut Option<usize>,
     ) -> Option<ContextCheckpoint> {
+        let utility = self.config.utility_model.clone()?;
         let foreground_budget = context::compute_message_budget(
             self.config.context_window,
             reduction_level,
@@ -2990,8 +3023,10 @@ impl Agent {
         // maintenance call on the same raw prefix.
         *attempted_boundary = Some(candidate.provider_boundary);
 
+        // Budgeted against the utility model's own window, which is typically
+        // smaller than the conversation model's.
         let summary_budget = context::compute_message_budget(
-            self.config.context_window,
+            utility.context_window,
             0,
             Some(CONTEXT_CHECKPOINT_SYSTEM_PROMPT),
             &[],
@@ -3015,9 +3050,9 @@ impl Agent {
         }
 
         let request = ChatRequest {
-            provider: self.config.provider.clone(),
-            model: self.config.model.clone(),
-            reasoning_model: self.config.reasoning_model,
+            provider: utility.provider.clone(),
+            model: utility.model.clone(),
+            reasoning_model: utility.reasoning_model,
             system: Some(CONTEXT_CHECKPOINT_SYSTEM_PROMPT.into()),
             messages: summary_messages,
             tools: Vec::new(),
@@ -3026,7 +3061,7 @@ impl Agent {
             // strict schema/validator provides determinism without narrowing
             // the set of models that can create a checkpoint.
             temperature: None,
-            reasoning_effort: self.config.reasoning_effort,
+            reasoning_effort: utility.reasoning_effort,
             // Constrain the answer to the payload schema. Without this the
             // model's shape is a request, the parse below is a coin toss, and a
             // lost toss abandons this prefix for the rest of the conversation —
@@ -7509,6 +7544,19 @@ mod tests {
         }
     }
 
+    /// What the host resolves for maintenance work. Deliberately not the
+    /// conversation model, so a maintenance request is identifiable by its
+    /// model alone.
+    fn test_utility_model() -> UtilityModel {
+        UtilityModel {
+            provider: None,
+            model: "utility-model".into(),
+            reasoning_model: false,
+            reasoning_effort: None,
+            context_window: 3_000,
+        }
+    }
+
     async fn append_semantic_checkpoint_history(
         store: &Arc<dyn Store>,
         chat_id: ChatId,
@@ -7577,6 +7625,7 @@ mod tests {
             AgentConfig {
                 model: "small-context-model".into(),
                 context_window: 3_000,
+                utility_model: Some(test_utility_model()),
                 ..Default::default()
             },
         );
@@ -7701,6 +7750,7 @@ mod tests {
             AgentConfig {
                 model: "small-context-model".into(),
                 context_window: 3_000,
+                utility_model: Some(test_utility_model()),
                 ..Default::default()
             },
         );
@@ -7743,6 +7793,7 @@ mod tests {
             AgentConfig {
                 model: "large-context-model".into(),
                 context_window: 50_000,
+                utility_model: Some(test_utility_model()),
                 ..Default::default()
             },
         );
@@ -7775,6 +7826,7 @@ mod tests {
             AgentConfig {
                 model: "small-context-model".into(),
                 context_window: 3_000,
+                utility_model: Some(test_utility_model()),
                 ..Default::default()
             },
         );
@@ -7788,7 +7840,8 @@ mod tests {
         assert_eq!(small_summary_calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             small_requests.lock().unwrap()[0].model,
-            "small-context-model"
+            "utility-model",
+            "maintenance runs on the utility model, not the conversation's"
         );
         assert_eq!(
             store

@@ -30,6 +30,7 @@ use crate::error::ServerError;
 use crate::event_projection::RendererSequencedEvent;
 use crate::extract::{Json, Path, Query};
 use crate::mcp_config::{McpServersConfig, McpServersInfo};
+use crate::model_roles::{self, ModelRole};
 use crate::providers::{self, ProviderCredential, ProviderInfo, ProviderKind, ProviderUpdate};
 use crate::state::AppState;
 use crate::web_search::{
@@ -285,9 +286,6 @@ fn mcp_request_error(error: AgentError) -> ServerError {
     }
 }
 
-/// The store-settings key for the selected model.
-const MODEL_SETTING: &str = "model";
-
 /// Product-facing project names stay compact across desktop and API clients.
 pub const MAX_PROJECT_TITLE_CHARS: usize = 120;
 /// Project metadata requests need only a compact JSON object.
@@ -343,23 +341,16 @@ pub async fn put_settings(
     match body.model {
         // Absent: leave the model unchanged.
         None => {}
-        // Explicit null: reset to the server default (stored as JSON null, which
-        // `read_model` reads back as "unset").
+        // Explicit null: reset to the server default.
         Some(None) => {
-            state
-                .store
-                .set_setting(MODEL_SETTING, &serde_json::Value::Null)
-                .await?;
+            model_roles::write_selection(&*state.store, ModelRole::Chat, None).await?;
         }
         // A value: reject empty (it would break every turn), else set it.
         Some(Some(model)) => {
             if model.is_empty() {
                 return Err(ServerError::bad_request("model must not be empty"));
             }
-            state
-                .store
-                .set_setting(MODEL_SETTING, &serde_json::json!(model))
-                .await?;
+            model_roles::write_selection(&*state.store, ModelRole::Chat, Some(&model)).await?;
         }
     }
     Ok(Json(Settings {
@@ -484,12 +475,20 @@ fn parse_web_search_provider(
     }
 }
 
-/// The configured model, if any.
+/// The configured chat model, if any — the `chat` role's explicit selection.
 async fn read_model(store: &dyn Store) -> openwave_core::Result<Option<String>> {
-    Ok(store
-        .get_setting(MODEL_SETTING)
+    model_roles::read_selection(store, ModelRole::Chat).await
+}
+
+/// The `chat` role's model with no conversation in hand: the global selection,
+/// else the model this process launched with.
+///
+/// The boot default is process state, which is why the chat role has no
+/// registry-backed default list of its own the way `utility` does.
+async fn chat_role_model(store: &dyn Store, boot_default: &str) -> openwave_core::Result<String> {
+    Ok(read_model(store)
         .await?
-        .and_then(|value| value.as_str().map(str::to_owned)))
+        .unwrap_or_else(|| boot_default.to_owned()))
 }
 
 /// Resolve which model a new execution in `chat` should use.
@@ -505,9 +504,7 @@ pub(crate) async fn resolve_chat_model(
 ) -> openwave_core::Result<String> {
     match chat.model.clone() {
         Some(model) => Ok(model),
-        None => Ok(read_model(store)
-            .await?
-            .unwrap_or_else(|| boot_default.to_owned())),
+        None => chat_role_model(store, boot_default).await,
     }
 }
 
@@ -682,19 +679,31 @@ pub struct ModelInfo {
     pub multimodal: bool,
 }
 
+/// One named model role and what it resolves to right now.
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub struct ModelRoleInfo {
+    /// The role this row describes.
+    pub role: ModelRole,
+    /// The catalog key the user selected for this role, or `None` when the role
+    /// is left automatic.
+    pub selection: Option<String>,
+    /// The catalog key this role resolves to right now, selection or not.
+    ///
+    /// A selector that offers "automatic" as a choice can only say what that
+    /// choice means if the server says which model it lands on. `None` when the
+    /// role resolves to nothing the catalog can name, which leaves the client
+    /// with nothing to promise rather than a guess — and, for `utility`, means
+    /// the work that depends on it is skipped.
+    pub resolved_key: Option<String>,
+}
+
 /// Response for `GET /models`.
 #[derive(Debug, Serialize)]
 pub struct ModelCatalog {
     /// The models a client can select from.
     pub models: Vec<ModelInfo>,
-    /// The catalog key a turn runs against when its chat carries no override —
-    /// the global default, else the one this server booted with.
-    ///
-    /// A selector that offers "default" as a choice can only say what that
-    /// choice means if the server says which model it lands on. `None` when the
-    /// fallback resolves to nothing the catalog can name, which leaves the
-    /// client with nothing to promise rather than a guess.
-    pub default_key: Option<String>,
+    /// Every named role, its selection, and what it currently resolves to.
+    pub roles: Vec<ModelRoleInfo>,
 }
 
 /// `GET /models` — the catalog a chat's model selector chooses from.
@@ -702,15 +711,16 @@ pub struct ModelCatalog {
 /// All typed registry rows plus current availability. Clients may explain
 /// unavailable rows, but must never offer them as usable selections.
 pub async fn list_models(State(state): State<AppState>) -> Result<Json<ModelCatalog>, ServerError> {
-    // The same order `POST /chats/{id}/turns` resolves a new turn with, minus
-    // the chat override, so the label a client shows for "default" is the model
-    // the next turn actually gets.
-    let fallback = read_model(&*state.store)
-        .await?
-        .unwrap_or_else(|| state.agent_config.model.clone());
-    let default_key = providers::resolve_model_policy(&*state.store, &fallback, true)
-        .await?
-        .map(|policy| policy.key);
+    let mut roles = Vec::with_capacity(ModelRole::ALL.len());
+    for &role in ModelRole::ALL {
+        let selection = model_roles::read_selection(&*state.store, role).await?;
+        let resolved_key = resolved_role_key(&state, role, selection.as_deref()).await?;
+        roles.push(ModelRoleInfo {
+            role,
+            selection,
+            resolved_key,
+        });
+    }
     let models = providers::catalog_models(&*state.store, &*state.secrets)
         .await?
         .into_iter()
@@ -731,10 +741,71 @@ pub async fn list_models(State(state): State<AppState>) -> Result<Json<ModelCata
                 .contains(&crate::model_registry::InputModality::Image),
         })
         .collect();
-    Ok(Json(ModelCatalog {
-        models,
-        default_key,
+    Ok(Json(ModelCatalog { models, roles }))
+}
+
+/// Body of `PUT /models/roles/{role}`. An explicit `null` selection returns the
+/// role to automatic resolution.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelRoleUpdate {
+    /// The catalog key to pin this role to, or `null` for automatic.
+    #[serde(default)]
+    pub selection: Option<String>,
+}
+
+/// `PUT /models/roles/{role}` — pin a role to one model, or clear it back to
+/// automatic resolution.
+///
+/// A selection must be a registered model whose provider is currently usable, so
+/// a role cannot be pinned to something that could not run. For `chat` this
+/// writes the same setting as `PUT /settings`.
+pub async fn put_model_role(
+    State(state): State<AppState>,
+    Path(role): Path<String>,
+    Json(body): Json<ModelRoleUpdate>,
+) -> Result<Json<ModelRoleInfo>, ServerError> {
+    let role = ModelRole::parse(&role)
+        .ok_or_else(|| ServerError::not_found(format!("unknown model role: {role}")))?;
+    let selection = match body.selection {
+        Some(selection) => Some(validate_model_selection(&state, &selection, false).await?),
+        None => None,
+    };
+    model_roles::write_selection(&*state.store, role, selection.as_deref()).await?;
+    let resolved_key = resolved_role_key(&state, role, selection.as_deref()).await?;
+    Ok(Json(ModelRoleInfo {
+        role,
+        selection,
+        resolved_key,
     }))
+}
+
+/// The catalog key `role` resolves to right now, given its stored `selection`.
+async fn resolved_role_key(
+    state: &AppState,
+    role: ModelRole,
+    selection: Option<&str>,
+) -> Result<Option<String>, ServerError> {
+    match role {
+        // The chat role goes through the same seam a new execution does, minus
+        // the per-chat override there is no chat here to read — so the label a
+        // client shows for "default" is what the next turn actually gets. Its
+        // last resort is the boot default, which no role's list can name.
+        ModelRole::Chat => {
+            let fallback = match selection {
+                Some(selection) => selection.to_owned(),
+                None => chat_role_model(&*state.store, &state.agent_config.model).await?,
+            };
+            Ok(
+                providers::resolve_model_policy(&*state.store, &fallback, true)
+                    .await?
+                    .map(|policy| policy.key),
+            )
+        }
+        _ => Ok(model_roles::resolve(&*state.store, &*state.secrets, role)
+            .await?
+            .map(|policy| policy.key)),
+    }
 }
 
 /// Body of `POST /projects`.
