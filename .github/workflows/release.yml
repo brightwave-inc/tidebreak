@@ -34,8 +34,16 @@ jobs:
     if: ${{ github.event_name == 'release' }}
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       actions: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Reject an invalid published release tag
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: node scripts/check-release-tag.mjs "$RELEASE_TAG"
       - name: Dispatch the build from the shared main cache scope
         env:
           GH_TOKEN: ${{ github.token }}
