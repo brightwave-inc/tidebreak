@@ -61,6 +61,12 @@ impl std::error::Error for EgressError {}
 /// A wildcard matches any subdomain but never the bare suffix itself:
 /// `*.example.com` matches `files.example.com`, not `example.com`. Grants
 /// stay as narrow as they read.
+///
+/// Grant-authoring footgun: `*.` matches any subdomain *depth*, unlike the
+/// single-label TLS certificate wildcard. `*.example.com` matches
+/// `a.b.c.example.com`, not just `a.example.com`. On a multi-tenant apex —
+/// `*.github.io`, `*.s3.amazonaws.com` — that grants every tenant, so scope
+/// the pattern to the specific subdomain rather than the shared apex.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DomainPattern {
     /// Lowercased suffix without the wildcard marker.
@@ -111,9 +117,30 @@ impl fmt::Display for DomainPattern {
 }
 
 /// Accept lowercase DNS-shaped hosts: dot-separated labels of
-/// `[a-z0-9-]`, no hyphen at a label edge, not an IP literal.
+/// `[a-z0-9-]`, no hyphen at a label edge, and not an IP literal in *any*
+/// encoding.
+///
+/// Rust's strict `IpAddr` parser only rejects canonical dotted-quad and
+/// colon-hex literals. libc, curl, and browsers still dial the alternate
+/// numeric encodings as literal addresses — decimal (`2130706433`), hex
+/// (`0x7f000001`), and dotted-short or octal (`127.1`, `0177.0.0.1`) — so a
+/// host in one of those forms must never classify as a `Domain` and skip the
+/// address path. The general rule a DNS name obeys and a numeric IP does not:
+/// the rightmost label (the TLD) carries at least one non-digit, no label is
+/// hex-encoded (`0x…`), and no all-digit label carries a leading zero
+/// (octal).
 fn validate_host(host: &str) -> Option<()> {
     if host.is_empty() || host.len() > MAX_DOMAIN_BYTES || host.parse::<IpAddr>().is_ok() {
+        return None;
+    }
+    // An all-digit rightmost label means the whole host is a numeric IP
+    // encoding (decimal `2130706433`, dotted-short `127.1`) — a real TLD
+    // always has a non-digit.
+    if host
+        .rsplit('.')
+        .next()
+        .is_some_and(|tld| !tld.is_empty() && tld.bytes().all(|byte| byte.is_ascii_digit()))
+    {
         return None;
     }
     let valid = host.split('.').all(|label| {
@@ -124,8 +151,25 @@ fn validate_host(host: &str) -> Option<()> {
             && label
                 .bytes()
                 .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            // Reject hex octets (`0x7f`) and leading-zero octal octets
+            // (`0177`) that dial as IP octets, not DNS labels.
+            && !is_hex_encoded(label)
+            && !is_leading_zero_numeric(label)
     });
     valid.then_some(())
+}
+
+/// A `0x…` hex-encoded label (an alternate IP octet or whole-address form).
+fn is_hex_encoded(label: &str) -> bool {
+    label
+        .strip_prefix("0x")
+        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+/// An all-digit label with a redundant leading zero (`0177`), the octal IP
+/// octet form; a lone `0` is a legitimate label and stays allowed.
+fn is_leading_zero_numeric(label: &str) -> bool {
+    label.len() > 1 && label.starts_with('0') && label.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// An IPv4 or IPv6 address block in CIDR notation; a bare address is the
@@ -144,7 +188,8 @@ impl CidrBlock {
         let (address, prefix) = match value.split_once('/') {
             Some((address, prefix)) => {
                 let address: IpAddr = address.parse().map_err(|_| invalid())?;
-                // Reject leading zeros / signs that `u8: FromStr` would accept.
+                // Reject the signs and whitespace `u8: FromStr` would
+                // otherwise accept (`+8`, ` 8`); only bare digits pass.
                 if !prefix.bytes().all(|byte| byte.is_ascii_digit()) {
                     return Err(invalid());
                 }
@@ -220,8 +265,17 @@ fn mask_address(address: IpAddr, prefix: u8) -> IpAddr {
 /// domain patterns and an address destination against address blocks; a
 /// domain grant says nothing about the addresses it resolves to, and
 /// vice versa.
+///
+/// The classification is the untrusted side of the decision, so it is
+/// constructible only through [`Self::parse`], which routes IP literals to
+/// the address path and holds every domain to [`validate_host`]. There is no
+/// public variant a caller could fill with an un-validated host to dodge the
+/// address classification.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum EgressDestination {
+pub struct EgressDestination(Destination);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Destination {
     Domain(String),
     Address(IpAddr),
 }
@@ -232,11 +286,11 @@ impl EgressDestination {
     pub fn parse(value: impl AsRef<str>) -> Result<Self, EgressError> {
         let value = value.as_ref();
         if let Ok(address) = value.parse::<IpAddr>() {
-            return Ok(Self::Address(address));
+            return Ok(Self(Destination::Address(address)));
         }
         let host = value.to_ascii_lowercase();
         validate_host(&host).ok_or_else(|| EgressError::InvalidDestination(value.to_owned()))?;
-        Ok(Self::Domain(host))
+        Ok(Self(Destination::Domain(host)))
     }
 }
 
@@ -285,12 +339,19 @@ impl EgressPolicy {
         let Self::Allowlist(allowlist) = self else {
             return false;
         };
-        match destination {
-            EgressDestination::Domain(host) => allowlist
-                .domains
-                .iter()
-                .any(|pattern| pattern.matches(host)),
-            EgressDestination::Address(address) => {
+        match &destination.0 {
+            Destination::Domain(host) => {
+                // Defense in depth behind the private constructor: a domain
+                // that would not survive classification never matches a
+                // pattern, so no bypass of `parse` can smuggle a numeric IP
+                // encoding onto the name path.
+                validate_host(host).is_some()
+                    && allowlist
+                        .domains
+                        .iter()
+                        .any(|pattern| pattern.matches(host))
+            }
+            Destination::Address(address) => {
                 allowlist.cidrs.iter().any(|block| block.contains(*address))
             }
         }
@@ -486,6 +547,65 @@ mod tests {
         assert!(CidrBlock::parse("2001:db8::/32")
             .unwrap()
             .contains("2001:db8::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn alternate_ip_encodings_never_classify_as_domains() {
+        // Numeric IP encodings libc/curl/browsers dial as literal addresses
+        // must be refused as destinations, not admitted as domain names that
+        // dodge the CIDR path.
+        for host in [
+            "2130706433",  // decimal
+            "0x7f000001",  // hex, whole address
+            "0x7f.0.0.1",  // hex octet
+            "127.1",       // dotted-short
+            "0177.0.0.1",  // octal octet
+            "192.168.0.1", // canonical, but classified as an address
+            "1",           // bare digit
+            "010",         // leading-zero octal
+        ] {
+            assert!(
+                !matches!(
+                    EgressDestination::parse(host),
+                    Ok(EgressDestination(Destination::Domain(_)))
+                ),
+                "{host:?} classified as a domain"
+            );
+            assert!(
+                DomainPattern::parse(host).is_err(),
+                "{host:?} accepted as a domain pattern"
+            );
+        }
+
+        // Legitimate names — including all-digit interior labels and a lone
+        // `0` label — still pass and classify as domains.
+        for host in [
+            "api.example.com",
+            "files.pypi.org",
+            "s3.amazonaws.com",
+            "1.2.3.4.example.com",
+            "0.example.com",
+            "xn--nxasmq6b.example",
+        ] {
+            assert!(
+                matches!(
+                    EgressDestination::parse(host),
+                    Ok(EgressDestination(Destination::Domain(_)))
+                ),
+                "{host:?} rejected as a domain"
+            );
+        }
+    }
+
+    #[test]
+    fn permits_re_validates_a_domain_that_bypassed_the_parse_gate() {
+        // A destination hand-built past the private `parse` constructor with a
+        // numeric IP encoding must not match a domain pattern: `permits`
+        // re-runs `validate_host`, so the bypass is denied rather than
+        // silently steered onto the name path.
+        let smuggled = EgressDestination(Destination::Domain("2130706433".to_owned()));
+        let policy = allowlist(&["*.example.com", "example.com"], &[]);
+        assert!(!policy.permits(&smuggled));
     }
 
     #[test]
