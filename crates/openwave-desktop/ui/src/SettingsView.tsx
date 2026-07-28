@@ -114,7 +114,11 @@ export function SettingsView({
           <GatewayPanel client={client} onChanged={onProvidersChanged} />
         )}
         {section === "models" && (
-          <ModelsPanel client={client} models={models} />
+          <ModelsPanel
+            client={client}
+            models={models}
+            onChanged={onProvidersChanged}
+          />
         )}
         {section === "web-search" && <WebSearchPanel client={client} />}
         {section === "code-execution" && (

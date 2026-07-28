@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import type {
   ApiClient,
   ModelInfo,
+  ModelRole,
+  ModelRoleInfo,
   ModelSelectionKey,
   ProviderKind,
 } from "../api";
@@ -18,28 +20,38 @@ import {
   SettingsSection,
 } from "./primitives";
 
+/**
+ * The roles a user can choose a model for, in the order they matter to them:
+ * the conversation first, then the work the app does on its own.
+ *
+ * A new role is an entry here, matching the server's role list.
+ */
+const ROLES: { role: ModelRole; title: string; hint: string }[] = [
+  {
+    role: "chat",
+    title: "Chat",
+    hint: "New conversations start on this model, and each one can still override it.",
+  },
+  {
+    role: "utility",
+    title: "Background work",
+    hint: "Work OpenWave does on its own — compacting a long conversation, for instance — runs here, so it is not billed at your conversation model. Left automatic, it picks the cheapest model your configured providers serve; with none available, that work is skipped rather than moved back onto your chat model.",
+  },
+];
+
 export function ModelsPanel({
   client,
   models,
+  onChanged,
 }: {
   client: ApiClient;
   models: ModelInfo[];
+  onChanged?: () => void;
 }) {
-  const [defaultModel, setDefaultModel] = useState<string | null>(null);
-  const [provider, setProvider] = useState<ProviderKind | null>(null);
+  const [roles, setRoles] = useState<ModelRoleInfo[]>([]);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
+  const [saving, setSaving] = useState<ModelRole | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  const providers = useMemo(
-    () =>
-      [...new Set(models.map((model) => model.provider))] as ProviderKind[],
-    [models],
-  );
-  const selected = modelForSelection(models, defaultModel);
-  const providerModels = provider
-    ? models.filter((model) => model.provider === provider)
-    : [];
 
   useEffect(() => {
     let cancelled = false;
@@ -47,18 +59,8 @@ export function ModelsPanel({
     setError(null);
     void (async () => {
       try {
-        const settings = await client.getSettings();
-        if (cancelled) return;
-        setDefaultModel(settings.model);
-        const resolved = modelForSelection(models, settings.model);
-        setProvider(
-          resolved?.provider ??
-            providers.find((kind) =>
-              models.some((model) => model.provider === kind && model.available),
-            ) ??
-            providers[0] ??
-            null,
-        );
+        const catalog = await client.listModels();
+        if (!cancelled) setRoles(catalog.roles);
       } catch (err) {
         if (!cancelled) setError(String(err));
       } finally {
@@ -68,97 +70,51 @@ export function ModelsPanel({
     return () => {
       cancelled = true;
     };
-  }, [client, models, providers]);
+  }, [client]);
 
-  async function save(model: ModelSelectionKey | null) {
-    setSaving(true);
+  async function save(role: ModelRole, selection: ModelSelectionKey | null) {
+    setSaving(role);
     setError(null);
     try {
-      const next = await client.putSettings({ model });
-      setDefaultModel(next.model);
-      const resolved = modelForSelection(models, next.model);
-      if (resolved) setProvider(resolved.provider);
+      const next = await client.putModelRole(role, selection);
+      setRoles((current) =>
+        current.map((entry) => (entry.role === role ? next : entry)),
+      );
+      // The composer labels its own default from the shell's catalog, which is
+      // now a step behind.
+      onChanged?.();
     } catch (err) {
       setError(String(err));
     } finally {
-      setSaving(false);
+      setSaving(null);
     }
   }
-
-  const canonical = canonicalModelSelection(models, defaultModel);
-  const selectedValue =
-    selected?.provider === provider ? (canonical ?? "") : "";
-  const legacyUnavailable = defaultModel !== null && selected === null;
 
   return (
     <SettingsPanel
       title="Models"
-      description="Choose the provider first, then a model that provider is configured to serve. New chats inherit this default; each conversation can still override it."
+      description="Choose the provider first, then a model that provider is configured to serve. Each role can be left automatic, in which case OpenWave resolves it against whatever you have credentialed."
       busy={loading}
     >
       {loading ? (
         <p className="text-sm text-muted-foreground">Loading model settings…</p>
       ) : (
         <>
-          <SettingsSection title="Default model">
-            <SettingsField label="Provider">
-              <select
-                className={SETTINGS_SELECT_CLASS}
-                value={provider ?? ""}
-                disabled={saving || providers.length === 0}
-                onChange={(event) =>
-                  setProvider((event.target.value || null) as ProviderKind | null)
-                }
-              >
-                {providers.length === 0 && (
-                  <option value="">No providers configured</option>
-                )}
-                {providers.map((kind) => {
-                  const usable = models.some(
-                    (model) => model.provider === kind && model.available,
-                  );
-                  return (
-                    <option key={kind} value={kind}>
-                      {providerLabel(kind)}
-                      {usable ? "" : " — unavailable"}
-                    </option>
-                  );
-                })}
-              </select>
-            </SettingsField>
-            <SettingsField
-              label="Model"
-              hint="Unavailable models remain visible for clarity but cannot be selected until their provider is enabled and credentialed."
-            >
-              <select
-                className={SETTINGS_SELECT_CLASS}
-                value={selectedValue}
-                disabled={saving || provider === null}
-                onChange={(event) => {
-                  const value = event.target.value as ModelSelectionKey | "";
-                  void save(value || null);
-                }}
-              >
-                <option value="">Server default</option>
-                {providerModels.map((model) => (
-                  <option
-                    key={model.key}
-                    value={model.key}
-                    disabled={!model.available}
-                  >
-                    {model.display_name}
-                    {model.available ? "" : " — unavailable"}
-                  </option>
-                ))}
-              </select>
-            </SettingsField>
-            {legacyUnavailable && (
-              <SettingsError>
-                The saved legacy model “{defaultModel}” is not uniquely registered.
-                Add it under the OpenAI-compatible provider, then choose it here.
-              </SettingsError>
-            )}
-          </SettingsSection>
+          {ROLES.map((entry) => {
+            const info = roles.find((row) => row.role === entry.role);
+            if (!info) return null;
+            return (
+              <ModelRoleRow
+                key={entry.role}
+                title={entry.title}
+                hint={entry.hint}
+                models={models}
+                info={info}
+                saving={saving === entry.role}
+                onSelect={(selection) => void save(entry.role, selection)}
+              />
+            );
+          })}
           {models.length === 0 && (
             <p className="text-sm text-muted-foreground">
               No models are registered yet. Configure a provider first.
@@ -169,4 +125,123 @@ export function ModelsPanel({
       {error && <SettingsError>{error}</SettingsError>}
     </SettingsPanel>
   );
+}
+
+/** One role's provider-then-model picker, plus what automatic resolves to. */
+function ModelRoleRow({
+  title,
+  hint,
+  models,
+  info,
+  saving,
+  onSelect,
+}: {
+  title: string;
+  hint: string;
+  models: ModelInfo[];
+  info: ModelRoleInfo;
+  saving: boolean;
+  onSelect: (selection: ModelSelectionKey | null) => void;
+}) {
+  const providers = useMemo(
+    () => [...new Set(models.map((model) => model.provider))] as ProviderKind[],
+    [models],
+  );
+  const selected = modelForSelection(models, info.selection);
+  const [provider, setProvider] = useState<ProviderKind | null>(null);
+
+  // Open on the pinned model's provider, else on one that could actually serve
+  // this role, so the model list beneath is never a dead end.
+  useEffect(() => {
+    setProvider(
+      selected?.provider ??
+        providers.find((kind) =>
+          models.some((model) => model.provider === kind && model.available),
+        ) ??
+        providers[0] ??
+        null,
+    );
+  }, [selected?.provider, providers, models]);
+
+  const providerModels = provider
+    ? models.filter((model) => model.provider === provider)
+    : [];
+  const canonical = canonicalModelSelection(models, info.selection);
+  const selectedValue = selected?.provider === provider ? (canonical ?? "") : "";
+  const unresolvedSelection = info.selection !== null && selected === null;
+  const resolved = modelForSelection(models, info.resolved_key);
+
+  return (
+    <SettingsSection title={title}>
+      <p className="text-sm text-muted-foreground">{hint}</p>
+      <SettingsField label="Provider">
+        <select
+          className={SETTINGS_SELECT_CLASS}
+          value={provider ?? ""}
+          disabled={saving || providers.length === 0}
+          onChange={(event) =>
+            setProvider((event.target.value || null) as ProviderKind | null)
+          }
+        >
+          {providers.length === 0 && (
+            <option value="">No providers configured</option>
+          )}
+          {providers.map((kind) => {
+            const usable = models.some(
+              (model) => model.provider === kind && model.available,
+            );
+            return (
+              <option key={kind} value={kind}>
+                {providerLabel(kind)}
+                {usable ? "" : " — unavailable"}
+              </option>
+            );
+          })}
+        </select>
+      </SettingsField>
+      <SettingsField
+        label="Model"
+        hint="Unavailable models remain visible for clarity but cannot be selected until their provider is enabled and credentialed."
+      >
+        <select
+          className={SETTINGS_SELECT_CLASS}
+          value={selectedValue}
+          disabled={saving || provider === null}
+          onChange={(event) => {
+            const value = event.target.value as ModelSelectionKey | "";
+            onSelect(value || null);
+          }}
+        >
+          <option value="">{automaticLabel(info, resolved)}</option>
+          {providerModels.map((model) => (
+            <option key={model.key} value={model.key} disabled={!model.available}>
+              {model.display_name}
+              {model.available ? "" : " — unavailable"}
+            </option>
+          ))}
+        </select>
+      </SettingsField>
+      {unresolvedSelection && (
+        <SettingsError>
+          The saved model “{info.selection}” is not uniquely registered. Add it
+          under the OpenAI-compatible provider, then choose it here.
+        </SettingsError>
+      )}
+    </SettingsSection>
+  );
+}
+
+/**
+ * What "automatic" currently means, named rather than implied.
+ *
+ * The server resolves a role against provider readiness, so only it can say
+ * which model the choice lands on — including that it lands on nothing.
+ */
+function automaticLabel(
+  info: ModelRoleInfo,
+  resolved: ModelInfo | null,
+): string {
+  if (resolved) return `Automatic — ${resolved.display_name}`;
+  if (info.resolved_key) return `Automatic — ${info.resolved_key}`;
+  return "Automatic — none available";
 }
