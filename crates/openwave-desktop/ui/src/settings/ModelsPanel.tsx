@@ -11,12 +11,23 @@ import {
   providerLabel,
 } from "../ModelSelection";
 import {
-  SETTINGS_SELECT_CLASS,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   SettingsError,
   SettingsField,
   SettingsPanel,
   SettingsSection,
 } from "./primitives";
+
+// Radix Select reserves the empty string for its placeholder, so the
+// "Server default" choice needs a sentinel that no catalog key can collide
+// with (keys are always `provider::id`).
+const SERVER_DEFAULT = "__server_default__";
 
 export function ModelsPanel({
   client,
@@ -102,55 +113,63 @@ export function ModelsPanel({
         <>
           <SettingsSection title="Default model">
             <SettingsField label="Provider">
-              <select
-                className={SETTINGS_SELECT_CLASS}
+              <Select
                 value={provider ?? ""}
                 disabled={saving || providers.length === 0}
-                onChange={(event) =>
-                  setProvider((event.target.value || null) as ProviderKind | null)
+                onValueChange={(value) =>
+                  setProvider((value || null) as ProviderKind | null)
                 }
               >
-                {providers.length === 0 && (
-                  <option value="">No providers configured</option>
-                )}
-                {providers.map((kind) => {
-                  const usable = models.some(
-                    (model) => model.provider === kind && model.available,
-                  );
-                  return (
-                    <option key={kind} value={kind}>
-                      {providerLabel(kind)}
-                      {usable ? "" : " — unavailable"}
-                    </option>
-                  );
-                })}
-              </select>
+                <SelectTrigger aria-label="Provider">
+                  <SelectValue placeholder="No providers configured" />
+                </SelectTrigger>
+                <SelectContent>
+                  {providers.map((kind) => {
+                    const usable = models.some(
+                      (model) => model.provider === kind && model.available,
+                    );
+                    return (
+                      <SelectItem key={kind} value={kind}>
+                        {providerLabel(kind)}
+                        {usable ? "" : " — unavailable"}
+                      </SelectItem>
+                    );
+                  })}
+                </SelectContent>
+              </Select>
             </SettingsField>
             <SettingsField
               label="Model"
               hint="Unavailable models remain visible for clarity but cannot be selected until their provider is enabled and credentialed."
             >
-              <select
-                className={SETTINGS_SELECT_CLASS}
-                value={selectedValue}
+              <Select
+                value={selectedValue === "" ? SERVER_DEFAULT : selectedValue}
                 disabled={saving || provider === null}
-                onChange={(event) => {
-                  const value = event.target.value as ModelSelectionKey | "";
-                  void save(value || null);
+                onValueChange={(value) => {
+                  void save(
+                    value === SERVER_DEFAULT
+                      ? null
+                      : (value as ModelSelectionKey),
+                  );
                 }}
               >
-                <option value="">Server default</option>
-                {providerModels.map((model) => (
-                  <option
-                    key={model.key}
-                    value={model.key}
-                    disabled={!model.available}
-                  >
-                    {model.display_name}
-                    {model.available ? "" : " — unavailable"}
-                  </option>
-                ))}
-              </select>
+                <SelectTrigger aria-label="Model">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={SERVER_DEFAULT}>Server default</SelectItem>
+                  {providerModels.map((model) => (
+                    <SelectItem
+                      key={model.key}
+                      value={model.key}
+                      disabled={!model.available}
+                    >
+                      {model.display_name}
+                      {model.available ? "" : " — unavailable"}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </SettingsField>
             {legacyUnavailable && (
               <SettingsError>

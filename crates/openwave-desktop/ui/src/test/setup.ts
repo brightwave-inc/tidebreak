@@ -12,6 +12,24 @@ if (
   Element.prototype.scrollTo = () => {};
 }
 
+// jsdom implements none of the Pointer Capture API nor scrollIntoView, which
+// Radix's Select and other pointer-driven primitives call while opening. Stubs
+// keep those components interactive under test.
+if (typeof Element !== "undefined") {
+  if (typeof Element.prototype.hasPointerCapture !== "function") {
+    Element.prototype.hasPointerCapture = () => false;
+  }
+  if (typeof Element.prototype.setPointerCapture !== "function") {
+    Element.prototype.setPointerCapture = () => {};
+  }
+  if (typeof Element.prototype.releasePointerCapture !== "function") {
+    Element.prototype.releasePointerCapture = () => {};
+  }
+  if (typeof Element.prototype.scrollIntoView !== "function") {
+    Element.prototype.scrollIntoView = () => {};
+  }
+}
+
 // jsdom has no ResizeObserver. A stub that never reports a size is as good as
 // no stub for anything that lays out from measurements, so this one answers
 // once per observed element with a plausible viewport-sized box.

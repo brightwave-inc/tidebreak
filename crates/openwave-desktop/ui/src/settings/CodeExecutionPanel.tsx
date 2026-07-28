@@ -8,7 +8,13 @@ import type {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
-  SETTINGS_SELECT_CLASS,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   SettingsError,
   SettingsField,
   SettingsPanel,
@@ -17,6 +23,10 @@ import {
 
 const MIN_CODE_EXECUTION_TIMEOUT_MS = 1_000;
 const MAX_CODE_EXECUTION_TIMEOUT_MS = 120_000;
+
+// Radix Select reserves the empty string, so "Disabled" (no provider) rides on
+// a sentinel value the wire never carries.
+const NO_PROVIDER = "__disabled__";
 
 export function CodeExecutionPanel({ client }: { client: ApiClient }) {
   const [config, setConfig] = useState<CodeExecutionConfigInfo | null>(null);
@@ -105,19 +115,25 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
 
           <SettingsSection>
             <SettingsField label="Provider">
-              <select
-                className={SETTINGS_SELECT_CLASS}
-                value={provider}
+              <Select
+                value={provider === "" ? NO_PROVIDER : provider}
                 disabled={saving}
-                onChange={(event) =>
+                onValueChange={(value) =>
                   setProvider(
-                    event.target.value as CodeExecutionProviderKind | "",
+                    value === NO_PROVIDER
+                      ? ""
+                      : (value as CodeExecutionProviderKind),
                   )
                 }
               >
-                <option value="">Disabled</option>
-                <option value="local">Local native sandbox</option>
-              </select>
+                <SelectTrigger aria-label="Provider">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NO_PROVIDER}>Disabled</SelectItem>
+                  <SelectItem value="local">Local native sandbox</SelectItem>
+                </SelectContent>
+              </Select>
             </SettingsField>
 
             <SettingsField

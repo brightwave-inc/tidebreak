@@ -5,6 +5,7 @@ import type { ApiClient, GatewayApps, GatewayStatus } from "../api";
 import { openExternal } from "../host";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import {
   SettingsError,
   SettingsField,
@@ -140,15 +141,21 @@ export function GatewayPanel({
       busy={working}
     >
       <SettingsSection>
-        <label className="flex items-center gap-2 text-sm font-medium">
-          <input
-            type="checkbox"
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex-1">
+            <p className="text-sm font-bold">Use Model Gateway</p>
+            <p className="text-xs text-muted-foreground">
+              Route models and governed tools through a signed-in gateway. Off,
+              OpenWave stays fully local.
+            </p>
+          </div>
+          <Switch
+            aria-label="Use Model Gateway"
             checked={status.enabled}
             disabled={working}
-            onChange={(event) => void save(event.target.checked)}
+            onCheckedChange={(checked) => void save(checked)}
           />
-          Use Model Gateway
-        </label>
+        </div>
 
         <SettingsField
           label="Gateway URL"

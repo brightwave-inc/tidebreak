@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ApiClient, ModelInfo } from "../api";
 import { ModelsPanel } from "./ModelsPanel";
@@ -45,25 +46,39 @@ describe("ModelsPanel", () => {
       has_api_key: true,
     });
     const client = { getSettings, putSettings } as unknown as ApiClient;
+    const user = userEvent.setup();
 
     render(<ModelsPanel client={client} models={models} />);
 
-    const provider = await screen.findByLabelText("Provider");
-    await waitFor(() => expect(provider).toHaveValue("openai"));
-    const model = screen.getAllByRole("combobox")[1];
-    expect(model).toHaveValue("openai::gpt-4o");
-    expect(screen.getByText("GPT-4o")).toBeInTheDocument();
+    // The saved bare id resolves to its provider and canonical model.
+    const provider = await screen.findByRole("combobox", { name: "Provider" });
+    await waitFor(() => expect(provider).toHaveTextContent("OpenAI"));
+    expect(
+      screen.getByRole("combobox", { name: "Model" }),
+    ).toHaveTextContent("GPT-4o");
 
-    fireEvent.change(provider, { target: { value: "anthropic" } });
+    // Switching provider alone must not persist anything.
+    await user.click(provider);
+    await user.click(
+      screen.getByRole("option", { name: "Anthropic — unavailable" }),
+    );
     expect(putSettings).not.toHaveBeenCalled();
-    const unavailable = screen.getByRole("option", {
-      name: "Claude Opus 4.8 — unavailable",
-    });
-    expect(unavailable).toBeDisabled();
 
-    fireEvent.change(model, {
-      target: { value: "" },
-    });
-    await waitFor(() => expect(putSettings).toHaveBeenCalledWith({ model: null }));
+    // That provider's only model is unavailable and cannot be chosen.
+    await user.click(screen.getByRole("combobox", { name: "Model" }));
+    expect(
+      screen.getByRole("option", { name: "Claude Opus 4.8 — unavailable" }),
+    ).toHaveAttribute("aria-disabled", "true");
+    await user.keyboard("{Escape}");
+
+    // Choosing a model — here the server default over the migrated GPT-4o —
+    // is what persists.
+    await user.click(provider);
+    await user.click(screen.getByRole("option", { name: "OpenAI" }));
+    await user.click(screen.getByRole("combobox", { name: "Model" }));
+    await user.click(screen.getByRole("option", { name: "Server default" }));
+    await waitFor(() =>
+      expect(putSettings).toHaveBeenCalledWith({ model: null }),
+    );
   });
 });
