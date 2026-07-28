@@ -59,6 +59,25 @@ describe("MessageMarkdown", () => {
     expect(markup).toContain("<strong>1</strong>");
   });
 
+  it("renders display math through KaTeX rather than as literal source", () => {
+    const markup = renderToStaticMarkup(
+      <MessageMarkdown>{"$$E = mc^2$$"}</MessageMarkdown>,
+    );
+
+    // KaTeX emits its own markup; the raw delimiters must not survive.
+    expect(markup).toContain("katex");
+    expect(markup).not.toContain("$$E = mc^2$$");
+  });
+
+  it("normalizes bracketed LaTeX delimiters into rendered math", () => {
+    const markup = renderToStaticMarkup(
+      <MessageMarkdown>{"\\[a^2 + b^2 = c^2\\]"}</MessageMarkdown>,
+    );
+
+    expect(markup).toContain("katex");
+    expect(markup).not.toContain("\\[");
+  });
+
   it("renders single newlines as line breaks without splitting paragraphs", () => {
     const markup = renderToStaticMarkup(
       <MessageMarkdown>{"first line\nsecond line"}</MessageMarkdown>,

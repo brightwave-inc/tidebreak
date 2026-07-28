@@ -3,7 +3,7 @@ import { ChevronDown } from "lucide-react";
 import { toolCallPresentation, type ToolCallStatus } from "./ToolCallCard";
 import { ToolIcon } from "./ToolIcon";
 import { ToolStatusIcon } from "./ToolStatusIcon";
-import { useStreamingTypewriter } from "./useStreamingTypewriter";
+import { useTypewriterOnce } from "./useTypewriterOnce";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -49,10 +49,10 @@ export function ToolActivityGroup({
   const contentId = `tool-activity-group-${groupIndex}`;
   const safeActivities = normalizeActivities(activities);
   const summary = toolActivityGroupPresentation(safeActivities);
-  const displayedSummary = useStreamingTypewriter(
-    summary.label,
-    summary.inProgress,
-  );
+  // The phase line types itself out once when the phase first goes live, then
+  // updates instantly as calls settle and nudge the wording — re-typing on
+  // every change reads as a stutter, and a settled phase should never animate.
+  const displayedSummary = useTypewriterOnce(summary.label, summary.inProgress);
 
   // A phase can be all cards and no rail — every call in it parked on an
   // approval, say. The cards are the part that must never go missing, so they
@@ -111,7 +111,6 @@ export function ToolActivityGroup({
             <ToolActivityRow
               key={activity.id ?? `position:${index}`}
               activity={activity}
-              live={summary.inProgress}
             />
           ))}
         </div>
@@ -121,15 +120,8 @@ export function ToolActivityGroup({
   );
 }
 
-function ToolActivityRow({
-  activity,
-  live,
-}: {
-  activity: ToolActivity;
-  live: boolean;
-}) {
+function ToolActivityRow({ activity }: { activity: ToolActivity }) {
   const presentation = toolCallPresentation(activity.name, activity.status);
-  const displayedTitle = useStreamingTypewriter(presentation.title, live);
 
   return (
     <div className="grid gap-1" role="listitem">
@@ -144,14 +136,15 @@ function ToolActivityRow({
           <ToolIcon name={activity.name} />
         </div>
         <ToolStatusIcon tone={presentation.tone} />
+        {/* Row titles do not type — only the phase line does. A running row
+            keeps the pulse so the rail still shows where the work is. */}
         <p
-          aria-label={presentation.title}
           className={cn(
             "whitespace-nowrap",
             presentation.tone === "running" && "animate-pulse",
           )}
         >
-          <span aria-hidden="true">{displayedTitle}</span>
+          {presentation.title}
         </p>
       </div>
     </div>

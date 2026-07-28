@@ -32,6 +32,7 @@ import type { TranscriptImageAttachment } from "./ImageAttachments";
 import { TranscriptImageAttachments } from "./TranscriptImageAttachments";
 import { BackgroundAgentList } from "./BackgroundAgentList";
 import { useSourceNav } from "./panel/SourceNav";
+import { useStreamingTypewriter } from "./useStreamingTypewriter";
 import { Skeleton } from "./components/ui/skeleton";
 
 export type ChatMessage =
@@ -557,6 +558,23 @@ function surfacedCards(
 }
 
 /**
+ * Assistant prose driven by the typewriter: while the bubble is the live
+ * streaming turn its text is typed in, and a settled or rehydrated message
+ * renders at once. Block-level memoization inside {@link MessageMarkdown} keeps
+ * each tick's re-parse confined to the trailing block.
+ */
+function AssistantMessageBody({
+  text,
+  streaming,
+}: {
+  text: string;
+  streaming: boolean;
+}) {
+  const displayed = useStreamingTypewriter(text, streaming);
+  return <MessageMarkdown>{displayed}</MessageMarkdown>;
+}
+
+/**
  * Memoized row: settled messages keep referential identity across reducer
  * transitions, so during streaming only the live assistant bubble (whose
  * message object changes each token) re-renders.
@@ -596,7 +614,9 @@ function MessageBubbleImpl({
 
     return (
       <article className="message message-assistant" aria-label="Assistant">
-        {message.text && <MessageMarkdown>{message.text}</MessageMarkdown>}
+        {message.text && (
+          <AssistantMessageBody text={message.text} streaming={busy} />
+        )}
         <AssistantSources
           sources={message.sources}
           onOpenSource={
