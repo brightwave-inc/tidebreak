@@ -1,7 +1,8 @@
 # External MCP servers
 
-OpenWave connects to MCP servers over two transports: a local stdio child
-process or a remote Streamable HTTP endpoint. In the desktop app, open
+OpenWave connects to MCP servers over three transports: a local stdio child
+process, a remote Streamable HTTP endpoint, or a model-gateway MCP endpoint
+bound to the signed-in gateway session. In the desktop app, open
 **Settings → MCP servers**, add a definition, pick its transport, and choose
 **Save and verify**. For a stdio server, OpenWave starts the executable
 directly with the argument array shown in the form; it never joins the fields
@@ -17,7 +18,14 @@ Each server has:
     working directory, optional literal **non-secret** environment values, and
     optional `env_from` names selected from the OpenWave host environment; or
   - **HTTP** — an `http`/`https` URL and an optional bearer-token variable
-    name selected from the OpenWave host environment;
+    name selected from the OpenWave host environment; or
+  - **gateway** — the slug of a model-gateway MCP endpoint
+    (`gateway_endpoint`). The endpoint URL and a short-lived `mcp:<slug>`
+    bearer are resolved from the signed-in gateway session at every
+    connection; nothing is copied, selected by name, or stored. Mount these
+    from **Settings → Model Gateway → Connected apps** with a toggle. Signed
+    out, the mount degrades to a "sign in to reconnect" diagnostic and
+    recovers on the next reconnect after sign-in;
 - a request timeout from 1 to 3,600,000 milliseconds; and
 - an enabled switch.
 

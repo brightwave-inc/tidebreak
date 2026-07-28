@@ -93,8 +93,9 @@ pub(crate) struct McpServersConfig {
     pub(crate) servers: Vec<McpServerDefinition>,
 }
 
-/// One external MCP server definition: a local stdio process (`command`) or a
-/// remote Streamable HTTP endpoint (`url`). Exactly one of the two is set;
+/// One external MCP server definition: a local stdio process (`command`), a
+/// remote Streamable HTTP endpoint (`url`), or a gateway-managed endpoint
+/// (`gateway_endpoint`). Exactly one of the three is set;
 /// [`validate_servers`] enforces that process fields stay with `command` and
 /// `bearer_token_env` stays with `url`.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
@@ -120,6 +121,12 @@ pub(crate) struct McpServerDefinition {
     /// resolved at connect time and never enters this type.
     #[serde(default)]
     pub(crate) bearer_token_env: Option<String>,
+    /// Endpoint slug of a gateway MCP endpoint, mounted through the signed-in
+    /// model-gateway session. The endpoint URL and its short-lived bearer are
+    /// resolved from the session at every connection and never enter this
+    /// type.
+    #[serde(default)]
+    pub(crate) gateway_endpoint: Option<String>,
     #[serde(default = "default_request_timeout_ms")]
     pub(crate) request_timeout_ms: u64,
     #[serde(default = "enabled_by_default")]
@@ -138,10 +145,28 @@ impl std::fmt::Debug for McpServerDefinition {
             .field("cwd", &self.cwd)
             .field("url", &self.url)
             .field("bearer_token_env", &self.bearer_token_env)
+            .field("gateway_endpoint", &self.gateway_endpoint)
             .field("request_timeout_ms", &self.request_timeout_ms)
             .field("enabled", &self.enabled)
             .finish()
     }
+}
+
+/// Resolves gateway-managed MCP endpoints at the connection boundary: the
+/// endpoint URL and a fresh session bearer for `mcp:<slug>`. Implemented by
+/// the gateway runtime over the signed-in session; token renewal stays inside
+/// the connector's rotation lock and no token value is ever stored here.
+#[async_trait::async_trait]
+pub(crate) trait GatewayEndpoints: Send + Sync {
+    async fn endpoint(&self, slug: &str) -> Result<GatewayEndpointAccess>;
+}
+
+/// One resolved gateway endpoint: where to connect and the bearer to present.
+/// Deliberately no `Debug`/`Serialize`: the token exists only on the path
+/// from resolution into the transport's prebuilt header.
+pub(crate) struct GatewayEndpointAccess {
+    pub(crate) url: String,
+    pub(crate) bearer_token: String,
 }
 
 impl McpServerDefinition {
@@ -171,7 +196,21 @@ impl McpServerDefinition {
         Ok(command)
     }
 
-    async fn connect(&self) -> Result<McpClient> {
+    async fn connect(&self, gateway: &dyn GatewayEndpoints) -> Result<McpClient> {
+        if let Some(slug) = &self.gateway_endpoint {
+            // Resolved per connection: a reconnect always presents a token
+            // that is fresh at that moment, so expiry is survived by the
+            // ordinary supervision/reconnect cycle.
+            let access = gateway.endpoint(slug).await?;
+            return McpClient::connect_http_with_timeouts(
+                self.name.clone(),
+                &access.url,
+                Some(&access.bearer_token),
+                INITIALIZATION_TIMEOUT,
+                Duration::from_millis(self.request_timeout_ms),
+            )
+            .await;
+        }
         if let Some(url) = &self.url {
             let bearer_token = self.resolve_bearer_token()?;
             return McpClient::connect_http_with_timeouts(
@@ -198,8 +237,11 @@ impl McpServerDefinition {
     /// re-fetchable templates, not evidence, so a reconnect refreshes them and
     /// a fetch failure just leaves that view unavailable (the transcript card
     /// degrades; tools are unaffected).
-    async fn connect_with_views(&self) -> Result<(McpClient, HashMap<String, UiViewDocument>)> {
-        let client = self.connect().await?;
+    async fn connect_with_views(
+        &self,
+        gateway: &dyn GatewayEndpoints,
+    ) -> Result<(McpClient, HashMap<String, UiViewDocument>)> {
+        let client = self.connect(gateway).await?;
         let uris: HashSet<String> = client
             .tools()
             .filter_map(|spec| client.ui_resource_uri(&spec.name))
@@ -314,13 +356,19 @@ pub(crate) struct McpRuntime {
     state: Mutex<RuntimeState>,
     mutation: Mutex<()>,
     store: Arc<dyn Store>,
+    /// Resolves gateway-managed endpoints at every connection.
+    gateway: Arc<dyn GatewayEndpoints>,
     next_epoch: AtomicU64,
     /// Outstanding single-use view-frame tokens: token → (server, uri, minted).
     view_frame_tokens: Mutex<HashMap<uuid::Uuid, (String, String, std::time::Instant)>>,
 }
 
 impl McpRuntime {
-    pub(crate) fn new(base_tools: Arc<ToolRegistry>, store: Arc<dyn Store>) -> Self {
+    pub(crate) fn new(
+        base_tools: Arc<ToolRegistry>,
+        store: Arc<dyn Store>,
+        gateway: Arc<dyn GatewayEndpoints>,
+    ) -> Self {
         Self {
             base_tools: (*base_tools).clone(),
             tools: RwLock::new(base_tools),
@@ -330,6 +378,7 @@ impl McpRuntime {
             }),
             mutation: Mutex::new(()),
             store,
+            gateway,
             next_epoch: AtomicU64::new(1),
             view_frame_tokens: Mutex::new(HashMap::new()),
         }
@@ -461,21 +510,22 @@ impl McpRuntime {
         persist: bool,
     ) -> Result<()> {
         validate_servers(&definitions)?;
+        let gateway = &*self.gateway;
         let mut servers = HashMap::new();
         let connections = join_all(definitions.iter().map(|definition| async move {
             if definition.enabled {
-                definition.connect_with_views().await.map(Some)
+                definition.connect_with_views(gateway).await.map(Some)
             } else {
                 Ok(None)
             }
         }))
         .await;
         for (definition, connection) in definitions.iter().zip(connections) {
-            let Some((client, ui_views)) = connection.map_err(|_| {
+            let Some((client, ui_views)) = connection.map_err(|error| {
                 AgentError::config(format!(
                     "external MCP server {} failed to start: {}",
                     definition.name,
-                    connection_diagnostic(definition)
+                    connection_diagnostic(definition, &error)
                 ))
             })?
             else {
@@ -521,10 +571,11 @@ impl McpRuntime {
     }
 
     async fn replace_permissive(&self, definitions: Vec<McpServerDefinition>) {
+        let gateway = &*self.gateway;
         let mut servers = HashMap::new();
         let connections = join_all(definitions.iter().map(|definition| async move {
             if definition.enabled {
-                definition.connect_with_views().await.map(Some)
+                definition.connect_with_views(gateway).await.map(Some)
             } else {
                 Ok(None)
             }
@@ -550,10 +601,10 @@ impl McpRuntime {
                     reconnect_lock: Arc::new(Mutex::new(())),
                     ui_views,
                 },
-                Err(_) => ManagedServer {
+                Err(error) => ManagedServer {
                     client: None,
                     health: McpHealth::Degraded,
-                    diagnostic: Some(connection_diagnostic(definition)),
+                    diagnostic: Some(connection_diagnostic(definition, &error)),
                     reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
                     epoch: self.fresh_epoch(),
                     reconnect_lock: Arc::new(Mutex::new(())),
@@ -647,7 +698,7 @@ impl McpRuntime {
             server.diagnostic = None;
             (definition, server.epoch)
         };
-        match definition.connect_with_views().await {
+        match definition.connect_with_views(&*self.gateway).await {
             Ok((client, ui_views)) => {
                 let mut state = self.state.lock().await;
                 // A settings replacement may have won while the process started.
@@ -688,8 +739,8 @@ impl McpRuntime {
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(registry);
                 Ok(self.info_locked(&state))
             }
-            Err(_) => {
-                let diagnostic = connection_diagnostic(&definition);
+            Err(error) => {
+                let diagnostic = connection_diagnostic(&definition, &error);
                 let mut state = self.state.lock().await;
                 if let Some(server) = state
                     .servers
@@ -826,20 +877,14 @@ fn validate_servers(servers: &[McpServerDefinition]) -> Result<()> {
     let mut names = HashSet::new();
     for server in servers {
         validate_name(&server.name)?;
-        match (&server.command, &server.url) {
-            (Some(_), Some(_)) => {
+        match (&server.command, &server.url, &server.gateway_endpoint) {
+            (None, None, None) => {
                 return Err(server_error(
                     &server.name,
-                    "must configure either command or url, not both",
+                    "must configure a command, a url, or a gateway endpoint",
                 ));
             }
-            (None, None) => {
-                return Err(server_error(
-                    &server.name,
-                    "must configure a command or a url",
-                ));
-            }
-            (Some(command), None) => {
+            (Some(command), None, None) => {
                 validate_process_string(&server.name, "command", command)?;
                 if command.is_empty() {
                     return Err(server_error(&server.name, "command must not be empty"));
@@ -851,31 +896,31 @@ fn validate_servers(servers: &[McpServerDefinition]) -> Result<()> {
                     ));
                 }
             }
-            (None, Some(url)) => {
+            (None, Some(url), None) => {
                 validate_process_string(&server.name, "url", url)?;
                 openwave_mcp::validate_http_url(url)
                     .map_err(|error| server_error(&server.name, error))?;
-                if !server.args.is_empty() {
-                    return Err(server_error(
-                        &server.name,
-                        "args apply only to command servers",
-                    ));
-                }
-                if !server.env.is_empty() || !server.env_from.is_empty() {
-                    return Err(server_error(
-                        &server.name,
-                        "process environment applies only to command servers",
-                    ));
-                }
-                if server.cwd.is_some() {
-                    return Err(server_error(
-                        &server.name,
-                        "cwd applies only to command servers",
-                    ));
-                }
+                validate_no_process_fields(server)?;
                 if let Some(bearer_name) = &server.bearer_token_env {
                     validate_environment_name(&server.name, bearer_name)?;
                 }
+            }
+            (None, None, Some(slug)) => {
+                validate_gateway_endpoint_slug(&server.name, slug)?;
+                validate_no_process_fields(server)?;
+                if server.bearer_token_env.is_some() {
+                    return Err(server_error(
+                        &server.name,
+                        "bearer_token_env applies only to url servers; a gateway \
+                         endpoint's bearer comes from the signed-in session",
+                    ));
+                }
+            }
+            _ => {
+                return Err(server_error(
+                    &server.name,
+                    "must configure exactly one of command, url, or gateway endpoint",
+                ));
             }
         }
         if server.args.len() > MAX_ARGS {
@@ -926,6 +971,48 @@ fn validate_servers(servers: &[McpServerDefinition]) -> Result<()> {
     Ok(())
 }
 
+/// Remote transports (url and gateway endpoint) never spawn a child, so no
+/// process field may accompany them.
+fn validate_no_process_fields(server: &McpServerDefinition) -> Result<()> {
+    if !server.args.is_empty() {
+        return Err(server_error(
+            &server.name,
+            "args apply only to command servers",
+        ));
+    }
+    if !server.env.is_empty() || !server.env_from.is_empty() {
+        return Err(server_error(
+            &server.name,
+            "process environment applies only to command servers",
+        ));
+    }
+    if server.cwd.is_some() {
+        return Err(server_error(
+            &server.name,
+            "cwd applies only to command servers",
+        ));
+    }
+    Ok(())
+}
+
+/// The gateway's endpoint-slug contract: 1–127 bytes of ASCII alphanumerics,
+/// `-`, or `_`. Mirrored here so an invalid slug is rejected when the
+/// configuration is saved, not when a connection first resolves it.
+fn validate_gateway_endpoint_slug(server_name: &str, slug: &str) -> Result<()> {
+    if slug.is_empty()
+        || slug.len() > 127
+        || !slug
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(server_error(
+            server_name,
+            "gateway endpoint must be 1-127 ASCII letters, digits, '_' or '-'",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_name(name: &str) -> Result<()> {
     if name.is_empty()
         || name.len() > MAX_SERVER_NAME_BYTES
@@ -968,7 +1055,15 @@ fn validate_environment_name(server_name: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
-fn connection_diagnostic(definition: &McpServerDefinition) -> String {
+fn connection_diagnostic(definition: &McpServerDefinition, error: &AgentError) -> String {
+    if definition.gateway_endpoint.is_some() {
+        if openwave_connectors::is_sign_in_required(error) {
+            return "Sign in to the model gateway to reconnect this server.".to_string();
+        }
+        return "Could not connect to this gateway endpoint. Check the gateway connection \
+                and your entitlements."
+            .to_string();
+    }
     if let Some(name) = definition
         .env_from
         .iter()
@@ -999,6 +1094,18 @@ mod tests {
         Ok(ConfiguredMcpServers(config.servers))
     }
 
+    /// The signed-out stand-in: every resolution demands a session.
+    struct NoGateway;
+
+    #[async_trait::async_trait]
+    impl GatewayEndpoints for NoGateway {
+        async fn endpoint(&self, _slug: &str) -> Result<GatewayEndpointAccess> {
+            Err(AgentError::Authentication(
+                "gateway sign-in required: no gateway session is stored".to_string(),
+            ))
+        }
+    }
+
     fn disabled_definition(name: &str, command: &str) -> McpServerDefinition {
         McpServerDefinition {
             name: name.to_string(),
@@ -1009,6 +1116,7 @@ mod tests {
             cwd: None,
             url: None,
             bearer_token_env: None,
+            gateway_endpoint: None,
             request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             enabled: false,
         }
@@ -1024,12 +1132,35 @@ mod tests {
             cwd: None,
             url: Some(url.to_string()),
             bearer_token_env: None,
+            gateway_endpoint: None,
+            request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
+            enabled: true,
+        }
+    }
+
+    fn gateway_definition(name: &str, slug: &str) -> McpServerDefinition {
+        McpServerDefinition {
+            name: name.to_string(),
+            command: None,
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            env_from: Vec::new(),
+            cwd: None,
+            url: None,
+            bearer_token_env: None,
+            gateway_endpoint: Some(slug.to_string()),
             request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             enabled: true,
         }
     }
 
     async fn test_runtime() -> (Arc<McpRuntime>, Arc<dyn Store>, tempfile::TempDir) {
+        test_runtime_with_gateway(Arc::new(NoGateway)).await
+    }
+
+    async fn test_runtime_with_gateway(
+        gateway: Arc<dyn GatewayEndpoints>,
+    ) -> (Arc<McpRuntime>, Arc<dyn Store>, tempfile::TempDir) {
         let directory = tempfile::tempdir().unwrap();
         let store: Arc<dyn Store> = Arc::new(
             DbStore::connect(&format!(
@@ -1043,6 +1174,7 @@ mod tests {
             Arc::new(McpRuntime::new(
                 Arc::new(ToolRegistry::new()),
                 store.clone(),
+                gateway,
             )),
             store,
             directory,
@@ -1182,7 +1314,7 @@ mod tests {
             }}]}}"#
         ))
         .unwrap();
-        let error = config.0[0].connect().await.err().unwrap();
+        let error = config.0[0].connect(&NoGateway).await.err().unwrap();
         assert!(error.to_string().contains(MISSING));
         assert!(error.to_string().contains("is not set"));
         assert!(!error.to_string().contains("secret-value"));
@@ -1196,13 +1328,14 @@ mod tests {
             r#"{{"servers":[{{"name":"docs","command":"/bin/docs","env_from":["{MISSING}"]}}]}}"#
         ))
         .unwrap();
-        let missing = connection_diagnostic(&config.0[0]);
+        let failure = AgentError::config("connect failed");
+        let missing = connection_diagnostic(&config.0[0], &failure);
         assert!(missing.contains(MISSING));
         assert!(!missing.contains('\n'));
 
         let generic = parse(r#"{"servers":[{"name":"docs","command":"/bin/docs"}]}"#).unwrap();
         assert_eq!(
-            connection_diagnostic(&generic.0[0]),
+            connection_diagnostic(&generic.0[0], &failure),
             "Could not initialize this server. Check its executable, arguments, and working directory."
         );
     }
@@ -1359,15 +1492,22 @@ mod tests {
 
     #[test]
     fn each_server_is_exactly_one_transport() {
-        let both = parse(
-            r#"{"servers":[{"name":"docs","command":"/bin/docs","url":"http://127.0.0.1/mcp"}]}"#,
-        )
-        .err()
-        .unwrap();
-        assert!(both.to_string().contains("not both"));
+        for extra in [
+            r#""url":"http://127.0.0.1/mcp""#,
+            r#""gateway_endpoint":"tools""#,
+        ] {
+            let both = parse(&format!(
+                r#"{{"servers":[{{"name":"docs","command":"/bin/docs",{extra}}}]}}"#
+            ))
+            .err()
+            .unwrap();
+            assert!(both.to_string().contains("exactly one"), "{extra}: {both}");
+        }
 
         let neither = parse(r#"{"servers":[{"name":"docs"}]}"#).err().unwrap();
-        assert!(neither.to_string().contains("command or a url"));
+        assert!(neither
+            .to_string()
+            .contains("command, a url, or a gateway endpoint"));
     }
 
     #[test]
@@ -1385,13 +1525,66 @@ mod tests {
             (r#""env_from":["TOKEN"]"#, "environment applies only"),
             (r#""cwd":"/srv""#, "cwd applies only"),
         ] {
+            for transport in [
+                r#""url":"http://127.0.0.1/mcp""#,
+                r#""gateway_endpoint":"tools""#,
+            ] {
+                let error = parse(&format!(
+                    r#"{{"servers":[{{"name":"docs",{transport},{field}}}]}}"#
+                ))
+                .err()
+                .unwrap();
+                assert!(
+                    error.to_string().contains(fragment),
+                    "{transport} {field}: {error}"
+                );
+            }
+        }
+
+        // A gateway endpoint's bearer comes from the session, never from a
+        // selected environment variable.
+        let bearer_on_gateway = parse(
+            r#"{"servers":[{"name":"docs","gateway_endpoint":"tools","bearer_token_env":"TOKEN"}]}"#,
+        )
+        .err()
+        .unwrap();
+        assert!(bearer_on_gateway.to_string().contains("signed-in session"));
+    }
+
+    #[test]
+    fn gateway_endpoint_slugs_follow_the_gateway_contract() {
+        for slug in ["tools", "example-security_2"] {
+            parse(&format!(
+                r#"{{"servers":[{{"name":"docs","gateway_endpoint":"{slug}"}}]}}"#
+            ))
+            .unwrap();
+        }
+        let overlong = "a".repeat(128);
+        for slug in ["", "has space", "path/../escape", "mcp:tools", &overlong] {
             let error = parse(&format!(
-                r#"{{"servers":[{{"name":"docs","url":"http://127.0.0.1/mcp",{field}}}]}}"#
+                r#"{{"servers":[{{"name":"docs","gateway_endpoint":"{slug}"}}]}}"#
             ))
             .err()
             .unwrap();
-            assert!(error.to_string().contains(fragment), "{field}: {error}");
+            assert!(
+                error.to_string().contains("gateway endpoint must be"),
+                "{slug}: {error}"
+            );
         }
+    }
+
+    #[tokio::test]
+    async fn signed_out_gateway_mounts_degrade_to_a_sign_in_diagnostic() {
+        let (runtime, _store, _directory) = test_runtime().await;
+        runtime
+            .replace_permissive(vec![gateway_definition("tools", "tools")])
+            .await;
+        let info = runtime.info().await;
+        assert_eq!(info.servers[0].health, McpHealth::Degraded);
+        assert_eq!(
+            info.servers[0].diagnostic.as_deref(),
+            Some("Sign in to the model gateway to reconnect this server.")
+        );
     }
 
     #[test]
@@ -1412,11 +1605,11 @@ mod tests {
         assert!(std::env::var_os(MISSING).is_none());
         let mut definition = http_definition("gateway", "http://127.0.0.1:1/mcp");
         definition.bearer_token_env = Some(MISSING.to_string());
-        let error = definition.connect().await.err().unwrap();
+        let error = definition.connect(&NoGateway).await.err().unwrap();
         assert!(error.to_string().contains(MISSING));
         assert!(error.to_string().contains("is not set"));
 
-        let diagnostic = connection_diagnostic(&definition);
+        let diagnostic = connection_diagnostic(&definition, &error);
         assert!(diagnostic.contains(MISSING));
         assert!(!diagnostic.contains('\n'));
     }
@@ -1424,7 +1617,7 @@ mod tests {
     #[test]
     fn http_diagnostics_are_fixed_strings_without_the_url() {
         let definition = http_definition("gateway", "http://127.0.0.1:9/mcp");
-        let diagnostic = connection_diagnostic(&definition);
+        let diagnostic = connection_diagnostic(&definition, &AgentError::config("connect failed"));
         assert_eq!(
             diagnostic,
             "Could not connect to this server. Check its URL and credentials."

@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ExternalLink, LogOut, RefreshCw } from "lucide-react";
-import type { ApiClient, GatewayApps, GatewayStatus } from "../api";
+import type {
+  ApiClient,
+  GatewayApps,
+  GatewayStatus,
+  McpServerDefinition,
+  McpServerInfo,
+} from "../api";
 import { openExternal } from "../host";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,6 +20,30 @@ import {
 } from "./primitives";
 
 const SIGN_IN_POLL_MS = 2_000;
+const DEFAULT_MOUNT_TIMEOUT_MS = 60_000;
+
+function definitionOf(server: McpServerInfo): McpServerDefinition {
+  const { health: _, tool_count: __, diagnostic: ___, ...value } = server;
+  return value;
+}
+
+/** A fresh gateway mount: everything comes from the session except the name,
+ * which doubles as the tool namespace. */
+function mountDefinition(slug: string): McpServerDefinition {
+  return {
+    name: slug,
+    command: null,
+    args: [],
+    env: {},
+    env_from: [],
+    cwd: null,
+    url: null,
+    bearer_token_env: null,
+    gateway_endpoint: slug,
+    request_timeout_ms: DEFAULT_MOUNT_TIMEOUT_MS,
+    enabled: true,
+  };
+}
 
 /** Native opener first; `window.open` only works in a plain browser tab. */
 async function openSignInPage(url: string) {
@@ -40,6 +70,7 @@ export function GatewayPanel({
 }) {
   const [status, setStatus] = useState<GatewayStatus | null>(null);
   const [apps, setApps] = useState<GatewayApps | null>(null);
+  const [mcpServers, setMcpServers] = useState<McpServerInfo[] | null>(null);
   const [baseUrl, setBaseUrl] = useState("");
   const [dirty, setDirty] = useState(false);
   const [working, setWorking] = useState(false);
@@ -88,6 +119,27 @@ export function GatewayPanel({
     };
   }, [client, status?.signed_in]);
 
+  // Mount state lives in the MCP configuration; load it alongside the apps so
+  // each endpoint's toggle reflects what is actually configured.
+  useEffect(() => {
+    if (!status?.signed_in) {
+      setMcpServers(null);
+      return;
+    }
+    let cancelled = false;
+    client
+      .listMcpServers()
+      .then((next) => {
+        if (!cancelled) setMcpServers(next.servers);
+      })
+      .catch(() => {
+        if (!cancelled) setMcpServers(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, status?.signed_in]);
+
   // While the browser flow is pending, watch for its outcome.
   useEffect(() => {
     if (status?.sign_in.state !== "pending") return;
@@ -108,6 +160,21 @@ export function GatewayPanel({
     } finally {
       setWorking(false);
     }
+  }
+
+  async function setMounted(slug: string, mounted: boolean) {
+    await run(async () => {
+      // Rebuild from the live configuration, not the panel cache, so a mount
+      // toggled here never drops a server edited elsewhere in the meantime.
+      const current = (await client.listMcpServers()).servers.map(definitionOf);
+      const without = current.filter(
+        (server) => server.gateway_endpoint !== slug,
+      );
+      const next = mounted ? [...without, mountDefinition(slug)] : without;
+      const result = await client.putMcpServers(next);
+      setMcpServers(result.servers);
+      toast.success(mounted ? `Mounted ${slug}` : `Unmounted ${slug}`);
+    });
   }
 
   async function save(enabled: boolean) {
@@ -133,6 +200,9 @@ export function GatewayPanel({
 
   const pendingUrl =
     status.sign_in.state === "pending" ? status.sign_in.authorization_url : null;
+  const endpointSlugs = [
+    ...new Set(apps?.apps.flatMap((app) => app.mcp_endpoint_slugs) ?? []),
+  ];
 
   return (
     <SettingsPanel
@@ -314,6 +384,50 @@ export function GatewayPanel({
                 </li>
               ))}
             </ul>
+          )}
+
+          {endpointSlugs.length > 0 && (
+            <div className="flex flex-col gap-2">
+              <div>
+                <p className="text-sm font-bold">MCP endpoints</p>
+                <p className="text-xs text-muted-foreground">
+                  Mounted endpoints connect with your gateway session — no
+                  tokens to copy, and they reconnect after you sign back in.
+                </p>
+              </div>
+              <ul className="flex flex-col gap-2">
+                {endpointSlugs.map((slug) => {
+                  const mounted = mcpServers?.find(
+                    (server) => server.gateway_endpoint === slug,
+                  );
+                  return (
+                    <li
+                      key={slug}
+                      className="flex items-center justify-between gap-4 rounded-md border px-3 py-2 text-sm"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <code className="font-medium">{slug}</code>
+                        {mounted && (
+                          <p className="text-muted-foreground text-xs">
+                            {mounted.health === "healthy"
+                              ? `${mounted.tool_count} tool${mounted.tool_count === 1 ? "" : "s"} available to new turns.`
+                              : (mounted.diagnostic ?? mounted.health)}
+                          </p>
+                        )}
+                      </div>
+                      <Switch
+                        aria-label={`Mount ${slug}`}
+                        checked={mounted !== undefined}
+                        disabled={working || mcpServers === null}
+                        onCheckedChange={(checked) =>
+                          void setMounted(slug, checked)
+                        }
+                      />
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
           )}
         </SettingsSection>
       )}

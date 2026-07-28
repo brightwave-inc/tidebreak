@@ -327,8 +327,9 @@ export type InputModality = "text" | "image";
 export type McpHealth = "initializing" | "healthy" | "degraded" | "reconnecting" | "disabled";
 
 /**
- * One external MCP server definition: a local stdio process (`command`) or a
- * remote Streamable HTTP endpoint (`url`). Exactly one of the two is set;
+ * One external MCP server definition: a local stdio process (`command`), a
+ * remote Streamable HTTP endpoint (`url`), or a gateway-managed endpoint
+ * (`gateway_endpoint`). Exactly one of the three is set;
  * [`validate_servers`] enforces that process fields stay with `command` and
  * `bearer_token_env` stays with `url`.
  */
@@ -349,7 +350,14 @@ url: string | null,
  * Parent environment name holding the HTTP bearer token. The value is
  * resolved at connect time and never enters this type.
  */
-bearer_token_env: string | null, request_timeout_ms: number, enabled: boolean, };
+bearer_token_env: string | null, 
+/**
+ * Endpoint slug of a gateway MCP endpoint, mounted through the signed-in
+ * model-gateway session. The endpoint URL and its short-lived bearer are
+ * resolved from the session at every connection and never enter this
+ * type.
+ */
+gateway_endpoint: string | null, request_timeout_ms: number, enabled: boolean, };
 
 /**
  * One renderer-safe server projection. Resolved `env_from` values and child
@@ -372,7 +380,14 @@ url: string | null,
  * Parent environment name holding the HTTP bearer token. The value is
  * resolved at connect time and never enters this type.
  */
-bearer_token_env: string | null, request_timeout_ms: number, enabled: boolean, };
+bearer_token_env: string | null, 
+/**
+ * Endpoint slug of a gateway MCP endpoint, mounted through the signed-in
+ * model-gateway session. The endpoint URL and its short-lived bearer are
+ * resolved from the session at every connection and never enter this
+ * type.
+ */
+gateway_endpoint: string | null, request_timeout_ms: number, enabled: boolean, };
 
 export type McpServersInfo = { servers: Array<McpServerInfo>, };
 

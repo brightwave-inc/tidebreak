@@ -686,6 +686,21 @@ impl GatewayConnection {
         self.auth.apps(&token).await
     }
 
+    /// The gateway's MCP endpoint URL for `slug`, under the configured base.
+    pub fn mcp_endpoint_url(&self, slug: &str) -> Result<String> {
+        validate_mcp_endpoint_slug(slug)?;
+        self.auth
+            .endpoint(&format!("mcp/{slug}"))
+            .map(|url| url.to_string())
+    }
+
+    /// A fresh access token bound to the `mcp:<slug>` resource, from cache
+    /// when possible and via rotating refresh otherwise.
+    pub async fn mcp_access_token(&self, slug: &str) -> Result<String> {
+        validate_mcp_endpoint_slug(slug)?;
+        self.access_token(&format!("mcp:{slug}")).await
+    }
+
     /// Revoke the session at the gateway (best-effort) and always clear the
     /// local vault. A gateway that is unreachable cannot hold local sign-out
     /// hostage; its server-side session still dies at refresh-token expiry.
@@ -846,6 +861,21 @@ struct ModelListResponse {
 #[derive(Deserialize)]
 struct AppListResponse {
     apps: Vec<GatewayApp>,
+}
+
+/// The gateway's endpoint-slug contract: 1–127 bytes of ASCII alphanumerics,
+/// `-`, or `_`. Enforced here so a slug can never rewrite the request path
+/// (`/`, `..`) or the token resource string it is embedded into.
+fn validate_mcp_endpoint_slug(slug: &str) -> Result<()> {
+    if slug.is_empty()
+        || slug.len() > 127
+        || !slug
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(gateway_error("configuration", "invalid MCP endpoint slug"));
+    }
+    Ok(())
 }
 
 async fn decode_json<T: for<'de> Deserialize<'de>>(
