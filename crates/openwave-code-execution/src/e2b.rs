@@ -5,6 +5,10 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use futures::StreamExt as _;
 use openwave_core::SecretProvider;
+use openwave_egress::{
+    CidrBlock, EgressEnforcement, EgressPolicy, EnforcementException, ExceptionReach,
+    ExceptionScope,
+};
 use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 
@@ -75,6 +79,7 @@ pub struct E2BExecutionProvider {
     pool: RemoteSessionPool,
     client: Client,
     endpoints: E2BEndpoints,
+    egress: Option<EgressPolicy>,
 }
 
 #[derive(Clone)]
@@ -132,7 +137,43 @@ impl E2BExecutionProvider {
             pool,
             client,
             endpoints,
+            egress: None,
         })
+    }
+
+    /// Compile an egress policy into every sandbox this provider creates.
+    ///
+    /// Without a policy the provider keeps today's disclosed open-egress
+    /// creation. With one, sandboxes are created deny-by-default and the
+    /// allowlist becomes E2B's per-sandbox `allowOut` rules — subject to the
+    /// enforcement holes declared by [`Self::egress_enforcement`].
+    #[must_use]
+    pub fn with_egress_policy(mut self, policy: EgressPolicy) -> Self {
+        self.egress = Some(policy);
+        self
+    }
+
+    /// Host knowledge about E2B's per-sandbox network enforcement, declared
+    /// as what it actually blocks. Vendor exceptions: DNS to `8.8.8.8` stays
+    /// open regardless of policy, and domain-pattern rules are enforced only
+    /// on ports 80 and 443, so a name denied only by a domain rule may stay
+    /// reachable on other ports.
+    #[must_use]
+    pub fn egress_enforcement() -> EgressEnforcement {
+        EgressEnforcement::external(vec![
+            EnforcementException {
+                scope: ExceptionScope::Address(
+                    CidrBlock::parse("8.8.8.8/32").expect("static exception block parses"),
+                ),
+                reach: ExceptionReach::Narrow,
+                purpose: "DNS resolution",
+            },
+            EnforcementException {
+                scope: ExceptionScope::DomainRulePortLimit(vec![80, 443]),
+                reach: ExceptionReach::GeneralPurpose,
+                purpose: "domain filtering covers HTTP and HTTPS ports only",
+            },
+        ])
     }
 
     async fn create_sandbox(
@@ -143,6 +184,7 @@ impl E2BExecutionProvider {
             "{}/sandboxes",
             self.endpoints.api_base.trim_end_matches('/')
         );
+        let network = e2b_network_settings(self.egress.as_ref());
         let response = self
             .client
             .post(url)
@@ -151,7 +193,8 @@ impl E2BExecutionProvider {
                 template_id: E2B_TEMPLATE,
                 timeout: E2B_SANDBOX_TTL_SECONDS,
                 secure: true,
-                allow_internet_access: true,
+                allow_internet_access: network.allow_internet_access,
+                network: network.network,
                 metadata: HashMap::from([("openwave_workspace_id", workspace_id)]),
             })
             .send()
@@ -291,7 +334,49 @@ struct CreateSandboxRequest<'a> {
     timeout: u64,
     secure: bool,
     allow_internet_access: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    network: Option<E2BNetworkConfig>,
     metadata: HashMap<&'static str, &'a str>,
+}
+
+#[derive(Serialize)]
+struct E2BNetworkConfig {
+    #[serde(rename = "allowOut")]
+    allow_out: Vec<String>,
+}
+
+struct E2BNetworkSettings {
+    allow_internet_access: bool,
+    network: Option<E2BNetworkConfig>,
+}
+
+/// Compile the host policy into E2B's creation-time network controls. No
+/// policy keeps today's disclosed open-egress sandbox; any policy creates the
+/// sandbox deny-by-default, with allowlist entries (wildcard domains and CIDR
+/// blocks) as `allowOut` holes through the blocked default.
+fn e2b_network_settings(policy: Option<&EgressPolicy>) -> E2BNetworkSettings {
+    let Some(policy) = policy else {
+        return E2BNetworkSettings {
+            allow_internet_access: true,
+            network: None,
+        };
+    };
+    let network = match policy {
+        EgressPolicy::BlockAll => None,
+        EgressPolicy::Allowlist(allowlist) => {
+            let allow_out: Vec<String> = allowlist
+                .domains()
+                .iter()
+                .map(ToString::to_string)
+                .chain(allowlist.cidrs().iter().map(ToString::to_string))
+                .collect();
+            (!allow_out.is_empty()).then_some(E2BNetworkConfig { allow_out })
+        }
+    };
+    E2BNetworkSettings {
+        allow_internet_access: false,
+        network,
+    }
 }
 
 #[derive(Serialize)]
@@ -654,6 +739,7 @@ mod tests {
 
     async fn mock_provider(
         mode: ProcessMode,
+        egress: Option<EgressPolicy>,
     ) -> (
         E2BExecutionProvider,
         Arc<MockState>,
@@ -682,6 +768,10 @@ mod tests {
             },
         )
         .unwrap();
+        let provider = match egress {
+            Some(policy) => provider.with_egress_policy(policy),
+            None => provider,
+        };
         (provider, state, server)
     }
 
@@ -817,7 +907,7 @@ mod tests {
 
     #[tokio::test]
     async fn e2b_reuses_the_chat_sandbox_and_replays_an_exact_execution() {
-        let (provider, state, server) = mock_provider(ProcessMode::Complete).await;
+        let (provider, state, server) = mock_provider(ProcessMode::Complete, None).await;
         let first_request = request("execution-1", "workspace-1", "first");
         let first = provider.execute(first_request.clone()).await.unwrap();
         assert_eq!(first.provider, CodeExecutionProviderKind::E2b);
@@ -862,6 +952,7 @@ mod tests {
         assert_eq!(create["metadata"]["openwave_workspace_id"], "workspace-1");
         assert_eq!(create["secure"], true);
         assert_eq!(create["allow_internet_access"], true);
+        assert!(create.get("network").is_none());
 
         let bodies = state.start_bodies.lock().unwrap();
         let first_start = decode_start_request(&bodies[0]);
@@ -873,8 +964,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn e2b_compiles_the_egress_policy_into_the_creation_request() {
+        use openwave_egress::{CidrBlock, DomainPattern, EgressAllowlist};
+
+        let policy = EgressPolicy::Allowlist(EgressAllowlist::new(
+            vec![DomainPattern::parse("*.pypi.org").unwrap()],
+            vec![CidrBlock::parse("140.82.112.0/20").unwrap()],
+        ));
+        let (provider, state, server) = mock_provider(ProcessMode::Complete, Some(policy)).await;
+        provider
+            .execute(request("execution-net", "workspace-net", "hello"))
+            .await
+            .unwrap();
+        let create = state.create_body.lock().unwrap().clone().unwrap();
+        assert_eq!(create["allow_internet_access"], false);
+        assert_eq!(
+            create["network"]["allowOut"],
+            json!(["*.pypi.org", "140.82.112.0/20"])
+        );
+
+        // Block-all needs no allow rules: the blocked default is the policy.
+        let block_all = e2b_network_settings(Some(&EgressPolicy::BlockAll));
+        assert!(!block_all.allow_internet_access);
+        assert!(block_all.network.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn e2b_projects_connect_deadlines_to_the_bounded_timeout_result() {
-        let (provider, state, server) = mock_provider(ProcessMode::Timeout).await;
+        let (provider, state, server) = mock_provider(ProcessMode::Timeout, None).await;
         let response = provider
             .execute(request("execution-timeout", "workspace-timeout", "slow"))
             .await

@@ -14,6 +14,7 @@ libraries.
       libraries          openwave-mcp          openwave-retrieval
                          openwave-router       openwave-web-search
                          openwave-host-broker  openwave-code-execution
+                         openwave-egress
                                             │
       the seam                         openwave-core
 
@@ -158,7 +159,23 @@ adapter behind the same contract.
 
 See [Code execution](code-execution.md).
 
-**Depends on:** `openwave-core`.
+**Depends on:** `openwave-core`, `openwave-egress`.
+
+## `openwave-egress` — egress policy decisions 🟢
+
+The dependency-free decision layer from
+[sandbox providers](sandbox-providers.md): one deny-by-default allowlist
+policy (wildcard domain patterns and CIDR blocks) answering whether a workload
+may open a connection to a destination, consulted by every enforcement point.
+It also owns the enforcement-tier vocabulary — external enforcement is a
+boundary, supervisor enforcement is defense in depth — and the per-backend
+enforcement declaration, stated as what the mechanism actually blocks with
+vendor exceptions included, which the admission rule for
+third-party-credential-bearing work checks. Deliberately std-only so the
+future in-sandbox supervisor can consult the same decision without pulling an
+HTTP client or async runtime into the sandbox image.
+
+**Depends on:** nothing in the workspace.
 
 ## `openwave-mcp` — the MCP face 🟡
 
