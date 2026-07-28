@@ -20,6 +20,13 @@ const chat = {
   project_id: null,
 } as unknown as Chat;
 
+function readWrite(
+  rootId: string,
+  displayName: string,
+): host.ConnectedFolderAccess {
+  return { rootId, displayName, capabilities: ["read", "write"] };
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((complete) => {
@@ -52,14 +59,27 @@ describe("FoldersView", () => {
     expect(host.listApprovedFolders).toHaveBeenCalledOnce();
   });
 
+  // The badge is the only place a reader learns whether the agent can change
+  // files in a folder, so it has to follow the host's answer rather than a
+  // constant the app chose.
+  it("shows each folder's access as the host reports it", async () => {
+    vi.mocked(host.listConnectedFolders).mockResolvedValue([
+      readWrite("writable", "Drafts"),
+      { rootId: "read-only", displayName: "Archive", capabilities: ["read"] },
+    ]);
+    render(<FoldersView chat={chat} />);
+
+    expect(await screen.findByText("Read and write")).toBeInTheDocument();
+    expect(screen.getByText("Read only")).toBeInTheDocument();
+    expect(screen.getAllByText("Read and write")).toHaveLength(1);
+  });
+
   it("offers approved folders that are not already connected", async () => {
     vi.mocked(host.listConnectedFolders)
+      .mockResolvedValueOnce([readWrite("connected", "Current project")])
       .mockResolvedValueOnce([
-        { rootId: "connected", displayName: "Current project" },
-      ])
-      .mockResolvedValueOnce([
-        { rootId: "connected", displayName: "Current project" },
-        { rootId: "available", displayName: "Research" },
+        readWrite("connected", "Current project"),
+        readWrite("available", "Research"),
       ]);
     vi.mocked(host.listApprovedFolders).mockResolvedValue([
       { rootId: "connected", displayName: "Current project" },
@@ -103,26 +123,21 @@ describe("FoldersView", () => {
   it("ignores a late folder response after switching chats", async () => {
     const firstChat = { ...chat, id: "chat-a", title: "Chat A" };
     const secondChat = { ...chat, id: "chat-b", title: "Chat B" };
-    const firstResponse = deferred<host.ConnectedFolder[]>();
-    const secondResponse = deferred<host.ConnectedFolder[]>();
-    vi.mocked(host.listConnectedFolders).mockImplementation(
-      (requestedChat) =>
-        requestedChat.id === firstChat.id
-          ? firstResponse.promise
-          : secondResponse.promise,
+    const firstResponse = deferred<host.ConnectedFolderAccess[]>();
+    const secondResponse = deferred<host.ConnectedFolderAccess[]>();
+    vi.mocked(host.listConnectedFolders).mockImplementation((requestedChat) =>
+      requestedChat.id === firstChat.id
+        ? firstResponse.promise
+        : secondResponse.promise,
     );
 
     const { rerender } = render(<FoldersView chat={firstChat} />);
     rerender(<FoldersView chat={secondChat} />);
 
-    secondResponse.resolve([
-      { rootId: "chat-b-root", displayName: "Chat B folder" },
-    ]);
+    secondResponse.resolve([readWrite("chat-b-root", "Chat B folder")]);
     expect(await screen.findByText("Chat B folder")).toBeInTheDocument();
 
-    firstResponse.resolve([
-      { rootId: "chat-a-root", displayName: "Chat A folder" },
-    ]);
+    firstResponse.resolve([readWrite("chat-a-root", "Chat A folder")]);
     await waitFor(() =>
       expect(screen.queryByText("Chat A folder")).not.toBeInTheDocument(),
     );
