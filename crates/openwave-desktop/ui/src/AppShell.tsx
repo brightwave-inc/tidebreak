@@ -16,8 +16,8 @@ import { useChatListStore } from "./ChatListStore";
 import { useConfirm } from "./components/ConfirmDialog";
 import { hasMacOverlayTitlebar } from "./host";
 import { Logomark } from "./Logomark";
-import { Sidebar } from "./Sidebar";
 import { useTheme } from "./theme";
+import { useActiveChatId } from "./useActiveChatId";
 import { useChatPromptWatcher } from "./useChatPromptWatcher";
 import { useUiStore } from "./UiStore";
 import { useDesktopUpdates } from "./updates";
@@ -27,12 +27,17 @@ import { useDesktopUpdates } from "./updates";
 const chatListActions = useChatListStore.getState();
 
 /**
- * The frame every route hangs in: the titlebar, the sidebar, and the connection
+ * The frame every route hangs in: the titlebar, the window, and the connection
  * to the local server.
  *
  * Everything here outlives a conversation. Anything scoped to one — its
- * transcript, its socket, its composer — belongs to the chat route, which is
- * remounted per chat and so cannot carry state across a switch.
+ * transcript, its socket, its composer, and now its rail — belongs to the chat
+ * route, which is remounted per chat and so cannot carry state across a switch.
+ *
+ * The mutations below stay here because they outlive the route that triggers
+ * them: deleting the open conversation has to survive that conversation's own
+ * unmount in order to decide what to open next. They reach the rails through
+ * the app context rather than through props.
  */
 export function AppShell() {
   const navigate = useNavigate();
@@ -43,7 +48,7 @@ export function AppShell() {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [status, setStatus] = useState("starting…");
   const sidebarCollapsed = useUiStore((state) => state.sidebarCollapsed);
-  const openChatId = useChatListStore((state) => state.selected?.id ?? null);
+  const openChatId = useActiveChatId();
   const savingTitle = useChatListStore((state) => state.savingTitle);
   const renameChatDraft = useChatListStore((state) => state.renameChatDraft);
   const skipRenameCommitRef = useRef(false);
@@ -139,7 +144,9 @@ export function AppShell() {
     deletionInFlightRef.current = true;
     chatListActions.setDeletingChatId(target.id);
     chatListActions.setChatsError(null);
-    const deletingOpenChat = useChatListStore.getState().selected?.id === target.id;
+    // Read before the await: deleting the open conversation navigates away, and
+    // by the time the request lands this is no longer the route we are on.
+    const deletingOpenChat = openChatId === target.id;
     try {
       await client.deleteChat(target.id);
       let refreshed = await client.listChats();
@@ -242,8 +249,13 @@ export function AppShell() {
         status,
         setStatus,
         newChat: () => void onNewChat(),
+        deleteChat: (target) => void onDeleteChat(target),
+        startRename: startChatRename,
+        commitRename: (target) => void commitChatRename(target),
+        cancelRename: cancelChatRename,
         themeMode,
         setThemeMode,
+        cycleTheme,
         updateState: desktopUpdates.state,
         checkForUpdate: desktopUpdates.check,
         restartForUpdate: onRestartForUpdate,
@@ -264,22 +276,9 @@ export function AppShell() {
             </button>
           </div>
         )}
+        {/* Each route renders its own rail beside its content — see RouteFrame. */}
         <div className="app-body">
-          <Sidebar
-            themeMode={themeMode}
-            updateReady={desktopUpdates.state.status === "ready"}
-            updateVersion={desktopUpdates.state.version ?? null}
-            onCycleTheme={cycleTheme}
-            onNewChat={() => void onNewChat()}
-            onStartRename={startChatRename}
-            onCommitRename={(target) => void commitChatRename(target)}
-            onCancelRename={cancelChatRename}
-            onDeleteChat={(target) => void onDeleteChat(target)}
-            onRestartForUpdate={() => void onRestartForUpdate()}
-          />
-          <div className="main">
-            <Outlet />
-          </div>
+          <Outlet />
         </div>
       </div>
     </AppContextProvider>

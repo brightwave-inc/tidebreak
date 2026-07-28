@@ -13,7 +13,6 @@ import {
  * The grammar is `{type}` or `{type}.{id}`:
  *
  *   chat
- *   chats
  *   sources
  *   sources.{documentId}
  *   outputs
@@ -32,8 +31,6 @@ export function parsePanelSegment(segment: string): PanelContent | null {
   switch (type) {
     case "chat":
       return id ? null : { type: "chat" };
-    case "chats":
-      return id ? null : { type: "chats" };
     case "folders":
       return id ? null : { type: "folders" };
     case "sources":
@@ -49,8 +46,6 @@ export function encodePanelSegment(panel: PanelContent): string {
   switch (panel.type) {
     case "chat":
       return "chat";
-    case "chats":
-      return "chats";
     case "folders":
       return "folders";
     case "sources":

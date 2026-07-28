@@ -1,6 +1,6 @@
 import { createContext, useContext } from "react";
 
-import type { ApiClient, ModelInfo, ProviderInfo } from "./api";
+import type { ApiClient, Chat, ModelInfo, ProviderInfo } from "./api";
 import type { ThemeMode } from "./theme";
 import type { DesktopUpdateState } from "./updates";
 
@@ -11,6 +11,11 @@ import type { DesktopUpdateState } from "./updates";
  * Routes are only mounted once the shell has a client, so this is never null
  * inside one — which is why {@link useApp} throws rather than returning an
  * optional the caller would have to narrow at every use.
+ *
+ * The chat mutations are here rather than drilled because the rails that invoke
+ * them are owned by the routes now, not by the shell. Their orchestration —
+ * the confirm dialog, the in-flight fences, what to open after a delete — still
+ * belongs to the shell, which is the only thing that outlives every route.
  */
 export type AppContextValue = {
   client: ApiClient;
@@ -21,8 +26,14 @@ export type AppContextValue = {
   setStatus: (next: string | ((current: string) => string)) => void;
   /** Start a conversation and open it. Fenced against a second in-flight create. */
   newChat: () => void;
+  /** Confirm, then delete, then land somewhere real. */
+  deleteChat: (chat: Chat) => void;
+  startRename: (chat: Chat) => void;
+  commitRename: (chat: Chat) => void;
+  cancelRename: () => void;
   themeMode: ThemeMode;
   setThemeMode: (mode: ThemeMode) => void;
+  cycleTheme: () => void;
   updateState: DesktopUpdateState;
   checkForUpdate: () => Promise<DesktopUpdateState>;
   restartForUpdate: () => Promise<void>;

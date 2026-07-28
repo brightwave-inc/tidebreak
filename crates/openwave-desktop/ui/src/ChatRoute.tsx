@@ -23,7 +23,6 @@ import {
   loadCurrentTerminalTranscript,
   presentChatTranscript,
 } from "./ChatTranscriptPresentation";
-import { ChatsPanel } from "./ChatsPanel";
 import { useFirstMessage } from "./FirstMessage";
 import { ChatView } from "./ChatView";
 import { DeliverablesView } from "./DeliverablesView";
@@ -54,6 +53,8 @@ import { PanelLayout } from "./panel/PanelLayout";
 import type { PanelContent } from "./panel/panelTypes";
 import { usePanelNav } from "./panel/usePanelNav";
 import { PanelBreadcrumb } from "./components/PanelHeader";
+import { RouteFrame } from "./RouteFrame";
+import { ChatSidebar } from "./sidebar/ChatSidebar";
 import { useRefreshSignals } from "./RefreshSignals";
 import { TranscriptVisibilityProvider } from "./TranscriptVisibility";
 import { useTurnLifecycle } from "./TurnLifecycleSignals";
@@ -85,7 +86,7 @@ const { signal: signalTurnLifecycle } = useTurnLifecycle.getState();
  */
 export function ChatRoute({ chatId }: { chatId: string }) {
   const navigate = useNavigate();
-  const { client, models, status, setStatus, newChat } = useApp();
+  const { client, models, status, setStatus } = useApp();
   const { layout } = usePanelNav();
   const chats = useChatListStore((state) => state.chats);
   const deletingChatId = useChatListStore((state) => state.deletingChatId);
@@ -101,13 +102,6 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   const draftRef = useRef("");
 
   const chat = chats.find((candidate) => candidate.id === chatId) ?? null;
-
-  // The sidebar highlights the open conversation, and the shell reads it when
-  // deciding where to go after a delete. The URL is the source of truth; this
-  // republishes it for the parts that subscribe to the store.
-  useEffect(() => {
-    if (chat) chatListActions.setSelected(chat);
-  }, [chat]);
 
   // A chat id that is not in the list — deleted in another window, or a stale
   // deep link — should land somewhere real rather than on an empty frame.
@@ -389,12 +383,6 @@ export function ChatRoute({ chatId }: { chatId: string }) {
 
     const side = position === "right" ? "right" : "left";
     switch (panel.type) {
-      case "chats":
-        return (
-          <PanelFrame position={side} spaceBetween>
-            <ChatsPanel activeChatId={chatId} onNewChat={newChat} />
-          </PanelFrame>
-        );
       case "sources":
         return (
           <PanelFrame position={side} spaceBetween>
@@ -420,6 +408,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   }
 
   return (
+    <RouteFrame sidebar={<ChatSidebar chat={chat} />}>
     <div className="mr-2 flex min-h-0 min-w-0 flex-1 flex-col">
       <header className="mt-2 flex h-9 w-full shrink-0 items-center justify-between gap-2 px-1">
         <div className="w-24" />
@@ -436,6 +425,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       <ImportQueue />
       <DocumentDropTarget chatId={chatId} />
     </div>
+    </RouteFrame>
   );
 }
 
