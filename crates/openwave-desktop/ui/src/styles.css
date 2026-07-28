@@ -986,6 +986,28 @@ body {
   gap: 0.18rem;
 }
 
+.assistant-source-open {
+  margin: -0.2rem -0.3rem;
+  border: 0;
+  border-radius: 6px;
+  padding: 0.2rem 0.3rem;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  background: none;
+}
+
+.assistant-source-open:hover,
+.assistant-source-open:focus-visible {
+  background: color-mix(in srgb, var(--accent) 58%, transparent);
+}
+
+.assistant-source-open:hover strong,
+.assistant-source-open:focus-visible strong {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 .assistant-source-copy strong {
   overflow-wrap: anywhere;
   color: var(--ink);

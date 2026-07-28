@@ -52,6 +52,7 @@ import { PanelFrame } from "./panel/PanelFrame";
 import { PanelLayout } from "./panel/PanelLayout";
 import type { PanelContent } from "./panel/panelTypes";
 import { usePanelNav } from "./panel/usePanelNav";
+import { SourceNavProvider, useStableSourceNav } from "./panel/SourceNav";
 import { PanelBreadcrumb } from "./components/PanelHeader";
 import { RouteFrame } from "./RouteFrame";
 import { ChatSidebar } from "./sidebar/ChatSidebar";
@@ -88,6 +89,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   const navigate = useNavigate();
   const { client, models, status, setStatus } = useApp();
   const { layout, openPanel } = usePanelNav();
+  const sourceNav = useStableSourceNav(openPanel);
   const chats = useChatListStore((state) => state.chats);
   const deletingChatId = useChatListStore((state) => state.deletingChatId);
   const busy = useChatSessionStore((session) => session.busy);
@@ -435,7 +437,11 @@ export function ChatRoute({ chatId }: { chatId: string }) {
           </span>
         </div>
       </header>
-      <PanelLayout layout={layout} renderPanel={renderPanel} />
+      {/* Citations live in the transcript but open into the panel beside it,
+          so the way there is provided above both slots. */}
+      <SourceNavProvider value={sourceNav}>
+        <PanelLayout layout={layout} renderPanel={renderPanel} />
+      </SourceNavProvider>
       <ImportQueue />
       <DocumentDropTarget chatId={chatId} />
     </div>

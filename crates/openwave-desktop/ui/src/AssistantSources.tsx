@@ -3,6 +3,13 @@ import { ChevronRight } from "lucide-react";
 export type AssistantSource = Readonly<{
   id: string;
   ordinal: number;
+  /** The cited source, which is the document panel this row opens. */
+  documentId: string;
+  /**
+   * Half-open byte range of the cited passage in the document's canonical
+   * text — the position the source panel highlights and scrolls to.
+   */
+  span: Readonly<{ start: number; end: number }>;
   excerpt: string;
   heading: string | null;
   pages: number[];
@@ -10,6 +17,11 @@ export type AssistantSource = Readonly<{
 
 type AssistantSourcesProps = {
   sources: readonly AssistantSource[];
+  /**
+   * Open the cited place in the source panel. Omitted where there is no panel
+   * to open into, which leaves the list exactly as it reads today.
+   */
+  onOpenSource?: (source: AssistantSource) => void;
 };
 
 // Matches the server's MAX_ASSISTANT_CITATIONS contract. Keeping the guard in
@@ -20,11 +32,19 @@ const MAX_EXCERPT_CHARACTERS = 600;
 const MAX_PAGE_REFERENCES = 8;
 
 /**
- * A closed, presentation-only view of evidence attached to an assistant
- * response. It intentionally has no navigation callbacks: source identity,
- * storage paths, and retrieval tokens stay outside the rendered surface.
+ * Evidence attached to an assistant response, as a list of places rather than a
+ * list of quotations: a row opens the document it came from at the passage it
+ * quoted.
+ *
+ * What a row carries is still closed. Storage paths, retrieval tokens, and the
+ * call the evidence came from stay outside the rendered surface; the document
+ * id and the cited span are here because they are the address, and neither is
+ * useful without the source panel that already resolves them.
  */
-export function AssistantSources({ sources }: AssistantSourcesProps) {
+export function AssistantSources({
+  sources,
+  onOpenSource,
+}: AssistantSourcesProps) {
   const visibleSources = [...sources]
     .map((source, inputIndex) => ({ source, inputIndex }))
     .sort(
@@ -71,19 +91,50 @@ export function AssistantSources({ sources }: AssistantSourcesProps) {
             <span className="assistant-source-number" aria-hidden="true">
               {source.ordinal}
             </span>
-            <div className="assistant-source-copy">
-              {boundedText(source.heading, MAX_HEADING_CHARACTERS) ? (
-                <strong>
-                  {boundedText(source.heading, MAX_HEADING_CHARACTERS)}
-                </strong>
-              ) : null}
-              <p>{boundedText(source.excerpt, MAX_EXCERPT_CHARACTERS)}</p>
-              <PageReferences pages={source.pages} />
-            </div>
+            <SourceCopy source={source} onOpen={onOpenSource} />
           </li>
         ))}
       </ol>
     </details>
+  );
+}
+
+/**
+ * The row's text, as a button wherever it can be opened.
+ *
+ * A citation whose document id did not survive the round trip is still worth
+ * reading, so it degrades to the plain excerpt rather than to a control that
+ * goes nowhere.
+ */
+function SourceCopy({
+  source,
+  onOpen,
+}: {
+  source: AssistantSource;
+  onOpen?: (source: AssistantSource) => void;
+}) {
+  const heading = boundedText(source.heading, MAX_HEADING_CHARACTERS);
+  const body = (
+    <>
+      {heading ? <strong>{heading}</strong> : null}
+      <p>{boundedText(source.excerpt, MAX_EXCERPT_CHARACTERS)}</p>
+      <PageReferences pages={source.pages} />
+    </>
+  );
+
+  if (!onOpen || !source.documentId) {
+    return <div className="assistant-source-copy">{body}</div>;
+  }
+
+  return (
+    <button
+      type="button"
+      className="assistant-source-copy assistant-source-open"
+      aria-label={`Open source ${source.ordinal}`}
+      onClick={() => onOpen(source)}
+    >
+      {body}
+    </button>
   );
 }
 

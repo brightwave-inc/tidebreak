@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 
 use crate::RetrievalEvidenceInput;
-use crate::{AssistantCitationId, MessageId};
+use crate::{AssistantCitationId, DocumentId, MessageId};
 
 const SOURCE_REFERENCE_PREFIX: &str = "[[ow-source:";
 const SOURCE_REFERENCE_SUFFIX: &str = "]]";
@@ -40,15 +40,39 @@ pub struct ParsedAssistantCitations {
 }
 
 /// Renderer-safe historical citation projected from immutable evidence.
+///
+/// The source identity and canonical-text span travel with the excerpt because
+/// a citation is a position in a document, not just a quotation of one: without
+/// them a reader can only be shown the words again, never where they came from.
+/// Neither is a capability — the document id already addresses the source panel,
+/// and the span only means anything against text the same client can already
+/// read.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
 pub struct AssistantCitationSnapshot {
     pub id: AssistantCitationId,
     #[serde(skip)]
     pub message_id: MessageId,
     pub ordinal: u16,
+    /// The cited source, addressable as a document panel.
+    pub document_id: DocumentId,
+    /// Half-open byte range of the cited passage in that document's canonical
+    /// text, which is the text the extracted-text view renders.
+    pub span: CitationSpan,
     pub excerpt: String,
     pub heading: Option<String>,
     pub pages: Vec<u32>,
+}
+
+/// A citation's byte range, projected for the renderer.
+///
+/// [`crate::ByteSpan`] is `usize`, which is a host-width detail rather than part
+/// of a wire contract; canonical text is bounded well inside `u32`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+pub struct CitationSpan {
+    /// Inclusive start byte offset.
+    pub start: u32,
+    /// Exclusive end byte offset.
+    pub end: u32,
 }
 
 /// Produce the exact closed reference a search result gives to the model.

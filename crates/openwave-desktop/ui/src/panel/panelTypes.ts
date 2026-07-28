@@ -6,7 +6,12 @@
  */
 export type PanelContent =
   | { type: "chat" }
-  | { type: "sources"; documentId?: string }
+  /**
+   * `citationId` is where in the document to open: the citation it names
+   * carries the cited span and page. It only means anything alongside the
+   * document it points into, so it is never set without `documentId`.
+   */
+  | { type: "sources"; documentId?: string; citationId?: string }
   | { type: "outputs"; outputId?: string }
   | { type: "folders" };
 

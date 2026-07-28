@@ -51,6 +51,8 @@ fn transcript_citation_json_is_closed_and_renderer_bounded() {
             id: openwave_core::AssistantCitationId::derive(message_id, 1),
             message_id,
             ordinal: 1,
+            document_id: openwave_core::DocumentId::new(),
+            span: openwave_core::CitationSpan { start: 0, end: 8 },
             excerpt: "x".repeat(openwave_core::MAX_CITATION_EXCERPT_CHARS),
             heading: Some("h".repeat(openwave_core::MAX_CITATION_HEADING_CHARS)),
             pages: (1..=u32::try_from(openwave_core::MAX_CITATION_PAGES).unwrap()).collect(),
@@ -67,20 +69,29 @@ fn transcript_citation_json_is_closed_and_renderer_bounded() {
             .keys()
             .cloned()
             .collect::<std::collections::BTreeSet<_>>(),
-        ["excerpt", "heading", "id", "ordinal", "pages"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
+        [
+            "document_id",
+            "excerpt",
+            "heading",
+            "id",
+            "ordinal",
+            "pages",
+            "span"
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
     );
+    // The source and the place in it are what make a citation navigable. What
+    // stays behind are the retrieval mechanics: the token the model was given,
+    // the call it came from, the ranking, and the generation fencing.
     let encoded = serde_json::to_string(&json).unwrap();
     for private in [
-        "document_id",
         "source_token",
         "call_id",
         "rank",
         "revision",
         "generation",
-        "span",
         "chunk",
         "source_uri",
         "tool",
