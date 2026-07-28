@@ -11,7 +11,11 @@ import {
 } from "./api";
 import { AppContextProvider } from "./AppContext";
 import { resolveServerInfo } from "./boot";
-import { prependReplacementChat } from "./ChatDeletion";
+import {
+  deletionDescription,
+  detachChatFolders,
+  prependReplacementChat,
+} from "./ChatDeletion";
 import { useChatListStore } from "./ChatListStore";
 import { useConfirm } from "./components/ConfirmDialog";
 import { hasMacOverlayTitlebar } from "./host";
@@ -154,9 +158,19 @@ export function AppShell() {
   async function onDeleteChat(target: Chat) {
     if (!client || deletionInFlightRef.current || creationInFlightRef.current) return;
     const label = target.title?.trim() || "this chat";
+    // The listed chat carries the folders it had at the last refresh, which
+    // predates anything connected since. The server refuses the delete on its
+    // own count, so ask it what is attached before promising to detach it.
+    let current: Chat;
+    try {
+      current = await client.getChat(target.id);
+    } catch (err) {
+      chatListActions.setChatsError(`Could not delete chat: ${String(err)}`);
+      return;
+    }
     const confirmed = await confirm({
       title: `Delete ${label}?`,
-      description: "This cannot be undone.",
+      description: deletionDescription(current.root_attachments.length),
       confirmLabel: "Delete chat",
       destructive: true,
     });
@@ -169,6 +183,7 @@ export function AppShell() {
     // by the time the request lands this is no longer the route we are on.
     const deletingOpenChat = openChatId === target.id;
     try {
+      await detachChatFolders(current);
       await client.deleteChat(target.id);
       let refreshed = await client.listChats();
       if (!deletingOpenChat) {
