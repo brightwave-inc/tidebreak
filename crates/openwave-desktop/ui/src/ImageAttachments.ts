@@ -1,4 +1,3 @@
-import { invoke } from "@tauri-apps/api/core";
 
 /**
  * Composer image attachments: what one is, how it moves between states, and the
@@ -497,15 +496,6 @@ function refusalFromBody(body: string): string {
     /* An unparseable body is just an unknown refusal. */
   }
   return imageAttachmentRefusal("");
-}
-
-/** Pick one image through the host's native picker and publish it. */
-export async function attachChatImage(
-  chatId: string,
-): Promise<PickedImage | null> {
-  return parseAttachedImage(
-    await invoke("attach_chat_image", { request: { chatId } }),
-  );
 }
 
 /**

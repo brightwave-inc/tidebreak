@@ -29,8 +29,8 @@ import { DeliverablesView } from "./DeliverablesView";
 import { DocumentsView } from "./DocumentsView";
 import { FoldersView } from "./FoldersView";
 import { hasNativeHost } from "./host";
+import { attachChatFiles } from "./attachments";
 import {
-  importLibraryDocuments,
   type ImportedDocument,
   type LibraryImportSuccess,
 } from "./documents";
@@ -93,9 +93,9 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   const busy = useChatSessionStore((session) => session.busy);
   const [hydrated, setHydrated] = useState(false);
   const [draft, setDraft] = useState("");
-  const [attachingSource, setAttachingSource] = useState(false);
+  const [attaching, setAttaching] = useState(false);
   const [recentSource, setRecentSource] = useState<ImportedDocument | null>(null);
-  const [sourceAttachmentError, setSourceAttachmentError] = useState<string | null>(null);
+  const [attachError, setAttachError] = useState<string | null>(null);
   const images = useImageAttachments(client, chatId);
   const handleEventRef = useRef<(event: SequencedEvent) => void>(() => {});
   const terminalHydrationGenerationRef = useRef(0);
@@ -289,23 +289,38 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     }
   }
 
-  async function onAddSource() {
-    if (attachingSource || deletingChatId !== null) return;
+  /**
+   * One picker for anything the reader wants to attach.
+   *
+   * Which of the two things each file becomes — pixels for the model, or a
+   * parsed and searchable source — is decided by the host from the bytes, so
+   * nothing here has to guess from a name or ask the reader to know first.
+   */
+  async function onAttach() {
+    if (attaching || deletingChatId !== null) return;
     if (!useNativePickerLatch.getState().claim(PICKER_HOLDERS.importSource)) {
-      setSourceAttachmentError(PICKER_BUSY_MESSAGE);
+      setAttachError(PICKER_BUSY_MESSAGE);
       return;
     }
-    setAttachingSource(true);
-    setSourceAttachmentError(null);
+    setAttaching(true);
+    setAttachError(null);
     try {
-      const batch = await importLibraryDocuments(chatId);
-      const source = batch?.results.find(isImportedDocument);
+      const attached = await attachChatFiles(chatId);
+      if (!attached) return;
+      images.adopt(attached.images);
+      const source = attached.documents?.results.find(isImportedDocument);
       if (source) setRecentSource(source.document);
+      // A file that could not be attached as an image is the reader's to fix,
+      // and saying nothing would read as a silent drop from the selection.
+      const [firstFailure] = attached.failedImages;
+      if (firstFailure) {
+        setAttachError(`${firstFailure.fileName}: ${firstFailure.message}`);
+      }
     } catch (err) {
-      setSourceAttachmentError(friendlySourceAttachmentError(err));
+      setAttachError(friendlyAttachError(err));
     } finally {
       useNativePickerLatch.getState().release(PICKER_HOLDERS.importSource);
-      setAttachingSource(false);
+      setAttaching(false);
     }
   }
 
@@ -337,18 +352,13 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             deletingChat={deletingChatId !== null}
             draft={draft}
             draftRef={draftRef}
-            attachingSource={attachingSource}
+            attaching={attaching}
             attachedSourceName={recentSource?.displayName ?? null}
-            sourceAttachmentError={sourceAttachmentError}
+            attachError={attachError}
             composerImages={{
               items: images.attachments,
-              // Drop and paste hand the composer the bytes directly; only the
-              // picker needs the host, so only it is withheld in a browser.
-              canPick: hasNativeHost(),
-              picking: images.attachingFromPicker,
               error: images.error,
               unsupportedModel: textOnlyModelLabel(models, chat!.model),
-              onPick: images.attachFromPicker,
               onAttachFiles: images.attachFiles,
               onRemove: images.remove,
               onRetry: images.retry,
@@ -372,7 +382,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
               </>
             }
             onDraftChange={setComposerDraft}
-            onAddSource={onAddSource}
+            onAttach={onAttach}
             onDismissAttachedSource={() => setRecentSource(null)}
             onSelectPrompt={setComposerDraft}
             onSend={onSend}
@@ -452,9 +462,9 @@ function textOnlyModelLabel(
   return model && !model.multimodal ? model.display_name : null;
 }
 
-function friendlySourceAttachmentError(error: unknown): string {
+function friendlyAttachError(error: unknown): string {
   const message = String(error).replace(/^Error:\s*/, "").trim();
-  return message && message.length <= 240 ? message : "Could not add that file.";
+  return message && message.length <= 240 ? message : "Could not attach that file.";
 }
 
 function isImportedDocument(

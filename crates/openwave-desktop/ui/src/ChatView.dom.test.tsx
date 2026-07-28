@@ -32,11 +32,8 @@ const client = {
 function noImages(): ComposerImages {
   return {
     items: [],
-    canPick: false,
-    picking: false,
     error: null,
     unsupportedModel: null,
-    onPick: vi.fn(),
     onAttachFiles: vi.fn(),
     onRemove: vi.fn(),
     onRetry: vi.fn(),
@@ -61,14 +58,14 @@ function DraftingChatView(overrides: Partial<ChatViewProps> = {}) {
       draftRef={draftRef}
       composerModelMenu={null}
       composerImages={noImages()}
-      attachingSource={false}
+      attaching={false}
       attachedSourceName={null}
-      sourceAttachmentError={null}
+      attachError={null}
       onDraftChange={(value) => {
         draftRef.current = value;
         setDraft(value);
       }}
-      onAddSource={vi.fn(async () => {})}
+      onAttach={vi.fn(async () => {})}
       onDismissAttachedSource={vi.fn()}
       onSelectPrompt={vi.fn()}
       onSend={vi.fn(async () => {})}
@@ -88,11 +85,11 @@ function renderChatView(overrides: Partial<ChatViewProps> = {}) {
     draftRef: { current: "" },
     composerModelMenu: null,
     composerImages: noImages(),
-    attachingSource: false,
+    attaching: false,
     attachedSourceName: null,
-    sourceAttachmentError: null,
+    attachError: null,
     onDraftChange: vi.fn(),
-    onAddSource: vi.fn(async () => {}),
+    onAttach: vi.fn(async () => {}),
     onDismissAttachedSource: vi.fn(),
     onSelectPrompt: vi.fn(),
     onSend: vi.fn(async () => {}),
