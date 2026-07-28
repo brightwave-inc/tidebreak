@@ -2612,12 +2612,7 @@ fn replacement_requires_native_approval_and_fails_closed_on_symlinks_and_revoke(
         );
     }
 
-    revoke(
-        &broker.controller(),
-        OperationId::new(),
-        subject,
-        root_id,
-    );
+    revoke(&broker.controller(), OperationId::new(), subject, root_id);
     assert!(matches!(
         operate(
             &broker.operator(),

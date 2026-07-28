@@ -564,12 +564,11 @@ mod tests {
             folder_hint: Some(openwave_core::RequestedFolderHint::Documents),
             claimed: true,
         };
-        let output_writeback =
-            crate::routes::client_execution::PendingOutputWritebackRequest {
-                call_id: openwave_core::CallId(id(6)),
-                turn_id: openwave_core::TurnId(id(7)),
-                claimed: false,
-            };
+        let output_writeback = crate::routes::client_execution::PendingOutputWritebackRequest {
+            call_id: openwave_core::CallId(id(6)),
+            turn_id: openwave_core::TurnId(id(7)),
+            claimed: false,
+        };
 
         vec![
             (

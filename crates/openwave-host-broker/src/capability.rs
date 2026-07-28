@@ -225,19 +225,15 @@ pub enum GrantError {
 fn validate_capability_scope(capability: Capability, scope: &Scope) -> Result<(), GrantError> {
     match (capability, scope) {
         (Capability::ListRoots, Scope::Subject)
-        | (Capability::ReadFiles | Capability::WriteFiles, Scope::Root { .. }) => {
+        | (Capability::ReadFiles | Capability::WriteFiles, Scope::Root { .. }) => Ok(()),
+        (Capability::ReadFiles | Capability::WriteFiles, Scope::PathSubtree { relative, .. })
+            if !relative.is_root() =>
+        {
             Ok(())
         }
-        (
-            Capability::ReadFiles | Capability::WriteFiles,
-            Scope::PathSubtree { relative, .. },
-        ) if !relative.is_root() => {
-            Ok(())
+        (Capability::ReadFiles | Capability::WriteFiles, Scope::PathSubtree { .. }) => {
+            Err(GrantError::EmptySubtree)
         }
-        (
-            Capability::ReadFiles | Capability::WriteFiles,
-            Scope::PathSubtree { .. },
-        ) => Err(GrantError::EmptySubtree),
         _ => Err(GrantError::InvalidCapabilityScope),
     }
 }

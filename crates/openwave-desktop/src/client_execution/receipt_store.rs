@@ -13,8 +13,8 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use chrono::{DateTime, Utc};
 use openwave_core::{
     validate_deliverable_name, CallId, ChatId, HostRootId, OutputId, OutputRevisionId,
-    OutputWriteMode, RootAttachmentChangeId, MAX_ATTACHMENT_REVISION, MAX_DELIVERABLE_BYTES,
-    MAX_CONNECTED_FOLDER_PATH_BYTES,
+    OutputWriteMode, RootAttachmentChangeId, MAX_ATTACHMENT_REVISION,
+    MAX_CONNECTED_FOLDER_PATH_BYTES, MAX_DELIVERABLE_BYTES,
 };
 use openwave_host_broker::GrantSubject;
 use openwave_host_broker::OperationId;
@@ -684,8 +684,7 @@ impl OutputWritebackReceipt {
             || matches!(self.mode, OutputWriteMode::Create) && self.approval_id.is_some()
             || matches!(self.mode, OutputWriteMode::Replace)
                 && self.approval_id.is_none_or(|id| id.is_nil())
-            || self.resolution.is_some()
-                && self.phase != FolderOperationPhase::DispatchStarted
+            || self.resolution.is_some() && self.phase != FolderOperationPhase::DispatchStarted
         {
             return Err(invalid_data("invalid output-writeback receipt"));
         }
@@ -901,10 +900,7 @@ impl ReceiptStore {
         write_atomically(&self.directory, &path, &bytes)
     }
 
-    pub(super) fn save_output_writeback(
-        &self,
-        receipt: &OutputWritebackReceipt,
-    ) -> io::Result<()> {
+    pub(super) fn save_output_writeback(&self, receipt: &OutputWritebackReceipt) -> io::Result<()> {
         receipt.validate()?;
         let bytes = serde_json::to_vec(receipt).map_err(invalid_data)?;
         if bytes.len() > MAX_RECEIPT_BYTES {
@@ -913,7 +909,11 @@ impl ReceiptStore {
         let path = self.output_writeback_receipt_path(receipt.call_id);
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
-            Ok(_) => return Err(invalid_data("output-writeback receipt is not a regular file")),
+            Ok(_) => {
+                return Err(invalid_data(
+                    "output-writeback receipt is not a regular file",
+                ))
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 if self.load_output_writebacks()?.len() >= MAX_RECEIPTS {
                     return Err(invalid_data("too many durable output-writeback receipts"));
