@@ -6838,6 +6838,57 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
         journaled.turn.as_ref().map(|turn| turn.status),
         Some(TurnRunStatus::Resuming)
     );
+    // A client call is executed and resolved outside the agent loop, and the
+    // resumed loop reads its result straight into the model transcript without
+    // ever revisiting the call. Nothing else announces that it finished, so the
+    // renderer showed the row running from `ToolCallStarted` until the chat was
+    // reopened. It announces itself here instead.
+    let completions = |events: Vec<crate::SequencedEvent>| {
+        events
+            .into_iter()
+            .filter(|event| matches!(event.event, AgentEvent::ToolCallCompleted { .. }))
+            .collect::<Vec<_>>()
+    };
+    let announced = completions(store.list_events(chat.id, 0).await.unwrap());
+    assert_eq!(announced.len(), 1);
+    let AgentEvent::ToolCallCompleted {
+        call_id,
+        ref output,
+        ref action,
+        ..
+    } = announced[0].event
+    else {
+        unreachable!("filtered to completions")
+    };
+    assert_eq!(call_id, request.id);
+    assert!(!output.is_error);
+    // Projected from the call's own stored arguments, so a client card names
+    // its action identically live and after a reload.
+    assert_eq!(
+        action.as_ref(),
+        crate::ToolActionPreview::build(&request.name, &request.arguments).as_ref()
+    );
+
+    // An exact retry recovers the same outcome without announcing it twice.
+    assert_eq!(
+        store
+            .resolve_client_tool_call_and_append_event(
+                request.id,
+                chat.id,
+                client_lease,
+                resolved_at,
+                &resolution,
+                resolved_at,
+            )
+            .await
+            .unwrap()
+            .outcome,
+        ResolveToolCallOutcome::Existing
+    );
+    assert_eq!(
+        completions(store.list_events(chat.id, 0).await.unwrap()).len(),
+        1
+    );
     let resumable = store.get_turn_run(turn_id).await.unwrap().unwrap();
     assert_eq!(resumable.status, TurnRunStatus::Resuming);
     assert_eq!((resumable.attempt_count, resumable.claim_count), (1, 1));
@@ -7892,9 +7943,16 @@ async fn client_wait_cancellation_fences_unclaimed_and_claimed_native_work() {
         claimed_wait.status,
         crate::model::TurnClientWaitStatus::Cancelled.as_str()
     );
+    // The call resolved before the turn was cancelled, and both are announced
+    // in that order. Without the completion the renderer would keep showing the
+    // native call running underneath a cancelled turn.
     let events = store.list_events(claimed_chat.id, 0).await.unwrap();
-    assert_eq!(events.len(), 1);
-    assert!(matches!(events[0].event, AgentEvent::TurnCancelled { .. }));
+    assert_eq!(events.len(), 2);
+    assert!(matches!(
+        events[0].event,
+        AgentEvent::ToolCallCompleted { call_id, .. } if call_id == claimed_call.id
+    ));
+    assert!(matches!(events[1].event, AgentEvent::TurnCancelled { .. }));
     let recovered = store
         .resolve_expired_client_tool_call_and_append_event(
             claimed_call.id,
