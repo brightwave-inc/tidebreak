@@ -259,9 +259,9 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
     }
     // Extended thinking and a forced tool are mutually exclusive on the Messages
     // API: with thinking on, `tool_choice` may only be `auto` or `none`. The
-    // output constraint is the caller's explicit ask and reasoning is a quality
-    // preference, so the constraint wins and this request does not think.
-    if req.reasoning_model && req.response_format.is_none() && takes_adaptive_thinking(&req.model) {
+    // forcing is the caller's explicit ask and reasoning is a quality
+    // preference, so the ask wins and this request does not think.
+    if req.reasoning_model && !forces_a_tool(req) && takes_adaptive_thinking(&req.model) {
         // An omitted `thinking` means thinking is *off* on Opus 4.7 and later,
         // so a reasoning model only reasons when the request says so.
         //
@@ -275,6 +275,15 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         }
     }
     Ok(body)
+}
+
+/// Whether the request obliges the model to call a specific tool or any tool.
+fn forces_a_tool(req: &ChatRequest) -> bool {
+    req.response_format.is_some()
+        || matches!(
+            req.tool_choice,
+            Some(ToolChoice::Required | ToolChoice::Tool { .. })
+        )
 }
 
 fn anthropic_tool_choice(choice: &ToolChoice) -> Result<Value> {
