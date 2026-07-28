@@ -14,6 +14,7 @@ use tokio::sync::watch;
 
 use openwave_core::Config;
 
+mod attachments;
 mod broker;
 mod client_execution;
 mod deliverables;
@@ -173,6 +174,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             server_info,
             request_user_attention,
+            attachments::attach_chat_files,
             documents::import_library_document,
             documents::import_library_documents,
             documents::import_dropped_library_documents,
@@ -180,7 +182,6 @@ pub fn run() {
             documents::search_library_documents,
             documents::delete_library_document,
             documents::retry_library_document,
-            image_attachments::attach_chat_image,
             deliverables::list_deliverables,
             deliverables::read_deliverable,
             deliverables::export_deliverable,

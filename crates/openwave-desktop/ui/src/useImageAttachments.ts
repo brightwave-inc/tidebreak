@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 
 import type { ApiClient } from "./api";
 import {
-  attachChatImage,
   imageAttachmentName,
   imageAttachmentRejection,
   queuedImageAttachment,
@@ -14,22 +13,16 @@ import {
   withUploadPublished,
   withUploadStarted,
   withoutAttachment,
-  MAX_IMAGE_ATTACHMENTS,
   type ImageAttachment,
+  type PickedImage,
 } from "./ImageAttachments";
-import {
-  PICKER_BUSY_MESSAGE,
-  PICKER_HOLDERS,
-  useNativePickerLatch,
-} from "./NativePickerLatch";
 
 export type ImageAttachmentControls = {
   attachments: ImageAttachment[];
-  /** The native picker is open, so a second one would be refused by the host. */
-  attachingFromPicker: boolean;
   /** Why the last attach was refused outright, before any bytes moved. */
   error: string | null;
-  attachFromPicker: () => void;
+  /** Take images the host has already published, from the composer's picker. */
+  adopt: (published: readonly PickedImage[]) => void;
   attachFiles: (files: readonly File[]) => void;
   remove: (id: string) => void;
   retry: (id: string) => void;
@@ -56,7 +49,6 @@ export function useImageAttachments(
   chatId: string,
 ): ImageAttachmentControls {
   const [attachments, setAttachments] = useState<ImageAttachment[]>([]);
-  const [attachingFromPicker, setAttachingFromPicker] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const attachmentsRef = useRef<ImageAttachment[]>([]);
   const filesRef = useRef(new Map<string, File>());
@@ -148,39 +140,21 @@ export function useImageAttachments(
     for (const attachment of queued) void upload(attachment.id);
   }
 
-  async function openPicker() {
-    if (attachingFromPicker) return;
-    if (attachmentsRef.current.length >= MAX_IMAGE_ATTACHMENTS) {
-      setError(`A message can carry at most ${MAX_IMAGE_ATTACHMENTS} images.`);
-      return;
-    }
-    if (!useNativePickerLatch.getState().claim(PICKER_HOLDERS.attachImage)) {
-      setError(PICKER_BUSY_MESSAGE);
-      return;
-    }
-    setAttachingFromPicker(true);
+  function adopt(published: readonly PickedImage[]) {
+    if (published.length === 0) return;
     setError(null);
-    try {
-      const published = await attachChatImage(chatId);
-      // Dismissing the picker is a normal outcome, not a failure.
-      if (!published) return;
-      update((current) => [
-        ...current,
-        readyImageAttachment(crypto.randomUUID(), published),
-      ]);
-    } catch (err) {
-      if (mountedRef.current) setError(failureText(err));
-    } finally {
-      useNativePickerLatch.getState().release(PICKER_HOLDERS.attachImage);
-      if (mountedRef.current) setAttachingFromPicker(false);
-    }
+    update((current) => [
+      ...current,
+      ...published.map((image) =>
+        readyImageAttachment(crypto.randomUUID(), image),
+      ),
+    ]);
   }
 
   return {
     attachments,
-    attachingFromPicker,
     error,
-    attachFromPicker: () => void openPicker(),
+    adopt,
     attachFiles,
     remove: (id) => {
       forget(id);

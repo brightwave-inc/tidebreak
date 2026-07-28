@@ -1,10 +1,13 @@
 //! Native image attachment bridge.
 //!
-//! Image bytes terminate here. The picker, the read, and the upload all happen
-//! in the host process; the webview receives an opaque attachment id and a few
-//! bounded numbers, and never sees the pixels or the path they came from. That
-//! is what keeps a compromised or merely buggy renderer from being able to
-//! exfiltrate the contents of a file the user only meant to show the model.
+//! Image bytes terminate here. The read and the upload happen in the host
+//! process; the webview receives an opaque attachment id and a few bounded
+//! numbers, and never sees the pixels or the path they came from. That is what
+//! keeps a compromised or merely buggy renderer from being able to exfiltrate
+//! the contents of a file the user only meant to show the model.
+//!
+//! Choosing the file is [`crate::attachments`]'s job, because one picker serves
+//! both images and documents and only the bytes can say which a file is.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -15,27 +18,11 @@ use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
 use openwave_core::{ChatId, MAX_IMAGE_BYTES};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State};
-use tauri_plugin_dialog::DialogExt;
-use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::documents::resolve_conversation_scope;
 use crate::host_access::HostAccess;
 use crate::{wait_server_info, AppState};
-
-/// Extensions offered in the picker.
-///
-/// This is a convenience filter only, never a trust decision: the server sniffs
-/// the actual format from the bytes and refuses a file whose contents disagree
-/// with what its name claims.
-const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif"];
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct AttachImageRequest {
-    chat_id: Uuid,
-}
 
 /// What the renderer learns about an attached image.
 ///
@@ -105,34 +92,23 @@ fn picked_image_name(path: &Path) -> Result<String, String> {
         .ok_or_else(|| "The selected image has an invalid name".to_owned())
 }
 
-/// Pick one image from disk and publish it for a conversation.
+/// Read one image off disk and publish it, returning what the renderer may see.
 ///
-/// Returns `None` when the user dismisses the picker, which is a normal outcome
-/// rather than a failure.
-#[tauri::command]
-pub(crate) async fn attach_chat_image(
-    app: AppHandle,
-    app_state: State<'_, Arc<AppState>>,
-    host_access: State<'_, HostAccess>,
-    request: AttachImageRequest,
-) -> Result<Option<AttachedImage>, String> {
-    // Validate before presenting native consent, then resolve again after the
-    // user returns so a long-lived picker cannot retain a deleted conversation.
-    resolve_conversation_scope(&host_access, request.chat_id).await?;
-    let _picker = host_access
-        .picker
-        .try_lock()
-        .map_err(|_| "A file or folder picker is already open".to_owned())?;
-    let Some(path) = pick_image(&app).await? else {
-        return Ok(None);
-    };
+/// Split out from the picker so a mixed selection can route a file here without
+/// opening a second dialog for it — see [`crate::attachments`].
+pub(crate) async fn publish_image_at(
+    app_state: &Arc<AppState>,
+    host_access: &HostAccess,
+    requested_chat: Uuid,
+    path: PathBuf,
+) -> Result<AttachedImage, String> {
     let file_name = picked_image_name(&path)?;
     let bytes = tauri::async_runtime::spawn_blocking(move || read_selected_image(&path))
         .await
         .map_err(|_| "Could not read the selected image".to_owned())??;
 
-    let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
-    let info = wait_server_info(app_state.inner()).await?;
+    let chat_id = resolve_conversation_scope(host_access, requested_chat).await?;
+    let info = wait_server_info(app_state).await?;
     // The declared type is derived from the bytes, not the file name, so the
     // server's sniff-versus-declared check stays a genuine cross-check of two
     // independent claims rather than a comparison of one value with itself.
@@ -163,7 +139,51 @@ pub(crate) async fn attach_chat_image(
         .json::<PublishedImageAttachment>()
         .await
         .map_err(|_| "Attaching the image returned an invalid response".to_owned())?;
-    Ok(Some(AttachedImage::new(published, file_name)))
+    Ok(AttachedImage::new(published, file_name))
+}
+
+/// Whether this file should be attached as an image rather than imported as a
+/// document, decided from its leading bytes and its size.
+///
+/// Both halves matter. An oversized PNG is a real image that cannot be an image
+/// attachment, and routing it here would refuse the file outright; treating it
+/// as a document instead keeps it usable, which is what the reader wanted from
+/// dropping it on the composer.
+pub(crate) fn is_attachable_image(path: &Path) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let Some(file_name) = path.file_name() else {
+        return false;
+    };
+    let Ok(directory) = Dir::open_ambient_dir(parent, ambient_authority()) else {
+        return false;
+    };
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let Ok(file) = directory.open_with(file_name, &options) else {
+        return false;
+    };
+    match file.metadata() {
+        Ok(metadata) if metadata.is_file() && metadata.len() <= MAX_IMAGE_BYTES => {}
+        _ => return false,
+    }
+    // Enough for the longest signature checked, and no more: this runs on every
+    // file in a selection, most of which are not images.
+    let mut header = [0u8; 12];
+    let mut read = 0;
+    let mut handle = file.take(12);
+    loop {
+        match handle.read(&mut header[read..]) {
+            Ok(0) => break,
+            Ok(count) => read += count,
+            Err(_) => return false,
+        }
+        if read == header.len() {
+            break;
+        }
+    }
+    declared_media_type(&header[..read]).is_some()
 }
 
 fn image_attachments_path(chat_id: ChatId) -> String {
@@ -216,26 +236,6 @@ fn declared_media_type(bytes: &[u8]) -> Option<&'static str> {
         return Some("image/webp");
     }
     None
-}
-
-async fn pick_image(app: &AppHandle) -> Result<Option<PathBuf>, String> {
-    let (tx, rx) = oneshot::channel();
-    let mut picker = app
-        .dialog()
-        .file()
-        .set_title("Attach an image")
-        .add_filter("Images", IMAGE_EXTENSIONS);
-    if let Some(window) = app.get_webview_window("main") {
-        picker = picker.set_parent(&window);
-    }
-    picker.pick_file(move |path| {
-        let _ = tx.send(path);
-    });
-    rx.await
-        .map_err(|_| "The image picker closed unexpectedly".to_owned())?
-        .map(tauri_plugin_dialog::FilePath::into_path)
-        .transpose()
-        .map_err(|_| "The image picker returned an invalid file".to_owned())
 }
 
 /// Read the picked file without following symlinks and without exceeding the
@@ -352,15 +352,6 @@ mod tests {
         assert!(picked_image_name(Path::new("/Users/private/bad\u{202e}gnp.png")).is_err());
         let overlong = format!("/Users/private/{}.png", "a".repeat(300));
         assert!(picked_image_name(Path::new(&overlong)).is_err());
-    }
-
-    #[test]
-    fn a_renderer_cannot_widen_the_request_beyond_one_conversation() {
-        let injected = serde_json::json!({
-            "chatId": Uuid::nil(),
-            "projectId": Uuid::nil(),
-        });
-        assert!(serde_json::from_value::<AttachImageRequest>(injected).is_err());
     }
 
     #[test]

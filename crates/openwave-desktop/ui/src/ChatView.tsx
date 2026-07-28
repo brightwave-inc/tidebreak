@@ -30,11 +30,11 @@ export type ChatViewProps = {
   draftRef: RefObject<string>;
   composerModelMenu: ReactNode;
   composerImages: ComposerImages;
-  attachingSource: boolean;
+  attaching: boolean;
   attachedSourceName: string | null;
-  sourceAttachmentError: string | null;
+  attachError: string | null;
   onDraftChange: (value: string) => void;
-  onAddSource: () => Promise<void>;
+  onAttach: () => Promise<void>;
   onDismissAttachedSource: () => void;
   onSelectPrompt: (prompt: string) => void;
   onSend: () => Promise<void>;
@@ -57,11 +57,11 @@ export function ChatView({
   draftRef,
   composerModelMenu,
   composerImages,
-  attachingSource,
+  attaching,
   attachedSourceName,
-  sourceAttachmentError,
+  attachError,
   onDraftChange,
-  onAddSource,
+  onAttach,
   onDismissAttachedSource,
   onSelectPrompt,
   onSend,
@@ -195,11 +195,11 @@ export function ChatView({
         draft={draft}
         modelMenu={composerModelMenu}
         images={composerImages}
-        canAttachSource={nativeHost}
-        attachingSource={attachingSource}
+        canAttach={nativeHost}
+        attaching={attaching}
         attachedSourceName={attachedSourceName}
-        sourceAttachmentError={sourceAttachmentError}
-        onAddSource={onAddSource}
+        attachError={attachError}
+        onAttach={onAttach}
         onDismissAttachedSource={onDismissAttachedSource}
         // Typing retires the verdict on the last piece of guidance. Accepted
         // guidance clears the draft through the raw callback instead, so

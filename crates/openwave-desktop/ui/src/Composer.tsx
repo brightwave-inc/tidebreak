@@ -98,16 +98,12 @@ function resizeComposerTextarea(textarea: HTMLTextAreaElement): void {
  */
 export type ComposerImages = {
   items: ImageAttachment[];
-  /** Whether the host can open a picker; drop and paste work regardless. */
-  canPick: boolean;
-  picking: boolean;
   error: string | null;
   /**
    * The selected model's label when it cannot read images, so the composer can
    * say so before the send that would be refused.
    */
   unsupportedModel: string | null;
-  onPick: () => void;
   onAttachFiles: (files: readonly File[]) => void;
   onRemove: (id: string) => void;
   onRetry: (id: string) => void;
@@ -135,11 +131,12 @@ export type ComposerProps = {
   draft: string;
   modelMenu?: ReactNode;
   images?: ComposerImages;
-  canAttachSource?: boolean;
-  attachingSource?: boolean;
+  /** Whether the host can open a picker; drop and paste work regardless. */
+  canAttach?: boolean;
+  attaching?: boolean;
   attachedSourceName?: string | null;
-  sourceAttachmentError?: string | null;
-  onAddSource?: () => Promise<void>;
+  attachError?: string | null;
+  onAttach?: () => Promise<void>;
   onDismissAttachedSource?: () => void;
   onDraftChange: (draft: string) => void;
   onSend: () => Promise<void>;
@@ -160,11 +157,11 @@ export function Composer({
   draft,
   modelMenu,
   images,
-  canAttachSource = false,
-  attachingSource = false,
+  canAttach = false,
+  attaching = false,
   attachedSourceName = null,
-  sourceAttachmentError = null,
-  onAddSource,
+  attachError = null,
+  onAttach,
   onDismissAttachedSource,
   onDraftChange,
   onSend,
@@ -338,31 +335,16 @@ export function Composer({
         />
         <div className="composer-actions">
           <div className="composer-actions-left">
-            {canAttachSource && onAddSource && (
-              <WithTooltip label={attachingSource ? "Adding source…" : "Add source"}>
+            {canAttach && onAttach && (
+              <WithTooltip label={attaching ? "Attaching…" : "Attach files"}>
                 <button
                   type="button"
                   className="composer-attach"
-                  aria-label={attachingSource ? "Adding source" : "Add source"}
-                  disabled={inputDisabled || attachingSource || busy}
-                  onClick={() => void onAddSource()}
+                  aria-label={attaching ? "Attaching" : "Attach files"}
+                  disabled={inputDisabled || attaching || busy}
+                  onClick={() => void onAttach()}
                 >
                   <Paperclip size={15} aria-hidden="true" />
-                </button>
-              </WithTooltip>
-            )}
-            {images?.canPick && (
-              <WithTooltip
-                label={images.picking ? "Choosing image…" : "Attach image"}
-              >
-                <button
-                  type="button"
-                  className="composer-attach"
-                  aria-label={images.picking ? "Choosing image" : "Attach image"}
-                  disabled={inputDisabled || images.picking}
-                  onClick={images.onPick}
-                >
-                  <ImageIcon size={15} aria-hidden="true" />
                 </button>
               </WithTooltip>
             )}
@@ -437,9 +419,9 @@ export function Composer({
             Guidance contains an unsupported character.
           </span>
         )}
-        {sourceAttachmentError && (
+        {attachError && (
           <span className="composer-turn-error" role="alert">
-            Couldn’t add source: {sourceAttachmentError}
+            Couldn’t attach: {attachError}
           </span>
         )}
         {images?.error && (

@@ -23,11 +23,8 @@ const noop = async () => undefined;
 function images(overrides: Partial<ComposerImages> = {}): ComposerImages {
   return {
     items: [],
-    canPick: true,
-    picking: false,
     error: null,
     unsupportedModel: null,
-    onPick: vi.fn(),
     onAttachFiles: vi.fn(),
     onRemove: vi.fn(),
     onRetry: vi.fn(),
@@ -290,7 +287,7 @@ describe("Composer", () => {
     expect(markup).toContain('disabled=""');
   });
 
-  it("keeps source attachment inside the conversation composer", () => {
+  it("offers one attach control, and reports what it added", () => {
     const markup = renderToStaticMarkup(
       <Composer
         activeTurnId={null}
@@ -299,11 +296,11 @@ describe("Composer", () => {
         cancelPending={false}
         disabled={false}
         draft="Summarize this"
-        canAttachSource
-        attachingSource={false}
+        canAttach
+        attaching={false}
         attachedSourceName="brief.pdf"
-        sourceAttachmentError={null}
-        onAddSource={noop}
+        attachError={null}
+        onAttach={noop}
         onDismissAttachedSource={vi.fn()}
         onDraftChange={vi.fn()}
         onSend={noop}
@@ -316,7 +313,10 @@ describe("Composer", () => {
       />,
     );
 
-    expect(markup).toContain('aria-label="Add source"');
+    // One button for any file. Which of the two things it becomes is the
+    // host's decision from the bytes, not a choice put to the reader.
+    expect(markup).toContain('aria-label="Attach files"');
+    expect(markup).not.toContain('aria-label="Attach image"');
     expect(markup).toContain("brief.pdf");
     expect(markup).toContain("Added to this conversation");
     expect(markup).toContain('aria-label="Dismiss brief.pdf"');
@@ -399,14 +399,6 @@ describe("Composer", () => {
     expect(markup).toContain("Choose a model that");
     expect(markup).toContain("remove the attached image");
     expect(markup).toContain('aria-label="Send message" disabled=""');
-  });
-
-  it("offers the picker only where a host can open one", () => {
-    expect(composerWithImages({})).toContain('aria-label="Attach image"');
-    // Drop and paste still work in a browser; only the native picker does not.
-    expect(composerWithImages({ canPick: false })).not.toContain(
-      'aria-label="Attach image"',
-    );
   });
 
   it("explains why a turn carrying images is not sendable yet", () => {

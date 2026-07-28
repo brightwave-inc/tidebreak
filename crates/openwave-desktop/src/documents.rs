@@ -606,7 +606,7 @@ fn drop_state(phase: LibraryImportDropPhase, paths: &[PathBuf]) -> LibraryImport
     }
 }
 
-async fn import_document_paths(
+pub(crate) async fn import_document_paths(
     app: &AppHandle,
     app_state: &Arc<AppState>,
     host_access: &HostAccess,
@@ -887,7 +887,7 @@ async fn pick_document(app: &AppHandle) -> Result<Option<PathBuf>, String> {
         .map_err(|_| "The document picker returned an invalid file".to_owned())
 }
 
-async fn pick_documents(app: &AppHandle) -> Result<Option<Vec<PathBuf>>, String> {
+pub(crate) async fn pick_documents(app: &AppHandle) -> Result<Option<Vec<PathBuf>>, String> {
     let (tx, rx) = oneshot::channel();
     let mut picker = app.dialog().file().set_title("Import documents");
     if let Some(window) = app.get_webview_window("main") {
