@@ -30,7 +30,8 @@ const UNIVER_VIEWER_STYLES = `
 `;
 
 interface Props extends HTMLAttributes<HTMLDivElement> {
-  client: Pick<ApiClient, "getDocumentFileContent">;
+  client: Pick<ApiClient, "getChatDocumentFile">;
+  chatId: string;
   documentId: string;
 }
 
@@ -43,6 +44,7 @@ interface Props extends HTMLAttributes<HTMLDivElement> {
  */
 export default function UniverDocumentViewer({
   client,
+  chatId,
   documentId,
   className,
   ...restProps
@@ -52,7 +54,9 @@ export default function UniverDocumentViewer({
   const [errorType, setErrorType] = useState<"parse" | "load" | null>(null);
   const [isReady, setIsReady] = useState(false);
 
-  const fileDownload = useFileDownload(client, documentId);
+  const fileDownload = useFileDownload(client, chatId, documentId, {
+    parseAs: "arrayBuffer",
+  });
 
   // Parse the docx, then mount Univer on the result.
   useEffect(() => {

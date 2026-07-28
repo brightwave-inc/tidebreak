@@ -917,26 +917,6 @@ export class ApiClient {
     );
   }
 
-  /**
-   * The original bytes of a source document, as stored.
-   *
-   * Returned as bytes rather than a URL because the renderer authenticates
-   * with a bearer header the webview cannot attach to an `<embed>` or `<img>`
-   * source, and because pdf.js wants a buffer anyway.
-   */
-  async getDocumentFileContent(
-    documentId: string,
-    signal?: AbortSignal,
-    onProgress?: (progress: FileDownloadProgress) => void,
-  ): Promise<Uint8Array> {
-    const { bytes } = await this.streamBytes(
-      `/documents/${encodeURIComponent(documentId)}/file-content`,
-      signal,
-      onProgress,
-    );
-    return bytes;
-  }
-
   /** One source's extracted text and catalog metadata. */
   getChatDocument(chatId: string, documentId: string): Promise<DocumentDetail> {
     return this.json(
@@ -948,24 +928,30 @@ export class ApiClient {
   /**
    * The original bytes of one source, exactly as they were imported.
    *
-   * Bytes are addressed by document id and never by a host path, so a viewer
-   * can show the file the reader gave us without the renderer learning where
-   * on disk it came from.
+   * Bytes are addressed by document id inside its conversation and never by a
+   * host path, so a viewer can show the file the reader gave us without the
+   * renderer learning where on disk it came from. The conversation is part of
+   * the address rather than decoration: the server serves a document's bytes
+   * only under the chat that owns it.
+   *
+   * Returned as bytes rather than a URL because the renderer authenticates with
+   * a bearer header the webview cannot attach to an `<embed>` or `<img>` source,
+   * and because pdf.js and the workbook parsers want a buffer anyway. The
+   * stored media type comes back alongside them because it is what the text
+   * viewers dispatch on, and it would otherwise be lost when the streamed
+   * chunks are reassembled.
    */
-  async getChatDocumentFile(
+  getChatDocumentFile(
     chatId: string,
     documentId: string,
     signal?: AbortSignal,
     onProgress?: (progress: FileDownloadProgress) => void,
-  ): Promise<Blob> {
-    const { bytes, contentType } = await this.streamBytes(
+  ): Promise<{ bytes: Uint8Array; contentType: string | null }> {
+    return this.streamBytes(
       `/chats/${encodeURIComponent(chatId)}/documents/${encodeURIComponent(documentId)}/file-content`,
       signal,
       onProgress,
     );
-    // The stored media type is what the viewers dispatch on, so it has to
-    // survive being reassembled from chunks.
-    return new Blob([bytes], contentType ? { type: contentType } : undefined);
   }
 
   patchChatTitle(chatId: string, title: string | null): Promise<Chat> {

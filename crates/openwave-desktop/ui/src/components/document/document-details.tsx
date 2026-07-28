@@ -1,3 +1,13 @@
+/**
+ * `components/document/` is the reading side of a source: the extracted text,
+ * the panel's view switcher below, and the viewers that need nothing more than
+ * the file's characters — image, text/markdown, JSON, XML.
+ *
+ * `document/` next to it is the heavy side: the media-type dispatcher and the
+ * viewers built on a document engine of their own (pdf.js, Univer), each of
+ * which is code-split so opening one format does not fetch the others. The
+ * download itself is shared — both sides use `@/document/useFileDownload`.
+ */
 import { Loader2Icon } from "lucide-react";
 import { lazy, Suspense, useEffect, useMemo, useRef } from "react";
 
@@ -115,6 +125,7 @@ export function DocumentDetails({
           {hasOriginalViewer(type) ? (
             <DocumentViewer
               client={client}
+              chatId={chatId}
               documentId={info.document_id}
               mediaType={type}
               targetPage={targetPage}
@@ -122,6 +133,7 @@ export function DocumentDetails({
             />
           ) : type.startsWith("image/") ? (
             <ImageViewer
+              client={client}
               chatId={chatId}
               documentID={info.document_id}
               className="bg-page-background grow"
@@ -130,6 +142,7 @@ export function DocumentDetails({
             <Suspense fallback={<ViewerLoading />}>
               {structured === "json" ? (
                 <JsonViewer
+                  client={client}
                   chatId={chatId}
                   documentID={info.document_id}
                   highlightPath={highlightPath}
@@ -137,6 +150,7 @@ export function DocumentDetails({
                 />
               ) : (
                 <XmlViewer
+                  client={client}
                   chatId={chatId}
                   documentID={info.document_id}
                   highlightPath={highlightPath}
@@ -146,6 +160,7 @@ export function DocumentDetails({
             </Suspense>
           ) : (
             <MarkdownViewer
+              client={client}
               chatId={chatId}
               documentID={info.document_id}
               highlightRange={highlightRange}

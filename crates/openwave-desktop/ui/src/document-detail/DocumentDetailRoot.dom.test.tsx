@@ -7,6 +7,7 @@ import type { ApiClient, DocumentDetail } from "@/api";
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import type { AssistantSource } from "@/AssistantSources";
 import { useChatSessionStore } from "@/ChatSessionStore";
+import { clearFileDownloadCache } from "@/document/useFileDownload";
 import { renderWithRouter } from "../test/router";
 import { DocumentDetailRoot } from "./DocumentDetailRoot";
 
@@ -46,6 +47,9 @@ afterEach(() => {
   useChatSessionStore.getState().reset();
   window.sessionStorage.clear();
   scrolledTo.length = 0;
+  // Downloaded bytes are cached for the life of the process, and every case
+  // here opens the same document id with different content.
+  clearFileDownloadCache();
 });
 
 beforeAll(() => {
@@ -74,11 +78,14 @@ function detail(overrides: Partial<DocumentDetail> = {}): DocumentDetail {
 async function openPanel(
   info: DocumentDetail,
   download = vi.fn(),
-  bytes: Blob = new Blob(["bytes"]),
+  body = "bytes",
 ) {
   const client = {
     getChatDocument: vi.fn().mockResolvedValue(info),
-    getChatDocumentFile: vi.fn().mockResolvedValue(bytes),
+    getChatDocumentFile: vi.fn().mockResolvedValue({
+      bytes: new TextEncoder().encode(body),
+      contentType: info.media_type,
+    }),
   };
   const rendered = await renderWithRouter(
     <AppContextProvider value={{ client } as unknown as AppContextValue}>
@@ -126,8 +133,10 @@ function seedTranscript(source: Partial<AssistantSource> & { id: string }) {
 async function openCitation(info: DocumentDetail, citationId: string) {
   const client = {
     getChatDocument: vi.fn().mockResolvedValue(info),
-    getChatDocumentFile: vi.fn().mockResolvedValue(new Blob(["bytes"])),
-    getDocumentFileContent: vi.fn().mockResolvedValue(new Uint8Array()),
+    getChatDocumentFile: vi.fn().mockResolvedValue({
+      bytes: new TextEncoder().encode("bytes"),
+      contentType: info.media_type,
+    }),
   };
   return renderWithRouter(
     <AppContextProvider value={{ client } as unknown as AppContextValue}>
@@ -203,7 +212,7 @@ describe("DocumentDetailRoot", () => {
     ["application/xml", XML_BODY],
     ["text/xml", XML_BODY],
   ])("draws %s as a tree rather than as raw text", async (mediaType, body) => {
-    await openPanel(detail({ media_type: mediaType, title: "Data" }), vi.fn(), new Blob([body]));
+    await openPanel(detail({ media_type: mediaType, title: "Data" }), vi.fn(), body);
 
     expect(await screen.findByRole("button", { name: "Collapse all" })).toBeVisible();
     // Decomposed into nodes, so the file's own text never appears as one run.
@@ -218,7 +227,7 @@ describe("DocumentDetailRoot", () => {
     await openPanel(
       detail({ media_type: "text/markdown", title: "Report.md" }),
       vi.fn(),
-      new Blob(["# Quarterly report\n\nBody.\n\n## Revenue by **segment**\n\nMore.\n"]),
+      "# Quarterly report\n\nBody.\n\n## Revenue by **segment**\n\nMore.\n",
     );
 
     await user.click(await screen.findByRole("button", { name: "Document outline" }));
@@ -237,7 +246,7 @@ describe("DocumentDetailRoot", () => {
     await openPanel(
       detail({ media_type: "text/plain", title: "Notes.txt" }),
       vi.fn(),
-      new Blob(["# Not a heading, just a line that starts with a hash\n"]),
+      "# Not a heading, just a line that starts with a hash\n",
     );
 
     expect(
@@ -300,11 +309,35 @@ describe("DocumentDetailRoot", () => {
     expect(await screen.findByText("Page 5")).toBeVisible();
   });
 
+  // The panel unmounts the viewer whenever the reader switches views, so
+  // without the byte cache every flip back pulls the whole file over again.
+  it("draws the original from cache when the reader flips views and back", async () => {
+    const user = userEvent.setup();
+    const { client } = await openPanel(
+      detail({
+        media_type: "text/markdown",
+        title: "Report.md",
+        content: "The text of record.",
+        searchable: true,
+      }),
+      vi.fn(),
+      "# Quarterly report\n",
+    );
+
+    expect(await screen.findByText("Quarterly report")).toBeVisible();
+    await user.click(screen.getByRole("tab", { name: "Extracted text" }));
+    expect(await screen.findByText("The text of record.")).toBeVisible();
+    await user.click(screen.getByRole("tab", { name: "Original document" }));
+
+    expect(await screen.findByText("Quarterly report")).toBeVisible();
+    expect(client.getChatDocumentFile).toHaveBeenCalledTimes(1);
+  });
+
   it("says so when a structured source will not parse", async () => {
     await openPanel(
       detail({ media_type: "application/json", title: "Truncated.json" }),
       vi.fn(),
-      new Blob(['{"invoice": ']),
+      '{"invoice": ',
     );
 
     expect(await screen.findByText("Unable to parse JSON")).toBeVisible();

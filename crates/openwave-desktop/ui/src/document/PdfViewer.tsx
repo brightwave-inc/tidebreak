@@ -14,10 +14,11 @@ import { Document, Page, pdfjs } from "react-pdf";
 // security policy. Vite emits the file and rewrites this to its final URL.
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
-import type { ApiClient, FileDownloadProgress } from "@/api";
+import type { ApiClient } from "@/api";
 import { FileDownloadProgressIndicator } from "@/components/document/FileDownloadProgress";
 import { Button } from "@/components/ui/button";
 import { useRegisterPdfControls } from "@/document/PdfControlsContext";
+import { useFileDownload } from "@/document/useFileDownload";
 import { usePdfPageState } from "@/document/usePdfPageState";
 import { useWheelPageNavigation } from "@/document/useWheelPageNavigation";
 import { useZoom } from "@/document/useZoom";
@@ -27,7 +28,8 @@ import { cn } from "@/lib/utils";
 pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 interface Props extends HTMLAttributes<HTMLDivElement> {
-  client: Pick<ApiClient, "getDocumentFileContent">;
+  client: Pick<ApiClient, "getChatDocumentFile">;
+  chatId: string;
   documentId: string;
   /** Open on this page the first time it is requested for this document. */
   targetPage?: number;
@@ -60,6 +62,7 @@ function PdfPage({ pageNumber, width }: PdfPageProps) {
  */
 export function PdfViewer({
   client,
+  chatId,
   documentId,
   targetPage,
   compact,
@@ -75,44 +78,27 @@ export function PdfViewer({
   const zoomIn = useZoom((s) => s.zoomIn);
   const zoomOut = useZoom((s) => s.zoomOut);
 
-  const [bytes, setBytes] = useState<Uint8Array | null>(null);
-  const [loadFailed, setLoadFailed] = useState(false);
+  const [renderFailed, setRenderFailed] = useState(false);
   const [numPages, setNumPages] = useState(0);
-  const [progress, setProgress] = useState<FileDownloadProgress | null>(null);
+
+  const { data, error, progress } = useFileDownload(client, chatId, documentId, {
+    parseAs: "arrayBuffer",
+  });
+  const loadFailed = renderFailed || error !== null;
 
   // Reset scale, error state and page count on document change.
   useEffect(() => {
     setScale(100);
-    setLoadFailed(false);
+    setRenderFailed(false);
     setNumPages(0);
   }, [documentId, setScale]);
 
-  useEffect(() => {
-    const abort = new AbortController();
-    setBytes(null);
-    setProgress(null);
-    void client
-      .getDocumentFileContent(documentId, abort.signal, (next) => {
-        if (!abort.signal.aborted) setProgress(next);
-      })
-      .then((data) => {
-        if (abort.signal.aborted) return;
-        setBytes(data);
-        setProgress(null);
-      })
-      .catch(() => {
-        if (abort.signal.aborted) return;
-        setLoadFailed(true);
-        setProgress(null);
-      });
-    return () => abort.abort();
-  }, [client, documentId]);
-
   const pdfFile = useMemo(() => {
-    if (!bytes) return null;
-    // Copy so pdf.js can transfer the buffer without detaching the cached one.
-    return { data: new Uint8Array(bytes) };
-  }, [bytes]);
+    if (!data) return null;
+    // The hook hands out its own copy of the bytes, so pdf.js is free to
+    // transfer this buffer without detaching the cached original.
+    return { data: new Uint8Array(data) };
+  }, [data]);
 
   const { currentPage, setCurrentPage } = usePdfPageState(documentId, {
     numPages,
@@ -305,7 +291,7 @@ export function PdfViewer({
           key={documentId}
           file={pdfFile ?? undefined}
           onLoadSuccess={({ numPages }) => setNumPages(numPages)}
-          onLoadError={() => setLoadFailed(true)}
+          onLoadError={() => setRenderFailed(true)}
           onItemClick={({ pageNumber }) => {
             if (pageNumber) {
               setCurrentPage(pageNumber);

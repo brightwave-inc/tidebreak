@@ -2,12 +2,13 @@ import { FileIcon, Loader2Icon } from "lucide-react";
 import type { HTMLAttributes } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import type { ApiClient } from "@/api";
+import { useFileDownload } from "@/document/useFileDownload";
 import { cn } from "@/lib/utils";
 import { extractHeadings } from "@/markdownHeadings";
 import { MessageMarkdown } from "@/MessageMarkdown";
 import { FileDownloadProgressIndicator } from "./FileDownloadProgress";
 import { MarkdownOutline } from "./MarkdownOutline";
-import { useFileDownload } from "./useFileDownload";
 
 /** A character range in the raw file, as a citation reports it. */
 export type HighlightRange = { start: number; end: number };
@@ -71,6 +72,7 @@ export function findChunkForOffset(
 }
 
 interface Props extends HTMLAttributes<HTMLDivElement> {
+  client: Pick<ApiClient, "getChatDocumentFile">;
   chatId: string;
   documentID: string;
   /**
@@ -85,6 +87,7 @@ interface Props extends HTMLAttributes<HTMLDivElement> {
 
 /** Text-shaped originals: markdown rendered, everything else as written. */
 export function MarkdownViewer({
+  client,
   chatId,
   documentID,
   highlightRange,
@@ -96,7 +99,9 @@ export function MarkdownViewer({
   const anchorRef = useRef<HTMLDivElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
 
-  const fileDownload = useFileDownload(chatId, documentID, { parseAs: "text" });
+  const fileDownload = useFileDownload(client, chatId, documentID, {
+    parseAs: "text",
+  });
   const fullContent = fileDownload.data ?? "";
 
   // Split into render-friendly chunks at paragraph boundaries
@@ -169,7 +174,7 @@ export function MarkdownViewer({
     });
   }, [citationInfo]);
 
-  if (fileDownload.isError) {
+  if (fileDownload.error) {
     return (
       <div className={cn("relative overflow-auto", className)} {...props}>
         <div className="flex h-64 items-center justify-center text-muted-foreground">
