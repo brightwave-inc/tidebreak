@@ -37,9 +37,13 @@ export type AgentRunCancellationSnapshot = { id: AgentRunId, status: AgentRunCan
 export type AgentRunCancellationStatus = "cancelling" | "cancelled";
 
 /**
- * Execution boundary for an [`AgentRun`].
+ * Where an [`AgentRun`]'s loop executes.
+ *
+ * Every run executes inside the OpenWave server process today. A run
+ * executing inside an execution provider's boundary adds a variant here
+ * rather than a second meaning to [`AgentRunTier`].
  */
-export type AgentRunExecution = "foreground" | "sandbox";
+export type AgentRunExecutionLocation = "in_process";
 
 /**
  * Identifies one durable foreground or sandboxed background agent run.
@@ -52,7 +56,7 @@ export type AgentRunId = string;
  * Worker lease tokens, delegated inputs, scheduling budgets, and other
  * executor-facing fields intentionally remain inside the server/store boundary.
  */
-export type AgentRunSnapshot = { id: AgentRunId, parent_id: AgentRunId | null, execution: AgentRunExecution, status: AgentRunStatus, started_at: string | null, finished_at: string | null, 
+export type AgentRunSnapshot = { id: AgentRunId, parent_id: AgentRunId | null, tier: AgentRunTier, execution_location: AgentRunExecutionLocation, status: AgentRunStatus, started_at: string | null, finished_at: string | null, 
 /**
  * Stable, bounded classification suitable for renderer display.
  */
@@ -70,6 +74,16 @@ activity: AgentActivitySnapshot | null, created_at: string, updated_at: string, 
  * Durable lifecycle of an [`AgentRun`].
  */
 export type AgentRunStatus = "active" | "queued" | "running" | "cancelling" | "waiting" | "retry_wait" | "completed" | "failed" | "cancelled";
+
+/**
+ * Run tier of an [`AgentRun`]: who advances the run.
+ *
+ * Formerly one half of `AgentRunExecution` (`foreground | sandbox`), which
+ * fused this axis with [`AgentRunExecutionLocation`]. The two agreed only
+ * while every run executed in-process, so the field split before a second
+ * location could exist.
+ */
+export type AgentRunTier = "foreground" | "background";
 
 /**
  * The approval policy class a tool declares for itself.

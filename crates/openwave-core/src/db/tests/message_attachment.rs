@@ -70,7 +70,7 @@ async fn m0014_upgrades_an_existing_store_and_orders_deletion_behind_its_foreign
     migration::Migrator::up(&conn, Some(13)).await.unwrap();
     let store = DbStore { conn: conn.clone() };
     let chat = sample_chat();
-    store.create_chat(&chat).await.unwrap();
+    super::create_chat_before_agent_run_split(&store, &chat).await;
     // The fixture starts before attachment persistence (and therefore before
     // standing-grant and agent-run model persistence). Upgrade before calling
     // current lifecycle code: its durable projections legitimately expect

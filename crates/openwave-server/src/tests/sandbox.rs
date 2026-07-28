@@ -913,7 +913,7 @@ async fn agent_run_snapshots_expose_only_safe_live_foreground_folder_activity() 
         let snapshots: Vec<serde_json::Value> = json_body(response).await;
         snapshots
             .into_iter()
-            .find(|snapshot| snapshot.get("execution") == Some(&serde_json::json!("foreground")))
+            .find(|snapshot| snapshot.get("tier") == Some(&serde_json::json!("foreground")))
             .expect("foreground snapshot is returned")
     };
 

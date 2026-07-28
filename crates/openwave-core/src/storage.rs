@@ -36,7 +36,7 @@ use crate::id::{
 };
 use crate::image::ImageRef;
 use crate::model::{
-    AgentRun, AgentRunExecution, AgentRunInboxEntry, AgentRunResult, AgentRunWaitSetCandidate,
+    AgentRun, AgentRunInboxEntry, AgentRunResult, AgentRunTier, AgentRunWaitSetCandidate,
     BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus, Chat, ClientToolCallRequest,
     DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
     DocumentParseOutput, DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert,
@@ -1629,7 +1629,7 @@ pub trait Store: Send + Sync {
         _chat_id: ChatId,
         _parent_id: Option<AgentRunId>,
         _spawn_call_id: Option<CallId>,
-        _execution: AgentRunExecution,
+        _tier: AgentRunTier,
         _input: Option<&str>,
     ) -> Result<AcceptAgentRunOutcome> {
         agent_run_storage_unavailable()

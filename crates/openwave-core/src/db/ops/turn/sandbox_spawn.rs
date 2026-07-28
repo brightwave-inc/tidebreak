@@ -441,7 +441,7 @@ where
         || child.parent_id != Some(checkpoint.parent_run_id.0)
         || child.parent_depth != Some(0)
         || child.spawn_call_id != Some(checkpoint.call_id.0)
-        || child.execution != crate::AgentRunExecution::Sandbox.as_str()
+        || child.tier != crate::AgentRunTier::Background.as_str()
         || child.depth != i16::from(AgentRun::MAX_DEPTH)
         || child.input.as_deref() != Some(arguments.task.as_str())
         || admission.delegated_root_id
