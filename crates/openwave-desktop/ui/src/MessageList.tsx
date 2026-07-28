@@ -1,5 +1,5 @@
-import { memo, useMemo } from "react";
-import type { ReactNode, RefObject, UIEvent } from "react";
+import { Fragment, memo, useMemo } from "react";
+import type { ReactNode, Ref, RefCallback, UIEvent } from "react";
 import type {
   ApprovalGrantRung,
   ApiClient,
@@ -32,6 +32,7 @@ import type { TranscriptImageAttachment } from "./ImageAttachments";
 import { TranscriptImageAttachments } from "./TranscriptImageAttachments";
 import { BackgroundAgentList } from "./BackgroundAgentList";
 import { useSourceNav } from "./panel/SourceNav";
+import { Skeleton } from "./components/ui/skeleton";
 
 export type ChatMessage =
   | {
@@ -106,7 +107,14 @@ type MessageListProps = {
   onRetryBackgroundAgentRuns?: () => void;
   busy: boolean;
   reasoningActive?: boolean;
-  scrollRef: RefObject<HTMLDivElement | null>;
+  scrollRef: Ref<HTMLDivElement>;
+  /** Attached to the transcript content column so growth can drive auto-follow. */
+  contentRef?: RefCallback<HTMLDivElement>;
+  /** Extra classes for the scroll container — used for the scroll-edge fades. */
+  maskClass?: string | null;
+  /** Lift the trailing exchange into a pinned wrapper so a just-sent message
+   *  lands near the top with room below for its streaming reply. */
+  pinLastTurn?: boolean;
   onScroll: (event: UIEvent<HTMLDivElement>) => void;
   onApproval: (
     callId: string,
@@ -156,6 +164,9 @@ export function MessageList({
   busy,
   reasoningActive = false,
   scrollRef,
+  contentRef,
+  maskClass,
+  pinLastTurn = false,
   onScroll,
   onApproval,
   onFolderAccessDecision,
@@ -174,7 +185,7 @@ export function MessageList({
     () => ({ decidingApprovalCalls, approvalErrors }),
     [decidingApprovalCalls, approvalErrors],
   );
-  const messageItems = groupMessageItems(
+  const { items: messageItems, lastTurnStart } = groupMessageItems(
     messages,
     busy,
     onApproval,
@@ -207,59 +218,120 @@ export function MessageList({
     );
   }
 
-  return (
-    <div className="messages" ref={scrollRef} onScroll={onScroll}>
-      <div className="messages-column">
-        {messageItems}
-        {folderAccessRequests.map((request) => (
-          <FolderAccessCard
-            key={request.callId}
-            request={request}
-            nativeHost={nativeHost}
-            nativeBusy={nativeBusy}
-            working={resolvingFolderCalls.has(request.callId)}
-            error={folderAccessErrors[request.callId]}
-            onDecision={(decision) =>
-              onFolderAccessDecision(request.callId, decision)
-            }
-            onCancel={() => onFolderAccessCancel(request.callId, request.turnId)}
-          />
-        ))}
-        {outputWritebackRequests.map((request) => (
-          <OutputWritebackCard
-            key={request.callId}
-            request={request}
-            nativeHost={nativeHost}
-            working={resolvingOutputWritebackCalls.has(request.callId)}
-            error={outputWritebackErrors[request.callId]}
-            onDecision={(decision) =>
-              onOutputWritebackDecision(request.callId, decision)
-            }
-            onCancel={() =>
-              onOutputWritebackCancel(request.callId, request.turnId)
-            }
-          />
-        ))}
-        {userQuestionRequests.map((request) => (
-          <UserQuestionsCard
-            key={request.callId}
-            request={request}
-            working={answeringQuestionCalls.has(request.callId)}
-            error={userQuestionErrors[request.callId]}
-            onAnswer={(answers) =>
-              onAnswerUserQuestions(request.callId, answers)
-            }
-            onCancel={() => onUserQuestionsCancel(request.turnId)}
-          />
-        ))}
-        {shouldShowAssistantWorking(
-          messages,
-          busy,
-          folderAccessRequests.length +
-            outputWritebackRequests.length +
-            userQuestionRequests.length,
-        ) && <AssistantWorkingIndicator thinking={reasoningActive} />}
+  // A conversation that hasn't hydrated yet is transiently empty; a skeleton
+  // holds the shape of a transcript so the pane doesn't flash blank before the
+  // history lands.
+  if (!hydrated && messages.length === 0) {
+    return (
+      <div
+        className={`messages${maskClass ? ` ${maskClass}` : ""}`}
+        ref={scrollRef}
+        onScroll={onScroll}
+      >
+        <div className="messages-column">
+          <TranscriptSkeleton />
+        </div>
       </div>
+    );
+  }
+
+  // The continuation cards and the working indicator belong to the turn in
+  // flight, so when the trailing turn is pinned they ride inside its wrapper.
+  const trailing = (
+    <>
+      {folderAccessRequests.map((request) => (
+        <FolderAccessCard
+          key={request.callId}
+          request={request}
+          nativeHost={nativeHost}
+          nativeBusy={nativeBusy}
+          working={resolvingFolderCalls.has(request.callId)}
+          error={folderAccessErrors[request.callId]}
+          onDecision={(decision) =>
+            onFolderAccessDecision(request.callId, decision)
+          }
+          onCancel={() => onFolderAccessCancel(request.callId, request.turnId)}
+        />
+      ))}
+      {outputWritebackRequests.map((request) => (
+        <OutputWritebackCard
+          key={request.callId}
+          request={request}
+          nativeHost={nativeHost}
+          working={resolvingOutputWritebackCalls.has(request.callId)}
+          error={outputWritebackErrors[request.callId]}
+          onDecision={(decision) =>
+            onOutputWritebackDecision(request.callId, decision)
+          }
+          onCancel={() =>
+            onOutputWritebackCancel(request.callId, request.turnId)
+          }
+        />
+      ))}
+      {userQuestionRequests.map((request) => (
+        <UserQuestionsCard
+          key={request.callId}
+          request={request}
+          working={answeringQuestionCalls.has(request.callId)}
+          error={userQuestionErrors[request.callId]}
+          onAnswer={(answers) => onAnswerUserQuestions(request.callId, answers)}
+          onCancel={() => onUserQuestionsCancel(request.turnId)}
+        />
+      ))}
+      {shouldShowAssistantWorking(
+        messages,
+        busy,
+        folderAccessRequests.length +
+          outputWritebackRequests.length +
+          userQuestionRequests.length,
+      ) && <AssistantWorkingIndicator thinking={reasoningActive} />}
+    </>
+  );
+
+  const pin = pinLastTurn && lastTurnStart >= 0;
+
+  return (
+    <div
+      className={`messages${maskClass ? ` ${maskClass}` : ""}`}
+      ref={scrollRef}
+      onScroll={onScroll}
+    >
+      <div className="messages-column" ref={contentRef}>
+        {pin ? (
+          <>
+            {messageItems.slice(0, lastTurnStart)}
+            <div className="message-turn is-pinned">
+              {messageItems.slice(lastTurnStart)}
+              {trailing}
+            </div>
+          </>
+        ) : (
+          <>
+            {messageItems}
+            {trailing}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Placeholder rows that echo the transcript's shape while history hydrates. */
+function TranscriptSkeleton() {
+  return (
+    <div className="flex w-full flex-col gap-4" aria-hidden="true">
+      {[0, 1, 2, 3].map((row) => (
+        <Fragment key={row}>
+          <Skeleton className="h-9 w-1/2 self-start rounded-xl" />
+          <div className="flex flex-col gap-2.5 py-2">
+            <Skeleton className="h-3 w-full" />
+            <Skeleton className="h-3 w-full" />
+            <Skeleton className="h-3 w-full" />
+            <Skeleton className="h-3 w-5/6" />
+            <Skeleton className="h-3 w-1/3" />
+          </div>
+        </Fragment>
+      ))}
     </div>
   );
 }
@@ -294,6 +366,10 @@ export function groupMessageItems(
   } = { runs: [], loading: false, error: null, retry: () => undefined },
 ) {
   const items: ReactNode[] = [];
+  // The item index at which the trailing turn opens (its user message). Lets the
+  // caller lift the last exchange into a pinned wrapper without re-deriving the
+  // turn boundary. Stays -1 for a transcript that opens on activity alone.
+  let lastTurnStart = -1;
   let index = 0;
   let groupIndex = 0;
   let streamingAssistantId: string | undefined;
@@ -318,6 +394,7 @@ export function groupMessageItems(
     const message = messages[index];
 
     if (!isActivityMessage(message)) {
+      if (message.role === "user") lastTurnStart = items.length;
       items.push(
         <MessageBubble
           key={message.id}
@@ -396,7 +473,7 @@ export function groupMessageItems(
     groupIndex += 1;
   }
 
-  return items;
+  return { items, lastTurnStart };
 }
 
 /**

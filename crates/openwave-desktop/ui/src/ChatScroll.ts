@@ -1,4 +1,4 @@
-export const AUTO_SCROLL_THRESHOLD_PX = 72;
+export const AUTO_SCROLL_THRESHOLD_PX = 30;
 
 type ScrollMetrics = {
   scrollTop: number;

@@ -8,14 +8,14 @@ import {
 } from "./ChatScroll";
 
 describe("chat scroll behavior", () => {
-  it("only follows new activity near the bottom", () => {
+  it("only follows new activity within a hair of the bottom", () => {
     expect(
-      isNearBottom({ scrollTop: 828, clientHeight: 100, scrollHeight: 1_000 }),
+      isNearBottom({ scrollTop: 870, clientHeight: 100, scrollHeight: 1_000 }),
     ).toBe(true);
     expect(
-      isNearBottom({ scrollTop: 827, clientHeight: 100, scrollHeight: 1_000 }),
+      isNearBottom({ scrollTop: 869, clientHeight: 100, scrollHeight: 1_000 }),
     ).toBe(false);
-    expect(AUTO_SCROLL_THRESHOLD_PX).toBe(72);
+    expect(AUTO_SCROLL_THRESHOLD_PX).toBe(30);
   });
 
   it("scrolls to the latest item when explicitly requested", () => {

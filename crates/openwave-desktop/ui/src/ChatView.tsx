@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -96,20 +97,121 @@ export function ChatView({
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const followsLatestRef = useRef(true);
+  const isProgrammaticRef = useRef(false);
   const visibleContinuationCallIdsRef = useRef<Set<string>>(new Set());
-  const [hasUnreadActivity, setHasUnreadActivity] = useState(false);
+  const scrollObserverRef = useRef<ResizeObserver | null>(null);
+  const contentObserverRef = useRef<ResizeObserver | null>(null);
+  const [scrolledAway, setScrolledAway] = useState(false);
+  const [maskClass, setMaskClass] = useState<string | null>(null);
+  // True once the reader has sent in this mounted session. Gates the turn pin so
+  // a freshly loaded history reads normally, then the just-sent turn is held tall
+  // enough to land near the top of the viewport.
+  const [pinLastTurn, setPinLastTurn] = useState(false);
+
+  // Reflect where the scroll sits onto the edge-fade masks: fade the top once
+  // there is content above, the bottom while there is content below.
+  const updateEdges = useCallback(() => {
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+    const fromTop = scroll.scrollTop > 0;
+    const fromBottom =
+      scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight > 1;
+    setMaskClass(
+      fromTop && fromBottom
+        ? "is-faded-both"
+        : fromTop
+          ? "is-faded-top"
+          : fromBottom
+            ? "is-faded-bottom"
+            : null,
+    );
+  }, []);
+
+  // Jump to the latest message. Marked programmatic so the resulting scroll
+  // events don't read as the reader deliberately scrolling away.
+  const scrollToBottom = useCallback((behavior: ScrollBehavior) => {
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+    isProgrammaticRef.current = true;
+    scrollToLatest(scroll, behavior);
+    if (behavior === "smooth") {
+      let timeout: ReturnType<typeof setTimeout>;
+      const done = () => {
+        clearTimeout(timeout);
+        isProgrammaticRef.current = false;
+      };
+      scroll.addEventListener("scrollend", done, { once: true });
+      timeout = setTimeout(() => {
+        scroll.removeEventListener("scrollend", done);
+        isProgrammaticRef.current = false;
+      }, 800);
+    } else {
+      requestAnimationFrame(() => {
+        isProgrammaticRef.current = false;
+      });
+    }
+  }, []);
+
+  const handleScroll = useCallback(() => {
+    updateEdges();
+    if (isProgrammaticRef.current) return;
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+    const away = !isNearBottom(scroll);
+    setScrolledAway(away);
+    // Drifting away disarms follow; re-arming is deliberate (the button, or a
+    // send), never a side effect of scrolling back toward the bottom.
+    if (away && followsLatestRef.current) followsLatestRef.current = false;
+  }, [updateEdges]);
+
+  // Track the scroll viewport height in a CSS variable so a pinned turn can
+  // reserve roughly a screenful, and keep the edge fades honest across resizes.
+  const attachScrollRef = useCallback(
+    (element: HTMLDivElement | null) => {
+      scrollObserverRef.current?.disconnect();
+      scrollRef.current = element;
+      if (!element) return;
+      const observer = new ResizeObserver(() => {
+        element.style.setProperty(
+          "--transcript-viewport",
+          `${element.clientHeight}px`,
+        );
+        updateEdges();
+      });
+      observer.observe(element);
+      scrollObserverRef.current = observer;
+    },
+    [updateEdges],
+  );
+
+  // Follow asynchronous layout growth (image loads, markdown reflow) that no
+  // React state change announces, so a following reader stays pinned to the end.
+  const attachContentRef = useCallback(
+    (element: HTMLDivElement | null) => {
+      contentObserverRef.current?.disconnect();
+      if (!element) return;
+      const observer = new ResizeObserver(() => {
+        if (!transcriptVisible) return;
+        if (followsLatestRef.current) scrollToBottom("auto");
+        const scroll = scrollRef.current;
+        if (scroll) setScrolledAway(!isNearBottom(scroll));
+        updateEdges();
+      });
+      observer.observe(element);
+      contentObserverRef.current = observer;
+    },
+    [transcriptVisible, scrollToBottom, updateEdges],
+  );
 
   useEffect(() => {
-    const scroll = scrollRef.current;
     // Scrolling a transcript that has been expanded away does nothing, so this
     // also runs on the way back to put a following reader at the latest message.
-    if (!scroll || !transcriptVisible) return;
+    if (!transcriptVisible) return;
     if (followsLatestRef.current) {
-      scrollToLatest(scroll, followScrollBehavior(busy));
-    } else {
-      setHasUnreadActivity(true);
+      scrollToBottom(followScrollBehavior(busy));
     }
-  }, [messages, busy, transcriptVisible]);
+    updateEdges();
+  }, [messages, busy, transcriptVisible, scrollToBottom, updateEdges]);
 
   useEffect(() => {
     const next = new Set([
@@ -122,18 +224,27 @@ export function ChatView({
     );
     visibleContinuationCallIdsRef.current = next;
     if (!gainedRequest) return;
-    const scroll = scrollRef.current;
-    if (!scroll) return;
-    if (followsLatestRef.current) {
-      scrollToLatest(scroll, followScrollBehavior(false));
-    } else {
-      setHasUnreadActivity(true);
-    }
+    if (followsLatestRef.current) scrollToBottom(followScrollBehavior(false));
   }, [
     folderAccess.requests,
     outputWritebacks.requests,
     userQuestions.requests,
+    scrollToBottom,
   ]);
+
+  const jumpToLatest = useCallback(() => {
+    followsLatestRef.current = true;
+    setScrolledAway(false);
+    scrollToBottom(followScrollBehavior(false));
+  }, [scrollToBottom]);
+
+  const handleSend = useCallback(async () => {
+    followsLatestRef.current = true;
+    setScrolledAway(false);
+    setPinLastTurn(true);
+    await onSend();
+    scrollToBottom(followScrollBehavior(false));
+  }, [onSend, scrollToBottom]);
 
   return (
     <section className="chat-pane">
@@ -160,12 +271,11 @@ export function ChatView({
           onRetryBackgroundAgentRuns={agentRuns.refresh}
           busy={busy}
           reasoningActive={reasoningActive}
-          scrollRef={scrollRef}
-          onScroll={(event) => {
-            const followsLatest = isNearBottom(event.currentTarget);
-            followsLatestRef.current = followsLatest;
-            if (followsLatest) setHasUnreadActivity(false);
-          }}
+          scrollRef={attachScrollRef}
+          contentRef={attachContentRef}
+          maskClass={maskClass}
+          pinLastTurn={pinLastTurn}
+          onScroll={handleScroll}
           onApproval={approvals.decide}
           onFolderAccessDecision={folderAccess.decide}
           onFolderAccessCancel={folderAccess.cancel}
@@ -179,22 +289,16 @@ export function ChatView({
           hydrated={hydrated}
           imageClient={client}
         />
-        {hasUnreadActivity && (
-          <button
-            type="button"
-            className="new-activity"
-            onClick={() => {
-              followsLatestRef.current = true;
-              setHasUnreadActivity(false);
-              if (scrollRef.current) {
-                scrollToLatest(scrollRef.current, followScrollBehavior(false));
-              }
-            }}
-          >
-            New activity
-            <ArrowDown size={13} />
-          </button>
-        )}
+        <button
+          type="button"
+          className={`scroll-to-latest${scrolledAway ? " is-visible" : ""}`}
+          aria-label="Scroll to latest"
+          aria-hidden={!scrolledAway}
+          tabIndex={scrolledAway ? 0 : -1}
+          onClick={jumpToLatest}
+        >
+          <ArrowDown size={16} />
+        </button>
       </div>
 
       <Composer
@@ -222,7 +326,7 @@ export function ChatView({
           turnControls.clearSteerFeedback();
           onDraftChange(value);
         }}
-        onSend={onSend}
+        onSend={handleSend}
         onSteer={turnControls.steer}
         onStop={turnControls.cancel}
         resetKey={chat.id}
