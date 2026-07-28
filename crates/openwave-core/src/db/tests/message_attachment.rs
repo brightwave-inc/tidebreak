@@ -71,22 +71,23 @@ async fn m0014_upgrades_an_existing_store_and_orders_deletion_behind_its_foreign
     let store = DbStore { conn: conn.clone() };
     let chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
-    let pre_upgrade_turn = TurnId::new();
+    // The fixture starts before attachment persistence (and therefore before
+    // standing-grant and agent-run model persistence). Upgrade before calling
+    // current lifecycle code: its durable projections legitimately expect
+    // columns that did not exist in this historical schema.
+    migration::Migrator::up(&conn, None).await.unwrap();
+    let pre_attachment_turn = TurnId::new();
     store
-        .accept_turn(pre_upgrade_turn, chat.id, "gpt-5", "before the upgrade")
+        .accept_turn(pre_attachment_turn, chat.id, "gpt-5", "before any image")
         .await
         .unwrap();
-    // The fixture starts before attachment persistence (and therefore before
-    // standing-grant persistence). Upgrade before calling current lifecycle
-    // code: its durable tool-call projection legitimately expects columns that
-    // did not exist in this historical schema.
-    migration::Migrator::up(&conn, None).await.unwrap();
     store
-        .request_turn_cancellation_and_append_event(pre_upgrade_turn, Utc::now())
+        .request_turn_cancellation_and_append_event(pre_attachment_turn, Utc::now())
         .await
         .unwrap();
 
-    // History written before the upgrade survives and simply has no images.
+    // A conversation created before attachment persistence keeps its history and
+    // simply has no images.
     assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 1);
     assert!(store
         .list_message_attachments(chat.id)

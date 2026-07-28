@@ -32,7 +32,51 @@ impl MigratorTrait for Migrator {
             Box::new(AddContextCheckpoints),
             Box::new(AddStandingToolGrants),
             Box::new(AddContextCheckpointUsage),
+            Box::new(AddAgentRunModel),
         ]
+    }
+}
+
+/// Records the model a sandbox run executes against.
+///
+/// The column is nullable because runs admitted before this migration have no
+/// recorded selection, and because foreground coordinators carry their model on
+/// each turn instead.
+struct AddAgentRunModel;
+
+impl MigrationName for AddAgentRunModel {
+    fn name(&self) -> &str {
+        "m20260728_000019_add_agent_run_model"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddAgentRunModel {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(AgentRun::Table)
+                    .add_column(
+                        ColumnDef::new(AgentRun::Model)
+                            .string_len(crate::model::AgentRun::MAX_MODEL_LEN as u32),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(AgentRun::Table)
+                    .drop_column(AgentRun::Model)
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
     }
 }
 
@@ -6115,6 +6159,7 @@ enum AgentRun {
     Depth,
     Status,
     Input,
+    Model,
     AttemptCount,
     MaxAttempts,
     ClaimCount,

@@ -1,7 +1,7 @@
 use chrono::Utc;
 use sea_orm::{
     sea_query::ExprTrait, ActiveModelTrait, ColumnTrait, Condition, DatabaseBackend, EntityTrait,
-    QueryFilter, QueryOrder, QuerySelect, Set, Statement, TransactionTrait,
+    NotSet, QueryFilter, QueryOrder, QuerySelect, Set, Statement, TransactionTrait,
 };
 
 use crate::agent_tools::SandboxAgentFileResource;
@@ -59,6 +59,9 @@ where
         depth: Set(0),
         status: Set(AgentRunStatus::Active.as_str().into()),
         input: Set(None),
+        // A foreground coordinator carries no model of its own; each of its
+        // turns records the selection it ran.
+        model: NotSet,
         attempt_count: Set(0),
         max_attempts: Set(0),
         claim_count: Set(0),
@@ -189,6 +192,9 @@ pub(in crate::db) async fn accept_agent_run(
         depth: Set(depth),
         status: Set(status.as_str().into()),
         input: Set(input.map(ToOwned::to_owned)),
+        // Only turn-bound sandbox admission records a model, and this path
+        // rejects sandbox execution outright.
+        model: NotSet,
         attempt_count: Set(0),
         max_attempts: Set(match execution {
             AgentRunExecution::Foreground => 0,
@@ -459,6 +465,11 @@ where
         depth: Set(i16::from(AgentRun::MAX_DEPTH)),
         status: Set(AgentRunStatus::Queued.as_str().into()),
         input: Set(Some(input.into())),
+        // Inherit the origin turn's frozen selection inside the same
+        // transaction that admits the child. A sandbox executor can then run
+        // the conversation's model without re-resolving mutable settings, and
+        // the row records what it ran against.
+        model: Set(Some(turn.model.clone())),
         attempt_count: Set(0),
         max_attempts: Set(AgentRun::DEFAULT_MAX_ATTEMPTS),
         claim_count: Set(0),
@@ -2426,6 +2437,7 @@ pub(in crate::db) fn agent_run_from_model(model: entities::agent_run::Model) -> 
             .map_err(|_| AgentError::Store("invalid negative agent-run depth".into()))?,
         status,
         input: model.input,
+        model: model.model,
         attempt_count: model.attempt_count,
         max_attempts: model.max_attempts,
         claim_count: model.claim_count,
@@ -2999,6 +3011,16 @@ fn validate_stored_shape(
     if model.id.is_nil() || model.updated_at < model.created_at {
         return Err(AgentError::Store(
             "invalid persisted agent-run identity or timestamp".into(),
+        ));
+    }
+    // A recorded model is optional — rows admitted before it was persisted have
+    // none — but a stored one must be a usable selection.
+    if model.model.as_ref().is_some_and(|selection| {
+        let len = selection.chars().count();
+        len == 0 || len > AgentRun::MAX_MODEL_LEN
+    }) {
+        return Err(AgentError::Store(
+            "invalid persisted agent-run model".into(),
         ));
     }
     let valid = match execution {
