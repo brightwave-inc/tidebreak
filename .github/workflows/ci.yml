@@ -92,6 +92,7 @@ jobs:
     outputs:
       rust: ${{ steps.scope.outputs.rust }}
       ui: ${{ steps.scope.outputs.ui }}
+      workspace: ${{ steps.scope.outputs.workspace }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -106,8 +107,11 @@ jobs:
           PUSH_HEAD_SHA: ${{ github.event.after }}
         run: |
           full_validation() {
-            echo "rust=true" >> "$GITHUB_OUTPUT"
-            echo "ui=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "rust=true"
+              echo "ui=true"
+              echo "workspace=true"
+            } >> "$GITHUB_OUTPUT"
           }
 
           case "$EVENT_NAME" in
@@ -138,24 +142,43 @@ jobs:
             exit 0
           fi
 
+          # `rust` gates the lanes that cover every crate: rustfmt, clippy, and
+          # the openwave-desktop tests. `workspace` gates the lanes that cover
+          # everything *except* openwave-desktop, so it can stay false when a
+          # change cannot reach them. `workspace` implies `rust`; the gate below
+          # asserts that.
           rust=false
           ui=false
+          workspace=false
           git diff --no-renames --name-only -z "$diff_range" \
             > "$RUNNER_TEMP/changed-files"
           while IFS= read -r -d '' file; do
             case "$file" in
               *.md|docs/*|assets/*|LICENSE|NOTICE) ;;
-              .github/workflows/ci.yml) rust=true; ui=true ;;
+              .github/workflows/ci.yml) rust=true; ui=true; workspace=true ;;
               # Generated from Rust definitions, and a Rust test is what checks
               # the checked-in copy is current. Editing this by hand has to run
-              # that test, or the staleness check has a bypass.
-              crates/openwave-desktop/ui/src/generated/*) rust=true; ui=true ;;
+              # that test, or the staleness check has a bypass. The test lives in
+              # openwave-server (see its wire_types module), so it runs in the
+              # `test` lane rather than the desktop one.
+              crates/openwave-desktop/ui/src/generated/*)
+                rust=true; ui=true; workspace=true ;;
               crates/openwave-desktop/ui/*) ui=true ;;
-              *) rust=true ;;
+              # The manifest forwards features into openwave-server, so it can
+              # change how the rest of the workspace builds. Its sources cannot.
+              crates/openwave-desktop/Cargo.toml) rust=true; workspace=true ;;
+              # Nothing in the workspace depends on openwave-desktop, and the
+              # `test` lane already excludes it, so no edit to its own sources
+              # can change that lane's result. The desktop lane still covers it.
+              crates/openwave-desktop/*) rust=true ;;
+              *) rust=true; workspace=true ;;
             esac
           done < "$RUNNER_TEMP/changed-files"
-          echo "rust=$rust" >> "$GITHUB_OUTPUT"
-          echo "ui=$ui" >> "$GITHUB_OUTPUT"
+          {
+            echo "rust=$rust"
+            echo "ui=$ui"
+            echo "workspace=$workspace"
+          } >> "$GITHUB_OUTPUT"
 
   secrets:
     name: secret scan (gitleaks)
@@ -278,7 +301,7 @@ jobs:
   test:
     name: test
     needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' }}
+    if: ${{ needs.changes.outputs.workspace == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -326,7 +349,7 @@ jobs:
     # instead of once per push to every open PR: post-merge is late signal, but
     # the feature is off by default in shipped builds. See #760 to restore the
     # pull-request run when durable vectors come back into active development.
-    if: ${{ needs.changes.outputs.rust == 'true' && github.event_name != 'pull_request' }}
+    if: ${{ needs.changes.outputs.workspace == 'true' && github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -384,7 +407,7 @@ jobs:
   postgres:
     name: postgres state machine
     needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' }}
+    if: ${{ needs.changes.outputs.workspace == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:
@@ -491,6 +514,7 @@ jobs:
           CHANGES_RESULT: ${{ needs.changes.result }}
           RUST_CHANGED: ${{ needs.changes.outputs.rust }}
           UI_CHANGED: ${{ needs.changes.outputs.ui }}
+          WORKSPACE_CHANGED: ${{ needs.changes.outputs.workspace }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
           test "$CHANGES_RESULT" = success
@@ -514,18 +538,39 @@ jobs:
               test "$FMT_RESULT" = success
               test "$LINT_RESULT" = success
               test "$DESKTOP_RESULT" = success
-              test "$TEST_RESULT" = success
-              test "$POSTGRES_RESULT" = success
               ;;
             false)
               test "$FMT_RESULT" = skipped
               test "$LINT_RESULT" = skipped
               test "$DESKTOP_RESULT" = skipped
+              ;;
+            *)
+              echo "invalid Rust change detector output: $RUST_CHANGED" >&2
+              exit 1
+              ;;
+          esac
+
+          # A workspace-scoped change is always Rust-scoped. If the detector ever
+          # reports otherwise it has a hole, and the lanes below would be checked
+          # against a scope the ones above never ran for.
+          if test "$WORKSPACE_CHANGED" = true && test "$RUST_CHANGED" != true; then
+            echo "workspace scope without Rust scope; the detector is wrong." >&2
+            exit 1
+          fi
+
+          # The lanes that cover the workspace minus openwave-desktop. A change
+          # confined to that crate's own sources cannot affect them.
+          case "$WORKSPACE_CHANGED" in
+            true)
+              test "$TEST_RESULT" = success
+              test "$POSTGRES_RESULT" = success
+              ;;
+            false)
               test "$TEST_RESULT" = skipped
               test "$POSTGRES_RESULT" = skipped
               ;;
             *)
-              echo "invalid Rust change detector output: $RUST_CHANGED" >&2
+              echo "invalid workspace change detector output: $WORKSPACE_CHANGED" >&2
               exit 1
               ;;
           esac
@@ -537,7 +582,7 @@ jobs:
           if test "$EVENT_NAME" = pull_request; then
             test "$VECTORS_RESULT" = skipped
           else
-            case "$RUST_CHANGED" in
+            case "$WORKSPACE_CHANGED" in
               true) test "$VECTORS_RESULT" = success ;;
               false) test "$VECTORS_RESULT" = skipped ;;
             esac
