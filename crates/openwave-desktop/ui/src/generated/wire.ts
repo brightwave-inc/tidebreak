@@ -210,7 +210,20 @@ action?: ToolActionPreview,
  * Closed projection of an actionable result. Arbitrary result text is
  * never included.
  */
-result?: ToolResultPreview, background_agent_run_id?: AgentRunId, status: ChatToolActivityStatus, started_at: string, finished_at: string | null, };
+result?: ToolResultPreview, 
+/**
+ * Set when this call retained a projection that no longer deserializes.
+ *
+ * The projection is a closed union that is allowed to move, and rows
+ * written before a change may no longer parse against it. Distinguishing
+ * that from "this call projected nothing" is the difference between a card
+ * that says its result can no longer be shown and one that silently
+ * vanishes — which would read as the call never having produced anything.
+ *
+ * A property of reading storage, not of the result: the live stream builds
+ * its projection in memory and can never set this.
+ */
+result_unreadable: boolean, background_agent_run_id?: AgentRunId, status: ChatToolActivityStatus, started_at: string, finished_at: string | null, };
 
 /**
  * Fixed lifecycle vocabulary exposed for a historical tool card.

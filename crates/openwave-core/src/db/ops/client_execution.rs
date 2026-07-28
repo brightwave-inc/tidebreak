@@ -62,6 +62,7 @@ pub(in crate::db) async fn accept_tool_call(
         execution: Set(call.execution.as_str().into()),
         status: Set(ToolCallStatus::Pending.as_str().into()),
         result: Set(None),
+        result_preview: Set(None),
         error_code: Set(None),
         error_detail: Set(None),
         approval_status: Set(None),
@@ -143,6 +144,7 @@ pub(in crate::db) async fn accept_claimed_tool_call(
         execution: Set(call.execution.as_str().into()),
         status: Set(ToolCallStatus::Pending.as_str().into()),
         result: Set(None),
+        result_preview: Set(None),
         error_code: Set(None),
         error_detail: Set(None),
         approval_status: Set(None),
@@ -294,6 +296,7 @@ pub(in crate::db) async fn resolve_server_tool_call(
         resolved_at,
         resolution,
         None,
+        None,
     )
     .await?
     .outcome)
@@ -305,6 +308,7 @@ pub(in crate::db) async fn resolve_server_tool_call_with_evidence(
     resolution: &ToolCallResolution,
     resolved_at: DateTime<Utc>,
     evidence: &[RetrievalEvidenceInput],
+    preview: Option<&crate::ToolResultPreview>,
 ) -> Result<ResolveToolCallOutcome> {
     Ok(resolve_tool_call(
         store,
@@ -313,6 +317,7 @@ pub(in crate::db) async fn resolve_server_tool_call_with_evidence(
         resolved_at,
         resolution,
         Some(evidence),
+        preview,
     )
     .await?
     .outcome)
@@ -329,6 +334,7 @@ pub(in crate::db) async fn resolve_claimed_server_tool_call_with_evidence(
     resolution: &ToolCallResolution,
     resolved_at: DateTime<Utc>,
     evidence: &[RetrievalEvidenceInput],
+    preview: Option<&crate::ToolResultPreview>,
 ) -> Result<ResolveToolCallOutcome> {
     Ok(resolve_tool_call(
         store,
@@ -343,6 +349,7 @@ pub(in crate::db) async fn resolve_claimed_server_tool_call_with_evidence(
         resolved_at,
         resolution,
         Some(evidence),
+        preview,
     )
     .await?
     .outcome)
@@ -371,6 +378,7 @@ pub(in crate::db) async fn abandon_inherited_server_tool_call(
         },
         resolved_at,
         resolution,
+        None,
         None,
     )
     .await?
@@ -413,6 +421,7 @@ pub(in crate::db) async fn resolve_client_tool_call_and_append_event(
         resolved_at,
         resolution,
         None,
+        None,
     )
     .await
 }
@@ -442,6 +451,7 @@ pub(in crate::db) async fn resolve_expired_client_tool_call_and_append_event(
         resolved_at,
         resolution,
         None,
+        None,
     )
     .await
 }
@@ -468,6 +478,7 @@ async fn resolve_tool_call(
     resolved_at: DateTime<Utc>,
     resolution: &ToolCallResolution,
     evidence: Option<&[RetrievalEvidenceInput]>,
+    preview: Option<&crate::ToolResultPreview>,
 ) -> Result<JournaledClientToolCallOutcome> {
     validate_resolution(resolution)?;
     let resolved_at = canonical_db_timestamp(resolved_at)?;
@@ -598,6 +609,10 @@ async fn resolve_tool_call(
     let mut active: entities::tool_call::ActiveModel = existing.into();
     active.status = Set(resolution.status().as_str().into());
     active.result = Set(Some(resolution.result().to_owned()));
+    // Serialization of a closed, already-clamped projection cannot fail in
+    // practice; a store write is the wrong place to panic if it ever did, and
+    // losing the card is the whole cost.
+    active.result_preview = Set(preview.and_then(|preview| serde_json::to_value(preview).ok()));
     active.error_code = Set(error_code);
     active.error_detail = Set(error_detail);
     active.client_lease_expires_at = Set(None);

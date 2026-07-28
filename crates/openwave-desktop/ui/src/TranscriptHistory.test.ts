@@ -23,6 +23,7 @@ describe("hydrateTranscriptHistory", () => {
       [
         {
           tool: "web_search",
+          result_unreadable: false,
           status: "completed",
           started_at: "2026-07-16T10:00:01Z",
           finished_at: "2026-07-16T10:00:01Z",
@@ -46,12 +47,14 @@ describe("hydrateTranscriptHistory", () => {
     const entries = hydrateTranscriptHistory([], [
       {
         tool: "spawn_sandbox_agent",
+        result_unreadable: false,
         status: "completed",
         started_at: "2026-07-16T10:00:00Z",
         finished_at: "2026-07-16T10:00:00Z",
       },
       {
         tool: "wait_for_agents",
+        result_unreadable: false,
         status: "completed",
         started_at: "2026-07-16T10:00:01Z",
         finished_at: "2026-07-16T10:00:02Z",
@@ -69,6 +72,7 @@ describe("hydrateTranscriptHistory", () => {
     const entries = hydrateTranscriptHistory([], [
       {
         tool: "ask_user_questions",
+        result_unreadable: false,
         status: "completed",
         started_at: "2026-07-16T10:00:00Z",
         finished_at: "2026-07-16T10:00:01Z",
@@ -84,6 +88,7 @@ describe("hydrateTranscriptHistory", () => {
     const entries = hydrateTranscriptHistory([], [
       {
         tool: "read_delegated_file",
+        result_unreadable: false,
         status: "completed",
         started_at: "2026-07-16T10:00:00Z",
         finished_at: "2026-07-16T10:00:01Z",
@@ -100,18 +105,21 @@ describe("hydrateTranscriptHistory", () => {
     const entries = hydrateTranscriptHistory([], [
       {
         tool: "list_sources",
+        result_unreadable: false,
         status: "completed",
         started_at: "2026-07-16T10:00:00Z",
         finished_at: "2026-07-16T10:00:00Z",
       },
       {
         tool: "read_source",
+        result_unreadable: false,
         status: "completed",
         started_at: "2026-07-16T10:00:01Z",
         finished_at: "2026-07-16T10:00:01Z",
       },
       {
         tool: "search",
+        result_unreadable: false,
         status: "completed",
         started_at: "2026-07-16T10:00:02Z",
         finished_at: "2026-07-16T10:00:02Z",
@@ -129,6 +137,7 @@ describe("hydrateTranscriptHistory", () => {
     const entries = hydrateTranscriptHistory([], [
       {
         tool: "create_deliverable",
+        result_unreadable: false,
         status: "completed",
         started_at: "2026-07-16T10:00:00Z",
         finished_at: "2026-07-16T10:00:01Z",
@@ -206,6 +215,7 @@ describe("hydrateTranscriptHistory", () => {
     const [entry] = hydrateTranscriptHistory([], [
       {
         tool: "other",
+        result_unreadable: false,
         status: "failed",
         started_at: "2026-07-16T10:00:00Z",
         finished_at: null,

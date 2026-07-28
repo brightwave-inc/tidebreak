@@ -774,12 +774,21 @@ where
         .map_err(store_err)?
         .into_iter()
         .filter(|call| terminal_turn_ids.contains(&call.turn_id))
-        .map(super::client_execution::tool_call_from_model)
-        .map(|call| call.map(tool_activity_from_call))
+        .map(|model| {
+            // Read off the model before it is narrowed to a record: the
+            // projection is renderer state and has no place on the canonical
+            // tool-call record the rest of the store passes around.
+            let stored_preview = model.result_preview.clone();
+            super::client_execution::tool_call_from_model(model)
+                .map(|call| tool_activity_from_call(call, stored_preview))
+        })
         .collect::<Result<Vec<_>>>()
 }
 
-fn tool_activity_from_call(call: ToolCallRecord) -> ChatToolActivitySnapshot {
+fn tool_activity_from_call(
+    call: ToolCallRecord,
+    stored_preview: Option<serde_json::Value>,
+) -> ChatToolActivitySnapshot {
     let status = match call.status {
         crate::model::ToolCallStatus::Completed => ChatToolActivityStatus::Completed,
         crate::model::ToolCallStatus::Failed => ChatToolActivityStatus::Failed,
@@ -788,13 +797,30 @@ fn tool_activity_from_call(call: ToolCallRecord) -> ChatToolActivitySnapshot {
             unreachable!("pending tool calls are excluded from durable activity")
         }
     };
+    // A retained projection is what the call actually produced, so it outranks
+    // anything rebuilt from the failure code — that fallback exists for calls
+    // resolved before projections were retained at all.
+    let (result, result_unreadable) = match stored_preview {
+        Some(stored) => match serde_json::from_value(stored) {
+            Ok(preview) => (Some(preview), false),
+            // The union is allowed to move. A row that no longer parses is a
+            // result this build cannot show, which is a different fact from
+            // this call having produced none.
+            Err(_) => (None, true),
+        },
+        None => (
+            crate::preview::ToolResultPreview::from_stored_error(
+                &call.name,
+                call.error_code.as_deref(),
+            ),
+            false,
+        ),
+    };
     ChatToolActivitySnapshot {
         tool: crate::RendererToolName::from(call.name.as_str()),
         action: crate::preview::ToolActionPreview::build(&call.name, &call.arguments),
-        result: crate::preview::ToolResultPreview::from_stored_error(
-            &call.name,
-            call.error_code.as_deref(),
-        ),
+        result,
+        result_unreadable,
         background_agent_run_id: (call.name == crate::agent_tools::SPAWN_SANDBOX_AGENT_TOOL)
             .then(|| crate::AgentRunId::sandbox_for_spawn_call(call.id)),
         status,
@@ -1224,5 +1250,83 @@ fn role_from_db(text: &str) -> Result<Role> {
         "assistant" => Ok(Role::Assistant),
         "tool" => Ok(Role::Tool),
         other => Err(AgentError::Store(format!("unknown role: {other}"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::id::CallId;
+    use crate::preview::{ResultEntry, ResultEntryKind, ToolResultPreview};
+
+    fn terminal_call(name: &str, error_code: Option<&str>) -> ToolCallRecord {
+        ToolCallRecord {
+            id: CallId::new(),
+            chat_id: ChatId::new(),
+            turn_id: crate::TurnId::new(),
+            provider_id: "provider".into(),
+            name: name.into(),
+            arguments: serde_json::json!({}),
+            execution: crate::model::ToolCallExecution::Server,
+            status: crate::model::ToolCallStatus::Completed,
+            result: Some("model-facing text".into()),
+            error_code: error_code.map(Into::into),
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
+            created_at: chrono::Utc::now(),
+            resolved_at: Some(chrono::Utc::now()),
+        }
+    }
+
+    /// The whole point of retaining a projection: reopening a chat shows the
+    /// card the reader saw live, rather than the muted rail line that used to
+    /// be all history could rebuild.
+    #[test]
+    fn a_retained_projection_comes_back_as_the_card_it_was() {
+        let stored = serde_json::to_value(ToolResultPreview::Entries {
+            entries: vec![ResultEntry::new(ResultEntryKind::File, "notes.md")],
+            failures: Vec::new(),
+            elided: 0,
+        })
+        .unwrap();
+        let activity = tool_activity_from_call(terminal_call("list_dir", None), Some(stored));
+        assert_eq!(
+            activity.result,
+            Some(ToolResultPreview::Entries {
+                entries: vec![ResultEntry::new(ResultEntryKind::File, "notes.md")],
+                failures: Vec::new(),
+                elided: 0,
+            })
+        );
+        assert!(!activity.result_unreadable);
+    }
+
+    /// The projection is a closed union that is allowed to move, so a row
+    /// written by an older build may no longer parse. Rendering nothing would
+    /// claim the call produced nothing, which is a different and untrue thing.
+    #[test]
+    fn a_projection_this_build_cannot_read_says_so_rather_than_vanishing() {
+        let activity = tool_activity_from_call(
+            terminal_call("list_dir", None),
+            Some(serde_json::json!({ "tool": "a_variant_from_the_future" })),
+        );
+        assert_eq!(activity.result, None);
+        assert!(activity.result_unreadable);
+    }
+
+    /// Calls that resolved before projections were retained still rebuild the
+    /// one enumerated signal history could always recover.
+    #[test]
+    fn a_call_with_no_retained_projection_falls_back_to_its_stored_signal() {
+        let activity = tool_activity_from_call(
+            terminal_call(crate::WEB_SEARCH_TOOL, Some("configuration_required")),
+            None,
+        );
+        assert_eq!(
+            activity.result,
+            Some(ToolResultPreview::WebSearchProviderRequired)
+        );
+        assert!(!activity.result_unreadable);
     }
 }
