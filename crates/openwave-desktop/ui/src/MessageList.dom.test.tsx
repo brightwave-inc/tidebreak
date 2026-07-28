@@ -648,6 +648,7 @@ describe("mcp app views", () => {
                 { kind: "file", label: "notes.md", detail: null, meta: "1.2 KB" },
                 { kind: "folder", label: "reports", detail: null, meta: null },
               ],
+              failures: [],
             },
           },
         ]}
@@ -680,6 +681,61 @@ describe("mcp app views", () => {
     expect(screen.getByText("notes.md")).toBeInTheDocument();
     expect(screen.getByText("reports")).toBeInTheDocument();
     expect(screen.getByText("3 more not shown")).toBeInTheDocument();
+  });
+
+  it("says on the collapsed header that some of the call failed", async () => {
+    const user = userEvent.setup();
+    render(
+      <MessageList
+        messages={[
+          {
+            id: "t1",
+            role: "tool",
+            callId: "c1",
+            name: "read_file",
+            status: "completed",
+            result: {
+              tool: "entries",
+              elided: 0,
+              entries: [
+                { kind: "file", label: "q3.md", detail: null, meta: null },
+              ],
+              failures: [
+                { label: "q4.md", error: "file is not valid UTF-8" },
+                { label: null, error: "the folder is no longer available" },
+              ],
+            },
+          },
+        ]}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
+        busy={false}
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+
+    // A partial success read as a clean one is the failure this whole channel
+    // exists to prevent: the reader must not have to open the card to find out
+    // that two of the three files never made it.
+    const card = screen.getByRole("status", {
+      name: "Read a file: File read complete",
+    });
+    expect(within(card).getByText(/1 result · 2 failed/)).toBeInTheDocument();
+
+    await user.click(within(card).getByRole("button"));
+    expect(screen.getByText("file is not valid UTF-8")).toBeInTheDocument();
+    // A failure the tool could not name still gets a row rather than vanishing.
+    expect(screen.getByText("the folder is no longer available")).toBeInTheDocument();
+    expect(screen.getByText("Item")).toBeInTheDocument();
   });
 });
 

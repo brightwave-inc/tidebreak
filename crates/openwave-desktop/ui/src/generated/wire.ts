@@ -722,6 +722,37 @@ meta: string | null, };
 export type ResultEntryKind = "file" | "folder" | "source" | "passage" | "link" | "output";
 
 /**
+ * One thing a call could not do.
+ *
+ * A batch tool succeeds and fails in the same breath — five files import, two
+ * do not — and a card that lists only what worked is not reporting, it is
+ * flattering. Every one of Brightwave's local-file results carries a parallel
+ * failures list for exactly this reason.
+ *
+ * Two fields because that is what a failure row reads as, and it is what
+ * Brightwave's own card normalizes its three failure shapes down to before
+ * rendering them: the thing that failed, and why.
+ */
+export type ResultFailure = { 
+/**
+ * What failed, when the tool can name it. `None` when the tool cannot —
+ * a folder it could not even read the name of — and the row then leads
+ * with a generic noun rather than being dropped. A failure the reader
+ * never sees is worse than one it cannot fully name.
+ */
+label: string | null, 
+/**
+ * Why it failed, in the tool's own words.
+ *
+ * This is tool-authored text, and it crosses on the same terms as a
+ * command's stderr already does: what the boundary keeps out is model- and
+ * provider-authored text and private diagnostics, and this is a message
+ * our own tool wrote for a person to act on. Clamped like every other
+ * field; a failure nobody can read is not a report.
+ */
+error: string, };
+
+/**
  * Why a root appears in one conversation's exact ordered projection.
  */
 export type RootAttachmentOrigin = "project_default" | "conversation";
@@ -818,6 +849,13 @@ server: string,
  * The validated `ui://` document reference.
  */
 resource_uri: string, } | { "tool": "entries", entries: Array<ResultEntry>, 
+/**
+ * What the same call could not do. Bounded and counted on the same
+ * terms as `entries`, and elided into the same tally: the card's job
+ * is to be honest about how much it is not showing, and a hidden
+ * failure is the worst thing to hide.
+ */
+failures: Array<ResultFailure>, 
 /**
  * Rows past [`MAX_RESULT_ENTRIES`], counted rather than shown. A card
  * that silently lists the first fifty of two hundred results is

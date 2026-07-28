@@ -220,6 +220,53 @@ impl ResultEntry {
     }
 }
 
+/// One thing a call could not do.
+///
+/// A batch tool succeeds and fails in the same breath — five files import, two
+/// do not — and a card that lists only what worked is not reporting, it is
+/// flattering. Every one of Brightwave's local-file results carries a parallel
+/// failures list for exactly this reason.
+///
+/// Two fields because that is what a failure row reads as, and it is what
+/// Brightwave's own card normalizes its three failure shapes down to before
+/// rendering them: the thing that failed, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ResultFailure {
+    /// What failed, when the tool can name it. `None` when the tool cannot —
+    /// a folder it could not even read the name of — and the row then leads
+    /// with a generic noun rather than being dropped. A failure the reader
+    /// never sees is worse than one it cannot fully name.
+    pub label: Option<String>,
+    /// Why it failed, in the tool's own words.
+    ///
+    /// This is tool-authored text, and it crosses on the same terms as a
+    /// command's stderr already does: what the boundary keeps out is model- and
+    /// provider-authored text and private diagnostics, and this is a message
+    /// our own tool wrote for a person to act on. Clamped like every other
+    /// field; a failure nobody can read is not a report.
+    pub error: String,
+}
+
+impl ResultFailure {
+    /// A failure the tool can name.
+    #[must_use]
+    pub fn new(label: impl Into<String>, error: impl Into<String>) -> Self {
+        Self {
+            label: Some(label.into()),
+            error: error.into(),
+        }
+    }
+
+    /// A failure the tool cannot name.
+    #[must_use]
+    pub fn unnamed(error: impl Into<String>) -> Self {
+        Self {
+            label: None,
+            error: error.into(),
+        }
+    }
+}
+
 /// A byte count as a card should read it.
 ///
 /// Ported from Brightwave's local-file result rows, which is where this reads
@@ -287,6 +334,11 @@ pub enum ToolResultPreview {
     /// variants to say "here is what I found".
     Entries {
         entries: Vec<ResultEntry>,
+        /// What the same call could not do. Bounded and counted on the same
+        /// terms as `entries`, and elided into the same tally: the card's job
+        /// is to be honest about how much it is not showing, and a hidden
+        /// failure is the worst thing to hide.
+        failures: Vec<ResultFailure>,
         /// Rows past [`MAX_RESULT_ENTRIES`], counted rather than shown. A card
         /// that silently lists the first fifty of two hundred results is
         /// telling the reader something false.
@@ -365,21 +417,40 @@ impl ToolResultPreview {
             // A failed call has no list to show — whatever partial data it left
             // behind describes work that did not happen.
             name if ENTRY_TOOLS.contains(&name) && !output.is_error => {
-                let listed = output.data.as_ref()?.get("entries")?.as_array()?;
+                let data = output.data.as_ref()?;
+                let listed = data.get("entries")?.as_array()?;
                 let entries: Vec<_> = listed
                     .iter()
                     .take(MAX_RESULT_ENTRIES)
                     .filter_map(result_entry)
                     .collect();
-                // A row the clamp rejected is dropped, not counted: `elided`
-                // means "there were more", and folding unreadable rows into it
-                // would make the card claim results the tool never returned.
-                let elided = u32::try_from(listed.len().saturating_sub(MAX_RESULT_ENTRIES))
-                    .unwrap_or(u32::MAX);
+                // Failures are optional — most tools have none — but a tool
+                // that reports them gets them bounded the same way.
+                let reported = data
+                    .get("failures")
+                    .and_then(Value::as_array)
+                    .map_or(&[][..], Vec::as_slice);
+                let failures: Vec<_> = reported
+                    .iter()
+                    .take(MAX_RESULT_ENTRIES)
+                    .filter_map(result_failure)
+                    .collect();
+                // Everything the call produced that this card is not showing,
+                // whether it was cut at the limit or dropped by the clamp.
+                // Both are rows the tool returned and the reader will not see,
+                // which is the only thing `elided` is claiming.
+                let elided = u32::try_from(
+                    (listed.len() - entries.len()) + (reported.len() - failures.len()),
+                )
+                .unwrap_or(u32::MAX);
                 // An empty list is a result, not the absence of one: a search
                 // that matched nothing and a search that was never projected
                 // look identical in the rail, and only one of them is true.
-                Some(Self::Entries { entries, elided })
+                Some(Self::Entries {
+                    entries,
+                    failures,
+                    elided,
+                })
             }
             _ => None,
         }
@@ -431,6 +502,19 @@ fn result_entry(value: &Value) -> Option<ResultEntry> {
 
 fn entry_field(value: Option<&Value>) -> Option<String> {
     clamp(value?.as_str()?, MAX_RESULT_ENTRY_CHARS)
+}
+
+/// Bound one failure row, or drop it.
+///
+/// The error is what makes the row worth showing, so a failure without a
+/// readable one is dropped — and counted into `elided`, so the card still
+/// reports that something went unshown. The label is genuinely optional and
+/// clamps away on its own without taking the row with it.
+fn result_failure(value: &Value) -> Option<ResultFailure> {
+    Some(ResultFailure {
+        label: entry_field(value.get("label")),
+        error: clamp(value.get("error")?.as_str()?, MAX_RESULT_ENTRY_CHARS)?,
+    })
 }
 
 /// Bound a captured stream, keeping its newlines: output without line breaks
@@ -754,14 +838,21 @@ mod tests {
             "detail": "reports/\nq3.md",
             "meta": 7,
         });
-        let Some(ToolResultPreview::Entries { entries, elided }) = ToolResultPreview::build(
+        // One row the clamp will reject outright: no label to lead with.
+        rows.push(serde_json::json!({ "kind": "file" }));
+        let Some(ToolResultPreview::Entries {
+            entries, elided, ..
+        }) = ToolResultPreview::build(
             "list_dir",
             &ToolOutput::text("listing").with_data(serde_json::json!({ "entries": rows })),
-        ) else {
+        )
+        else {
             panic!("list_dir projects a list");
         };
         assert_eq!(entries.len(), MAX_RESULT_ENTRIES);
-        assert_eq!(elided, 7);
+        // Cut at the limit and dropped by the clamp both count: they are rows
+        // the call produced that the reader will not see.
+        assert_eq!(elided, 8);
         assert_eq!(entries[0].label.chars().count(), MAX_RESULT_ENTRY_CHARS);
         assert_eq!(entries[0].detail.as_deref(), Some("reports/q3.md"));
         // A hint that is not a string is dropped; the row survives without it.
@@ -779,9 +870,60 @@ mod tests {
             ),
             Some(ToolResultPreview::Entries {
                 entries: Vec::new(),
+                failures: Vec::new(),
                 elided: 0,
             })
         );
+    }
+
+    #[test]
+    fn a_batch_call_reports_what_it_could_not_do_beside_what_it_did() {
+        // Listing only the successes is not reporting, it is flattering: a card
+        // that says "Imported 3" for a call that also failed two has told the
+        // reader something false by omission.
+        let output = ToolOutput::text("imported 3 of 5")
+            .with_entries(vec![ResultEntry::new(ResultEntryKind::File, "q3.md")])
+            .with_failures(vec![
+                ResultFailure::new("q4.md", "file is not valid UTF-8"),
+                // A tool that cannot even name what failed still reports it.
+                ResultFailure::unnamed("the folder is no longer available"),
+            ]);
+        assert_eq!(
+            ToolResultPreview::build("read_file", &output),
+            Some(ToolResultPreview::Entries {
+                entries: vec![ResultEntry::new(ResultEntryKind::File, "q3.md")],
+                failures: vec![
+                    ResultFailure::new("q4.md", "file is not valid UTF-8"),
+                    ResultFailure::unnamed("the folder is no longer available"),
+                ],
+                elided: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn a_failure_without_a_readable_reason_is_dropped_but_still_counted() {
+        // The reason is the whole of what a failure row is for, so a row
+        // without one cannot render — but vanishing silently would leave the
+        // card quietly under-reporting how much went wrong.
+        let Some(ToolResultPreview::Entries {
+            failures, elided, ..
+        }) = ToolResultPreview::build(
+            "read_file",
+            &ToolOutput::text("done").with_data(serde_json::json!({
+                "entries": [],
+                "failures": [
+                    { "label": "q4.md", "error": "unreadable" },
+                    { "label": "q5.md" },
+                    { "label": "q6.md", "error": "\u{0}\u{1b}" },
+                ],
+            })),
+        )
+        else {
+            panic!("read_file projects a list");
+        };
+        assert_eq!(failures, vec![ResultFailure::new("q4.md", "unreadable")]);
+        assert_eq!(elided, 2);
     }
 
     #[test]

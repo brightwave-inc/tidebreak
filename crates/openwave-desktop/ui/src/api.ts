@@ -281,6 +281,8 @@ export type ToolResultPreview =
       /** What a call found, read, or wrote, as the list of things it was. */
       tool: "entries";
       entries: ResultEntry[];
+      /** What the same call could not do. */
+      failures: ResultFailure[];
       /** Rows the server bounded away, counted rather than shown. */
       elided: number;
     };
@@ -291,6 +293,14 @@ export type ResultEntry = {
   label: string;
   detail: string | null;
   meta: string | null;
+};
+
+/** One thing a listed call could not do. */
+export type ResultFailure = {
+  /** What failed, when the tool could name it. */
+  label: string | null;
+  /** Why, in the tool's own words. */
+  error: string;
 };
 
 /** The entries-shaped result the list card renders. */
@@ -1513,6 +1523,23 @@ function parseResultEntry(value: unknown): ResultEntry | null {
 }
 
 /**
+ * Validate one failure row.
+ *
+ * The reason is what the row exists to say, so a row without a readable one is
+ * dropped — and, like a dropped entry, counted as not shown rather than
+ * vanishing. A failure the card quietly omits is the worst kind of omission.
+ */
+function parseResultFailure(value: unknown): ResultFailure | null {
+  if (!isRecord(value)) return null;
+  const { error } = value;
+  const label = value.label ?? null;
+  if (typeof error !== "string" || error.length === 0 || !isOptionalString(label)) {
+    return null;
+  }
+  return { label, error };
+}
+
+/**
  * Validate a result field by field, on the same terms as an action: anything
  * that cannot be fully verified is dropped rather than half-rendered.
  */
@@ -1537,20 +1564,32 @@ export function parseToolResultPreview(
     return { tool: "mcp_app", server, resourceUri: resource_uri };
   }
   if (value.tool === "entries") {
-    const { entries, elided }: UncheckedEntriesResult = value;
-    if (!Array.isArray(entries) || !Number.isInteger(elided) || Number(elided) < 0) {
+    const { entries, failures, elided }: UncheckedEntriesResult = value;
+    if (
+      !Array.isArray(entries) ||
+      !Array.isArray(failures) ||
+      !Number.isInteger(elided) ||
+      Number(elided) < 0
+    ) {
       return null;
     }
-    const parsed = entries
+    const parsedEntries = entries
       .map(parseResultEntry)
       .filter((entry): entry is ResultEntry => entry !== null);
+    const parsedFailures = failures
+      .map(parseResultFailure)
+      .filter((failure): failure is ResultFailure => failure !== null);
     // Rows this parser rejected are counted with the ones the server bounded
     // away, because in both cases the card is showing fewer results than the
     // call returned and has to say so.
     return {
       tool: "entries",
-      entries: parsed,
-      elided: Number(elided) + (entries.length - parsed.length),
+      entries: parsedEntries,
+      failures: parsedFailures,
+      elided:
+        Number(elided) +
+        (entries.length - parsedEntries.length) +
+        (failures.length - parsedFailures.length),
     };
   }
   if (value.tool !== "exec") return null;
