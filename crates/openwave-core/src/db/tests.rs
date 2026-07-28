@@ -12646,6 +12646,25 @@ async fn expired_client_lease_is_not_transferred_implicitly() {
         outcome => panic!("unexpected claim outcome: {outcome:?}"),
     };
     let after_expiry = expiry + chrono::Duration::seconds(1);
+    let recovered_expiry = after_expiry + chrono::Duration::minutes(1);
+    assert!(matches!(
+        store
+            .claim_client_tool_call(
+                call.id,
+                chat.id,
+                first,
+                lease_token,
+                after_expiry,
+                recovered_expiry,
+            )
+            .await
+            .unwrap(),
+        ClaimClientToolCallOutcome::Existing(claim)
+            if claim.lease_token == lease_token
+                && claim.call.client_executor_id == Some(first)
+                && claim.call.client_lease_expires_at == Some(recovered_expiry)
+    ));
+    let after_recovered_expiry = recovered_expiry + chrono::Duration::seconds(1);
     assert_eq!(
         store
             .claim_client_tool_call(
@@ -12653,8 +12672,8 @@ async fn expired_client_lease_is_not_transferred_implicitly() {
                 chat.id,
                 uuid::Uuid::new_v4(),
                 uuid::Uuid::new_v4(),
-                after_expiry,
-                after_expiry + chrono::Duration::minutes(1),
+                after_recovered_expiry,
+                after_recovered_expiry + chrono::Duration::minutes(1),
             )
             .await
             .unwrap(),
@@ -12666,11 +12685,11 @@ async fn expired_client_lease_is_not_transferred_implicitly() {
                 call.id,
                 chat.id,
                 lease_token,
-                after_expiry,
+                after_recovered_expiry,
                 &ToolCallResolution::Cancelled {
                     result: "cancelled".into(),
                 },
-                after_expiry,
+                after_recovered_expiry,
             )
             .await
             .unwrap(),
@@ -12685,9 +12704,9 @@ async fn expired_client_lease_is_not_transferred_implicitly() {
                 call.id,
                 chat.id,
                 lease_token,
-                after_expiry,
+                after_recovered_expiry,
                 &recovered,
-                after_expiry,
+                after_recovered_expiry,
             )
             .await
             .unwrap(),
@@ -12699,7 +12718,7 @@ async fn expired_client_lease_is_not_transferred_implicitly() {
                 call.id,
                 chat.id,
                 lease_token,
-                after_expiry,
+                after_recovered_expiry,
                 &recovered,
                 after_expiry,
             )

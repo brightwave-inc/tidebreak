@@ -13,6 +13,7 @@ import { Composer, type ComposerImages } from "./Composer";
 import { MessageList } from "./MessageList";
 import { useTranscriptVisible } from "./TranscriptVisibility";
 import { useFolderAccessRequests } from "./useFolderAccessRequests";
+import { useOutputWritebackRequests } from "./useOutputWritebackRequests";
 import { useToolApprovals } from "./useToolApprovals";
 import { useTurnControls } from "./useTurnControls";
 import { useUserQuestions } from "./useUserQuestions";
@@ -68,6 +69,7 @@ export function ChatView({
 }: ChatViewProps) {
   const transcriptVisible = useTranscriptVisible();
   const folderAccess = useFolderAccessRequests(client, chat.id);
+  const outputWritebacks = useOutputWritebackRequests(client, chat.id);
   const userQuestions = useUserQuestions(client, chat.id);
   const approvals = useToolApprovals(client, chat.id);
   const turnControls = useTurnControls(client, chat.id, draftRef, () =>
@@ -112,6 +114,7 @@ export function ChatView({
   useEffect(() => {
     const next = new Set([
       ...folderAccess.requests.map((request) => request.callId),
+      ...outputWritebacks.requests.map((request) => request.callId),
       ...userQuestions.requests.map((request) => request.callId),
     ]);
     const gainedRequest = [...next].some(
@@ -126,7 +129,11 @@ export function ChatView({
     } else {
       setHasUnreadActivity(true);
     }
-  }, [folderAccess.requests, userQuestions.requests]);
+  }, [
+    folderAccess.requests,
+    outputWritebacks.requests,
+    userQuestions.requests,
+  ]);
 
   return (
     <section className="chat-pane">
@@ -135,11 +142,14 @@ export function ChatView({
           messages={messages}
           chatId={chat.id}
           folderAccessRequests={folderAccess.requests}
+          outputWritebackRequests={outputWritebacks.requests}
           userQuestionRequests={userQuestions.requests}
           nativeHost={nativeHost}
           nativeBusy={folderAccess.resolving.size > 0}
           resolvingFolderCalls={folderAccess.resolving}
           folderAccessErrors={folderAccess.errors}
+          resolvingOutputWritebackCalls={outputWritebacks.resolving}
+          outputWritebackErrors={outputWritebacks.errors}
           answeringQuestionCalls={userQuestions.answering}
           userQuestionErrors={userQuestions.errors}
           decidingApprovalCalls={approvals.deciding}
@@ -159,6 +169,10 @@ export function ChatView({
           onApproval={approvals.decide}
           onFolderAccessDecision={folderAccess.decide}
           onFolderAccessCancel={folderAccess.cancel}
+          onOutputWritebackDecision={outputWritebacks.decide}
+          onOutputWritebackCancel={(callId, turnId) =>
+            outputWritebacks.cancel(callId, turnId)
+          }
           onAnswerUserQuestions={userQuestions.answer}
           onUserQuestionsCancel={userQuestions.cancel}
           onSelectPrompt={onSelectPrompt}

@@ -65,6 +65,8 @@ use openwave_core::{
     validate_import_connected_file_arguments, validate_list_connected_folders_arguments,
     validate_list_folder_arguments, validate_read_connected_file_arguments,
     validate_request_folder_access_arguments, AgentConfig, AgentError, Config, CreateDeliverable,
+    validate_write_output_to_connected_folder_arguments,
+    write_output_to_connected_folder_tool_spec,
     KeychainSecretProvider, ListDir, Profile, ReadFile, Result, SecretProvider, Store, Tool,
     ToolRegistry, WriteFile,
 };
@@ -343,6 +345,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/chats/{id}/client-executions/pending",
             get(routes::list_pending_folder_access_requests),
+        )
+        .route(
+            "/chats/{id}/output-writebacks/pending",
+            get(routes::list_pending_output_writebacks),
         )
         .route(
             "/chats/{id}/questions/pending",
@@ -773,6 +779,10 @@ fn agent_deps(
     tools.register_validated_client(
         import_connected_file_tool_spec(),
         validate_import_connected_file_arguments,
+    );
+    tools.register_validated_client(
+        write_output_to_connected_folder_tool_spec(),
+        validate_write_output_to_connected_folder_arguments,
     );
     tools.register_validated_foreground_client(
         ask_user_questions_tool_spec(),

@@ -23,9 +23,22 @@ function folderRequest(callId: string) {
 
 function prompt(
   chatId: string,
-  { questions = [], folderAccess = [] }: { questions?: string[]; folderAccess?: string[] } = {},
+  {
+    questions = [],
+    folderAccess = [],
+    outputWritebacks = [],
+  }: {
+    questions?: string[];
+    folderAccess?: string[];
+    outputWritebacks?: string[];
+  } = {},
 ) {
-  return { chatId, questionCallIds: questions, folderAccessCallIds: folderAccess };
+  return {
+    chatId,
+    questionCallIds: questions,
+    folderAccessCallIds: folderAccess,
+    outputWritebackCallIds: outputWritebacks,
+  };
 }
 
 function stubClient(overrides: Record<string, unknown> = {}) {
@@ -33,13 +46,19 @@ function stubClient(overrides: Record<string, unknown> = {}) {
     listPendingChatPrompts: vi.fn().mockResolvedValue([]),
     listPendingUserQuestions: vi.fn().mockResolvedValue([]),
     listPendingFolderAccessRequests: vi.fn().mockResolvedValue([]),
+    listPendingOutputWritebackRequests: vi.fn().mockResolvedValue([]),
     ...overrides,
   } as unknown as ApiClient;
 }
 
 beforeEach(() => {
   vi.mocked(host.requestUserAttention).mockClear();
-  usePendingPrompts.setState({ chatId: null, userQuestions: [], folderAccess: [] });
+  usePendingPrompts.setState({
+    chatId: null,
+    userQuestions: [],
+    folderAccess: [],
+    outputWritebacks: [],
+  });
   useChatAttention.getState().clear();
 });
 afterEach(cleanup);

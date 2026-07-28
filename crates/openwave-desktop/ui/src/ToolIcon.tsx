@@ -43,6 +43,7 @@ const TOOL_ICONS: Record<RendererToolName, LucideIcon> = {
   list_dir: FolderOpen,
   write_file: FilePenLine,
   create_deliverable: FilePlus2,
+  write_output_to_connected_folder: FileInput,
   request_folder_access: FolderPlus,
   connect_folder: FolderPlus,
   list_connected_folders: FolderOpen,

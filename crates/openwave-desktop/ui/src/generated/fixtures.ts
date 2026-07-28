@@ -43,3 +43,9 @@ export const PENDING_FOLDER_ACCESS_REQUEST = {
   "reason": "The assistant needs read access to files outside the folders connected to this conversation.",
   "turn_id": "00000000-0000-0000-0000-000000000004"
 } as const;
+
+export const PENDING_OUTPUT_WRITEBACK_REQUEST = {
+  "call_id": "00000000-0000-0000-0000-000000000006",
+  "claimed": false,
+  "turn_id": "00000000-0000-0000-0000-000000000007"
+} as const;

@@ -28,6 +28,7 @@ export function useChatPromptWatcher(client: ApiClient | null, chatId: string | 
   const detailsRefreshRef = useRef<(() => void) | null>(null);
   const questionsSignal = useRefreshSignals((state) => state.userQuestions);
   const folderSignal = useRefreshSignals((state) => state.folderAccess);
+  const writebackSignal = useRefreshSignals((state) => state.outputWritebacks);
 
   useEffect(() => {
     if (!client) {
@@ -54,13 +55,17 @@ export function useChatPromptWatcher(client: ApiClient | null, chatId: string | 
         attentionActions.setChatIdsWithPendingPrompts(
           pending.map((prompt) => prompt.chatId),
         );
-        const pendingQuestionIds = new Set(
-          pending.flatMap((prompt) => prompt.questionCallIds),
+        const pendingPromptIds = new Set(
+          pending.flatMap((prompt) => [
+            ...prompt.questionCallIds,
+            ...prompt.folderAccessCallIds,
+            ...prompt.outputWritebackCallIds,
+          ]),
         );
-        const unannounced = [...pendingQuestionIds].filter(
+        const unannounced = [...pendingPromptIds].filter(
           (callId) => !announcedCallIdsRef.current.has(callId),
         );
-        announcedCallIdsRef.current = pendingQuestionIds;
+        announcedCallIdsRef.current = pendingPromptIds;
         if (unannounced.length > 0) {
           void requestUserAttention().catch(() => {
             // Attention is a best-effort hint. Durable polling is truth.
@@ -103,6 +108,7 @@ export function useChatPromptWatcher(client: ApiClient | null, chatId: string | 
     let cancelled = false;
     let questionsSeq = 0;
     let folderSeq = 0;
+    let writebackSeq = 0;
 
     const readQuestions = async () => {
       const seq = ++questionsSeq;
@@ -131,9 +137,25 @@ export function useChatPromptWatcher(client: ApiClient | null, chatId: string | 
       }
     };
 
+    const readOutputWritebacks = async () => {
+      const seq = ++writebackSeq;
+      try {
+        const pending = await client.listPendingOutputWritebackRequests(chatId);
+        if (!cancelled && seq === writebackSeq) {
+          promptActions.setOutputWritebacks(chatId, pending);
+        }
+      } catch (err) {
+        if (!cancelled && seq === writebackSeq) {
+          console.error("failed to refresh pending output write-backs", err);
+          promptActions.setOutputWritebacks(chatId, []);
+        }
+      }
+    };
+
     const readDetails = () => {
       void readQuestions();
       void readFolderAccess();
+      void readOutputWritebacks();
     };
 
     detailsRefreshRef.current = readDetails;
@@ -144,6 +166,7 @@ export function useChatPromptWatcher(client: ApiClient | null, chatId: string | 
       cancelled = true;
       questionsSeq += 1;
       folderSeq += 1;
+      writebackSeq += 1;
       detailsRefreshRef.current = null;
       promptActions.setRefresh(() => {});
     };
@@ -151,11 +174,23 @@ export function useChatPromptWatcher(client: ApiClient | null, chatId: string | 
 
   // Only a signal raised after this mounted means anything; the counters are
   // app-wide and may already be well past zero on arrival.
-  const lastSignalsRef = useRef({ questions: questionsSignal, folder: folderSignal });
+  const lastSignalsRef = useRef({
+    questions: questionsSignal,
+    folder: folderSignal,
+    writeback: writebackSignal,
+  });
   useEffect(() => {
     const last = lastSignalsRef.current;
-    if (last.questions === questionsSignal && last.folder === folderSignal) return;
-    lastSignalsRef.current = { questions: questionsSignal, folder: folderSignal };
+    if (
+      last.questions === questionsSignal &&
+      last.folder === folderSignal &&
+      last.writeback === writebackSignal
+    ) return;
+    lastSignalsRef.current = {
+      questions: questionsSignal,
+      folder: folderSignal,
+      writeback: writebackSignal,
+    };
     refreshRef.current?.();
-  }, [questionsSignal, folderSignal]);
+  }, [questionsSignal, folderSignal, writebackSignal]);
 }

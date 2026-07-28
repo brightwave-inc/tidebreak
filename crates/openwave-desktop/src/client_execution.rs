@@ -25,6 +25,7 @@ use crate::host_access::{pick_folder, AuthoritativeContext, HostAccess};
 mod control_plane;
 pub(crate) mod delegated_file_read;
 pub(crate) mod folder_operations;
+pub(crate) mod output_writeback;
 mod product_sync;
 mod receipt_store;
 pub(crate) mod root_attachment_reconciliation;
@@ -41,6 +42,7 @@ use receipt_store::{
 };
 pub(crate) use receipt_store::{
     OutputExportFailureReason, OutputExportPhase, OutputExportReceipt, OutputExportTerminal,
+    OutputWritebackReceipt,
 };
 
 const RECOVERY_IDLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);

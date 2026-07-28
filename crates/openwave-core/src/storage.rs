@@ -97,6 +97,7 @@ pub struct PendingChatPrompt {
     pub chat_id: ChatId,
     pub question_call_ids: Vec<CallId>,
     pub folder_access_call_ids: Vec<CallId>,
+    pub output_writeback_call_ids: Vec<CallId>,
 }
 
 /// Result of a fail-closed conversation deletion request.

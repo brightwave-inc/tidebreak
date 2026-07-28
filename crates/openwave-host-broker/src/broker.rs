@@ -8,7 +8,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    io::{self, Read},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -17,10 +17,11 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use cap_fs_ext::OpenOptionsSyncExt;
+use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsSyncExt};
 use cap_std::fs::{Dir, OpenOptions};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -38,7 +39,8 @@ use crate::{
         ReadFileResult, RegisterRootReceipt, RegisterRootRequest, RegisterRootResult, Response,
         ResponseEnvelope, RevokeRootRequest, RevokeRootResult, RootAttachmentMutationKind,
         RootAttachmentMutationReceipt, RootAttachmentMutationRequest, RootAttachmentMutationResult,
-        RootSummary, MAX_READ_FILE_BINARY_BYTES, PROTOCOL_VERSION,
+        RootSummary, WriteFileMode, WriteFileRequest, WriteFileResult, MAX_READ_FILE_BINARY_BYTES,
+        PROTOCOL_VERSION,
     },
     Capability, ConsentMethod, ConsentRecord, ExecutionContext, Grant, GrantError, GrantId,
     GrantSubject, OperationId, RelativePath, RootAttachment, RootId, RootPolicy, RootPolicyError,
@@ -53,6 +55,7 @@ const MAX_LIST_DIR_BYTES: usize = 64 * 1024;
 const MAX_LIST_DIR_ENTRIES: usize = 4_096;
 const MAX_LIST_ROOTS: usize = 256;
 const MAX_ROOT_DISPLAY_BYTES: usize = 1024;
+pub(crate) const MAX_WRITE_FILE_BYTES: usize = 512 * 1024;
 
 /// A broker request failed without widening host access.
 #[derive(Debug, Error)]
@@ -95,6 +98,18 @@ pub enum BrokerError {
     Audit(#[from] AuditError),
     #[error("host filesystem operation failed: {0}")]
     Io(#[from] io::Error),
+    #[error("write destination already exists")]
+    DestinationExists,
+    #[error("write destination does not exist")]
+    DestinationMissing,
+    #[error("replacement requires a fresh approval identity")]
+    ReplacementApprovalRequired,
+    #[error("write content does not match its bounded digest")]
+    InvalidWriteContent,
+    #[error("write dispatch may have partially completed")]
+    AmbiguousWrite,
+    #[error("a durable write receipt contains a terminal failure")]
+    StoredWriteFailure(ErrorResponse),
 }
 
 /// Owner of the shared broker registry.
@@ -164,6 +179,10 @@ enum MutationRecord {
         request: AttachmentFingerprint,
         outcome: MutationOutcome<RootAttachmentMutationResult>,
     },
+    Write {
+        request: WriteFingerprint,
+        outcome: MutationOutcome<WriteFileResult>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -200,11 +219,23 @@ struct AttachmentFingerprint {
     consent_method: Option<ConsentMethod>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WriteFingerprint {
+    context: ExecutionContext,
+    root_id: RootId,
+    path: RelativePath,
+    mode: WriteFileMode,
+    approval_id: Option<Uuid>,
+    byte_len: usize,
+    sha256: [u8; 32],
+}
+
 struct PreparedRegistration {
     conversation_id: Uuid,
     root_id: RootId,
     root: RegisteredRoot,
-    grants: [Grant; 2],
+    grants: [Grant; 3],
     attachment: RootAttachment,
 }
 
@@ -313,6 +344,11 @@ impl OperationAudit {
             OperationRequest::ReadFileBinary(request) => (
                 AuditOperation::ReadFileBinary,
                 Capability::ReadFiles,
+                AuditTarget::path(request.root_id, &request.path),
+            ),
+            OperationRequest::WriteFile(request) => (
+                AuditOperation::WriteFile,
+                Capability::WriteFiles,
                 AuditTarget::path(request.root_id, &request.path),
             ),
         };
@@ -571,7 +607,8 @@ impl Controller {
                     && registered.conversation_id == request.conversation_id => {}
                 MutationRecord::Register { .. }
                 | MutationRecord::Revoke { .. }
-                | MutationRecord::Attachment { .. } => {
+                | MutationRecord::Attachment { .. }
+                | MutationRecord::Write { .. } => {
                     return Err(error_response(BrokerError::OperationIdConflict));
                 }
             }
@@ -599,7 +636,11 @@ impl Controller {
             }) => RegisterRootReceipt::Failed {
                 error: error.clone(),
             },
-            Some(MutationRecord::Revoke { .. } | MutationRecord::Attachment { .. }) => {
+            Some(
+                MutationRecord::Revoke { .. }
+                | MutationRecord::Attachment { .. }
+                | MutationRecord::Write { .. },
+            ) => {
                 unreachable!("non-registration operation was rejected above")
             }
         };
@@ -640,6 +681,13 @@ impl Controller {
             request.subject,
             Capability::ReadFiles,
             Scope::Root { root_id },
+            consent.clone(),
+        )?;
+        let write_grant = Grant::from_consent(
+            GrantId::new(),
+            request.subject,
+            Capability::WriteFiles,
+            Scope::Root { root_id },
             consent,
         )?;
         Ok(PreparedRegistration {
@@ -650,7 +698,7 @@ impl Controller {
                 display_name,
                 root: Arc::new(validated),
             },
-            grants: [list_grant, read_grant],
+            grants: [list_grant, read_grant, write_grant],
             attachment: RootAttachment::new(request.conversation_id, root_id)?,
         })
     }
@@ -858,6 +906,12 @@ impl Operator {
                     grant_id = Some(self.reauthorize(envelope.context, root_id, &path)?);
                     Ok(result)
                 }
+                OperationRequest::WriteFile(request) => {
+                    let (result, authorized_by) =
+                        self.write_file(envelope.context, request)?;
+                    grant_id = authorized_by;
+                    Ok(OperationResult::WriteFile(result))
+                }
             }
         })();
         (result, grant_id)
@@ -881,6 +935,7 @@ impl Operator {
             Some(OperationResult::ListDirectory { entries }) => (Some(entries.len()), None),
             Some(OperationResult::ReadFile(result)) => (None, Some(result.bytes)),
             Some(OperationResult::ReadFileBinary(result)) => (None, Some(result.bytes)),
+            Some(OperationResult::WriteFile(result)) => (None, Some(result.bytes)),
             None => (None, None),
         };
         let event = AuditEvent {
@@ -928,6 +983,133 @@ impl Operator {
         Ok((directory, grant_id))
     }
 
+    fn write_file(
+        &self,
+        context: ExecutionContext,
+        request: WriteFileRequest,
+    ) -> Result<(WriteFileResult, Option<GrantId>), BrokerError> {
+        let content = decode_write_content(&request)?;
+        let approval_id = request.approval.map(|approval| approval.approval_id);
+        if matches!(request.mode, WriteFileMode::Replace)
+            && approval_id.is_none_or(|id| id.is_nil())
+        {
+            return Err(BrokerError::ReplacementApprovalRequired);
+        }
+        if matches!(request.mode, WriteFileMode::Create) && approval_id.is_some() {
+            return Err(BrokerError::ReplacementApprovalRequired);
+        }
+        let fingerprint = WriteFingerprint {
+            context,
+            root_id: request.root_id,
+            path: request.path.clone(),
+            mode: request.mode,
+            approval_id,
+            byte_len: request.bytes,
+            sha256: request.sha256,
+        };
+
+        let recovering = {
+            let mut state = self.lock_state()?;
+            let mut next = state.clone();
+            match claim_write(&mut next, request.operation_id, &fingerprint)? {
+                WriteClaim::Complete(result) => {
+                    return result
+                        .map(|result| (result, None))
+                        .map_err(BrokerError::StoredWriteFailure);
+                }
+                WriteClaim::Dispatch { recovering } => {
+                    authorize_write(&next, context, request.root_id, &request.path)?;
+                    self.commit_state(&mut state, next)?;
+                    recovering
+                }
+            }
+        };
+
+        let mut state = self.lock_state()?;
+        let grant_id = match authorize_write(&state, context, request.root_id, &request.path) {
+            Ok(grant_id) => grant_id,
+            Err(error) => {
+                let terminal = Err(error_response(error));
+                let mut next = state.clone();
+                complete_write(
+                    &mut next,
+                    request.operation_id,
+                    &fingerprint,
+                    terminal.clone(),
+                )?;
+                self.commit_state(&mut state, next)?;
+                return terminal
+                    .map(|result| (result, None))
+                    .map_err(BrokerError::StoredWriteFailure);
+            }
+        };
+        let directory = state
+            .roots
+            .get(&request.root_id)
+            .ok_or(BrokerError::Denied)?
+            .root
+            .directory()
+            .try_clone()?;
+
+        let terminal = if recovering {
+            if destination_matches(
+                &directory,
+                &request.path,
+                request.bytes,
+                request.sha256,
+            ) {
+                Ok(WriteFileResult {
+                    operation_id: request.operation_id,
+                    bytes: request.bytes,
+                    replaced: matches!(request.mode, WriteFileMode::Replace),
+                })
+            } else {
+                Err(error_response(BrokerError::AmbiguousWrite))
+            }
+        } else {
+            match atomic_write_connected_file(
+                &directory,
+                &request.path,
+                &content,
+                request.mode,
+                request.operation_id,
+            ) {
+                Ok(replaced) => Ok(WriteFileResult {
+                    operation_id: request.operation_id,
+                    bytes: request.bytes,
+                    replaced,
+                }),
+                Err(_error)
+                    if destination_matches(
+                        &directory,
+                        &request.path,
+                        request.bytes,
+                        request.sha256,
+                    ) =>
+                {
+                    Ok(WriteFileResult {
+                        operation_id: request.operation_id,
+                        bytes: request.bytes,
+                        replaced: matches!(request.mode, WriteFileMode::Replace),
+                    })
+                }
+                Err(error) => Err(error_response(error)),
+            }
+        };
+
+        let mut next = state.clone();
+        complete_write(
+            &mut next,
+            request.operation_id,
+            &fingerprint,
+            terminal.clone(),
+        )?;
+        self.commit_state(&mut state, next)?;
+        terminal
+            .map(|result| (result, Some(grant_id)))
+            .map_err(BrokerError::StoredWriteFailure)
+    }
+
     fn reauthorize(
         &self,
         context: ExecutionContext,
@@ -946,6 +1128,23 @@ impl Operator {
         )?;
         state.roots.get(&root_id).ok_or(BrokerError::Denied)?;
         Ok(grant_id)
+    }
+
+    fn commit_state(
+        &self,
+        current: &mut MutexGuard<'_, State>,
+        next: State,
+    ) -> Result<(), BrokerError> {
+        if let Some(state_file) = &self.shared.state_file {
+            if let Err(error) = state_file.save(&next) {
+                if matches!(error, BrokerError::PersistenceAmbiguous) {
+                    self.shared.failed_closed.store(true, Ordering::SeqCst);
+                }
+                return Err(error);
+            }
+        }
+        **current = next;
+        Ok(())
     }
 
     fn lock_state(&self) -> Result<MutexGuard<'_, State>, BrokerError> {
@@ -972,6 +1171,7 @@ fn hello() -> HelloResult {
             "list_directory".to_owned(),
             "read_file".to_owned(),
             "read_file_binary".to_owned(),
+            "write_file".to_owned(),
         ],
     }
 }
@@ -1059,6 +1259,27 @@ fn error_response(error: BrokerError) -> ErrorResponse {
             "host filesystem operation failed",
             transient_io_kind(error.kind()),
         ),
+        BrokerError::DestinationExists => (
+            ErrorCode::AlreadyExists,
+            "write destination already exists",
+            false,
+        ),
+        BrokerError::DestinationMissing => (
+            ErrorCode::NotFound,
+            "write destination does not exist",
+            false,
+        ),
+        BrokerError::ReplacementApprovalRequired | BrokerError::InvalidWriteContent => (
+            ErrorCode::InvalidRequest,
+            "write request is invalid",
+            false,
+        ),
+        BrokerError::AmbiguousWrite => (
+            ErrorCode::AmbiguousWrite,
+            "write outcome is ambiguous and will not be replayed",
+            false,
+        ),
+        BrokerError::StoredWriteFailure(error) => return error,
         BrokerError::StatePoisoned => (
             ErrorCode::Internal,
             "broker state is unavailable; restart the broker",
@@ -1131,6 +1352,11 @@ fn registration_is_connected(
         && state.grants.iter().any(|grant| {
             grant.subject() == request.subject
                 && grant.capability() == Capability::ReadFiles
+                && matches!(grant.scope(), Scope::Root { root_id } if *root_id == root.root_id)
+        })
+        && state.grants.iter().any(|grant| {
+            grant.subject() == request.subject
+                && grant.capability() == Capability::WriteFiles
                 && matches!(grant.scope(), Scope::Root { root_id } if *root_id == root.root_id)
         })
 }
@@ -1301,6 +1527,225 @@ fn complete_attachment(
     }
 }
 
+enum WriteClaim {
+    Dispatch { recovering: bool },
+    Complete(Result<WriteFileResult, ErrorResponse>),
+}
+
+fn claim_write(
+    state: &mut State,
+    operation_id: OperationId,
+    request: &WriteFingerprint,
+) -> Result<WriteClaim, BrokerError> {
+    match state.mutations.get(&operation_id) {
+        None => {
+            state.mutations.insert(
+                operation_id,
+                MutationRecord::Write {
+                    request: request.clone(),
+                    outcome: MutationOutcome::Pending,
+                },
+            );
+            state.active_mutations.insert(operation_id);
+            Ok(WriteClaim::Dispatch { recovering: false })
+        }
+        Some(MutationRecord::Write {
+            request: existing,
+            outcome: MutationOutcome::Complete(result),
+        }) if existing == request => Ok(WriteClaim::Complete(result.clone())),
+        Some(MutationRecord::Write {
+            request: existing,
+            outcome: MutationOutcome::Pending,
+        }) if existing == request => {
+            if state.active_mutations.insert(operation_id) {
+                Ok(WriteClaim::Dispatch { recovering: true })
+            } else {
+                Err(BrokerError::OperationInProgress)
+            }
+        }
+        Some(_) => Err(BrokerError::OperationIdConflict),
+    }
+}
+
+fn complete_write(
+    state: &mut State,
+    operation_id: OperationId,
+    request: &WriteFingerprint,
+    result: Result<WriteFileResult, ErrorResponse>,
+) -> Result<(), BrokerError> {
+    match state.mutations.get_mut(&operation_id) {
+        Some(MutationRecord::Write {
+            request: existing,
+            outcome,
+        }) if existing == request && matches!(outcome, MutationOutcome::Pending) => {
+            *outcome = MutationOutcome::Complete(result);
+            state.active_mutations.remove(&operation_id);
+            Ok(())
+        }
+        _ => Err(BrokerError::OperationIdConflict),
+    }
+}
+
+fn authorize_write(
+    state: &State,
+    context: ExecutionContext,
+    root_id: RootId,
+    path: &RelativePath,
+) -> Result<GrantId, BrokerError> {
+    let grant_id = authorize(
+        state,
+        context,
+        Capability::WriteFiles,
+        Resource::Path {
+            root_id: &root_id,
+            relative: path,
+        },
+    )?;
+    state.roots.get(&root_id).ok_or(BrokerError::Denied)?;
+    Ok(grant_id)
+}
+
+fn decode_write_content(request: &WriteFileRequest) -> Result<Vec<u8>, BrokerError> {
+    if request.path.is_root()
+        || request.bytes == 0
+        || request.bytes > MAX_WRITE_FILE_BYTES
+        || request.content_base64.len() > 4 * MAX_WRITE_FILE_BYTES / 3 + 8
+    {
+        return Err(BrokerError::InvalidWriteContent);
+    }
+    let content = BASE64
+        .decode(&request.content_base64)
+        .map_err(|_| BrokerError::InvalidWriteContent)?;
+    if content.len() != request.bytes
+        || <[u8; 32]>::from(Sha256::digest(&content)) != request.sha256
+    {
+        return Err(BrokerError::InvalidWriteContent);
+    }
+    Ok(content)
+}
+
+fn destination_parent(root: &Dir, path: &RelativePath) -> Result<(Dir, String), BrokerError> {
+    let filesystem_path = Path::new(path.as_str());
+    let filename = filesystem_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or(BrokerError::InvalidWriteContent)?
+        .to_owned();
+    let parent = filesystem_path.parent().unwrap_or_else(|| Path::new(""));
+    let directory = if parent.as_os_str().is_empty() {
+        root.try_clone()?
+    } else {
+        root.open_dir_nofollow(parent)?
+    };
+    Ok((directory, filename))
+}
+
+fn atomic_write_connected_file(
+    root: &Dir,
+    path: &RelativePath,
+    content: &[u8],
+    mode: WriteFileMode,
+    operation_id: OperationId,
+) -> Result<bool, BrokerError> {
+    let (directory, filename) = destination_parent(root, path)?;
+    match directory.symlink_metadata(&filename) {
+        Ok(metadata) => match mode {
+            WriteFileMode::Create => return Err(BrokerError::DestinationExists),
+            WriteFileMode::Replace
+                if !metadata.is_file() || metadata.file_type().is_symlink() =>
+            {
+                return Err(BrokerError::NotRegularFile);
+            }
+            WriteFileMode::Replace => {}
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if matches!(mode, WriteFileMode::Replace) {
+                return Err(BrokerError::DestinationMissing);
+            }
+        }
+        Err(error) => return Err(error.into()),
+    }
+
+    let temporary = format!(".openwave-write-{operation_id}.tmp");
+    let result = (|| -> Result<bool, BrokerError> {
+        let mut options = OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No)
+            .sync(true);
+        let mut file = directory.open_with(&temporary, &options)?;
+        file.write_all(content)?;
+        file.sync_all()?;
+        drop(file);
+        match mode {
+            WriteFileMode::Create => {
+                directory
+                    .hard_link(&temporary, &directory, &filename)
+                    .map_err(|error| {
+                        if error.kind() == io::ErrorKind::AlreadyExists {
+                            BrokerError::DestinationExists
+                        } else {
+                            BrokerError::Io(error)
+                        }
+                    })?;
+                directory.remove_file(&temporary)?;
+                Ok(false)
+            }
+            WriteFileMode::Replace => {
+                let metadata = directory.symlink_metadata(&filename)?;
+                if !metadata.is_file() || metadata.file_type().is_symlink() {
+                    return Err(BrokerError::NotRegularFile);
+                }
+                directory.rename(&temporary, &directory, &filename)?;
+                Ok(true)
+            }
+        }
+    })();
+    if result.is_err() {
+        let _ = directory.remove_file(&temporary);
+    }
+    result
+}
+
+fn destination_matches(
+    root: &Dir,
+    path: &RelativePath,
+    byte_len: usize,
+    sha256: [u8; 32],
+) -> bool {
+    if byte_len == 0 || byte_len > MAX_WRITE_FILE_BYTES {
+        return false;
+    }
+    let Ok((directory, filename)) = destination_parent(root, path) else {
+        return false;
+    };
+    let Ok(metadata) = directory.symlink_metadata(&filename) else {
+        return false;
+    };
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() != byte_len as u64
+    {
+        return false;
+    }
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let Ok(file) = directory.open_with(&filename, &options) else {
+        return false;
+    };
+    let mut bytes = Vec::with_capacity(byte_len);
+    if file
+        .take((MAX_WRITE_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return false;
+    }
+    bytes.len() == byte_len && <[u8; 32]>::from(Sha256::digest(&bytes)) == sha256
+}
+
 fn apply_root_attachment(
     state: &mut State,
     request: AttachmentFingerprint,
@@ -1431,6 +1876,19 @@ fn ensure_subject_grants(
             GrantId::new(),
             subject,
             Capability::ReadFiles,
+            Scope::Root { root_id },
+            consent.clone(),
+        )?);
+    }
+    if !state.grants.iter().any(|grant| {
+        grant.subject() == subject
+            && grant.capability() == Capability::WriteFiles
+            && matches!(grant.scope(), Scope::Root { root_id: granted } if *granted == root_id)
+    }) {
+        state.grants.push(Grant::from_consent(
+            GrantId::new(),
+            subject,
+            Capability::WriteFiles,
             Scope::Root { root_id },
             consent,
         )?);

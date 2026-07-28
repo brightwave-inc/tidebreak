@@ -22,6 +22,8 @@ pub const LIST_CONNECTED_FOLDERS_TOOL: &str = "list_connected_folders";
 pub const LIST_FOLDER_TOOL: &str = "list_folder";
 pub const READ_CONNECTED_FILE_TOOL: &str = "read_connected_file";
 pub const IMPORT_CONNECTED_FILE_TOOL: &str = "import_connected_file";
+/// Stable name for publishing an existing immutable output into an attached root.
+pub const WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL: &str = "write_output_to_connected_folder";
 
 /// Maximum UTF-8 bytes in a root-relative path supplied by the model.
 pub const MAX_CONNECTED_FOLDER_PATH_BYTES: usize = 1_024;
@@ -232,6 +234,44 @@ pub struct ImportConnectedFileArgs {
     pub path: String,
 }
 
+/// Whether connected-folder publication may replace an existing regular file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(description = "", transform = preserve_enum_wire_shape)]
+pub enum OutputWriteMode {
+    /// Create the destination atomically and refuse an existing entry.
+    #[schemars(description = "")]
+    Create,
+    /// Replace one existing regular file after a fresh native approval.
+    #[schemars(description = "")]
+    Replace,
+}
+
+/// Canonical model proposal for writing one existing output to an attached root.
+///
+/// Output bytes and revision identity are deliberately absent. The trusted
+/// native executor resolves both from the authoritative output record at claim
+/// time, then binds them into its private recovery receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WriteOutputToConnectedFolderArgs {
+    /// Existing opaque output identity owned by this conversation.
+    #[schemars(description = "")]
+    pub output_id: uuid::Uuid,
+    /// Opaque root identity already attached to this conversation.
+    #[schemars(description = "")]
+    pub root_id: uuid::Uuid,
+    /// Nonempty destination relative to the attached root.
+    #[schemars(
+        length(min = 1, max = MAX_CONNECTED_FOLDER_PATH_BYTES),
+        description = "Nonempty root-relative destination path."
+    )]
+    pub path: String,
+    /// Create/no-clobber by default; replacement requires a fresh native approval.
+    #[schemars(description = "")]
+    pub mode: OutputWriteMode,
+}
+
 /// Model-facing outcome of one import proposal.
 ///
 /// Deliberately says nothing about how the file was read. The model proposed a
@@ -282,6 +322,15 @@ impl ReadConnectedFileArgs {
     }
 }
 
+impl WriteOutputToConnectedFolderArgs {
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        !self.output_id.is_nil()
+            && !self.root_id.is_nil()
+            && valid_connected_folder_path(&self.path, false)
+    }
+}
+
 /// Validate a canonical model payload before it is durably checkpointed.
 #[must_use]
 pub fn validate_list_connected_folders_arguments(arguments: &Value) -> bool {
@@ -306,6 +355,13 @@ pub fn validate_read_connected_file_arguments(arguments: &Value) -> bool {
 #[must_use]
 pub fn validate_import_connected_file_arguments(arguments: &Value) -> bool {
     serde_json::from_value::<ImportConnectedFileArgs>(arguments.clone())
+        .is_ok_and(|arguments| arguments.is_well_formed())
+}
+
+/// Validate one pathless output write-back proposal before checkpointing it.
+#[must_use]
+pub fn validate_write_output_to_connected_folder_arguments(arguments: &Value) -> bool {
+    serde_json::from_value::<WriteOutputToConnectedFolderArgs>(arguments.clone())
         .is_ok_and(|arguments| arguments.is_well_formed())
 }
 
@@ -338,6 +394,14 @@ pub fn import_connected_file_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<ImportConnectedFileArgs>(
         IMPORT_CONNECTED_FILE_TOOL,
         "Add one file below an already connected folder to this conversation as a source, so it can be searched and cited. Use this for a PDF, Office document, or any other file that read_connected_file cannot return as text. Use only an opaque root_id and a nonempty root-relative path; never use an absolute path or parent traversal. Importing the same file again recovers the same single source rather than adding a duplicate. The result is normally still processing: check list_sources for whether it became searchable.",
+    )
+}
+
+#[must_use]
+pub fn write_output_to_connected_folder_tool_spec() -> ToolSpec {
+    ToolSpec::for_args::<WriteOutputToConnectedFolderArgs>(
+        WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
+        "Copy an existing conversation output into a folder already connected to this conversation. Provide only the opaque output_id, opaque root_id, bounded root-relative destination, and explicit create or replace intent. Create refuses an existing entry. Replace requires fresh user approval; never provide output bytes or an absolute path.",
     )
 }
 
@@ -572,6 +636,50 @@ mod tests {
                 "message": "That file is no longer available to this conversation."
             })
         );
+    }
+
+    #[test]
+    fn output_writeback_names_only_durable_identities_and_a_relative_destination() {
+        let output_id = uuid::Uuid::new_v4();
+        let root_id = uuid::Uuid::new_v4();
+        assert!(validate_write_output_to_connected_folder_arguments(
+            &serde_json::json!({
+                "output_id": output_id,
+                "root_id": root_id,
+                "path": "reports/final.md",
+                "mode": "create"
+            })
+        ));
+        for invalid in [
+            serde_json::json!({
+                "output_id": output_id,
+                "root_id": root_id,
+                "path": "../final.md",
+                "mode": "create"
+            }),
+            serde_json::json!({
+                "output_id": output_id,
+                "root_id": root_id,
+                "path": "/tmp/final.md",
+                "mode": "replace"
+            }),
+            serde_json::json!({
+                "output_id": output_id,
+                "root_id": root_id,
+                "path": "final.md",
+                "mode": "create",
+                "content": "forbidden"
+            }),
+        ] {
+            assert!(!validate_write_output_to_connected_folder_arguments(
+                &invalid
+            ));
+        }
+        let spec = write_output_to_connected_folder_tool_spec();
+        assert_eq!(spec.name, WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL);
+        assert_eq!(spec.input_schema["additionalProperties"], false);
+        assert!(spec.description.contains("never provide output bytes"));
+        assert!(!spec.description.contains("scratch"));
     }
 
     #[test]

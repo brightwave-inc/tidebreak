@@ -9,7 +9,8 @@ use crate::model::{ToolCallExecution, ToolCallStatus, TurnClientWaitStatus, Turn
 use crate::storage::PendingChatPrompt;
 use crate::{
     validate_request_folder_access_arguments, CallId, ChatId, ASK_USER_QUESTIONS_TOOL,
-    REQUEST_FOLDER_ACCESS_TOOL,
+    validate_write_output_to_connected_folder_arguments, REQUEST_FOLDER_ACCESS_TOOL,
+    WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
 };
 
 use super::super::{entities, store_err, DbStore};
@@ -94,6 +95,7 @@ pub(in crate::db) async fn list_pending_chat_prompts(
                 chat_id: ChatId(request.chat_id),
                 question_call_ids: Vec::new(),
                 folder_access_call_ids: Vec::new(),
+                output_writeback_call_ids: Vec::new(),
             })
             .question_call_ids
             .push(CallId(request.call_id));
@@ -118,8 +120,36 @@ pub(in crate::db) async fn list_pending_chat_prompts(
                 chat_id: ChatId(call.chat_id),
                 question_call_ids: Vec::new(),
                 folder_access_call_ids: Vec::new(),
+                output_writeback_call_ids: Vec::new(),
             })
             .folder_access_call_ids
+            .push(CallId(call.id));
+    }
+
+    let writeback_calls = entities::tool_call::Entity::find()
+        .filter(
+            entities::tool_call::Column::Name.eq(WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL),
+        )
+        .filter(entities::tool_call::Column::Execution.eq(ToolCallExecution::Client.as_str()))
+        .filter(entities::tool_call::Column::Status.eq(ToolCallStatus::Pending.as_str()))
+        .order_by_asc(entities::tool_call::Column::ChatId)
+        .order_by_asc(entities::tool_call::Column::HistoryOrder)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?;
+    for call in writeback_calls {
+        if !validate_write_output_to_connected_folder_arguments(&call.arguments) {
+            continue;
+        }
+        prompts
+            .entry(call.chat_id)
+            .or_insert_with(|| PendingChatPrompt {
+                chat_id: ChatId(call.chat_id),
+                question_call_ids: Vec::new(),
+                folder_access_call_ids: Vec::new(),
+                output_writeback_call_ids: Vec::new(),
+            })
+            .output_writeback_call_ids
             .push(CallId(call.id));
     }
 

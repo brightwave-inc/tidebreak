@@ -13,7 +13,8 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use chrono::{DateTime, Utc};
 use openwave_core::{
     validate_deliverable_name, CallId, ChatId, HostRootId, OutputId, OutputRevisionId,
-    RootAttachmentChangeId, MAX_ATTACHMENT_REVISION, MAX_DELIVERABLE_BYTES,
+    OutputWriteMode, RootAttachmentChangeId, MAX_ATTACHMENT_REVISION, MAX_DELIVERABLE_BYTES,
+    MAX_CONNECTED_FOLDER_PATH_BYTES,
 };
 use openwave_host_broker::GrantSubject;
 use openwave_host_broker::OperationId;
@@ -30,8 +31,10 @@ const FOLDER_OPERATION_PREFIX: &str = "folder-operation-";
 const DELEGATED_FILE_READ_PREFIX: &str = "delegated-file-read-";
 const MANUAL_FOLDER_CONNECT_PREFIX: &str = "manual-folder-connect-";
 const OUTPUT_EXPORT_PREFIX: &str = "output-export-";
+const OUTPUT_WRITEBACK_PREFIX: &str = "output-writeback-";
 const MAX_SAFE_ROOT_DISPLAY_BYTES: usize = 1_024;
 const OUTPUT_EXPORT_RECEIPT_VERSION: u32 = 1;
+const OUTPUT_WRITEBACK_RECEIPT_VERSION: u32 = 1;
 
 pub(crate) struct ReceiptStore {
     directory: PathBuf,
@@ -180,6 +183,31 @@ pub(crate) struct OutputExportReceipt {
     pub(crate) terminal: Option<OutputExportTerminal>,
 }
 
+/// App-private receipt binding one client call to one immutable output revision.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) struct OutputWritebackReceipt {
+    version: u32,
+    pub(super) chat_id: ChatId,
+    pub(super) call_id: CallId,
+    pub(super) executor_id: Uuid,
+    pub(super) lease_token: Uuid,
+    pub(super) operation_id: OperationId,
+    pub(super) output_id: OutputId,
+    pub(super) revision_id: OutputRevisionId,
+    pub(super) root_id: HostRootId,
+    pub(super) relative_path: String,
+    pub(super) mode: OutputWriteMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) approval_id: Option<Uuid>,
+    pub(super) byte_len: u64,
+    pub(super) sha256: [u8; 32],
+    #[serde(default)]
+    pub(super) phase: FolderOperationPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) resolution: Option<StoredResolution>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum OutputExportPhase {
@@ -282,6 +310,9 @@ pub(super) enum StoredResolution {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error_detail: Option<String>,
     },
+    Cancelled {
+        result: String,
+    },
 }
 
 impl std::fmt::Debug for FolderAccessReceipt {
@@ -370,6 +401,30 @@ impl std::fmt::Debug for OutputExportReceipt {
                 &self.destination.as_ref().map(|_| "[redacted]"),
             )
             .field("terminal", &self.terminal)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for OutputWritebackReceipt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OutputWritebackReceipt")
+            .field("version", &self.version)
+            .field("chat_id", &self.chat_id)
+            .field("call_id", &self.call_id)
+            .field("executor_id", &self.executor_id)
+            .field("lease_token", &"[redacted]")
+            .field("operation_id", &self.operation_id)
+            .field("output_id", &self.output_id)
+            .field("revision_id", &self.revision_id)
+            .field("root_id", &self.root_id)
+            .field("relative_path", &"[redacted]")
+            .field("mode", &self.mode)
+            .field("approval_id", &self.approval_id)
+            .field("byte_len", &self.byte_len)
+            .field("sha256", &"[redacted]")
+            .field("phase", &self.phase)
+            .field("resolution", &self.resolution)
             .finish()
     }
 }
@@ -568,6 +623,76 @@ impl OutputExportReceipt {
     }
 }
 
+impl OutputWritebackReceipt {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new(
+        chat_id: ChatId,
+        call_id: CallId,
+        executor_id: Uuid,
+        output_id: OutputId,
+        revision_id: OutputRevisionId,
+        root_id: HostRootId,
+        relative_path: String,
+        mode: OutputWriteMode,
+        approval_id: Option<Uuid>,
+        byte_len: u64,
+        sha256: [u8; 32],
+    ) -> Self {
+        Self {
+            version: OUTPUT_WRITEBACK_RECEIPT_VERSION,
+            chat_id,
+            call_id,
+            executor_id,
+            lease_token: Uuid::new_v4(),
+            operation_id: OperationId::from_uuid(call_id.0)
+                .expect("non-nil call IDs are valid broker operation IDs"),
+            output_id,
+            revision_id,
+            root_id,
+            relative_path,
+            mode,
+            approval_id,
+            byte_len,
+            sha256,
+            phase: FolderOperationPhase::NotStarted,
+            resolution: None,
+        }
+    }
+
+    fn validate(&self) -> io::Result<()> {
+        if self.version != OUTPUT_WRITEBACK_RECEIPT_VERSION
+            || self.chat_id.0.is_nil()
+            || self.call_id.0.is_nil()
+            || self.executor_id.is_nil()
+            || self.lease_token.is_nil()
+            || self.operation_id.as_uuid() != self.call_id.0
+            || self.output_id.as_uuid().is_nil()
+            || self.revision_id.as_uuid().is_nil()
+            || self.root_id.as_uuid().is_nil()
+            || self.relative_path.is_empty()
+            || self.relative_path.len() > MAX_CONNECTED_FOLDER_PATH_BYTES
+            || self.relative_path.contains(['\0', '\\'])
+            || self.relative_path.starts_with('/')
+            || self.relative_path.split('/').any(|part| {
+                part.is_empty()
+                    || matches!(part, "." | "..")
+                    || part.contains(':')
+                    || part.chars().any(char::is_control)
+            })
+            || self.byte_len == 0
+            || self.byte_len > MAX_DELIVERABLE_BYTES as u64
+            || matches!(self.mode, OutputWriteMode::Create) && self.approval_id.is_some()
+            || matches!(self.mode, OutputWriteMode::Replace)
+                && self.approval_id.is_none_or(|id| id.is_nil())
+            || self.resolution.is_some()
+                && self.phase != FolderOperationPhase::DispatchStarted
+        {
+            return Err(invalid_data("invalid output-writeback receipt"));
+        }
+        Ok(())
+    }
+}
+
 impl FolderOperationReceipt {
     pub(super) fn new(
         chat_id: ChatId,
@@ -694,6 +819,7 @@ impl ReceiptStore {
         store.load_delegated_file_reads()?;
         store.load_manual_connects()?;
         store.load_output_exports()?;
+        store.load_output_writebacks()?;
         Ok(store)
     }
 
@@ -775,6 +901,29 @@ impl ReceiptStore {
         write_atomically(&self.directory, &path, &bytes)
     }
 
+    pub(super) fn save_output_writeback(
+        &self,
+        receipt: &OutputWritebackReceipt,
+    ) -> io::Result<()> {
+        receipt.validate()?;
+        let bytes = serde_json::to_vec(receipt).map_err(invalid_data)?;
+        if bytes.len() > MAX_RECEIPT_BYTES {
+            return Err(invalid_data("output-writeback receipt is too large"));
+        }
+        let path = self.output_writeback_receipt_path(receipt.call_id);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => return Err(invalid_data("output-writeback receipt is not a regular file")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if self.load_output_writebacks()?.len() >= MAX_RECEIPTS {
+                    return Err(invalid_data("too many durable output-writeback receipts"));
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        write_atomically(&self.directory, &path, &bytes)
+    }
+
     pub(super) fn remove(&self, call_id: CallId) -> io::Result<()> {
         match fs::remove_file(self.receipt_path(call_id)) {
             Ok(()) => sync_directory(&self.directory),
@@ -831,6 +980,9 @@ impl ReceiptStore {
                 continue;
             }
             if file_name.starts_with(OUTPUT_EXPORT_PREFIX) {
+                continue;
+            }
+            if file_name.starts_with(OUTPUT_WRITEBACK_PREFIX) {
                 continue;
             }
             if file_name.starts_with('.') && file_name.ends_with(".tmp") {
@@ -1056,6 +1208,47 @@ impl ReceiptStore {
         Ok(receipts)
     }
 
+    pub(super) fn load_output_writebacks(&self) -> io::Result<Vec<OutputWritebackReceipt>> {
+        let mut receipts = Vec::new();
+        let mut call_ids = HashSet::new();
+        for entry in fs::read_dir(&self.directory)? {
+            let entry = entry?;
+            let file_name = entry.file_name();
+            let Some(file_name) = file_name.to_str() else {
+                return Err(invalid_data("invalid client-execution receipt name"));
+            };
+            let Some(call_id) = file_name
+                .strip_prefix(OUTPUT_WRITEBACK_PREFIX)
+                .and_then(|name| name.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            if receipts.len() >= MAX_RECEIPTS {
+                return Err(invalid_data("too many durable output-writeback receipts"));
+            }
+            let call_id = Uuid::parse_str(call_id)
+                .map(CallId::from)
+                .map_err(invalid_data)?;
+            validate_private_file(&entry.path(), MAX_RECEIPT_BYTES)?;
+            let mut bytes = Vec::new();
+            File::open(entry.path())?
+                .take((MAX_RECEIPT_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > MAX_RECEIPT_BYTES {
+                return Err(invalid_data("output-writeback receipt is too large"));
+            }
+            let receipt: OutputWritebackReceipt =
+                serde_json::from_slice(&bytes).map_err(invalid_data)?;
+            receipt.validate()?;
+            if receipt.call_id != call_id || !call_ids.insert(call_id) {
+                return Err(invalid_data("output-writeback receipt identity mismatch"));
+            }
+            receipts.push(receipt);
+        }
+        receipts.sort_by_key(|receipt| receipt.call_id.to_string());
+        Ok(receipts)
+    }
+
     fn receipt_path(&self, call_id: CallId) -> PathBuf {
         self.directory.join(format!("{call_id}.json"))
     }
@@ -1078,6 +1271,11 @@ impl ReceiptStore {
     fn output_export_receipt_path(&self, operation_id: Uuid) -> PathBuf {
         self.directory
             .join(format!("{OUTPUT_EXPORT_PREFIX}{operation_id}.json"))
+    }
+
+    fn output_writeback_receipt_path(&self, call_id: CallId) -> PathBuf {
+        self.directory
+            .join(format!("{OUTPUT_WRITEBACK_PREFIX}{call_id}.json"))
     }
 }
 
@@ -1210,6 +1408,43 @@ fn invalid_data(error: impl std::fmt::Display) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn output_writeback_receipts_bind_exact_authority_and_redact_the_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ReceiptStore::open(temp.path()).unwrap();
+        let mut receipt = OutputWritebackReceipt::new(
+            ChatId::new(),
+            CallId::new(),
+            store.executor_id(),
+            OutputId::new(),
+            OutputRevisionId::new(),
+            HostRootId::from_uuid(Uuid::new_v4()).unwrap(),
+            "published/report.pdf".to_owned(),
+            OutputWriteMode::Replace,
+            Some(Uuid::new_v4()),
+            4,
+            Sha256::digest(b"data").into(),
+        );
+        store.save_output_writeback(&receipt).unwrap();
+        assert_eq!(
+            store.load_output_writebacks().unwrap(),
+            vec![receipt.clone()]
+        );
+        assert_eq!(receipt.operation_id.as_uuid(), receipt.call_id.0);
+        assert!(!format!("{receipt:?}").contains("published/report.pdf"));
+
+        receipt.phase = FolderOperationPhase::DispatchStarted;
+        receipt.resolution = Some(StoredResolution::Completed {
+            result: r#"{"status":"written"}"#.to_owned(),
+        });
+        store.save_output_writeback(&receipt).unwrap();
+        assert_eq!(
+            store.load_output_writebacks().unwrap(),
+            vec![receipt.clone()]
+        );
+    }
 
     #[test]
     fn receipts_roundtrip_with_stable_executor_and_exact_resolution() {

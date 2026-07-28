@@ -283,7 +283,7 @@ pub(crate) async fn export_deliverable(
     terminalize_output_export(&host_access.receipts, &mut receipt, terminal)
 }
 
-async fn require_live_output(
+pub(crate) async fn require_live_output(
     store: Option<&std::sync::Arc<dyn Store>>,
     chat_id: ChatId,
     output_id: OutputId,
@@ -304,7 +304,7 @@ async fn require_live_output(
     Ok((output, revision))
 }
 
-async fn require_exact_revision(
+pub(crate) async fn require_exact_revision(
     store: Option<&std::sync::Arc<dyn Store>>,
     chat_id: ChatId,
     output_id: OutputId,
@@ -317,7 +317,11 @@ async fn require_exact_revision(
         .get_output(output_id)
         .await
         .map_err(|_| "Could not load that output".to_owned())?
-        .filter(|output| output.chat_id == chat_id && output.deleted_at.is_none())
+        .filter(|output| {
+            output.chat_id == chat_id
+                && output.deleted_at.is_none()
+                && output.current_revision == revision_id
+        })
         .ok_or_else(|| "Output not found in this conversation".to_owned())?;
     let revision = store
         .get_output_revision(revision_id)
@@ -358,7 +362,7 @@ fn summary_from_record(
     })
 }
 
-fn read_output_revision_bytes(
+pub(crate) fn read_output_revision_bytes(
     scratch_root: &Path,
     chat_id: ChatId,
     output: &OutputRecord,

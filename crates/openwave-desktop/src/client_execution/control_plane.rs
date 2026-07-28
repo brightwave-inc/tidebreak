@@ -90,6 +90,13 @@ pub(super) struct PendingDelegatedFileRead {
     pub(super) claimed: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct PendingChatPrompt {
+    pub(super) chat_id: ChatId,
+    #[serde(default)]
+    pub(super) output_writeback_call_ids: Vec<CallId>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum DelegatedFileClaimDisposition {
@@ -239,6 +246,12 @@ impl ControlPlaneClient {
         &self,
     ) -> Result<Vec<PendingDelegatedFileRead>, ControlPlaneError> {
         self.get("/sandbox-file-reads/pending").await
+    }
+
+    pub(super) async fn pending_output_writebacks(
+        &self,
+    ) -> Result<Vec<PendingChatPrompt>, ControlPlaneError> {
+        self.get("/chats/pending-prompts").await
     }
 
     pub(super) async fn claim_delegated_file_read(

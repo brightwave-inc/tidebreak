@@ -1,6 +1,10 @@
 import { create } from "zustand";
 
-import type { PendingFolderAccessRequest, PendingUserQuestions } from "./api";
+import type {
+  PendingFolderAccessRequest,
+  PendingOutputWritebackRequest,
+  PendingUserQuestions,
+} from "./api";
 
 /**
  * What the agent is waiting on the reader for, in the conversation they have
@@ -16,6 +20,7 @@ export type PendingPromptsStore = {
   chatId: string | null;
   userQuestions: PendingUserQuestions[];
   folderAccess: PendingFolderAccessRequest[];
+  outputWritebacks: PendingOutputWritebackRequest[];
   /**
    * Ask the watcher to read again. Acting on a request should show its result
    * immediately rather than at the next poll.
@@ -23,6 +28,10 @@ export type PendingPromptsStore = {
   refresh: () => void;
   setUserQuestions: (chatId: string, requests: PendingUserQuestions[]) => void;
   setFolderAccess: (chatId: string, requests: PendingFolderAccessRequest[]) => void;
+  setOutputWritebacks: (
+    chatId: string,
+    requests: PendingOutputWritebackRequest[],
+  ) => void;
   setRefresh: (refresh: () => void) => void;
   /** Drop everything held for a conversation that is no longer the open one. */
   reset: (chatId: string | null) => void;
@@ -33,6 +42,7 @@ export function createPendingPromptsStore() {
     chatId: null,
     userQuestions: [],
     folderAccess: [],
+    outputWritebacks: [],
     refresh: () => {},
     // A read that lands after the reader has moved on describes a conversation
     // nobody is looking at, and writing it would put another chat's questions
@@ -45,8 +55,13 @@ export function createPendingPromptsStore() {
       if (get().chatId !== chatId) return;
       set({ folderAccess });
     },
+    setOutputWritebacks: (chatId, outputWritebacks) => {
+      if (get().chatId !== chatId) return;
+      set({ outputWritebacks });
+    },
     setRefresh: (refresh) => set({ refresh }),
-    reset: (chatId) => set({ chatId, userQuestions: [], folderAccess: [] }),
+    reset: (chatId) =>
+      set({ chatId, userQuestions: [], folderAccess: [], outputWritebacks: [] }),
   }));
 }
 

@@ -187,6 +187,7 @@ pub fn run() {
             deliverables::read_deliverable,
             deliverables::export_deliverable,
             client_execution::resolve_folder_access_request,
+            client_execution::output_writeback::resolve_output_writeback_request,
             host_access::connect_folder,
             host_access::connect_approved_folder,
             host_access::list_approved_folders,
@@ -266,6 +267,10 @@ async fn boot_server(
     tauri::async_runtime::spawn(async move {
         client_execution::delegated_file_read::recover_delegated_file_read(delegated_file_app)
             .await;
+    });
+    let output_writeback_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        client_execution::output_writeback::recover_output_writebacks(output_writeback_app).await;
     });
     let root_attachment_app = app.clone();
     tauri::async_runtime::spawn(async move {

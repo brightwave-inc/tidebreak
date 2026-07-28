@@ -13,9 +13,10 @@ use serde::{Deserialize, Serialize};
 use chrono::{Duration, Utc};
 use openwave_core::{
     CallId, ChatId, ClaimClientToolCallOutcome, HeartbeatClientToolCallOutcome,
-    RequestFolderAccessArgs, RequestedFolderHint, ResolveToolCallOutcome, ToolCallExecution,
-    ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnId, TurnRunStatus,
-    REQUEST_FOLDER_ACCESS_TOOL,
+    OutputWriteMode, RequestFolderAccessArgs, RequestedFolderHint, ResolveToolCallOutcome,
+    ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnId, TurnRunStatus,
+    WriteOutputToConnectedFolderArgs, REQUEST_FOLDER_ACCESS_TOOL,
+    WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
 };
 
 use crate::error::ServerError;
@@ -141,6 +142,15 @@ pub struct PendingFolderAccessRequest {
     pub claimed: bool,
 }
 
+/// Renderer-safe replacement approval. Canonical output, root, and destination
+/// identities remain native-only; the card can approve or decline this exact call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+pub struct PendingOutputWritebackRequest {
+    pub call_id: CallId,
+    pub turn_id: TurnId,
+    pub claimed: bool,
+}
+
 /// `GET /chats/{id}/client-executions/pending` — renderer-safe consent prompts.
 ///
 /// Unknown, malformed, or non-folder-access client calls are omitted rather
@@ -156,6 +166,25 @@ pub async fn list_pending_folder_access_requests(
         .await?
         .into_iter()
         .filter_map(renderer_folder_access_request)
+        .collect();
+    Ok(Json(requests))
+}
+
+/// `GET /chats/{id}/output-writebacks/pending` — replacement approvals only.
+///
+/// Create/no-clobber calls are handled automatically by the native executor and
+/// are intentionally omitted from the renderer.
+pub async fn list_pending_output_writebacks(
+    State(state): State<AppState>,
+    Path(id): Path<ChatId>,
+) -> Result<Json<Vec<PendingOutputWritebackRequest>>, ServerError> {
+    ensure_chat(&state, id).await?;
+    let requests = state
+        .store
+        .list_pending_client_tool_calls(id)
+        .await?
+        .into_iter()
+        .filter_map(renderer_output_writeback_request)
         .collect();
     Ok(Json(requests))
 }
@@ -193,6 +222,27 @@ fn renderer_folder_access_request(call: ToolCallRecord) -> Option<PendingFolderA
         turn_id: call.turn_id,
         reason: RENDERER_FOLDER_ACCESS_REASON.to_owned(),
         folder_hint: arguments.folder_hint,
+        claimed: call.client_executor_id.is_some(),
+    })
+}
+
+fn renderer_output_writeback_request(
+    call: ToolCallRecord,
+) -> Option<PendingOutputWritebackRequest> {
+    if call.name != WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL
+        || call.execution != ToolCallExecution::Client
+        || call.status != ToolCallStatus::Pending
+    {
+        return None;
+    }
+    let arguments: WriteOutputToConnectedFolderArgs =
+        serde_json::from_value(call.arguments).ok()?;
+    if !arguments.is_well_formed() || arguments.mode != OutputWriteMode::Replace {
+        return None;
+    }
+    Some(PendingOutputWritebackRequest {
+        call_id: call.id,
+        turn_id: call.turn_id,
         claimed: call.client_executor_id.is_some(),
     })
 }

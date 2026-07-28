@@ -9,7 +9,9 @@ use crate::{
     RequestId,
 };
 
-pub const MAX_REQUEST_BYTES: usize = 128 * 1024;
+/// Enough for one base64-encoded maximum output write plus strict envelope overhead.
+pub const MAX_REQUEST_BYTES: usize =
+    4 * crate::broker::MAX_WRITE_FILE_BYTES / 3 + 128 * 1024;
 
 /// Enough for a base64 [`crate::protocol::MAX_READ_FILE_BINARY_BYTES`] payload
 /// plus envelope overhead. Binary reads are the only response that approaches

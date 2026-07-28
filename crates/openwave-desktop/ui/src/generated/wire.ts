@@ -461,6 +461,12 @@ preview?: ToolActionPreview, can_approve: boolean, can_remember: boolean, };
 export type PendingFolderAccessRequest = { call_id: CallId, turn_id: TurnId, reason: string, folder_hint: RequestedFolderHint | null, claimed: boolean, };
 
 /**
+ * Renderer-safe replacement approval. Canonical output, root, and destination
+ * identities remain native-only; the card can approve or decline this exact call.
+ */
+export type PendingOutputWritebackRequest = { call_id: CallId, turn_id: TurnId, claimed: boolean, };
+
+/**
  * Renderer-safe, durable card projection.
  *
  * It contains only the validated presentation contract. Provider metadata,
@@ -589,7 +595,7 @@ export type RendererSequencedEvent = { seq: number, event: RendererAgentEvent, }
  * are all generated from this enum, so a variant added here cannot leave one of
  * them behind — see `docs/wire-types.md`.
  */
-export type RendererToolName = "search" | "list_sources" | "read_source" | "read_tool_result" | "web_search" | "read_delegated_file" | "read_file" | "list_dir" | "write_file" | "create_deliverable" | "request_folder_access" | "connect_folder" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file" | "spawn_sandbox_agent" | "wait_for_agents" | "ask_user_questions" | "exec" | "other";
+export type RendererToolName = "search" | "list_sources" | "read_source" | "read_tool_result" | "web_search" | "read_delegated_file" | "read_file" | "list_dir" | "write_file" | "create_deliverable" | "request_folder_access" | "connect_folder" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file" | "write_output_to_connected_folder" | "spawn_sandbox_agent" | "wait_for_agents" | "ask_user_questions" | "exec" | "other";
 
 export type RendererToolStatus = "completed" | "failed";
 
@@ -793,6 +799,7 @@ export const RENDERER_TOOL_NAMES = [
   "list_folder",
   "read_connected_file",
   "import_connected_file",
+  "write_output_to_connected_folder",
   "spawn_sandbox_agent",
   "wait_for_agents",
   "ask_user_questions",

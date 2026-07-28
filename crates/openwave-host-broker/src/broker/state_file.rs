@@ -21,7 +21,7 @@ use crate::{
     RootPolicy, Scope,
 };
 
-const STATE_VERSION: u32 = 2;
+const STATE_VERSION: u32 = 3;
 const STATE_FILE_NAME: &str = "host-broker-state.json";
 pub(super) const MAX_STATE_FILE_BYTES: usize = 16 * 1024 * 1024;
 
@@ -111,7 +111,7 @@ impl StateFile {
             return Err(BrokerError::StateTooLarge);
         }
         let persisted: PersistedState = serde_json::from_slice(&bytes).map_err(invalid_data)?;
-        if persisted.version != STATE_VERSION {
+        if !matches!(persisted.version, 2 | STATE_VERSION) {
             return Err(invalid_data(format!(
                 "unsupported broker state version {}",
                 persisted.version
@@ -147,9 +147,27 @@ impl StateFile {
                 return Err(invalid_data("duplicate persisted operation identity").into());
             }
         }
+        let mut grants = persisted.grants;
+        if persisted.version == 2 {
+            let write_grants = grants
+                .iter()
+                .filter(|grant| grant.capability() == crate::Capability::ReadFiles)
+                .map(|grant| {
+                    Grant::from_consent(
+                        crate::GrantId::new(),
+                        grant.subject(),
+                        crate::Capability::WriteFiles,
+                        grant.scope().clone(),
+                        grant.consent().clone(),
+                    )
+                    .map_err(BrokerError::from)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            grants.extend(write_grants);
+        }
         let state = State {
             roots,
-            grants: persisted.grants,
+            grants,
             attachments: persisted.attachments,
             mutations,
             active_mutations: Default::default(),
@@ -414,6 +432,21 @@ pub(super) fn validate_loaded_state(state: &State) -> Result<(), BrokerError> {
                 )
                 .into());
             }
+            MutationRecord::Write {
+                request,
+                outcome: super::MutationOutcome::Complete(Ok(result)),
+            } if result.bytes != request.byte_len
+                || result.replaced != matches!(request.mode, crate::WriteFileMode::Replace) =>
+            {
+                return Err(invalid_data(
+                    "successful write receipt does not match its request",
+                )
+                .into());
+            }
+            MutationRecord::Write {
+                outcome: super::MutationOutcome::Pending,
+                ..
+            } => {}
             _ => {}
         }
     }
