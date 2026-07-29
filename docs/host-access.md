@@ -73,7 +73,19 @@ code:
 These routes require both the ordinary bearer credential and the native
 client-executor credential. The server supplies the stable executor identity;
 it is never accepted from a body, returned in a response, included in server
-discovery, or exposed to the renderer. Begin and finish retries return stable
+discovery, or exposed to the renderer.
+
+The rule that keeps the two credentials coherent, and the test for whether a new
+route belongs behind the second one: **the client-executor credential gates
+operations that exercise host authority — claiming work to execute locally,
+reading the filesystem, changing folder grants. It does not gate user content.**
+
+A route placed behind it becomes unreachable to the renderer, which holds only
+the primary bearer, and therefore unreachable to every future client that is
+renderer-shaped: a web or mobile client, a self-hosted deployment's browser UI,
+or a CLI. That is the intended consequence for host authority and a defect for
+anything else, so the distinction is worth checking rather than inheriting from
+whichever router a route was added next to. Begin and finish retries return stable
 `begun`/`existing` and `finished`/`existing` dispositions. A missing change and
 a change owned by another executor are both reported as not found, while busy
 and revision conflicts do not identify the pending operation.
