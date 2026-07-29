@@ -50,7 +50,9 @@ export function SidebarFrame({ children }: { children: ReactNode }) {
           aria-label="Home"
           onClick={() => void navigate({ to: "/" })}
         >
-          <Logomark width="28" height="15" />
+          {/* Square box around the wide mark, so the home button lines up with
+              the column of square rail buttons under it. */}
+          <Logomark width="28" height="28" />
         </button>
         <span className="grow" />
         {!isCompact && (
