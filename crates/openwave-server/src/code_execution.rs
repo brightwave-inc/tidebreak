@@ -14,7 +14,8 @@ use async_trait::async_trait;
 use openwave_code_execution::{
     CodeExecutionError, CodeExecutionProvider, CodeExecutionProviderKind, CodeExecutionRequest,
     CodeExecutionResponse, DaytonaCredential, DaytonaExecutionProvider, E2BCredential,
-    E2BExecutionProvider, LocalExecutionProvider, RemoteSessionPool, DAYTONA_CREDENTIAL_KEY,
+    E2BExecutionProvider, ExecutionWorkspaceId, LocalExecutionProvider, RemoteSessionPool,
+    WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing, DAYTONA_CREDENTIAL_KEY,
     E2B_CREDENTIAL_KEY,
 };
 use openwave_core::{Result, SecretProvider, Store};
@@ -287,6 +288,67 @@ impl ConfiguredCodeExecutionProvider {
             remote_sessions: RemoteSessionPool::default(),
         }
     }
+
+    /// Resolve the currently selected adapter at the last boundary before use.
+    async fn resolve(
+        &self,
+    ) -> std::result::Result<Box<dyn CodeExecutionProvider>, CodeExecutionError> {
+        let config = read_config(&*self.store).await.map_err(|_| {
+            CodeExecutionError::Unavailable("configuration storage is unavailable".into())
+        })?;
+        let Some(provider) = config.provider else {
+            return Err(CodeExecutionError::NotConfigured);
+        };
+        match provider {
+            CodeExecutionProviderKind::Local => Ok(Box::new(LocalExecutionProvider::new(
+                &self.scratch_root,
+                Duration::from_millis(config.timeout_ms),
+            )?)),
+            CodeExecutionProviderKind::E2b => {
+                let credential = E2BCredential::load(&*self.secrets)
+                    .await?
+                    .ok_or(CodeExecutionError::NotConfigured)?;
+                Ok(Box::new(E2BExecutionProvider::with_session_pool(
+                    credential,
+                    Duration::from_millis(config.timeout_ms),
+                    self.remote_sessions.clone(),
+                )?))
+            }
+            CodeExecutionProviderKind::Daytona => {
+                let credential = DaytonaCredential::load(&*self.secrets)
+                    .await?
+                    .ok_or(CodeExecutionError::NotConfigured)?;
+                Ok(Box::new(DaytonaExecutionProvider::with_session_pool(
+                    credential,
+                    Duration::from_millis(config.timeout_ms),
+                    self.remote_sessions.clone(),
+                )?))
+            }
+            _ => Err(CodeExecutionError::Unavailable(
+                "selected provider is not supported by this build".into(),
+            )),
+        }
+    }
+
+    /// The configured provider's optional durable-workspace surface.
+    ///
+    /// Returns `Ok(None)` when execution is disabled, no provider is fully
+    /// configured, or the selected backend has no workspace lifecycle, so host
+    /// callers degrade instead of failing. This is a host-internal API; no
+    /// model-facing tool is registered over it.
+    pub async fn workspace(
+        &self,
+    ) -> std::result::Result<Option<ConfiguredWorkspace>, CodeExecutionError> {
+        let provider = match self.resolve().await {
+            Ok(provider) => provider,
+            Err(CodeExecutionError::NotConfigured) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if provider.workspace_lifecycle().is_none() {
+            return Ok(None);
+        }
+        Ok(Some(ConfiguredWorkspace { provider }))
+    }
 }
 
 #[async_trait]
@@ -295,46 +357,80 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
         &self,
         request: CodeExecutionRequest,
     ) -> std::result::Result<CodeExecutionResponse, CodeExecutionError> {
-        let config = read_config(&*self.store).await.map_err(|_| {
-            CodeExecutionError::Unavailable("configuration storage is unavailable".into())
-        })?;
-        let Some(provider) = config.provider else {
-            return Err(CodeExecutionError::NotConfigured);
-        };
-        match provider {
-            CodeExecutionProviderKind::Local => {
-                let provider = LocalExecutionProvider::new(
-                    &self.scratch_root,
-                    Duration::from_millis(config.timeout_ms),
-                )?;
-                provider.execute(request).await
-            }
-            CodeExecutionProviderKind::E2b => {
-                let credential = E2BCredential::load(&*self.secrets)
-                    .await?
-                    .ok_or(CodeExecutionError::NotConfigured)?;
-                let provider = E2BExecutionProvider::with_session_pool(
-                    credential,
-                    Duration::from_millis(config.timeout_ms),
-                    self.remote_sessions.clone(),
-                )?;
-                provider.execute(request).await
-            }
-            CodeExecutionProviderKind::Daytona => {
-                let credential = DaytonaCredential::load(&*self.secrets)
-                    .await?
-                    .ok_or(CodeExecutionError::NotConfigured)?;
-                let provider = DaytonaExecutionProvider::with_session_pool(
-                    credential,
-                    Duration::from_millis(config.timeout_ms),
-                    self.remote_sessions.clone(),
-                )?;
-                provider.execute(request).await
-            }
-            _ => Err(CodeExecutionError::Unavailable(
-                "selected provider is not supported by this build".into(),
-            )),
-        }
+        self.resolve().await?.execute(request).await
+    }
+
+    // `workspace_lifecycle` stays `None` here on purpose: the capability of
+    // this late-binding wrapper depends on the configuration read at call
+    // time, which the synchronous trait flag cannot express. Host callers use
+    // [`ConfiguredCodeExecutionProvider::workspace`] instead.
+}
+
+/// A resolved workspace-lifecycle handle over the currently selected provider.
+pub struct ConfiguredWorkspace {
+    provider: Box<dyn CodeExecutionProvider>,
+}
+
+impl ConfiguredWorkspace {
+    fn lifecycle(&self) -> std::result::Result<&dyn WorkspaceLifecycle, CodeExecutionError> {
+        // Checked when this handle was constructed; re-checked instead of
+        // unwrapped so a defect degrades into an error, not a panic.
+        self.provider.workspace_lifecycle().ok_or_else(|| {
+            CodeExecutionError::Unavailable("selected provider lost its workspace surface".into())
+        })
+    }
+}
+
+#[async_trait]
+impl WorkspaceLifecycle for ConfiguredWorkspace {
+    async fn create_workspace(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+    ) -> std::result::Result<(), CodeExecutionError> {
+        self.lifecycle()?.create_workspace(workspace).await
+    }
+
+    async fn connect_workspace(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+    ) -> std::result::Result<bool, CodeExecutionError> {
+        self.lifecycle()?.connect_workspace(workspace).await
+    }
+
+    async fn destroy_workspace(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+    ) -> std::result::Result<(), CodeExecutionError> {
+        self.lifecycle()?.destroy_workspace(workspace).await
+    }
+
+    async fn put_workspace_file(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+        path: &WorkspaceFilePath,
+        content: &[u8],
+    ) -> std::result::Result<(), CodeExecutionError> {
+        self.lifecycle()?
+            .put_workspace_file(workspace, path, content)
+            .await
+    }
+
+    async fn get_workspace_file(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+        path: &WorkspaceFilePath,
+    ) -> std::result::Result<Vec<u8>, CodeExecutionError> {
+        self.lifecycle()?.get_workspace_file(workspace, path).await
+    }
+
+    async fn list_workspace_files(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+        path: Option<&WorkspaceFilePath>,
+    ) -> std::result::Result<WorkspaceListing, CodeExecutionError> {
+        self.lifecycle()?
+            .list_workspace_files(workspace, path)
+            .await
     }
 }
 
@@ -428,6 +524,39 @@ mod tests {
         };
         assert_eq!(local.provider, Some(CodeExecutionProviderKind::Local));
         assert_eq!(local.timeout_ms, MAX_TIMEOUT_MS);
+    }
+
+    #[tokio::test]
+    async fn workspace_capability_degrades_to_none_instead_of_failing() {
+        let (store, dir) = test_store().await;
+        let provider = ConfiguredCodeExecutionProvider::new(
+            Arc::new(store),
+            Arc::new(NoSecrets),
+            dir.path().join("scratch"),
+        );
+        assert!(provider.workspace().await.unwrap().is_some());
+
+        // Disabling execution and selecting a managed provider without a
+        // credential must both report "no workspace", not an error.
+        provider
+            .store
+            .set_setting(
+                CODE_EXECUTION_SETTING,
+                &serde_json::json!({ "provider": null, "timeout_ms": DEFAULT_TIMEOUT_MS }),
+            )
+            .await
+            .unwrap();
+        assert!(provider.workspace().await.unwrap().is_none());
+
+        provider
+            .store
+            .set_setting(
+                CODE_EXECUTION_SETTING,
+                &serde_json::json!({ "provider": "e2b", "timeout_ms": DEFAULT_TIMEOUT_MS }),
+            )
+            .await
+            .unwrap();
+        assert!(provider.workspace().await.unwrap().is_none());
     }
 
     #[tokio::test]

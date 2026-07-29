@@ -26,6 +26,8 @@ use crate::receipt::{request_fingerprint, BeginExecution, ExecutionReceipt};
 use crate::CodeExecutionProviderKind;
 use crate::{
     CodeExecutionError, CodeExecutionProvider, CodeExecutionRequest, CodeExecutionResponse,
+    ExecutionWorkspaceId, WorkspaceFileEntry, WorkspaceFilePath, WorkspaceLifecycle,
+    WorkspaceListing, MAX_WORKSPACE_FILE_BYTES, MAX_WORKSPACE_LIST_ENTRIES,
 };
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
@@ -110,6 +112,102 @@ impl LocalExecutionProvider {
         secure_dir(&receipts)?;
         Ok((workspace, cwd, receipts))
     }
+
+    fn ensured_root(&self) -> Result<PathBuf, CodeExecutionError> {
+        fs::create_dir_all(&self.scratch_root).map_err(|_| {
+            CodeExecutionError::Sandbox("private scratch root is unavailable".into())
+        })?;
+        fs::canonicalize(&self.scratch_root)
+            .map_err(|_| CodeExecutionError::Sandbox("private scratch root is unavailable".into()))
+    }
+
+    fn existing_root(&self) -> Result<Option<PathBuf>, CodeExecutionError> {
+        match fs::canonicalize(&self.scratch_root) {
+            Ok(root) => Ok(Some(root)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(CodeExecutionError::Sandbox(
+                "private scratch root is unavailable".into(),
+            )),
+        }
+    }
+
+    fn workspace_in(
+        root: &Path,
+        workspace: &ExecutionWorkspaceId,
+        create: bool,
+    ) -> Result<Option<PathBuf>, CodeExecutionError> {
+        let candidate = root.join(workspace.as_str());
+        if create {
+            fs::create_dir_all(&candidate).map_err(|_| {
+                CodeExecutionError::Sandbox("private workspace is unavailable".into())
+            })?;
+        }
+        let metadata = match fs::symlink_metadata(&candidate) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => {
+                return Err(CodeExecutionError::Sandbox(
+                    "private workspace is unavailable".into(),
+                ));
+            }
+        };
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(CodeExecutionError::Sandbox(
+                "private workspace is not a regular directory".into(),
+            ));
+        }
+        let workspace = fs::canonicalize(&candidate)
+            .map_err(|_| CodeExecutionError::Sandbox("private workspace is unavailable".into()))?;
+        if !workspace.starts_with(root) {
+            return Err(CodeExecutionError::Sandbox(
+                "private workspace escaped its root".into(),
+            ));
+        }
+        Ok(Some(workspace))
+    }
+
+    fn ensured_workspace(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+    ) -> Result<PathBuf, CodeExecutionError> {
+        let root = self.ensured_root()?;
+        Self::workspace_in(&root, workspace, true)?
+            .ok_or_else(|| CodeExecutionError::Sandbox("private workspace is unavailable".into()))
+    }
+
+    /// Resolve `path`'s canonical parent inside `workspace` and rejoin the
+    /// final component, so a symlinked intermediate directory cannot escape
+    /// the workspace. The final component's own type is checked separately.
+    fn resolve_file(
+        workspace: &Path,
+        path: &WorkspaceFilePath,
+        create_parents: bool,
+    ) -> Result<Option<PathBuf>, CodeExecutionError> {
+        let target = workspace.join(path.as_str());
+        let parent = target
+            .parent()
+            .ok_or_else(|| CodeExecutionError::Sandbox("workspace path has no parent".into()))?;
+        if create_parents {
+            fs::create_dir_all(parent).map_err(|_| {
+                CodeExecutionError::Sandbox("workspace directories are unavailable".into())
+            })?;
+        }
+        let parent = match fs::canonicalize(parent) {
+            Ok(parent) => parent,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => {
+                return Err(CodeExecutionError::Sandbox(
+                    "workspace directories are unavailable".into(),
+                ));
+            }
+        };
+        if !parent.starts_with(workspace) {
+            return Err(CodeExecutionError::Sandbox(
+                "workspace path escaped the private workspace".into(),
+            ));
+        }
+        Ok(Some(parent.join(path.file_name())))
+    }
 }
 
 #[async_trait]
@@ -153,6 +251,244 @@ impl CodeExecutionProvider for LocalExecutionProvider {
                 Err(error)
             }
         }
+    }
+
+    fn workspace_lifecycle(&self) -> Option<&dyn WorkspaceLifecycle> {
+        // Managing scratch files needs no confinement primitive, so the
+        // capability is offered even where `execute` reports unsupported.
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl WorkspaceLifecycle for LocalExecutionProvider {
+    async fn create_workspace(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+    ) -> Result<(), CodeExecutionError> {
+        self.ensured_workspace(workspace).map(|_| ())
+    }
+
+    async fn connect_workspace(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+    ) -> Result<bool, CodeExecutionError> {
+        let Some(root) = self.existing_root()? else {
+            return Ok(false);
+        };
+        Ok(Self::workspace_in(&root, workspace, false)?.is_some())
+    }
+
+    async fn destroy_workspace(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+    ) -> Result<(), CodeExecutionError> {
+        let Some(root) = self.existing_root()? else {
+            return Ok(());
+        };
+        let Some(workspace) = Self::workspace_in(&root, workspace, false)? else {
+            return Ok(());
+        };
+        fs::remove_dir_all(&workspace)
+            .map_err(|_| CodeExecutionError::Sandbox("could not remove private workspace".into()))
+    }
+
+    async fn put_workspace_file(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+        path: &WorkspaceFilePath,
+        content: &[u8],
+    ) -> Result<(), CodeExecutionError> {
+        if content.len() > MAX_WORKSPACE_FILE_BYTES {
+            return Err(CodeExecutionError::WorkspaceFileTooLarge);
+        }
+        let workspace = self.ensured_workspace(workspace)?;
+        let target = Self::resolve_file(&workspace, path, true)?.ok_or_else(|| {
+            CodeExecutionError::Sandbox("workspace directories are unavailable".into())
+        })?;
+        // The final `target` is written by an atomic rename, so its own type is
+        // not load-bearing for containment — the temp file below is what we
+        // actually write into, and it must not be a pre-planted symlink. A
+        // process with write access to chat scratch (an exec-tool command runs
+        // Seatbelt-confined to this same root) could otherwise plant a symlink
+        // at a guessable temp path and redirect the unsandboxed host write onto
+        // an arbitrary host file. Two defenses close that: an unpredictable
+        // temp name, and an exclusive, no-follow create that fails rather than
+        // following anything that already exists at the path.
+        let parent = target
+            .parent()
+            .ok_or_else(|| CodeExecutionError::Sandbox("workspace path has no parent".into()))?;
+        let temporary = parent.join(format!(".workspace-put.{}", uuid::Uuid::new_v4()));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            options.mode(0o600);
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = options.open(&temporary).map_err(|_| {
+            CodeExecutionError::Sandbox("could not write the workspace file".into())
+        })?;
+        file.write_all(content)
+            .and_then(|()| file.sync_all())
+            .and_then(|()| fs::rename(&temporary, &target))
+            .map_err(|_| {
+                let _ = fs::remove_file(&temporary);
+                CodeExecutionError::Sandbox("could not write the workspace file".into())
+            })
+    }
+
+    async fn get_workspace_file(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+        path: &WorkspaceFilePath,
+    ) -> Result<Vec<u8>, CodeExecutionError> {
+        let Some(root) = self.existing_root()? else {
+            return Err(CodeExecutionError::WorkspaceFileNotFound);
+        };
+        let Some(workspace) = Self::workspace_in(&root, workspace, false)? else {
+            return Err(CodeExecutionError::WorkspaceFileNotFound);
+        };
+        let Some(target) = Self::resolve_file(&workspace, path, false)? else {
+            return Err(CodeExecutionError::WorkspaceFileNotFound);
+        };
+        // Open without following the final component, then judge the opened
+        // descriptor — never a path stat'd separately from the open. A
+        // lstat-then-open read races a writer that keeps the path a regular
+        // file at the check and swaps in a symlink to a host secret before the
+        // open, so on unix containment comes from the descriptor we actually
+        // read (O_NOFOLLOW + fstat below).
+        //
+        // Without O_NOFOLLOW we cannot refuse a final symlink at open time, so
+        // restore the prior cross-platform guard: reject a symlinked final
+        // component with a pre-open lstat. This is the same lstat-then-open
+        // shape the unix path deliberately abandons, kept here only to preserve
+        // the earlier refusal rather than to defend against a local race the
+        // platform cannot express away.
+        #[cfg(not(unix))]
+        match fs::symlink_metadata(&target) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(CodeExecutionError::InvalidRequest(
+                    "workspace path is not a regular file".into(),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(CodeExecutionError::WorkspaceFileNotFound);
+            }
+            Err(_) => {
+                return Err(CodeExecutionError::Sandbox(
+                    "could not read the workspace file".into(),
+                ));
+            }
+        }
+        let mut open = OpenOptions::new();
+        open.read(true);
+        #[cfg(unix)]
+        open.custom_flags(libc::O_NOFOLLOW);
+        let file = match open.open(&target) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(CodeExecutionError::WorkspaceFileNotFound);
+            }
+            // A final symlink fails the no-follow open with ELOOP; report it as
+            // an invalid path rather than a missing file so a planted symlink
+            // is not silently indistinguishable from absence.
+            Err(error) if is_symlink_loop(&error) => {
+                return Err(CodeExecutionError::InvalidRequest(
+                    "workspace path is not a regular file".into(),
+                ));
+            }
+            Err(_) => {
+                return Err(CodeExecutionError::Sandbox(
+                    "could not read the workspace file".into(),
+                ));
+            }
+        };
+        let metadata = file
+            .metadata()
+            .map_err(|_| CodeExecutionError::Sandbox("could not read the workspace file".into()))?;
+        if !metadata.is_file() {
+            return Err(CodeExecutionError::InvalidRequest(
+                "workspace path is not a regular file".into(),
+            ));
+        }
+        if metadata.len() > MAX_WORKSPACE_FILE_BYTES as u64 {
+            return Err(CodeExecutionError::WorkspaceFileTooLarge);
+        }
+        let mut content = Vec::new();
+        file.take(MAX_WORKSPACE_FILE_BYTES as u64 + 1)
+            .read_to_end(&mut content)
+            .map_err(|_| CodeExecutionError::Sandbox("could not read the workspace file".into()))?;
+        if content.len() > MAX_WORKSPACE_FILE_BYTES {
+            return Err(CodeExecutionError::WorkspaceFileTooLarge);
+        }
+        Ok(content)
+    }
+
+    async fn list_workspace_files(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+        path: Option<&WorkspaceFilePath>,
+    ) -> Result<WorkspaceListing, CodeExecutionError> {
+        let workspace = self.ensured_workspace(workspace)?;
+        let base = match path {
+            None => workspace.clone(),
+            Some(path) => {
+                let candidate = workspace.join(path.as_str());
+                let base = match fs::canonicalize(&candidate) {
+                    Ok(base) => base,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        return Err(CodeExecutionError::WorkspaceFileNotFound);
+                    }
+                    Err(_) => {
+                        return Err(CodeExecutionError::Sandbox(
+                            "could not list the workspace".into(),
+                        ));
+                    }
+                };
+                if !base.starts_with(&workspace) {
+                    return Err(CodeExecutionError::Sandbox(
+                        "workspace path escaped the private workspace".into(),
+                    ));
+                }
+                if !base.is_dir() {
+                    return Err(CodeExecutionError::InvalidRequest(
+                        "workspace path is not a directory".into(),
+                    ));
+                }
+                base
+            }
+        };
+        let reader = fs::read_dir(&base)
+            .map_err(|_| CodeExecutionError::Sandbox("could not list the workspace".into()))?;
+        let mut entries = Vec::new();
+        for entry in reader {
+            let entry = entry
+                .map_err(|_| CodeExecutionError::Sandbox("could not list the workspace".into()))?;
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.file_type().is_symlink() || (!metadata.is_dir() && !metadata.is_file()) {
+                continue;
+            }
+            let relative = match path {
+                None => name,
+                Some(path) => format!("{}/{name}", path.as_str()),
+            };
+            entries.push(WorkspaceFileEntry {
+                path: relative,
+                directory: metadata.is_dir(),
+                size_bytes: metadata.is_file().then_some(metadata.len()),
+            });
+        }
+        entries.sort_by(|left, right| left.path.cmp(&right.path));
+        let truncated = entries.len() > MAX_WORKSPACE_LIST_ENTRIES;
+        entries.truncate(MAX_WORKSPACE_LIST_ENTRIES);
+        Ok(WorkspaceListing { entries, truncated })
     }
 }
 
@@ -266,6 +602,17 @@ fn finish_execution(path: &Path, receipt: &ExecutionReceipt) -> Result<(), CodeE
 
 fn sync_dir(path: &Path) -> std::io::Result<()> {
     fs::File::open(path)?.sync_all()
+}
+
+/// Whether an open error is the no-follow refusal of a final symlink.
+#[cfg(unix)]
+fn is_symlink_loop(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(libc::ELOOP)
+}
+
+#[cfg(not(unix))]
+fn is_symlink_loop(_error: &std::io::Error) -> bool {
+    false
 }
 
 fn secure_dir(path: &Path) -> Result<(), CodeExecutionError> {
@@ -724,6 +1071,161 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(conflict, CodeExecutionError::IdentityConflict));
+    }
+
+    #[tokio::test]
+    async fn local_workspace_lifecycle_round_trips_and_stays_inside_scratch() {
+        let root = tempfile::tempdir().unwrap();
+        let provider = LocalExecutionProvider::new(root.path(), Duration::from_secs(1)).unwrap();
+        let workspace = ExecutionWorkspaceId::parse("chat-ws").unwrap();
+
+        assert!(!provider.connect_workspace(&workspace).await.unwrap());
+        provider.create_workspace(&workspace).await.unwrap();
+        assert!(provider.connect_workspace(&workspace).await.unwrap());
+
+        let path = WorkspaceFilePath::parse("reports/summary.bin").unwrap();
+        let content = b"\x00binary\xff".to_vec();
+        provider
+            .put_workspace_file(&workspace, &path, &content)
+            .await
+            .unwrap();
+        assert_eq!(
+            provider
+                .get_workspace_file(&workspace, &path)
+                .await
+                .unwrap(),
+            content
+        );
+
+        let top = provider
+            .list_workspace_files(&workspace, None)
+            .await
+            .unwrap();
+        assert_eq!(top.entries.len(), 1);
+        assert_eq!(top.entries[0].path, "reports");
+        assert!(top.entries[0].directory);
+        let nested = provider
+            .list_workspace_files(
+                &workspace,
+                Some(&WorkspaceFilePath::parse("reports").unwrap()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(nested.entries.len(), 1);
+        assert_eq!(nested.entries[0].path, "reports/summary.bin");
+        assert_eq!(nested.entries[0].size_bytes, Some(content.len() as u64));
+
+        assert!(matches!(
+            provider
+                .get_workspace_file(&workspace, &WorkspaceFilePath::parse("missing").unwrap())
+                .await,
+            Err(CodeExecutionError::WorkspaceFileNotFound)
+        ));
+        assert!(matches!(
+            provider
+                .put_workspace_file(
+                    &workspace,
+                    &path,
+                    &vec![0_u8; crate::MAX_WORKSPACE_FILE_BYTES + 1],
+                )
+                .await,
+            Err(CodeExecutionError::WorkspaceFileTooLarge)
+        ));
+
+        // A symlink planted in the workspace must never let a read escape it,
+        // whether it is the file itself or an intermediate directory.
+        #[cfg(unix)]
+        {
+            let outside = root.path().join("outside.txt");
+            fs::write(&outside, "secret").unwrap();
+            let workspace_dir = root.path().join("chat-ws");
+            std::os::unix::fs::symlink(&outside, workspace_dir.join("link.txt")).unwrap();
+            std::os::unix::fs::symlink(root.path(), workspace_dir.join("escape")).unwrap();
+            assert!(provider
+                .get_workspace_file(&workspace, &WorkspaceFilePath::parse("link.txt").unwrap())
+                .await
+                .is_err());
+            assert!(provider
+                .get_workspace_file(
+                    &workspace,
+                    &WorkspaceFilePath::parse("escape/outside.txt").unwrap(),
+                )
+                .await
+                .is_err());
+            let listed = provider
+                .list_workspace_files(&workspace, None)
+                .await
+                .unwrap();
+            assert!(listed.entries.iter().all(|entry| entry.path == "reports"));
+        }
+
+        provider.destroy_workspace(&workspace).await.unwrap();
+        assert!(!provider.connect_workspace(&workspace).await.unwrap());
+        // Destroying a workspace that no longer exists stays a success.
+        provider.destroy_workspace(&workspace).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn planted_symlinks_never_redirect_a_workspace_read_or_write() {
+        let root = tempfile::tempdir().unwrap();
+        let provider = LocalExecutionProvider::new(root.path(), Duration::from_secs(1)).unwrap();
+        let workspace = ExecutionWorkspaceId::parse("chat-attack").unwrap();
+        provider.create_workspace(&workspace).await.unwrap();
+        let workspace_dir = root.path().join("chat-attack");
+
+        // A host secret the confined writer wants the unsandboxed host to touch.
+        let secret = root.path().join("secret.txt");
+        fs::write(&secret, "original-secret").unwrap();
+
+        // Write: a symlink pre-planted at the destination filename must not
+        // redirect the write onto the secret. The atomic rename replaces the
+        // symlink itself, so the payload lands inside the workspace and the
+        // secret is untouched.
+        let write_path = WorkspaceFilePath::parse("report.txt").unwrap();
+        std::os::unix::fs::symlink(&secret, workspace_dir.join("report.txt")).unwrap();
+        provider
+            .put_workspace_file(&workspace, &write_path, b"payload")
+            .await
+            .unwrap();
+        assert_eq!(fs::read_to_string(&secret).unwrap(), "original-secret");
+        let written = workspace_dir.join("report.txt");
+        assert!(!fs::symlink_metadata(&written)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_to_string(&written).unwrap(), "payload");
+
+        // Read: a symlink at the requested path must error rather than follow
+        // out to the secret, even though the target is a regular file's worth
+        // of bytes on the other end.
+        std::os::unix::fs::symlink(&secret, workspace_dir.join("leak.txt")).unwrap();
+        let leak = provider
+            .get_workspace_file(&workspace, &WorkspaceFilePath::parse("leak.txt").unwrap())
+            .await;
+        assert!(
+            matches!(leak, Err(CodeExecutionError::InvalidRequest(_))),
+            "no-follow read must refuse a symlink, got {leak:?}"
+        );
+
+        // A second write still succeeds alongside an unrelated planted dotfile.
+        // This does not exercise the temp-name defense — a fixed `.stale`
+        // suffix can never collide with the real `.workspace-put.{uuid}` name
+        // by construction — it only guards against an incidental regression
+        // where a stray dotfile wedged puts.
+        fs::write(workspace_dir.join(".workspace-put.stale"), "junk").unwrap();
+        provider
+            .put_workspace_file(
+                &workspace,
+                &WorkspaceFilePath::parse("second.txt").unwrap(),
+                b"second",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(workspace_dir.join("second.txt")).unwrap(),
+            "second"
+        );
     }
 
     #[test]
