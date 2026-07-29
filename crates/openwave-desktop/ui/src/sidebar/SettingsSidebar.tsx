@@ -47,7 +47,10 @@ export function SettingsSidebar({ onBack }: { onBack: () => void }) {
               aria-current={active ? "page" : undefined}
               data-active={active || undefined}
               className="data-[active]:bg-muted"
-              onClick={() => void navigate({ to })}
+              // Replace rather than push: the whole settings visit occupies one
+              // history entry, so "Back to app" is a single step out no matter
+              // how many sections were browsed.
+              onClick={() => void navigate({ to, replace: true })}
             >
               <Icon />
               <span>{section.label}</span>

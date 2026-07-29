@@ -381,6 +381,18 @@ describe("app shell", () => {
     await user.click(screen.getByText("Settings"));
     await screen.findByTestId("settings");
 
+    // Browsing sections must not bury the way out: section hops replace the
+    // history entry, so one "Back to app" still exits — not a hop back to the
+    // previously viewed section.
+    await user.click(screen.getByRole("button", { name: "Appearance" }));
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/settings/appearance"),
+    );
+    await user.click(screen.getByRole("button", { name: "Updates" }));
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/settings/updates"),
+    );
+
     await user.click(screen.getByRole("button", { name: "Back to app" }));
 
     await waitFor(() => expect(router.state.location.pathname).toBe("/c/chat-1"));
