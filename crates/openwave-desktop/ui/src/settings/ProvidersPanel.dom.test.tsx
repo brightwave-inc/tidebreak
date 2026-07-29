@@ -7,6 +7,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient, ProviderInfo } from "../api";
 import { ProvidersPanel } from "./ProvidersPanel";
@@ -144,9 +145,13 @@ describe("ProvidersPanel", () => {
       />,
     );
 
-    fireEvent.change(screen.getByLabelText("Gemini credential type"), {
-      target: { value: "service_account" },
-    });
+    const user = userEvent.setup();
+    await user.click(screen.getByLabelText("Gemini credential type"));
+    await user.click(
+      await screen.findByRole("option", {
+        name: "Google Cloud service account",
+      }),
+    );
     fireEvent.change(screen.getByLabelText("Vertex AI location"), {
       target: { value: "us-central1" },
     });

@@ -16,13 +16,13 @@ const TooltipContent = React.forwardRef<
       hideWhenDetached
       sideOffset={sideOffset}
       className={cn(
-        "z-50 max-w-xs rounded-lg bg-neutral-900 px-3 py-2.5 text-sm font-medium text-neutral-50 shadow-lg select-none dark:bg-neutral-100 dark:text-neutral-900 data-[state=delayed-open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=delayed-open]:fade-in-0 data-[state=delayed-open]:zoom-in-95 data-[state=closed]:zoom-out-95",
+        "z-50 max-w-xs rounded-lg bg-primary px-3 py-2.5 text-sm font-medium text-primary-foreground shadow-lg select-none data-[state=delayed-open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=delayed-open]:fade-in-0 data-[state=delayed-open]:zoom-in-95 data-[state=closed]:zoom-out-95",
         className,
       )}
       {...props}
     >
       {children}
-      <TooltipPrimitive.Arrow className="fill-neutral-900 dark:fill-neutral-100" />
+      <TooltipPrimitive.Arrow className="fill-primary" />
     </TooltipPrimitive.Content>
   </TooltipPrimitive.Portal>
 ));

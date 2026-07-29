@@ -12,6 +12,7 @@ import {
 } from "./AgentRunDisplay";
 import type { ToolCallStatus } from "./ToolCallCard";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
 export type BackgroundAgentSpawn = {
@@ -149,8 +150,8 @@ export function BackgroundAgentList({
           })}
           {unresolvedSpawns.map((spawn) => (
             <div key={spawn.callId} className="flex min-w-0 items-center gap-2 border-t border-border px-3 py-2.5">
-              <span className="size-2 shrink-0 animate-pulse rounded-full bg-muted-foreground" aria-hidden="true" />
-              <span className="h-4 w-28 animate-pulse rounded bg-muted" aria-hidden="true" />
+              <Skeleton className="size-2 shrink-0 rounded-full bg-muted-foreground" aria-hidden="true" />
+              <Skeleton className="h-4 w-28" aria-hidden="true" />
               <span className="text-sm text-muted-foreground">
                 {loading ? "Starting background agent" : "Waiting for background agent"}
               </span>

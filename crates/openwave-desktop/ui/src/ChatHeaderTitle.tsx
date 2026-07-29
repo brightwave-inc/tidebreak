@@ -14,6 +14,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
+import { WithTooltip } from "@/components/ui/tooltip";
 
 /**
  * BW-style breadcrumb header: "Chats / chat title".
@@ -77,14 +78,15 @@ export function ChatHeaderTitle({ chat }: { chat: Chat }) {
           />
         </div>
       ) : (
-        <button
-          type="button"
-          className="min-w-0 truncate font-medium hover:underline cursor-pointer"
-          title="Rename chat"
-          onClick={() => startRename(chat)}
-        >
-          {displayTitle}
-        </button>
+        <WithTooltip label="Rename chat">
+          <button
+            type="button"
+            className="min-w-0 truncate font-medium hover:underline cursor-pointer"
+            onClick={() => startRename(chat)}
+          >
+            {displayTitle}
+          </button>
+        </WithTooltip>
       )}
 
       <DropdownMenu>
