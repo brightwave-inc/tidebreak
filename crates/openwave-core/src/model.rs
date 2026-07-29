@@ -104,6 +104,29 @@ pub enum SourceLocation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bounds: Option<PageBounds>,
     },
+    /// One node of a structured source — a JSON value, an XML or HTML element.
+    ///
+    /// A structured source has no pages: its canonical text is the file itself,
+    /// and the position a reader opens is a node of the tree the file parses
+    /// into. The path is recorded alongside the span rather than instead of it,
+    /// because the span is still what addresses the extracted text.
+    StructuredPath {
+        /// The path itself, interpreted according to `path_type`.
+        path: String,
+        /// How to read the path.
+        path_type: StructuredPathType,
+    },
+}
+
+impl SourceLocation {
+    /// The structured path this location names, where it names one.
+    #[must_use]
+    pub fn structured_path(&self) -> Option<(&str, StructuredPathType)> {
+        match self {
+            Self::StructuredPath { path, path_type } => Some((path.as_str(), *path_type)),
+            _ => None,
+        }
+    }
 }
 
 /// Mapping from canonical text back to a location in the original source.
@@ -137,9 +160,20 @@ pub fn validate_source_regions(
         if region.span.start < previous_end {
             return Err("source regions must be ordered and nonoverlapping");
         }
-        let SourceLocation::Page { bounds, .. } = &region.location;
-        if bounds.is_some_and(|bounds| !bounds.is_valid()) {
-            return Err("source region bounds must be nonempty and within the page");
+        match &region.location {
+            SourceLocation::Page { bounds, .. } => {
+                if bounds.is_some_and(|bounds| !bounds.is_valid()) {
+                    return Err("source region bounds must be nonempty and within the page");
+                }
+            }
+            SourceLocation::StructuredPath { path, .. } => {
+                if path.is_empty()
+                    || path.len() > EvidenceLocation::MAX_STRUCTURED_PATH_BYTES
+                    || path.contains('\0')
+                {
+                    return Err("structured source region paths must be nonempty and bounded");
+                }
+            }
         }
         previous_end = region.span.end;
     }
@@ -883,6 +917,48 @@ impl EvidenceLocation {
             }
         }
     }
+
+    /// The location a passage occupies, given the parser regions its span maps
+    /// to and the headings above it.
+    ///
+    /// The regions decide the kind. A parser that resolved a structured source
+    /// hands back node paths, and a passage covering several of them is at the
+    /// node that contains them all — the enclosing record of three quoted
+    /// fields, not the first of the three. When the passage covers so much of
+    /// the tree that the only common node is the root, which has no path, the
+    /// first node it touches is where a reader is sent instead. Anything else
+    /// is document content, which is what pages, headings, and geometry
+    /// describe.
+    #[must_use]
+    pub fn for_source_regions(
+        heading_path: Vec<String>,
+        source_regions: Vec<SourceRegion>,
+    ) -> Self {
+        let Some((first, path_type)) = source_regions
+            .first()
+            .and_then(|region| region.location.structured_path())
+        else {
+            return Self::DocumentContent {
+                heading_path,
+                source_regions,
+            };
+        };
+        let mut common = first;
+        for region in &source_regions[1..] {
+            let Some((path, kind)) = region.location.structured_path() else {
+                continue;
+            };
+            if kind != path_type {
+                continue;
+            }
+            common = path_type.common_ancestor(common, path);
+        }
+        let path = if common.is_empty() { first } else { common };
+        Self::StructuredPath {
+            path: path.to_owned(),
+            path_type,
+        }
+    }
 }
 
 /// How the `path` of a structured-path evidence location is written.
@@ -895,6 +971,44 @@ pub enum StructuredPathType {
     JsonDotNotation,
     /// An XPath expression into an XML or HTML document.
     XmlXpath,
+}
+
+impl StructuredPathType {
+    /// The character that separates one step of a path of this kind.
+    #[must_use]
+    pub const fn separator(self) -> char {
+        match self {
+            Self::JsonDotNotation => '.',
+            Self::XmlXpath => '/',
+        }
+    }
+
+    /// The deepest node both paths lie under, as a path of the same kind.
+    ///
+    /// Empty when the two share no addressable node: two JSON paths under
+    /// different top-level keys, or two XPaths whose only common step is the
+    /// document itself. The root of a tree has no path, so an empty answer is
+    /// the honest one rather than a path that addresses everything.
+    #[must_use]
+    pub fn common_ancestor<'a>(self, left: &'a str, right: &str) -> &'a str {
+        let separator = self.separator();
+        let matched: usize = left
+            .split(separator)
+            .zip(right.split(separator))
+            .take_while(|(left_step, right_step)| left_step == right_step)
+            .map(|(left_step, _)| left_step.len())
+            .sum::<usize>();
+        let steps = left
+            .split(separator)
+            .zip(right.split(separator))
+            .take_while(|(left_step, right_step)| left_step == right_step)
+            .count();
+        // The shared steps are rejoined by the separator they were split on, so
+        // the prefix is their bytes plus one separator between each pair. An
+        // XPath's leading step is empty, which leaves the root as the empty
+        // path it is.
+        &left[..matched + steps.saturating_sub(1)]
+    }
 }
 
 /// Whether `cell` is an A1-notation reference: a column of letters followed by

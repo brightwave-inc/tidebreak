@@ -184,7 +184,12 @@ pub(crate) fn project_citation_pages(
     // that start at the same point.
     let mut rects = BTreeSet::new();
     for region in regions {
-        let SourceLocation::Page { number, bounds } = region.location;
+        // A region that names something other than a page has no page to
+        // paint; document-content evidence never carries one, and a location
+        // this projection does not recognize is left out rather than guessed at.
+        let SourceLocation::Page { number, bounds } = region.location else {
+            continue;
+        };
         let page = number.get();
         if pages.len() < MAX_CITATION_PAGES && !pages.contains(&page) {
             pages.push(page);

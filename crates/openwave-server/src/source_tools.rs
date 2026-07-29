@@ -338,10 +338,7 @@ impl Tool for ReadSourceTool {
             chunk_id: ChunkId::derive(document_id, span.start, span.end),
             span,
             snippet: window.text.to_owned(),
-            location: EvidenceLocation::DocumentContent {
-                heading_path: Vec::new(),
-                source_regions,
-            },
+            location: EvidenceLocation::for_source_regions(Vec::new(), source_regions),
             source,
         };
         Ok(ToolOutput::text(content)

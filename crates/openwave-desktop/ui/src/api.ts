@@ -48,6 +48,7 @@ import {
   type ChatToolActivityStatus,
   type CitationFormat as WireCitationFormat,
   type CitationPageBounds as WireCitationPageBounds,
+  type StructuredPathType as WireStructuredPathType,
   type RendererAgentEvent,
   type RendererChatFrame,
   type RendererChatMetadata,
@@ -240,6 +241,12 @@ export type ChatMessageCitation = AssistantCitationSnapshot;
  * places it as a fraction of whatever size the page was rendered at.
  */
 export type CitationPageBounds = WireCitationPageBounds;
+
+/**
+ * How a citation's node path is written: dotted keys and indices for JSON, an
+ * XPath expression for XML and HTML.
+ */
+export type StructuredPathType = WireStructuredPathType;
 
 /** One durable image identity in a historical user message. */
 export type ChatMessageImageAttachment = WireTranscriptImageAttachment;

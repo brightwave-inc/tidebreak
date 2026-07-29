@@ -85,6 +85,13 @@ export function hydrateTranscriptHistory(
                   location.kind === "document_content" ? location.pages : [],
                 bounds:
                   location.kind === "document_content" ? location.bounds : [],
+                // A structured source is opened at a node instead: the tree
+                // viewers navigate by path, and the span alone names nothing
+                // they can expand or scroll to.
+                structuredPath:
+                  location.kind === "structured_path"
+                    ? { path: location.path, pathType: location.path_type }
+                    : undefined,
               }),
             )
           : [],

@@ -182,6 +182,10 @@ impl Document {
     /// that happens the regions are coalesced by page: the page a passage came
     /// from is the part worth keeping, and the geometry within it is the part
     /// worth losing.
+    ///
+    /// A structured source coalesces the same way one level up the tree: a
+    /// passage crossing four hundred cells of a table is at the table, and the
+    /// enclosing node is what survives when the individual ones cannot.
     #[must_use]
     pub fn source_regions_for(&self, span: ByteSpan) -> Vec<SourceRegion> {
         let clipped: Vec<SourceRegion> = self
@@ -199,8 +203,52 @@ impl Document {
         if clipped.len() <= RetrievalEvidenceInput::MAX_SOURCE_REGIONS {
             return clipped;
         }
+        if clipped
+            .iter()
+            .all(|region| region.location.structured_path().is_some())
+        {
+            return coalesce_by_ancestor(clipped);
+        }
         coalesce_by_page(clipped)
     }
+}
+
+/// Fold a run of structured-path regions into at most the number of regions
+/// evidence carries, naming each group by the deepest node its members share.
+///
+/// Regions arrive ordered, so a group is a contiguous stretch of the passage
+/// and the node above them all is a true description of it. A group whose
+/// members share no node at all — spanning two top-level keys, say — keeps the
+/// first node it touches, which is at least somewhere the reader can be sent.
+fn coalesce_by_ancestor(regions: Vec<SourceRegion>) -> Vec<SourceRegion> {
+    let limit = RetrievalEvidenceInput::MAX_SOURCE_REGIONS;
+    let group_size = regions.len().div_ceil(limit).max(1);
+    regions
+        .chunks(group_size)
+        .filter_map(|group| {
+            let first = group.first()?;
+            let (first_path, path_type) = first.location.structured_path()?;
+            let common = group
+                .iter()
+                .filter_map(|region| region.location.structured_path())
+                .filter(|(_, kind)| *kind == path_type)
+                .fold(first_path, |common, (path, _)| {
+                    path_type.common_ancestor(common, path)
+                });
+            let path = if common.is_empty() {
+                first_path
+            } else {
+                common
+            };
+            Some(SourceRegion {
+                span: ByteSpan::new(first.span.start, group.last()?.span.end),
+                location: SourceLocation::StructuredPath {
+                    path: path.to_owned(),
+                    path_type,
+                },
+            })
+        })
+        .collect()
 }
 
 /// Merge consecutive regions that name the same page into one region for that

@@ -70,7 +70,7 @@ export function isDocumentRenderable(mediaType: string): boolean {
  * source sniffed as `image/svg+xml` or `application/ld+json` is that tree
  * shape, and a reader opening one wants the tree rather than a wall of text.
  */
-function structuredKind(type: string): "json" | "xml" | null {
+export function structuredKind(type: string): "json" | "xml" | null {
   if (type === "application/json" || type.endsWith("+json")) return "json";
   if (type === "application/xml" || type === "text/xml" || type.endsWith("+xml")) {
     return "xml";
@@ -87,10 +87,10 @@ type DocumentDetailsProps = {
    * Node to reveal in a tree viewer, when opened from a citation: a
    * dot-notation path for JSON, an XPath expression for XML.
    *
-   * Uncalled, and not derivable from a citation: a citation addresses a byte
-   * range of the text read out of the file, and which node of the parsed tree
-   * that range came from is not recorded anywhere. The viewers honour the prop,
-   * so a producer of node paths would only have to reach this far.
+   * Recorded when the source was parsed and carried on the citation beside its
+   * span, so a citation into a tree opens at the node it quoted rather than at
+   * the top of the file. Absent for a citation into a source with no tree, and
+   * for one made before its source's paths were recorded.
    */
   highlightPath?: string;
   /**

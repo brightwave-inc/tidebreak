@@ -1009,10 +1009,13 @@ fn build_retrieval(
 /// Office parser claims Word/Excel/PowerPoint/OpenDocument types (converting via
 /// LibreOffice when present, storing without searchable text when not); with
 /// `parse-image`, the image parser claims common raster types (PNG/JPEG/WebP/GIF/
-/// TIFF/BMP), stored without searchable text until OCR lands; `PlainTextParser`
-/// claims `text/*`; the `FallbackParser` claims everything else so **any** upload
-/// is accepted — text-like unknown types stay searchable and binary ones are
-/// stored without polluting the index.
+/// TIFF/BMP), stored without searchable text until OCR lands; the
+/// `StructuredTextParser` claims the tree-shaped text types (JSON, XML, HTML),
+/// whose text it passes through unchanged while recording which node each part
+/// of it came from; `PlainTextParser` claims the rest of `text/*`; the
+/// `FallbackParser` claims everything else so **any** upload is accepted —
+/// text-like unknown types stay searchable and binary ones are stored without
+/// polluting the index.
 fn document_parser_registry() -> ParserRegistry {
     let registry = ParserRegistry::new();
     #[cfg(feature = "parse-liteparse")]
@@ -1022,6 +1025,7 @@ fn document_parser_registry() -> ParserRegistry {
     #[cfg(feature = "parse-image")]
     let registry = registry.with_parser(openwave_retrieval::LiteParseImageParser::new());
     registry
+        .with_parser(openwave_retrieval::StructuredTextParser::new())
         .with_parser(PlainTextParser::new())
         .with_parser(FallbackParser::new())
 }

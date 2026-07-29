@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 
-import { HttpError, type DocumentDetail } from "@/api";
+import { HttpError, type DocumentDetail, type StructuredPathType } from "@/api";
 import { useApp } from "@/AppContext";
 import {
+  baseMediaType,
   DocumentDetails,
   isDocumentRenderable,
+  structuredKind,
   type DocumentView,
 } from "@/components/document/document-details";
 import { DocumentError } from "@/components/document/error";
@@ -91,6 +93,20 @@ export function DocumentDetailRoot({
       ? placement.bounds
       : undefined;
 
+  // A node path only opens a source the panel draws as a tree, and only in the
+  // notation that tree is addressed by. A JSON path handed to the XML viewer
+  // resolves to nothing, so a mismatch is treated as no path at all rather than
+  // as a highlight that silently never appears.
+  const treeKind = info ? structuredKind(baseMediaType(info.media_type)) : null;
+  const pathKind = treeViewerForPath(placement?.structuredPath?.pathType);
+  const citationPath =
+    placement?.structuredPath != null &&
+    hasOriginalDocumentTab &&
+    pathKind != null &&
+    pathKind === treeKind
+      ? placement.structuredPath.path
+      : undefined;
+
   // Arriving from a citation, land on whichever view can show where it points:
   // the recorded page of a paginated original, or else the extracted text,
   // where the passage itself is highlighted. A citation the transcript cannot
@@ -102,7 +118,7 @@ export function DocumentDetailRoot({
   // showing nothing at all rather than saying what went wrong.
   const citationView: DocumentView | null = !placement
     ? null
-    : citationPage != null && hasOriginalDocumentTab
+    : (citationPage != null || citationPath != null) && hasOriginalDocumentTab
       ? "original_doc"
       : "extracted_text";
 
@@ -179,6 +195,7 @@ export function DocumentDetailRoot({
           view={view}
           hasOriginalDocumentTab={hasOriginalDocumentTab}
           citationSpan={placement?.span}
+          highlightPath={citationPath}
           targetPage={citationPage}
           citationBounds={citationBounds}
         />
@@ -194,6 +211,26 @@ export function DocumentDetailRoot({
       )}
     </PanelFrame>
   );
+}
+
+/**
+ * Which tree viewer reads a path of this notation, where one does.
+ *
+ * A notation this build does not know resolves to nothing rather than to a
+ * guess, so a citation written by a newer server opens the source normally
+ * instead of highlighting the wrong node.
+ */
+function treeViewerForPath(
+  pathType: StructuredPathType | undefined,
+): "json" | "xml" | null {
+  switch (pathType) {
+    case "json_dot_notation":
+      return "json";
+    case "xml_xpath":
+      return "xml";
+    default:
+      return null;
+  }
 }
 
 /** Why the source did not load, and whether asking again could help. */
