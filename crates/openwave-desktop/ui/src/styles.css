@@ -60,6 +60,11 @@
   --info-background: oklch(0.951 0.026 236.824);
   --info-border: oklch(0.391 0.09 240.876);
 
+  /* Brand highlight — the band a cited phrase carries and the chip beside it. */
+  --brightwave: oklch(0.87 0.2 102);
+  --citation-mark: var(--color-neutral-300);
+  --citation-mark-active-ink: var(--foreground);
+
   --radius: 0.5rem;
 
   /* The app chrome is the page background; every content region is a card
@@ -159,6 +164,12 @@
   --info-background: oklch(0.391 0.09 240.876);
   --info-border: oklch(0.746 0.16 232.661);
 
+  /* The band keeps its brand chroma on a dark page; only the chip and the glyph
+     it sits on have to swap so the mark stays legible either way. */
+  --brightwave: oklch(0.87 0.2 102);
+  --citation-mark: var(--color-neutral-700);
+  --citation-mark-active-ink: var(--background);
+
   --shadow-sm: 0 0px 8px 0px oklch(0 0 0 / 0.24);
   --shadow: 0 0px 8px 0px oklch(0 0 0 / 0.28);
   --shadow-lg: 0 0px 12px 0px oklch(0 0 0 / 0.32);
@@ -221,6 +232,8 @@
   --color-info-foreground-muted: var(--info-foreground-muted);
   --color-info-background: var(--info-background);
   --color-info-border: var(--info-border);
+
+  --color-brightwave: var(--brightwave);
 
   --shadow-2xs: var(--shadow-sm);
   --shadow-xs: var(--shadow-sm);
@@ -1063,8 +1076,8 @@ body {
 
 /* ---------- Inline citations ---------- */
 
-/* The cited phrase is prose first: it inherits the type around it and carries
-   the same underline a link does, so a sentence still reads as a sentence. */
+/* The cited phrase is prose first: it inherits the type around it, so a sentence
+   still reads as a sentence and nothing is marked until it is pointed at. */
 .inline-citation {
   display: inline;
   margin: 0;
@@ -1075,54 +1088,71 @@ body {
   background: none;
   font: inherit;
   text-align: inherit;
-  text-decoration: underline;
-  text-decoration-color: color-mix(in srgb, currentColor 30%, transparent);
-  text-decoration-style: dotted;
-  text-underline-offset: 0.16em;
 }
 
-.inline-citation:hover,
-.inline-citation:focus-visible,
-.inline-citation[data-state="open"] {
-  text-decoration-color: currentColor;
+/* The band is painted as a background rather than an underline so it can grow
+   from nothing to the full phrase — an underline's thickness is animatable, its
+   length is not. */
+.inline-citation-phrase {
+  background-image: linear-gradient(var(--brightwave), var(--brightwave));
+  background-position: left bottom;
+  background-repeat: no-repeat;
+  background-size: 0% 35%;
+  transition: background-size 160ms ease-out;
 }
 
-.inline-citation-ordinal {
-  margin-left: 0.12em;
-  color: var(--muted-foreground);
-  font-size: 0.68em;
-  font-weight: 600;
-  text-decoration: none;
+.inline-citation:hover .inline-citation-phrase,
+.inline-citation:focus-visible .inline-citation-phrase,
+.inline-citation[data-state="open"] .inline-citation-phrase {
+  background-size: 100% 35%;
 }
 
-.inline-citation:hover .inline-citation-ordinal,
-.inline-citation:focus-visible .inline-citation-ordinal,
-.inline-citation[data-state="open"] .inline-citation-ordinal {
-  color: var(--ink);
+.inline-citation-mark {
+  display: inline-block;
+  margin-left: 0.25rem;
+  border-radius: 4px;
+  padding: 0 0.375rem;
+  background: var(--citation-mark);
+  transition: background-color 160ms ease-out;
+}
+
+.inline-citation:hover .inline-citation-mark,
+.inline-citation:focus-visible .inline-citation-mark,
+.inline-citation[data-state="open"] .inline-citation-mark {
+  background: var(--brightwave);
+}
+
+/* Mirrored to read as a closing quote, and filled rather than stroked because a
+   stroked glyph this small renders as a smudge. */
+.inline-citation-glyph {
+  display: inline-block;
+  width: 0.625rem;
+  height: 0.625rem;
+  transform: translateY(-2px) scale(-1);
+  fill: var(--foreground);
+  stroke: none;
+  transition: fill 160ms ease-out;
+}
+
+.inline-citation:hover .inline-citation-glyph,
+.inline-citation:focus-visible .inline-citation-glyph,
+.inline-citation[data-state="open"] .inline-citation-glyph {
+  fill: var(--citation-mark-active-ink);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .inline-citation-phrase,
+  .inline-citation-mark,
+  .inline-citation-glyph {
+    transition: none;
+  }
 }
 
 .inline-citation-popover {
   display: grid;
   gap: 0.5rem;
+  overflow-y: auto;
   font-size: 0.78rem;
-}
-
-.inline-citation-open {
-  justify-self: start;
-  border: 0;
-  border-radius: 6px;
-  padding: 0.2rem 0.4rem;
-  margin: 0 -0.4rem -0.2rem;
-  cursor: pointer;
-  color: var(--ink);
-  background: none;
-  font: inherit;
-  font-weight: 600;
-}
-
-.inline-citation-open:hover,
-.inline-citation-open:focus-visible {
-  background: color-mix(in srgb, var(--accent) 58%, transparent);
 }
 
 /* ---------- Notices ---------- */

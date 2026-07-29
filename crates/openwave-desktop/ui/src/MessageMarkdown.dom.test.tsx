@@ -63,7 +63,7 @@ describe("inline citations", () => {
     return { ...view, onOpenSource };
   }
 
-  it("anchors each citation on the phrase it backs, badged by its ordinal", async () => {
+  it("anchors each citation on the phrase it backs and opens its document on one click", async () => {
     const user = userEvent.setup();
     const { container, onOpenSource } = renderCited(
       `The reef :cit[is the largest in the world]{citation_id=${REEF}}, ` +
@@ -81,15 +81,33 @@ describe("inline citations", () => {
     expect(container.textContent).not.toContain(":cit");
     expect(container.textContent).not.toContain("citation_id");
 
-    // Each span carries its own evidence, and opening it hands back the
-    // snapshot the phrase was anchored to.
+    // The document is the destination: one click gets there, with no popover in
+    // the way, and hands back the snapshot the phrase was anchored to.
     await user.click(cited[1]!);
-    const popover = await screen.findByText("Tides");
-    expect(popover.parentElement).toHaveTextContent("Tides run to four metres.");
-    expect(popover.parentElement).toHaveTextContent("Pages 11, 12");
-
-    await user.click(screen.getByRole("button", { name: "Open source" }));
     expect(onOpenSource).toHaveBeenCalledWith(sources[1]);
+    expect(screen.queryByText("Tides run to four metres.")).toBeNull();
+  });
+
+  it("shows the evidence in place when there is no document to open", async () => {
+    const user = userEvent.setup();
+    const onOpenSource = vi.fn();
+    render(
+      <MessageCitationsProvider
+        value={{ sources: [source({ documentId: "" })], onOpenSource }}
+      >
+        <MessageMarkdown>
+          {`The reef :cit[is the largest in the world]{citation_id=${REEF}}.`}
+        </MessageMarkdown>
+      </MessageCitationsProvider>,
+    );
+
+    await user.click(screen.getByRole("button"));
+    const popover = await screen.findByText("Extent");
+    expect(popover.parentElement).toHaveTextContent(
+      "The reef spans 2,300 kilometres.",
+    );
+    expect(popover.parentElement).toHaveTextContent("Page 4");
+    expect(onOpenSource).not.toHaveBeenCalled();
   });
 
   it("reads as prose when the citation is not one the message carries", () => {

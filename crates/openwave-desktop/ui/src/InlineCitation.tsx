@@ -1,9 +1,9 @@
+import { Quote } from "lucide-react";
 import { createContext, useContext, type ReactNode } from "react";
 
 import { CitationEvidence, type AssistantSource } from "./AssistantSources";
 import {
   Popover,
-  PopoverClose,
   PopoverContent,
   PopoverTrigger,
 } from "./components/ui/popover";
@@ -41,13 +41,21 @@ const CITATION_ID =
  * A cited phrase, in the prose where the model wrote it.
  *
  * The phrase stays prose — it inherits the surrounding type and reads as part of
- * the sentence — with the citation's ordinal beside it and its evidence a click
- * away. The ordinal comes from the snapshot rather than from the order spans
- * happen to appear in: a citation dropped past the message's bound leaves a gap,
- * and a badge counted off the rendering would silently renumber the rest.
+ * the sentence — marked by a highlight that grows in under it on hover and a
+ * small quote chip after it. It carries no ordinal: the sources row at the foot
+ * of the message is where a citation is numbered, and a number in the middle of
+ * a sentence only interrupts it.
+ *
+ * The document is the destination. A citation that names one opens it at the
+ * cited passage on a single click, which is what a reader wants from an anchor
+ * over a phrase; the popover is what is left when there is no document to open
+ * into, and shows the evidence in place instead.
  *
  * An id that matches no snapshot is a normal state, not an error to show: the
- * phrase was authored as prose and renders as prose, without a badge to press.
+ * phrase was authored as prose and renders as prose, without a control to press.
+ * That is also why nothing here guards against a half-streamed citation — a
+ * streaming message's directives are reduced to their phrasing before they reach
+ * the renderer, and its snapshots arrive with the settled turn.
  */
 export function InlineCitation({
   citationId,
@@ -66,39 +74,44 @@ export function InlineCitation({
 
   if (!source) return <>{children}</>;
 
+  const openDocument =
+    onOpenSource && source.documentId ? () => onOpenSource(source) : undefined;
+
+  const anchor = (
+    // Named by the phrase it wraps, not by a label that would replace it: what
+    // the citation backs is the sentence, and the ordinal only says which
+    // citation backs it.
+    <button type="button" className="inline-citation" onClick={openDocument}>
+      <span className="inline-citation-phrase">{children}</span>
+      <span className="sr-only">, citation {source.ordinal}</span>
+      <span className="inline-citation-mark" aria-hidden="true">
+        <Quote className="inline-citation-glyph" />
+      </span>
+    </button>
+  );
+
+  if (openDocument) return anchor;
+
   return (
     <Popover>
-      <PopoverTrigger asChild>
-        {/* Named by the phrase it wraps, not by a label that would replace it:
-            what the citation backs is the sentence, and the badge only says
-            which citation backs it. */}
-        <button type="button" className="inline-citation">
-          {children}
-          <sup className="inline-citation-ordinal">
-            <span className="sr-only">, citation {source.ordinal}</span>
-            <span aria-hidden="true">{source.ordinal}</span>
-          </sup>
-        </button>
-      </PopoverTrigger>
+      <PopoverTrigger asChild>{anchor}</PopoverTrigger>
       <PopoverContent
-        className="inline-citation-popover w-80"
+        className="inline-citation-popover"
         align="start"
         side="bottom"
+        collisionPadding={10}
+        // Wide enough to read an excerpt as prose rather than as a column, and
+        // held inside whatever the popover was given to open into.
+        style={{
+          width:
+            "min(36rem, calc(var(--radix-popover-content-available-width) - 20px))",
+          maxWidth: "calc(100vw - 20px)",
+          maxHeight: "calc(var(--radix-popover-content-available-height) - 1em)",
+        }}
       >
         <div className="assistant-source-copy">
           <CitationEvidence source={source} />
         </div>
-        {onOpenSource && source.documentId ? (
-          <PopoverClose asChild>
-            <button
-              type="button"
-              className="inline-citation-open"
-              onClick={() => onOpenSource(source)}
-            >
-              Open source
-            </button>
-          </PopoverClose>
-        ) : null}
       </PopoverContent>
     </Popover>
   );
