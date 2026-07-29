@@ -91,6 +91,8 @@ mod retriever;
 #[cfg(feature = "tool")]
 mod search;
 mod selection;
+#[cfg(feature = "parse-spreadsheet")]
+mod spreadsheet_parser;
 mod structure;
 mod vector;
 
@@ -122,6 +124,8 @@ pub use retriever::{GenerationIndexOutcome, IngestOutcome, Retriever};
 #[cfg(feature = "tool")]
 pub use search::{SearchTool, SourceCatalog};
 pub use selection::MAX_SEARCH_RESULTS;
+#[cfg(feature = "parse-spreadsheet")]
+pub use spreadsheet_parser::SpreadsheetParser;
 pub use vector::{
     DocumentGenerationState, GenerationStageOutcome, InMemoryVectorStore, SearchOptions,
     SearchScope, VectorRecord, VectorStore, DEFAULT_MIN_DENSE_SIMILARITY,

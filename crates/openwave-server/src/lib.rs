@@ -1005,21 +1005,30 @@ fn build_retrieval(
 }
 
 /// Assemble the document parsers, narrowest first. With the `parse-liteparse`
-/// feature, the PDF parser claims `application/pdf`; with `parse-office`, the
-/// Office parser claims Word/Excel/PowerPoint/OpenDocument types (converting via
-/// LibreOffice when present, storing without searchable text when not); with
-/// `parse-image`, the image parser claims common raster types (PNG/JPEG/WebP/GIF/
-/// TIFF/BMP), stored without searchable text until OCR lands; the
-/// `StructuredTextParser` claims the tree-shaped text types (JSON, XML, HTML),
-/// whose text it passes through unchanged while recording which node each part
-/// of it came from; `PlainTextParser` claims the rest of `text/*`; the
-/// `FallbackParser` claims everything else so **any** upload is accepted —
-/// text-like unknown types stay searchable and binary ones are stored without
-/// polluting the index.
+/// feature, the PDF parser claims `application/pdf`; with `parse-spreadsheet`,
+/// the spreadsheet parser claims Excel and OpenDocument workbooks, reading their
+/// sheets and cells directly; with `parse-office`, the Office parser claims the
+/// remaining Word/PowerPoint/OpenDocument types (converting via LibreOffice when
+/// present, storing without searchable text when not); with `parse-image`, the
+/// image parser claims common raster types (PNG/JPEG/WebP/GIF/TIFF/BMP), stored
+/// without searchable text until OCR lands; the `StructuredTextParser` claims
+/// the tree-shaped text types (JSON, XML, HTML), whose text it passes through
+/// unchanged while recording which node each part of it came from;
+/// `PlainTextParser` claims the rest of `text/*`; the `FallbackParser` claims
+/// everything else so **any** upload is accepted — text-like unknown types stay
+/// searchable and binary ones are stored without polluting the index.
+///
+/// Order carries meaning between the two workbook paths: the Office parser
+/// still claims spreadsheets, and only registering the native one ahead of it
+/// keeps a workbook off the LibreOffice detour. That leaves the fallback
+/// intact — build without `parse-spreadsheet` and workbooks convert exactly as
+/// they did.
 fn document_parser_registry() -> ParserRegistry {
     let registry = ParserRegistry::new();
     #[cfg(feature = "parse-liteparse")]
     let registry = registry.with_parser(openwave_retrieval::LiteParsePdfParser::new());
+    #[cfg(feature = "parse-spreadsheet")]
+    let registry = registry.with_parser(openwave_retrieval::SpreadsheetParser::new());
     #[cfg(feature = "parse-office")]
     let registry = registry.with_parser(openwave_retrieval::LiteParseOfficeParser::new());
     #[cfg(feature = "parse-image")]

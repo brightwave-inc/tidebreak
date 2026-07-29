@@ -13,6 +13,7 @@ import { lazy, Suspense } from "react";
 import { Loader2Icon } from "lucide-react";
 
 import type { ApiClient, CitationPageBounds } from "@/api";
+import type { SheetHighlightRange } from "@/document/UniverSpreadsheetViewer";
 
 // pdf.js is a large dependency and most sessions never open a PDF, so it is
 // fetched from the app bundle on first use rather than at startup.
@@ -72,6 +73,19 @@ export function isPaginatedOriginalViewer(mediaType: string): boolean {
   return normalizeMediaType(mediaType) === "application/pdf";
 }
 
+/**
+ * Whether this format's original view is a grid, and so can be opened at the
+ * cell range a citation was recorded on.
+ *
+ * OpenDocument workbooks are indexed with cell ranges but have no viewer here,
+ * so a citation into one opens the extracted text instead — where the rows it
+ * quoted are what gets highlighted.
+ */
+export function isGridOriginalViewer(mediaType: string): boolean {
+  const type = normalizeMediaType(mediaType);
+  return SPREADSHEET_MEDIA_TYPES.has(type) || DELIMITED_TEXT_MEDIA_TYPES.has(type);
+}
+
 interface DocumentViewerProps {
   client: Pick<ApiClient, "getChatDocumentFile">;
   chatId: string;
@@ -84,6 +98,11 @@ interface DocumentViewerProps {
    * Only a paginated viewer has anywhere to draw them.
    */
   citationBounds?: readonly CitationPageBounds[];
+  /**
+   * Cells of a cited range to select and scroll to. Only a grid viewer has
+   * anywhere to put them.
+   */
+  citationCellRange?: SheetHighlightRange;
   className?: string;
 }
 
@@ -94,6 +113,7 @@ export function DocumentViewer({
   mediaType,
   targetPage,
   citationBounds,
+  citationCellRange,
   className,
 }: DocumentViewerProps) {
   const type = normalizeMediaType(mediaType);
@@ -121,6 +141,7 @@ export function DocumentViewer({
           client={client}
           chatId={chatId}
           documentId={documentId}
+          highlightRange={citationCellRange}
           isCsv={DELIMITED_TEXT_MEDIA_TYPES.has(type)}
           className={className}
         />
