@@ -22,6 +22,40 @@ const signedIn: GatewayStatus = {
   model_count: 2,
 };
 
+/** A configured gateway mount as `listMcpServers` reports it. */
+function gatewayMount(slug: string, overrides: Record<string, unknown> = {}) {
+  return {
+    name: slug,
+    command: null,
+    args: [],
+    env: {},
+    env_from: [],
+    cwd: null,
+    url: null,
+    bearer_token_env: null,
+    gateway_endpoint: slug,
+    request_timeout_ms: 60_000,
+    enabled: true,
+    health: "healthy",
+    tool_count: 3,
+    diagnostic: null,
+    ...overrides,
+  };
+}
+
+const incidentApps = {
+  supported: true,
+  apps: [
+    {
+      id: "app-1",
+      name: "Incident API",
+      app_kind: "rest_api",
+      enabled: true,
+      mcp_endpoint_slugs: ["example-security-tools"],
+    },
+  ],
+};
+
 function api(overrides: Partial<Record<keyof ApiClient, unknown>> = {}) {
   return {
     getGatewayStatus: vi.fn().mockResolvedValue(signedOut),
@@ -269,22 +303,10 @@ describe("GatewayPanel", () => {
   });
 
   it("keeps a row and unmount toggle for a mount whose entitlement was revoked", async () => {
-    const revokedMount = {
-      name: "revoked-tools",
-      command: null,
-      args: [],
-      env: {},
-      env_from: [],
-      cwd: null,
-      url: null,
-      bearer_token_env: null,
-      gateway_endpoint: "revoked-tools",
-      request_timeout_ms: 60_000,
-      enabled: true,
+    const revokedMount = gatewayMount("revoked-tools", {
       health: "reconnecting",
       tool_count: 0,
-      diagnostic: null,
-    };
+    });
     const putMcpServers = vi.fn().mockResolvedValue({ servers: [] });
     const client = api({
       getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
@@ -302,6 +324,12 @@ describe("GatewayPanel", () => {
     expect(
       screen.getByText(/No longer granted to your teams/),
     ).toBeInTheDocument();
+    // The explanation replaces the health line, and the apps section's empty
+    // copy doesn't sit above a populated mount list.
+    expect(screen.queryByText(/Connecting/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/No connected apps are granted/),
+    ).not.toBeInTheDocument();
 
     // And the toggle still unmounts it.
     const toggle = screen.getByRole("switch", { name: "Mount revoked-tools" });
@@ -317,30 +345,21 @@ describe("GatewayPanel", () => {
       .mockResolvedValue({ servers: [] });
     const client = api({
       getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
-      getGatewayApps: vi.fn().mockResolvedValue({
-        supported: true,
-        apps: [
-          {
-            id: "app-1",
-            name: "Incident API",
-            app_kind: "rest_api",
-            enabled: true,
-            mcp_endpoint_slugs: ["example-security-tools"],
-          },
-        ],
-      }),
+      getGatewayApps: vi.fn().mockResolvedValue(incidentApps),
       listMcpServers,
     });
     const user = userEvent.setup();
     render(<GatewayPanel client={client} onChanged={() => undefined} />);
 
-    // The failure is visible and named, and the retry succeeds in place.
+    // The failure is visible and named, and the disabled toggle is explained
+    // rather than passing unknown off as unmounted.
     expect(
       await screen.findByText(/mcp backend unavailable/),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("switch", { name: "Mount example-security-tools" }),
     ).toBeDisabled();
+    expect(screen.getByText(/Mount state unknown/)).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /Retry/ }));
     await waitFor(() =>
@@ -351,6 +370,61 @@ describe("GatewayPanel", () => {
     expect(
       screen.getByRole("switch", { name: "Mount example-security-tools" }),
     ).toBeEnabled();
+  });
+
+  it("keeps last-known rows and live toggles when a later refresh fails", async () => {
+    const listMcpServers = vi
+      .fn()
+      .mockResolvedValueOnce({ servers: [gatewayMount("example-security-tools")] })
+      .mockRejectedValue(new Error("mcp backend unavailable"));
+    const client = api({
+      getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
+      getGatewayApps: vi.fn().mockResolvedValue(incidentApps),
+      listMcpServers,
+    });
+    vi.useFakeTimers();
+    render(<GatewayPanel client={client} onChanged={() => undefined} />);
+    await act(async () => {});
+    expect(screen.getByText(/3 tools available/)).toBeInTheDocument();
+
+    // The 15s refresh fails: the error appears, but the last-known row keeps
+    // its health line and a usable toggle instead of resetting to unknown.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_100);
+    });
+    expect(screen.getByText(/mcp backend unavailable/)).toBeInTheDocument();
+    expect(screen.getByText(/3 tools available/)).toBeInTheDocument();
+    const toggle = screen.getByRole("switch", {
+      name: "Mount example-security-tools",
+    });
+    expect(toggle).toBeChecked();
+    expect(toggle).toBeEnabled();
+  });
+
+  it("still shows configured mounts when entitlements cannot be read", async () => {
+    const client = api({
+      getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
+      getGatewayApps: vi
+        .fn()
+        .mockRejectedValue(new Error("gateway unreachable")),
+      listMcpServers: vi.fn().mockResolvedValue({
+        servers: [gatewayMount("example-security-tools")],
+      }),
+    });
+    render(<GatewayPanel client={client} onChanged={() => undefined} />);
+
+    // The row survives the apps failure, labeled unknown-entitlements — never
+    // misreported as revoked.
+    expect(
+      await screen.findByText("example-security-tools"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Couldn't read your entitlements/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/No longer granted/)).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("switch", { name: "Mount example-security-tools" }),
+    ).toBeChecked();
   });
 
   it("surfaces a failed sign-in with its bounded message", async () => {

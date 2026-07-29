@@ -65,6 +65,12 @@ function mountStatus(mounted: McpServerInfo): string {
   }
 }
 
+/** A message that can sit mid-sentence: `String(err)` would keep the error
+ * class prefix ("HttpError: ...") in front of it. */
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 /** A fresh gateway mount: everything comes from the session except the name,
  * which doubles as the tool namespace. */
 function mountDefinition(slug: string, name: string): McpServerDefinition {
@@ -101,6 +107,9 @@ export function GatewayPanel({
 }) {
   const [status, setStatus] = useState<GatewayStatus | null>(null);
   const [apps, setApps] = useState<GatewayApps | null>(null);
+  // Distinguishes "the apps read failed" from "no apps granted": a failure
+  // must not make configured mounts masquerade as revoked, nor hide them.
+  const [appsFailed, setAppsFailed] = useState(false);
   const [mcpServers, setMcpServers] = useState<McpServerInfo[] | null>(null);
   const [mcpError, setMcpError] = useState<string | null>(null);
   // Bumped by the Retry affordance; re-runs the mount-list effect immediately
@@ -115,6 +124,9 @@ export function GatewayPanel({
   // them), and the poll must not refill a field the user is editing.
   const signedInRef = useRef(false);
   const dirtyRef = useRef(false);
+  // Monotonic id for mount-list reads: a slow in-flight read must not clobber
+  // the fresher list a toggle write (or a newer read) has since installed.
+  const mountsRequestRef = useRef(0);
 
   const reload = useCallback(async () => {
     const next = await client.getGatewayStatus();
@@ -134,20 +146,28 @@ export function GatewayPanel({
 
   // Entitled apps are never cached server-side (a revoked grant disappears on
   // the next request), so fetch them fresh whenever the signed-in state turns
-  // on. A fetch failure only hides the section; models keep working.
+  // on. A fetch failure hides the apps list but is remembered, so mount rows
+  // can say entitlements are unknown instead of claiming anything.
   useEffect(() => {
     if (!status?.signed_in) {
       setApps(null);
+      setAppsFailed(false);
       return;
     }
     let cancelled = false;
     client
       .getGatewayApps()
       .then((next) => {
-        if (!cancelled) setApps(next);
+        if (!cancelled) {
+          setApps(next);
+          setAppsFailed(false);
+        }
       })
       .catch(() => {
-        if (!cancelled) setApps(null);
+        if (!cancelled) {
+          setApps(null);
+          setAppsFailed(true);
+        }
       });
     return () => {
       cancelled = true;
@@ -166,22 +186,23 @@ export function GatewayPanel({
       setMcpError(null);
       return;
     }
-    let cancelled = false;
     const refresh = async () => {
+      const request = ++mountsRequestRef.current;
       try {
         const next = await client.listMcpServers();
-        if (!cancelled) {
-          setMcpServers(next.servers);
-          setMcpError(null);
-        }
+        if (request !== mountsRequestRef.current) return;
+        setMcpServers(next.servers);
+        setMcpError(null);
       } catch (err) {
-        if (!cancelled) setMcpError(String(err));
+        if (request !== mountsRequestRef.current) return;
+        setMcpError(errorMessage(err));
       }
     };
     void refresh();
     const timer = window.setInterval(() => void refresh(), MOUNT_REFRESH_MS);
     return () => {
-      cancelled = true;
+      // Invalidate any in-flight read; a re-run issues fresh ids above this.
+      mountsRequestRef.current += 1;
       window.clearInterval(timer);
     };
   }, [client, status?.signed_in, mountsRefreshNonce]);
@@ -221,6 +242,8 @@ export function GatewayPanel({
         ? [...without, mountDefinition(slug, mountName(slug, taken))]
         : without;
       const result = await client.putMcpServers(next);
+      // Supersede any in-flight background read; this list is fresher.
+      mountsRequestRef.current += 1;
       setMcpServers(result.servers);
       setMcpError(null);
       toast.success(mounted ? `Mounted ${slug}` : `Unmounted ${slug}`);
@@ -265,6 +288,17 @@ export function GatewayPanel({
         .filter((slug): slug is string => slug !== null),
     ]),
   ];
+  // "Revoked" is only a claim we can make after actually reading the
+  // entitlements; a failed or unsupported apps read leaves them unknown.
+  const entitlementsKnown = apps?.supported === true;
+  /** The one line under a mount row: unknown beats revoked beats health. */
+  const rowNote = (slug: string, mounted: McpServerInfo | undefined) => {
+    if (mcpServers === null) return "Mount state unknown.";
+    if (entitlementsKnown && !entitledSlugs.has(slug)) {
+      return "No longer granted to your teams. Switch off to unmount it.";
+    }
+    return mounted ? mountStatus(mounted) : null;
+  };
 
   return (
     <SettingsPanel
@@ -418,100 +452,104 @@ export function GatewayPanel({
         )}
       </SettingsSection>
 
-      {status.signed_in && apps?.supported && (
-        <SettingsSection title="Connected apps">
-          {apps.apps.length === 0 ? (
-            <p className="text-muted-foreground text-sm">
-              No connected apps are granted to your teams yet.
-            </p>
-          ) : (
-            <ul className="flex flex-col gap-2">
-              {apps.apps.map((app) => (
-                <li key={app.id} className="rounded-md border px-3 py-2 text-sm">
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium">{app.name}</span>
-                    <span className="text-muted-foreground text-xs">
-                      {app.app_kind}
-                    </span>
-                    {!app.enabled && (
-                      <span className="text-muted-foreground text-xs">
-                        disabled
-                      </span>
-                    )}
-                  </div>
-                  {app.mcp_endpoint_slugs.length > 0 && (
-                    <p className="text-muted-foreground text-xs">
-                      via {app.mcp_endpoint_slugs.join(", ")}
-                    </p>
-                  )}
-                </li>
-              ))}
-            </ul>
-          )}
-
-          {(endpointSlugs.length > 0 || mcpError !== null) && (
-            <div className="flex flex-col gap-2">
-              <div>
-                <p className="text-sm font-bold">MCP endpoints</p>
-                <p className="text-xs text-muted-foreground">
-                  Mounted endpoints connect with your gateway session — no
-                  tokens to copy, and they reconnect after you sign back in.
-                </p>
-              </div>
-              {mcpError !== null && (
-                <div className="flex items-center justify-between gap-4">
-                  <SettingsError>
-                    Couldn't read the MCP server list: {mcpError}
-                  </SettingsError>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    disabled={working}
-                    onClick={() => setMountsRefreshNonce((nonce) => nonce + 1)}
-                  >
-                    <RefreshCw size={14} />
-                    Retry
-                  </Button>
-                </div>
-              )}
+      {status.signed_in &&
+        apps?.supported &&
+        (apps.apps.length > 0 || endpointSlugs.length === 0) && (
+          <SettingsSection title="Connected apps">
+            {apps.apps.length === 0 ? (
+              <p className="text-muted-foreground text-sm">
+                No connected apps are granted to your teams yet.
+              </p>
+            ) : (
               <ul className="flex flex-col gap-2">
-                {endpointSlugs.map((slug) => {
-                  const mounted = mcpServers?.find(
-                    (server) => server.gateway_endpoint === slug,
-                  );
-                  return (
-                    <li
-                      key={slug}
-                      className="flex items-center justify-between gap-4 rounded-md border px-3 py-2 text-sm"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <code className="font-medium">{slug}</code>
-                        {!entitledSlugs.has(slug) ? (
-                          <p className="text-muted-foreground text-xs">
-                            No longer granted to your teams. Switch off to
-                            unmount it.
-                          </p>
-                        ) : (
-                          mounted && (
-                            <p className="text-muted-foreground text-xs">
-                              {mountStatus(mounted)}
-                            </p>
-                          )
-                        )}
-                      </div>
-                      <Switch
-                        aria-label={`Mount ${slug}`}
-                        checked={mounted !== undefined}
-                        disabled={working || mcpServers === null}
-                        onCheckedChange={(checked) =>
-                          void setMounted(slug, checked)
-                        }
-                      />
-                    </li>
-                  );
-                })}
+                {apps.apps.map((app) => (
+                  <li
+                    key={app.id}
+                    className="rounded-md border px-3 py-2 text-sm"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium">{app.name}</span>
+                      <span className="text-muted-foreground text-xs">
+                        {app.app_kind}
+                      </span>
+                      {!app.enabled && (
+                        <span className="text-muted-foreground text-xs">
+                          disabled
+                        </span>
+                      )}
+                    </div>
+                    {app.mcp_endpoint_slugs.length > 0 && (
+                      <p className="text-muted-foreground text-xs">
+                        via {app.mcp_endpoint_slugs.join(", ")}
+                      </p>
+                    )}
+                  </li>
+                ))}
               </ul>
+            )}
+          </SettingsSection>
+        )}
+
+      {/* Deliberately NOT gated on the apps read: a configured mount keeps
+          its row — and a mount-list failure its Retry — even when the
+          entitlements can't be read at all. */}
+      {status.signed_in && (endpointSlugs.length > 0 || mcpError !== null) && (
+        <SettingsSection
+          title="MCP endpoints"
+          description="Mounted endpoints connect with your gateway session — no tokens to copy, and they reconnect after you sign back in."
+        >
+          {appsFailed && (
+            <p className="text-muted-foreground text-xs">
+              Couldn't read your entitlements from the gateway; these are the
+              configured mounts.
+            </p>
+          )}
+          {mcpError !== null && (
+            <div className="flex items-center justify-between gap-4">
+              <SettingsError>
+                Couldn't read the MCP server list: {mcpError}
+              </SettingsError>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={working}
+                onClick={() => setMountsRefreshNonce((nonce) => nonce + 1)}
+              >
+                <RefreshCw size={14} />
+                Retry
+              </Button>
             </div>
+          )}
+          {endpointSlugs.length > 0 && (
+            <ul className="flex flex-col gap-2">
+              {endpointSlugs.map((slug) => {
+                const mounted = mcpServers?.find(
+                  (server) => server.gateway_endpoint === slug,
+                );
+                const note = rowNote(slug, mounted);
+                return (
+                  <li
+                    key={slug}
+                    className="flex items-center justify-between gap-4 rounded-md border px-3 py-2 text-sm"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <code className="font-medium">{slug}</code>
+                      {note && (
+                        <p className="text-muted-foreground text-xs">{note}</p>
+                      )}
+                    </div>
+                    <Switch
+                      aria-label={`Mount ${slug}`}
+                      checked={mounted !== undefined}
+                      disabled={working || mcpServers === null}
+                      onCheckedChange={(checked) =>
+                        void setMounted(slug, checked)
+                      }
+                    />
+                  </li>
+                );
+              })}
+            </ul>
           )}
         </SettingsSection>
       )}
