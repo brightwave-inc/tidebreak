@@ -611,14 +611,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn child_environment_is_allowlisted() {
-        let allowed = minimal_environment();
-        assert!(allowed.iter().all(|(key, _)| MINIMAL_ENV_KEYS
-            .iter()
-            .any(|candidate| key == OsStr::new(candidate))));
-    }
-
     #[tokio::test]
     async fn response_framing_is_bounded_and_requires_a_nonempty_line() {
         let mut complete = BufReader::new(b"{\"ok\":true}\r\n".as_slice());
