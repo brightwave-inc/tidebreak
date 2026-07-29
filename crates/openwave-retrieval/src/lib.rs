@@ -116,7 +116,7 @@ pub use parse::{DocumentParser, FallbackParser, ParsedDocument, ParserRegistry, 
 pub use rerank::Reranker;
 pub use retriever::{GenerationIndexOutcome, IngestOutcome, Retriever};
 #[cfg(feature = "tool")]
-pub use search::SearchTool;
+pub use search::{SearchTool, SourceCatalog};
 pub use selection::MAX_SEARCH_RESULTS;
 pub use vector::{
     DocumentGenerationState, GenerationStageOutcome, InMemoryVectorStore, SearchOptions,

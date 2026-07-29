@@ -84,3 +84,5 @@ liteparse-pdfium-sys = { version = "=1.4.0", optional = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 tempfile = "=3.27.0"
+# Only to construct DocumentSummaryRecord fixtures for the search-card join.
+chrono = { workspace = true }

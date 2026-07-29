@@ -315,6 +315,8 @@ export type ResultEntry = {
   label: string;
   detail: string | null;
   meta: string | null;
+  /** The document's media type, when the row is a document with one. */
+  mediaType: string | null;
 };
 
 /** One thing a listed call could not do. */
@@ -1625,16 +1627,18 @@ function parseResultEntry(value: unknown): ResultEntry | null {
   // wrong type would be a reason to distrust the row, and it drops that field.
   const detail = value.detail ?? null;
   const meta = value.meta ?? null;
+  const mediaType = value.media_type ?? null;
   if (
     typeof label !== "string" ||
     label.length === 0 ||
     !(RESULT_ENTRY_KINDS as readonly unknown[]).includes(kind) ||
     !isOptionalString(detail) ||
-    !isOptionalString(meta)
+    !isOptionalString(meta) ||
+    !isOptionalString(mediaType)
   ) {
     return null;
   }
-  return { kind: kind as ResultEntryKind, label, detail, meta };
+  return { kind: kind as ResultEntryKind, label, detail, meta, mediaType };
 }
 
 /**

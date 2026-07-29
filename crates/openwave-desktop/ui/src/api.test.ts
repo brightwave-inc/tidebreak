@@ -814,7 +814,13 @@ describe("parseToolResultPreview closed results", () => {
         tool: "entries",
         elided: 2,
         entries: [
-          { kind: "file", label: "notes.md", detail: "scratch", meta: "1.2 KB" },
+          {
+            kind: "file",
+            label: "notes.md",
+            detail: "scratch",
+            meta: "1.2 KB",
+            media_type: "text/markdown",
+          },
           { kind: "sabotage", label: "notes.md" },
           { kind: "file", label: "" },
           { kind: "folder", label: "reports" },
@@ -829,8 +835,14 @@ describe("parseToolResultPreview closed results", () => {
       tool: "entries",
       elided: 5,
       entries: [
-        { kind: "file", label: "notes.md", detail: "scratch", meta: "1.2 KB" },
-        { kind: "folder", label: "reports", detail: null, meta: null },
+        {
+          kind: "file",
+          label: "notes.md",
+          detail: "scratch",
+          meta: "1.2 KB",
+          mediaType: "text/markdown",
+        },
+        { kind: "folder", label: "reports", detail: null, meta: null, mediaType: null },
       ],
       failures: [{ label: "q4.md", error: "unreadable" }],
     });

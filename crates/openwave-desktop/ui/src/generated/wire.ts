@@ -868,7 +868,17 @@ detail: string | null,
 /**
  * Trailing meta — a size, a count, a status word.
  */
-meta: string | null, };
+meta: string | null, 
+/**
+ * The document's media type, when the row is a document with one.
+ *
+ * Data rather than display text: the renderer maps it to a type-specific
+ * icon (a PDF mark, a spreadsheet mark) and never prints it. Still not a
+ * glyph name — the vocabulary is media types, and the renderer keeps its
+ * own closed mapping with a generic fallback. `default` because retained
+ * projections predate the field.
+ */
+media_type: string | null, };
 
 /**
  * What one row of a listed result is, which is what picks its icon.

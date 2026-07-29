@@ -191,6 +191,15 @@ pub struct ResultEntry {
     pub detail: Option<String>,
     /// Trailing meta — a size, a count, a status word.
     pub meta: Option<String>,
+    /// The document's media type, when the row is a document with one.
+    ///
+    /// Data rather than display text: the renderer maps it to a type-specific
+    /// icon (a PDF mark, a spreadsheet mark) and never prints it. Still not a
+    /// glyph name — the vocabulary is media types, and the renderer keeps its
+    /// own closed mapping with a generic fallback. `default` because retained
+    /// projections predate the field.
+    #[serde(default)]
+    pub media_type: Option<String>,
 }
 
 impl ResultEntry {
@@ -202,6 +211,7 @@ impl ResultEntry {
             label: label.into(),
             detail: None,
             meta: None,
+            media_type: None,
         }
     }
 
@@ -216,6 +226,13 @@ impl ResultEntry {
     #[must_use]
     pub fn with_meta(mut self, meta: impl Into<String>) -> Self {
         self.meta = Some(meta.into());
+        self
+    }
+
+    /// Name the document's media type.
+    #[must_use]
+    pub fn with_media_type(mut self, media_type: impl Into<String>) -> Self {
+        self.media_type = Some(media_type.into());
         self
     }
 }
@@ -513,6 +530,7 @@ fn result_entry(value: &Value) -> Option<ResultEntry> {
         label: clamp(value.get("label")?.as_str()?, MAX_RESULT_ENTRY_CHARS)?,
         detail: entry_field(value.get("detail")),
         meta: entry_field(value.get("meta")),
+        media_type: entry_field(value.get("media_type")),
     })
 }
 

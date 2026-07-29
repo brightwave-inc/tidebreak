@@ -835,6 +835,9 @@ fn agent_deps(
     source_store: Arc<dyn Store>,
 ) -> (Arc<Retriever>, ToolRegistry, AgentConfig) {
     let (retrieval, search) = build_retrieval(embedder, store);
+    // The document store lets the search card name matched documents (title,
+    // media type) instead of listing anonymous passages.
+    let search = Box::new(search.with_source_catalog(source_store.clone()));
     let mut tools = ToolRegistry::new()
         .with(Box::new(ReadFile))
         .with(Box::new(ListDir))

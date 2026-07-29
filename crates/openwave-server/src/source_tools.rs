@@ -156,6 +156,7 @@ impl Tool for ListSourcesTool {
                     openwave_core::ResultEntryKind::Source,
                     record.title.as_deref().unwrap_or("Untitled source"),
                 )
+                .with_media_type(record.media_type.clone())
                 .with_meta(readiness_label(record.readiness().as_str()))
             })
             .collect();
@@ -341,6 +342,7 @@ impl Tool for ReadSourceTool {
                 openwave_core::ResultEntryKind::Source,
                 title,
             )
+            .with_media_type(document.media_type.clone())
             // Which slice of the source was read, because a source read in
             // twelve-thousand-character windows produces twelve identical rail
             // lines and the range is the only thing telling them apart.
