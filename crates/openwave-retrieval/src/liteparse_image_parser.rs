@@ -146,6 +146,12 @@ impl DocumentParser for LiteParseImageParser {
         IMAGE_MEDIA_TYPES.contains(&Self::base_media_type(media_type).as_str())
     }
 
+    /// `liteparse` is configured for Markdown output, so a parsed
+    /// image carries Markdown regardless of the source's own type.
+    fn canonical_media_type(&self, _media_type: &str) -> String {
+        "text/markdown".to_string()
+    }
+
     async fn parse(&self, raw: &[u8], media_type: &str) -> Result<ParsedDocument> {
         if !self.supports(media_type) {
             return Err(RetrievalError::parse(format!(
