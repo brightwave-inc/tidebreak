@@ -19,6 +19,7 @@ use openwave_code_execution::{
     E2B_CREDENTIAL_KEY,
 };
 use openwave_core::{Result, SecretProvider, Store};
+use openwave_egress::{CidrBlock, DomainPattern, EgressAllowlist, EgressError, EgressPolicy};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ServerError;
@@ -36,6 +37,62 @@ const CREDENTIAL_PROVIDERS: [CodeExecutionProviderKind; 2] = [
     CodeExecutionProviderKind::Daytona,
 ];
 
+/// Host-owned, non-secret egress policy for the managed exec sandboxes.
+///
+/// The model never sets this (invariant 1): it is host configuration, carries
+/// no secret, and accepts no endpoint. `Open` is the default and preserves
+/// exec's out-of-the-box behavior — E2B and Daytona are created with open
+/// internet access, as they always have been. Egress restriction is opt-in:
+/// an `Allowlist` switches every managed sandbox created afterwards to
+/// deny-by-default and compiles the listed domain patterns and CIDR blocks
+/// into the vendor's per-sandbox network controls. An empty allowlist denies
+/// everything on both axes.
+///
+/// The strings are validated to the same [`DomainPattern`] and [`CidrBlock`]
+/// grammar the decision layer uses, so a malformed grant is rejected at
+/// `PUT` time rather than silently widening egress at sandbox creation.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, ts_rs::TS)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum EgressConfig {
+    /// Unrestricted egress — today's default. No policy is applied and the
+    /// managed adapters create open-internet sandboxes.
+    #[default]
+    Open,
+    /// Deny-by-default egress restricted to these domain patterns and CIDR
+    /// blocks. An empty allowlist blocks all egress.
+    Allowlist {
+        domains: Vec<String>,
+        cidrs: Vec<String>,
+    },
+}
+
+impl EgressConfig {
+    /// The egress policy to compile into a managed sandbox at creation, or
+    /// `None` to keep today's open-internet creation.
+    ///
+    /// Returns an error rather than silently opening egress when a stored
+    /// pattern does not parse, so an invalid grant fails closed at the network
+    /// boundary instead of degrading to unrestricted.
+    fn to_policy(&self) -> std::result::Result<Option<EgressPolicy>, EgressError> {
+        match self {
+            Self::Open => Ok(None),
+            Self::Allowlist { domains, cidrs } => {
+                let domains = domains
+                    .iter()
+                    .map(DomainPattern::parse)
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                let cidrs = cidrs
+                    .iter()
+                    .map(CidrBlock::parse)
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(Some(EgressPolicy::Allowlist(EgressAllowlist::new(
+                    domains, cidrs,
+                ))))
+            }
+        }
+    }
+}
+
 /// Non-secret host selection. Local is usable by default because its mandatory
 /// sandbox denies network and outside-workspace writes. `None` explicitly
 /// removes execution from service without changing the stable tool contract.
@@ -45,6 +102,11 @@ pub struct CodeExecutionConfig {
     pub provider: Option<CodeExecutionProviderKind>,
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
+    /// Egress policy for the managed adapters. Absent in configs written
+    /// before this field existed; those default to `Open`, preserving the
+    /// open-internet creation they already had.
+    #[serde(default)]
+    pub egress: EgressConfig,
 }
 
 impl Default for CodeExecutionConfig {
@@ -52,6 +114,7 @@ impl Default for CodeExecutionConfig {
         Self {
             provider: Some(CodeExecutionProviderKind::Local),
             timeout_ms: DEFAULT_TIMEOUT_MS,
+            egress: EgressConfig::Open,
         }
     }
 }
@@ -61,6 +124,7 @@ impl CodeExecutionConfig {
         Self {
             provider: None,
             timeout_ms: DEFAULT_TIMEOUT_MS,
+            egress: EgressConfig::Open,
         }
     }
 
@@ -70,12 +134,27 @@ impl CodeExecutionConfig {
                 "code execution timeout_ms must be between {MIN_TIMEOUT_MS} and {MAX_TIMEOUT_MS}"
             )));
         }
+        // A malformed allowlist is a bad request, not a silent open egress.
+        self.egress
+            .to_policy()
+            .map_err(|error| ServerError::bad_request(error.to_string()))?;
         Ok(())
     }
 }
 
 const fn default_timeout_ms() -> u64 {
     DEFAULT_TIMEOUT_MS
+}
+
+/// Compile the stored egress config into a policy at the last boundary before
+/// a managed sandbox is created. A malformed stored allowlist fails closed by
+/// refusing execution rather than degrading to open egress.
+fn resolve_egress_policy(
+    egress: &EgressConfig,
+) -> std::result::Result<Option<EgressPolicy>, CodeExecutionError> {
+    egress.to_policy().map_err(|error| {
+        CodeExecutionError::InvalidRequest(format!("invalid egress policy: {error}"))
+    })
 }
 
 /// Renderer-safe configuration and readiness.
@@ -87,6 +166,70 @@ pub struct CodeExecutionConfigInfo {
     pub timeout_ms: u64,
     pub available: bool,
     pub has_credential: bool,
+    /// The configured egress policy and each managed provider's enforcement
+    /// status, so the renderer can present the policy and disclose which
+    /// providers actually restrict egress today.
+    pub egress: CodeExecutionEgressInfo,
+}
+
+/// Renderer-safe egress policy plus per-provider enforcement disclosure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+pub struct CodeExecutionEgressInfo {
+    /// The configured host policy. `Open` is the default: managed sandboxes are
+    /// created with open internet access. An allowlist restricts every managed
+    /// sandbox created afterwards.
+    pub policy: EgressConfig,
+    /// One row per managed provider, stating whether its egress restriction is
+    /// confirmed against the live vendor API or still pending confirmation.
+    pub enforcement: Vec<CodeExecutionEgressEnforcement>,
+}
+
+/// A managed provider's egress-enforcement status, as host knowledge rather
+/// than a claim the backend makes about itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+pub struct CodeExecutionEgressEnforcement {
+    pub provider: CodeExecutionProviderKind,
+    /// `true` once the vendor's per-sandbox network semantics are confirmed to
+    /// enforce the configured allowlist. E2B is confirmed; Daytona is not yet,
+    /// so a configured policy is applied but must not be relied on as a
+    /// boundary until its deny-all semantics are confirmed against the live API.
+    pub confirmed: bool,
+    /// Plain-language disclosure for the settings surface.
+    pub note: String,
+}
+
+/// The managed providers' egress-enforcement disclosure. This is host
+/// knowledge compiled into the build — E2B's per-sandbox `allowOut` semantics
+/// are documented and confirmed, while Daytona's empty-but-present allowlist
+/// "deny that axis" behavior is not yet confirmed against the live API.
+fn egress_enforcement_status() -> Vec<CodeExecutionEgressEnforcement> {
+    vec![
+        CodeExecutionEgressEnforcement {
+            provider: CodeExecutionProviderKind::E2b,
+            confirmed: true,
+            note: "E2B enforces the per-sandbox allowlist. DNS resolution and \
+                   non-HTTP/S ports stay reachable regardless of policy."
+                .to_owned(),
+        },
+        CodeExecutionEgressEnforcement {
+            provider: CodeExecutionProviderKind::Daytona,
+            confirmed: false,
+            note: "A configured policy is sent at creation, but whether an empty \
+                   allowlist denies that axis is not yet confirmed against the \
+                   live Daytona API, and Daytona keeps general-purpose services \
+                   reachable. Do not rely on it as a network boundary yet."
+                .to_owned(),
+        },
+    ]
+}
+
+impl CodeExecutionEgressInfo {
+    fn from_config(policy: EgressConfig) -> Self {
+        Self {
+            policy,
+            enforcement: egress_enforcement_status(),
+        }
+    }
 }
 
 /// Renderer-safe readiness for one managed provider's fixed credential slot.
@@ -112,6 +255,10 @@ pub struct CodeExecutionConfigUpdate {
     pub provider: Option<Option<CodeExecutionProviderKind>>,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    /// Replace the egress policy. Absent leaves the current policy unchanged;
+    /// no secret or endpoint is accepted here — only domain patterns and CIDRs.
+    #[serde(default)]
+    pub egress: Option<EgressConfig>,
 }
 
 fn double_option<'de, D, T>(deserializer: D) -> std::result::Result<Option<Option<T>>, D::Error>
@@ -162,6 +309,7 @@ pub async fn config_info(
         timeout_ms: config.timeout_ms,
         available,
         has_credential,
+        egress: CodeExecutionEgressInfo::from_config(config.egress),
     })
 }
 
@@ -189,6 +337,9 @@ pub async fn update_config(
     }
     if let Some(timeout_ms) = update.timeout_ms {
         config.timeout_ms = timeout_ms;
+    }
+    if let Some(egress) = update.egress {
+        config.egress = egress;
     }
     config.validate()?;
     write_config(store, &config).await?;
@@ -308,21 +459,38 @@ impl ConfiguredCodeExecutionProvider {
                 let credential = E2BCredential::load(&*self.secrets)
                     .await?
                     .ok_or(CodeExecutionError::NotConfigured)?;
-                Ok(Box::new(E2BExecutionProvider::with_session_pool(
+                let provider = E2BExecutionProvider::with_session_pool(
                     credential,
                     Duration::from_millis(config.timeout_ms),
                     self.remote_sessions.clone(),
-                )?))
+                )?;
+                // A configured allowlist becomes E2B's per-sandbox network
+                // rules; `Open` leaves today's open-internet creation intact.
+                let provider = match resolve_egress_policy(&config.egress)? {
+                    Some(policy) => provider.with_egress_policy(policy),
+                    None => provider,
+                };
+                Ok(Box::new(provider))
             }
             CodeExecutionProviderKind::Daytona => {
                 let credential = DaytonaCredential::load(&*self.secrets)
                     .await?
                     .ok_or(CodeExecutionError::NotConfigured)?;
-                Ok(Box::new(DaytonaExecutionProvider::with_session_pool(
+                let provider = DaytonaExecutionProvider::with_session_pool(
                     credential,
                     Duration::from_millis(config.timeout_ms),
                     self.remote_sessions.clone(),
-                )?))
+                )?;
+                // The same policy compiles into Daytona's block-all switch and
+                // allowlists. Enforcement of the empty-present "deny that axis"
+                // case is still pending live confirmation (see the enforcement
+                // disclosure in `egress_enforcement_status`); the default
+                // (`Open` -> open egress) is unchanged.
+                let provider = match resolve_egress_policy(&config.egress)? {
+                    Some(policy) => provider.with_egress_policy(policy)?,
+                    None => provider,
+                };
+                Ok(Box::new(provider))
             }
             _ => Err(CodeExecutionError::Unavailable(
                 "selected provider is not supported by this build".into(),
@@ -476,6 +644,7 @@ mod tests {
         assert!(CodeExecutionConfig {
             provider: Some(CodeExecutionProviderKind::Local),
             timeout_ms: MIN_TIMEOUT_MS - 1,
+            egress: EgressConfig::Open,
         }
         .validate()
         .is_err());
@@ -489,6 +658,77 @@ mod tests {
         assert!(json.get("credential").is_none());
     }
 
+    #[test]
+    fn egress_defaults_to_open_and_compiles_no_policy() {
+        let config = CodeExecutionConfig::default();
+        assert_eq!(config.egress, EgressConfig::Open);
+        // Open must leave the managed adapters on today's open-internet
+        // creation: no policy is threaded into the create path.
+        assert_eq!(config.egress.to_policy().unwrap(), None);
+
+        // The egress config carries no secret or endpoint — only patterns.
+        let json = serde_json::to_value(&config.egress).unwrap();
+        assert_eq!(json, serde_json::json!({ "mode": "open" }));
+    }
+
+    #[test]
+    fn egress_allowlist_compiles_to_a_deny_by_default_decision_policy() {
+        let config = EgressConfig::Allowlist {
+            domains: vec!["*.pypi.org".to_owned(), "crates.io".to_owned()],
+            cidrs: vec!["140.82.112.0/20".to_owned()],
+        };
+        let Some(EgressPolicy::Allowlist(allowlist)) = config.to_policy().unwrap() else {
+            panic!("a non-empty allowlist compiles to an allowlist policy");
+        };
+        assert_eq!(allowlist.domains().len(), 2);
+        assert_eq!(allowlist.cidrs().len(), 1);
+
+        // An empty allowlist is a deny-all policy, not open egress.
+        let empty = EgressConfig::Allowlist {
+            domains: vec![],
+            cidrs: vec![],
+        };
+        let Some(EgressPolicy::Allowlist(empty_list)) = empty.to_policy().unwrap() else {
+            panic!("an empty allowlist still compiles to a policy");
+        };
+        assert!(empty_list.is_empty());
+
+        // A malformed grant fails closed at validation rather than widening.
+        let bad = EgressConfig::Allowlist {
+            domains: vec!["not a host".to_owned()],
+            cidrs: vec![],
+        };
+        assert!(bad.to_policy().is_err());
+        assert!(CodeExecutionConfig {
+            provider: Some(CodeExecutionProviderKind::E2b),
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+            egress: bad,
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn egress_enforcement_reports_e2b_confirmed_and_daytona_pending() {
+        let status = egress_enforcement_status();
+        let e2b = status
+            .iter()
+            .find(|row| row.provider == CodeExecutionProviderKind::E2b)
+            .expect("E2B enforcement is disclosed");
+        let daytona = status
+            .iter()
+            .find(|row| row.provider == CodeExecutionProviderKind::Daytona)
+            .expect("Daytona enforcement is disclosed");
+        assert!(
+            e2b.confirmed,
+            "E2B's per-sandbox egress semantics are confirmed"
+        );
+        assert!(
+            !daytona.confirmed,
+            "Daytona's deny-all semantics are pending live confirmation and must not be claimed as a boundary"
+        );
+    }
+
     #[tokio::test]
     async fn configuration_can_disable_and_reenable_local_execution() {
         let (store, _dir) = test_store().await;
@@ -499,6 +739,7 @@ mod tests {
             CodeExecutionConfigUpdate {
                 provider: Some(None),
                 timeout_ms: Some(MIN_TIMEOUT_MS),
+                egress: None,
             },
         )
         .await;
@@ -515,6 +756,7 @@ mod tests {
             CodeExecutionConfigUpdate {
                 provider: Some(Some(CodeExecutionProviderKind::Local)),
                 timeout_ms: Some(MAX_TIMEOUT_MS),
+                egress: None,
             },
         )
         .await;

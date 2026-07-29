@@ -6643,6 +6643,7 @@ dependencies = [
  "openwave-code-execution",
  "openwave-connectors",
  "openwave-core",
+ "openwave-egress",
  "openwave-mcp",
  "openwave-retrieval",
  "openwave-router",

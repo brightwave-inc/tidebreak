@@ -15,8 +15,8 @@ The authenticated local API owns provider selection and timeout policy:
 
 | Route | Purpose |
 | --- | --- |
-| `GET /code-execution` | Return the selected provider, timeout, and host readiness |
-| `PUT /code-execution` | Select a fixed provider or disable execution, and update the bounded timeout |
+| `GET /code-execution` | Return the selected provider, timeout, egress policy, and host readiness |
+| `PUT /code-execution` | Select a fixed provider or disable execution, update the bounded timeout, and set the managed-sandbox egress policy |
 | `GET /code-execution/credentials` | Read readiness for the fixed E2B and Daytona key slots |
 | `PUT /code-execution/credentials/{e2b\|daytona}` | Store that provider's API key in its fixed host-secret slot |
 | `DELETE /code-execution/credentials/{e2b\|daytona}` | Remove only that provider's saved API key |
@@ -44,6 +44,51 @@ value, or secret reference is accepted by the non-secret settings surface.
 `GET /code-execution` reports `has_credential` for the selected provider only,
 while `GET /code-execution/credentials` reports readiness for both managed slots
 independently. Local execution needs no credential and has no slot to report.
+
+### Egress policy
+
+`GET`/`PUT /code-execution` also carry a host-owned, non-secret egress policy for
+the managed sandboxes, under the `egress` field. It is a store setting, not a
+keychain secret: it holds only an allowlist of domain patterns and CIDR blocks,
+or `open`, and the surface accepts no endpoint or secret. The model never sets
+it — it is host configuration, like provider selection and timeout.
+
+The `policy` is one of:
+
+```json
+{ "mode": "open" }
+{ "mode": "allowlist", "domains": ["*.pypi.org"], "cidrs": ["140.82.112.0/20"] }
+```
+
+Egress restriction is **opt-in, and the default is `open`**. Managed sandboxes
+have always been created with open internet access, and flipping the default to
+deny would break package installs and network fetches inside code execution, so
+`open` stays the out-of-the-box behavior and is disclosed as such in settings.
+Configuring an allowlist switches every managed sandbox created afterwards to
+deny-by-default: only the listed domains and address blocks are reachable, and
+an empty allowlist denies all egress. Domain and address rules are independent —
+a domain grant never opens a raw IP and an address block never opens a
+hostname — matching the decision layer in
+[sandbox providers](sandbox-providers.md). Each pattern is validated to that
+layer's grammar at `PUT` time, so a malformed grant is a bad request rather than
+a silent widening; a malformed *stored* policy fails closed by refusing
+execution, never by reverting to open egress. The local provider already denies
+all network and is unaffected.
+
+The `enforcement` field discloses, per managed provider, whether its egress
+restriction is confirmed against the live vendor API:
+
+- **E2B is confirmed.** A configured allowlist becomes E2B's per-sandbox
+  `allowOut` rules with `allow_internet_access: false`. DNS resolution and
+  non-HTTP/S ports stay reachable regardless of policy, as E2B's mechanism
+  allows.
+- **Daytona is pending.** A configured policy is sent at sandbox creation
+  (block-all switch or comma-separated allowlists), but whether an
+  empty-but-present allowlist denies that axis is not yet confirmed against the
+  live Daytona API, and Daytona keeps general-purpose services (package
+  registries, git hosting, container registries, AI APIs) reachable regardless
+  of policy. Daytona egress is therefore applied but must not be relied on as a
+  network boundary until confirmed.
 
 The `exec` tool remains registered with a stable schema while settings change.
 The host resolves the selected provider immediately before execution, so a
@@ -179,5 +224,7 @@ The provider adapters own only their control-plane and command transports:
 Managed credentials remain in the OS secret store and never enter configuration,
 tool arguments, logs, or renderer responses. Remote API endpoints are fixed by
 the build; Daytona toolbox URLs returned by the control plane are restricted to
-HTTPS Daytona origins. Both managed providers allow internet access inside the
-sandbox, unlike the local native provider.
+HTTPS Daytona origins. By default both managed providers allow internet access
+inside the sandbox, unlike the local native provider; a configured
+[egress policy](#egress-policy) restricts that access at sandbox creation, with
+E2B's enforcement confirmed and Daytona's pending live confirmation.

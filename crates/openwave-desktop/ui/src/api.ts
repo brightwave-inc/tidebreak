@@ -12,6 +12,7 @@ import {
   type CodeExecutionConfigInfo as WireCodeExecutionConfigInfo,
   type CodeExecutionCredentialReadiness as WireCodeExecutionCredentialReadiness,
   type CodeExecutionProviderKind as WireCodeExecutionProviderKind,
+  type EgressConfig as WireEgressConfig,
   type CustomModelConfig as WireCustomModelConfig,
   type McpHealth as WireMcpHealth,
   type McpServerDefinition as WireMcpServerDefinition,
@@ -169,6 +170,12 @@ export type CodeExecutionConfigInfo = WireCodeExecutionConfigInfo;
 /** Readiness only: the API never returns a saved managed-provider key. */
 export type CodeExecutionCredentialReadiness =
   WireCodeExecutionCredentialReadiness;
+
+/**
+ * Host-owned egress policy for the managed sandboxes. Never a secret: only
+ * domain patterns and CIDR blocks, or `open` for today's unrestricted egress.
+ */
+export type EgressConfig = WireEgressConfig;
 
 export type McpHealth = WireMcpHealth;
 
@@ -673,6 +680,7 @@ export class ApiClient {
   putCodeExecutionConfig(body: {
     provider?: CodeExecutionProviderKind | null;
     timeout_ms?: number;
+    egress?: EgressConfig;
   }): Promise<CodeExecutionConfigInfo> {
     return this.json("/code-execution", {
       method: "PUT",

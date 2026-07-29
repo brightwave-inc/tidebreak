@@ -15,6 +15,19 @@ import type {
 } from "../api";
 import { CodeExecutionPanel } from "./CodeExecutionPanel";
 
+/** The default egress projection: open policy, E2B confirmed, Daytona pending. */
+const OPEN_EGRESS: CodeExecutionConfigInfo["egress"] = {
+  policy: { mode: "open" },
+  enforcement: [
+    { provider: "e2b", confirmed: true, note: "E2B enforces the allowlist." },
+    {
+      provider: "daytona",
+      confirmed: false,
+      note: "Applied but pending live confirmation.",
+    },
+  ],
+};
+
 function clientFor(
   config: CodeExecutionConfigInfo,
   credentials: CodeExecutionCredentialReadiness[] = [
@@ -57,6 +70,7 @@ describe("CodeExecutionPanel", () => {
         timeout_ms: 20_000,
         available: false,
         has_credential: false,
+        egress: OPEN_EGRESS,
       });
 
     render(<CodeExecutionPanel client={client} />);
@@ -82,9 +96,11 @@ describe("CodeExecutionPanel", () => {
       "daytona",
       "daytona-secret",
     );
+    // Egress restriction is opt-in: an untouched panel saves the open policy.
     expect(putCodeExecutionConfig).toHaveBeenCalledWith({
       provider: "e2b",
       timeout_ms: 30_000,
+      egress: { mode: "open" },
     });
     // A provider must not go active in a pass that failed to store its key.
     expect(
@@ -99,6 +115,7 @@ describe("CodeExecutionPanel", () => {
         timeout_ms: 20_000,
         available: true,
         has_credential: true,
+        egress: OPEN_EGRESS,
       },
       [
         { provider: "e2b", has_credential: true },
@@ -118,12 +135,48 @@ describe("CodeExecutionPanel", () => {
     expect(deleteCodeExecutionCredential).toHaveBeenCalledTimes(1);
   });
 
+  it("sends a domain-and-CIDR allowlist once egress restriction is turned on", async () => {
+    const { client, putCodeExecutionConfig } = clientFor({
+      provider: "e2b",
+      timeout_ms: 20_000,
+      available: true,
+      has_credential: true,
+      egress: OPEN_EGRESS,
+    });
+
+    render(<CodeExecutionPanel client={client} />);
+
+    fireEvent.click(
+      await screen.findByRole("switch", { name: "Restrict network egress" }),
+    );
+    fireEvent.change(screen.getByLabelText(/Allowed domains/), {
+      target: { value: "*.pypi.org\nfiles.pythonhosted.org" },
+    });
+    fireEvent.change(screen.getByLabelText(/Allowed address blocks/), {
+      target: { value: "140.82.112.0/20" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+
+    await waitFor(() =>
+      expect(putCodeExecutionConfig).toHaveBeenCalledWith({
+        provider: "e2b",
+        timeout_ms: 20_000,
+        egress: {
+          mode: "allowlist",
+          domains: ["*.pypi.org", "files.pythonhosted.org"],
+          cidrs: ["140.82.112.0/20"],
+        },
+      }),
+    );
+  });
+
   it("rejects a timeout outside the bounds before touching the server", async () => {
     const { client, putCodeExecutionConfig } = clientFor({
       provider: "local",
       timeout_ms: 20_000,
       available: true,
       has_credential: false,
+      egress: OPEN_EGRESS,
     });
 
     render(<CodeExecutionPanel client={client} />);
