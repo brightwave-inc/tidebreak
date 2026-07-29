@@ -221,7 +221,7 @@ setup or compilation failure from also losing newly downloaded Cargo
 dependencies. Each architecture then saves one unsigned archive containing
 Cargo fingerprints, build-script outputs, compiled dependency files, and the
 credential-free Rust products produced by `--no-bundle`: the desktop
-executable, host broker, desktop libraries, and staged PDFium runtime. Keeping
+executable, host broker, and desktop libraries. Keeping
 those final unsigned products lets an exact-source build skip the otherwise
 expensive desktop relink. The archive is saved before a failed compile is
 reported, so successful partial work remains reusable. None of these jobs load
@@ -325,10 +325,6 @@ Treat the release workflow as public even while the repository is private:
 - Tauri notarizes and staples the app bundle. The workflow separately submits
   the signed DMG to Apple's notary service, requires an accepted result, and
   staples its ticket before artifact verification or upload.
-- The release-only Tauri pre-bundle hook signs the staged PDFium Mach-O library
-  with the same Developer ID identity and a secure timestamp. Tauri treats it as
-  an arbitrary resource and does not sign it automatically; Apple rejects the
-  enclosing app during notarization if this nested signature is missing.
 
 Public source does not eliminate the need for operational controls. Restrict
 who can publish releases and change Actions configuration, protect `main`, and

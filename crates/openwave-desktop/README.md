@@ -70,27 +70,6 @@ broker and the default Tauri configuration includes it automatically:
 cargo tauri build
 ```
 
-## PDFium runtime for packaged apps
-
-The in-process server uses the liteparse PDF parser, which loads the PDFium
-shared library at runtime. In a dev build the loader resolves it via the cache
-path `pdfium-sys` bakes into the binary, but an installed app has no such path.
-
-For release builds the desktop build script stages the target's PDFium library
-into `resources/pdfium/`, `tauri.conf.json` ships it via `bundle.resources`, and
-the host exports `PDFIUM_LIB_PATH` to that bundled directory at startup (the
-loader's highest-priority search location). The staged binary is copied from the
-same `target/<profile>/deps/` file `pdfium-sys` resolves, so it always matches
-the pinned version the app was compiled against. If the library is missing at
-build time the bundle still builds (with a loud `cargo:warning`) and PDF parsing
-fails closed with a clear message rather than crashing.
-
-Building an installer per platform and confirming PDF import in the packaged app
-is release-engineering work that must be run on macOS, Windows, and Linux. The
-[release guide](../../docs/releases.md) defines the current tag-derived macOS
-signed/notarized delivery pipeline, its hosted artifact contract, and the
-additional upgrade gate before `1.0.0`.
-
 ## Run locally (browser UI against `openwave serve`)
 
 Useful when iterating on the React UI without rebuilding the native shell.
@@ -119,7 +98,6 @@ pnpm --dir ui dev
 | `ui/` | React + Vite frontend |
 | `scripts/` | Cross-platform sidecar staging for Tauri dev/build |
 | `binaries/` | Generated target-specific sidecar (gitignored) |
-| `resources/pdfium/` | Staged PDFium runtime for packaged apps (gitignored) |
-| `tauri.conf.json` | Window, CSP, sidecar bundle, resources, and build commands |
+| `tauri.conf.json` | Window, CSP, sidecar bundle, and build commands |
 | `icons/` | App icons (generated from the brand mark) |
 | `capabilities/` | Tauri ACL (loopback remote URLs for the local API) |

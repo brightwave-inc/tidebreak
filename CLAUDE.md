@@ -122,20 +122,11 @@ is the whole rule, and it is coarse on purpose:
   -D warnings`), and the desktop tests. Every cargo invocation passes `--locked`,
   so a lockfile drift fails there too.
 - A Rust change also marks the **workspace** scope, which adds the headless
-  workspace tests with the server's rich parser adapters disabled, plus the
-  PostgreSQL turn-state lane, unless every changed file is one of
-  `openwave-desktop`'s own sources. Nothing in the workspace depends on the
-  desktop crate and the headless lane already excludes it, so those lanes cannot
-  see such a change.
-  Its `Cargo.toml` is not covered by the carve-out — it forwards features into
-  `openwave-server` — and neither is
-  `ui/src/generated/`, whose staleness check lives in `openwave-server`.
-- Parser, feature-wiring, dependency, and CI changes also mark the **parser**
-  scope. Its focused PDF/Office/image/spreadsheet contracts run in a headless
-  job parallel to the desktop behavior suite. Normal desktop builds keep those
-  parsers enabled by default; the desktop test harness disables them because the
-  focused lane already covers their behavior and clippy compile-checks the rich
-  production topology.
+  workspace tests plus the PostgreSQL turn-state lane, unless every changed file
+  is one of `openwave-desktop`'s own sources. Nothing in the workspace depends on
+  the desktop crate and the headless lane already excludes it, so those lanes
+  cannot see such a change. `ui/src/generated/` is not covered by the carve-out
+  because its staleness check lives in `openwave-server`.
 - Any file under `crates/openwave-desktop/ui/` marks it **UI**, which runs
   `pnpm test` and `pnpm build` as two fixed parallel jobs.
 - Branch protection requires the pull-request gate jobs directly. Conditional

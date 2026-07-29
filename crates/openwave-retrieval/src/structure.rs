@@ -1,13 +1,13 @@
 //! Node paths for structured sources: which part of the tree a byte span came
 //! from.
 //!
-//! JSON, XML, and HTML are indexed as their own text — nothing is extracted out
-//! of them, so a chunk's byte span already addresses the file verbatim. That is
+//! JSON, XML, and HTML are retained as their own text — nothing is extracted out
+//! of them, so a source region's byte span addresses the file verbatim. That is
 //! enough to highlight a passage in the extracted text and not enough to open
 //! the file as the tree it is, because "bytes 4100–5300" names no node. This
 //! module walks the source once and records, for each run of leaf content, the
 //! path of the node it belongs to. Those become [`SourceRegion`]s beside the
-//! spans they describe, so a passage retrieved later resolves to a node without
+//! spans they describe, so a passage read later resolves to a node without
 //! reparsing the document.
 //!
 //! Paths are written in the notation each tree is addressed by: dotted keys and
@@ -16,7 +16,7 @@
 //!
 //! Both scanners are lenient about what they cannot read: a document that does
 //! not parse yields no regions at all, which costs the node view and leaves
-//! everything else — text, chunks, spans, citations — exactly as it was.
+//! everything else — text, spans, citations — exactly as it was.
 
 use std::collections::HashMap;
 
@@ -32,10 +32,9 @@ const MAX_DEPTH: usize = 128;
 
 /// Most regions one document's structure map holds.
 ///
-/// A structure map is stored with the document and read back on every search
-/// that touches it, so a machine-generated file with a million leaves must not
-/// turn into a million rows. Past the limit the document keeps its text, spans,
-/// and citations and loses only the node view.
+/// A structure map is stored with the document, so a machine-generated file
+/// with a million leaves must not turn into a million rows. Past the limit the
+/// document keeps its text, spans, and citations and loses only the node view.
 const MAX_REGIONS: usize = 50_000;
 
 /// Which tree shape a source parses into.

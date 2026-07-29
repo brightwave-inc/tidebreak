@@ -592,16 +592,18 @@ byte length and SHA-256 digest, and parses it into:
 - source regions that map text byte ranges back to locations such as pages.
 
 The parse completion marks the document ready atomically. The configured
-registry selects a parser by media type: liteparse handles PDF, Office, and
-raster image formats, a plain-text parser handles `text/*`, and a fallback keeps
-anything else storable by decoding it when it is valid UTF-8 and leaving it
-empty when it is not. The model can represent page provenance, but the parsers
-do not emit page regions today.
+registry parses JSON, XML, HTML, and `text/*` in process. A fallback keeps other
+media types storable by decoding valid UTF-8 and leaving binary content empty.
+The model can represent page provenance, but the parsers do not emit page
+regions today.
 
 Because that selection is by media type, the media type has to be right. The
 trusted native side decides it from the bytes rather than from the filename, so
-a document cannot be routed to a parser that cannot read it. A parser that
-produces no text yields a ready source with no directly readable text.
+a document cannot be routed to a parser that cannot read it. PDF, Office,
+workbook, and raster image uploads currently reach the fallback and report
+`stored_no_text`; richer extraction will move to an execution-based document
+path. Any parser that produces no text yields a ready source with no directly
+readable text.
 
 There is no document event stream yet. After receiving `202`, a client polls the
 document list or detail endpoint for `queued → processing → ready/failed`. The

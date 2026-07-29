@@ -95,7 +95,6 @@ jobs:
     name: change scope
     runs-on: ubuntu-latest
     outputs:
-      parsers: ${{ steps.scope.outputs.parsers }}
       rust: ${{ steps.scope.outputs.rust }}
       sandbox_container: ${{ steps.scope.outputs.sandbox_container }}
       ui: ${{ steps.scope.outputs.ui }}
@@ -116,7 +115,6 @@ jobs:
           full_validation() {
             {
               echo "rust=true"
-              echo "parsers=true"
               echo "sandbox_container=true"
               echo "ui=true"
               echo "workspace=true"
@@ -157,7 +155,6 @@ jobs:
           # change cannot reach them. `workspace` implies `rust`; the gate below
           # asserts that.
           rust=false
-          parsers=false
           sandbox_container=false
           ui=false
           workspace=false
@@ -168,7 +165,6 @@ jobs:
               *.md|docs/*|assets/*|LICENSE|NOTICE) ;;
               .github/workflows/ci.yml)
                 rust=true
-                parsers=true
                 sandbox_container=true
                 ui=true
                 workspace=true
@@ -177,7 +173,6 @@ jobs:
               # behavior for the heavyweight sandbox-container capability.
               .cargo/*|Cargo.lock|Cargo.toml|rust-toolchain.toml)
                 rust=true
-                parsers=true
                 sandbox_container=true
                 workspace=true
                 ;;
@@ -189,32 +184,9 @@ jobs:
               crates/openwave-desktop/ui/src/generated/*)
                 rust=true; ui=true; workspace=true ;;
               crates/openwave-desktop/ui/*) ui=true ;;
-              # The manifest forwards features into openwave-server, so it can
-              # change how the rest of the workspace builds. Its sources cannot.
-              crates/openwave-desktop/Cargo.toml)
-                rust=true
-                parsers=true
-                workspace=true
-                ;;
-              crates/openwave-cli/Cargo.toml)
-                rust=true
-                parsers=true
-                workspace=true
-                ;;
-              crates/openwave-retrieval/*)
-                rust=true
-                parsers=true
-                workspace=true
-                ;;
               crates/openwave-server/Cargo.toml)
                 rust=true
-                parsers=true
                 sandbox_container=true
-                workspace=true
-                ;;
-              crates/openwave-server/src/lib.rs|crates/openwave-server/src/tests/documents.rs)
-                rust=true
-                parsers=true
                 workspace=true
                 ;;
               # The real-container lane adds a packaging/runtime boundary over
@@ -239,10 +211,6 @@ jobs:
             echo "workspace scope without Rust scope; the detector is wrong." >&2
             exit 1
           fi
-          if [[ "$parsers" == true && "$workspace" != true ]]; then
-            echo "parser scope without workspace scope; the detector is wrong." >&2
-            exit 1
-          fi
           if [[ "$sandbox_container" == true && "$workspace" != true ]]; then
             echo "sandbox-container scope without workspace scope; the detector is wrong." >&2
             exit 1
@@ -250,7 +218,6 @@ jobs:
 
           {
             echo "rust=$rust"
-            echo "parsers=$parsers"
             echo "sandbox_container=$sandbox_container"
             echo "ui=$ui"
             echo "workspace=$workspace"
@@ -334,56 +301,6 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-  parsers:
-    name: rich document parser contracts
-    needs: changes
-    if: ${{ needs.changes.outputs.parsers == 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      CARGO_INCREMENTAL: 0
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
-      SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_RW_MODE: READ_WRITE
-      RUSTC_WRAPPER: sccache
-      RUSTFLAGS: -C link-arg=-fuse-ld=mold
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Install toolchain (honors rust-toolchain.toml)
-        run: rustup show
-      - name: Set up compiler cache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
-        with:
-          version: v0.16.0
-      - name: Install headless system deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends mold
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          shared-key: cargo-registry-v3-${{ hashFiles('Cargo.lock') }}
-          add-job-id-key: "false"
-          add-rust-environment-hash-key: "false"
-          cache-bin: false
-          cache-targets: false
-          save-if: false
-      - name: Exercise rich parser contracts
-        run: |
-          parser_features="parse-liteparse,parse-office,parse-image,parse-spreadsheet"
-          cargo test -p openwave-retrieval --features "$parser_features" --locked \
-            liteparse_parser::tests
-          cargo test -p openwave-retrieval --features "$parser_features" --locked \
-            liteparse_office_parser::tests
-          cargo test -p openwave-retrieval --features "$parser_features" --locked \
-            liteparse_image_parser::tests
-          cargo test -p openwave-retrieval --features "$parser_features" --locked \
-            spreadsheet_parser::tests
-          cargo test -p openwave-retrieval --features "$parser_features" --locked \
-            production_registry_routes_rich_formats_to_the_intended_parser
-          cargo test -p openwave-retrieval --features "$parser_features" --locked \
-            --test liteparse_pdf
-
   desktop:
     name: desktop test
     needs: changes
@@ -424,7 +341,7 @@ jobs:
           cache-targets: false
           save-if: false
       - name: desktop tests
-        run: cargo test -p openwave-desktop --no-default-features --locked
+        run: cargo test -p openwave-desktop --locked
 
   test:
     name: test
@@ -467,12 +384,7 @@ jobs:
         if: ${{ github.ref == 'refs/heads/main' }}
         run: cargo fetch --locked
       - name: headless tests
-        run: >-
-          cargo test --workspace --exclude openwave-desktop
-          --no-default-features
-          --features
-          openwave-core/default,openwave-retrieval/default,openwave-router/default
-          --locked
+        run: cargo test --workspace --exclude openwave-desktop --locked
 
   postgres:
     name: postgres state machine

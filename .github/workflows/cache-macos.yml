@@ -88,7 +88,6 @@ jobs:
             target/${{ matrix.target }}/release/openwave-host-broker
             target/${{ matrix.target }}/release/libopenwave_desktop_lib.*
             crates/openwave-desktop/binaries/openwave-host-broker-${{ matrix.target }}
-            crates/openwave-desktop/resources/pdfium/libpdfium.dylib
           key: macos-release-target-v2-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
           restore-keys: |
             macos-release-target-v2-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
@@ -141,7 +140,6 @@ jobs:
             target/${{ matrix.target }}/release/openwave-host-broker \
             target/${{ matrix.target }}/release/libopenwave_desktop_lib.* \
             crates/openwave-desktop/binaries/openwave-host-broker-${{ matrix.target }} \
-            crates/openwave-desktop/resources/pdfium/libpdfium.dylib \
             2>/dev/null | tail -1 || true
 
       - name: Save unsigned Rust build cache
@@ -161,7 +159,6 @@ jobs:
             target/${{ matrix.target }}/release/openwave-host-broker
             target/${{ matrix.target }}/release/libopenwave_desktop_lib.*
             crates/openwave-desktop/binaries/openwave-host-broker-${{ matrix.target }}
-            crates/openwave-desktop/resources/pdfium/libpdfium.dylib
           key: ${{ steps.rust-build-cache.outputs.cache-primary-key }}
 
       - name: Require a successful cache-warm compilation

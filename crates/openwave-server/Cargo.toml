@@ -10,36 +10,6 @@ authors.workspace = true
 [lints]
 workspace = true
 
-[features]
-# Rich PDF ingestion via the local, PDFium-backed liteparse parser. On by
-# default so the desktop and `openwave serve` accept `application/pdf` uploads.
-# The liteparse build downloads a prebuilt PDFium binary; build with
-# `--no-default-features` for a lean, text-only pipeline with no such fetch.
-default = ["document-parsers"]
-document-parsers = [
-    "parse-liteparse",
-    "parse-office",
-    "parse-image",
-    "parse-spreadsheet",
-]
-parse-liteparse = ["openwave-retrieval/parse-liteparse"]
-# Rich Office ingestion (Word/Excel/PowerPoint/OpenDocument) via liteparse's
-# LibreOffice conversion path. On by default, adding no build cost beyond
-# parse-liteparse. LibreOffice is an optional runtime tool: without it, Office
-# uploads are stored without searchable text rather than rejected.
-parse-office = ["openwave-retrieval/parse-office"]
-# Spreadsheet-native ingestion (xlsx/xlsm/xlsb/xls/ods), which reads workbooks
-# directly instead of converting them to PDF. On by default: it needs nothing
-# installed at runtime, and it is the only path on which a workbook's sheets and
-# cell addresses survive parsing — which is what a cell-range citation is made
-# of. Takes precedence over parse-office for those types.
-parse-spreadsheet = ["openwave-retrieval/parse-spreadsheet"]
-# Raster image ingestion (PNG/JPEG/WebP/GIF/TIFF/BMP) via liteparse's image
-# conversion path. On by default, adding no build cost beyond parse-liteparse.
-# OCR is off, so images are stored without searchable text (an OCR slice comes
-# later); routing them to a dedicated parser gives a stable fingerprint and keeps
-# them out of the generic fallback.
-parse-image = ["openwave-retrieval/parse-image"]
 [dependencies]
 openwave-shell-policy = { path = "../openwave-shell-policy" }
 openwave-code-execution = { path = "../openwave-code-execution" }

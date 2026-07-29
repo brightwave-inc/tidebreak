@@ -1475,14 +1475,14 @@ async fn ingest_accepts_any_media_type_via_the_fallback_parser() {
         .parse()
         .unwrap();
 
-    // Binary bytes with an unclaimed media type are accepted too, but retained
-    // without decoded canonical text.
+    // Binary PDF bytes reach the fallback parser and are retained without
+    // decoded canonical text.
     let binary = post_raw(
         &router,
         &bearer,
-        "/documents/raw?uri=file%3A%2F%2F%2Fblob.bin",
-        Some("application/octet-stream"),
-        vec![0x89, 0x50, 0x4E, 0x47, 0x00, 0xFF],
+        "/documents/raw?uri=file%3A%2F%2F%2Fdocument.pdf",
+        Some("application/pdf"),
+        b"%PDF-1.7\n%\xFF\xFF\n".to_vec(),
     )
     .await;
     assert_eq!(binary.status(), StatusCode::ACCEPTED);
@@ -1510,6 +1510,10 @@ async fn ingest_accepts_any_media_type_via_the_fallback_parser() {
         openwave_core::DocumentProcessingStatus::Ready
     );
     assert!(binary_doc.canonical_text.is_empty());
+    assert_eq!(
+        openwave_core::SourceReadiness::of(binary_doc.processing_status, binary_doc.is_readable()),
+        openwave_core::SourceReadiness::StoredNoText
+    );
 }
 
 #[tokio::test]

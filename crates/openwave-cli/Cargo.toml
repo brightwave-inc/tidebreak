@@ -10,12 +10,6 @@ authors.workspace = true
 [lints]
 workspace = true
 
-[features]
-# Keep ordinary `openwave serve` builds feature-complete while allowing the
-# headless workspace lane to exercise the server without its heavyweight parser
-# adapters. Parser-specific coverage runs separately with this feature enabled.
-default = ["document-parsers"]
-document-parsers = ["openwave-server/document-parsers"]
 # The binary is `openwave` (not `openwave-cli`), so `openwave serve` is the command.
 [[bin]]
 name = "openwave"
@@ -27,7 +21,7 @@ path = "src/main.rs"
 # through `openwave-server`. This avoids directly enabling unrelated defaults.
 openwave-core = { path = "../openwave-core", default-features = false, features = ["tools"] }
 openwave-mcp = { path = "../openwave-mcp" }
-openwave-server = { path = "../openwave-server", default-features = false }
+openwave-server = { path = "../openwave-server" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [dev-dependencies]
