@@ -2577,7 +2577,10 @@ async fn resolve_embedder_uses_openai_only_when_enabled_and_keyed() {
     .unwrap();
     let (online, byok) = resolve_embedder(&*store, &secrets, true).await;
     assert_eq!(online.dimensions(), EMBED_DIMS);
-    assert!(byok, "the BYOK pick must be reported — it gates the restart");
+    assert!(
+        byok,
+        "the BYOK pick must be reported — it gates the restart"
+    );
     assert_ne!(EMBED_DIMS, HashEmbedder::default().dimensions());
 
     // Enabled + keyed but BYOK disallowed (managed profile, or an unreadable

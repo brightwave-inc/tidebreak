@@ -1021,7 +1021,10 @@ async fn resolve_embedder(
         None
     };
     match key {
-        Some(key) => (Arc::new(OpenAiEmbedder::new(key, EMBED_MODEL, EMBED_DIMS)), true),
+        Some(key) => (
+            Arc::new(OpenAiEmbedder::new(key, EMBED_MODEL, EMBED_DIMS)),
+            true,
+        ),
         None => (Arc::new(HashEmbedder::default()), false),
     }
 }
