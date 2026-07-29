@@ -6651,6 +6651,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "ts-rs",
+ "uuid",
 ]
 
 [[package]]
