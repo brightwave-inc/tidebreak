@@ -6899,11 +6899,13 @@ name = "openwave-sandbox-agent"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "libc",
  "openwave-core",
  "openwave-sandbox-protocol",
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.19",
  "tokio",
 ]

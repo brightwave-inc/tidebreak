@@ -5,9 +5,10 @@
 //! the agent loop — with the host side dialing in over a TCP loopback and
 //! answering model steps from a scripted mock model. It exercises the whole
 //! sandbox-resident path the image packages: attach handshake, model inference
-//! dialed back over reverse RPC, a local tool call, the event stream, and a
-//! submitted result — and asserts exactly-once against the host's operation-log
-//! seam (each model step runs once, one record per operation).
+//! dialed back over reverse RPC, real filesystem tool calls (write a file, then
+//! read it back), the event stream, and a submitted result — and asserts
+//! exactly-once against the host's operation-log seam (each model step runs
+//! once, one record per operation).
 //!
 //! The whole scenario runs under a wall-clock [`timeout`](tokio::time::timeout),
 //! so a transport regression fails the test fast instead of hanging the suite.
@@ -35,14 +36,15 @@ use openwave_sandbox_protocol::{
 /// The per-run transport secret the sandbox expects and the host presents.
 const SECRET: &str = "agent-run-transport-secret";
 
-/// A mock host model that scripts the loop: it asks for the word-count tool on
-/// the first step, then — once the transcript shows the tool's result — returns a
-/// final answer. It counts executions so a test can assert exactly-once.
+/// A mock host model that scripts the loop through the real sandbox tools: write
+/// a file, then read it back, then return a final answer. It counts executions
+/// so a test can assert exactly-once.
 struct ScriptedModel {
     executions: Arc<AtomicUsize>,
 }
 
-const FINAL_ANSWER: &str = "counted the words in the sample";
+const FINAL_ANSWER: &str = "wrote the note and read it back";
+const NOTE_CONTENT: &str = "hello from the sandbox";
 
 #[async_trait::async_trait]
 impl CapabilityResponder for ScriptedModel {
@@ -52,11 +54,14 @@ impl CapabilityResponder for ScriptedModel {
             ReverseRequest::ModelInference(params) => params.prompt,
             _ => unreachable!("only model inference is exercised"),
         };
-        let completion = if prompt.contains("Tool word_count result") {
-            FINAL_ANSWER.to_owned()
+        // Drive real local tool calls over the loop's directive protocol: first a
+        // write, then a read of the same file, then the final answer.
+        let completion = if !prompt.contains("Tool write_file") {
+            format!("use-tool:write_file:{{\"path\":\"note.txt\",\"content\":\"{NOTE_CONTENT}\"}}")
+        } else if !prompt.contains("Tool read_file") {
+            "use-tool:read_file:{\"path\":\"note.txt\"}".to_owned()
         } else {
-            // Drive a real local tool call over the loop's directive protocol.
-            "use-tool:word_count:{\"text\":\"alpha beta gamma delta\"}".to_owned()
+            FINAL_ANSWER.to_owned()
         };
         Response::Ok(ReverseResult::ModelInference(ModelInferenceResult {
             completion,
@@ -127,8 +132,13 @@ async fn scenario() {
     .await
     .expect("attach accepted");
 
-    // Drive the agent loop; it dials its model steps back over the connection.
-    let agent = tokio::spawn(async move { run_agent(run, "count the words in the sample").await });
+    // Drive the agent loop; it dials its model steps back over the connection and
+    // runs its filesystem tools against a real workspace directory.
+    let workspace = tempfile::tempdir().expect("workspace");
+    let workspace_path = workspace.path().to_path_buf();
+    let agent = tokio::spawn(async move {
+        run_agent(run, "write a note then read it back", workspace_path).await
+    });
 
     // Drain the event stream until the terminal result arrives.
     let mut progress = Vec::new();
@@ -145,11 +155,16 @@ async fn scenario() {
     };
 
     assert_eq!(result, FINAL_ANSWER, "the run submitted its final answer");
-    // The loop actually ran the local tool: word_count("alpha beta gamma delta")
-    // is 4, surfaced on a progress event.
+    // The loop actually ran the local tools: the read surfaced the bytes the
+    // write laid down, on a progress event.
     assert!(
-        progress.iter().any(|line| line.contains("word_count -> 4")),
-        "the sandbox-resident tool ran locally: {progress:?}"
+        progress.iter().any(|line| line.contains(NOTE_CONTENT)),
+        "the sandbox read the file it wrote: {progress:?}"
+    );
+    // And the write landed on the real workspace filesystem.
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("note.txt")).unwrap(),
+        NOTE_CONTENT
     );
 
     let answer = agent
@@ -158,12 +173,12 @@ async fn scenario() {
         .expect("agent run succeeds");
     assert_eq!(answer, FINAL_ANSWER);
 
-    // Exactly-once seam: two model steps, two distinct operations, each recorded
-    // once and executed once.
+    // Exactly-once seam: three model steps (write, read, final), three distinct
+    // operations, each recorded once and executed once.
     assert_eq!(
         executions.load(Ordering::SeqCst),
-        2,
+        3,
         "each model step executed exactly once"
     );
-    assert_eq!(store.len(), 2, "one operation-log record per model step");
+    assert_eq!(store.len(), 3, "one operation-log record per model step");
 }

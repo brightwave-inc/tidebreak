@@ -31,23 +31,41 @@ WORKDIR /src
 COPY . .
 
 # Build only the agent crate. Its dependency on openwave-core carries
-# `default-features = false`, so sea-orm, the OS keychain, and the filesystem
-# tools are never compiled into the image — no model or third-party credential
-# ships in it.
+# `default-features = false`, so sea-orm, the OS keychain, and openwave-core's
+# own feature-gated filesystem tools are never compiled into the image — no model
+# or third-party credential ships in it. (The sandbox-resident `exec`/filesystem
+# tools live in this crate and are the point of the image.)
 RUN cargo build --release --locked -p openwave-sandbox-agent
 
+# The sandbox-resident `exec` tool runs model-authored commands through /bin/sh
+# inside the container — in-container execution IS the containment. distroless/cc
+# ships no shell, so stage a static busybox (a shell plus the common coreutils
+# applets) and the workspace root the tools are scoped to, then copy just those
+# into the runtime. busybox is a deliberate, bounded surface for running the
+# model's commands, not a general package manager.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends busybox-static \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /rootfs/bin /rootfs/workspace \
+    && cp /bin/busybox /rootfs/bin/busybox \
+    && /rootfs/bin/busybox --install -s /rootfs/bin
+
 # ---- runtime stage ---------------------------------------------------------
-# distroless/cc provides glibc and libgcc for the dynamically-linked binary and
-# nothing else — no shell, no package manager — a minimal attack surface for a
-# container that runs untrusted model output. The binary uses rustls (no OpenSSL)
-# and opens no keychain, so cc is sufficient.
+# distroless/cc provides glibc and libgcc for the dynamically-linked binary; the
+# binary uses rustls (no OpenSSL) and opens no keychain, so cc is sufficient. It
+# ships no package manager — the only added surface is the staged busybox the
+# exec tool shells out to, in a container that runs untrusted model output.
 FROM gcr.io/distroless/cc-debian12 AS runtime
 
 COPY --from=build /src/target/release/openwave-sandbox-agent /usr/local/bin/openwave-sandbox-agent
+# busybox (/bin/sh + coreutils applets) and the /workspace tool root.
+COPY --from=build /rootfs /
 
 # The listener address the supervisor binds; the host dials this port.
 ENV OPENWAVE_SANDBOX_LISTEN=0.0.0.0:8080
+# The in-container workspace root the exec and filesystem tools are scoped to.
+ENV OPENWAVE_SANDBOX_WORKSPACE=/workspace
 EXPOSE 8080
 
-# distroless has no shell, so use the exec form.
+# distroless has no shell for a RUN, so use the exec form for the entrypoint.
 ENTRYPOINT ["/usr/local/bin/openwave-sandbox-agent"]
