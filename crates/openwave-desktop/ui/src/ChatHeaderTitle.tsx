@@ -1,3 +1,4 @@
+import { useNavigate } from "@tanstack/react-router";
 import { Ellipsis, Pencil, Trash2 } from "lucide-react";
 
 import type { Chat } from "./api";
@@ -12,18 +13,17 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Button } from "@/components/ui/button";
 
 /**
- * The open conversation's title, made actable from where it is shown.
+ * BW-style breadcrumb header: "Chats / chat title".
  *
- * Rename and delete used to live only on the sidebar's chat row, out of reach
- * whenever the rail was collapsed. Clicking the title here swaps it for an edit
- * field, and the menu beside it offers the same two actions — both wired to the
- * shell's existing orchestration, so a deletion of the open chat lands home the
- * same way it does from the rail. The rename draft is the shared one, so the
- * two entry points cannot disagree about what is being typed.
+ * Clicking "Chats" navigates home; clicking the title swaps it for an inline
+ * edit field. The ellipsis menu offers Rename and Delete, wired to the shell's
+ * existing orchestration.
  */
 export function ChatHeaderTitle({ chat }: { chat: Chat }) {
+  const navigate = useNavigate();
   const { startRename, commitRename, cancelRename, deleteChat } = useApp();
   const renaming = useChatListStore((state) => state.renamingChatId === chat.id);
   const renameDraft = useChatListStore((state) => state.renameChatDraft);
@@ -34,58 +34,72 @@ export function ChatHeaderTitle({ chat }: { chat: Chat }) {
     (state) => state.derivedTitleChatId === chat.id,
   );
   const title = chat.title?.trim() || "New chat";
-  // Typed out only when the name arrived just now, in step with the sidebar row
-  // showing the same conversation.
   const displayTitle = useTypewriterOnce(title, justNamed);
 
-  if (renaming) {
-    return (
-      <Input
-        className="h-auto min-w-0 max-w-sm flex-1 px-2 py-1 text-center text-sm"
-        autoFocus
-        aria-label="Chat title"
-        value={renameDraft}
-        disabled={savingTitle}
-        onChange={(event) => setRenameDraft(event.target.value)}
-        onBlur={() => commitRename(chat)}
-        onKeyDown={(event) => {
-          // Enter commits through the same blur the field would fire on losing
-          // focus; Escape flags the pending blur to skip so it does not patch.
-          if (event.key === "Enter") {
-            event.preventDefault();
-            event.currentTarget.blur();
-          }
-          if (event.key === "Escape") {
-            event.preventDefault();
-            cancelRename();
-          }
-        }}
-      />
-    );
-  }
-
   return (
-    <div className="flex min-w-0 max-w-sm flex-1 items-center justify-center gap-1">
+    <div className="flex min-w-0 items-center gap-2 text-sm">
       <button
         type="button"
-        className="min-w-0 cursor-pointer truncate rounded-md px-2 py-1 text-center text-sm font-medium transition-colors hover:bg-muted"
-        title="Rename chat"
-        onClick={() => startRename(chat)}
+        className="shrink-0 font-medium text-muted-foreground hover:underline cursor-pointer"
+        onClick={() => void navigate({ to: "/" })}
       >
-        {displayTitle}
+        Chats
       </button>
+      <span className="text-muted-foreground shrink-0">/</span>
+
+      {renaming ? (
+        <div className="inline-grid min-w-0">
+          {/* Hidden span to auto-size the grid cell */}
+          <span
+            className="invisible col-start-1 row-start-1 max-w-sm px-2 py-1 text-sm font-medium whitespace-nowrap"
+            aria-hidden="true"
+          >
+            {renameDraft || " "}
+          </span>
+          <Input
+            className="col-start-1 row-start-1 h-auto max-w-sm min-w-0 px-2 py-1 text-sm"
+            autoFocus
+            aria-label="Chat title"
+            value={renameDraft}
+            disabled={savingTitle}
+            onChange={(event) => setRenameDraft(event.target.value)}
+            onBlur={() => commitRename(chat)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                event.currentTarget.blur();
+              }
+              if (event.key === "Escape") {
+                event.preventDefault();
+                cancelRename();
+              }
+            }}
+          />
+        </div>
+      ) : (
+        <button
+          type="button"
+          className="min-w-0 truncate font-medium hover:underline cursor-pointer"
+          title="Rename chat"
+          onClick={() => startRename(chat)}
+        >
+          {displayTitle}
+        </button>
+      )}
+
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <button
-            type="button"
-            className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
-            aria-label={`Actions for ${title}`}
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="shrink-0"
             disabled={deletingChatId !== null}
           >
-            <Ellipsis size={15} />
-          </button>
+            <Ellipsis className="size-4" />
+            <span className="sr-only">Chat menu</span>
+          </Button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="center">
+        <DropdownMenuContent align="end">
           <DropdownMenuItem onSelect={() => startRename(chat)}>
             <Pencil />
             Rename
