@@ -319,6 +319,7 @@ mod tests {
         // output rather than the wire, so the generated types are what the
         // validators narrow *from* — see the aliases in api.ts.
         generate::collect_from::<crate::routes::PendingApprovalSnapshot>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::StandingGrantSnapshot>(&cfg, &mut out);
         generate::collect_from::<openwave_core::PendingUserQuestions>(&cfg, &mut out);
         generate::collect_from::<crate::routes::client_execution::PendingFolderAccessRequest>(
             &cfg, &mut out,

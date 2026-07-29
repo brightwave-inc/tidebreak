@@ -1,0 +1,212 @@
+import { useCallback, useEffect, useState } from "react";
+
+import type {
+  ApiClient,
+  GrantScope,
+  RendererToolName,
+  StandingGrantSnapshot,
+} from "../api";
+import { useConfirm } from "../components/ConfirmDialog";
+import { Button } from "@/components/ui/button";
+import { SettingsError, SettingsPanel, SettingsSection } from "./primitives";
+
+// The "what the agent can do without asking" surface: every standing grant,
+// grouped by the chat it applies to, each revocable back to being asked.
+// A grant the reader cannot find is a one-way door; this page is where it is
+// found.
+
+const TOOL_LABELS: Partial<Record<RendererToolName, string>> = {
+  exec: "Commands",
+  search: "Document search",
+  web_search: "Web search",
+};
+
+export function toolGrantLabel(action: RendererToolName): string {
+  return TOOL_LABELS[action] ?? action;
+}
+
+/**
+ * The scope line, worded as the width of what was agreed to. Mirrors the
+ * approval card's rungs: the exact action, an executable with any arguments,
+ * or the whole tool.
+ */
+export function grantScopeLabel(
+  scope: GrantScope,
+  action: RendererToolName,
+): string {
+  switch (scope.scope) {
+    case "exact_action": {
+      if (scope.tool === "exec") {
+        return [scope.command, ...scope.args].join(" ");
+      }
+      return `“${scope.query}”`;
+    }
+    case "any_args_for":
+      return `${scope.command} …`;
+    case "whole_tool":
+      switch (action) {
+        case "exec":
+          return "Any command";
+        case "search":
+          return "Every document search";
+        case "web_search":
+          return "Every web search";
+        default:
+          return `Every ${toolGrantLabel(action)} call`;
+      }
+  }
+}
+
+export function shortOpaqueId(id: string): string {
+  return id.length <= 10 ? id : `${id.slice(0, 6)}…${id.slice(-4)}`;
+}
+
+export function chatLabel(grant: StandingGrantSnapshot): string {
+  const title = grant.chat_title?.trim();
+  return title || `Chat ${shortOpaqueId(grant.chat_id)}`;
+}
+
+function grantedAtLabel(grantedAt: string): string {
+  const when = new Date(grantedAt);
+  if (Number.isNaN(when.getTime())) return "";
+  return `Added ${when.toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  })}`;
+}
+
+/** Grants in listing order, bucketed by chat without reordering across rows. */
+export function groupByChat(
+  grants: readonly StandingGrantSnapshot[],
+): { chatId: string; label: string; grants: StandingGrantSnapshot[] }[] {
+  const groups = new Map<
+    string,
+    { chatId: string; label: string; grants: StandingGrantSnapshot[] }
+  >();
+  for (const grant of grants) {
+    const group = groups.get(grant.chat_id);
+    if (group) group.grants.push(grant);
+    else
+      groups.set(grant.chat_id, {
+        chatId: grant.chat_id,
+        label: chatLabel(grant),
+        grants: [grant],
+      });
+  }
+  return [...groups.values()];
+}
+
+function GrantRow({
+  grant,
+  busy,
+  onRevoke,
+}: {
+  grant: StandingGrantSnapshot;
+  busy: boolean;
+  onRevoke: () => void;
+}) {
+  const metadata = grantedAtLabel(grant.granted_at);
+  return (
+    <div className="flex items-center justify-between gap-4">
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-medium">
+          {grantScopeLabel(grant.scope, grant.action)}
+        </p>
+        <p className="text-muted-foreground mt-0.5 truncate text-sm">
+          {toolGrantLabel(grant.action)}
+        </p>
+        {metadata && (
+          <p className="text-muted-foreground mt-1 truncate text-xs">
+            {metadata}
+          </p>
+        )}
+      </div>
+      <Button variant="ghost" size="sm" disabled={busy} onClick={onRevoke}>
+        Revoke
+      </Button>
+    </div>
+  );
+}
+
+export function PermissionsPanel({ client }: { client: ApiClient }) {
+  const [grants, setGrants] = useState<StandingGrantSnapshot[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const { confirm, dialog } = useConfirm();
+
+  const reload = useCallback(async () => {
+    try {
+      setGrants(await client.listStandingGrants());
+      setError(null);
+    } catch {
+      setError("Saved approvals could not be loaded.");
+    }
+  }, [client]);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  async function revoke(grant: StandingGrantSnapshot) {
+    const confirmed = await confirm({
+      title: "Revoke this approval?",
+      description: `The agent will ask again before ${toolGrantLabel(
+        grant.action,
+      ).toLowerCase()} covered by “${grantScopeLabel(
+        grant.scope,
+        grant.action,
+      )}” in ${chatLabel(grant)}.`,
+      confirmLabel: "Revoke",
+      destructive: true,
+    });
+    if (!confirmed) return;
+    setBusyId(grant.source_call_id);
+    try {
+      await client.revokeStandingGrant(grant.source_call_id);
+      setGrants(
+        (current) =>
+          current?.filter(
+            (existing) => existing.source_call_id !== grant.source_call_id,
+          ) ?? null,
+      );
+      setError(null);
+    } catch {
+      setError("The approval could not be revoked. Try again.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <SettingsPanel
+      title="Permissions"
+      description="What the agent can do without asking. Revoke anything to be asked again."
+      busy={grants === null}
+    >
+      {error && <SettingsError>{error}</SettingsError>}
+      {grants !== null && grants.length === 0 && !error && (
+        <p className="text-sm text-muted-foreground">
+          Nothing saved yet. When you answer an approval with “always allow”,
+          it appears here.
+        </p>
+      )}
+      {grants !== null &&
+        groupByChat(grants).map((group) => (
+          <SettingsSection key={group.chatId} title={group.label}>
+            <div className="flex flex-col gap-4">
+              {group.grants.map((grant) => (
+                <GrantRow
+                  key={grant.source_call_id}
+                  grant={grant}
+                  busy={busyId === grant.source_call_id}
+                  onRevoke={() => void revoke(grant)}
+                />
+              ))}
+            </div>
+          </SettingsSection>
+        ))}
+      {dialog}
+    </SettingsPanel>
+  );
+}

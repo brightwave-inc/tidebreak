@@ -449,6 +449,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_revoked_grant_leaves_the_list_and_stops_covering() {
+        let exec_args = json!({ "command": "cargo", "args": ["test"], "cwd": "." });
+        let (store, request) = setup_with_arguments("exec", exec_args.clone()).await;
+        let broker = ApprovalBroker::new(store.clone());
+        let pending = broker.register(request.clone(), None).await;
+        drop(pending.decision);
+        assert_eq!(
+            broker
+                .resolve_with_grant(
+                    request.chat_id,
+                    request.call_id,
+                    ApprovalDecision::Approve,
+                    Some(crate::routes::ApprovalGrantRung::WholeTool),
+                )
+                .await
+                .unwrap(),
+            ResolveApprovalOutcome::Resolved
+        );
+
+        // The grant is findable, carrying the identity a revocation names.
+        let listed = store.list_standing_tool_grants().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].source_call_id, request.call_id);
+        assert_eq!(listed[0].grant.chat_id(), request.chat_id);
+        assert_eq!(listed[0].grant.tool_name(), "exec");
+
+        // A matching later call is auto-granted while the grant stands…
+        let covered = request_for(&store, request.chat_id, "exec", exec_args.clone()).await;
+        let registration = broker.register(covered, None).await;
+        assert!(matches!(
+            registration.publication,
+            openwave_core::ApprovalRequiredPublication::StandingGrant
+        ));
+        assert_eq!(registration.decision.await, ApprovalDecision::Approve);
+
+        // …and parks on the gate again once it is revoked.
+        assert!(store
+            .revoke_standing_tool_grant(request.call_id)
+            .await
+            .unwrap());
+        assert!(store.list_standing_tool_grants().await.unwrap().is_empty());
+        assert!(!store
+            .revoke_standing_tool_grant(request.call_id)
+            .await
+            .unwrap());
+        let uncovered = request_for(&store, request.chat_id, "exec", exec_args).await;
+        let registration = broker.register(uncovered, None).await;
+        assert!(!matches!(
+            registration.publication,
+            openwave_core::ApprovalRequiredPublication::StandingGrant
+        ));
+        drop(registration.decision);
+    }
+
+    #[tokio::test]
     async fn decision_survives_broker_recreation() {
         let (store, request) = setup("search").await;
         let first = ApprovalBroker::new(store.clone());
