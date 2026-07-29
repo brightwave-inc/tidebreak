@@ -347,7 +347,32 @@ impl WorkspaceLifecycle for LocalExecutionProvider {
         // descriptor — never a path stat'd separately from the open. A
         // lstat-then-open read races a writer that keeps the path a regular
         // file at the check and swaps in a symlink to a host secret before the
-        // open, so containment must come from the descriptor we actually read.
+        // open, so on unix containment comes from the descriptor we actually
+        // read (O_NOFOLLOW + fstat below).
+        //
+        // Without O_NOFOLLOW we cannot refuse a final symlink at open time, so
+        // restore the prior cross-platform guard: reject a symlinked final
+        // component with a pre-open lstat. This is the same lstat-then-open
+        // shape the unix path deliberately abandons, kept here only to preserve
+        // the earlier refusal rather than to defend against a local race the
+        // platform cannot express away.
+        #[cfg(not(unix))]
+        match fs::symlink_metadata(&target) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(CodeExecutionError::InvalidRequest(
+                    "workspace path is not a regular file".into(),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(CodeExecutionError::WorkspaceFileNotFound);
+            }
+            Err(_) => {
+                return Err(CodeExecutionError::Sandbox(
+                    "could not read the workspace file".into(),
+                ));
+            }
+        }
         let mut open = OpenOptions::new();
         open.read(true);
         #[cfg(unix)]
@@ -1174,9 +1199,11 @@ mod tests {
             "no-follow read must refuse a symlink, got {leak:?}"
         );
 
-        // A guessable temp-name collision cannot wedge writes either: the
-        // exclusive create uses an unpredictable name, so an unrelated planted
-        // dotfile does not block a fresh put.
+        // A second write still succeeds alongside an unrelated planted dotfile.
+        // This does not exercise the temp-name defense — a fixed `.stale`
+        // suffix can never collide with the real `.workspace-put.{uuid}` name
+        // by construction — it only guards against an incidental regression
+        // where a stray dotfile wedged puts.
         fs::write(workspace_dir.join(".workspace-put.stale"), "junk").unwrap();
         provider
             .put_workspace_file(
