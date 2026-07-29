@@ -19,7 +19,9 @@ import { SettingsSidebar } from "./sidebar/SettingsSidebar";
  * Going back is the previous history entry rather than a remembered chat id.
  * Settings is reachable from everywhere, so where the reader came from is the
  * only answer that is right from all of them — and it is one fewer place that
- * has to keep its own copy of which conversation is open.
+ * has to keep its own copy of which conversation is open. That entry is always
+ * the one before settings because navigation inside settings — the index
+ * redirect and the rail's section links — replaces rather than pushes.
  */
 export function SettingsRoute() {
   const navigate = useNavigate();

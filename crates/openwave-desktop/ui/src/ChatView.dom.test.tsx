@@ -58,14 +58,12 @@ function DraftingChatView(overrides: Partial<ChatViewProps> = {}) {
       draftRef={draftRef}
       composerModelMenu={null}
       composerImages={noImages()}
-      attaching={false}
       attachedSourceName={null}
       attachError={null}
       onDraftChange={(value) => {
         draftRef.current = value;
         setDraft(value);
       }}
-      onAttach={vi.fn(async () => {})}
       onDismissAttachedSource={vi.fn()}
       onSelectPrompt={vi.fn()}
       onSend={vi.fn(async () => {})}
@@ -85,11 +83,9 @@ function renderChatView(overrides: Partial<ChatViewProps> = {}) {
     draftRef: { current: "" },
     composerModelMenu: null,
     composerImages: noImages(),
-    attaching: false,
     attachedSourceName: null,
     attachError: null,
     onDraftChange: vi.fn(),
-    onAttach: vi.fn(async () => {}),
     onDismissAttachedSource: vi.fn(),
     onSelectPrompt: vi.fn(),
     onSend: vi.fn(async () => {}),

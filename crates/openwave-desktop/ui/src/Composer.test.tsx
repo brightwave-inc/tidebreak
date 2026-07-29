@@ -287,7 +287,7 @@ describe("Composer", () => {
     expect(markup).toContain('disabled=""');
   });
 
-  it("offers one attach control, and reports what it added", () => {
+  it("reports what source was added", () => {
     const markup = renderToStaticMarkup(
       <Composer
         activeTurnId={null}
@@ -296,11 +296,8 @@ describe("Composer", () => {
         cancelPending={false}
         disabled={false}
         draft="Summarize this"
-        canAttach
-        attaching={false}
         attachedSourceName="brief.pdf"
         attachError={null}
-        onAttach={noop}
         onDismissAttachedSource={vi.fn()}
         onDraftChange={vi.fn()}
         onSend={noop}
@@ -313,11 +310,6 @@ describe("Composer", () => {
       />,
     );
 
-    // One control for any file. Which of the two things it becomes is the
-    // host's decision from the bytes, not a choice put to the reader — the
-    // menu behind this trigger offers a single upload, never a per-kind pair.
-    expect(markup).toContain('aria-label="Add to this chat"');
-    expect(markup).not.toContain('aria-label="Attach image"');
     expect(markup).toContain("brief.pdf");
     expect(markup).toContain("Added to this conversation");
     expect(markup).toContain('aria-label="Dismiss brief.pdf"');

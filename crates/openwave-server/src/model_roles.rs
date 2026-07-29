@@ -198,12 +198,61 @@ async fn gateway_defaults(
 ) -> Result<Vec<String>> {
     let mut models = providers::gateway_models(store, policy).await?;
     models.sort_by_key(|model| model.context_window);
-    Ok(models
+    Ok(selection_keys(&models))
+}
+
+/// The entitled models in the gateway's own listed order — the order the
+/// composer picker renders them, and therefore the chat role's fallback
+/// order. Contrast [`gateway_defaults`], which re-sorts the same list
+/// cheapest-first for background work.
+async fn gateway_listed(store: &dyn Store) -> Result<Vec<String>> {
+    Ok(selection_keys(
+        &providers::read_config(store, providers::ProviderKind::ModelGateway)
+            .await?
+            .models,
+    ))
+}
+
+fn selection_keys(models: &[providers::CustomModelConfig]) -> Vec<String> {
+    models
         .iter()
         .map(|model| {
             crate::model_registry::selection_key(providers::ProviderKind::ModelGateway, &model.id)
         })
-        .collect())
+        .collect()
+}
+
+/// The chat role's effective policy for `selection` under `managed`: the
+/// selection itself while its provider can serve it, else the first entitled
+/// gateway model.
+///
+/// This is one function on purpose. The roles read labels the default with it
+/// and the turn-accept seam freezes a model from it, so the model a client
+/// shows for "default" and the model the next turn actually runs cannot
+/// diverge. Unmanaged, the selection resolves as-is, dead or not: the open
+/// experience refuses loudly at send rather than silently moving a foreground
+/// turn to another provider.
+pub async fn effective_chat_policy(
+    store: &dyn Store,
+    secrets: &dyn SecretProvider,
+    managed: &crate::managed_policy::ManagedPolicy,
+    selection: &str,
+) -> Result<Option<ResolvedModelPolicy>> {
+    let resolved = providers::resolve_model_policy(store, selection, true).await?;
+    if !managed.managed {
+        return Ok(resolved);
+    }
+    if let Some(policy) = resolved {
+        if providers::provider_is_usable(store, secrets, policy.provider, managed).await? {
+            return Ok(Some(policy));
+        }
+    }
+    for key in gateway_listed(store).await? {
+        if let Some(policy) = usable_policy(store, secrets, managed, &key).await? {
+            return Ok(Some(policy));
+        }
+    }
+    Ok(None)
 }
 
 /// Resolve `selection` only if its provider is usable under `managed`.

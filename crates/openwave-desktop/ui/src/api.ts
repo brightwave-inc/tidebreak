@@ -678,6 +678,9 @@ export class ApiClient {
   putWebSearchConfig(body: {
     provider?: WebSearchProviderKind | null;
     timeout_ms?: number;
+    // Explicit null clears the configured instance URL; omitting the field
+    // leaves it as it is.
+    searxng_base_url?: string | null;
   }): Promise<WebSearchConfigInfo> {
     return this.json("/web-search", {
       method: "PUT",

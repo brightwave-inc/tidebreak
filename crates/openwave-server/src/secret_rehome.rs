@@ -24,9 +24,21 @@ use crate::providers::{ProviderKind, LEGACY_ANTHROPIC_API_KEY};
 /// Credential keys for the web-search providers. `credential_key` is a `const
 /// fn`, so the keys resolve here rather than being spelled out again.
 const WEB_SEARCH_CREDENTIAL_KEYS: &[&str] = &[
-    WebSearchProviderKind::Exa.credential_key(),
-    WebSearchProviderKind::Tavily.credential_key(),
+    web_search_credential_key(WebSearchProviderKind::Exa),
+    web_search_credential_key(WebSearchProviderKind::Tavily),
+    web_search_credential_key(WebSearchProviderKind::Brave),
 ];
+
+/// One provider's fixed credential key, in const context.
+///
+/// A credential-free provider (a self-hosted instance) stores nothing and has
+/// nothing to re-home, so listing one above is a compile-time error.
+const fn web_search_credential_key(kind: WebSearchProviderKind) -> &'static str {
+    match kind.credential_key() {
+        Some(key) => key,
+        None => panic!("web-search provider stores no credential"),
+    }
+}
 
 /// Credential keys for the code-execution providers that take one (`Local`
 /// runs in the host sandbox and has none).
@@ -192,8 +204,9 @@ mod tests {
     }
 
     /// A provider whose credential key is missing here would keep prompting
-    /// with no way to repair it. The matches are exhaustive, so adding a kind
-    /// fails to compile until its key is listed.
+    /// with no way to repair it. `ProviderKind::ALL` and
+    /// `WebSearchProviderKind::ALL` cover every variant, so adding a kind fails
+    /// this test until its key is listed.
     #[test]
     fn every_credentialed_provider_kind_is_covered() {
         let keys = stored_secret_keys();
@@ -201,14 +214,12 @@ mod tests {
         for kind in ProviderKind::ALL {
             assert!(keys.contains(&kind.credential_key()), "{kind:?}");
         }
-        for kind in [WebSearchProviderKind::Exa, WebSearchProviderKind::Tavily] {
-            match kind {
-                WebSearchProviderKind::Exa | WebSearchProviderKind::Tavily => {}
-            }
-            assert!(
-                keys.iter().any(|key| key == kind.credential_key()),
-                "{kind:?}"
-            );
+        for kind in WebSearchProviderKind::ALL {
+            // A credential-free provider stores nothing to re-home.
+            let Some(expected) = kind.credential_key() else {
+                continue;
+            };
+            assert!(keys.iter().any(|key| key == expected), "{kind:?}");
         }
         // `CodeExecutionProviderKind` is `#[non_exhaustive]`, so a match here
         // cannot stand in for coverage; assert the credentialed kinds' keys

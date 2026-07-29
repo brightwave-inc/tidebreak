@@ -1,8 +1,9 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { Plus, RefreshCw, Trash2 } from "lucide-react";
 import type {
   ApiClient,
+  GatewayApps,
   McpServerDefinition,
   McpServerInfo,
 } from "../api";
@@ -19,6 +20,13 @@ import {
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_TIMEOUT_MS = 3_600_000;
+/** Mount health lives in the local MCP supervisor, so a modest refresh while
+ * the section is visible keeps the health lines honest without gateway load. */
+const MOUNT_REFRESH_MS = 15_000;
+/** Server names cap at 32 bytes (the MCP tool namespace); endpoint slugs go
+ * to 127, so the mount name is derived, not the slug itself. Mount identity
+ * is always the `gateway_endpoint` field, never the name. */
+const MAX_NAMESPACE_BYTES = 32;
 
 function emptyServer(index: number): McpServerInfo {
   return {
@@ -78,10 +86,10 @@ export function McpPanel({
   managed = false,
 }: {
   client: ApiClient;
-  /** On a managed profile the server refuses manual server writes, so this
-   * panel becomes a read-only view of what is mounted. Gateway mounts and
-   * their health stay visible; they are added and removed from the Model
-   * Gateway panel, which is where they come from. */
+  /** On a managed profile the server refuses manual server writes, so the
+   * manual half of this panel becomes a read-only view of what is mounted.
+   * The gateway endpoints section keeps its toggles: a `gateway_endpoint`
+   * definition is exactly the write managed policy admits. */
   managed?: boolean;
 }) {
   const [servers, setServers] = useState<McpServerInfo[]>([]);
@@ -90,32 +98,154 @@ export function McpPanel({
   const [reconnecting, setReconnecting] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Gateway session state, held here because the gateway endpoints section
+  // shares this panel's one server list instead of owning a second copy.
+  const [signedIn, setSignedIn] = useState(false);
+  const [apps, setApps] = useState<GatewayApps | null>(null);
+  // Distinguishes "the apps read failed" from "no apps granted": a failure
+  // must not make configured mounts masquerade as revoked, nor hide them.
+  const [appsFailed, setAppsFailed] = useState(false);
+  // Whether any server-list read has succeeded: before one has, a mount
+  // toggle would be a write against unknown state, so the rows say so.
+  const [serversKnown, setServersKnown] = useState(false);
+  const [listError, setListError] = useState<string | null>(null);
+  // Bumped by the Retry affordance; re-runs the list effect immediately and
+  // restarts its cadence.
+  const [refreshNonce, setRefreshNonce] = useState(0);
+  const [mounting, setMounting] = useState(false);
+  // `dirty`, mirrored for the async work below: a background read or a slow
+  // mount write resolves against a render whose captured `dirty` may predate
+  // the edit it must not clobber.
+  const dirtyRef = useRef(false);
+  // Monotonic id for server-list reads: a slow in-flight read must not
+  // clobber the fresher list a write (or a newer read) has since installed.
+  const requestRef = useRef(0);
 
+  function markDirty(value: boolean) {
+    dirtyRef.current = value;
+    setDirty(value);
+  }
+
+  /** Install a fresh, authoritative server list: wholesale when nothing is
+   * unsaved; otherwise reconciled around the draft. Gateway mounts follow
+   * the saved configuration — their toggle writes immediately, and the next
+   * Save must carry the result instead of reverting it — while manual rows
+   * keep the reader's unsaved edits, and edited mount rows refresh only
+   * their health. */
+  function adoptServers(fresh: McpServerInfo[]) {
+    setServers((current) => {
+      // Reading the ref inside the updater is sound where a transition
+      // detector would not be: it only reads, so a StrictMode double-invoke
+      // computes the same list twice.
+      if (!dirtyRef.current) return fresh;
+      const freshMounts = new Map<string, McpServerInfo>();
+      for (const server of fresh) {
+        if (server.gateway_endpoint !== null) {
+          freshMounts.set(server.gateway_endpoint, server);
+        }
+      }
+      const kept = current.flatMap((server) => {
+        if (server.gateway_endpoint === null) return [server];
+        const mount = freshMounts.get(server.gateway_endpoint);
+        if (mount === undefined) return [];
+        freshMounts.delete(server.gateway_endpoint);
+        return [
+          {
+            ...server,
+            health: mount.health,
+            tool_count: mount.tool_count,
+            diagnostic: mount.diagnostic,
+          },
+        ];
+      });
+      return [...kept, ...freshMounts.values()];
+    });
+  }
+
+  // An unreachable gateway reads as signed out: the endpoints section then
+  // treats entitlements as unknown rather than failing a page whose subject
+  // is the local MCP configuration.
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    setError(null);
-    void client
-      .listMcpServers()
-      .then((result) => {
-        if (!cancelled) {
-          setServers(result.servers);
-          setDirty(false);
-        }
+    client
+      .getGatewayStatus()
+      .then((status) => {
+        if (!cancelled) setSignedIn(status.signed_in);
       })
-      .catch((err) => {
-        if (!cancelled) setError(String(err));
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
+      .catch(() => {
+        if (!cancelled) setSignedIn(false);
       });
     return () => {
       cancelled = true;
     };
   }, [client]);
 
+  // Entitled apps are never cached server-side (a revoked grant disappears on
+  // the next request), so fetch them fresh whenever the signed-in state turns
+  // on. A fetch failure is remembered, so mount rows can say entitlements are
+  // unknown instead of claiming anything.
+  useEffect(() => {
+    if (!signedIn) {
+      setApps(null);
+      setAppsFailed(false);
+      return;
+    }
+    let cancelled = false;
+    client
+      .getGatewayApps()
+      .then((next) => {
+        if (!cancelled) {
+          setApps(next);
+          setAppsFailed(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setApps(null);
+          setAppsFailed(true);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, signedIn]);
+
+  // The one reader of the server list: the initial load, the Retry
+  // affordance, and — while a gateway session exists — a steady cadence, so
+  // a mount that degrades after the first read doesn't keep a stale healthy
+  // line. A failed read keeps the last-known rows and surfaces a retryable
+  // error instead of silently disabling every toggle.
+  useEffect(() => {
+    const read = async () => {
+      const request = ++requestRef.current;
+      try {
+        const result = await client.listMcpServers();
+        if (request !== requestRef.current) return;
+        adoptServers(result.servers);
+        setServersKnown(true);
+        setListError(null);
+        setLoading(false);
+      } catch (err) {
+        if (request !== requestRef.current) return;
+        setListError(errorMessage(err));
+        setLoading(false);
+      }
+    };
+    void read();
+    const timer = signedIn
+      ? window.setInterval(() => void read(), MOUNT_REFRESH_MS)
+      : null;
+    return () => {
+      // Invalidate any in-flight read; a re-run issues fresh ids above this.
+      requestRef.current += 1;
+      if (timer !== null) window.clearInterval(timer);
+    };
+    // adoptServers touches only refs and state setters, so the effect only
+    // re-runs when a read would actually change: client, session, retry.
+  }, [client, signedIn, refreshNonce]);
+
   function update(index: number, change: Partial<McpServerInfo>) {
-    setDirty(true);
+    markDirty(true);
     setServers((current) =>
       current.map((server, itemIndex) =>
         itemIndex === index ? { ...server, ...change } : server,
@@ -128,13 +258,47 @@ export function McpPanel({
     setError(null);
     try {
       const result = await client.putMcpServers(servers.map(definition));
+      // Supersede any in-flight background read; this list is fresher.
+      requestRef.current += 1;
       setServers(result.servers);
-      setDirty(false);
+      setServersKnown(true);
+      setListError(null);
+      markDirty(false);
       toast.success("Saved MCP servers");
     } catch (err) {
-      setError(String(err));
+      setError(errorMessage(err));
     } finally {
       setSaving(false);
+    }
+  }
+
+  /** Mount or unmount one endpoint: an immediate, complete configuration
+   * write, rebuilt from the live configuration rather than the draft above
+   * so it never persists an unsaved edit — nor drops a server saved from
+   * elsewhere in the meantime. */
+  async function setMounted(slug: string, mounted: boolean) {
+    setMounting(true);
+    setError(null);
+    try {
+      const current = (await client.listMcpServers()).servers.map(definition);
+      const without = current.filter(
+        (server) => server.gateway_endpoint !== slug,
+      );
+      const taken = new Set(without.map((server) => server.name));
+      const next = mounted
+        ? [...without, mountDefinition(slug, mountName(slug, taken))]
+        : without;
+      const result = await client.putMcpServers(next);
+      // Supersede any in-flight background read; this list is fresher.
+      requestRef.current += 1;
+      adoptServers(result.servers);
+      setServersKnown(true);
+      setListError(null);
+      toast.success(mounted ? `Mounted ${slug}` : `Unmounted ${slug}`);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setMounting(false);
     }
   }
 
@@ -150,11 +314,13 @@ export function McpPanel({
     );
     try {
       const result = await client.reconnectMcpServer(name);
+      requestRef.current += 1;
       setServers(result.servers);
     } catch (err) {
-      setError(String(err));
+      setError(errorMessage(err));
       try {
         const result = await client.listMcpServers();
+        requestRef.current += 1;
         setServers(result.servers);
       } catch {
         // Preserve the reconnect error; reopening Settings performs a full load.
@@ -164,20 +330,68 @@ export function McpPanel({
     }
   }
 
-  const working = saving || reconnecting !== null;
+  const working = saving || reconnecting !== null || mounting;
+
+  const entitledSlugs = new Set(
+    apps?.apps.flatMap((app) => app.mcp_endpoint_slugs) ?? [],
+  );
+  // Rows are the union of what's entitled and what's configured: a mount
+  // whose grant was revoked — or whose session signed out — must keep its
+  // row rather than dropping to a bare failing server in the list.
+  const endpointSlugs = [
+    ...new Set([
+      ...entitledSlugs,
+      ...servers
+        .map((server) => server.gateway_endpoint)
+        .filter((slug): slug is string => slug !== null),
+    ]),
+  ];
+  // Signed out, the section still lists configured mounts (toggles off,
+  // pointing at sign-in); it disappears only when there is nothing to show —
+  // an unpaired profile with no gateway mounts.
+  const endpointsVisible =
+    endpointSlugs.length > 0 || (signedIn && listError !== null);
+  const endpointsSection = endpointsVisible && (
+    <GatewayEndpoints
+      signedIn={signedIn}
+      slugs={endpointSlugs}
+      servers={servers}
+      serversKnown={serversKnown}
+      entitledSlugs={apps?.supported === true ? entitledSlugs : null}
+      appsFailed={appsFailed}
+      listError={listError}
+      working={working}
+      onRetry={() => {
+        // One error surface: a retry that recovers the list must not leave a
+        // stale action error standing beside fresh rows.
+        setError(null);
+        setRefreshNonce((nonce) => nonce + 1);
+      }}
+      onToggle={(slug, mounted) => void setMounted(slug, mounted)}
+    />
+  );
+  // A failed list read still surfaces (without the section's Retry) when the
+  // section that normally carries it has nothing else to show.
+  const fallbackListError = !endpointsVisible && listError !== null && (
+    <SettingsError>
+      Couldn't read the MCP server list: {listError}
+    </SettingsError>
+  );
 
   if (managed) {
     return (
       <SettingsPanel
         title="MCP servers"
         description="Tool servers provided by your organization's model gateway."
-        busy={loading}
+        busy={loading || working}
       >
+        {endpointsSection}
         {loading ? (
           <p className="text-sm text-muted-foreground">Loading MCP servers…</p>
         ) : (
           <ManagedServerList servers={servers} />
         )}
+        {fallbackListError}
         {error && <SettingsError>{error}</SettingsError>}
       </SettingsPanel>
     );
@@ -189,6 +403,7 @@ export function McpPanel({
       description="Connect local stdio tool servers or remote HTTP endpoints without a shell or a desktop restart."
       busy={loading || working}
     >
+      {endpointsSection}
       {loading ? (
         <p className="text-sm text-muted-foreground">
           Loading MCP servers…
@@ -257,7 +472,7 @@ export function McpPanel({
                   Managed by the Model Gateway (endpoint{" "}
                   <code>{server.gateway_endpoint}</code>). Its URL and
                   short-lived credentials come from the signed-in gateway
-                  session; mount or unmount it from the Model Gateway panel.
+                  session; mount or unmount it under Gateway endpoints above.
                 </p>
               )}
 
@@ -423,22 +638,39 @@ export function McpPanel({
                       : "Reconnect and refresh tools"}
                   </Button>
                 )}
-                <Button
-                  type="button"
-                  variant="destructive"
-                  disabled={working}
-                  onClick={() =>
-                    setServers((current) => {
-                      setDirty(true);
-                      return current.filter(
-                        (_, itemIndex) => itemIndex !== index,
+                {/* Mounts are owned by the mount write, not the draft: a
+                    draft deletion would be undone by the next reconcile,
+                    which re-adds every configured mount. Unmounting writes
+                    immediately, like the section's toggle. */}
+                {transportOf(server) === "gateway" ? (
+                  <Button
+                    type="button"
+                    variant="destructive"
+                    disabled={working}
+                    onClick={() => {
+                      const slug = server.gateway_endpoint;
+                      if (slug !== null) void setMounted(slug, false);
+                    }}
+                  >
+                    <Trash2 size={14} />
+                    Unmount
+                  </Button>
+                ) : (
+                  <Button
+                    type="button"
+                    variant="destructive"
+                    disabled={working}
+                    onClick={() => {
+                      markDirty(true);
+                      setServers((current) =>
+                        current.filter((_, itemIndex) => itemIndex !== index),
                       );
-                    })
-                  }
-                >
-                  <Trash2 size={14} />
-                  Remove
-                </Button>
+                    }}
+                  >
+                    <Trash2 size={14} />
+                    Remove
+                  </Button>
+                )}
               </div>
             </SettingsSection>
           ))}
@@ -448,12 +680,13 @@ export function McpPanel({
               type="button"
               variant="outline"
               disabled={working}
-              onClick={() =>
-                setServers((current) => {
-                  setDirty(true);
-                  return [...current, emptyServer(current.length)];
-                })
-              }
+              onClick={() => {
+                markDirty(true);
+                setServers((current) => [
+                  ...current,
+                  emptyServer(current.length),
+                ]);
+              }}
             >
               <Plus size={14} />
               Add server
@@ -478,8 +711,178 @@ export function McpPanel({
           </p>
         </>
       )}
+      {fallbackListError}
       {error && <SettingsError>{error}</SettingsError>}
     </SettingsPanel>
+  );
+}
+
+/** A valid, unused namespace for a mount: the slug, truncated to the name
+ * limit and de-duplicated against every configured server. */
+function mountName(slug: string, taken: ReadonlySet<string>): string {
+  const base = slug.slice(0, MAX_NAMESPACE_BYTES);
+  if (!taken.has(base)) return base;
+  for (let n = 2; ; n += 1) {
+    const suffix = `_${n}`;
+    const candidate =
+      base.slice(0, MAX_NAMESPACE_BYTES - suffix.length) + suffix;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
+/** Sentence-shaped status for a mount row; diagnostics already are one. */
+function mountStatus(mounted: McpServerInfo): string {
+  if (mounted.health === "healthy") {
+    return `${mounted.tool_count} tool${mounted.tool_count === 1 ? "" : "s"} available to new turns.`;
+  }
+  if (mounted.diagnostic) return mounted.diagnostic;
+  switch (mounted.health) {
+    case "initializing":
+    case "reconnecting":
+      return "Connecting…";
+    case "disabled":
+      return "Disabled in its server entry.";
+    default:
+      return "Needs attention. See its server entry.";
+  }
+}
+
+/** A message that can sit mid-sentence: `String(err)` would keep the error
+ * class prefix ("HttpError: ...") in front of it. */
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** A fresh gateway mount: everything comes from the session except the name,
+ * which doubles as the tool namespace. */
+function mountDefinition(slug: string, name: string): McpServerDefinition {
+  return {
+    name,
+    command: null,
+    args: [],
+    env: {},
+    env_from: [],
+    cwd: null,
+    url: null,
+    bearer_token_env: null,
+    gateway_endpoint: slug,
+    request_timeout_ms: DEFAULT_TIMEOUT_MS,
+    enabled: true,
+  };
+}
+
+/**
+ * The gateway's MCP endpoints, and the toggle that mounts each one.
+ *
+ * Mounting belongs beside the health of what is mounted, so it lives here
+ * rather than in the Model Gateway panel, which keeps the connected apps as
+ * an informational list. A `gateway_endpoint` definition is the one write
+ * managed policy admits, so these toggles stay live on a managed profile
+ * where every manual server on this page is read-only.
+ *
+ * Purely presentational: the panel owns the single server list this section
+ * reads, its refresh cadence, and the mount writes, so there is no second
+ * copy of the configuration to fall out of step with the editor beside it.
+ */
+function GatewayEndpoints({
+  signedIn,
+  slugs,
+  servers,
+  serversKnown,
+  entitledSlugs,
+  appsFailed,
+  listError,
+  working,
+  onRetry,
+  onToggle,
+}: {
+  signedIn: boolean;
+  slugs: string[];
+  servers: McpServerInfo[];
+  /** Whether any server-list read has succeeded yet; before one has, mount
+   * state is unknown and the rows say so instead of writing blind. */
+  serversKnown: boolean;
+  /** null while entitlements are unknown — signed out, an older gateway, or
+   * a failed apps read — so no row ever claims a revocation it can't know. */
+  entitledSlugs: ReadonlySet<string> | null;
+  appsFailed: boolean;
+  listError: string | null;
+  working: boolean;
+  onRetry: () => void;
+  onToggle: (slug: string, mounted: boolean) => void;
+}) {
+  /** The one line under a mount row: unknown beats revoked beats health. */
+  const rowNote = (slug: string, mounted: McpServerInfo | undefined) => {
+    if (!serversKnown) return "Mount state unknown.";
+    if (entitledSlugs !== null && !entitledSlugs.has(slug)) {
+      return "No longer granted to your teams. Switch off to unmount it.";
+    }
+    return mounted ? mountStatus(mounted) : null;
+  };
+
+  return (
+    <SettingsSection
+      title="Gateway endpoints"
+      description="Mounted endpoints connect with your gateway session — no tokens to copy, and they reconnect after you sign back in."
+    >
+      {!signedIn && (
+        <p className="text-muted-foreground text-xs">
+          Sign in to the Model Gateway to mount or unmount endpoints. The
+          configured mounts stay listed meanwhile.
+        </p>
+      )}
+      {appsFailed && (
+        <p className="text-muted-foreground text-xs">
+          Couldn't read your entitlements from the gateway; these are the
+          configured mounts.
+        </p>
+      )}
+      {listError !== null && (
+        <div className="flex items-center justify-between gap-4">
+          <SettingsError>
+            Couldn't read the MCP server list: {listError}
+          </SettingsError>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={working}
+            onClick={onRetry}
+          >
+            <RefreshCw size={14} />
+            Retry
+          </Button>
+        </div>
+      )}
+      {slugs.length > 0 && (
+        <ul className="flex flex-col gap-2">
+          {slugs.map((slug) => {
+            const mounted = servers.find(
+              (server) => server.gateway_endpoint === slug,
+            );
+            const note = rowNote(slug, mounted);
+            return (
+              <li
+                key={slug}
+                className="flex items-center justify-between gap-4 rounded-md border px-3 py-2 text-sm"
+              >
+                <div className="min-w-0 flex-1">
+                  <code className="font-medium">{slug}</code>
+                  {note && (
+                    <p className="text-muted-foreground text-xs">{note}</p>
+                  )}
+                </div>
+                <Switch
+                  aria-label={`Mount ${slug}`}
+                  checked={mounted !== undefined}
+                  disabled={!signedIn || working || !serversKnown}
+                  onCheckedChange={(checked) => onToggle(slug, checked)}
+                />
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </SettingsSection>
   );
 }
 
@@ -497,8 +900,8 @@ function ManagedServerList({ servers }: { servers: McpServerInfo[] }) {
       {servers.length === 0 && (
         <SettingsSection>
           <p className="text-sm text-muted-foreground">
-            No MCP servers are mounted. Mount the endpoints you are entitled to
-            from the Model Gateway section.
+            No MCP servers are mounted. Any endpoints your teams are granted
+            appear under Gateway endpoints above.
           </p>
         </SettingsSection>
       )}
@@ -521,8 +924,8 @@ function ManagedServerList({ servers }: { servers: McpServerInfo[] }) {
           {transportOf(server) === "gateway" ? (
             <p className="text-sm text-muted-foreground">
               Managed by the Model Gateway (endpoint{" "}
-              <code>{server.gateway_endpoint}</code>). Mount or unmount it from
-              the Model Gateway section.
+              <code>{server.gateway_endpoint}</code>). Mount or unmount it under
+              Gateway endpoints above.
             </p>
           ) : (
             <p className="text-sm text-muted-foreground">

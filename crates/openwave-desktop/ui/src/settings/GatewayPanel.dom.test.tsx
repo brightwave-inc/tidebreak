@@ -22,40 +22,6 @@ const signedIn: GatewayStatus = {
   model_count: 2,
 };
 
-/** A configured gateway mount as `listMcpServers` reports it. */
-function gatewayMount(slug: string, overrides: Record<string, unknown> = {}) {
-  return {
-    name: slug,
-    command: null,
-    args: [],
-    env: {},
-    env_from: [],
-    cwd: null,
-    url: null,
-    bearer_token_env: null,
-    gateway_endpoint: slug,
-    request_timeout_ms: 60_000,
-    enabled: true,
-    health: "healthy",
-    tool_count: 3,
-    diagnostic: null,
-    ...overrides,
-  };
-}
-
-const incidentApps = {
-  supported: true,
-  apps: [
-    {
-      id: "app-1",
-      name: "Incident API",
-      app_kind: "rest_api",
-      enabled: true,
-      mcp_endpoint_slugs: ["example-security-tools"],
-    },
-  ],
-};
-
 function api(overrides: Partial<Record<keyof ApiClient, unknown>> = {}) {
   return {
     getGatewayStatus: vi.fn().mockResolvedValue(signedOut),
@@ -65,8 +31,6 @@ function api(overrides: Partial<Record<keyof ApiClient, unknown>> = {}) {
     gatewaySignOut: vi.fn().mockResolvedValue(signedOut),
     syncGatewayModels: vi.fn().mockResolvedValue(signedIn),
     getGatewayApps: vi.fn().mockResolvedValue({ supported: true, apps: [] }),
-    listMcpServers: vi.fn().mockResolvedValue({ servers: [] }),
-    putMcpServers: vi.fn().mockResolvedValue({ servers: [] }),
     putProvider: vi.fn().mockResolvedValue({}),
     ...overrides,
   } as unknown as ApiClient;
@@ -84,7 +48,13 @@ describe("GatewayPanel", () => {
     const open = vi.fn();
     vi.stubGlobal("open", open);
     const user = userEvent.setup();
-    render(<GatewayPanel client={client} onChanged={() => undefined} />);
+    render(
+      <GatewayPanel
+        client={client}
+        onChanged={() => undefined}
+        onOpenMcpSettings={() => undefined}
+      />,
+    );
 
     expect(await screen.findByText("Not signed in")).toBeInTheDocument();
     expect(screen.queryByPlaceholderText(/API key/i)).not.toBeInTheDocument();
@@ -105,7 +75,13 @@ describe("GatewayPanel", () => {
     });
     const onChanged = vi.fn();
     const user = userEvent.setup();
-    render(<GatewayPanel client={client} onChanged={onChanged} />);
+    render(
+      <GatewayPanel
+        client={client}
+        onChanged={onChanged}
+        onOpenMcpSettings={() => undefined}
+      />,
+    );
 
     expect(await screen.findByText("Signed in")).toBeInTheDocument();
     expect(screen.getByText(/abaas@example\.test/)).toBeInTheDocument();
@@ -127,7 +103,13 @@ describe("GatewayPanel", () => {
         .mockResolvedValue({ ...signedOut, configured: false, base_url: undefined }),
     });
     const user = userEvent.setup();
-    render(<GatewayPanel client={client} onChanged={() => undefined} />);
+    render(
+      <GatewayPanel
+        client={client}
+        onChanged={() => undefined}
+        onOpenMcpSettings={() => undefined}
+      />,
+    );
 
     await screen.findByText("Not signed in");
     // Unconfigured, the connect affordance stays off.
@@ -157,7 +139,13 @@ describe("GatewayPanel", () => {
     const client = api({ getGatewayStatus });
     const onChanged = vi.fn();
     vi.useFakeTimers();
-    render(<GatewayPanel client={client} onChanged={onChanged} />);
+    render(
+      <GatewayPanel
+        client={client}
+        onChanged={onChanged}
+        onOpenMcpSettings={() => undefined}
+      />,
+    );
     // Flush the initial status load.
     await act(async () => {});
 
@@ -190,7 +178,13 @@ describe("GatewayPanel", () => {
         ],
       }),
     });
-    render(<GatewayPanel client={client} onChanged={() => undefined} />);
+    render(
+      <GatewayPanel
+        client={client}
+        onChanged={() => undefined}
+        onOpenMcpSettings={() => undefined}
+      />,
+    );
 
     expect(await screen.findByText("Incident API")).toBeInTheDocument();
     expect(screen.getByText(/via example-security-tools/)).toBeInTheDocument();
@@ -203,32 +197,22 @@ describe("GatewayPanel", () => {
         .fn()
         .mockResolvedValue({ supported: false, apps: [] }),
     });
-    render(<GatewayPanel client={older} onChanged={() => undefined} />);
+    render(
+      <GatewayPanel
+        client={older}
+        onChanged={() => undefined}
+        onOpenMcpSettings={() => undefined}
+      />,
+    );
     expect(await screen.findByText("Signed in")).toBeInTheDocument();
     expect(screen.queryByText("Connected apps")).not.toBeInTheDocument();
+    // The route to mounting still shows: older gateways mount by slug too.
+    expect(
+      screen.getByRole("button", { name: /Mount endpoints in MCP servers/ }),
+    ).toBeInTheDocument();
   });
 
-  it("mounts a gateway endpoint with a session-bound definition", async () => {
-    const putMcpServers = vi.fn().mockResolvedValue({
-      servers: [
-        {
-          name: "example-security-tools",
-          command: null,
-          args: [],
-          env: {},
-          env_from: [],
-          cwd: null,
-          url: null,
-          bearer_token_env: null,
-          gateway_endpoint: "example-security-tools",
-          request_timeout_ms: 60_000,
-          enabled: true,
-          health: "healthy",
-          tool_count: 3,
-          diagnostic: null,
-        },
-      ],
-    });
+  it("keeps connected apps informational and sends mounting to the MCP page", async () => {
     const client = api({
       getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
       getGatewayApps: vi.fn().mockResolvedValue({
@@ -243,188 +227,26 @@ describe("GatewayPanel", () => {
           },
         ],
       }),
-      putMcpServers,
     });
+    const openMcpSettings = vi.fn();
     const user = userEvent.setup();
-    render(<GatewayPanel client={client} onChanged={() => undefined} />);
-
-    await user.click(
-      await screen.findByRole("switch", {
-        name: "Mount example-security-tools",
-      }),
+    render(
+      <GatewayPanel
+        client={client}
+        onChanged={() => undefined}
+        onOpenMcpSettings={openMcpSettings}
+      />,
     );
-    await waitFor(() =>
-      expect(putMcpServers).toHaveBeenCalledWith([
-        expect.objectContaining({
-          name: "example-security-tools",
-          gateway_endpoint: "example-security-tools",
-          url: null,
-          bearer_token_env: null,
-        }),
-      ]),
-    );
-    // The saved mount reports its health inline.
-    expect(await screen.findByText(/3 tools available/)).toBeInTheDocument();
-  });
 
-  it("derives a mount name that fits the namespace limit for long slugs", async () => {
-    const longSlug = "a-very-long-endpoint-slug-that-exceeds-the-name-limit";
-    const putMcpServers = vi.fn().mockResolvedValue({ servers: [] });
-    const client = api({
-      getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
-      getGatewayApps: vi.fn().mockResolvedValue({
-        supported: true,
-        apps: [
-          {
-            id: "app-1",
-            name: "Incident API",
-            app_kind: "rest_api",
-            enabled: true,
-            mcp_endpoint_slugs: [longSlug],
-          },
-        ],
-      }),
-      putMcpServers,
-    });
-    const user = userEvent.setup();
-    render(<GatewayPanel client={client} onChanged={() => undefined} />);
-
-    await user.click(
-      await screen.findByRole("switch", { name: `Mount ${longSlug}` }),
-    );
-    await waitFor(() =>
-      expect(putMcpServers).toHaveBeenCalledWith([
-        expect.objectContaining({
-          name: longSlug.slice(0, 32),
-          gateway_endpoint: longSlug,
-        }),
-      ]),
-    );
-  });
-
-  it("keeps a row and unmount toggle for a mount whose entitlement was revoked", async () => {
-    const revokedMount = gatewayMount("revoked-tools", {
-      health: "reconnecting",
-      tool_count: 0,
-    });
-    const putMcpServers = vi.fn().mockResolvedValue({ servers: [] });
-    const client = api({
-      getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
-      // No entitled app references the mounted slug any more.
-      getGatewayApps: vi.fn().mockResolvedValue({ supported: true, apps: [] }),
-      listMcpServers: vi.fn().mockResolvedValue({ servers: [revokedMount] }),
-      putMcpServers,
-    });
-    const user = userEvent.setup();
-    render(<GatewayPanel client={client} onChanged={() => undefined} />);
-
-    // The configured mount keeps its row, with an explanation instead of a
-    // health line.
-    expect(await screen.findByText("revoked-tools")).toBeInTheDocument();
+    expect(await screen.findByText("Incident API")).toBeInTheDocument();
     expect(
-      screen.getByText(/No longer granted to your teams/),
-    ).toBeInTheDocument();
-    // The explanation replaces the health line, and the apps section's empty
-    // copy doesn't sit above a populated mount list.
-    expect(screen.queryByText(/Connecting/)).not.toBeInTheDocument();
-    expect(
-      screen.queryByText(/No connected apps are granted/),
+      screen.queryByRole("switch", { name: /^Mount / }),
     ).not.toBeInTheDocument();
 
-    // And the toggle still unmounts it.
-    const toggle = screen.getByRole("switch", { name: "Mount revoked-tools" });
-    expect(toggle).toBeChecked();
-    await user.click(toggle);
-    await waitFor(() => expect(putMcpServers).toHaveBeenCalledWith([]));
-  });
-
-  it("surfaces a failed server-list fetch as a retryable error, not dead toggles", async () => {
-    const listMcpServers = vi
-      .fn()
-      .mockRejectedValueOnce(new Error("mcp backend unavailable"))
-      .mockResolvedValue({ servers: [] });
-    const client = api({
-      getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
-      getGatewayApps: vi.fn().mockResolvedValue(incidentApps),
-      listMcpServers,
-    });
-    const user = userEvent.setup();
-    render(<GatewayPanel client={client} onChanged={() => undefined} />);
-
-    // The failure is visible and named, and the disabled toggle is explained
-    // rather than passing unknown off as unmounted.
-    expect(
-      await screen.findByText(/mcp backend unavailable/),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("switch", { name: "Mount example-security-tools" }),
-    ).toBeDisabled();
-    expect(screen.getByText(/Mount state unknown/)).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: /Retry/ }));
-    await waitFor(() =>
-      expect(
-        screen.queryByText(/mcp backend unavailable/),
-      ).not.toBeInTheDocument(),
+    await user.click(
+      screen.getByRole("button", { name: /Mount endpoints in MCP servers/ }),
     );
-    expect(
-      screen.getByRole("switch", { name: "Mount example-security-tools" }),
-    ).toBeEnabled();
-  });
-
-  it("keeps last-known rows and live toggles when a later refresh fails", async () => {
-    const listMcpServers = vi
-      .fn()
-      .mockResolvedValueOnce({ servers: [gatewayMount("example-security-tools")] })
-      .mockRejectedValue(new Error("mcp backend unavailable"));
-    const client = api({
-      getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
-      getGatewayApps: vi.fn().mockResolvedValue(incidentApps),
-      listMcpServers,
-    });
-    vi.useFakeTimers();
-    render(<GatewayPanel client={client} onChanged={() => undefined} />);
-    await act(async () => {});
-    expect(screen.getByText(/3 tools available/)).toBeInTheDocument();
-
-    // The 15s refresh fails: the error appears, but the last-known row keeps
-    // its health line and a usable toggle instead of resetting to unknown.
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(15_100);
-    });
-    expect(screen.getByText(/mcp backend unavailable/)).toBeInTheDocument();
-    expect(screen.getByText(/3 tools available/)).toBeInTheDocument();
-    const toggle = screen.getByRole("switch", {
-      name: "Mount example-security-tools",
-    });
-    expect(toggle).toBeChecked();
-    expect(toggle).toBeEnabled();
-  });
-
-  it("still shows configured mounts when entitlements cannot be read", async () => {
-    const client = api({
-      getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
-      getGatewayApps: vi
-        .fn()
-        .mockRejectedValue(new Error("gateway unreachable")),
-      listMcpServers: vi.fn().mockResolvedValue({
-        servers: [gatewayMount("example-security-tools")],
-      }),
-    });
-    render(<GatewayPanel client={client} onChanged={() => undefined} />);
-
-    // The row survives the apps failure, labeled unknown-entitlements — never
-    // misreported as revoked.
-    expect(
-      await screen.findByText("example-security-tools"),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/Couldn't read your entitlements/),
-    ).toBeInTheDocument();
-    expect(screen.queryByText(/No longer granted/)).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("switch", { name: "Mount example-security-tools" }),
-    ).toBeChecked();
+    expect(openMcpSettings).toHaveBeenCalled();
   });
 
   it("surfaces a failed sign-in with its bounded message", async () => {
@@ -434,7 +256,13 @@ describe("GatewayPanel", () => {
         sign_in: { state: "failed", message: "browser authorization timed out" },
       }),
     });
-    render(<GatewayPanel client={client} onChanged={() => undefined} />);
+    render(
+      <GatewayPanel
+        client={client}
+        onChanged={() => undefined}
+        onOpenMcpSettings={() => undefined}
+      />,
+    );
 
     expect(
       await screen.findByText(/browser authorization timed out/),

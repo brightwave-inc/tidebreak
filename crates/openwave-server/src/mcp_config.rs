@@ -431,8 +431,8 @@ impl McpRuntime {
     ///
     /// Managed lockdown refuses these rather than every manual definition in
     /// the body: a profile that carried manual servers before it was managed
-    /// keeps them (inert, see [`MANAGED_DISABLED_DIAGNOSTIC`]), and the
-    /// gateway panel — which saves the complete server list to mount an
+    /// keeps them (inert, see [`MANAGED_DISABLED_DIAGNOSTIC`]), and the MCP
+    /// servers page — which saves the complete server list to mount a gateway
     /// endpoint — is not blocked by their presence. Removing one is a
     /// candidate without it, so nothing is trapped in the configuration.
     ///
