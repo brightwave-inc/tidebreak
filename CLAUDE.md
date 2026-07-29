@@ -129,13 +129,20 @@ is the whole rule, and it is coarse on purpose:
 - The aggregate `fmt · clippy · build · test` check asserts each lane either
   succeeded or was legitimately skipped, and branch protection requires it. A
   lane is skipped only when the change could not have affected it.
-- **One exception, and it is a real coverage gap:** the `durable vector store`
-  lane no longer runs on pull requests. LanceDB is the most expensive thing in
-  CI and the durable store is parked, so it runs only on merges to `main` and on
-  `workflow_dispatch`. If you touch `openwave-retrieval`, the `vec-lance`
+- The two heavyweight capability lanes are scoped separately on merges to
+  `main`. `durable vector store` runs when retrieval, its server/CLI/desktop
+  feature wiring, or dependency/toolchain inputs change. `sandbox-resident
+  container e2e` runs when the sandbox agent/protocol, container driver,
+  Dockerfile, or dependency/toolchain inputs change. A weekly scheduled run and
+  every `workflow_dispatch` exercise both as a backstop.
+- **One exception, and it is a real coverage gap:** neither heavyweight lane
+  runs on pull requests. If you touch `openwave-retrieval`, the `vec-lance`
   feature, or the release guard in `openwave-server`'s build script, run
   `cargo test -p openwave-retrieval --features vec-lance` locally — a PR going
-  green says nothing about it. Tracked in #760.
+  green says nothing about LanceDB. Tracked in #760. The container path has
+  lower residual risk because PRs drive the same host driver against the real
+  sandbox agent over loopback, but only the post-merge/scheduled lane proves the
+  Docker packaging and container network boundary.
 
 So a scoped skip is not a coverage hole, and duplicating those lanes locally is
 wasted time. Run a cheap subset for fast feedback on what you actually touched —

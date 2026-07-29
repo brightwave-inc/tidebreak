@@ -6,6 +6,11 @@ on:
   pull_request:
     types:
       [opened, reopened, synchronize, edited, labeled, unlabeled, ready_for_review]
+  # Backstop the deliberately scoped post-merge capability lanes even during a
+  # week with no relevant merge. The non-PR full-validation path below makes a
+  # scheduled run exercise every lane.
+  schedule:
+    - cron: "17 6 * * 1"
   workflow_dispatch:
 
 # Least privilege by default; fork PRs get read-only.
@@ -91,7 +96,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       rust: ${{ steps.scope.outputs.rust }}
+      sandbox_container: ${{ steps.scope.outputs.sandbox_container }}
       ui: ${{ steps.scope.outputs.ui }}
+      vectors: ${{ steps.scope.outputs.vectors }}
       workspace: ${{ steps.scope.outputs.workspace }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -109,7 +116,9 @@ jobs:
           full_validation() {
             {
               echo "rust=true"
+              echo "sandbox_container=true"
               echo "ui=true"
+              echo "vectors=true"
               echo "workspace=true"
             } >> "$GITHUB_OUTPUT"
           }
@@ -125,7 +134,7 @@ jobs:
               head_sha="$PUSH_HEAD_SHA"
               diff_range="$base_sha..$head_sha"
               ;;
-            workflow_dispatch)
+            schedule|workflow_dispatch)
               full_validation
               exit 0
               ;;
@@ -148,14 +157,30 @@ jobs:
           # change cannot reach them. `workspace` implies `rust`; the gate below
           # asserts that.
           rust=false
+          sandbox_container=false
           ui=false
+          vectors=false
           workspace=false
           git diff --no-renames --name-only -z "$diff_range" \
             > "$RUNNER_TEMP/changed-files"
           while IFS= read -r -d '' file; do
             case "$file" in
               *.md|docs/*|assets/*|LICENSE|NOTICE) ;;
-              .github/workflows/ci.yml) rust=true; ui=true; workspace=true ;;
+              .github/workflows/ci.yml)
+                rust=true
+                sandbox_container=true
+                ui=true
+                vectors=true
+                workspace=true
+                ;;
+              # These inputs can change dependency resolution or compiler
+              # behavior for either heavyweight capability.
+              .cargo/*|Cargo.lock|Cargo.toml|rust-toolchain.toml)
+                rust=true
+                sandbox_container=true
+                vectors=true
+                workspace=true
+                ;;
               # Generated from Rust definitions, and a Rust test is what checks
               # the checked-in copy is current. Editing this by hand has to run
               # that test, or the staleness check has a bypass. The test lives in
@@ -166,7 +191,42 @@ jobs:
               crates/openwave-desktop/ui/*) ui=true ;;
               # The manifest forwards features into openwave-server, so it can
               # change how the rest of the workspace builds. Its sources cannot.
-              crates/openwave-desktop/Cargo.toml) rust=true; workspace=true ;;
+              crates/openwave-desktop/Cargo.toml)
+                rust=true
+                vectors=true
+                workspace=true
+                ;;
+              # The CLI forwards the release-only durable-store feature.
+              crates/openwave-cli/Cargo.toml)
+                rust=true
+                vectors=true
+                workspace=true
+                ;;
+              # LanceDB behavior and the server's production wiring are the
+              # only surfaces the durable-store lane adds over headless tests.
+              crates/openwave-retrieval/*)
+                rust=true
+                vectors=true
+                workspace=true
+                ;;
+              crates/openwave-server/Cargo.toml)
+                rust=true
+                sandbox_container=true
+                vectors=true
+                workspace=true
+                ;;
+              crates/openwave-server/build.rs|crates/openwave-server/src/lib.rs|crates/openwave-server/src/tests/documents.rs)
+                rust=true
+                vectors=true
+                workspace=true
+                ;;
+              # The real-container lane adds a packaging/runtime boundary over
+              # the loopback coverage that runs in every headless test job.
+              crates/openwave-sandbox-agent/*|crates/openwave-sandbox-protocol/*|crates/openwave-server/src/sandbox_container_run.rs|crates/openwave-server/src/sandbox_container_run/*|crates/openwave-server/src/sandbox_docker.rs)
+                rust=true
+                sandbox_container=true
+                workspace=true
+                ;;
               # Nothing in the workspace depends on openwave-desktop, and the
               # `test` lane already excludes it, so no edit to its own sources
               # can change that lane's result. The desktop lane still covers it.
@@ -176,7 +236,9 @@ jobs:
           done < "$RUNNER_TEMP/changed-files"
           {
             echo "rust=$rust"
+            echo "sandbox_container=$sandbox_container"
             echo "ui=$ui"
+            echo "vectors=$vectors"
             echo "workspace=$workspace"
           } >> "$GITHUB_OUTPUT"
 
@@ -345,11 +407,12 @@ jobs:
     name: durable vector store
     needs: changes
     # LanceDB is ~330 crates nobody else compiles, and it is the most expensive
-    # lane we run. While the durable store is parked, pay for it once per merge
-    # instead of once per push to every open PR: post-merge is late signal, but
-    # the feature is off by default in shipped builds. See #760 to restore the
-    # pull-request run when durable vectors come back into active development.
-    if: ${{ needs.changes.outputs.workspace == 'true' && github.event_name != 'pull_request' }}
+    # lane we run. While the durable store is parked, pay for it after a relevant
+    # merge and in the weekly/manual backstops instead of once per push to every
+    # open PR: post-merge is late signal, but the feature is off by default in
+    # shipped builds. See #760 to restore the pull-request run when durable
+    # vectors come back into active development.
+    if: ${{ needs.changes.outputs.vectors == 'true' && github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -460,11 +523,11 @@ jobs:
     # Builds the sandbox-agent image (compiling the agent crate's slice of the
     # workspace inside Docker) and drives a real container end to end. That is
     # expensive, and the container runtime is a detected capability rather than a
-    # hard dependency, so — like the durable vector lane — pay for it once per
-    # merge instead of once per push to every open PR. The rest of the stack is
-    # covered on every PR by the loopback tests, which drive the same driver
-    # against the real agent over a socket.
-    if: ${{ needs.changes.outputs.workspace == 'true' && github.event_name != 'pull_request' }}
+    # hard dependency, so — like the durable vector lane — pay for it after
+    # relevant merges and in weekly/manual backstops instead of once per push to
+    # every open PR. The rest of the stack is covered on every PR by the loopback
+    # tests, which drive the same driver against the real agent over a socket.
+    if: ${{ needs.changes.outputs.sandbox_container == 'true' && github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -569,7 +632,9 @@ jobs:
           CHANGES_RESULT: ${{ needs.changes.result }}
           RUST_CHANGED: ${{ needs.changes.outputs.rust }}
           UI_CHANGED: ${{ needs.changes.outputs.ui }}
+          VECTORS_CHANGED: ${{ needs.changes.outputs.vectors }}
           WORKSPACE_CHANGED: ${{ needs.changes.outputs.workspace }}
+          SANDBOX_CONTAINER_CHANGED: ${{ needs.changes.outputs.sandbox_container }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
           test "$CHANGES_RESULT" = success
@@ -612,6 +677,14 @@ jobs:
             echo "workspace scope without Rust scope; the detector is wrong." >&2
             exit 1
           fi
+          if test "$VECTORS_CHANGED" = true && test "$WORKSPACE_CHANGED" != true; then
+            echo "vector scope without workspace scope; the detector is wrong." >&2
+            exit 1
+          fi
+          if test "$SANDBOX_CONTAINER_CHANGED" = true && test "$WORKSPACE_CHANGED" != true; then
+            echo "sandbox-container scope without workspace scope; the detector is wrong." >&2
+            exit 1
+          fi
 
           # The lanes that cover the workspace minus openwave-desktop. A change
           # confined to that crate's own sources cannot affect them.
@@ -631,26 +704,33 @@ jobs:
           esac
 
           # The durable vector store is deliberately not a pull-request gate
-          # (see the job's own comment and #760). Assert the exemption rather
-          # than dropping the lane from the gate, so a silent regression on main
-          # still fails here.
+          # (see the job's own comment and #760). Assert the exemption and the
+          # post-merge scope rather than dropping the lane from the aggregate.
           if test "$EVENT_NAME" = pull_request; then
             test "$VECTORS_RESULT" = skipped
           else
-            case "$WORKSPACE_CHANGED" in
+            case "$VECTORS_CHANGED" in
               true) test "$VECTORS_RESULT" = success ;;
               false) test "$VECTORS_RESULT" = skipped ;;
+              *)
+                echo "invalid vector change detector output: $VECTORS_CHANGED" >&2
+                exit 1
+                ;;
             esac
           fi
 
           # The sandbox-resident container e2e is post-merge only for the same
           # reason (see the job's own comment): it builds the agent image. Assert
-          # the exemption rather than dropping the lane from the gate.
+          # the exemption and the post-merge scope here too.
           if test "$EVENT_NAME" = pull_request; then
             test "$SANDBOX_CONTAINER_RESULT" = skipped
           else
-            case "$WORKSPACE_CHANGED" in
+            case "$SANDBOX_CONTAINER_CHANGED" in
               true) test "$SANDBOX_CONTAINER_RESULT" = success ;;
               false) test "$SANDBOX_CONTAINER_RESULT" = skipped ;;
+              *)
+                echo "invalid sandbox-container change detector output: $SANDBOX_CONTAINER_CHANGED" >&2
+                exit 1
+                ;;
             esac
           fi

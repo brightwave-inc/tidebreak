@@ -144,6 +144,53 @@ test("Rust CI requires the same PostgreSQL lane on pull requests and main", () =
   assert.match(testJob, /cache-on-failure: true/);
 });
 
+test("heavy capability lanes run only for relevant merges and scheduled backstops", () => {
+  const ci = workflows["ci.yml"];
+  const changes = workflowJob(ci, "changes");
+  const vectors = workflowJob(ci, "vectors");
+  const sandboxContainer = workflowJob(ci, "sandbox-container");
+  const aggregate = workflowJob(ci, "rust");
+
+  assert.match(ci, /^  schedule:\n    - cron: "17 6 \* \* 1"$/m);
+  assert.match(changes, /schedule\|workflow_dispatch\)/);
+  assert.match(changes, /echo "vectors=true"/);
+  assert.match(changes, /echo "sandbox_container=true"/);
+
+  // Positive scopes: feature implementations, production wiring, packaging,
+  // and dependency/toolchain inputs all exercise their expensive capability.
+  assert.match(changes, /crates\/openwave-retrieval\/\*\)/);
+  assert.match(
+    changes,
+    /crates\/openwave-server\/build\.rs\|crates\/openwave-server\/src\/lib\.rs\|crates\/openwave-server\/src\/tests\/documents\.rs\)/,
+  );
+  assert.match(changes, /crates\/openwave-sandbox-agent\/\*/);
+  assert.match(changes, /crates\/openwave-sandbox-protocol\/\*/);
+  assert.match(changes, /\.cargo\/\*\|Cargo\.lock\|Cargo\.toml\|rust-toolchain\.toml\)/);
+
+  // Negative scope: the generic Rust/workspace fallback deliberately does not
+  // turn either heavyweight capability on.
+  assert.match(changes, /\*\) rust=true; workspace=true ;;/);
+
+  assert.match(
+    vectors,
+    /if:.*needs\.changes\.outputs\.vectors == 'true'.*github\.event_name != 'pull_request'/,
+  );
+  assert.match(
+    sandboxContainer,
+    /if:.*needs\.changes\.outputs\.sandbox_container == 'true'.*github\.event_name != 'pull_request'/,
+  );
+  assert.match(aggregate, /case "\$VECTORS_CHANGED" in/);
+  assert.match(aggregate, /case "\$SANDBOX_CONTAINER_CHANGED" in/);
+  assert.match(
+    aggregate,
+    /vector scope without workspace scope; the detector is wrong/,
+  );
+  assert.match(
+    aggregate,
+    /sandbox-container scope without workspace scope; the detector is wrong/,
+  );
+});
+
 test("production secrets remain isolated to the release workflow", () => {
   const secretConsumers = Object.entries(workflows)
     .filter(([, source]) => source.includes("secrets."))
