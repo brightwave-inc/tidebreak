@@ -669,6 +669,50 @@ describe("McpPanel", () => {
     );
   });
 
+  it("a background refresh landing mid-edit keeps the unsaved draft", async () => {
+    // The mount write disables the form while it flies, so the in-flight
+    // completion a reader can actually race against is the background list
+    // read. It captures a render from before the edit; only the dirty ref —
+    // not that render's `dirty` — can tell it the draft must survive.
+    const listMcpServers = vi.fn().mockResolvedValue(healthy);
+    const client = api(healthy, {
+      listMcpServers,
+      getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
+    });
+    // Real time may pass (userEvent needs it); only the 15s cadence is
+    // driven explicitly.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const user = userEvent.setup();
+    render(<McpPanel client={client} />);
+    await act(async () => {});
+    expect(
+      screen.getByPlaceholderText("/absolute/path/to/server"),
+    ).toHaveValue("/opt/mcp/docs");
+
+    // The next cadence read hangs; the reader edits while it is in flight.
+    let resolveRead!: (value: McpServersInfo) => void;
+    listMcpServers.mockImplementationOnce(
+      () =>
+        new Promise<McpServersInfo>((resolve) => {
+          resolveRead = resolve;
+        }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_100);
+    });
+    await user.type(
+      screen.getByPlaceholderText("/absolute/path/to/server"),
+      "-edited",
+    );
+
+    // The read's snapshot predates the edit; landing, it must not undo it.
+    resolveRead(healthy);
+    await act(async () => {});
+    expect(
+      screen.getByPlaceholderText("/absolute/path/to/server"),
+    ).toHaveValue("/opt/mcp/docs-edited");
+  });
+
   it("keeps a mount made during unsaved edits through the next save", async () => {
     const mount = gatewayMount("example-security-tools");
     const putMcpServers = vi

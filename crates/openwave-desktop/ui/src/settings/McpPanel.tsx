@@ -134,6 +134,9 @@ export function McpPanel({
    * their health. */
   function adoptServers(fresh: McpServerInfo[]) {
     setServers((current) => {
+      // Reading the ref inside the updater is sound where a transition
+      // detector would not be: it only reads, so a StrictMode double-invoke
+      // computes the same list twice.
       if (!dirtyRef.current) return fresh;
       const freshMounts = new Map<string, McpServerInfo>();
       for (const server of fresh) {
@@ -221,10 +224,10 @@ export function McpPanel({
         adoptServers(result.servers);
         setServersKnown(true);
         setListError(null);
+        setLoading(false);
       } catch (err) {
         if (request !== requestRef.current) return;
         setListError(errorMessage(err));
-      } finally {
         setLoading(false);
       }
     };
@@ -263,7 +266,7 @@ export function McpPanel({
       markDirty(false);
       toast.success("Saved MCP servers");
     } catch (err) {
-      setError(String(err));
+      setError(errorMessage(err));
     } finally {
       setSaving(false);
     }
@@ -314,7 +317,7 @@ export function McpPanel({
       requestRef.current += 1;
       setServers(result.servers);
     } catch (err) {
-      setError(String(err));
+      setError(errorMessage(err));
       try {
         const result = await client.listMcpServers();
         requestRef.current += 1;
@@ -635,20 +638,39 @@ export function McpPanel({
                       : "Reconnect and refresh tools"}
                   </Button>
                 )}
-                <Button
-                  type="button"
-                  variant="destructive"
-                  disabled={working}
-                  onClick={() => {
-                    markDirty(true);
-                    setServers((current) =>
-                      current.filter((_, itemIndex) => itemIndex !== index),
-                    );
-                  }}
-                >
-                  <Trash2 size={14} />
-                  Remove
-                </Button>
+                {/* Mounts are owned by the mount write, not the draft: a
+                    draft deletion would be undone by the next reconcile,
+                    which re-adds every configured mount. Unmounting writes
+                    immediately, like the section's toggle. */}
+                {transportOf(server) === "gateway" ? (
+                  <Button
+                    type="button"
+                    variant="destructive"
+                    disabled={working}
+                    onClick={() => {
+                      const slug = server.gateway_endpoint;
+                      if (slug !== null) void setMounted(slug, false);
+                    }}
+                  >
+                    <Trash2 size={14} />
+                    Unmount
+                  </Button>
+                ) : (
+                  <Button
+                    type="button"
+                    variant="destructive"
+                    disabled={working}
+                    onClick={() => {
+                      markDirty(true);
+                      setServers((current) =>
+                        current.filter((_, itemIndex) => itemIndex !== index),
+                      );
+                    }}
+                  >
+                    <Trash2 size={14} />
+                    Remove
+                  </Button>
+                )}
               </div>
             </SettingsSection>
           ))}

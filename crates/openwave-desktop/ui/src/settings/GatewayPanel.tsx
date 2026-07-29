@@ -133,6 +133,19 @@ export function GatewayPanel({
 
   const pendingUrl =
     status.sign_in.state === "pending" ? status.sign_in.authorization_url : null;
+  // The one route to mounting, shown whenever signed in: a gateway without
+  // the apps surface still mounts endpoints by slug on the MCP servers page.
+  const mountSignpost = (
+    <Button
+      type="button"
+      variant="outline"
+      className="self-start"
+      onClick={onOpenMcpSettings}
+    >
+      <PlugZap size={14} />
+      Mount endpoints in MCP servers
+    </Button>
+  );
 
   return (
     <SettingsPanel
@@ -286,54 +299,48 @@ export function GatewayPanel({
         )}
       </SettingsSection>
 
-      {status.signed_in && (
-        <>
-          {apps?.supported && (
-            <SettingsSection
-              title="Connected apps"
-              description="The apps your teams have granted this deployment. Mounting their MCP endpoints happens under MCP servers, beside the health of what is mounted."
-            >
-              {apps.apps.length === 0 ? (
-                <p className="text-muted-foreground text-sm">
-                  No connected apps are granted to your teams yet.
-                </p>
-              ) : (
-                <ul className="flex flex-col gap-2">
-                  {apps.apps.map((app) => (
-                    <li key={app.id} className="rounded-md border px-3 py-2 text-sm">
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium">{app.name}</span>
-                        <span className="text-muted-foreground text-xs">
-                          {app.app_kind}
-                        </span>
-                        {!app.enabled && (
-                          <span className="text-muted-foreground text-xs">
-                            disabled
-                          </span>
-                        )}
-                      </div>
-                      {app.mcp_endpoint_slugs.length > 0 && (
-                        <p className="text-muted-foreground text-xs">
-                          via {app.mcp_endpoint_slugs.join(", ")}
-                        </p>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </SettingsSection>
-          )}
-          <Button
-            type="button"
-            variant="outline"
-            className="self-start"
-            onClick={onOpenMcpSettings}
+      {status.signed_in &&
+        (apps?.supported ? (
+          <SettingsSection
+            title="Connected apps"
+            description="The apps your teams have granted this deployment. Mounting their MCP endpoints happens under MCP servers, beside the health of what is mounted."
           >
-            <PlugZap size={14} />
-            Mount endpoints in MCP servers
-          </Button>
-        </>
-      )}
+            {apps.apps.length === 0 ? (
+              <p className="text-muted-foreground text-sm">
+                No connected apps are granted to your teams yet.
+              </p>
+            ) : (
+              <ul className="flex flex-col gap-2">
+                {apps.apps.map((app) => (
+                  <li
+                    key={app.id}
+                    className="rounded-md border px-3 py-2 text-sm"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium">{app.name}</span>
+                      <span className="text-muted-foreground text-xs">
+                        {app.app_kind}
+                      </span>
+                      {!app.enabled && (
+                        <span className="text-muted-foreground text-xs">
+                          disabled
+                        </span>
+                      )}
+                    </div>
+                    {app.mcp_endpoint_slugs.length > 0 && (
+                      <p className="text-muted-foreground text-xs">
+                        via {app.mcp_endpoint_slugs.join(", ")}
+                      </p>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {mountSignpost}
+          </SettingsSection>
+        ) : (
+          <SettingsSection>{mountSignpost}</SettingsSection>
+        ))}
 
       <p className="text-sm leading-relaxed text-muted-foreground">
         Sign-in happens in your browser against the gateway itself; OpenWave
