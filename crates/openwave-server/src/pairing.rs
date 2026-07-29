@@ -16,7 +16,6 @@ use tokio::sync::Mutex;
 
 use crate::managed_policy;
 use crate::mcp_config::McpRuntime;
-use crate::providers;
 
 /// Serializes pairing end to end. [`managed_policy::provision`] is a
 /// check-then-write over the settings store, and the [`Store`] API offers no
@@ -150,26 +149,24 @@ pub async fn pair_with_gateway(
     let base_url = config.base_url().to_string();
     GatewayAuth::new(config)?.meta().await?;
     let _guard = PAIRING.lock().await;
-    // Model sync rechecks the resolved policy and writes its snapshot under
-    // the shared gateway-state lock, and neither runs under PAIRING; hold
-    // that lock across the conflict check and the policy write so a sync in
-    // flight either sees the pre-pairing policy and refuses, or the
-    // post-pairing one — never a torn middle. Lock order is PAIRING first,
-    // state lock second — this is the only path that takes both.
-    let already_provisioned = {
-        let _lock = providers::GATEWAY_STATE_WRITES.lock().await;
-        // Refuse a conflicting pairing before the write.
-        let already_provisioned = match managed_policy::provisioned_url(store).await? {
-            Some(existing) if existing != base_url => {
-                return Err(PairingError::Conflict {
-                    provisioned_url: existing,
-                });
-            }
-            other => other.is_some(),
-        };
-        managed_policy::provision(store, &base_url).await?;
-        already_provisioned
+    // No gateway-state lock here, deliberately. Pairing writes only the
+    // policy now, and the model snapshot is stamped with the deployment it
+    // was fetched from — so a sync racing this pairing cannot corrupt
+    // anything: whichever order the two land in, a snapshot stamped by the
+    // old gateway is simply never honored once policy names the new one
+    // (`gateway_models` filters on the stamp). The stamp is the guard, and
+    // taking a lock that guards nothing would only claim protection this
+    // path does not actually depend on. PAIRING alone still makes the
+    // conflict check and the policy write atomic against another pairing.
+    let already_provisioned = match managed_policy::provisioned_url(store).await? {
+        Some(existing) if existing != base_url => {
+            return Err(PairingError::Conflict {
+                provisioned_url: existing,
+            });
+        }
+        other => other.is_some(),
     };
+    managed_policy::provision(store, &base_url).await?;
     handle.mcp.enforce_manual_lockdown().await;
     Ok(PairingOutcome {
         base_url,
@@ -194,6 +191,7 @@ mod tests {
         GatewayEndpointAccess, GatewayEndpoints, McpHealth, McpServerDefinition, McpServersConfig,
         MANAGED_DISABLED_DIAGNOSTIC,
     };
+    use crate::providers;
 
     /// The signed-out stand-in: pairing never resolves an endpoint.
     struct NoGateway;

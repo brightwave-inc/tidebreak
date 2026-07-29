@@ -27,17 +27,21 @@ const CREDENTIAL_SUFFIX: &str = ".credential";
 /// Legacy Anthropic API-key secret (pre-providers). Still read as a fallback.
 pub const LEGACY_ANTHROPIC_API_KEY: &str = "provider.anthropic.api_key";
 
-/// Serializes every writer of the durable gateway state: the provisioning
-/// write (pairing) and the entitled-model snapshot (model sync, sign-out).
+/// Serializes the writers of the entitled-model snapshot: model sync and
+/// sign-out.
 ///
-/// The [`Store`] API has no cross-call transaction, so a sync whose policy
-/// recheck and snapshot write interleaved with a provisioning write could
-/// stamp a snapshot the new policy never entitled. Process-local for the
-/// same reason as pairing's own mutex: the server's instance lock guarantees
-/// one process owns the store, and a static cannot be accidentally wired
-/// into two instances that no longer exclude each other. Lock order:
-/// acquired after the pairing mutex and after the gateway runtime's sign-in
-/// state lock, never before either, and never held across a network call.
+/// Both read the resolved policy, decide what the snapshot should say, and
+/// write it, and the [`Store`] API has no cross-call transaction — so
+/// unserialized, a sign-out's clear could land inside a sync's
+/// recheck-and-write and be overwritten by the models it was clearing.
+/// Pairing deliberately does not take this lock: it writes only policy, and
+/// the snapshot's deployment stamp already makes a racing sync's write
+/// inert. Process-local for the same reason as pairing's own mutex: the
+/// server's instance lock guarantees one process owns the store, and a
+/// static cannot be accidentally wired into two instances that no longer
+/// exclude each other. Lock order: acquired after the gateway runtime's
+/// sign-in state lock, never before it, and never held across a network
+/// call.
 pub(crate) static GATEWAY_STATE_WRITES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Setting key for the entitled-model snapshot synced from the managed
@@ -101,13 +105,23 @@ pub(crate) async fn gateway_models(
 /// One-shot boot cutover for the retired additive gateway configuration.
 ///
 /// The `provider.model_gateway` row is no longer read anywhere: policy is
-/// the only gateway source. On a managed profile whose row was stamped by
-/// the policy's own deployment, the row's synced model list is carried into
-/// [`GATEWAY_MODELS_KEY`] once, so the picker does not go blank on upgrade.
-/// On an unmanaged profile a stored row is the retired legacy state: it is
-/// ignored outright — never auto-converted to managed, because lockdown must
-/// not be imposed without the pairing consent flow — and one boot warning
-/// names the remedy.
+/// the only gateway source. Two things still have to happen once, on the
+/// boot after the upgrade.
+///
+/// A managed profile keeps its models. Profiles paired from a gateway's own
+/// page carry the entitled set the pairing synced, and nothing re-syncs it
+/// for a reader who is already signed in — so without this their picker goes
+/// empty until they find the refresh button. The row's list is carried into
+/// [`GATEWAY_MODELS_KEY`] when it names the policy's own deployment.
+///
+/// An unmanaged profile's gateway vanishes, by decision: that mode is
+/// retired, and the row is never read as identity, so nothing here can
+/// convert a profile to managed — lockdown must not be imposed without the
+/// pairing consent flow. One warning names the remedy.
+///
+/// Either way the row is dropped once it has been dealt with, which is what
+/// makes "the provider row is retired" true of the store and not only of the
+/// read paths — and keeps the warning a one-time upgrade notice.
 pub(crate) async fn retire_legacy_gateway_row(
     store: &dyn Store,
     policy: &crate::managed_policy::ManagedPolicy,
@@ -119,6 +133,10 @@ pub(crate) async fn retire_legacy_gateway_row(
     else {
         return Ok(());
     };
+    if row.base_url.is_none() && row.models.is_empty() {
+        // Already retired (or never configured).
+        return Ok(());
+    }
     if !policy.managed {
         if row.base_url.is_some() {
             tracing::warn!(
@@ -127,16 +145,39 @@ pub(crate) async fn retire_legacy_gateway_row(
                  pair via your gateway's page to reconnect"
             );
         }
-        return Ok(());
+        return clear_legacy_gateway_row(store).await;
     }
     let Some(gateway_url) = policy.gateway_url.clone() else {
+        // A misconfigured managed policy names no deployment to attribute the
+        // row to. Leave it untouched: the authority is repairable, and the
+        // next boot can still carry the snapshot forward.
         return Ok(());
     };
-    if row.models.is_empty()
-        || row.base_url.as_deref() != Some(gateway_url.as_str())
-        || read_gateway_snapshot(store).await?.is_some()
-    {
-        return Ok(());
+    if row.models.is_empty() || read_gateway_snapshot(store).await?.is_some() {
+        return clear_legacy_gateway_row(store).await;
+    }
+    // Compare deployments as URLs, not as strings. Pairing wrote the
+    // normalized form, but a row written through the old provider route
+    // before that path normalized (#935) holds whatever was typed — so a
+    // profile that became managed by MDM over such a row has
+    // `https://corp.gateway` beside a policy's `https://corp.gateway/`. An
+    // unparseable legacy value can be attributed to no deployment and is
+    // treated as a mismatch.
+    let row_url = row
+        .base_url
+        .as_deref()
+        .and_then(|url| crate::managed_policy::validated_gateway_url(url).ok());
+    if row_url.as_deref() != Some(gateway_url.as_str()) {
+        // A row from a gateway this profile is no longer managed by: its
+        // models describe another deployment's entitlements. Rare, which is
+        // exactly when the reason for an empty picker is worth a log line.
+        tracing::warn!(
+            "the legacy model-gateway row names a different deployment than the \
+             managed policy ({:?} vs {gateway_url}); its synced models are \
+             discarded — refresh the model list to resync the entitled set",
+            row.base_url
+        );
+        return clear_legacy_gateway_row(store).await;
     }
     write_gateway_snapshot(
         store,
@@ -144,6 +185,19 @@ pub(crate) async fn retire_legacy_gateway_row(
             gateway_url,
             models: row.models,
         },
+    )
+    .await?;
+    clear_legacy_gateway_row(store).await
+}
+
+/// Drop the retired row. Written as the disabled default rather than deleted
+/// outright: [`Store`] exposes no setting delete, and the default is exactly
+/// what an absent row already reads as everywhere.
+async fn clear_legacy_gateway_row(store: &dyn Store) -> Result<()> {
+    write_config(
+        store,
+        ProviderKind::ModelGateway,
+        &ProviderConfig::disabled(),
     )
     .await
 }

@@ -249,7 +249,11 @@ function ManagedGatewayPanel({
             <SettingsStatus
               tone="not-configured"
               label="Not signed in"
-              description="Connect to sign in with your browser."
+              description={
+                origin === null
+                  ? "This device's managed policy names no gateway. Contact your administrator."
+                  : "Connect to sign in with your browser."
+              }
             />
             {status.sign_in.state === "failed" && (
               <SettingsError>{status.sign_in.message}</SettingsError>
@@ -275,7 +279,9 @@ function ManagedGatewayPanel({
             ) : (
               <Button
                 type="button"
-                disabled={working}
+                // No origin means a misconfigured policy: there is no
+                // deployment to sign in against, and the server would refuse.
+                disabled={working || origin === null}
                 onClick={() =>
                   void run(async () => {
                     const started = await client.gatewaySignIn();

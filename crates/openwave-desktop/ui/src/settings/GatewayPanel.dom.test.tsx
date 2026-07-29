@@ -236,6 +236,31 @@ describe("GatewayPanel", () => {
     expect(openMcpSettings).toHaveBeenCalled();
   });
 
+  it("a policy that names no gateway cannot be connected to", async () => {
+    // Misconfigured managed policy: there is no deployment to sign in
+    // against, so the affordance stays off rather than failing on click.
+    // The server derives status from the same policy, so it names no
+    // origin either.
+    const client = api({
+      getGatewayStatus: vi
+        .fn()
+        .mockResolvedValue({ ...signedOut, base_url: undefined }),
+    });
+    render(
+      <GatewayPanel
+        client={client}
+        managed
+        gatewayUrl={null}
+        onChanged={() => undefined}
+        onOpenMcpSettings={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByText("Not signed in")).toBeInTheDocument();
+    expect(screen.getByText(/names no gateway/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Connect/ })).toBeDisabled();
+  });
+
   it("surfaces a failed sign-in with its bounded message", async () => {
     const client = api({
       getGatewayStatus: vi.fn().mockResolvedValue({

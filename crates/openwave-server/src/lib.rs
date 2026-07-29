@@ -680,11 +680,13 @@ async fn bind_inner(
         providers::migrate_legacy_anthropic(&*store, &*secrets).await?;
     }
     // The additive gateway configuration is retired: carry a managed row's
-    // model snapshot forward once, and name the remedy for a legacy
-    // unmanaged one. Skipped when policy is unreadable — fail closed, and
-    // the legacy row stays untouched for when the policy is repaired.
+    // model snapshot forward once, name the remedy for a legacy unmanaged
+    // one, and revoke the session an unmanaged profile can no longer reach.
+    // Skipped when policy is unreadable — fail closed, and the legacy state
+    // stays untouched for when the policy is repaired.
     if let Ok(policy) = &boot_policy {
         providers::retire_legacy_gateway_row(&*store, policy).await?;
+        gateway_runtime::retire_unmanaged_gateway_session(secrets.clone(), policy).await?;
     }
     let gateway =
         gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone(), os_policy.clone());

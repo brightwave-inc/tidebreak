@@ -407,6 +407,57 @@ impl crate::mcp_config::GatewayEndpoints for GatewayRuntime {
     }
 }
 
+/// Complete the legacy hard cut for the session, not just the configuration.
+///
+/// An unmanaged profile can carry a gateway session signed in under the
+/// retired additive mode. Nothing reaches it any more — the whole sign-in
+/// surface is managed-only, and the renderer has no gateway page — so
+/// without this the refresh token would sit in the keychain forever with no
+/// path to revoke it. Boot owns that cleanup instead.
+///
+/// Revocation is best-effort and bounded: an unreachable gateway can no more
+/// hold this hostage than it can a normal sign-out (the server-side session
+/// still dies at refresh-token expiry), and boot must not stall on it. The
+/// local clear afterwards is unconditional, so the session is gone locally
+/// whether or not the gateway ever answered — and because it is gone, this
+/// whole step runs at most once per profile.
+///
+/// An unreadable stored blob is left alone: it carries no usable refresh
+/// token, so it is not the live zombie this exists to kill.
+pub(crate) async fn retire_unmanaged_gateway_session(
+    secrets: Arc<dyn SecretProvider>,
+    policy: &crate::managed_policy::ManagedPolicy,
+) -> Result<()> {
+    /// Long enough for a healthy gateway to answer a revoke, short enough
+    /// that a dead one is a hiccup at boot rather than a hang.
+    const REVOKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+    if policy.managed {
+        return Ok(());
+    }
+    let vault = CredentialVault::new(secrets.clone());
+    let Ok(Some(credentials)) = vault.load().await else {
+        return Ok(());
+    };
+    tracing::warn!(
+        "clearing a model-gateway session left by the retired additive \
+         configuration ({}); pair via your gateway's page to sign in again",
+        credentials.base_url
+    );
+    // The connection owns revoke-then-clear (the refresh token never leaves
+    // the connectors crate), so the session is retired through the same path
+    // an explicit sign-out takes.
+    if let Ok(config) = GatewayAuthConfig::new(&credentials.base_url) {
+        if let Ok(auth) = GatewayAuth::new(config) {
+            let connection = GatewayConnection::new(auth, CredentialVault::new(secrets.clone()));
+            let _ = tokio::time::timeout(REVOKE_TIMEOUT, connection.sign_out()).await;
+        }
+    }
+    // Unconditional: a gateway that never answered, or a stored base URL that
+    // no longer parses, must not leave the credential behind.
+    CredentialVault::new(secrets).clear().await
+}
+
 /// The one refusal for every managed-only gateway surface: unmanaged
 /// profiles have no gateway (policy is the only source), and a managed
 /// policy without a usable URL is misconfigured rather than open.
@@ -1173,9 +1224,19 @@ mod tests {
         assert!(runtime.sign_out().await.is_err());
     }
 
-    /// The boot cutover's carry-forward: a managed profile whose legacy row
-    /// was stamped by the policy's own deployment keeps its synced models
-    /// across the upgrade — once, and only from that deployment.
+    /// The boot cutover's carry-forward: a managed profile — the shape a
+    /// gateway-page pairing produces — keeps the models its row had synced,
+    /// once, and only from the deployment policy actually names.
+    ///
+    /// Nothing re-syncs the entitled set for a reader who is already signed
+    /// in, so dropping this leaves their picker empty until they find the
+    /// refresh button.
+    ///
+    /// The row URL is the VERBATIM form here: the old provider write path
+    /// did not normalize (#935), so a profile that became managed by MDM
+    /// over such a row holds "https://corp.gateway" beside a policy's
+    /// "https://corp.gateway/". Compare deployments as strings instead of
+    /// URLs and that profile silently reaches the picker empty.
     #[tokio::test]
     async fn boot_carries_a_managed_rows_snapshot_forward_once() {
         let directory = tempfile::tempdir().unwrap();
@@ -1192,7 +1253,7 @@ mod tests {
             .unwrap();
         let legacy_row = |id: &str| providers::ProviderConfig {
             enabled: true,
-            base_url: Some("https://corp.gateway/".to_string()),
+            base_url: Some("https://corp.gateway".to_string()),
             vertex_location: None,
             models: vec![CustomModelConfig {
                 id: id.to_string(),
@@ -1219,8 +1280,18 @@ mod tests {
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "carried-model");
 
-        // One-shot: once a snapshot exists, later boots never overwrite it
-        // from the retired row.
+        // The row is gone once it has been dealt with, so "retired entirely"
+        // is true of the store and not only of the read paths.
+        assert!(
+            providers::read_config(&*store, crate::providers::ProviderKind::ModelGateway)
+                .await
+                .unwrap()
+                .base_url
+                .is_none()
+        );
+
+        // One-shot: once a snapshot exists, a row that reappears never
+        // overwrites it.
         providers::write_config(
             &*store,
             crate::providers::ProviderKind::ModelGateway,
@@ -1234,5 +1305,192 @@ mod tests {
         let models = providers::gateway_models(&*store, &policy).await.unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "carried-model");
+    }
+
+    /// A row from a deployment the profile is no longer managed by is not
+    /// carried forward: its models describe another gateway's entitlements.
+    /// The row still goes.
+    #[tokio::test]
+    async fn boot_discards_a_snapshot_from_a_foreign_deployment() {
+        let directory = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                directory.path().join("gateway.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        crate::managed_policy::provision(&*store, "https://corp.gateway")
+            .await
+            .unwrap();
+        providers::write_config(
+            &*store,
+            crate::providers::ProviderKind::ModelGateway,
+            &providers::ProviderConfig {
+                enabled: true,
+                base_url: Some("https://other.gateway".to_string()),
+                vertex_location: None,
+                models: vec![CustomModelConfig {
+                    id: "foreign-model".to_string(),
+                    display_name: None,
+                    context_window: 32_768,
+                    max_output_tokens: 4_096,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+            .await
+            .unwrap();
+        providers::retire_legacy_gateway_row(&*store, &policy)
+            .await
+            .unwrap();
+        assert!(providers::read_gateway_snapshot(&*store)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(
+            providers::read_config(&*store, crate::providers::ProviderKind::ModelGateway)
+                .await
+                .unwrap()
+                .base_url
+                .is_none()
+        );
+    }
+
+    /// The unmanaged half of the cutover: the row is ignored (never
+    /// converted to managed) and dropped, so the warning naming the remedy
+    /// is a one-time upgrade notice rather than a line on every boot.
+    #[tokio::test]
+    async fn boot_drops_an_unmanaged_legacy_row_without_making_it_managed() {
+        let directory = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                directory.path().join("gateway.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        providers::write_config(
+            &*store,
+            crate::providers::ProviderKind::ModelGateway,
+            &providers::ProviderConfig {
+                enabled: true,
+                base_url: Some("https://corp.gateway".to_string()),
+                vertex_location: None,
+                models: vec![CustomModelConfig {
+                    id: "legacy-model".to_string(),
+                    display_name: None,
+                    context_window: 32_768,
+                    max_output_tokens: 4_096,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+            .await
+            .unwrap();
+        providers::retire_legacy_gateway_row(&*store, &policy)
+            .await
+            .unwrap();
+
+        assert!(
+            !crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+                .await
+                .unwrap()
+                .managed,
+            "a legacy row must never auto-convert the profile to managed"
+        );
+        assert!(providers::read_gateway_snapshot(&*store)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(
+            providers::read_config(&*store, crate::providers::ProviderKind::ModelGateway)
+                .await
+                .unwrap()
+                .base_url
+                .is_none()
+        );
+    }
+
+    /// The session half of the legacy hard cut: an unmanaged profile with a
+    /// session left over from the retired additive mode has no surface that
+    /// could ever revoke it, so boot clears it. Without this the refresh
+    /// token lives in the keychain forever.
+    #[tokio::test]
+    async fn boot_clears_a_gateway_session_left_on_an_unmanaged_profile() {
+        let directory = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                directory.path().join("gateway.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let secrets: Arc<dyn SecretProvider> = Arc::new(MockSecrets::default());
+        let seed = |secrets: Arc<dyn SecretProvider>, base_url: &'static str| async move {
+            let credentials: openwave_connectors::GatewayCredentials =
+                serde_json::from_value(json!({
+                    "base_url": base_url,
+                    "installation_id": "install-1",
+                    "user_id": "user-1",
+                    "refresh_token": "mg_rt_zombie",
+                    "access_tokens": {}
+                }))
+                .unwrap();
+            CredentialVault::new(secrets)
+                .save(&credentials)
+                .await
+                .unwrap();
+        };
+        // Nothing listens here: the revoke fails fast and the clear happens
+        // anyway, which is the contract.
+        seed(secrets.clone(), "http://127.0.0.1:1").await;
+
+        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+            .await
+            .unwrap();
+        assert!(!policy.managed);
+        retire_unmanaged_gateway_session(secrets.clone(), &policy)
+            .await
+            .unwrap();
+        assert!(
+            !openwave_connectors::has_stored_credentials(&*secrets).await,
+            "the retired session must not survive boot on an unmanaged profile"
+        );
+
+        // A stored base URL that no longer passes the gateway contract has
+        // no connection to revoke through, so only the unconditional clear
+        // can retire it. Drop that clear and the credential survives here.
+        seed(secrets.clone(), "http://user:pw@stale.example").await;
+        retire_unmanaged_gateway_session(secrets.clone(), &policy)
+            .await
+            .unwrap();
+        assert!(
+            !openwave_connectors::has_stored_credentials(&*secrets).await,
+            "a session whose stored URL cannot be parsed must still be cleared"
+        );
+
+        // A managed profile's session is untouched: it is the credential the
+        // profile actually runs on.
+        seed(secrets.clone(), "https://corp.gateway/").await;
+        crate::managed_policy::provision(&*store, "https://corp.gateway")
+            .await
+            .unwrap();
+        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+            .await
+            .unwrap();
+        retire_unmanaged_gateway_session(secrets.clone(), &policy)
+            .await
+            .unwrap();
+        assert!(openwave_connectors::has_stored_credentials(&*secrets).await);
     }
 }
