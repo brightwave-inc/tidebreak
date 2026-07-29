@@ -6,9 +6,11 @@ import { ChatExplorer } from "./ChatExplorer";
 import { useChatListStore } from "./ChatListStore";
 import { Composer } from "./Composer";
 import { useFirstMessage } from "./FirstMessage";
+import { hasNativeHost } from "./host";
 import { ModelMenu, ReasoningEffortMenu } from "./ModelMenu";
 import { modelForSelection } from "./ModelSelection";
 import { useNewChatSettings } from "./NewChatSettings";
+import { usePendingAttach } from "./PendingAttach";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import { RouteFrame } from "./RouteFrame";
 import { HomeSidebar } from "./sidebar/HomeSidebar";
@@ -16,6 +18,7 @@ import { ToolsMenu } from "./ToolsMenu";
 
 const chatListActions = useChatListStore.getState();
 const firstMessageActions = useFirstMessage.getState();
+const pendingAttachActions = usePendingAttach.getState();
 
 /**
  * Where the app opens, and where the logo goes back to.
@@ -55,6 +58,27 @@ export function HomeRoute() {
       chatListActions.setChatsError(null);
       firstMessageActions.hold(created.id, content);
       setDraft("");
+      await navigate({ to: "/c/$chatId", params: { chatId: created.id } });
+    } catch (err) {
+      setError(`Could not start a chat: ${String(err)}`);
+    } finally {
+      chatListActions.setCreatingChat(false);
+    }
+  }
+
+  async function attachToNewChat() {
+    if (creatingChat) return;
+    chatListActions.setCreatingChat(true);
+    setError(null);
+    try {
+      const created = await client.createChat(newChat.model ?? undefined, null, {
+        reasoningEffort: newChat.reasoningEffort,
+        permissionMode: newChat.permissionMode,
+        citationFormat: newChat.citationFormat,
+      });
+      chatListActions.prependChat(created);
+      chatListActions.setChatsError(null);
+      pendingAttachActions.hold(created.id);
       await navigate({ to: "/c/$chatId", params: { chatId: created.id } });
     } catch (err) {
       setError(`Could not start a chat: ${String(err)}`);
@@ -103,6 +127,7 @@ export function HomeRoute() {
               <>
                 <ToolsMenu
                   disabled={creatingChat}
+                  onAttach={hasNativeHost() ? attachToNewChat : undefined}
                   citationFormat={newChat.citationFormat}
                   defaultCitationFormat={defaultCitationFormat}
                   onCitationFormatChange={newChat.setCitationFormat}
