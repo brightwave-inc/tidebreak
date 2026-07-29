@@ -13,7 +13,6 @@ use async_trait::async_trait;
 use axum::body::{to_bytes, Body, Bytes};
 use axum::http::{header, Request, StatusCode};
 use futures::stream::{self, BoxStream, StreamExt};
-// Tests use the in-memory store; production wires LanceDB in `bind`.
 use openwave_core::{
     Agent, AgentConfig, AgentErrorInfo, AgentEvent, AgentRunInboxStatus, AgentRunStatus,
     ApprovalClass, BeginRootAttachmentChange, BlobMetadata, BlobStore, BlobStream, CallId, Chat,
@@ -24,9 +23,6 @@ use openwave_core::{
     SandboxToolCallRequest, SecretProvider, SequencedEvent, StopReason, Tool, ToolCallExecution,
     ToolCallRecord, ToolCallResolution, ToolCallStatus, ToolCtx, ToolOutput, ToolRegistry,
     ToolSpec, TurnCheckpointProgress, TurnId, TurnRunStatus, TurnSteerId, Usage,
-};
-use openwave_retrieval::{
-    Embedding, InMemoryVectorStore, RetrievalError, ScoredChunk, VectorRecord,
 };
 use openwave_web_search::{
     WebSearchError, WebSearchProvider, WebSearchProviderKind, WebSearchRequest, WebSearchResolver,
@@ -836,149 +832,6 @@ impl BlobStore for FirstPutGatedBlobStore {
 
     fn delete(&self, id: uuid::Uuid) -> Result<()> {
         self.inner.delete(id)
-    }
-}
-
-struct FailingEmbedder;
-
-#[async_trait]
-impl Embedder for FailingEmbedder {
-    fn dimensions(&self) -> usize {
-        8
-    }
-
-    async fn embed_documents(
-        &self,
-        _texts: &[String],
-    ) -> openwave_retrieval::Result<Vec<Embedding>> {
-        Err(RetrievalError::embed("injected embedding failure"))
-    }
-}
-
-struct FailAfterFirstBatchEmbedder {
-    inner: HashEmbedder,
-    calls: AtomicUsize,
-}
-
-struct FailNextDeleteVectorStore {
-    inner: InMemoryVectorStore,
-    fail_delete: std::sync::atomic::AtomicBool,
-}
-
-impl FailNextDeleteVectorStore {
-    fn new(dimensions: usize) -> Self {
-        Self {
-            inner: InMemoryVectorStore::new(dimensions),
-            fail_delete: std::sync::atomic::AtomicBool::new(false),
-        }
-    }
-
-    fn fail_next_delete(&self) {
-        self.fail_delete.store(true, Ordering::SeqCst);
-    }
-}
-
-#[async_trait]
-impl VectorStore for FailNextDeleteVectorStore {
-    async fn upsert(&self, records: Vec<VectorRecord>) -> openwave_retrieval::Result<()> {
-        self.inner.upsert(records).await
-    }
-
-    async fn query_with_options(
-        &self,
-        query_text: &str,
-        query: &Embedding,
-        k: usize,
-        options: openwave_retrieval::SearchOptions,
-    ) -> openwave_retrieval::Result<Vec<ScoredChunk>> {
-        self.inner
-            .query_with_options(query_text, query, k, options)
-            .await
-    }
-
-    async fn replace_document(
-        &self,
-        document_id: openwave_core::DocumentId,
-        records: Vec<VectorRecord>,
-    ) -> openwave_retrieval::Result<()> {
-        if records.is_empty() && self.fail_delete.swap(false, Ordering::SeqCst) {
-            return Err(RetrievalError::vector_store("injected delete failure"));
-        }
-        self.inner.replace_document(document_id, records).await
-    }
-
-    async fn stage_document_generation(
-        &self,
-        document_id: openwave_core::DocumentId,
-        generation: openwave_core::DocumentGeneration,
-        records: Vec<VectorRecord>,
-    ) -> openwave_retrieval::Result<openwave_retrieval::GenerationStageOutcome> {
-        if records.is_empty() && self.fail_delete.swap(false, Ordering::SeqCst) {
-            return Err(RetrievalError::vector_store("injected tombstone failure"));
-        }
-        self.inner
-            .stage_document_generation(document_id, generation, records)
-            .await
-    }
-
-    async fn activate_document_generation(
-        &self,
-        document_id: openwave_core::DocumentId,
-        generation: openwave_core::DocumentGeneration,
-    ) -> openwave_retrieval::Result<bool> {
-        self.inner
-            .activate_document_generation(document_id, generation)
-            .await
-    }
-
-    async fn active_document_generation(
-        &self,
-        document_id: openwave_core::DocumentId,
-    ) -> openwave_retrieval::Result<Option<openwave_core::DocumentGeneration>> {
-        self.inner.active_document_generation(document_id).await
-    }
-
-    async fn newest_document_generation(
-        &self,
-        document_id: openwave_core::DocumentId,
-    ) -> openwave_retrieval::Result<Option<openwave_retrieval::DocumentGenerationState>> {
-        self.inner.newest_document_generation(document_id).await
-    }
-
-    async fn document_len(
-        &self,
-        document_id: openwave_core::DocumentId,
-    ) -> openwave_retrieval::Result<Option<usize>> {
-        self.inner.document_len(document_id).await
-    }
-
-    async fn len(&self) -> openwave_retrieval::Result<usize> {
-        self.inner.len().await
-    }
-}
-
-#[async_trait]
-impl Embedder for FailAfterFirstBatchEmbedder {
-    fn dimensions(&self) -> usize {
-        self.inner.dimensions()
-    }
-
-    fn fingerprint(&self) -> String {
-        "test-fail-after-first-v1".into()
-    }
-
-    async fn embed_documents(
-        &self,
-        texts: &[String],
-    ) -> openwave_retrieval::Result<Vec<Embedding>> {
-        if self.calls.fetch_add(1, Ordering::SeqCst) > 0 {
-            return Err(RetrievalError::embed("injected update failure"));
-        }
-        self.inner.embed_documents(texts).await
-    }
-
-    async fn embed_query(&self, text: &str) -> openwave_retrieval::Result<Embedding> {
-        self.inner.embed_query(text).await
     }
 }
 
@@ -1987,10 +1840,7 @@ impl Store for PauseTerminalStore {
 async fn test_app_with(
     provider: Arc<dyn ModelProvider>,
 ) -> (Router, Arc<str>, Arc<dyn Store>, tempfile::TempDir) {
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     test_app_with_retrieval(provider, retrieval).await
 }
 
@@ -2010,10 +1860,7 @@ async fn test_app_with_worker() -> (
     tempfile::TempDir,
     document_worker::DocumentWorker,
 ) {
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     test_app_with_retrieval_and_worker(Arc::new(FakeProvider), retrieval).await
 }
 
@@ -2047,7 +1894,6 @@ async fn test_app_with_retrieval_and_worker(
         state.blobs.clone(),
         retrieval,
         state.document_job_wake.clone(),
-        state.document_writes.clone(),
         document_worker::DocumentWorkerConfig::default(),
     );
     spawn_turn_worker(&state);
@@ -2114,10 +1960,7 @@ async fn test_app_with_scanner_resolution_race(
     injected.do_not_pause_terminal();
     configure(&injected);
     let store: Arc<dyn Store> = injected;
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -2177,10 +2020,7 @@ async fn test_app_with_state() -> (
 ) {
     let (dir, store) = temp_db_store("stateful-test.db").await;
     let store: Arc<dyn Store> = Arc::new(store);
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -2244,10 +2084,7 @@ async fn admit_sandbox_for_test(
 async fn test_app_with_secrets() -> (Router, Arc<str>, Arc<MemSecrets>, tempfile::TempDir) {
     let (dir, store) = temp_db_store("t.db").await;
     let store: Arc<dyn Store> = Arc::new(store);
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     let secrets = Arc::new(MemSecrets::default());
     let state = AppState::new(
         Config::desktop(dir.path()),
@@ -2270,10 +2107,7 @@ async fn test_app_with_secrets() -> (Router, Arc<str>, Arc<MemSecrets>, tempfile
 async fn app_state_roots_blob_storage_under_the_data_directory() {
     let (dir, store) = temp_db_store("t.db").await;
     let store: Arc<dyn Store> = Arc::new(store);
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store,

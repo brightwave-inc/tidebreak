@@ -303,9 +303,6 @@ mod tests {
 
     use openwave_core::EvidenceLocation;
 
-    use crate::chunk::{Chunker, TextChunker};
-    use crate::document::{Document, DocumentSource};
-
     const XLSX_MEDIA_TYPE: &str =
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
@@ -373,10 +370,8 @@ mod tests {
             .expect("a workbook's cell map is valid against its own text");
     }
 
-    /// The whole point of the slice: a retrieved passage of a workbook is a
-    /// rectangle on a named sheet, not a byte span into rendered prose.
     #[tokio::test]
-    async fn a_chunk_of_a_workbook_is_located_at_the_range_it_covers() {
+    async fn workbook_regions_resolve_to_the_range_they_cover() {
         let workbook = super::test_fixtures::build_xlsx(&[(
             "Q4 Results",
             &[
@@ -389,32 +384,19 @@ mod tests {
             .parse(&workbook, XLSX_MEDIA_TYPE)
             .await
             .unwrap();
-        let document = Document::new(DocumentSource::Inline, XLSX_MEDIA_TYPE, &parsed.text)
-            .with_source_regions(parsed.source_regions);
-        let chunks = TextChunker::default()
-            .chunk(&document, "text/markdown")
-            .unwrap();
-
-        let located: Vec<_> = chunks
-            .iter()
-            .map(|chunk| {
-                EvidenceLocation::for_source_regions(
-                    chunk.heading_path.clone(),
-                    chunk.source_regions.clone(),
-                )
-            })
-            .collect();
+        let located =
+            EvidenceLocation::for_source_regions(Vec::new(), parsed.source_regions.clone());
         assert_eq!(
             located,
-            vec![EvidenceLocation::SpreadsheetCellRange {
+            EvidenceLocation::SpreadsheetCellRange {
                 start_cell: "A1".into(),
                 end_cell: Some("C3".into()),
                 sheet_index: 0,
                 sheet_name: "Q4 Results".into(),
-            }],
+            },
             "the whole grid is one range on its sheet"
         );
-        assert!(located[0].is_well_formed());
+        assert!(located.is_well_formed());
     }
 
     #[tokio::test]
@@ -441,52 +423,6 @@ mod tests {
             3
         );
     }
-
-    /// A grid is dense enough that an ordinary chunk covers more cells than
-    /// evidence may carry. Without coalescing that produced evidence which
-    /// failed validation outright, so this is the case the range shape has to
-    /// survive rather than a hypothetical one.
-    #[tokio::test]
-    async fn a_passage_over_more_cells_than_evidence_carries_stays_one_valid_range() {
-        let rows: Vec<Vec<String>> = (0..200)
-            .map(|row| (0..10).map(|column| format!("{row}-{column}")).collect())
-            .collect();
-        let borrowed: Vec<Vec<&str>> = rows
-            .iter()
-            .map(|row| row.iter().map(String::as_str).collect())
-            .collect();
-        let sheet: Vec<&[&str]> = borrowed.iter().map(Vec::as_slice).collect();
-        let workbook = super::test_fixtures::build_xlsx(&[("Ledger", &sheet)]);
-
-        let parsed = SpreadsheetParser::new()
-            .parse(&workbook, XLSX_MEDIA_TYPE)
-            .await
-            .unwrap();
-        let document = Document::new(DocumentSource::Inline, XLSX_MEDIA_TYPE, &parsed.text)
-            .with_source_regions(parsed.source_regions);
-        let chunks = TextChunker::default()
-            .chunk(&document, "text/markdown")
-            .unwrap();
-
-        assert!(chunks.len() > 1, "the fixture is meant to span many chunks");
-        for chunk in &chunks {
-            chunk
-                .validate_source_regions()
-                .expect("a dense workbook passage must still be valid evidence");
-            let located = EvidenceLocation::for_source_regions(
-                chunk.heading_path.clone(),
-                chunk.source_regions.clone(),
-            );
-            assert!(
-                matches!(
-                    &located,
-                    EvidenceLocation::SpreadsheetCellRange { sheet_name, .. } if sheet_name == "Ledger"
-                ) && located.is_well_formed(),
-                "every chunk of a workbook is a range on its sheet: {located:?}"
-            );
-        }
-    }
-
     #[tokio::test]
     async fn bytes_that_are_not_a_workbook_fail_rather_than_indexing_as_prose() {
         let error = SpreadsheetParser::new()

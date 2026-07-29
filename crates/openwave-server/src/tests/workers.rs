@@ -169,11 +169,7 @@ async fn foreground_spawn_is_nonblocking_and_ordered_wait_resumes_with_child_res
         Arc::new(FixedResolver(provider.clone())),
         Arc::new(MemSecrets::default()),
         Arc::new(tools),
-        build_retrieval(
-            Arc::new(HashEmbedder::default()),
-            Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-        )
-        .0,
+        build_retrieval(),
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
@@ -379,10 +375,7 @@ async fn worker_drains_a_turn_queued_before_startup() {
         openwave_core::AcceptTurnOutcome::Accepted(_)
     ));
 
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -465,10 +458,7 @@ async fn concurrent_message_retry_converges_across_a_model_setting_race() {
         .await
         .unwrap();
     let gate = Arc::new(Notify::new());
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     let (router, token, store, _dir) = test_app_from_parts(
         Arc::new(GatedProvider { gate: gate.clone() }),
         retrieval,
@@ -532,10 +522,7 @@ async fn worker_recovers_ambiguous_claim_and_completion_with_exact_receipts() {
     injected.fail_after_next_completion_commit();
     injected.fail_next_terminal_recovery();
     let store: Arc<dyn Store> = injected.clone();
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     let (router, token, store, _dir) = test_app_from_parts_with_worker_config(
         Arc::new(FakeProvider),
         retrieval,
@@ -813,11 +800,7 @@ async fn worker_renews_a_near_expiry_ambiguous_claim_before_execution() {
         }))),
         Arc::new(MemSecrets::default()),
         Arc::new(ToolRegistry::new()),
-        build_retrieval(
-            Arc::new(HashEmbedder::default()),
-            Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-        )
-        .0,
+        build_retrieval(),
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
@@ -910,11 +893,7 @@ async fn worker_heartbeats_while_event_journaling_is_blocked() {
         Arc::new(FixedResolver(Arc::new(FakeProvider))),
         Arc::new(MemSecrets::default()),
         Arc::new(ToolRegistry::new()),
-        build_retrieval(
-            Arc::new(HashEmbedder::default()),
-            Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-        )
-        .0,
+        build_retrieval(),
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
@@ -1147,11 +1126,7 @@ async fn durable_slot_stays_held_and_cancel_can_win_terminal_commit_race() {
         Arc::new(FixedResolver(Arc::new(FakeProvider))),
         Arc::new(MemSecrets::default()),
         Arc::new(ToolRegistry::new()),
-        build_retrieval(
-            Arc::new(HashEmbedder::default()),
-            Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-        )
-        .0,
+        build_retrieval(),
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
@@ -1254,10 +1229,7 @@ async fn steer_wins_a_completion_race_and_restarts_generation() {
         release.clone(),
     ));
     let calls = Arc::new(AtomicUsize::new(0));
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -1389,10 +1361,7 @@ async fn late_steers_share_the_turn_wide_model_step_budget() {
         release.clone(),
     ));
     let calls = Arc::new(AtomicUsize::new(0));
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -1574,11 +1543,7 @@ async fn approval_endpoint_unparks_a_sensitive_tool() {
         }))),
         Arc::new(MemSecrets::default()),
         tools,
-        build_retrieval(
-            Arc::new(HashEmbedder::default()),
-            Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-        )
-        .0,
+        build_retrieval(),
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
@@ -1877,11 +1842,7 @@ async fn foreground_web_search_runs_end_to_end_through_durable_approval() {
         }))),
         Arc::new(MemSecrets::default()),
         tools,
-        build_retrieval(
-            Arc::new(HashEmbedder::default()),
-            Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-        )
-        .0,
+        build_retrieval(),
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
@@ -2007,17 +1968,15 @@ async fn foreground_web_search_runs_end_to_end_through_durable_approval() {
 
 /// End-to-end integration test that drives the whole product path as a single
 /// flow over one in-process server, store, and worker set: raw document ingest,
-/// the parse/index worker, a library search that must surface the ingested
-/// passage as a citation, and a chat turn whose Sensitive tool crosses the
-/// approval gate — first parking on the gate, then reusing a standing grant so a
-/// later covered call runs without re-prompting.
+/// the parse worker, and a chat turn whose Sensitive tool crosses the approval
+/// gate — first parking on the gate, then reusing a standing grant so a later
+/// covered call runs without re-prompting.
 ///
-/// Unlike the per-slice tests, every seam here shares the same instances: the
-/// retriever the worker indexes into is the one the `/search` route reads from,
-/// and the approval store the gate parks in is the one the HTTP endpoint
-/// decides against. The point is to catch gaps the mocked-seam unit tests can't.
+/// Unlike the per-slice tests, the approval store the gate parks in is the one
+/// the HTTP endpoint decides against. The point is to catch gaps the mocked-seam
+/// unit tests cannot.
 #[tokio::test(flavor = "multi_thread")]
-async fn ingest_index_search_then_chat_through_the_approval_gate() {
+async fn ingest_parse_then_chat_through_the_approval_gate() {
     let dir = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
         DbStore::connect(&format!(
@@ -2027,11 +1986,7 @@ async fn ingest_index_search_then_chat_through_the_approval_gate() {
         .await
         .unwrap(),
     );
-    // One retriever shared by the indexing worker and the `/search` route.
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     let ran = Arc::new(AtomicUsize::new(0));
     // Named "search": the approval calibration only presents recognized tools,
     // so this is the one Sensitive name the approval endpoint can approve (an
@@ -2061,7 +2016,6 @@ async fn ingest_index_search_then_chat_through_the_approval_gate() {
         state.blobs.clone(),
         retrieval,
         state.document_job_wake.clone(),
-        state.document_writes.clone(),
         document_worker::DocumentWorkerConfig::default(),
     );
     spawn_turn_worker(&state);
@@ -2204,11 +2158,7 @@ async fn approval_endpoint_rejects_unpresentable_sensitive_tool_approval() {
         }))),
         Arc::new(MemSecrets::default()),
         tools,
-        build_retrieval(
-            Arc::new(HashEmbedder::default()),
-            Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-        )
-        .0,
+        build_retrieval(),
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()

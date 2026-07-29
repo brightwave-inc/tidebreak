@@ -191,11 +191,8 @@ fn spawn_pairing(app: tauri::AppHandle, link: ProvisionLink) {
         )
         .await;
         match outcome {
-            Ok(Some(newly_provisioned)) => {
+            Ok(Some(())) => {
                 log_pairing(&app, &format!("provisioned to {origin}"));
-                if newly_provisioned {
-                    prompt_restart(&app);
-                }
             }
             Ok(None) => log_pairing(&app, &format!("pairing with {origin} declined")),
             Err(failure) => {
@@ -212,9 +209,8 @@ fn spawn_pairing(app: tauri::AppHandle, link: ProvisionLink) {
 /// The confirmation gate, separated from the dialog and the store so the
 /// decision path is testable without a GUI: `confirm` sees only the gateway
 /// origin, and nothing runs `pair` but a confirming answer. What a confirmed
-/// pairing yields flows back to the caller — today, whether this pairing
-/// newly provisioned the profile, which decides the restart prompt — and so
-/// does what a failed one raised, which decides the refusal dialog.
+/// pairing yields flows back to the caller, as does what a failed one raised,
+/// which decides the refusal dialog.
 async fn pair_after_confirmation<C, P, F, T, E>(
     link: ProvisionLink,
     confirm: C,
@@ -279,15 +275,14 @@ impl std::fmt::Display for PairFailure {
 /// Validate, probe, and provision — all server-side. The sign-in gate is a
 /// separate surface: once policy flips to managed it presents itself on its
 /// next poll, so pairing does not drive the renderer. Reports whether this
-/// pairing newly provisioned the profile — the restart-prompt signal — and
 /// keeps the server's typed conflict refusal distinct from other failures,
 /// reduced to the provisioned gateway's origin.
-async fn pair(app: tauri::AppHandle, gateway_url: String) -> Result<bool, PairFailure> {
+async fn pair(app: tauri::AppHandle, gateway_url: String) -> Result<(), PairFailure> {
     let handle = wait_pairing_handle(&app)
         .await
         .map_err(PairFailure::Other)?;
     match openwave_server::pair_with_gateway(&handle, &gateway_url).await {
-        Ok(outcome) => Ok(outcome.newly_provisioned),
+        Ok(_) => Ok(()),
         Err(PairingError::Conflict { provisioned_url }) => Err(PairFailure::Conflict {
             provisioned_origin: origin_of(&provisioned_url),
         }),
@@ -334,39 +329,6 @@ fn show_pairing_failure(app: &tauri::AppHandle, origin: &str, failure: &PairFail
         .title("Pairing failed")
         .kind(MessageDialogKind::Error)
         .blocking_show();
-}
-
-/// Offer the restart that completes enforcement, after the pairing that
-/// provisioned this profile. The embeddings client is boot-scoped (the
-/// vector index is dimension-bound to it — see `embedding setup` in
-/// `openwave-server`), so a BYOK embedder resolved at launch keeps serving
-/// until the next start. An idempotent re-pair never reaches here; the
-/// first pairing of a profile already OS-managed at boot does, and for it
-/// the offered restart simply changes nothing. Declining is honored without
-/// nagging, but not silently: one log line records that enforcement
-/// completes at the next launch.
-fn prompt_restart(app: &tauri::AppHandle) {
-    let restart = app
-        .dialog()
-        .message(
-            "Pairing complete — restart OpenWave to finish applying managed \
-             enforcement.\n\nUntil the next launch, document embeddings keep \
-             the configuration the app started with.",
-        )
-        .title("Pairing complete")
-        .kind(MessageDialogKind::Info)
-        .buttons(MessageDialogButtons::OkCancelCustom(
-            "Restart Now".to_string(),
-            "Later".to_string(),
-        ))
-        .blocking_show();
-    if restart {
-        app.restart();
-    }
-    log_pairing(
-        app,
-        "restart deferred; managed enforcement completes at the next launch",
-    );
 }
 
 async fn wait_pairing_handle(app: &tauri::AppHandle) -> Result<PairingHandle, String> {

@@ -1069,14 +1069,6 @@ async fn library_document_failure(
 
 fn failure_projection(code: Option<&str>) -> LibraryDocumentFailure {
     let (message, retriable) = match code {
-        Some("embedding_failed") => (
-            "OpenWave could not prepare this source for search. Check the model connection, then retry.",
-            true,
-        ),
-        Some("vector_store_failed" | "index_failed") => (
-            "The local search index was unavailable. Retry preparing this source.",
-            true,
-        ),
         Some("source_blob_read_failed") => (
             "OpenWave could not read the stored file. Retry, or delete it and add it again if the problem continues.",
             true,
@@ -1097,11 +1089,7 @@ fn failure_projection(code: Option<&str>) -> LibraryDocumentFailure {
             "The stored file is unavailable or damaged. Delete this source and add the file again.",
             false,
         ),
-        Some("dimension_mismatch" | "generation_conflict") => (
-            "This source no longer matches the current search index. Delete it and add the file again.",
-            false,
-        ),
-        Some("generation_fenced" | "activation_fenced" | "invalid_document_stage") => (
+        Some("invalid_document_stage") => (
             "This source was superseded while it was being prepared. Delete it and add the file again.",
             false,
         ),
@@ -1856,9 +1844,6 @@ mod tests {
     #[test]
     fn failure_projection_offers_retry_only_for_recoverable_worker_failures() {
         for code in [
-            "embedding_failed",
-            "vector_store_failed",
-            "index_failed",
             "source_blob_read_failed",
             "pipeline_changed",
             "lease_expired",
@@ -1872,10 +1857,6 @@ mod tests {
             "source_blob_missing",
             "source_blob_length_mismatch",
             "source_blob_digest_mismatch",
-            "dimension_mismatch",
-            "generation_conflict",
-            "generation_fenced",
-            "activation_fenced",
             "invalid_document_stage",
             "unknown",
         ] {

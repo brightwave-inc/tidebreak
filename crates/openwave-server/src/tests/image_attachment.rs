@@ -567,10 +567,7 @@ async fn a_turn_carrying_images_against_a_text_only_model_is_refused() {
     )
     .await
     .unwrap();
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -680,10 +677,7 @@ async fn a_curated_openai_model_answers_after_receiving_png_and_jpeg_attachments
     )
     .await
     .unwrap();
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),

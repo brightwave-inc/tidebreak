@@ -16,12 +16,6 @@ workspace = true
 # own focused contracts.
 default = ["document-parsers"]
 document-parsers = ["openwave-server/document-parsers"]
-# Forwards the server's durable, on-disk vector store. Off by default so a dev
-# build and the workspace tests skip the LanceDB dependency tree; every shipped
-# bundle enables it (`cargo tauri build --features vec-lance`), and
-# `openwave-server`'s build script fails a release build that does not.
-vec-lance = ["openwave-server/vec-lance"]
-
 [lib]
 name = "openwave_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]

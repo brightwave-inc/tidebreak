@@ -13,16 +13,6 @@ updates:
       # updates below remain `ci(deps)` and do not release the product.
       prefix: deps
       include: scope
-    # LanceDB 0.31 exposes Arrow 58 types. Moving any one of these direct
-    # dependencies to Arrow 59 creates an incompatible duplicate type graph;
-    # advance them together when LanceDB adopts the next Arrow major.
-    ignore:
-      - dependency-name: arrow-array
-        versions: [">=59"]
-      - dependency-name: arrow-schema
-        versions: [">=59"]
-      - dependency-name: arrow-select
-        versions: [">=59"]
     groups:
       # Batch low-risk bumps into one PR to keep the queue quiet.
       cargo-minor-and-patch:

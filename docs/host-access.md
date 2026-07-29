@@ -12,8 +12,8 @@ plane can use the same contracts later.
 ## The product model
 
 OpenWave owns an application data directory. It contains the operational
-database, retained source blobs, the search index, broker state, audit records,
-and private scratch data. It is not a user project and should not appear as the
+database, retained source blobs, broker state, audit records, and private
+scratch data. It is not a user project and should not appear as the
 one folder all conversations work in.
 
 A folder elsewhere on the machine is a **connected root**. It becomes available

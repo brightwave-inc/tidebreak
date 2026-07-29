@@ -52,40 +52,35 @@ are not exactly-once yet.
                  | routes + workers    |
                  +---+------+-------+--+
                      |      |       |
-          model calls|      |       |file/search tools
+          model calls|      |       |file/source tools
                      |      |       |
               +------v--+   |   +---v------------------+
-              | router  |   |   | host broker + search |
+              | router  |   |   | host broker + tools  |
               +---------+   |   +----------------------+
                             |
         +-------------------+--------------------+
-        |                   |                    |
-  operational store    source blob store    Lance vector index
-  chats, turns, jobs    immutable raw bytes  derived search data
-  SQLite today          local filesystem     local filesystem
+        |                                        |
+  operational store                         source blob store
+  chats, turns, jobs, canonical text         immutable raw bytes
+  SQLite today                               local filesystem
 ```
 
-There are three different kinds of persisted data because they have different
+There are two different kinds of persisted data because they have different
 jobs:
 
 - The **operational store** is the source of truth. It contains chats, messages,
   turns, event history, document metadata, canonical text, and worker state.
 - The **blob store** retains immutable original document bytes. It makes a later
   reparse possible and deduplicates identical content.
-- The **Lance index** is a derived search structure. It contains chunks and
-  embeddings and should always be rebuildable from authoritative data.
-
-Keeping the index separate is deliberate. Losing or rebuilding a search index
-must not mean losing the source document.
 
 ## Startup, configuration, and local data
 
 Both the desktop and `openwave serve` use the same server boot path. The native
 desktop additionally enforces one application instance, owns folder consent,
 and lazily starts its bundled host-broker sidecar. Server startup acquires
-exclusive ownership of the data directory, opens the operational database and
-Lance index, loads provider configuration, registers tools, starts the turn and
-document workers, and finally binds an ephemeral loopback port with a fresh
+exclusive ownership of the data directory, opens the operational database,
+loads provider configuration, registers tools, starts the turn and document
+workers, and finally binds an ephemeral loopback port with a fresh
 bearer token. Saved MCP definitions are loaded into a supervised runtime; the
 legacy `OPENWAVE_MCP_CONFIG` file supplies the initial definitions when no saved
 configuration exists. A malformed boot file or failed enabled boot server fails
@@ -100,19 +95,18 @@ The main local data is easy to recognize:
 | `openwave.db` | SQLite operational source of truth |
 | `openwave-schema.json` | pre-v1 local SQLite schema epoch |
 | `blobs/` | retained immutable document bytes |
-| `vectors/` | derived Lance search index |
 | `openwave.lock` | proof that one process owns this data directory |
 | OS keychain | provider credentials, kept outside the database |
 
 While the app remains at version `0.0.0`, baseline migrations may be rewritten
 instead of accumulated. The local SQLite schema epoch makes that explicit for
 both the desktop app and a headless `openwave serve` using the desktop profile.
-Opening an older pre-v1 database rebuilds `openwave.db`, its SQLite journals,
-and the derived `vectors/` index so stale search results cannot survive the
-reset. A current epoch preserves both stores. Unknown, newer, or post-v1
-lifecycle markers fail closed so a prerelease binary cannot silently erase a
-future stable database, and the destructive path is disabled at runtime for
-package major version 1 and later.
+Opening an older pre-v1 database rebuilds `openwave.db` and its SQLite journals
+so stale state cannot survive the reset. A current epoch preserves both stores.
+Startup also removes the retired `vectors/` directory when it is safe to open
+the current schema. Unknown, newer, or post-v1 lifecycle markers fail closed so
+a prerelease binary cannot silently erase a future stable database, and the
+destructive path is disabled at runtime for package major version 1 and later.
 
 Source bytes under `blobs/` are physically retained during the reset, but their
 database records are gone. They are therefore unreachable through the product
@@ -132,9 +126,7 @@ the schema stabilizes for v1.
 
 Non-secret provider settings and the default model live in the operational
 store and can change while the process runs. Model routing observes those
-changes without restart. The embedding backend is different: it is selected at
-startup because the Lance index has a fixed vector width, so enabling OpenAI
-embeddings takes effect after a restart.
+changes without restart.
 
 The model catalog shows built-in choices even before a key is configured. This
 helps configuration, but it does not bypass egress safety: a turn still fails
@@ -569,8 +561,8 @@ so an accepted catalog record never points at bytes that were not written.
 ### 2. Accept a new document generation
 
 The operational store creates or updates the stable document record and queues a
-`Parse` job in the same transaction. The API returns `202 Accepted`; parsing and
-embedding happen later.
+`Parse` job in the same transaction. The API returns `202 Accepted`; parsing
+happens later.
 
 This is where “revision” and “generation” matter:
 
@@ -588,49 +580,28 @@ adds exact identity, so even an unexpected equal revision cannot be mistaken for
 the generation a worker originally claimed.
 
 This model is more explicit than a simple mutable document row because parsing
-and embedding happen outside the database and may take minutes. Every worker
-completion needs to prove, “I processed exactly the generation that is still
-current.”
+happens outside the database and may take time. Every worker completion needs
+to prove, “I processed exactly the generation that is still current.”
 
 ### 3. Parse into canonical text
 
 A document worker claims the `Parse` job with a lease, verifies the retained
 byte length and SHA-256 digest, and parses it into:
 
-- canonical UTF-8 text, the text-of-record used by indexing;
+- canonical UTF-8 text, the text-of-record used by direct source reads;
 - source regions that map text byte ranges back to locations such as pages.
 
-The parse completion and creation of the matching `Index` job are atomic. The
-configured registry selects a parser by media type: liteparse handles PDF,
-Office, and raster image formats, a plain-text parser handles `text/*`, and a
-fallback keeps anything else storable by indexing it when it decodes as UTF-8
-and leaving it empty when it does not. The model can represent page provenance,
-but the parsers do not emit page regions today.
+The parse completion marks the document ready atomically. The configured
+registry selects a parser by media type: liteparse handles PDF, Office, and
+raster image formats, a plain-text parser handles `text/*`, and a fallback keeps
+anything else storable by decoding it when it is valid UTF-8 and leaving it
+empty when it is not. The model can represent page provenance, but the parsers
+do not emit page regions today.
 
 Because that selection is by media type, the media type has to be right. The
 trusted native side decides it from the bytes rather than from the filename, so
-a document cannot be routed to a parser that cannot read it — and a parser that
-produces no text yields a source the catalog reports as stored but not
-searchable rather than as ready.
-
-### 4. Chunk, embed, and stage
-
-The index worker splits canonical text into overlapping structural chunks,
-creates embeddings, and writes the exact generation to a staged area in Lance.
-Search still sees the prior active generation during this work.
-
-The default is an offline deterministic hash embedder. If OpenAI is enabled and
-has a credential at startup, OpenWave uses `text-embedding-3-small` instead. The
-choice is intentionally gated by the provider's enabled flag so documents are
-not sent to an external embedding service unexpectedly. With OpenAI embeddings,
-both document chunks and later search queries leave the machine.
-
-### 5. Activate, then mark ready
-
-After staging, the worker rechecks its exact live lease, activates the generation
-in Lance, and records the indexed revision in the operational store. The document
-then becomes `ready`. A stale worker is fenced at every publication boundary and
-cannot overwrite a newer upload.
+a document cannot be routed to a parser that cannot read it. A parser that
+produces no text yields a ready source with no directly readable text.
 
 There is no document event stream yet. After receiving `202`, a client polls the
 document list or detail endpoint for `queued → processing → ready/failed`. The
@@ -650,56 +621,26 @@ queued --> running --> succeeded
 superseded work and deleted documents become cancelled instead of publishing.
 ```
 
-An auditor periodically compares authoritative documents, active parser/index
-fingerprints, jobs, and derived index coverage. It can repair missing work or
-schedule reprocessing after a pipeline change. Delete uses a durable tombstone so
-an old vector generation cannot reappear after removal.
+An auditor periodically compares authoritative documents, parser fingerprints,
+and jobs. It can repair missing work or schedule reprocessing after a parser
+change.
 
-### 6. Retire unused blobs
+### 4. Retire unused blobs
 
 Replacing or deleting a document may make its old source blob unreferenced. A
 separate leased retirement worker rechecks all authoritative references before
 deleting it. A grace-period orphan auditor also reclaims blobs that were written
 but never became referenced because a later catalog transaction failed.
 
-## How search works
-
-Product search is scoped to the exact conversation. The HTTP chat-search
-endpoint and the agent's `search` tool both filter by that chat identity; they
-never fall back to conversationless or project documents. Explicit legacy
-global/project endpoints remain available only to callers that deliberately use
-those lower-level APIs.
-
-For each query, OpenWave:
-
-1. embeds the query;
-2. retrieves both dense-vector matches and lexical BM25 matches;
-3. combines their ranks with reciprocal-rank fusion;
-4. can rerank a larger candidate set when a reranker is configured;
-5. suppresses heavily overlapping passages and adds modest document diversity;
-6. returns bounded citations with source spans and provenance.
-
-In plain language, lexical search matches words, vector search matches embedding
-proximity, and rank fusion combines the two result lists. The vector leg becomes
-meaningfully semantic when OpenAI embeddings are active; the offline hash
-embedder is a deterministic local baseline. The reranker seam exists, but the
-server does not configure a reranker today.
-
-The current Lance implementation is durable and generation-aware, but search is
-still a flat scan rather than an approximate nearest-neighbor (ANN) index. That
-is an intentional pre-scale baseline, not the final large-corpus performance
-design.
-
 ## How grounded sources reach a chat answer
 
-Search results and assistant citations are related, but they are not the same
-record. When the `search` tool completes, OpenWave saves a private, bounded
-snapshot of the passages it returned. Each passage receives a random opaque
-reference that the model may place in its answer. That reference is an internal
-protocol token, not a URL and not Markdown.
+Source-tool results and assistant citations are related, but they are not the
+same record. When a source tool returns private evidence, each passage receives
+a random opaque reference that the model may place in its answer. That reference
+is an internal protocol token, not a URL and not Markdown.
 
 Before publishing assistant text, the agent loop removes those internal tokens,
-resolves only references produced by a search from the same chat and turn, and
+resolves only references produced by a tool from the same chat and turn, and
 commits the clean message and its ordered citations together. The same rule
 applies to an assistant message that precedes another tool call, to a message
 accepted at a steering boundary, and to the final answer. Exact retries reuse
@@ -768,15 +709,14 @@ a stable identity and the composer waits for authoritative events rather than
 treating the request as locally applied. Completed assistant messages render the
 closed structured source cards described above. A native composer action adds a
 user-picked file directly to the current conversation and confirms it inline;
-the Sources surface remains the durable catalog/search view. It lists only the
-authoritative current chat's catalog, polls durable processing status, and
-searches only its ready passages. Switching conversations switches this scope;
-there is no shared standalone-chat corpus.
+the Sources surface remains the durable catalog view. It lists only the
+authoritative current chat's catalog and polls durable processing status.
+Switching conversations switches this scope; there is no shared standalone-chat
+corpus.
 Native code reads the selected file and calls the conversation-scoped local
-document APIs. The renderer sees only bounded titles, lifecycle states, and
-plain-text search passages, never the source path, source bytes, generation
-identities, index metadata, or canonical search records. Connected-folder
-consent and reads work.
+document APIs. The renderer sees only bounded titles and lifecycle states, never
+the source path, source bytes, generation identities, or canonical source
+records. Connected-folder consent and reads work.
 Agent-approved picker results, manual connect/disconnect, and bounded startup
 recovery all reconcile broker registration, exact attachment, and the durable
 product projection before reporting success. Every folder UI action therefore
@@ -788,10 +728,9 @@ those routes on their primary bearer because they do not have a webview trust
 boundary. The native document bridge follows bounded catalog cursors and reports
 when it has intentionally stopped at the newest 1,000 records.
 
-The chat's `list_sources`, `read_source`, and `search` tools can see only
-documents owned by that exact conversation. Direct reads become available as
-soon as parsing publishes canonical text, without waiting for embedding, and
-produce the same durable grounded-citation evidence as semantic search. A page
+The chat's `list_sources` and `read_source` tools can see only documents owned by
+that exact conversation. Direct reads become available as soon as parsing
+publishes canonical text and produce durable grounded-citation evidence. A page
 fetched by `web_extract` becomes one of those documents, so a claim drawn from
 the public web is anchored and reopenable on the same terms as one drawn from an
 imported file; it arrives already parsed, so it is citable immediately.
@@ -876,8 +815,8 @@ a gate in #853, which any shared-deployment work should be blocked on.
 | Model providers | `crates/openwave-router/src/` | Anthropic/OpenAI adapters and model-to-provider routing |
 | Local API | `crates/openwave-server/src/lib.rs`, `routes.rs`, `routes/client_execution.rs` | Authentication, API assembly, chat, turn, and leased client-execution routes |
 | Turn execution | `crates/openwave-server/src/turn_worker.rs` | Claiming, heartbeats, event journaling, terminal resolution |
-| Documents | `crates/openwave-server/src/routes/document.rs`, `document_worker.rs` | Upload API and Parse/Index worker orchestration |
-| Retrieval | `crates/openwave-retrieval/src/` | Parsing, chunks, embeddings, Lance, ranking, citations |
+| Documents | `crates/openwave-server/src/routes/document.rs`, `document_worker.rs` | Upload API and durable parse-worker orchestration |
+| Retrieval | `crates/openwave-retrieval/src/` | Parser selection, canonical text, and source-region mappings |
 | Desktop | `crates/openwave-desktop/src/`, `crates/openwave-desktop/ui/src/` | Tauri host and current React shell |
 | Host access | `crates/openwave-host-broker/src/`, `docs/host-access.md` | Broker trust boundary, connected-root model, and reconciliation plan |
 | MCP | `crates/openwave-mcp/src/`, `crates/openwave-cli/src/main.rs` | MCP protocol server and stdio command |
@@ -895,28 +834,26 @@ When changing the runtime, these rules matter more than the exact module layout:
    identity committed, not merely that an in-memory task was spawned.
 2. **Give commands stable identities.** Ambiguous network retries should recover
    the first result; the same identity with different input should conflict.
-3. **Make related facts atomic.** Input plus queued turn, parse completion plus
-   index enqueue, and final answer plus completion event belong in transactions.
+3. **Make related facts atomic.** Input plus queued turn, parse completion, and
+   final answer plus completion event belong in transactions.
 4. **Fence expensive work.** Workers must present an exact lease and exact source
    generation before publishing.
 5. **Treat notifications as hints.** A `Notify` or process-local signal may reduce
    latency, but durable polling must eventually find all accepted work.
-6. **Keep the index derived.** Canonical source and provenance remain in the
-   operational store; Lance can be repaired or rebuilt.
-7. **Retry exact requests after ambiguous failures.** Do not invent new IDs or
+6. **Retry exact requests after ambiguous failures.** Do not invent new IDs or
    timestamps until it is known that the original operation did not commit.
-8. **Do not replay unknown side effects.** Until tool execution has durable
+7. **Do not replay unknown side effects.** Until tool execution has durable
    checkpoints and idempotency contracts, fail conservatively after ambiguity.
-9. **Journal before live publication.** Reconnect correctness comes from the
+8. **Journal before live publication.** Reconnect correctness comes from the
    journal, not the in-memory broadcast bus.
-10. **Test state machines against both databases.** SQLite is the desktop path;
+9. **Test state machines against both databases.** SQLite is the desktop path;
     PostgreSQL tests catch different transaction and locking behavior.
 
 ## What is solid, and what comes next
 
 The strongest parts today are the core seams, database constraints, durable
-document pipeline, generation-aware Lance publication, durable turn acceptance
-and ownership, atomic client-wait checkpoints, terminal turn commits,
+document parsing, durable turn acceptance and ownership, atomic client-wait
+checkpoints, terminal turn commits,
 cancellation, reconnectable event stream, durable foreground/sandbox agent-run
 leases and result delivery, bounded non-blocking child admission, ordered
 multi-child waits, the foreground terminal guard, Markdown and tool-call
@@ -935,7 +872,7 @@ The main next steps are:
 - only then extend the bounded depth-one hierarchy with carefully scoped
   sandbox-safe capabilities without widening exact delegated-file or spawn
   authority;
-- add richer parsers and wire indexed search into MCP;
+- add richer parsers;
 - resolve a principal in the request path and scope queries by owner (#853)
   before finishing the self-host profile, which is otherwise a multi-user server
   with no per-user authorization;
@@ -1002,12 +939,8 @@ steps; the migrations should be condensed into a clean baseline before v1.
   steering freshness counter of a turn.
 - **Revision token:** random exact identity paired with a document revision.
 - **Generation:** the revision number and revision token together.
-- **Fingerprint:** stable identity of parser, chunker, or embedder behavior.
-- **Canonical text:** authoritative parsed text from which the search index can
-  be rebuilt.
-- **Watermark:** the document revision known to be active in the derived index.
-- **Tombstone:** an explicit empty/deleted generation that prevents old derived
-  data from reappearing.
+- **Fingerprint:** stable identity of parser behavior.
+- **Canonical text:** authoritative parsed text used for direct source reads.
 - **Fence:** a check that rejects completion from stale ownership or stale input.
 - **Idempotent:** safe to repeat with the same identity and receive the same
   logical result.

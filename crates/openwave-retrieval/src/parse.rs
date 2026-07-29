@@ -1,8 +1,8 @@
 //! The document-parser seam: raw bytes in, plain text out.
 //!
-//! A [`DocumentParser`] turns a source file's bytes into the canonical plain text
-//! that chunking and embedding operate on. The always-on [`PlainTextParser`]
-//! handles `text/*` (plain, markdown) with zero dependencies. Rich formats
+//! A [`DocumentParser`] turns a source file's bytes into canonical text plus the
+//! source regions that make direct reads citable. The always-on
+//! [`PlainTextParser`] handles `text/*` (plain, markdown) with zero dependencies. Rich formats
 //! (PDF/office/images) will arrive later as a feature-gated parser behind this
 //! same trait, so the pipeline never has to care which parser produced the text.
 //!
@@ -304,8 +304,8 @@ impl DocumentParser for FallbackParser {
     }
 
     async fn parse(&self, raw: &[u8], _media_type: &str) -> Result<ParsedDocument> {
-        // Index only genuinely textual bytes; binary content is retained but not
-        // decoded into the search index.
+        // Decode only genuinely textual bytes; binary content is retained
+        // without pretending it is readable text.
         let text = std::str::from_utf8(raw)
             .map(str::to_owned)
             .unwrap_or_default();

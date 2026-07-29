@@ -142,20 +142,13 @@ is the whole rule, and it is coarse on purpose:
   jobs report a successful skip when their scope is false; the always-running
   change detector rejects impossible narrower-scope combinations before those
   jobs consume them. There is no serial aggregate wrapper after the slowest job.
-- The two heavyweight capability lanes are scoped separately on merges to
-  `main`. `durable vector store` runs when retrieval, its server/CLI/desktop
-  feature wiring, or dependency/toolchain inputs change. `sandbox-resident
-  container e2e` runs when the sandbox agent/protocol, container driver,
+- The heavyweight `sandbox-resident container e2e` lane is scoped separately on
+  merges to `main`. It runs when the sandbox agent/protocol, container driver,
   Dockerfile, or dependency/toolchain inputs change. A weekly scheduled run and
-  every `workflow_dispatch` exercise both as a backstop.
-- **One exception, and it is a real coverage gap:** neither heavyweight lane
-  runs on pull requests. If you touch `openwave-retrieval`, the `vec-lance`
-  feature, or the release guard in `openwave-server`'s build script, run
-  `cargo test -p openwave-retrieval --features vec-lance` locally — a PR going
-  green says nothing about LanceDB. Tracked in #760. The container path has
-  lower residual risk because PRs drive the same host driver against the real
-  sandbox agent over loopback, but only the post-merge/scheduled lane proves the
-  Docker packaging and container network boundary.
+  every `workflow_dispatch` exercise it as a backstop. Pull requests drive the
+  same host driver against the real sandbox agent over loopback, but only the
+  post-merge/scheduled lane proves the Docker packaging and container network
+  boundary.
 
 So a scoped skip is not a coverage hole, and duplicating those lanes locally is
 wasted time. Run a cheap subset for fast feedback on what you actually touched —

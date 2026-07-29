@@ -129,16 +129,11 @@ See [Execution providers and sandbox-resident agent runs](sandbox-providers.md).
 
 **Depends on:** no OpenWave crate (standalone wire contract).
 
-## `openwave-retrieval` — parsing, search, citations 🟢
+## `openwave-retrieval` — canonical document parsing 🟢
 
-Asynchronous parsing, structural chunking, embeddings, scoped hybrid
-lexical+dense search, reranking, and grounded citations behind a `VectorStore`
-seam with in-memory and durable embedded LanceDB backends. Durable source
-revisions and Parse→Index jobs are coordinated by `openwave-core` and
-`openwave-server`. The LanceDB backend is the `vec-lance` build feature, off by
-default here and in `openwave-server` because it is the largest dependency tree
-in the workspace; release builds must enable it, and `openwave-server`'s build
-script fails the build when they do not.
+Asynchronous parser selection, stable parser fingerprints, canonical text, and
+validated source-region mappings. The server's durable parse worker uses this
+crate to turn retained source bytes into directly readable document records.
 
 **Depends on:** `openwave-core`.
 
