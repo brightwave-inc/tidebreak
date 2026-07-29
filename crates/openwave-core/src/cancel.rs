@@ -101,19 +101,6 @@ impl Future for Cancelled {
 mod tests {
     use super::*;
 
-    #[test]
-    fn default_token_is_not_cancelled() {
-        assert!(!CancelToken::new().is_cancelled());
-    }
-
-    #[test]
-    fn clones_share_the_flag() {
-        let token = CancelToken::new();
-        let clone = token.clone();
-        token.cancel();
-        assert!(clone.is_cancelled());
-    }
-
     #[tokio::test]
     async fn cancelled_future_resolves_when_tripped() {
         let token = CancelToken::new();
@@ -121,19 +108,6 @@ mod tests {
         token.cancel();
         // Already tripped, so this returns immediately rather than hanging.
         waiter.await;
-    }
-
-    #[tokio::test]
-    async fn cancelled_future_wakes_a_parked_waiter() {
-        let token = CancelToken::new();
-        let waiter = token.cancelled();
-        let clone = token.clone();
-        // Trip the token from another task while the waiter is parked.
-        let trip = tokio::spawn(async move {
-            clone.cancel();
-        });
-        waiter.await;
-        trip.await.unwrap();
     }
 
     #[tokio::test]

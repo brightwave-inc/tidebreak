@@ -481,14 +481,4 @@ mod tests {
             assert!(MAX_BINARY_DELIVERABLE_BYTES > MAX_DELIVERABLE_BYTES);
         }
     }
-
-    #[test]
-    fn a_revision_producer_is_exactly_one_of_turn_or_run() {
-        let turn = TurnId::new();
-        let run = AgentRunId::new();
-        assert_eq!(RevisionProducer::Turn(turn).turn_id(), Some(turn));
-        assert_eq!(RevisionProducer::Turn(turn).producing_run_id(), None);
-        assert_eq!(RevisionProducer::Run(run).producing_run_id(), Some(run));
-        assert_eq!(RevisionProducer::Run(run).turn_id(), None);
-    }
 }

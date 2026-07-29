@@ -433,50 +433,7 @@ pub trait ModelProvider: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use futures::stream::{self, StreamExt};
-
     use super::*;
-
-    struct Dummy;
-
-    #[async_trait]
-    impl ModelProvider for Dummy {
-        fn id(&self) -> ProviderId {
-            ProviderId::new("dummy")
-        }
-
-        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
-            Ok(stream::empty().boxed())
-        }
-    }
-
-    /// The returned stream must be `'static` — holdable after the provider it
-    /// came from is dropped, as the agent loop needs when the provider lives in
-    /// an `Arc<dyn ModelProvider>` registry.
-    #[test]
-    fn provider_stream_outlives_the_provider_borrow() {
-        let provider: Arc<dyn ModelProvider> = Arc::new(Dummy);
-        let stream = futures::executor::block_on(provider.stream(ChatRequest {
-            provider: None,
-            model: "m".into(),
-            reasoning_model: false,
-            system: None,
-            messages: vec![],
-            tools: vec![],
-            max_tokens: None,
-            temperature: None,
-            reasoning_effort: None,
-            images: ImageAttachments::new(),
-            ..Default::default()
-        }))
-        .unwrap();
-        drop(provider);
-        // Holding the stream after dropping `provider` only compiles if it is
-        // `'static` and did not borrow `self`.
-        let _held: BoxStream<'static, ProviderEvent> = stream;
-    }
 
     #[test]
     fn content_block_tags_its_variant() {

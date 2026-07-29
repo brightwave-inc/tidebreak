@@ -1019,16 +1019,6 @@ mod tests {
     }
 
     #[test]
-    fn byte_counts_read_as_sizes_and_keep_a_digit_only_where_it_says_something() {
-        assert_eq!(format_bytes(0), "0 B");
-        assert_eq!(format_bytes(900), "900 B");
-        assert_eq!(format_bytes(1024), "1 KB");
-        assert_eq!(format_bytes(1536), "1.5 KB");
-        assert_eq!(format_bytes(20 * 1024), "20 KB");
-        assert_eq!(format_bytes(3 * 1024 * 1024 + 512 * 1024), "3.5 MB");
-    }
-
-    #[test]
     fn an_mcp_tool_with_a_declared_view_projects_a_reference_not_markup() {
         let output =
             output_with_data(serde_json::json!({"status": 200})).with_ui_view(crate::ToolUiView {

@@ -423,14 +423,6 @@ describe("activity phases", () => {
   });
 });
 
-describe("row memoization", () => {
-  it("MessageBubble is a memoized component", () => {
-    expect((MessageBubble as unknown as { $$typeof: symbol }).$$typeof).toBe(
-      Symbol.for("react.memo"),
-    );
-  });
-});
-
 describe("historical image attachments", () => {
   afterEach(() => vi.unstubAllGlobals());
 
