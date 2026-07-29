@@ -56,7 +56,7 @@ pub enum ConnectError {
 /// attached-only run, checkpoints and waits.
 pub struct HostConnection {
     accepted: AttachAccepted,
-    events: mpsc::UnboundedReceiver<SandboxEvent>,
+    events: mpsc::Receiver<SandboxEvent>,
     outbound: Outbound,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -87,6 +87,24 @@ impl WireClient {
         stream: S,
         attach: AttachRequest,
         host: CapabilityHost,
+    ) -> Result<HostConnection, ConnectError>
+    where
+        S: AsyncRead + AsyncWrite + Send + 'static,
+    {
+        // The host caps its inbound event buffer at MAX_BUFFERED_EVENTS — the same
+        // ceiling a conforming sandbox self-limits its un-acknowledged events to,
+        // so a conforming peer never fills it, but a misbehaving one is torn down
+        // rather than allowed to grow host memory without bound.
+        Self::connect_with(stream, attach, host, crate::protocol::MAX_BUFFERED_EVENTS).await
+    }
+
+    /// [`connect`](Self::connect) with an explicit inbound event-buffer bound,
+    /// for exercising the host's ceiling at a small, cheap scale.
+    pub(crate) async fn connect_with<S>(
+        stream: S,
+        attach: AttachRequest,
+        host: CapabilityHost,
+        event_capacity: usize,
     ) -> Result<HostConnection, ConnectError>
     where
         S: AsyncRead + AsyncWrite + Send + 'static,
@@ -129,13 +147,13 @@ impl WireClient {
                 Err(error) => return Err(ConnectError::Transport(error)),
             };
 
-            // The event channel is unbounded so forwarding an event never blocks
-            // the read loop that also dispatches reverse requests and answers
-            // pings — a slow `next_event` consumer must not stall the reverse
-            // lane. A conforming sandbox bounds the backlog for us: it stops
-            // producing once MAX_BUFFERED_EVENTS go un-acknowledged, and
-            // [`HostConnection::acknowledge`] is how the host advances that.
-            let (event_tx, event_rx) = mpsc::unbounded_channel::<SandboxEvent>();
+            // The event channel is BOUNDED at the host's ceiling. The read loop
+            // forwards events with a non-blocking `try_send`, so a slow
+            // `next_event` consumer never stalls reverse-request dispatch or ping
+            // handling (the decoupling this design needs); but the bound caps host
+            // memory, and a peer that overruns it is torn down as a protocol
+            // violation rather than buffered without limit.
+            let (event_tx, event_rx) = mpsc::channel::<SandboxEvent>(event_capacity.max(1));
             let writer = tokio::spawn(write_prioritized(write_half, control_rx, data_rx));
             let reader_task = tokio::spawn(read_loop(reader, host, outbound.clone(), event_tx));
 
@@ -160,12 +178,15 @@ impl HostConnection {
     /// Await the next event on the sandbox's stream, or `None` once the
     /// connection has drained and closed.
     ///
-    /// The owner MUST keep draining this: forwarded events are buffered off the
-    /// read loop's path so a slow consumer cannot stall reverse-request dispatch
-    /// or liveness, and the only thing that bounds that buffer is the sandbox's
-    /// own flow control — it stops producing once MAX_BUFFERED_EVENTS go
-    /// un-acknowledged. Draining (and [`acknowledge`](Self::acknowledge)ing) keeps
-    /// that backlog from parking the run.
+    /// Forwarded events are buffered off the read loop's path (a non-blocking
+    /// hand-off) so a slow consumer cannot stall reverse-request dispatch or
+    /// liveness. That buffer is bounded at the host's own ceiling
+    /// (MAX_BUFFERED_EVENTS): a conforming sandbox self-limits below it and never
+    /// trips it, but a peer that overruns it — buggy or hostile — has its
+    /// connection torn down (this stream then returns `None`) rather than being
+    /// allowed to grow host memory without bound. Draining, and
+    /// [`acknowledge`](Self::acknowledge)ing, keeps the backlog from parking the
+    /// run.
     pub async fn next_event(&mut self) -> Option<SandboxEvent> {
         self.events.recv().await
     }
@@ -204,10 +225,11 @@ async fn read_loop<R>(
     mut reader: BufReader<R>,
     host: CapabilityHost,
     outbound: Outbound,
-    events: mpsc::UnboundedSender<SandboxEvent>,
+    events: mpsc::Sender<SandboxEvent>,
 ) where
     R: AsyncRead + Unpin + Send + 'static,
 {
+    use tokio::sync::mpsc::error::TrySendError;
     // Per-request forwarders are detached: each awaits its operation's outcome
     // and writes the response frame. The execution behind an operation lives in
     // the CapabilityHost, decoupled from this connection, so a disconnect tears
@@ -246,11 +268,22 @@ async fn read_loop<R>(
             }
             WireFrame::Control(ControlFrame::Pong { .. }) => {}
             WireFrame::Event(event) => {
-                // Non-blocking: forwarding an event must never stall this loop's
-                // reverse-request dispatch or ping handling. An error means the
-                // caller dropped the connection, so stop forwarding.
-                if events.send(event).is_err() {
+                // An inbound event is untrusted input. `read_frame` bounds a frame
+                // at MAX_FRAME_BYTES; re-enforce the smaller per-event payload cap
+                // here, and refuse an over-bound event as a protocol violation
+                // rather than forward it.
+                if !event.payload.within_bounds() {
                     break;
+                }
+                // Non-blocking: forwarding an event must never stall this loop's
+                // reverse-request dispatch or ping handling. A `Full` channel means
+                // the peer overran the host's event ceiling — impossible for a
+                // conforming sandbox, which self-limits below it — so tear the
+                // connection down instead of blocking or buffering without bound.
+                // `Closed` means the owner dropped the connection.
+                match events.try_send(event) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(_) | TrySendError::Closed(_)) => break,
                 }
             }
             // The host answers requests; it never receives responses or another
@@ -260,5 +293,151 @@ async fn read_loop<R>(
             | WireFrame::Handshake(_)
             | WireFrame::EventAck { .. } => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use super::*;
+    use crate::{
+        events::EventPayload,
+        ids::{RunId, Sequence},
+        oplog::InMemoryOperationStore,
+        protocol::{Response, MAX_EVENT_PAYLOAD_BYTES, PROTOCOL_VERSION},
+        reverse::{CapabilityResponder, GrantSet, ReverseRequest, ReverseResult, RunProvenance},
+    };
+
+    /// A responder that is never invoked: these tests drive only the event lane.
+    struct NoopResponder;
+
+    #[async_trait::async_trait]
+    impl CapabilityResponder for NoopResponder {
+        async fn respond(&self, _request: ReverseRequest) -> Response<ReverseResult> {
+            unreachable!("the ceiling tests never issue a reverse request")
+        }
+    }
+
+    fn events_only_host() -> CapabilityHost {
+        CapabilityHost::new(
+            GrantSet::none(RunProvenance {
+                run_id: RunId::new(),
+                provider: "wire-host-test".to_owned(),
+            }),
+            Arc::new(NoopResponder),
+            Arc::new(InMemoryOperationStore::new()),
+        )
+    }
+
+    fn attach() -> AttachRequest {
+        AttachRequest {
+            protocol_version: PROTOCOL_VERSION,
+            run_id: RunId::new(),
+            resume_from: EventCursor::START,
+        }
+    }
+
+    /// Answer the attach handshake on a raw sandbox side, then hand back the write
+    /// half so the caller can flood frames directly.
+    async fn accept_handshake<S>(
+        sandbox: S,
+    ) -> (BufReader<tokio::io::ReadHalf<S>>, tokio::io::WriteHalf<S>)
+    where
+        S: AsyncRead + AsyncWrite,
+    {
+        let (read_half, mut write_half) = split(sandbox);
+        let mut reader = BufReader::new(read_half);
+        let _ = read_frame(&mut reader).await;
+        let accepted = WireFrame::Handshake(HandshakeResponse::Accepted(AttachAccepted {
+            protocol_version: PROTOCOL_VERSION,
+            granted_capabilities: Vec::new(),
+            latest_sequence: None,
+        }));
+        let _ = write_frame(&mut write_half, &accepted).await;
+        (reader, write_half)
+    }
+
+    /// A peer that floods more un-acknowledged events than the host's ceiling is
+    /// torn down — the host buffers at most its ceiling and then closes the
+    /// stream, rather than growing memory without bound or stalling.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_peer_that_overruns_the_event_ceiling_is_torn_down() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let capacity = 4usize;
+            let (host_side, sandbox_side) = tokio::io::duplex(64 * 1024);
+
+            let flood = tokio::spawn(async move {
+                let (_reader, mut write_half) = accept_handshake(sandbox_side).await;
+                // Flood well past the host's ceiling, never reading an ack.
+                for seq in 1..=(capacity as u64 + 50) {
+                    let event = WireFrame::Event(SandboxEvent {
+                        sequence: Sequence::new(seq),
+                        payload: EventPayload::Progress(format!("e{seq}")),
+                    });
+                    if write_frame(&mut write_half, &event).await.is_err() {
+                        break;
+                    }
+                }
+            });
+
+            let mut conn =
+                WireClient::connect_with(host_side, attach(), events_only_host(), capacity)
+                    .await
+                    .expect("attach accepted");
+
+            // Let the read loop fill the bounded channel and tear down on overrun.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            // The stream yields at most the ceiling, then closes (teardown) — it
+            // does not hang (the outer timeout would catch that) or buffer without
+            // bound (the count would exceed the ceiling).
+            let mut count = 0usize;
+            while conn.next_event().await.is_some() {
+                count += 1;
+                assert!(count <= capacity, "host buffered past its ceiling");
+            }
+            assert!(
+                count <= capacity,
+                "host tore down after buffering at most its ceiling, got {count}"
+            );
+
+            let _ = flood.await;
+        })
+        .await
+        .expect("test completed within its time bound");
+    }
+
+    /// A single over-bound event (within the 1 MiB frame cap but past the 64 KiB
+    /// per-event payload cap) is refused at the host as a protocol violation.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_over_bound_event_payload_is_refused_at_the_host() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let (host_side, sandbox_side) = tokio::io::duplex(4 * 1024 * 1024);
+
+            let peer = tokio::spawn(async move {
+                let (_reader, mut write_half) = accept_handshake(sandbox_side).await;
+                let event = WireFrame::Event(SandboxEvent {
+                    sequence: Sequence::new(1),
+                    payload: EventPayload::Progress("x".repeat(MAX_EVENT_PAYLOAD_BYTES + 1)),
+                });
+                let _ = write_frame(&mut write_half, &event).await;
+            });
+
+            let mut conn = WireClient::connect_with(host_side, attach(), events_only_host(), 16)
+                .await
+                .expect("attach accepted");
+
+            // The over-bound event is dropped and the connection torn down, so the
+            // stream closes without ever yielding it.
+            assert!(
+                conn.next_event().await.is_none(),
+                "an over-bound event must be refused, not forwarded"
+            );
+
+            let _ = peer.await;
+        })
+        .await
+        .expect("test completed within its time bound");
     }
 }
