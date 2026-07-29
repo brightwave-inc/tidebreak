@@ -298,6 +298,34 @@ describe("ManagedGate", () => {
     expect(screen.queryByText("the open product")).not.toBeInTheDocument();
   });
 
+  it("a stalled pending sign-in can be started over without waiting it out", async () => {
+    // The server holds a pending flow for the full sign-in timeout; the gate
+    // must not make the reader wait it out with reopening the same page as
+    // the only affordance.
+    const client = api({
+      getGatewayStatus: vi.fn().mockResolvedValue({
+        ...signedOut,
+        sign_in: { state: "pending", authorization_url: "http://gw/stalled" },
+      }),
+    });
+    const open = vi.fn();
+    vi.stubGlobal("open", open);
+    const user = userEvent.setup();
+    mount(client);
+
+    expect(await screen.findByText(/Waiting for the browser/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Start over/ }));
+
+    // A fresh flow begins — a new attempt server-side, and the new page
+    // opens — rather than reopening the stalled attempt's page.
+    await waitFor(() => expect(client.gatewaySignIn).toHaveBeenCalled());
+    expect(open).toHaveBeenCalledWith(
+      "http://gw/oauth/authorize?x=1",
+      "_blank",
+      "noreferrer,noopener",
+    );
+  });
+
   it("surfaces a failed browser sign-in and offers to try again", async () => {
     const client = api({
       getGatewayStatus: vi.fn().mockResolvedValue({

@@ -59,16 +59,26 @@ struct ProvisionLink {
     origin: String,
 }
 
+/// The scheme dev builds register and answer alongside `openwave`. A dev run
+/// used to `register_all()`, which persistently re-pointed the real scheme's
+/// per-user registration at whatever debug binary ran last — links on that
+/// machine then bypassed the installed app until it was reinstalled. The dev
+/// scheme keeps dev deep-link work exercisable without ever touching the
+/// installed registration. It must stay in the deep-link config's scheme
+/// list: the plugin only recognizes configured schemes when it picks deep
+/// links out of launch arguments.
+const DEV_SCHEME: &str = "openwave-dev";
+
 /// Register the open-URL listener and pick up a launch link.
 pub(crate) fn install(app: &tauri::AppHandle) {
     // Dev builds have no installer run to write the scheme registration, so
-    // register at runtime. Debug-only: in a release build this would write
-    // a per-user registration for whatever path the binary runs from,
-    // shadowing the installer's registration. Not available on macOS, where
-    // the bundle's Info.plist (generated from the deep-link config) is the
-    // only registration path.
+    // register at runtime — only the dev scheme, never the real one, which
+    // in a dev run would shadow the installed app's registration. Debug-only:
+    // a release binary's registration is the installer's job. Not available
+    // on macOS, where the bundle's Info.plist (generated from the deep-link
+    // config) is the only registration path.
     #[cfg(all(debug_assertions, any(windows, target_os = "linux")))]
-    if let Err(error) = app.deep_link().register_all() {
+    if let Err(error) = app.deep_link().register(DEV_SCHEME) {
         eprintln!("openwave-desktop: deep-link scheme registration failed: {error}");
     }
     let handle = app.clone();
@@ -111,16 +121,17 @@ pub(crate) fn focus_main_window(app: &tauri::AppHandle) {
 
 /// Parse and validate a provision link.
 ///
-/// The contract is strict — scheme `openwave`, action `provision` with no
-/// userinfo, port, or extra path, exactly one query parameter named
-/// `gateway`, and a gateway value that is an http(s) URL with no query or
-/// fragment — so a malformed or hostile link is refused whole rather than
-/// partially honored. Near-miss gateway values matter: the conflict check on
-/// the write path compares normalized URL strings, so accepting a decorated
-/// variant would mint a distinct, permanently conflicting policy value. The
-/// gateway URL is additionally held to the connectors contract server-side.
+/// The contract is strict — scheme `openwave` (dev builds also answer
+/// `openwave-dev`), action `provision` with no userinfo, port, or extra
+/// path, exactly one query parameter named `gateway`, and a gateway value
+/// that is an http(s) URL with no userinfo, query, or fragment — so a
+/// malformed or hostile link is refused whole rather than partially honored.
+/// Near-miss gateway values matter: the conflict check on the write path
+/// compares normalized URL strings, so accepting a decorated variant would
+/// mint a distinct, permanently conflicting policy value. The gateway URL is
+/// additionally held to the connectors contract server-side.
 fn provision_link(url: &tauri::Url) -> Result<ProvisionLink, String> {
-    if url.scheme() != "openwave" {
+    if url.scheme() != "openwave" && !(cfg!(debug_assertions) && url.scheme() == DEV_SCHEME) {
         return Err("not an openwave:// link".into());
     }
     if !url.username().is_empty() || url.password().is_some() {
@@ -158,6 +169,9 @@ fn provision_link(url: &tauri::Url) -> Result<ProvisionLink, String> {
         tauri::Url::parse(&value).map_err(|_| "the gateway URL is invalid".to_string())?;
     if !matches!(gateway.scheme(), "http" | "https") {
         return Err("the gateway URL must use http or https".into());
+    }
+    if !gateway.username().is_empty() || gateway.password().is_some() {
+        return Err("the gateway URL must not carry credentials".into());
     }
     if gateway.query().is_some() || gateway.fragment().is_some() {
         return Err("the gateway URL must not carry a query or fragment".into());
@@ -381,6 +395,12 @@ async fn wait_pairing_handle(app: &tauri::AppHandle) -> Result<PairingHandle, St
     }
 }
 
+/// Growth cap for `pairing.log`. Every ignored deep link writes a line, and
+/// a deep link is an unauthenticated remote trigger, so without a cap a
+/// hostile page could grow the file without bound. Attempts past the cap
+/// still reach stderr.
+const PAIRING_LOG_MAX_BYTES: u64 = 256 * 1024;
+
 /// One bounded, secret-free line per pairing attempt: stderr for terminal
 /// launches, `pairing.log` under app-data for GUI launches. Only the gateway
 /// origin is ever named — never the full link or URL — and gateway errors
@@ -391,11 +411,15 @@ fn log_pairing(app: &tauri::AppHandle, message: &str) {
     let Ok(dir) = crate::data_dir(app) else {
         return;
     };
+    let path = dir.join("pairing.log");
+    if std::fs::metadata(&path).is_ok_and(|meta| meta.len() >= PAIRING_LOG_MAX_BYTES) {
+        return;
+    }
     let line = format!("{} {message}\n", chrono::Local::now().to_rfc3339());
     let _ = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(dir.join("pairing.log"))
+        .open(path)
         .and_then(|mut file| file.write_all(line.as_bytes()));
 }
 
@@ -451,12 +475,18 @@ mod tests {
             ),
             ("openwave://provision:9999?gateway=https://gw.example", None),
             ("openwave://pro%76ision?gateway=https://gw.example", None),
-            // Near-miss gateway values: not a URL, wrong scheme, or carrying
-            // a query or fragment (which would also leak into any log that
-            // echoed them, and would mint a permanently conflicting policy
-            // value under the string-equality conflict check).
+            // Near-miss gateway values: not a URL, wrong scheme, carrying
+            // credentials, or carrying a query or fragment (which would also
+            // leak into any log that echoed them, and would mint a
+            // permanently conflicting policy value under the string-equality
+            // conflict check).
             ("openwave://provision?gateway=notaurl", None),
             ("openwave://provision?gateway=ftp://gw.example", None),
+            (
+                "openwave://provision?gateway=https://user:pw@gw.example",
+                None,
+            ),
+            ("openwave://provision?gateway=https://user@gw.example", None),
             (
                 "openwave://provision?gateway=https://gw.example/?token=x",
                 None,
@@ -476,6 +506,15 @@ mod tests {
                 "{link}"
             );
         }
+    }
+
+    /// Dev builds answer the dev scheme so a dev run never has to claim the
+    /// real one; release builds refuse it. The expectation flips with the
+    /// build profile, which is exactly the contract.
+    #[test]
+    fn the_dev_scheme_is_a_debug_only_alias() {
+        let url = tauri::Url::parse("openwave-dev://provision?gateway=https://gw.example").unwrap();
+        assert_eq!(provision_link(&url).is_ok(), cfg!(debug_assertions));
     }
 
     #[tokio::test]
