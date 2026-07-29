@@ -205,11 +205,12 @@ async fn gateway_defaults(
 /// composer picker renders them, and therefore the chat role's fallback
 /// order. Contrast [`gateway_defaults`], which re-sorts the same list
 /// cheapest-first for background work.
-async fn gateway_listed(store: &dyn Store) -> Result<Vec<String>> {
+async fn gateway_listed(
+    store: &dyn Store,
+    policy: &crate::managed_policy::ManagedPolicy,
+) -> Result<Vec<String>> {
     Ok(selection_keys(
-        &providers::read_config(store, providers::ProviderKind::ModelGateway)
-            .await?
-            .models,
+        &providers::gateway_models(store, policy).await?,
     ))
 }
 
@@ -247,7 +248,7 @@ pub async fn effective_chat_policy(
             return Ok(Some(policy));
         }
     }
-    for key in gateway_listed(store).await? {
+    for key in gateway_listed(store, managed).await? {
         if let Some(policy) = usable_policy(store, secrets, managed, &key).await? {
             return Ok(Some(policy));
         }

@@ -56,11 +56,12 @@ pub(crate) enum SignInProgress {
 }
 
 /// Renderer-safe projection of the gateway connection state. Never carries
-/// token material — only what the settings surface displays.
+/// token material — only what the settings surface displays. `base_url` is
+/// the policy's gateway origin: present exactly when the profile is managed
+/// with a usable URL (the retired `configured`/`enabled` bits collapsed into
+/// its presence).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 pub(crate) struct GatewayStatus {
-    pub(crate) configured: bool,
-    pub(crate) enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub(crate) base_url: Option<String>,
@@ -115,12 +116,9 @@ impl GatewayRuntime {
 
     /// The renderer-facing connection status, derived from policy alone: a
     /// profile is gateway-connected exactly when managed policy asserts it,
-    /// so an unmanaged profile reads unconfigured whatever legacy rows
+    /// so an unmanaged profile reads no gateway whatever legacy rows
     /// persist, and a managed policy whose URL is missing (misconfigured)
-    /// reads unconfigured, honestly.
-    ///
-    /// `configured` and `enabled` are now the same bit — kept apart only for
-    /// wire-shape stability until the renderer slice retires them.
+    /// reads none, honestly.
     pub(crate) async fn status(&self) -> Result<GatewayStatus> {
         // One policy read for the whole projection: the renderer polls this
         // every couple of seconds while a sign-in is pending.
@@ -131,8 +129,6 @@ impl GatewayRuntime {
             None => None,
         };
         Ok(GatewayStatus {
-            configured: base_url.is_some(),
-            enabled: base_url.is_some(),
             base_url,
             signed_in: credentials.is_some(),
             account_hint: credentials
@@ -853,7 +849,7 @@ mod tests {
         runtime.sync_models().await.unwrap();
 
         let status = runtime.status().await.unwrap();
-        assert!(status.configured && status.enabled && status.signed_in);
+        assert!(status.base_url.is_some() && status.signed_in);
         assert_eq!(status.account_hint.as_deref(), Some("abaas@example.test"));
         assert_eq!(status.installation_id.as_deref(), Some("install-1"));
         assert_eq!(status.model_count, 2);
@@ -950,7 +946,7 @@ mod tests {
         let (runtime, _store, _directory) = signed_in_runtime_at(&base, "http://127.0.0.1:9").await;
 
         let status = runtime.status().await.unwrap();
-        assert!(status.configured);
+        assert!(status.base_url.is_some());
         assert!(
             !status.signed_in,
             "a foreign session must not read signed-in"
@@ -1013,7 +1009,7 @@ mod tests {
             "the fixture must have no stored gateway state for the assertion to mean anything"
         );
         let status = runtime.status().await.unwrap();
-        assert!(status.configured && status.enabled && status.signed_in);
+        assert!(status.signed_in);
         assert_eq!(
             status.base_url.as_deref(),
             Some(format!("{base}/").as_str())
@@ -1132,9 +1128,9 @@ mod tests {
             "a legacy row must never auto-convert the profile to managed"
         );
 
-        // The status surface reads unconfigured and signed out.
+        // The status surface reads no gateway and signed out.
         let status = runtime.status().await.unwrap();
-        assert!(!status.configured && !status.enabled && !status.signed_in);
+        assert!(!status.signed_in);
         assert!(status.base_url.is_none());
         assert_eq!(status.model_count, 0);
 

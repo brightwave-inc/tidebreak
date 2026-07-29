@@ -4,11 +4,8 @@ import { ExternalLink, LogOut, PlugZap, RefreshCw } from "lucide-react";
 import type { ApiClient, GatewayApps, GatewayStatus } from "../api";
 import { openSignInPage } from "../openSignInPage";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Switch } from "@/components/ui/switch";
 import {
   SettingsError,
-  SettingsField,
   SettingsPanel,
   SettingsSection,
   SettingsStatus,
@@ -17,37 +14,85 @@ import {
 const SIGN_IN_POLL_MS = 2_000;
 
 /**
- * The Model Gateway connection: one toggle, one URL, one sign-in.
+ * The Model Gateway section.
  *
- * Authentication is the gateway's own OAuth flow in the system browser —
- * OpenWave never sees a password or IdP credential, only the gateway's
- * rotating tokens, which live in the keychain. Signed in, the entitled
- * models sync into the picker; signed out, the app is exactly the local
- * bring-your-own-key product it was before.
+ * Policy is the only gateway source: a profile connects through the
+ * gateway's own page (deep-link pairing) or the organization's device
+ * management, never from settings — there is no URL field and no enable
+ * toggle in any state. Unmanaged profiles render a signpost at that flow;
+ * managed profiles get the slim identity panel: who is signed in, the
+ * read-only gateway origin from policy, sign in/out, and a models refresh.
  */
 export function GatewayPanel({
   client,
+  managed,
+  gatewayUrl,
   onChanged,
   onOpenMcpSettings,
 }: {
   client: ApiClient;
+  /** Whether the resolved policy manages this profile. */
+  managed: boolean;
+  /** The policy's locked gateway origin, shown read-only. */
+  gatewayUrl: string | null;
   onChanged: () => void;
   /** Navigates to the MCP servers section, where entitled endpoints are
    * mounted. Mounting lives beside the health of what is mounted, so this
    * panel points at it rather than carrying its own toggles. */
   onOpenMcpSettings: () => void;
 }) {
+  if (!managed) {
+    // Deep links and stale history entries still resolve here even though
+    // the rail hides the section; say plainly how connecting works now.
+    return (
+      <SettingsPanel
+        title="Model Gateway"
+        description="This profile is not connected to a model gateway."
+      >
+        <p className="text-sm leading-relaxed text-muted-foreground">
+          Connecting happens from your gateway&apos;s own page — open it in
+          your browser and choose Connect — or through your
+          organization&apos;s device management. There is nothing to
+          configure here; until then, OpenWave stays fully local with your
+          own provider keys.
+        </p>
+      </SettingsPanel>
+    );
+  }
+  return (
+    <ManagedGatewayPanel
+      client={client}
+      gatewayUrl={gatewayUrl}
+      onChanged={onChanged}
+      onOpenMcpSettings={onOpenMcpSettings}
+    />
+  );
+}
+
+/**
+ * Authentication is the gateway's own OAuth flow in the system browser —
+ * OpenWave never sees a password or IdP credential, only the gateway's
+ * rotating tokens, which live in the keychain.
+ */
+function ManagedGatewayPanel({
+  client,
+  gatewayUrl,
+  onChanged,
+  onOpenMcpSettings,
+}: {
+  client: ApiClient;
+  gatewayUrl: string | null;
+  onChanged: () => void;
+  onOpenMcpSettings: () => void;
+}) {
   const [status, setStatus] = useState<GatewayStatus | null>(null);
   const [apps, setApps] = useState<GatewayApps | null>(null);
-  const [baseUrl, setBaseUrl] = useState("");
-  const [dirty, setDirty] = useState(false);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Refs, not state reads, inside `reload`: transition detection must not
+  // A ref, not a state read, inside `reload`: transition detection must not
   // live in a state updater (updaters are pure and StrictMode double-invokes
-  // them), and the poll must not refill a field the user is editing.
+  // them).
   const signedInRef = useRef(false);
-  const dirtyRef = useRef(false);
 
   const reload = useCallback(async () => {
     const next = await client.getGatewayStatus();
@@ -55,9 +100,6 @@ export function GatewayPanel({
     if (!signedInRef.current && next.signed_in) onChanged();
     signedInRef.current = next.signed_in;
     setStatus(next);
-    setBaseUrl((current) =>
-      current === "" && !dirtyRef.current ? (next.base_url ?? "") : current,
-    );
     return next;
   }, [client, onChanged]);
 
@@ -110,19 +152,6 @@ export function GatewayPanel({
     }
   }
 
-  async function save(enabled: boolean) {
-    await run(async () => {
-      await client.putProvider("model_gateway", {
-        enabled,
-        base_url: baseUrl.trim() === "" ? null : baseUrl.trim(),
-      });
-      setDirty(false);
-      dirtyRef.current = false;
-      onChanged();
-      toast.success("Saved gateway settings");
-    });
-  }
-
   if (!status) {
     return (
       <SettingsPanel title="Model Gateway" description="Loading…" busy>
@@ -133,6 +162,9 @@ export function GatewayPanel({
 
   const pendingUrl =
     status.sign_in.state === "pending" ? status.sign_in.authorization_url : null;
+  // The policy names the deployment; the status echoes it. Prefer the policy
+  // (it is what the profile is locked to) and fall back to the echo.
+  const origin = gatewayUrl ?? status.base_url ?? null;
   // The one route to mounting, shown whenever signed in: a gateway without
   // the apps surface still mounts endpoints by slug on the MCP servers page.
   const mountSignpost = (
@@ -150,52 +182,16 @@ export function GatewayPanel({
   return (
     <SettingsPanel
       title="Model Gateway"
-      description="Sign in to a model-gateway deployment to use the models and governed tools you are entitled to. Off, OpenWave stays fully local."
+      description="This profile is managed by your organization's model gateway: models and governed tools come from the deployment below."
       busy={working}
     >
-      <SettingsSection>
-        <div className="flex items-center justify-between gap-4">
-          <div className="flex-1">
-            <p className="text-sm font-bold">Use Model Gateway</p>
-            <p className="text-xs text-muted-foreground">
-              Route models and governed tools through a signed-in gateway. Off,
-              OpenWave stays fully local.
-            </p>
-          </div>
-          <Switch
-            aria-label="Use Model Gateway"
-            checked={status.enabled}
-            disabled={working}
-            onCheckedChange={(checked) => void save(checked)}
-          />
-        </div>
-
-        <SettingsField
-          label="Gateway URL"
-          hint="The deployment's base URL, e.g. http://127.0.0.1:28081 for a local dev gateway."
-        >
-          <Input
-            value={baseUrl}
-            disabled={working}
-            autoComplete="off"
-            spellCheck={false}
-            placeholder="https://gateway.example"
-            onChange={(event) => {
-              setBaseUrl(event.target.value);
-              setDirty(true);
-              dirtyRef.current = true;
-            }}
-          />
-        </SettingsField>
-        {dirty && (
-          <Button
-            type="button"
-            disabled={working}
-            onClick={() => void save(status.enabled)}
-          >
-            Save gateway URL
-          </Button>
-        )}
+      <SettingsSection title="Gateway">
+        <p className="text-sm">
+          <code className="font-medium">{origin ?? "—"}</code>
+        </p>
+        <p className="text-xs text-muted-foreground">
+          Set by your organization&apos;s policy and not editable here.
+        </p>
       </SettingsSection>
 
       <SettingsSection title="Connection">
@@ -253,11 +249,7 @@ export function GatewayPanel({
             <SettingsStatus
               tone="not-configured"
               label="Not signed in"
-              description={
-                status.configured
-                  ? "Connect to sign in with your browser."
-                  : "Save the gateway URL, then connect."
-              }
+              description="Connect to sign in with your browser."
             />
             {status.sign_in.state === "failed" && (
               <SettingsError>{status.sign_in.message}</SettingsError>
@@ -283,7 +275,7 @@ export function GatewayPanel({
             ) : (
               <Button
                 type="button"
-                disabled={working || !status.configured || dirty}
+                disabled={working}
                 onClick={() =>
                   void run(async () => {
                     const started = await client.gatewaySignIn();

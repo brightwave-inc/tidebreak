@@ -39,8 +39,6 @@ const healthy: McpServersInfo = {
 };
 
 const signedOut: GatewayStatus = {
-  configured: true,
-  enabled: true,
   base_url: "http://127.0.0.1:28081",
   signed_in: false,
   model_count: 0,

@@ -1640,13 +1640,10 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         .save(&credentials)
         .await
         .unwrap();
-    providers::write_config(
+    providers::write_gateway_snapshot(
         &*store,
-        providers::ProviderKind::ModelGateway,
-        &providers::ProviderConfig {
-            enabled: true,
-            base_url: Some("https://corp.gateway/".to_string()),
-            vertex_location: None,
+        &providers::GatewayModelSnapshot {
+            gateway_url: "https://corp.gateway/".to_string(),
             // Flagship-first, as a gateway well might list them: chat takes
             // the gateway's first pick, utility must not.
             models: vec![

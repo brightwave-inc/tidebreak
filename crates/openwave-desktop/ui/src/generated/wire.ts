@@ -473,9 +473,12 @@ supported: boolean, apps: Array<GatewayAppInfo>, };
 
 /**
  * Renderer-safe projection of the gateway connection state. Never carries
- * token material — only what the settings surface displays.
+ * token material — only what the settings surface displays. `base_url` is
+ * the policy's gateway origin: present exactly when the profile is managed
+ * with a usable URL (the retired `configured`/`enabled` bits collapsed into
+ * its presence).
  */
-export type GatewayStatus = { configured: boolean, enabled: boolean, base_url?: string, signed_in: boolean, account_hint?: string, installation_id?: string, model_count: number, sign_in: SignInProgress, };
+export type GatewayStatus = { base_url?: string, signed_in: boolean, account_hint?: string, installation_id?: string, model_count: number, sign_in: SignInProgress, };
 
 /**
  * How far a standing grant reaches.

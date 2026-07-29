@@ -5,10 +5,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient, GatewayStatus } from "../api";
 import { GatewayPanel } from "./GatewayPanel";
 
+const GATEWAY_URL = "http://127.0.0.1:28081/";
+
 const signedOut: GatewayStatus = {
-  configured: true,
-  enabled: true,
-  base_url: "http://127.0.0.1:28081",
+  base_url: GATEWAY_URL,
   signed_in: false,
   model_count: 0,
   sign_in: { state: "idle" },
@@ -36,6 +36,27 @@ function api(overrides: Partial<Record<keyof ApiClient, unknown>> = {}) {
   } as unknown as ApiClient;
 }
 
+function managedPanel(
+  client: ApiClient,
+  {
+    onChanged = () => undefined,
+    onOpenMcpSettings = () => undefined,
+  }: {
+    onChanged?: () => void;
+    onOpenMcpSettings?: () => void;
+  } = {},
+) {
+  return (
+    <GatewayPanel
+      client={client}
+      managed
+      gatewayUrl={GATEWAY_URL}
+      onChanged={onChanged}
+      onOpenMcpSettings={onOpenMcpSettings}
+    />
+  );
+}
+
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
@@ -43,24 +64,52 @@ afterEach(() => {
 });
 
 describe("GatewayPanel", () => {
-  it("connects through the browser and never asks for a credential", async () => {
+  it("unmanaged: renders the pairing signpost with no gateway configuration surface", async () => {
     const client = api();
-    const open = vi.fn();
-    vi.stubGlobal("open", open);
-    const user = userEvent.setup();
     render(
       <GatewayPanel
         client={client}
+        managed={false}
+        gatewayUrl={null}
         onChanged={() => undefined}
         onOpenMcpSettings={() => undefined}
       />,
     );
 
+    expect(
+      screen.getByText(/not connected to a model gateway/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/gateway's own page/i)).toBeInTheDocument();
+    // No URL field, no enable toggle, no connect flow — and no gateway
+    // traffic at all: policy is the only way a profile becomes connected.
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Connect/ }),
+    ).not.toBeInTheDocument();
+    expect(client.getGatewayStatus).not.toHaveBeenCalled();
+  });
+
+  it("managed: shows the read-only policy origin and connects through the browser", async () => {
+    const client = api();
+    const open = vi.fn();
+    vi.stubGlobal("open", open);
+    const user = userEvent.setup();
+    render(managedPanel(client));
+
     expect(await screen.findByText("Not signed in")).toBeInTheDocument();
+    // The origin comes from policy and is display-only: no input to edit
+    // it, no toggle to turn the gateway off, and no credential prompt.
+    expect(screen.getByText(GATEWAY_URL)).toBeInTheDocument();
+    expect(screen.getByText(/not editable here/i)).toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
     expect(screen.queryByPlaceholderText(/API key/i)).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /Connect/ }));
     await waitFor(() => expect(client.gatewaySignIn).toHaveBeenCalled());
+    // Connecting is the sign-in flow alone — never a provider write.
+    expect(client.putProvider).not.toHaveBeenCalled();
     expect(open).toHaveBeenCalledWith(
       "http://gw/oauth/authorize?x=1",
       "_blank",
@@ -75,13 +124,7 @@ describe("GatewayPanel", () => {
     });
     const onChanged = vi.fn();
     const user = userEvent.setup();
-    render(
-      <GatewayPanel
-        client={client}
-        onChanged={onChanged}
-        onOpenMcpSettings={() => undefined}
-      />,
-    );
+    render(managedPanel(client, { onChanged }));
 
     expect(await screen.findByText("Signed in")).toBeInTheDocument();
     expect(screen.getByText(/abaas@example\.test/)).toBeInTheDocument();
@@ -96,38 +139,6 @@ describe("GatewayPanel", () => {
     await waitFor(() => expect(client.gatewaySignOut).toHaveBeenCalled());
   });
 
-  it("saves the gateway URL as provider configuration", async () => {
-    const client = api({
-      getGatewayStatus: vi
-        .fn()
-        .mockResolvedValue({ ...signedOut, configured: false, base_url: undefined }),
-    });
-    const user = userEvent.setup();
-    render(
-      <GatewayPanel
-        client={client}
-        onChanged={() => undefined}
-        onOpenMcpSettings={() => undefined}
-      />,
-    );
-
-    await screen.findByText("Not signed in");
-    // Unconfigured, the connect affordance stays off.
-    expect(screen.getByRole("button", { name: /Connect/ })).toBeDisabled();
-
-    await user.type(
-      screen.getByPlaceholderText("https://gateway.example"),
-      "http://127.0.0.1:28081",
-    );
-    await user.click(screen.getByRole("button", { name: "Save gateway URL" }));
-    await waitFor(() =>
-      expect(client.putProvider).toHaveBeenCalledWith("model_gateway", {
-        enabled: true,
-        base_url: "http://127.0.0.1:28081",
-      }),
-    );
-  });
-
   it("watches a pending browser sign-in and refreshes the catalog on completion", async () => {
     const getGatewayStatus = vi
       .fn()
@@ -139,13 +150,7 @@ describe("GatewayPanel", () => {
     const client = api({ getGatewayStatus });
     const onChanged = vi.fn();
     vi.useFakeTimers();
-    render(
-      <GatewayPanel
-        client={client}
-        onChanged={onChanged}
-        onOpenMcpSettings={() => undefined}
-      />,
-    );
+    render(managedPanel(client, { onChanged }));
     // Flush the initial status load.
     await act(async () => {});
 
@@ -178,13 +183,7 @@ describe("GatewayPanel", () => {
         ],
       }),
     });
-    render(
-      <GatewayPanel
-        client={client}
-        onChanged={() => undefined}
-        onOpenMcpSettings={() => undefined}
-      />,
-    );
+    render(managedPanel(client));
 
     expect(await screen.findByText("Incident API")).toBeInTheDocument();
     expect(screen.getByText(/via example-security-tools/)).toBeInTheDocument();
@@ -197,13 +196,7 @@ describe("GatewayPanel", () => {
         .fn()
         .mockResolvedValue({ supported: false, apps: [] }),
     });
-    render(
-      <GatewayPanel
-        client={older}
-        onChanged={() => undefined}
-        onOpenMcpSettings={() => undefined}
-      />,
-    );
+    render(managedPanel(older));
     expect(await screen.findByText("Signed in")).toBeInTheDocument();
     expect(screen.queryByText("Connected apps")).not.toBeInTheDocument();
     // The route to mounting still shows: older gateways mount by slug too.
@@ -230,13 +223,7 @@ describe("GatewayPanel", () => {
     });
     const openMcpSettings = vi.fn();
     const user = userEvent.setup();
-    render(
-      <GatewayPanel
-        client={client}
-        onChanged={() => undefined}
-        onOpenMcpSettings={openMcpSettings}
-      />,
-    );
+    render(managedPanel(client, { onOpenMcpSettings: openMcpSettings }));
 
     expect(await screen.findByText("Incident API")).toBeInTheDocument();
     expect(
@@ -256,13 +243,7 @@ describe("GatewayPanel", () => {
         sign_in: { state: "failed", message: "browser authorization timed out" },
       }),
     });
-    render(
-      <GatewayPanel
-        client={client}
-        onChanged={() => undefined}
-        onOpenMcpSettings={() => undefined}
-      />,
-    );
+    render(managedPanel(client));
 
     expect(
       await screen.findByText(/browser authorization timed out/),

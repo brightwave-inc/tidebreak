@@ -12,9 +12,17 @@ describe("settings sections", () => {
     const managed = settingsSectionsFor(true);
     expect(managed.map((section) => section.path)).not.toContain("providers");
     expect(defaultSettingsPathFor(true)).toBe("/settings/gateway");
+  });
 
-    // An unmanaged profile is untouched: every section, providers first.
-    expect(settingsSectionsFor(false)).toEqual(SETTINGS_SECTIONS);
+  it("drops the gateway entry from an unmanaged profile's rail", () => {
+    // Policy is the only gateway source: an unmanaged profile has nothing to
+    // configure under Model Gateway, so the section leaves its rail — while
+    // every route in the registry still resolves for deep links.
+    const unmanaged = settingsSectionsFor(false);
+    expect(unmanaged.map((section) => section.path)).not.toContain("gateway");
     expect(defaultSettingsPathFor(false)).toBe("/settings/providers");
+    expect(SETTINGS_SECTIONS.map((section) => section.path)).toContain(
+      "gateway",
+    );
   });
 });
