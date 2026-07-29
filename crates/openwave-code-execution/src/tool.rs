@@ -46,8 +46,11 @@ impl Tool for ExecTool {
             description: "Run one executable with an argument vector in the configured isolated \
                           execution provider. No shell parses the arguments unless you explicitly \
                           invoke a shell. The local provider blocks network and user-data access \
-                          outside private chat scratch; E2B runs in a managed cloud sandbox. Every \
-                          provider returns bounded stdout/stderr."
+                          outside private chat scratch; managed cloud sandboxes (E2B, Daytona) \
+                          have the chat's private scratch mirrored in before the command runs and \
+                          mirrored back after, so files from write_file are visible here and \
+                          files this command writes are visible to read_file. Every provider \
+                          returns bounded stdout/stderr."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -131,6 +134,13 @@ impl Tool for ExecTool {
         if response.output_truncated {
             content.push_str("\noutput_truncated: true");
         }
+        if !response.sync_notes.is_empty() {
+            content.push_str("\n\nworkspace sync:");
+            for note in &response.sync_notes {
+                content.push('\n');
+                content.push_str(note);
+            }
+        }
         if !response.stdout.is_empty() {
             content.push_str("\n\nstdout:\n");
             content.push_str(&response.stdout);
@@ -151,6 +161,7 @@ impl Tool for ExecTool {
             "duration_ms": response.duration_ms,
             "stdout": response.stdout,
             "stderr": response.stderr,
+            "sync_notes": response.sync_notes,
         }));
         output.is_error = failed;
         Ok(output)
@@ -185,6 +196,7 @@ mod tests {
                 timed_out: false,
                 output_truncated: false,
                 duration_ms: 3,
+                sync_notes: Vec::new(),
             })
         }
     }
