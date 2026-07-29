@@ -1179,6 +1179,13 @@ async fn chat_document_routes_isolate_sources_search_and_delete_lifecycle() {
         second_list["documents"][0]["document_id"],
         second_id.to_string()
     );
+    // The happy path, which this test asserted around rather than through: the
+    // conversation that owns a source can fetch it by id. Without this, a
+    // detail route that never resolves anything still passes the isolation
+    // assertions below.
+    let owned: serde_json::Value =
+        json_body(get(format!("/chats/{}/documents/{first_id}", first.id)).await).await;
+    assert_eq!(owned["document_id"], first_id.to_string());
     assert_eq!(
         get(format!("/chats/{}/documents/{second_id}", first.id))
             .await
