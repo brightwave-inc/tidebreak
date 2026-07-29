@@ -909,12 +909,9 @@ mod tests {
             source_byte_len: None,
             content_revision: 1,
             processing_status: DocumentProcessingStatus::Ready,
-            searchable: true,
-            indexed_revision: Some(1),
-            index_fingerprint: None,
+            readable: true,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
-            indexed_at: None,
         }
     }
 

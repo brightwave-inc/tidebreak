@@ -77,7 +77,7 @@ describe("SourcesView catalog", () => {
       documentId: ids.retryable,
       title: "Retry me.pdf",
       processingStatus: "failed",
-      searchable: false,
+      readable: false,
       failure: {
         message: "The local search index was unavailable. Retry preparing this source.",
         retriable: true,
@@ -87,7 +87,7 @@ describe("SourcesView catalog", () => {
       documentId: ids.permanent,
       title: "Broken.pdf",
       processingStatus: "failed",
-      searchable: false,
+      readable: false,
       failure: {
         message:
           "OpenWave could not read this file. Delete it and add a supported, uncorrupted version.",
@@ -98,14 +98,14 @@ describe("SourcesView catalog", () => {
       documentId: ids.queued,
       title: "Preparing.md",
       processingStatus: "processing",
-      searchable: false,
+      readable: false,
     });
-    const unsearchable = source({ documentId: ids.zeta, title: "Scan.pdf", searchable: false });
+    const unreadable = source({ documentId: ids.zeta, title: "Scan.pdf", readable: false });
     const ready = source({ documentId: ids.alpha, title: "Ready.md" });
-    const apis = sourceApis([retryable, permanent, queued, unsearchable, ready]);
+    const apis = sourceApis([retryable, permanent, queued, unreadable, ready]);
     vi.mocked(apis.list)
       .mockResolvedValueOnce({
-        documents: [retryable, permanent, queued, unsearchable, ready],
+        documents: [retryable, permanent, queued, unreadable, ready],
         truncated: false,
       })
       .mockResolvedValue({
@@ -113,7 +113,7 @@ describe("SourcesView catalog", () => {
           { ...retryable, processingStatus: "queued", failure: null },
           permanent,
           queued,
-          unsearchable,
+          unreadable,
           ready,
         ],
         truncated: false,
@@ -123,10 +123,10 @@ describe("SourcesView catalog", () => {
     render(<SourcesView chatId="chat-1" apis={apis} />);
     await screen.findByRole("button", { name: "Open Ready.md" });
 
-    // A ready, searchable source is the quiet case and wears no pill at all.
+    // A ready, readable source is the quiet case and wears no pill at all.
     expect(screen.getAllByText("Failed")).toHaveLength(2);
     expect(screen.getByText("Preparing")).toBeVisible();
-    expect(screen.getByText("Not searchable")).toBeVisible();
+    expect(screen.getByText("No text")).toBeVisible();
     // Only the retriable failure offers the action.
     expect(screen.getAllByRole("button", { name: "Retry" })).toHaveLength(1);
 
@@ -227,7 +227,7 @@ function source(overrides: Partial<LibraryDocument> = {}): LibraryDocument {
     mediaType: "text/markdown",
     sizeBytes: 512,
     processingStatus: "ready",
-    searchable: true,
+    readable: true,
     failure: null,
     updatedAt: "2026-07-22T00:00:00Z",
     ...overrides,

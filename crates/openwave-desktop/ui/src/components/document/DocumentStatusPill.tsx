@@ -7,10 +7,10 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 /**
  * A source's preparation state, as a pill beside its name.
  *
- * A source that is ready and searchable draws nothing: the common case should
+ * A source that is ready and readable draws nothing: the common case should
  * be quiet, and a column of "Ready" badges is noise the reader learns to skip.
  * Only the states that mean something — still working, readable but not
- * searchable, failed — get a pill, and the two that need explaining carry it
+ * readable, failed — get a pill, and the two that need explaining carry it
  * in a popover rather than spilling a sentence into the row.
  */
 export function DocumentStatusPill({
@@ -32,12 +32,12 @@ export function DocumentStatusPill({
       );
 
     case "ready":
-      if (document.searchable) return null;
+      if (document.readable) return null;
       return (
         <ExplainedBadge
           variant="warning"
-          label="Not searchable"
-          message="OpenWave stored this file, but found no searchable text in it. It is still available to the conversation as a source."
+          label="No text"
+          message="OpenWave stored this file, but found no readable text in it. It is still available to the conversation as a source."
         />
       );
 

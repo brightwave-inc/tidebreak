@@ -113,13 +113,10 @@ pub(in crate::db) async fn accept_source_and_enqueue_parse(
             content_revision: Set(advanced.current.content_revision),
             revision_token: Set(advanced.current.revision_token),
             processing_status: Set(DocumentProcessingStatus::Queued.as_str().into()),
-            indexed_revision: Set(None),
-            index_fingerprint: Set(None),
             created_at: Set(existing
                 .as_ref()
                 .map_or(source.updated_at, |current| current.created_at)),
             updated_at: Set(source.updated_at),
-            indexed_at: Set(None),
         };
         if existing.is_some() {
             active.update(&transaction).await.map_err(store_err)?;
@@ -158,18 +155,14 @@ pub(in crate::db) async fn accept_source_and_enqueue_parse(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(in crate::db) async fn complete_parse_and_enqueue_index(
+pub(in crate::db) async fn complete_parse(
     store: &DbStore,
     id: DocumentJobId,
     lease_token: uuid::Uuid,
     completed_at: chrono::DateTime<Utc>,
     output: &DocumentParseOutput,
-    index_fingerprint: &str,
-    index_max_attempts: i32,
-) -> Result<Option<(DocumentRecord, DocumentJob)>> {
+) -> Result<Option<DocumentRecord>> {
     validate_document_source_regions(&output.canonical_text, &output.source_regions)?;
-    validate_job_input(index_fingerprint, index_max_attempts)?;
 
     let Some(candidate) = entities::document_job::Entity::find_by_id(id.0)
         .one(&store.conn)
@@ -262,7 +255,7 @@ pub(in crate::db) async fn complete_parse_and_enqueue_index(
         )
         .col_expr(
             entities::document::Column::ProcessingStatus,
-            sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Queued.as_str()),
+            sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Ready.as_str()),
         )
         .col_expr(
             entities::document::Column::UpdatedAt,
@@ -283,22 +276,6 @@ pub(in crate::db) async fn complete_parse_and_enqueue_index(
         )));
     }
 
-    let generation = DocumentGeneration {
-        content_revision: job.content_revision,
-        revision_token: job.revision_token,
-    };
-    let index_job = new_job(
-        DocumentId(job.document_id),
-        generation,
-        DocumentJobKind::Index,
-        index_fingerprint,
-        index_max_attempts,
-        completed_at,
-    );
-    document_job_active_model(&index_job)
-        .insert(&transaction)
-        .await
-        .map_err(store_err)?;
     let record = entities::document::Entity::find_by_id(job.document_id)
         .one(&transaction)
         .await
@@ -306,7 +283,7 @@ pub(in crate::db) async fn complete_parse_and_enqueue_index(
         .ok_or_else(|| AgentError::Store("parsed source document disappeared".into()))?;
     let record = document_from_model(record)?;
     transaction.commit().await.map_err(store_err)?;
-    Ok(Some((record, index_job)))
+    Ok(Some(record))
 }
 
 pub(in crate::db) async fn ensure_parse_job(
@@ -426,18 +403,6 @@ pub(in crate::db) async fn ensure_parse_job(
             .col_expr(
                 entities::document::Column::ProcessingStatus,
                 sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Queued.as_str()),
-            )
-            .col_expr(
-                entities::document::Column::IndexedRevision,
-                sea_orm::sea_query::Expr::value(Option::<i64>::None),
-            )
-            .col_expr(
-                entities::document::Column::IndexFingerprint,
-                sea_orm::sea_query::Expr::value(Option::<String>::None),
-            )
-            .col_expr(
-                entities::document::Column::IndexedAt,
-                sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
             );
         if advances_generation {
             update = update
@@ -537,7 +502,6 @@ pub(in crate::db) async fn retry_document_job(
         document.source_blob_id.is_some() && document.canonical_fingerprint.is_none();
     let stage_matches = match kind {
         DocumentJobKind::Parse => awaiting_parse,
-        DocumentJobKind::Index => !awaiting_parse,
     };
     if !stage_matches {
         transaction.commit().await.map_err(store_err)?;
@@ -646,18 +610,6 @@ pub(in crate::db) async fn retry_document_job(
         .col_expr(
             entities::document::Column::ProcessingStatus,
             sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Queued.as_str()),
-        )
-        .col_expr(
-            entities::document::Column::IndexedRevision,
-            sea_orm::sea_query::Expr::value(Option::<i64>::None),
-        )
-        .col_expr(
-            entities::document::Column::IndexFingerprint,
-            sea_orm::sea_query::Expr::value(Option::<String>::None),
-        )
-        .col_expr(
-            entities::document::Column::IndexedAt,
-            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
         )
         .filter(entities::document::Column::Id.eq(document.id))
         .filter(entities::document::Column::ContentRevision.eq(document.content_revision))

@@ -1,4 +1,4 @@
-//! Document ingestion, catalog, lifecycle, and search HTTP handlers.
+//! Document ingestion, catalog, and lifecycle HTTP handlers.
 
 use axum::body::Body;
 use axum::extract::State;
@@ -13,9 +13,7 @@ use openwave_core::{
     AgentError, ChatId, DocumentJobId, DocumentListCursor, DocumentRecord, DocumentScope,
     DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, ProjectId,
 };
-use openwave_retrieval::{
-    Citation, DocumentId, RetrievalError, SearchScope, SearchTool, MAX_SEARCH_RESULTS,
-};
+use openwave_retrieval::{DocumentId, RetrievalError};
 
 use crate::document_stage::{retry_document_job_spec, MAX_PARSE_ATTEMPTS};
 use crate::error::ServerError;
@@ -106,22 +104,16 @@ pub struct DocumentSummary {
     pub content_revision: i64,
     /// Processing lifecycle of the current source revision.
     pub processing_status: openwave_core::DocumentProcessingStatus,
-    /// Whether a search of this conversation can actually match this source.
+    /// Whether the canonical text can be read as a source.
     ///
-    /// A `ready` source with `searchable: false` was stored and can be opened
+    /// A `ready` source with `readable: false` was stored and can be opened
     /// by name, but its parser produced no text — a scanned image, or a format
     /// whose parser is not installed on this host.
-    pub searchable: bool,
-    /// Source revision currently represented in the index.
-    pub indexed_revision: Option<i64>,
-    /// Parser/chunker/embedder identity for the current indexed revision.
-    pub index_fingerprint: Option<String>,
+    pub readable: bool,
     /// When this document was first created.
     pub created_at: chrono::DateTime<Utc>,
     /// When its authoritative source last changed.
     pub updated_at: chrono::DateTime<Utc>,
-    /// When the current index watermark was recorded.
-    pub indexed_at: Option<chrono::DateTime<Utc>>,
 }
 
 impl From<DocumentSummaryRecord> for DocumentSummary {
@@ -136,12 +128,9 @@ impl From<DocumentSummaryRecord> for DocumentSummary {
             source_byte_len: document.source_byte_len,
             content_revision: document.content_revision,
             processing_status: document.processing_status,
-            searchable: document.searchable,
-            indexed_revision: document.indexed_revision,
-            index_fingerprint: document.index_fingerprint,
+            readable: document.readable,
             created_at: document.created_at,
             updated_at: document.updated_at,
-            indexed_at: document.indexed_at,
         }
     }
 }
@@ -158,12 +147,9 @@ impl From<&DocumentRecord> for DocumentSummary {
             source_byte_len: document.source_blob.as_ref().map(|source| source.byte_len),
             content_revision: document.content_revision,
             processing_status: document.processing_status,
-            searchable: document.is_searchable(),
-            indexed_revision: document.indexed_revision,
-            index_fingerprint: document.index_fingerprint.clone(),
+            readable: document.is_readable(),
             created_at: document.created_at,
             updated_at: document.updated_at,
-            indexed_at: document.indexed_at,
         }
     }
 }
@@ -244,8 +230,8 @@ pub struct ChatDocumentDetail {
     pub media_type: String,
     pub title: Option<String>,
     pub processing_status: openwave_core::DocumentProcessingStatus,
-    /// Whether a search of this conversation can match this source.
-    pub searchable: bool,
+    /// Whether the canonical text is readable as a source.
+    pub readable: bool,
     /// Whether this source retained the bytes it was made from, and so whether
     /// the file-content route has anything to serve.
     ///
@@ -269,7 +255,7 @@ impl From<DocumentRecord> for ChatDocumentDetail {
             media_type: summary.media_type,
             title: summary.title,
             processing_status: summary.processing_status,
-            searchable: summary.searchable,
+            readable: summary.readable,
             has_original_bytes,
             updated_at: summary.updated_at,
             content: document.canonical_text,
@@ -1202,75 +1188,6 @@ pub async fn delete_chat_document(
     state.document_job_wake.notify_one();
     state.blob_retirement_wake.notify_one();
     Ok(StatusCode::ACCEPTED)
-}
-
-/// Body of `POST /search`.
-#[derive(Debug, Deserialize)]
-pub struct SearchRequest {
-    /// The natural-language query.
-    pub query: String,
-    /// How many passages to return (optional; clamped to `[1, MAX_SEARCH_RESULTS]`).
-    #[serde(default)]
-    pub k: Option<usize>,
-}
-
-/// Result of `POST /search`.
-#[derive(Debug, Serialize)]
-pub struct SearchResults {
-    /// Ranked citations, most relevant first.
-    pub citations: Vec<Citation>,
-}
-
-/// `POST /search` — search the shared index and return grounded citations. This
-/// is the direct HTTP counterpart to the agent's `search` tool; both read the
-/// same index. `k` defaults to [`SearchTool::DEFAULT_K`] and is clamped, never
-/// rejected.
-pub async fn search_documents(
-    State(state): State<AppState>,
-    Json(body): Json<SearchRequest>,
-) -> Result<Json<SearchResults>, ServerError> {
-    search_documents_in_scope(&state, SearchScope::Unscoped, body).await
-}
-
-/// `POST /projects/{project_id}/search` — search exactly one project corpus.
-pub async fn search_project_documents(
-    State(state): State<AppState>,
-    Path(project_id): Path<ProjectId>,
-    Json(body): Json<SearchRequest>,
-) -> Result<Json<SearchResults>, ServerError> {
-    require_project(&state, project_id).await?;
-    search_documents_in_scope(&state, SearchScope::Project(project_id), body).await
-}
-
-/// `POST /chats/{chat_id}/search` — search only the owning conversation's sources.
-pub async fn search_chat_documents(
-    State(state): State<AppState>,
-    Path(chat_id): Path<ChatId>,
-    Json(body): Json<SearchRequest>,
-) -> Result<Json<SearchResults>, ServerError> {
-    require_chat(&state, chat_id).await?;
-    search_documents_in_scope(&state, SearchScope::Chat(chat_id), body).await
-}
-
-async fn search_documents_in_scope(
-    state: &AppState,
-    scope: SearchScope,
-    body: SearchRequest,
-) -> Result<Json<SearchResults>, ServerError> {
-    let query = body.query.trim();
-    if query.is_empty() {
-        return Err(ServerError::bad_request("query must not be empty"));
-    }
-    let k = body
-        .k
-        .unwrap_or(SearchTool::DEFAULT_K)
-        .clamp(1, MAX_SEARCH_RESULTS);
-    let citations = state
-        .retrieval
-        .search(scope, query, k)
-        .await
-        .map_err(retrieval_error)?;
-    Ok(Json(SearchResults { citations }))
 }
 
 async fn require_project(state: &AppState, project_id: ProjectId) -> Result<(), ServerError> {

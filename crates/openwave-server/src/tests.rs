@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use super::*;
 
 use std::ops::Range;
@@ -1247,30 +1249,6 @@ impl Store for PauseTerminalStore {
     ) -> Result<Option<openwave_core::DocumentGeneration>> {
         self.inner.get_document_generation(id).await
     }
-    async fn list_pending_document_retirements(
-        &self,
-        after: Option<openwave_core::DocumentId>,
-        limit: u64,
-    ) -> Result<Vec<(openwave_core::DocumentId, openwave_core::DocumentGeneration)>> {
-        self.inner
-            .list_pending_document_retirements(after, limit)
-            .await
-    }
-    async fn get_pending_document_retirement(
-        &self,
-        id: openwave_core::DocumentId,
-    ) -> Result<Option<openwave_core::DocumentGeneration>> {
-        self.inner.get_pending_document_retirement(id).await
-    }
-    async fn complete_document_retirement(
-        &self,
-        id: openwave_core::DocumentId,
-        generation: openwave_core::DocumentGeneration,
-    ) -> Result<bool> {
-        self.inner
-            .complete_document_retirement(id, generation)
-            .await
-    }
     async fn delete_document(
         &self,
         id: openwave_core::DocumentId,
@@ -1287,16 +1265,6 @@ impl Store for PauseTerminalStore {
         document: &openwave_core::DocumentUpsert,
     ) -> Result<openwave_core::DocumentRecord> {
         self.inner.upsert_document(document).await
-    }
-    async fn upsert_document_and_enqueue_index(
-        &self,
-        document: &openwave_core::DocumentUpsert,
-        pipeline_fingerprint: &str,
-        max_attempts: i32,
-    ) -> Result<(openwave_core::DocumentRecord, openwave_core::DocumentJob)> {
-        self.inner
-            .upsert_document_and_enqueue_index(document, pipeline_fingerprint, max_attempts)
-            .await
     }
     async fn accept_document_source_and_enqueue_parse(
         &self,
@@ -1338,16 +1306,6 @@ impl Store for PauseTerminalStore {
             .heartbeat_document_job(id, lease_token, now, lease_expires_at)
             .await
     }
-    async fn complete_document_index_job(
-        &self,
-        id: openwave_core::DocumentJobId,
-        lease_token: uuid::Uuid,
-        completed_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<bool> {
-        self.inner
-            .complete_document_index_job(id, lease_token, completed_at)
-            .await
-    }
     async fn record_document_job_failure(
         &self,
         id: openwave_core::DocumentJobId,
@@ -1366,28 +1324,6 @@ impl Store for PauseTerminalStore {
                 error_code,
                 error_detail,
             )
-            .await
-    }
-    async fn mark_document_indexed(
-        &self,
-        id: openwave_core::DocumentId,
-        revision: i64,
-        revision_token: uuid::Uuid,
-        fingerprint: &str,
-        indexed_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<bool> {
-        self.inner
-            .mark_document_indexed(id, revision, revision_token, fingerprint, indexed_at)
-            .await
-    }
-    async fn clear_document_index(
-        &self,
-        id: openwave_core::DocumentId,
-        revision: i64,
-        revision_token: uuid::Uuid,
-    ) -> Result<bool> {
-        self.inner
-            .clear_document_index(id, revision, revision_token)
             .await
     }
     async fn create_chat(&self, chat: &Chat) -> Result<()> {
@@ -2118,13 +2054,11 @@ async fn test_app_with_retrieval_and_worker(
     (app(state), token, store, dir, worker)
 }
 
-async fn run_parse_and_index(worker: &document_worker::DocumentWorker) {
-    for _ in 0..2 {
-        assert!(matches!(
-            worker.run_once().await.unwrap(),
-            document_worker::WorkerOutcome::Completed(_)
-        ));
-    }
+async fn run_parse(worker: &document_worker::DocumentWorker) {
+    assert!(matches!(
+        worker.run_once().await.unwrap(),
+        document_worker::WorkerOutcome::Completed(_)
+    ));
 }
 
 fn test_app_from_parts(

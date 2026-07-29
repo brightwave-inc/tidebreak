@@ -198,43 +198,6 @@ pub struct ChatToolActivitySnapshot {
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-/// Why maintenance determined that a document needs an index job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DocumentIndexJobReason {
-    /// The operational watermark is current, but the derived generation is absent.
-    DerivedStateMissing,
-    /// The desired generation exists only partially and cannot be safely reused.
-    DerivedStateIncomplete,
-    /// The configured chunking/embedding pipeline differs from the indexed one.
-    PipelineChanged,
-}
-
-impl DocumentIndexJobReason {
-    /// Whether this repair must publish under a fresh generation fence.
-    #[must_use]
-    #[allow(dead_code)]
-    pub(crate) const fn advances_generation(self) -> bool {
-        matches!(self, Self::DerivedStateIncomplete | Self::PipelineChanged)
-    }
-}
-
-/// Result of atomically ensuring one desired document index job.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EnsureDocumentIndexJobOutcome {
-    /// A new job was inserted or an exact terminal job was reset to queued.
-    Enqueued(DocumentJob),
-    /// The desired current job already exists and requires no state change.
-    Existing(DocumentJob),
-    /// The desired current job failed and requires an explicit user retry.
-    Failed(DocumentJob),
-    /// Canonical content is still owned by the current parse stage.
-    Parsing(DocumentJob),
-    /// The source document no longer exists.
-    MissingDocument,
-    /// The caller inspected an obsolete source generation.
-    GenerationChanged(DocumentGeneration),
-}
-
 /// Result of atomically ensuring canonical output from one parser pipeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnsureDocumentParseJobOutcome {
@@ -1232,39 +1195,6 @@ pub trait Store: Send + Sync {
         document_storage_unavailable()
     }
 
-    /// List durable tombstone watermarks whose retrieval retirement is unfinished.
-    ///
-    /// Results are ordered by document id, strictly after `after` when present,
-    /// and bounded by `limit`. A worker can advance past a poison entry and wrap
-    /// to the beginning by issuing a later scan with `after = None`.
-    async fn list_pending_document_retirements(
-        &self,
-        _after: Option<DocumentId>,
-        _limit: u64,
-    ) -> Result<Vec<(DocumentId, DocumentGeneration)>> {
-        document_storage_unavailable()
-    }
-
-    /// Read the exact retirement watermark currently pending for one document.
-    async fn get_pending_document_retirement(
-        &self,
-        _id: DocumentId,
-    ) -> Result<Option<DocumentGeneration>> {
-        document_storage_unavailable()
-    }
-
-    /// Mark one exact tombstone generation's retrieval retirement complete.
-    ///
-    /// Returns `false` when that exact generation is no longer pending. A live
-    /// recreation may coexist with an older pending retirement watermark.
-    async fn complete_document_retirement(
-        &self,
-        _id: DocumentId,
-        _generation: DocumentGeneration,
-    ) -> Result<bool> {
-        document_storage_unavailable()
-    }
-
     /// Hard-delete source content and return its durable tombstone generation.
     ///
     /// The generation clock is retained without source content. Repeated deletion
@@ -1276,34 +1206,13 @@ pub trait Store: Send + Sync {
     /// Create or replace authoritative document content.
     ///
     /// A never-seen id starts at revision one. Replacing or recreating an id
-    /// increments its retained generation atomically, preserves `created_at` only
-    /// for a live replacement, and clears the index watermark. `project_id`, when
-    /// present, must identify an existing project. A live document cannot move
-    /// between the unscoped and project corpora, or between projects; direct
-    /// upserts enforce the same ownership rules as the enqueueing write path.
+    /// increments its retained generation atomically and preserves `created_at`
+    /// only for a live replacement. Published canonical content is immediately
+    /// ready. `project_id`, when present, must identify an existing project. A
+    /// live document cannot move between the unscoped and project corpora, or
+    /// between projects; direct upserts enforce the same ownership rules as the
+    /// enqueueing write path.
     async fn upsert_document(&self, _document: &DocumentUpsert) -> Result<DocumentRecord> {
-        document_storage_unavailable()
-    }
-
-    /// Atomically persist a new source revision and enqueue its index job.
-    ///
-    /// Any older nonterminal job for the document is cancelled in the same
-    /// transaction. The returned job is bound to the returned record's exact
-    /// `(content_revision, revision_token)` identity. Repeating identical source
-    /// content and pipeline fingerprint returns that exact revision/job without
-    /// allocating another, including its original `max_attempts` and terminal
-    /// status. Intentional reprocessing/retry is an explicit job-state transition,
-    /// not another source write. `DocumentUpsert::updated_at` is source metadata
-    /// and is deliberately excluded from retry identity. Workflow timestamps are
-    /// owned by the store rather than copied from source metadata. `project_id`
-    /// must identify an existing project when present, and ownership of a live
-    /// document is immutable until that document is deleted.
-    async fn upsert_document_and_enqueue_index(
-        &self,
-        _document: &DocumentUpsert,
-        _pipeline_fingerprint: &str,
-        _max_attempts: i32,
-    ) -> Result<(DocumentRecord, DocumentJob)> {
         document_storage_unavailable()
     }
 
@@ -1311,8 +1220,8 @@ pub trait Store: Send + Sync {
     ///
     /// The blob must already be durably published. Repeating an identical source
     /// and parser fingerprint returns the exact existing generation and job.
-    /// Any source or parser change advances the generation, clears canonical and
-    /// index state, and cancels older nonterminal work in the same transaction.
+    /// Any source or parser change advances the generation, clears canonical
+    /// state, and cancels older nonterminal work in the same transaction.
     async fn accept_document_source_and_enqueue_parse(
         &self,
         _document: &DocumentSourceUpsert,
@@ -1322,38 +1231,18 @@ pub trait Store: Send + Sync {
         document_storage_unavailable()
     }
 
-    /// Atomically publish canonical parser output and enqueue the index stage.
+    /// Atomically publish canonical parser output and mark the document ready.
     ///
     /// The transition succeeds only for the exact live, unexpired parse lease.
-    /// On success the parse job becomes terminal, canonical state becomes
-    /// authoritative, and one index job is queued in the same transaction.
-    async fn complete_document_parse_job_and_enqueue_index(
+    /// On success the parse job becomes terminal and canonical state becomes
+    /// authoritative in the same transaction.
+    async fn complete_document_parse_job(
         &self,
         _id: DocumentJobId,
         _lease_token: uuid::Uuid,
         _completed_at: chrono::DateTime<chrono::Utc>,
         _output: &DocumentParseOutput,
-        _index_fingerprint: &str,
-        _index_max_attempts: i32,
-    ) -> Result<Option<(DocumentRecord, DocumentJob)>> {
-        document_storage_unavailable()
-    }
-
-    /// Atomically establish the current index job requested by an auditor.
-    ///
-    /// `expected_generation` is a compare-and-swap fence around the auditor's
-    /// observation. Missing derived state requeues the exact current generation;
-    /// incomplete derived state and a changed pipeline advance the source
-    /// generation once without changing source fields. Failed jobs remain failed
-    /// until an explicit retry.
-    async fn ensure_document_index_job(
-        &self,
-        _document_id: DocumentId,
-        _expected_generation: DocumentGeneration,
-        _pipeline_fingerprint: &str,
-        _max_attempts: i32,
-        _reason: DocumentIndexJobReason,
-    ) -> Result<EnsureDocumentIndexJobOutcome> {
+    ) -> Result<Option<DocumentRecord>> {
         document_storage_unavailable()
     }
 
@@ -1361,8 +1250,8 @@ pub trait Store: Send + Sync {
     ///
     /// The caller's observed generation is a compare-and-swap fence. Missing
     /// work for pending canonical output is repaired in that generation; a
-    /// parser change advances the generation once, clears derived canonical and
-    /// index state, and enqueues Parse without changing retained source fields.
+    /// parser change advances the generation once, clears derived canonical
+    /// state, and enqueues Parse without changing retained source fields.
     /// Failed work remains failed until an explicit retry.
     async fn ensure_document_parse_job(
         &self,
@@ -1435,20 +1324,6 @@ pub trait Store: Send + Sync {
         document_storage_unavailable()
     }
 
-    /// Atomically succeed a live index job and publish its exact document
-    /// revision as ready in the operational store.
-    ///
-    /// Returns `false` when the job is no longer running under the exact,
-    /// unexpired lease or its timestamp would regress durable state.
-    async fn complete_document_index_job(
-        &self,
-        _id: DocumentJobId,
-        _lease_token: uuid::Uuid,
-        _completed_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<bool> {
-        document_storage_unavailable()
-    }
-
     /// Atomically record a live job failure and its matching document state.
     ///
     /// A future `retry_at` moves a job with attempts remaining to `retry_wait`
@@ -1464,36 +1339,6 @@ pub trait Store: Send + Sync {
         _error_code: &str,
         _error_detail: Option<&str>,
     ) -> Result<Option<DocumentJobStatus>> {
-        document_storage_unavailable()
-    }
-
-    /// Mark an exact `(revision, revision_token)` as indexed with `fingerprint`.
-    ///
-    /// `fingerprint` must not be empty.
-    ///
-    /// Returns `false` without modifying the row when the document is missing,
-    /// the lifecycle token differs, or a newer content revision won the race.
-    async fn mark_document_indexed(
-        &self,
-        _id: DocumentId,
-        _revision: i64,
-        _revision_token: uuid::Uuid,
-        _fingerprint: &str,
-        _indexed_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<bool> {
-        document_storage_unavailable()
-    }
-
-    /// Clear the index watermark for an exact content revision and lifecycle.
-    ///
-    /// Returns `false` without modifying the row when the document or exact
-    /// revision identity is no longer current.
-    async fn clear_document_index(
-        &self,
-        _id: DocumentId,
-        _revision: i64,
-        _revision_token: uuid::Uuid,
-    ) -> Result<bool> {
         document_storage_unavailable()
     }
 

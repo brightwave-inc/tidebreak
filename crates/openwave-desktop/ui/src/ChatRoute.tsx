@@ -308,7 +308,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
    * One picker for anything the reader wants to attach.
    *
    * Which of the two things each file becomes — pixels for the model, or a
-   * parsed and searchable source — is decided by the host from the bytes, so
+   * parsed and readable source — is decided by the host from the bytes, so
    * nothing here has to guess from a name or ask the reader to know first.
    */
   async function onAttach() {

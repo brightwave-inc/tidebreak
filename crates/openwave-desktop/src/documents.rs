@@ -59,7 +59,7 @@ struct CatalogDocument {
     source_byte_len: Option<u64>,
     content_revision: i64,
     processing_status: DocumentProcessingStatus,
-    searchable: bool,
+    readable: bool,
     updated_at: String,
 }
 
@@ -78,7 +78,7 @@ pub(crate) struct LibraryDocument {
     media_type: String,
     size_bytes: Option<u64>,
     processing_status: DocumentProcessingStatus,
-    searchable: bool,
+    readable: bool,
     failure: Option<LibraryDocumentFailure>,
     updated_at: String,
 }
@@ -100,7 +100,7 @@ impl LibraryDocument {
             media_type: document.media_type,
             size_bytes: document.source_byte_len,
             processing_status: document.processing_status,
-            searchable: document.searchable,
+            readable: document.readable,
             failure,
             updated_at: document.updated_at,
         }
@@ -1168,7 +1168,7 @@ fn streaming_local_client() -> reqwest::Client {
 
 async fn pick_document(app: &AppHandle) -> Result<Option<PathBuf>, String> {
     let (tx, rx) = oneshot::channel();
-    // Any file may be imported: text-like formats are indexed and searchable,
+    // Any file may be imported: text-like formats are indexed and readable,
     // and the rest are stored so they can still be worked with. No filter is set
     // so the native picker never greys out a file for its type.
     let mut picker = app.dialog().file().set_title("Import a document");
@@ -1822,7 +1822,7 @@ mod tests {
                 source_byte_len: Some(42),
                 content_revision: 1,
                 processing_status: DocumentProcessingStatus::Ready,
-                searchable: true,
+                readable: true,
                 updated_at: "2026-07-18T00:00:00Z".to_owned(),
             },
             None,
@@ -1841,7 +1841,7 @@ mod tests {
                 "failure",
                 "mediaType",
                 "processingStatus",
-                "searchable",
+                "readable",
                 "sizeBytes",
                 "title",
                 "updatedAt"

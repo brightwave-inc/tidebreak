@@ -14,7 +14,7 @@ export type LibraryDocument = {
   sizeBytes: number | null;
   processingStatus: DocumentProcessingStatus;
   /** Whether searching this conversation can actually match this source. */
-  searchable: boolean;
+  readable: boolean;
   failure: LibraryDocumentFailure | null;
   updatedAt: string;
 };
@@ -303,7 +303,7 @@ function parseLibraryDocument(value: unknown): LibraryDocument {
       "mediaType",
       "sizeBytes",
       "processingStatus",
-      "searchable",
+      "readable",
       "failure",
       "updatedAt",
     ])
@@ -324,7 +324,7 @@ function parseLibraryDocument(value: unknown): LibraryDocument {
         value.sizeBytes < 1 ||
         value.sizeBytes > MAX_SOURCE_BYTES)) ||
     !isProcessingStatus(value.processingStatus) ||
-    typeof value.searchable !== "boolean" ||
+    typeof value.readable !== "boolean" ||
     !isLibraryDocumentFailure(value.failure) ||
     (value.processingStatus === "failed") !== (value.failure !== null) ||
     typeof value.updatedAt !== "string" ||
@@ -338,7 +338,7 @@ function parseLibraryDocument(value: unknown): LibraryDocument {
     mediaType: value.mediaType,
     sizeBytes: value.sizeBytes,
     processingStatus: value.processingStatus,
-    searchable: value.searchable,
+    readable: value.readable,
     failure: value.failure,
     updatedAt: value.updatedAt,
   };

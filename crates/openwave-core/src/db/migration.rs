@@ -2,9 +2,8 @@ use sea_orm::DatabaseBackend;
 use sea_orm_migration::prelude::*;
 
 use super::{
-    AgentRunStatus, BlobRetirementStatus, DocumentJobKind, DocumentJobStatus,
-    DocumentProcessingStatus, TurnAgentRunWaitStatus, TurnClientWaitStatus, TurnRunStatus,
-    TurnSteerStatus,
+    AgentRunStatus, BlobRetirementStatus, DocumentJobStatus, DocumentProcessingStatus,
+    TurnAgentRunWaitStatus, TurnClientWaitStatus, TurnRunStatus, TurnSteerStatus,
 };
 use crate::model::{AgentRunWaitCondition, SandboxToolCallStatus};
 
@@ -43,6 +42,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddEvidenceLocation),
             Box::new(AllowContainerExecutionLocation),
             Box::new(WidenStandingGrantScope),
+            Box::new(RetireDocumentIndexing),
         ]
     }
 }
@@ -6720,10 +6720,7 @@ impl MigrationTrait for AddDocuments {
                             .on_delete(ForeignKeyAction::Cascade),
                     )
                     .check(Expr::col(DocumentJob::ContentRevision).gte(1))
-                    .check(Expr::col(DocumentJob::Kind).is_in([
-                        DocumentJobKind::Parse.as_str(),
-                        DocumentJobKind::Index.as_str(),
-                    ]))
+                    .check(Expr::col(DocumentJob::Kind).is_in(["parse", "index"]))
                     .check(
                         Func::char_length(Expr::col(DocumentJob::Kind))
                             .lte(64)
@@ -7140,6 +7137,364 @@ impl MigrationTrait for WidenStandingGrantScope {
             "ALTER TABLE standing_tool_grant DROP CONSTRAINT fk_standing_tool_grant_project"
                 .to_owned(),
             "ALTER TABLE standing_tool_grant DROP COLUMN project_id".to_owned(),
+        ];
+        manager
+            .get_connection()
+            .execute_unprepared(&format!("{};", statements.join(";\n")))
+            .await?;
+        Ok(())
+    }
+}
+
+/// Retires the semantic index stage: a parsed document is ready the moment its
+/// canonical text is published, because there is no derived vector store left
+/// to publish into.
+///
+/// Index jobs are deleted rather than cancelled — they describe a stage that no
+/// longer exists. Documents whose canonical output was already published (or
+/// that never had raw bytes to parse) are promoted to `ready`, including rows
+/// whose only failure was an index attempt. The index watermark columns and
+/// their consistency checks leave the document table, and the retirement
+/// watermark leaves the generation clock — retirement existed only to
+/// unpublish vector generations.
+struct RetireDocumentIndexing;
+
+impl MigrationName for RetireDocumentIndexing {
+    fn name(&self) -> &str {
+        "m20260729_000029_retire_document_indexing"
+    }
+}
+
+const DOCUMENT_REBUILD: &str = "document_rebuild";
+const DOCUMENT_GENERATION_REBUILD: &str = "document_generation_rebuild";
+
+/// Rows whose text of record is already published: canonical-only documents,
+/// and raw sources whose parse completed.
+const DOCUMENT_TEXT_PUBLISHED: &str = "source_blob_id IS NULL OR canonical_fingerprint IS NOT NULL";
+
+fn document_index_revision_check() -> SimpleExpr {
+    Expr::col(Document::IndexedRevision)
+        .is_null()
+        .or(Expr::col(Document::IndexedRevision)
+            .gte(1)
+            .and(Expr::col(Document::IndexedRevision).lte(Expr::col(Document::ContentRevision))))
+}
+
+fn document_processing_watermark_check() -> SimpleExpr {
+    let watermark_absent = Expr::col(Document::IndexedRevision)
+        .is_null()
+        .and(Expr::col(Document::IndexFingerprint).is_null())
+        .and(Expr::col(Document::IndexedAt).is_null());
+    let watermark_present = Expr::col(Document::IndexedRevision)
+        .is_not_null()
+        .and(Expr::col(Document::IndexFingerprint).is_not_null().and(
+            Func::char_length(Expr::col(Document::IndexFingerprint)).between(
+                1,
+                crate::model::DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN as i32,
+            ),
+        ))
+        .and(Expr::col(Document::IndexedAt).is_not_null());
+    Expr::col(Document::ProcessingStatus)
+        .eq(DocumentProcessingStatus::Ready.as_str())
+        .and(Expr::col(Document::IndexedRevision).eq(Expr::col(Document::ContentRevision)))
+        .and(watermark_present)
+        .or(Expr::col(Document::ProcessingStatus)
+            .ne(DocumentProcessingStatus::Ready.as_str())
+            .and(watermark_absent))
+}
+
+fn document_generation_retirement_check() -> SimpleExpr {
+    Expr::col(DocumentGeneration::RetirementPending)
+        .eq(false)
+        .and(Expr::col(DocumentGeneration::RetirementContentRevision).is_null())
+        .and(Expr::col(DocumentGeneration::RetirementRevisionToken).is_null())
+        .or(Expr::col(DocumentGeneration::RetirementPending)
+            .eq(true)
+            .and(Expr::col(DocumentGeneration::RetirementContentRevision).is_not_null())
+            .and(Expr::col(DocumentGeneration::RetirementContentRevision).gte(1))
+            .and(Expr::col(DocumentGeneration::RetirementRevisionToken).is_not_null()))
+}
+
+fn document_rebuild_table(indexed: bool) -> TableCreateStatement {
+    let rebuild = Alias::new(DOCUMENT_REBUILD);
+    let mut table = Table::create();
+    table
+        .table(rebuild.clone())
+        .col(ColumnDef::new(Document::Id).uuid().not_null().primary_key())
+        .col(ColumnDef::new(Document::ChatId).uuid())
+        .col(ColumnDef::new(Document::ProjectId).uuid())
+        .col(ColumnDef::new(Document::SourceUri).text())
+        .col(ColumnDef::new(Document::MediaType).text().not_null())
+        .col(ColumnDef::new(Document::Title).text())
+        .col(ColumnDef::new(Document::SourceBlobId).uuid())
+        .col(ColumnDef::new(Document::SourceSha256).binary())
+        .col(ColumnDef::new(Document::SourceByteLen).big_integer())
+        .col(ColumnDef::new(Document::CanonicalText).text().not_null())
+        .col(ColumnDef::new(Document::CanonicalFingerprint).text())
+        .col(
+            ColumnDef::new(Document::SourceRegions)
+                .json_binary()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(Document::ContentRevision)
+                .big_integer()
+                .not_null()
+                .default(1),
+        )
+        .col(ColumnDef::new(Document::RevisionToken).uuid().not_null())
+        .col(
+            ColumnDef::new(Document::ProcessingStatus)
+                .text()
+                .not_null()
+                .default(DocumentProcessingStatus::Queued.as_str()),
+        )
+        .col(
+            ColumnDef::new(Document::CreatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(Document::UpdatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .check(
+            Expr::col(Document::SourceBlobId)
+                .is_null()
+                .and(Expr::col(Document::SourceSha256).is_null())
+                .and(Expr::col(Document::SourceByteLen).is_null())
+                .or(Expr::col(Document::SourceBlobId)
+                    .is_not_null()
+                    .and(Expr::col(Document::SourceSha256).is_not_null())
+                    .and(Expr::col(Document::SourceByteLen).is_not_null())
+                    .and(Expr::cust("LENGTH(source_sha256) = 32"))
+                    .and(Expr::col(Document::SourceByteLen).gte(0))),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_document_project")
+                .from(rebuild, Document::ProjectId)
+                .to(Project::Table, Project::Id)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .check(Expr::col(Document::MediaType).ne(""))
+        .check(
+            Expr::col(Document::SourceUri)
+                .is_null()
+                .or(Expr::col(Document::SourceUri).ne("")),
+        )
+        .check(Expr::col(Document::CanonicalFingerprint).is_null().or(
+            Func::char_length(Expr::col(Document::CanonicalFingerprint)).between(
+                1,
+                crate::model::DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN as i32,
+            ),
+        ))
+        .check(Expr::col(Document::ContentRevision).gte(1))
+        .check(Expr::col(Document::ProcessingStatus).is_in([
+            DocumentProcessingStatus::Queued.as_str(),
+            DocumentProcessingStatus::Processing.as_str(),
+            DocumentProcessingStatus::Ready.as_str(),
+            DocumentProcessingStatus::Failed.as_str(),
+        ]));
+    if indexed {
+        table
+            .col(ColumnDef::new(Document::IndexedRevision).big_integer())
+            .col(ColumnDef::new(Document::IndexFingerprint).text())
+            .col(ColumnDef::new(Document::IndexedAt).timestamp_with_time_zone())
+            .check(document_index_revision_check())
+            .check(document_processing_watermark_check());
+    }
+    table.to_owned()
+}
+
+fn document_generation_rebuild_table(retirement: bool) -> TableCreateStatement {
+    let mut table = Table::create();
+    table
+        .table(Alias::new(DOCUMENT_GENERATION_REBUILD))
+        .col(
+            ColumnDef::new(DocumentGeneration::DocumentId)
+                .uuid()
+                .not_null()
+                .primary_key(),
+        )
+        .col(
+            ColumnDef::new(DocumentGeneration::ContentRevision)
+                .big_integer()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(DocumentGeneration::RevisionToken)
+                .uuid()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(DocumentGeneration::Tombstone)
+                .boolean()
+                .not_null()
+                .default(false),
+        )
+        .check(Expr::col(DocumentGeneration::ContentRevision).gte(1));
+    if retirement {
+        table
+            .col(
+                ColumnDef::new(DocumentGeneration::RetirementPending)
+                    .boolean()
+                    .not_null()
+                    .default(false),
+            )
+            .col(ColumnDef::new(DocumentGeneration::RetirementContentRevision).big_integer())
+            .col(ColumnDef::new(DocumentGeneration::RetirementRevisionToken).uuid())
+            .check(document_generation_retirement_check());
+    }
+    table.to_owned()
+}
+
+fn document_rebuild_indexes() -> [IndexCreateStatement; 3] {
+    [
+        Index::create()
+            .name("idx_document_project_created")
+            .table(Document::Table)
+            .col(Document::ProjectId)
+            .col(Document::CreatedAt)
+            .to_owned(),
+        Index::create()
+            .name("idx_document_source_blob")
+            .table(Document::Table)
+            .col(Document::SourceBlobId)
+            .to_owned(),
+        Index::create()
+            .name("idx_document_chat_created")
+            .table(Document::Table)
+            .col(Document::ChatId)
+            .col(Document::CreatedAt)
+            .to_owned(),
+    ]
+}
+
+async fn rebuild_document_indexing_sqlite(
+    manager: &SchemaManager<'_>,
+    indexed: bool,
+) -> Result<(), DbErr> {
+    let shared = "id, chat_id, project_id, source_uri, media_type, title, source_blob_id, \
+         source_sha256, source_byte_len, canonical_text, canonical_fingerprint, source_regions, \
+         content_revision, revision_token, created_at, updated_at";
+    let copy_document = if indexed {
+        // Reintroducing the watermark leaves it empty, and an empty watermark
+        // cannot substantiate `ready`: those rows go back to awaiting an index.
+        format!(
+            "INSERT INTO {DOCUMENT_REBUILD} ({shared}, processing_status, indexed_revision, \
+              index_fingerprint, indexed_at) \
+             SELECT {shared}, CASE processing_status WHEN 'ready' THEN 'queued' \
+              ELSE processing_status END, NULL, NULL, NULL \
+             FROM document"
+        )
+    } else {
+        format!(
+            "INSERT INTO {DOCUMENT_REBUILD} ({shared}, processing_status) \
+             SELECT {shared}, CASE WHEN {DOCUMENT_TEXT_PUBLISHED} THEN 'ready' \
+              ELSE processing_status END \
+             FROM document"
+        )
+    };
+    let generation_shared = "document_id, content_revision, revision_token, tombstone";
+    let copy_generation = if indexed {
+        format!(
+            "INSERT INTO {DOCUMENT_GENERATION_REBUILD} ({generation_shared}, \
+              retirement_pending, retirement_content_revision, retirement_revision_token) \
+             SELECT {generation_shared}, FALSE, NULL, NULL FROM document_generation"
+        )
+    } else {
+        format!(
+            "INSERT INTO {DOCUMENT_GENERATION_REBUILD} ({generation_shared}) \
+             SELECT {generation_shared} FROM document_generation"
+        )
+    };
+    let mut statements = vec![
+        "PRAGMA foreign_keys=OFF".to_owned(),
+        "BEGIN IMMEDIATE".to_owned(),
+        format!("DROP TABLE IF EXISTS {DOCUMENT_REBUILD}"),
+        format!("DROP TABLE IF EXISTS {DOCUMENT_GENERATION_REBUILD}"),
+        document_rebuild_table(indexed).to_string(SqliteQueryBuilder),
+        copy_document,
+        "DROP TABLE document".to_owned(),
+        format!("ALTER TABLE {DOCUMENT_REBUILD} RENAME TO document"),
+        document_generation_rebuild_table(indexed).to_string(SqliteQueryBuilder),
+        copy_generation,
+        "DROP TABLE document_generation".to_owned(),
+        format!("ALTER TABLE {DOCUMENT_GENERATION_REBUILD} RENAME TO document_generation"),
+    ];
+    statements.extend(
+        document_rebuild_indexes()
+            .iter()
+            .map(|index| index.to_string(SqliteQueryBuilder)),
+    );
+    statements.push("COMMIT".to_owned());
+    statements.push("PRAGMA foreign_keys=ON".to_owned());
+    manager
+        .get_connection()
+        .execute_unprepared(&format!("{};", statements.join(";\n")))
+        .await?;
+    Ok(())
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for RetireDocumentIndexing {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared("DELETE FROM document_job WHERE kind = 'index'")
+            .await?;
+        if manager.get_database_backend() == DatabaseBackend::Sqlite {
+            return rebuild_document_indexing_sqlite(manager, false).await;
+        }
+        let statements = [
+            "ALTER TABLE document DROP COLUMN indexed_revision CASCADE, \
+             DROP COLUMN index_fingerprint CASCADE, DROP COLUMN indexed_at CASCADE"
+                .to_owned(),
+            format!(
+                "UPDATE document SET processing_status = 'ready' \
+                 WHERE processing_status <> 'ready' AND ({DOCUMENT_TEXT_PUBLISHED})"
+            ),
+            "ALTER TABLE document_generation DROP COLUMN retirement_pending CASCADE, \
+             DROP COLUMN retirement_content_revision CASCADE, \
+             DROP COLUMN retirement_revision_token CASCADE"
+                .to_owned(),
+        ];
+        manager
+            .get_connection()
+            .execute_unprepared(&format!("{};", statements.join(";\n")))
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if manager.get_database_backend() == DatabaseBackend::Sqlite {
+            return rebuild_document_indexing_sqlite(manager, true).await;
+        }
+        let index_revision = render_postgres_check(document_index_revision_check());
+        let watermark = render_postgres_check(document_processing_watermark_check());
+        let retirement = render_postgres_check(document_generation_retirement_check());
+        let statements = [
+            // An empty watermark cannot substantiate `ready`.
+            "UPDATE document SET processing_status = 'queued' WHERE processing_status = 'ready'"
+                .to_owned(),
+            "ALTER TABLE document ADD COLUMN indexed_revision bigint, \
+             ADD COLUMN index_fingerprint text, ADD COLUMN indexed_at timestamptz"
+                .to_owned(),
+            format!("ALTER TABLE document ADD CONSTRAINT chk_document_index_revision CHECK ({index_revision})"),
+            format!(
+                "ALTER TABLE document ADD CONSTRAINT chk_document_processing_watermark CHECK ({watermark})"
+            ),
+            "ALTER TABLE document_generation \
+             ADD COLUMN retirement_pending boolean NOT NULL DEFAULT FALSE, \
+             ADD COLUMN retirement_content_revision bigint, \
+             ADD COLUMN retirement_revision_token uuid"
+                .to_owned(),
+            format!(
+                "ALTER TABLE document_generation ADD CONSTRAINT \
+                 chk_document_generation_retirement CHECK ({retirement})"
+            ),
         ];
         manager
             .get_connection()

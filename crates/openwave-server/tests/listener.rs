@@ -118,13 +118,13 @@ async fn api_rejects_missing_and_wrong_tokens() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn retrieval_routes_require_a_token() {
+async fn document_routes_require_a_token() {
     let (addr, _token, _dir) = serve_test_server().await;
     let client = reqwest::Client::new();
 
-    // Both retrieval routes sit behind the bearer-token layer, not out in the
+    // Document routes sit behind the bearer-token layer, not out in the
     // open like /healthz — a request with no token is rejected before it runs.
-    for uri in ["/documents", "/search"] {
+    for uri in ["/documents"] {
         let response = client
             .post(format!("http://{addr}{uri}"))
             .json(&serde_json::json!({}))
