@@ -6588,6 +6588,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "openwave-reverse-rpc-spike"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "openwave-router"
 version = "0.0.0"
 dependencies = [
