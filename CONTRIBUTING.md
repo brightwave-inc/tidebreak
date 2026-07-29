@@ -34,46 +34,62 @@ The Rust toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml);
 
 ### macOS keychain prompts
 
-OpenWave keeps secrets in the login keychain, and macOS ties keychain
-approvals to the binary's code signature — so unsigned dev builds would
-re-trigger the access prompt on every rebuild. To prevent that, `cargo run`
-and `cargo test` launch through
+OpenWave keeps secrets in the login keychain, and macOS ties keychain approvals
+to the binary's code signature — so unsigned dev builds would re-trigger the
+access prompt on every rebuild. To prevent that, `cargo run` and `cargo test`
+launch through
 [`scripts/macos-dev-sign-runner.sh`](scripts/macos-dev-sign-runner.sh), which
-signs the binary with your `openwave-dev` or `Apple Development` certificate
-(whichever exists) before running it. If neither exists, OpenWave creates a
-local-only `openwave-dev` identity in a dedicated keychain under
-`~/Library/Application Support/OpenWave/dev-signing`. That keychain unlocks
-with its own generated password, so starting a dev build does not need your
-login-keychain password or a Developer ID distribution key.
+signs the binary before running it.
 
-Every binary is signed with the same fixed identifier, so an item a signed
-build creates stays readable from every other dev binary — including test
-executables, whose hashed file names change between builds. You can set
-`OPENWAVE_DEV_SIGNING_IDENTITY` to pick an identity explicitly, or set it
-empty to opt out.
+**What makes an approval stick is a team identifier.** macOS records the
+approval as a requirement it can re-evaluate — the code-signing identifier plus
+the certificate's team — and any later build that satisfies it is let through.
+A certificate without a team identifier gives it nothing stable to match, so
+the approval is pinned to that one binary's cdhash and the next rebuild prompts
+again. **Always Allow** cannot settle it either, and the partition-list repair
+Apple documents also needs a team identifier.
 
-#### Credentials stored before dev signing
+So the runner signs with the first of these it finds:
 
-Signing fixes items the signed build **created**. Credentials you stored
-earlier belong to that earlier build, and macOS keeps challenging for them —
-one prompt per credential, on every launch. **Always Allow** does not settle
-it: the local `openwave-dev` certificate is self-signed with no team
-identifier, so the approval is pinned to the binary's cdhash and the next
-rebuild invalidates it. (The partition-list repair that Apple documents needs a
-team identifier, so it does not apply either.)
+1. `$OPENWAVE_DEV_SIGNING_IDENTITY`, if set — set it empty to opt out
+2. an **Apple Development** identity
+3. a **Developer ID Application** identity
+4. an `openwave-dev` certificate already in a searchable keychain
+5. a local-only `openwave-dev` identity it creates in a dedicated keychain
+   under `~/Library/Application Support/OpenWave/dev-signing`
 
-Re-home those credentials once instead, which rewrites each one so the item
-belongs to the dev signature:
+Options 2 and 3 carry a team identifier and are the ones that stop the prompts;
+3 means local development signs with a distribution key, which is the price of
+2 not being available. Option 5 needs no Apple account and unlocks with its own
+generated password, so it never asks for your login-keychain password — but
+being self-signed it has no team identifier, so credential prompts will keep
+returning on rebuild. It is a floor, not a fix.
+
+Every binary is signed with the same fixed identifier (`openwave-dev`), so one
+approval covers every dev binary — including test executables, whose hashed
+file names change between builds.
+
+#### Credentials stored under a different identity
+
+An item is bound to whatever signed the binary that **created** it. Credentials
+stored before dev signing existed — or under an identity you have since moved
+away from, including the self-signed fallback — keep prompting. Re-home them
+once, which rewrites each item under the identity in use now:
 
 ```sh
 cargo run -p openwave-cli -- rehome-secrets
 ```
 
-Run it through Cargo, so the signing runner applies. Each stored credential
-asks for access once or twice more while it is read and its old item removed —
-plain **Allow** is enough — and then stops asking, including after later
-rebuilds. `security find-generic-password -s openwave.dev` lists what the dev
-profile has stored.
+Run it through Cargo so the signing runner applies. Each credential asks for
+access once or twice more while it is read and its old item removed — plain
+**Allow** is enough — and then stops, including after later rebuilds, provided
+the identity carries a team identifier. `security find-generic-password -s
+openwave.dev` lists what the dev profile has stored.
+
+The first build after switching identities may also raise a one-time *codesign
+wants to access key* prompt for the new signing key. **Always Allow** does
+settle that one — `codesign` is a stable Apple-signed binary — or set the
+key's partition list to avoid it up front.
 
 ### Desktop UI
 

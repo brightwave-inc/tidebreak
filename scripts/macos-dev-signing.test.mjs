@@ -16,24 +16,24 @@ import test from "node:test";
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
 const runner = join(scriptsDir, "macos-dev-sign-runner.sh");
 
-test("bootstraps and reuses local signing when only Developer ID exists", async () => {
-  const root = await mkdtemp(join(tmpdir(), "openwave-dev-signing-"));
+/// Stand up a fake `security`/`codesign`/target binary on PATH and run the
+/// runner over it, returning every command it issued. `identities` is what the
+/// fake `security find-identity` prints.
+async function runWithIdentities(root, identities) {
   const binDir = join(root, "bin");
   const log = join(root, "commands.log");
   const probe = join(root, "probe");
   await mkdir(binDir);
 
-  try {
-    const security = join(binDir, "security");
-    await writeFile(
-      security,
-      `#!/usr/bin/env bash
+  const security = join(binDir, "security");
+  await writeFile(
+    security,
+    `#!/usr/bin/env bash
 set -euo pipefail
 printf 'security %s\\n' "$*" >>"$OPENWAVE_TEST_LOG"
 case "$1" in
   find-identity)
-    printf '  1) ABCDEF "Developer ID Application: Example (TEAMID)"\\n'
-    printf '     1 valid identities found\\n'
+    printf '%s' "$OPENWAVE_TEST_IDENTITIES"
     ;;
   create-keychain)
     keychain="\${!#}"
@@ -51,54 +51,110 @@ case "$1" in
     ;;
 esac
 `,
-    );
+  );
 
-    const codesign = join(binDir, "codesign");
-    await writeFile(
-      codesign,
-      `#!/usr/bin/env bash
+  const codesign = join(binDir, "codesign");
+  await writeFile(
+    codesign,
+    `#!/usr/bin/env bash
 set -euo pipefail
 if [[ "$1" == "--display" ]]; then
   exit 1
 fi
 printf 'codesign %s\\n' "$*" >>"$OPENWAVE_TEST_LOG"
 `,
-    );
+  );
 
-    await writeFile(
-      probe,
-      `#!/usr/bin/env bash
+  await writeFile(
+    probe,
+    `#!/usr/bin/env bash
 printf 'exec %s\\n' "$*" >>"$OPENWAVE_TEST_LOG"
 `,
+  );
+  await Promise.all([
+    chmod(security, 0o755),
+    chmod(codesign, 0o755),
+    chmod(probe, 0o755),
+  ]);
+
+  const env = {
+    ...process.env,
+    OPENWAVE_DEV_SIGNING_DIR: join(root, "signing"),
+    OPENWAVE_TEST_LOG: log,
+    OPENWAVE_TEST_IDENTITIES: identities,
+    OPENWAVE_TEST_LOGIN_KEYCHAIN: join(root, "login.keychain-db"),
+    PATH: `${binDir}:${process.env.PATH}`,
+  };
+
+  for (const argument of ["first", "second"]) {
+    const result = spawnSync(runner, [probe, argument], {
+      encoding: "utf8",
+      env,
+    });
+    assert.equal(result.status, 0, result.stderr);
+  }
+
+  return readFile(log, "utf8");
+}
+
+// A team identifier is the whole point: without one, macOS pins the keychain
+// approval to the binary's cdhash and the next rebuild prompts again. So a
+// team-identified certificate has to beat the local-only fallback, even though
+// it means development signs with a distribution key.
+test("prefers a team-identified identity over bootstrapping a local one", async () => {
+  const root = await mkdtemp(join(tmpdir(), "openwave-dev-signing-"));
+  try {
+    const commands = await runWithIdentities(
+      root,
+      '  1) ABCDEF "Developer ID Application: Example (TEAMID)"\n     1 valid identities found\n',
     );
-    await Promise.all([
-      chmod(security, 0o755),
-      chmod(codesign, 0o755),
-      chmod(probe, 0o755),
-    ]);
 
-    const env = {
-      ...process.env,
-      OPENWAVE_DEV_SIGNING_DIR: join(root, "signing"),
-      OPENWAVE_TEST_LOG: log,
-      OPENWAVE_TEST_LOGIN_KEYCHAIN: join(root, "login.keychain-db"),
-      PATH: `${binDir}:${process.env.PATH}`,
-    };
+    assert.equal(commands.match(/security create-keychain/g), null);
+    assert.equal(
+      commands.match(
+        /codesign --force --sign Developer ID Application: Example \(TEAMID\)/g,
+      )?.length,
+      2,
+    );
+    assert.match(commands, /codesign .*--identifier openwave-dev/);
+    assert.match(commands, /exec first/);
+    assert.match(commands, /exec second/);
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
 
-    for (const argument of ["first", "second"]) {
-      const result = spawnSync(runner, [probe, argument], {
-        encoding: "utf8",
-        env,
-      });
-      assert.equal(result.status, 0, result.stderr);
-    }
+test("prefers Apple Development over Developer ID", async () => {
+  const root = await mkdtemp(join(tmpdir(), "openwave-dev-signing-"));
+  try {
+    const commands = await runWithIdentities(
+      root,
+      '  1) ABCDEF "Developer ID Application: Example (TEAMID)"\n' +
+        '  2) 123456 "Apple Development: dev@example.com (OTHERID)"\n' +
+        "     2 valid identities found\n",
+    );
 
-    const commands = await readFile(log, "utf8");
+    assert.match(
+      commands,
+      /codesign --force --sign Apple Development: dev@example\.com \(OTHERID\)/,
+    );
+    assert.equal(commands.match(/Developer ID Application/g), null);
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
+test("bootstraps local signing when no identity exists", async () => {
+  const root = await mkdtemp(join(tmpdir(), "openwave-dev-signing-"));
+  try {
+    const commands = await runWithIdentities(root, "     0 valid identities found\n");
+
     assert.equal(commands.match(/security create-keychain/g)?.length, 1);
     assert.equal(commands.match(/security import/g)?.length, 1);
-    assert.equal(commands.match(/security find-identity/g)?.length, 1);
-    assert.equal(commands.match(/codesign --force --sign openwave-dev/g)?.length, 2);
-    assert.match(commands, /codesign .*--identifier openwave-dev/);
+    assert.equal(
+      commands.match(/codesign --force --sign openwave-dev/g)?.length,
+      2,
+    );
     assert.match(commands, /exec first/);
     assert.match(commands, /exec second/);
   } finally {

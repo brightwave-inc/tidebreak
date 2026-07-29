@@ -18,11 +18,27 @@
 # executables, whose hashed file names would otherwise produce a fresh
 # designated requirement (and a fresh prompt) on every rebuild.
 #
+# That only holds for a certificate carrying a team identifier. macOS builds
+# the ACL entry from a requirement it can re-evaluate — identifier plus the
+# leaf's team — and any later build satisfying it is let through. A
+# self-signed certificate has no team identifier, so there is nothing stable
+# to match on and the approval is pinned to the binary's cdhash instead: the
+# next rebuild invalidates it and the prompt returns. A team-identified
+# identity therefore wins over the local-only one, even though using one means
+# development touches a distribution key that it otherwise would not.
+#
 # Identity, in order of preference:
 #   1. $OPENWAVE_DEV_SIGNING_IDENTITY (set to opt out with an empty value)
-#   2. an "openwave-dev" self-signed certificate, if one exists
-#   3. the first "Apple Development" identity in the keychain
-#   4. a local-only "openwave-dev" identity bootstrapped in its own keychain
+#   2. the first "Apple Development" identity — team-identified, and the one
+#      meant for local builds
+#   3. the first "Developer ID Application" identity — also team-identified
+#   4. an "openwave-dev" certificate already in a searchable keychain
+#   5. a local-only "openwave-dev" identity bootstrapped in its own keychain,
+#      which stops the per-rebuild prompt for nothing else on the list
+#
+# Switching between identities re-homes nothing: credentials stored under the
+# previous one keep prompting until `cargo run -p openwave-cli --
+# rehome-secrets` rewrites them.
 
 set -euo pipefail
 
@@ -34,7 +50,10 @@ find_identity() {
   local identities
   identities="$(security find-identity -v -p codesigning 2>/dev/null)" || return 0
   local pattern
-  for pattern in '"\(openwave-dev\)"' '"\(Apple Development: [^"]*\)"'; do
+  for pattern in \
+    '"\(Apple Development: [^"]*\)"' \
+    '"\(Developer ID Application: [^"]*\)"' \
+    '"\(openwave-dev\)"'; do
     local match
     match="$(sed -n "s/.*${pattern}.*/\\1/p" <<<"$identities" | head -n 1)"
     if [[ -n "$match" ]]; then
@@ -42,18 +61,18 @@ find_identity() {
       return 0
     fi
   done
+  return 0
 }
 
 if [[ -n "${OPENWAVE_DEV_SIGNING_IDENTITY+x}" ]]; then
   identity="$OPENWAVE_DEV_SIGNING_IDENTITY"
-elif "$script_dir/setup-macos-dev-signing.sh" --existing-only; then
-  # The bootstrapped certificate is intentionally self-signed and untrusted,
-  # so `security find-identity -p codesigning` does not list it even though
-  # codesign can use it. Check its dedicated keychain first.
-  identity="openwave-dev"
 else
   identity="$(find_identity)"
   if [[ -z "$identity" ]]; then
+    # Nothing team-identified to sign with. The bootstrapped certificate is
+    # self-signed and untrusted, so `security find-identity -p codesigning`
+    # never lists it even though codesign can use it; setting it up (or
+    # confirming it is already there) is what makes it available.
     if "$script_dir/setup-macos-dev-signing.sh"; then
       identity="openwave-dev"
     else
