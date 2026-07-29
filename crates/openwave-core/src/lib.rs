@@ -78,8 +78,8 @@ pub use agent_tools::{
 pub use approval::{
     ApprovalDecision, ApprovalFuture, ApprovalGate, ApprovalJournalIdentity, ApprovalRegistration,
     ApprovalRegistrationFuture, ApprovalRequest, ApprovalRequiredPublication, AutoApproveGate,
-    GrantScope, RefuseGate, StandingGrant, StandingGrants, ToolApproval, ToolApprovalKind,
-    ToolApprovalStatus,
+    GrantScope, RefuseGate, StandingGrant, StandingGrantRecord, StandingGrants, ToolApproval,
+    ToolApprovalKind, ToolApprovalStatus,
 };
 #[cfg(feature = "blob-fs")]
 pub use blob::FsBlobStore;

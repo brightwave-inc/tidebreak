@@ -2649,6 +2649,26 @@ pub trait Store: Send + Sync {
         ))
     }
 
+    /// Every durable standing grant, newest first, across all chats.
+    ///
+    /// A malformed row is skipped, never surfaced: what cannot be described
+    /// cannot be knowingly kept, and it already fails to authorize anything
+    /// at match time for the same reason.
+    async fn list_standing_tool_grants(&self) -> Result<Vec<crate::approval::StandingGrantRecord>> {
+        Err(AgentError::Store(
+            "durable standing-grant storage is not implemented by this Store".into(),
+        ))
+    }
+
+    /// Withdraw one standing grant by the approval that created it. Later
+    /// matching calls park on the gate again. Returns `false` when no such
+    /// grant exists (already revoked, or never granted).
+    async fn revoke_standing_tool_grant(&self, _source_call_id: CallId) -> Result<bool> {
+        Err(AgentError::Store(
+            "durable standing-grant storage is not implemented by this Store".into(),
+        ))
+    }
+
     /// List a bounded page of pending approvals for one chat.
     async fn list_pending_tool_call_approvals(
         &self,

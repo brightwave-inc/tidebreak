@@ -437,6 +437,16 @@ supported: boolean, apps: Array<GatewayAppInfo>, };
 export type GatewayStatus = { configured: boolean, enabled: boolean, base_url?: string, signed_in: boolean, account_hint?: string, installation_id?: string, model_count: number, sign_in: SignInProgress, };
 
 /**
+ * How much a standing grant covers.
+ *
+ * A grant is easy to widen by accident and hard to notice afterwards, so the
+ * scope is stated in the grant itself rather than inferred from the tool. The
+ * narrower variants exist because "don't ask me about commands again" is a
+ * much larger thing to agree to than "don't ask me about `cargo` again".
+ */
+export type GrantScope = { "scope": "exact_action" } & ToolActionPreview | { "scope": "any_args_for", command: string, } | { "scope": "whole_tool" };
+
+/**
  * Opaque identifier for a folder registered with a host broker.
  *
  * This is product projection data, not authority: possession of an id never
@@ -968,6 +978,22 @@ has_api_key: boolean, };
  * Renderer-safe progress of the current sign-in attempt.
  */
 export type SignInProgress = { "state": "idle" } | { "state": "pending", authorization_url: string, } | { "state": "failed", message: string, };
+
+/**
+ * One durable "don't ask again" the reader has made, with enough provenance
+ * to recognize it later and withdraw it. Grant scopes are already closed
+ * renderer-safe projections, so the snapshot carries them verbatim.
+ */
+export type StandingGrantSnapshot = { 
+/**
+ * The approval decision that created the grant — also the handle a
+ * revocation names.
+ */
+source_call_id: CallId, chat_id: ChatId, 
+/**
+ * Chat title for provenance; `None` when the chat is untitled.
+ */
+chat_title: string | null, action: RendererToolName, approval: ToolApprovalKind, scope: GrantScope, granted_at: string, };
 
 /**
  * The action a call will take, in a form a human can inspect.

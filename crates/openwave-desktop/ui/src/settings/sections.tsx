@@ -6,6 +6,7 @@ import {
   Palette,
   PlugZap,
   RefreshCw,
+  ShieldCheck,
   SquareTerminal,
   Waypoints,
 } from "lucide-react";
@@ -16,6 +17,7 @@ import { AppearancePanel } from "./AppearancePanel";
 import { CodeExecutionPanel } from "./CodeExecutionPanel";
 import { GatewayPanel } from "./GatewayPanel";
 import { McpPanel } from "./McpPanel";
+import { PermissionsPanel } from "./PermissionsPanel";
 import { ModelsPanel } from "./ModelsPanel";
 import { ProvidersPanel } from "./ProvidersPanel";
 import { UpdatesPanel } from "./UpdatesPanel";
@@ -71,6 +73,11 @@ function McpSection() {
   return <McpPanel client={client} managed={managed} />;
 }
 
+function PermissionsSection() {
+  const { client } = useApp();
+  return <PermissionsPanel client={client} />;
+}
+
 function AppearanceSection() {
   const { themeMode, setThemeMode } = useApp();
   return <AppearancePanel mode={themeMode} onChange={setThemeMode} />;
@@ -121,6 +128,12 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     Component: CodeExecutionSection,
   },
   { path: "mcp", label: "MCP servers", icon: PlugZap, Component: McpSection },
+  {
+    path: "permissions",
+    label: "Permissions",
+    icon: ShieldCheck,
+    Component: PermissionsSection,
+  },
   { path: "appearance", label: "Appearance", icon: Palette, Component: AppearanceSection },
   { path: "updates", label: "Updates", icon: RefreshCw, Component: UpdatesSection },
 ];

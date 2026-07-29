@@ -21,6 +21,8 @@ import {
   type GatewayAppInfo as WireGatewayAppInfo,
   type GatewayStatus as WireGatewayStatus,
   type SignInProgress,
+  type StandingGrantSnapshot,
+  type GrantScope,
   type McpServerInfo as WireMcpServerInfo,
   type ManagedPolicy as WireManagedPolicy,
   type ManagedPolicySource as WireManagedPolicySource,
@@ -62,6 +64,8 @@ import type { DocumentProcessingStatus } from "./documents";
 
 export type {
   ApprovalClass,
+  GrantScope,
+  StandingGrantSnapshot,
   ChatToolActivityStatus,
   TranscriptRole,
   RendererToolName,
@@ -1136,6 +1140,19 @@ export class ApiClient {
       approvals.set(approval.callId, approval);
     }
     return [...approvals.values()];
+  }
+
+  /** Every standing "don't ask again", newest first, across all chats. */
+  listStandingGrants(): Promise<StandingGrantSnapshot[]> {
+    return this.json(`/grants`, { headers: this.headers() });
+  }
+
+  /** Withdraw a standing grant; later matching calls ask again. */
+  revokeStandingGrant(sourceCallId: string): Promise<void> {
+    return this.json(`/grants/${sourceCallId}`, {
+      method: "DELETE",
+      headers: this.headers(),
+    });
   }
 
   async listPendingFolderAccessRequests(

@@ -314,7 +314,7 @@ pub struct StandingGrant {
 /// scope is stated in the grant itself rather than inferred from the tool. The
 /// narrower variants exist because "don't ask me about commands again" is a
 /// much larger thing to agree to than "don't ask me about `cargo` again".
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(tag = "scope", rename_all = "snake_case")]
 pub enum GrantScope {
     /// Exactly the action the card showed, and nothing else.
@@ -482,6 +482,16 @@ impl StandingGrant {
             && kind.is_approvable()
             && self.scope.covers_call(tool_name, arguments)
     }
+}
+
+/// A durable standing grant as the revocation surface reads it: the grant
+/// itself plus the approval decision that created it, which is also the row's
+/// identity and therefore the handle a revocation names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StandingGrantRecord {
+    /// The call whose approval created this grant (primary key).
+    pub source_call_id: CallId,
+    pub grant: StandingGrant,
 }
 
 /// Explicit in-memory grants for isolated, non-durable callers such as the

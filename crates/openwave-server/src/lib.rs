@@ -407,6 +407,11 @@ pub fn app(state: AppState) -> Router {
             "/chats/{id}/approvals/{call_id}",
             post(routes::post_approval),
         )
+        .route("/grants", get(routes::list_standing_grants))
+        .route(
+            "/grants/{call_id}",
+            axum::routing::delete(routes::delete_standing_grant),
+        )
         .route("/chats/{id}/events", get(routes::chat_events))
         .merge(client_executor_api)
         .route_layer(axum::middleware::from_fn_with_state(

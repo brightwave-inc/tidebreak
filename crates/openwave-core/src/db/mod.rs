@@ -2700,6 +2700,14 @@ impl Store for DbStore {
         ops::approval::list_pending(self, chat_id, limit).await
     }
 
+    async fn list_standing_tool_grants(&self) -> Result<Vec<crate::approval::StandingGrantRecord>> {
+        ops::approval::list_standing_grants(self).await
+    }
+
+    async fn revoke_standing_tool_grant(&self, source_call_id: CallId) -> Result<bool> {
+        ops::approval::revoke_standing_grant(self, source_call_id).await
+    }
+
     async fn claim_client_tool_call(
         &self,
         id: CallId,

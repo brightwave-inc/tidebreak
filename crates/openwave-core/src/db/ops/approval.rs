@@ -74,6 +74,50 @@ where
     Ok(None)
 }
 
+/// Every durable standing grant, newest first, hydrated on the same terms as
+/// [`matching_standing_grant`]: a row whose kind, scope, or grantability no
+/// longer parses is skipped rather than surfaced or widened.
+pub(in crate::db) async fn list_standing_grants(
+    store: &DbStore,
+) -> Result<Vec<crate::approval::StandingGrantRecord>> {
+    let rows = entities::standing_tool_grant::Entity::find()
+        .order_by_desc(entities::standing_tool_grant::Column::GrantedAt)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let stored_kind = ToolApprovalKind::from_standing_grant_key(&row.approval_kind)?;
+            let scope = serde_json::from_value::<GrantScope>(row.scope).ok()?;
+            let grant = StandingGrant::scoped(
+                ChatId(row.chat_id),
+                row.tool_name,
+                stored_kind,
+                scope,
+                row.granted_at,
+            )?;
+            Some(crate::approval::StandingGrantRecord {
+                source_call_id: CallId(row.source_call_id),
+                grant,
+            })
+        })
+        .collect())
+}
+
+/// Delete one standing grant by its source approval. Idempotent: deleting a
+/// grant that is already gone reports `false` rather than erroring.
+pub(in crate::db) async fn revoke_standing_grant(
+    store: &DbStore,
+    source_call_id: CallId,
+) -> Result<bool> {
+    let result = entities::standing_tool_grant::Entity::delete_by_id(source_call_id.0)
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(result.rows_affected == 1)
+}
+
 /// The `approval_class` column spelling for a gated call.
 ///
 /// Existing databases constrain the column to `"sensitive"`, from before

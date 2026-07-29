@@ -2327,6 +2327,70 @@ pub(crate) async fn list_pending_approvals(
     ))
 }
 
+/// One durable "don't ask again" the reader has made, with enough provenance
+/// to recognize it later and withdraw it. Grant scopes are already closed
+/// renderer-safe projections, so the snapshot carries them verbatim.
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub(crate) struct StandingGrantSnapshot {
+    /// The approval decision that created the grant — also the handle a
+    /// revocation names.
+    pub source_call_id: CallId,
+    pub chat_id: ChatId,
+    /// Chat title for provenance; `None` when the chat is untitled.
+    pub chat_title: Option<String>,
+    pub action: openwave_core::RendererToolName,
+    pub approval: openwave_core::ToolApprovalKind,
+    pub scope: openwave_core::GrantScope,
+    pub granted_at: chrono::DateTime<Utc>,
+}
+
+/// `GET /grants` — every standing grant, newest first, across all chats.
+///
+/// The settings surface for "what the agent can do without asking": a grant
+/// the reader cannot find is a one-way door, and this is where it is found.
+pub(crate) async fn list_standing_grants(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<StandingGrantSnapshot>>, ServerError> {
+    let grants = state.store.list_standing_tool_grants().await?;
+    let titles: std::collections::HashMap<ChatId, Option<String>> = state
+        .store
+        .list_chats()
+        .await?
+        .into_iter()
+        .map(|chat| (chat.id, chat.title))
+        .collect();
+    Ok(Json(
+        grants
+            .into_iter()
+            .map(|record| StandingGrantSnapshot {
+                source_call_id: record.source_call_id,
+                chat_id: record.grant.chat_id(),
+                chat_title: titles.get(&record.grant.chat_id()).cloned().flatten(),
+                action: openwave_core::RendererToolName::from(record.grant.tool_name()),
+                approval: record.grant.kind(),
+                scope: record.grant.scope().clone(),
+                granted_at: record.grant.granted_at(),
+            })
+            .collect(),
+    ))
+}
+
+/// `DELETE /grants/{call_id}` — withdraw a standing grant. Later matching
+/// calls park on the approval card again. `204` on success, `404` when the
+/// grant does not exist (already revoked, or never granted).
+pub(crate) async fn delete_standing_grant(
+    State(state): State<AppState>,
+    Path(call_id): Path<CallId>,
+) -> Result<StatusCode, ServerError> {
+    if state.store.revoke_standing_tool_grant(call_id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ServerError::not_found(format!(
+            "standing grant {call_id} not found"
+        )))
+    }
+}
+
 /// `POST /chats/{id}/approvals/{call_id}` — decide a parked Sensitive tool call.
 ///
 /// `204` on success. `404` if the chat or call isn't pending. The turn stays
