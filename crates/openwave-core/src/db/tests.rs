@@ -5372,11 +5372,13 @@ async fn m0013_adds_outputs_to_an_existing_conversation_store() {
         id: crate::id::OutputId::new(),
         chat_id: chat.id,
         filename: "brief.md".into(),
+        kind: crate::deliverable::DeliverableKind::Text,
         revision: crate::deliverable::NewOutputRevision {
             id: crate::id::OutputRevisionId::new(),
             byte_len: 7,
             sha256: [3; 32],
             turn_id: None,
+            producing_run_id: None,
             citations: Vec::new(),
             created_at: DateTime::<Utc>::from_timestamp(1_710_000_000, 0).unwrap(),
         },
@@ -5400,26 +5402,47 @@ async fn m0015_adds_output_citations_without_changing_existing_outputs() {
     let store = DbStore { conn: conn.clone() };
     let chat = sample_chat();
     create_chat_before_agent_run_split(&store, &chat).await;
-    let request = crate::deliverable::CreateOutput {
-        id: crate::id::OutputId::new(),
-        chat_id: chat.id,
-        filename: "brief.md".into(),
-        revision: crate::deliverable::NewOutputRevision {
-            id: crate::id::OutputRevisionId::new(),
-            byte_len: 7,
-            sha256: [3; 32],
-            turn_id: None,
-            citations: Vec::new(),
-            created_at: DateTime::<Utc>::from_timestamp(1_710_000_000, 0).unwrap(),
-        },
-    };
-    let created = store.create_output(&request).await.unwrap();
+    // Seed the output at the pre-producing-run schema via raw SQL, the way
+    // intermediate-schema upgrade tests write against a partially migrated store
+    // (the ORM entity now carries `producing_run_id`, absent before m0023).
+    let output_id = crate::id::OutputId::new();
+    let revision_id = crate::id::OutputRevisionId::new();
+    conn.execute_unprepared(&format!(
+        "INSERT INTO output \
+         (id, chat_id, filename, media_type, current_revision_id, revision_count, \
+          created_at, updated_at, deleted_at) \
+         VALUES (X'{output}', X'{chat}', 'brief.md', 'text/markdown', X'{revision}', 1, \
+          '2024-03-09 16:00:00+00:00', '2024-03-09 16:00:00+00:00', NULL); \
+         INSERT INTO output_revision \
+         (id, output_id, ordinal, byte_len, sha256, turn_id, created_at) \
+         VALUES (X'{revision}', X'{output}', 1, 7, X'{sha}', NULL, \
+          '2024-03-09 16:00:00+00:00')",
+        output = output_id.0.simple(),
+        chat = chat.id.0.simple(),
+        revision = revision_id.0.simple(),
+        sha = "03".repeat(32),
+    ))
+    .await
+    .unwrap();
 
     migration::Migrator::up(&conn, None).await.unwrap();
 
-    assert_eq!(store.get_output(created.id).await.unwrap(), Some(created));
+    // Both the citations migration and the binary/producing-run migration
+    // preserve the pre-existing output and its revision unchanged.
+    let output = store.get_output(output_id).await.unwrap().unwrap();
+    assert_eq!(output.filename, "brief.md");
+    assert_eq!(output.media_type, "text/markdown");
+    assert_eq!(output.revision_count, 1);
+    let revision = store
+        .get_output_revision(revision_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(revision.byte_len, 7);
+    assert_eq!(revision.turn_id, None);
+    assert_eq!(revision.producing_run_id, None);
     assert!(store
-        .list_output_revision_citations(request.revision.id)
+        .list_output_revision_citations(revision_id)
         .await
         .unwrap()
         .is_empty());

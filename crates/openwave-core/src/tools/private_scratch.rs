@@ -176,7 +176,7 @@ pub(super) fn write_utf8_file(workspace: &Dir, path: &Path, content: &[u8]) -> s
 /// A hard link gives the temporary file an atomic, no-replace final name. If a
 /// previous attempt already published that name, accepting it only when its
 /// exact bytes match makes an interrupted store response safe to retry.
-pub(super) fn publish_immutable_file(
+pub(crate) fn publish_immutable_file(
     workspace: &Dir,
     path: &Path,
     content: &[u8],

@@ -1247,6 +1247,7 @@ pub mod output_revision {
         pub byte_len: i64,
         pub sha256: Vec<u8>,
         pub turn_id: Option<Uuid>,
+        pub producing_run_id: Option<Uuid>,
         pub created_at: DateTimeUtc,
     }
 

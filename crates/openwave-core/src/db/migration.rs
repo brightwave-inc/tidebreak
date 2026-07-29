@@ -36,6 +36,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddToolResultPreviews),
             Box::new(SplitAgentRunExecution),
             Box::new(AddOperationLog),
+            Box::new(ExtendOutputRevisionsForBinary),
         ]
     }
 }
@@ -1394,6 +1395,231 @@ impl MigrationTrait for AddOutputRevisionCitations {
             )
             .await
     }
+}
+
+/// Extends the output-revision shape so the record can hold host-accepted binary
+/// workspace artifacts and can attribute a revision to a producing background
+/// run.
+///
+/// Two additive changes to `output_revision`:
+///
+/// - `producing_run_id` (nullable) records the background run that produced a
+///   revision, alongside the existing `turn_id`. A revision names at most one
+///   producer, enforced by a check; existing rows keep only their `turn_id`.
+/// - the coarse `byte_len` upper bound is raised from the 512 KiB text cap to
+///   the 16 MiB binary cap. The tight per-kind ceiling (text stays 512 KiB) is
+///   enforced in application validation; the database bound is the outer limit
+///   that admits a binary artifact at all.
+///
+/// SQLite cannot alter a check constraint in place, so it rebuilds the table
+/// under foreign-key suppression the same way the agent-run split does; the
+/// `output_revision_citation` foreign key resolves to the rebuilt table once it
+/// is renamed. PostgreSQL alters the column and constraints directly. The `down`
+/// is symmetric and restores the original shape.
+struct ExtendOutputRevisionsForBinary;
+
+impl MigrationName for ExtendOutputRevisionsForBinary {
+    fn name(&self) -> &str {
+        "m20260729_000023_extend_output_revisions_for_binary"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for ExtendOutputRevisionsForBinary {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if manager.get_database_backend() == DatabaseBackend::Sqlite {
+            return rebuild_output_revision_sqlite(manager, true).await;
+        }
+        let statements = [
+            "ALTER TABLE output_revision ADD COLUMN producing_run_id uuid".to_owned(),
+            // The baseline's byte_len checks are unnamed; drop both by the column
+            // they constrain, then re-add named ones so a re-up after down is
+            // idempotent.
+            "DO $$
+             DECLARE name text;
+             BEGIN
+                 FOR name IN
+                     SELECT conname FROM pg_constraint
+                     WHERE conrelid = 'output_revision'::regclass
+                       AND contype = 'c'
+                       AND pg_get_constraintdef(oid) LIKE '%byte_len%'
+                 LOOP
+                     EXECUTE format('ALTER TABLE output_revision DROP CONSTRAINT %I', name);
+                 END LOOP;
+             END $$"
+                .to_owned(),
+            "ALTER TABLE output_revision ADD CONSTRAINT chk_output_revision_byte_len_nonneg \
+             CHECK (byte_len >= 0)"
+                .to_owned(),
+            format!(
+                "ALTER TABLE output_revision ADD CONSTRAINT chk_output_revision_byte_len_max \
+                 CHECK (byte_len <= {})",
+                crate::deliverable::MAX_BINARY_DELIVERABLE_BYTES as i64
+            ),
+            "ALTER TABLE output_revision ADD CONSTRAINT chk_output_revision_producer \
+             CHECK (turn_id IS NULL OR producing_run_id IS NULL)"
+                .to_owned(),
+        ];
+        for statement in statements {
+            manager
+                .get_connection()
+                .execute_unprepared(&statement)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if manager.get_database_backend() == DatabaseBackend::Sqlite {
+            return rebuild_output_revision_sqlite(manager, false).await;
+        }
+        let statements = [
+            "ALTER TABLE output_revision DROP CONSTRAINT chk_output_revision_producer".to_owned(),
+            "DO $$
+             DECLARE name text;
+             BEGIN
+                 FOR name IN
+                     SELECT conname FROM pg_constraint
+                     WHERE conrelid = 'output_revision'::regclass
+                       AND contype = 'c'
+                       AND pg_get_constraintdef(oid) LIKE '%byte_len%'
+                 LOOP
+                     EXECUTE format('ALTER TABLE output_revision DROP CONSTRAINT %I', name);
+                 END LOOP;
+             END $$"
+                .to_owned(),
+            "ALTER TABLE output_revision ADD CONSTRAINT chk_output_revision_byte_len_nonneg \
+             CHECK (byte_len >= 0)"
+                .to_owned(),
+            format!(
+                "ALTER TABLE output_revision ADD CONSTRAINT chk_output_revision_byte_len_max \
+                 CHECK (byte_len <= {})",
+                crate::deliverable::MAX_DELIVERABLE_BYTES as i64
+            ),
+            "ALTER TABLE output_revision DROP COLUMN producing_run_id".to_owned(),
+        ];
+        for statement in statements {
+            manager
+                .get_connection()
+                .execute_unprepared(&statement)
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+/// The table name used while rebuilding `output_revision` on SQLite.
+const OUTPUT_REVISION_REBUILD: &str = "output_revision_rebuild";
+
+async fn rebuild_output_revision_sqlite(
+    manager: &SchemaManager<'_>,
+    binary: bool,
+) -> Result<(), DbErr> {
+    let statements = vec![
+        "PRAGMA foreign_keys=OFF".to_owned(),
+        "BEGIN IMMEDIATE".to_owned(),
+        output_revision_rebuild_table(binary).to_string(SqliteQueryBuilder),
+        output_revision_rebuild_copy_sql(binary),
+        "DROP TABLE output_revision".to_owned(),
+        format!("ALTER TABLE {OUTPUT_REVISION_REBUILD} RENAME TO output_revision"),
+        output_revision_ordinal_index().to_string(SqliteQueryBuilder),
+        "COMMIT".to_owned(),
+        "PRAGMA foreign_keys=ON".to_owned(),
+    ];
+    manager
+        .get_connection()
+        .execute_unprepared(&format!("{};", statements.join(";\n")))
+        .await?;
+    Ok(())
+}
+
+fn output_revision_rebuild_table(binary: bool) -> TableCreateStatement {
+    let rebuild = Alias::new(OUTPUT_REVISION_REBUILD);
+    let byte_ceiling = if binary {
+        crate::deliverable::MAX_BINARY_DELIVERABLE_BYTES as i64
+    } else {
+        crate::deliverable::MAX_DELIVERABLE_BYTES as i64
+    };
+    let mut statement = Table::create();
+    statement
+        .table(rebuild.clone())
+        .col(
+            ColumnDef::new(OutputRevision::Id)
+                .uuid()
+                .not_null()
+                .primary_key(),
+        )
+        .col(ColumnDef::new(OutputRevision::OutputId).uuid().not_null())
+        .col(ColumnDef::new(OutputRevision::Ordinal).integer().not_null())
+        .col(
+            ColumnDef::new(OutputRevision::ByteLen)
+                .big_integer()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(OutputRevision::Sha256)
+                .binary_len(32)
+                .not_null(),
+        )
+        .col(ColumnDef::new(OutputRevision::TurnId).uuid());
+    if binary {
+        statement.col(ColumnDef::new(OutputRevision::ProducingRunId).uuid());
+    }
+    statement
+        .col(
+            ColumnDef::new(OutputRevision::CreatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_output_revision_output")
+                .from(rebuild, OutputRevision::OutputId)
+                .to(Output::Table, Output::Id)
+                .on_delete(ForeignKeyAction::Cascade),
+        )
+        .check(
+            Expr::col(OutputRevision::Ordinal)
+                .between(1, crate::deliverable::MAX_OUTPUT_REVISIONS as i32),
+        )
+        .check(Expr::col(OutputRevision::ByteLen).gte(0))
+        .check(Expr::col(OutputRevision::ByteLen).lte(byte_ceiling));
+    if binary {
+        statement.check(
+            Expr::col(OutputRevision::TurnId)
+                .is_null()
+                .or(Expr::col(OutputRevision::ProducingRunId).is_null()),
+        );
+    }
+    statement.to_owned()
+}
+
+fn output_revision_rebuild_copy_sql(binary: bool) -> String {
+    if binary {
+        format!(
+            "INSERT INTO {OUTPUT_REVISION_REBUILD} \
+             (id, output_id, ordinal, byte_len, sha256, turn_id, producing_run_id, created_at) \
+             SELECT id, output_id, ordinal, byte_len, sha256, turn_id, NULL, created_at \
+             FROM output_revision"
+        )
+    } else {
+        format!(
+            "INSERT INTO {OUTPUT_REVISION_REBUILD} \
+             (id, output_id, ordinal, byte_len, sha256, turn_id, created_at) \
+             SELECT id, output_id, ordinal, byte_len, sha256, turn_id, created_at \
+             FROM output_revision"
+        )
+    }
+}
+
+fn output_revision_ordinal_index() -> IndexCreateStatement {
+    Index::create()
+        .name("idx_output_revision_ordinal")
+        .table(OutputRevision::Table)
+        .col(OutputRevision::OutputId)
+        .col(OutputRevision::Ordinal)
+        .unique()
+        .to_owned()
 }
 
 /// Records the images a message was submitted with, so a reloaded conversation
@@ -6728,6 +6954,7 @@ enum OutputRevision {
     ByteLen,
     Sha256,
     TurnId,
+    ProducingRunId,
     CreatedAt,
 }
 
