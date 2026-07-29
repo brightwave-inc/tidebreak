@@ -150,6 +150,7 @@ impl AppState {
             tools.clone(),
             store.clone(),
             gateway.clone(),
+            os_policy.clone(),
         ));
         Ok(Self {
             config: Arc::new(config),

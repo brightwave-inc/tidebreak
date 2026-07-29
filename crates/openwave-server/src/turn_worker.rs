@@ -73,6 +73,9 @@ pub(crate) struct TurnWorker {
     store: Arc<dyn Store>,
     resolver: Arc<dyn ProviderResolver>,
     secrets: Arc<dyn SecretProvider>,
+    /// The OS authority for managed-mode resolution, so background role
+    /// resolution sees the same policy every request handler does.
+    os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     tools: Arc<ToolRegistry>,
     blobs: Option<Arc<dyn BlobStore>>,
     mcp: Option<Arc<McpRuntime>>,
@@ -276,6 +279,7 @@ impl TurnWorker {
         store: Arc<dyn Store>,
         resolver: Arc<dyn ProviderResolver>,
         secrets: Arc<dyn SecretProvider>,
+        os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
         tools: Arc<ToolRegistry>,
         approvals: Arc<ApprovalBroker>,
         events: Arc<EventBus>,
@@ -300,6 +304,7 @@ impl TurnWorker {
             store,
             resolver,
             secrets,
+            os_policy,
             tools,
             blobs: None,
             mcp: None,
@@ -501,7 +506,12 @@ impl TurnWorker {
         // the next turn. `None` is not a failure: background maintenance is
         // skipped rather than run on the model the user picked for talking.
         let utility_model = if self.resolver.enforces_model_registry() {
-            crate::model_roles::resolve_utility_model(&*self.store, &*self.secrets).await?
+            crate::model_roles::resolve_utility_model(
+                &*self.store,
+                &*self.secrets,
+                &*self.os_policy,
+            )
+            .await?
         } else {
             None
         };

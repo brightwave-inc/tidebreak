@@ -63,10 +63,29 @@ pub async fn get_mcp_servers(
 
 /// `PUT /mcp/servers` — atomically validate, connect, persist, and publish a
 /// complete replacement set. A failed candidate never changes active tools.
+///
+/// On a managed profile the manual transports are locked: a body that adds or
+/// edits a `command` or `url` server is refused with the same stable
+/// `managed_profile` kind the provider lockdown uses, before anything is
+/// validated or connected — so a refused write leaves the configuration
+/// exactly as it was. Gateway-endpoint mounts remain the sanctioned path, and
+/// manual servers already on file may still ride along a save unchanged (they
+/// run forced-disabled) or be removed.
 pub async fn put_mcp_servers(
     State(state): State<AppState>,
     Json(body): Json<McpServersConfig>,
 ) -> Result<Json<McpServersInfo>, ServerError> {
+    let policy = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
+    if policy.managed {
+        let refused = state.mcp.manual_additions(&body).await;
+        if !refused.is_empty() {
+            return Err(providers::managed_profile_refusal(format!(
+                "this profile is managed by a model gateway; manual MCP servers are locked \
+                 ({}). Mount gateway-managed endpoints from the Model Gateway settings instead.",
+                refused.join(", ")
+            )));
+        }
+    }
     // Once validation/startup begins, finish the durable/live commit even if
     // the HTTP client disconnects and drops this handler future.
     let runtime = state.mcp.clone();
@@ -894,9 +913,11 @@ async fn resolved_role_key(
                     .map(|policy| policy.key),
             )
         }
-        _ => Ok(model_roles::resolve(&*state.store, &*state.secrets, role)
-            .await?
-            .map(|policy| policy.key)),
+        _ => Ok(
+            model_roles::resolve(&*state.store, &*state.secrets, &*state.os_policy, role)
+                .await?
+                .map(|policy| policy.key),
+        ),
     }
 }
 

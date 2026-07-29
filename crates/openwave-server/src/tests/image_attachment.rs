@@ -134,6 +134,7 @@ fn spawn_turn_worker_with_image_blobs(state: &AppState) {
         state.store.clone(),
         state.resolver.clone(),
         state.secrets.clone(),
+        state.os_policy.clone(),
         state.tools.clone(),
         state.approvals.clone(),
         state.events.clone(),

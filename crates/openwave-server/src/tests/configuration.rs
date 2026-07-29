@@ -2192,3 +2192,80 @@ async fn a_managed_profile_refuses_byok_and_gateway_repoint_writes() {
     let response = delete(&router, &bearer, "/providers/anthropic/credential").await;
     assert_eq!(response.status(), StatusCode::CONFLICT);
 }
+
+/// The managed MCP write path over the real route: a manual transport is
+/// refused with the same stable `managed_profile` kind the provider lockdown
+/// uses and changes nothing, while the sanctioned gateway-endpoint mount is
+/// accepted — carrying an already-configured manual server along untouched,
+/// so mounting is not blocked by history the profile cannot edit any more.
+#[tokio::test]
+async fn a_managed_profile_refuses_manual_mcp_servers_and_accepts_gateway_mounts() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let legacy = serde_json::json!({
+        "name": "legacy_docs",
+        "command": "/not/started/while/disabled",
+        "enabled": false
+    });
+
+    // Configured before the profile was managed.
+    let saved = put_mcp_servers(&router, &bearer, serde_json::json!({"servers": [legacy]})).await;
+    assert_eq!(saved.status(), StatusCode::OK);
+    crate::managed_policy::provision(&*store, "https://corp.gateway")
+        .await
+        .unwrap();
+
+    for manual in [
+        serde_json::json!({"name": "added", "command": "/bin/docs", "enabled": false}),
+        serde_json::json!({"name": "added", "url": "http://127.0.0.1:1/mcp", "enabled": false}),
+        // Editing the pre-existing one is a change, so it is refused too.
+        serde_json::json!({"name": "legacy_docs", "command": "/bin/other", "enabled": false}),
+    ] {
+        let refused = put_mcp_servers(
+            &router,
+            &bearer,
+            serde_json::json!({"servers": [legacy, manual]}),
+        )
+        .await;
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+        let error: AgentErrorInfo = json_body(refused).await;
+        assert_eq!(error.kind, "managed_profile");
+    }
+
+    // Nothing the refusals touched: the active configuration is what it was.
+    let active = get_mcp_servers(&router, &bearer).await;
+    assert_eq!(active["servers"].as_array().unwrap().len(), 1);
+    assert_eq!(active["servers"][0]["name"], "legacy_docs");
+
+    // A gateway mount is accepted — signed out it degrades in place rather
+    // than failing the save — and the untouched manual definition rides along.
+    let mounted = put_mcp_servers(
+        &router,
+        &bearer,
+        serde_json::json!({
+            "servers": [legacy, {"name": "tools", "gateway_endpoint": "tools"}]
+        }),
+    )
+    .await;
+    assert_eq!(mounted.status(), StatusCode::OK);
+    let info: serde_json::Value = json_body(mounted).await;
+    assert_eq!(info["servers"][1]["gateway_endpoint"], "tools");
+    // The manual definition survives, forced down with a legible reason
+    // instead of vanishing from the profile.
+    assert_eq!(info["servers"][0]["health"], "disabled");
+    assert_eq!(
+        info["servers"][0]["diagnostic"],
+        crate::mcp_config::MANAGED_DISABLED_DIAGNOSTIC
+    );
+
+    // Removing it is still possible: a candidate without it is not an edit.
+    let removed = put_mcp_servers(
+        &router,
+        &bearer,
+        serde_json::json!({"servers": [{"name": "tools", "gateway_endpoint": "tools"}]}),
+    )
+    .await;
+    assert_eq!(removed.status(), StatusCode::OK);
+    let info: serde_json::Value = json_body(removed).await;
+    assert_eq!(info["servers"].as_array().unwrap().len(), 1);
+}

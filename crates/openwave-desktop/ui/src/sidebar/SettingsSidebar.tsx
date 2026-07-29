@@ -1,7 +1,8 @@
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { ArrowLeft, PanelLeftOpen } from "lucide-react";
 
-import { SETTINGS_SECTIONS } from "@/settings/sections";
+import { useManagedPolicy } from "@/managedPolicy";
+import { settingsSectionsFor } from "@/settings/sections";
 import { useUiStore } from "@/UiStore";
 import { Sidebar, SidebarButton, SidebarContent, useSidebarWidth } from "./primitives";
 
@@ -20,6 +21,8 @@ export function SettingsSidebar({ onBack }: { onBack: () => void }) {
   const toggleSidebar = useUiStore((state) => state.toggleSidebar);
   const isCompact = useSidebarWidth() === "compact";
   const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const { managed } = useManagedPolicy();
+  const sections = settingsSectionsFor(managed);
 
   return (
     <Sidebar>
@@ -34,7 +37,7 @@ export function SettingsSidebar({ onBack }: { onBack: () => void }) {
           <ArrowLeft />
           <span>Back to app</span>
         </SidebarButton>
-        {SETTINGS_SECTIONS.map((section) => {
+        {sections.map((section) => {
           const to = `/settings/${section.path}`;
           const active = pathname === to;
           const Icon = section.icon;

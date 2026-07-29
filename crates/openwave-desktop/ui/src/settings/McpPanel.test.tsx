@@ -246,4 +246,51 @@ describe("McpPanel", () => {
     expect(await screen.findByText("Needs attention")).toBeInTheDocument();
     expect(screen.getByText(/DOCS_TOKEN/)).toBeInTheDocument();
   });
+
+  it("is read-only on a managed profile, keeping mounts and their reasons visible", async () => {
+    const client = api({
+      servers: [
+        {
+          ...healthy.servers[0],
+          name: "legacy_docs",
+          health: "disabled",
+          tool_count: 0,
+          diagnostic:
+            "Disabled by managed policy. Gateway-managed MCP endpoints remain available.",
+        },
+        {
+          name: "tools",
+          command: null,
+          args: [],
+          env: {},
+          env_from: [],
+          cwd: null,
+          url: null,
+          bearer_token_env: null,
+          gateway_endpoint: "tools",
+          request_timeout_ms: 60_000,
+          enabled: true,
+          health: "healthy",
+          tool_count: 3,
+          diagnostic: null,
+        },
+      ],
+    });
+    render(<McpPanel client={client} managed />);
+
+    // The gateway mount and its health stay visible; the locked manual server
+    // stays listed with the server's own reason rather than disappearing.
+    expect(await screen.findByText("Healthy")).toBeInTheDocument();
+    expect(screen.getByText("3 tools available to new turns.")).toBeInTheDocument();
+    expect(screen.getByText(/Disabled by managed policy/)).toBeInTheDocument();
+
+    // Nothing manual is editable: no fields, and no way to add or save one.
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Add server" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Save and verify" }),
+    ).not.toBeInTheDocument();
+  });
 });

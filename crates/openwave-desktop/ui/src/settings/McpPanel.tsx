@@ -73,7 +73,17 @@ function definition(server: McpServerInfo): McpServerDefinition {
   return value;
 }
 
-export function McpPanel({ client }: { client: ApiClient }) {
+export function McpPanel({
+  client,
+  managed = false,
+}: {
+  client: ApiClient;
+  /** On a managed profile the server refuses manual server writes, so this
+   * panel becomes a read-only view of what is mounted. Gateway mounts and
+   * their health stay visible; they are added and removed from the Model
+   * Gateway panel, which is where they come from. */
+  managed?: boolean;
+}) {
   const [servers, setServers] = useState<McpServerInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -155,6 +165,23 @@ export function McpPanel({ client }: { client: ApiClient }) {
   }
 
   const working = saving || reconnecting !== null;
+
+  if (managed) {
+    return (
+      <SettingsPanel
+        title="MCP servers"
+        description="Tool servers provided by your organization's model gateway."
+        busy={loading}
+      >
+        {loading ? (
+          <p className="text-sm text-muted-foreground">Loading MCP servers…</p>
+        ) : (
+          <ManagedServerList servers={servers} />
+        )}
+        {error && <SettingsError>{error}</SettingsError>}
+      </SettingsPanel>
+    );
+  }
 
   return (
     <SettingsPanel
@@ -453,6 +480,58 @@ export function McpPanel({ client }: { client: ApiClient }) {
       )}
       {error && <SettingsError>{error}</SettingsError>}
     </SettingsPanel>
+  );
+}
+
+/**
+ * The managed read-only view: what is mounted and whether it is working.
+ *
+ * Manual servers a profile carried in from before it was managed stay listed
+ * with the server's own diagnostic explaining that policy turned them off —
+ * a row that vanished would look like data loss, and one that looked editable
+ * would be a write the server refuses.
+ */
+function ManagedServerList({ servers }: { servers: McpServerInfo[] }) {
+  return (
+    <>
+      {servers.length === 0 && (
+        <SettingsSection>
+          <p className="text-sm text-muted-foreground">
+            No MCP servers are mounted. Mount the endpoints you are entitled to
+            from the Model Gateway section.
+          </p>
+        </SettingsSection>
+      )}
+      {servers.map((server, index) => (
+        <SettingsSection key={index} title={server.name || `Server ${index + 1}`}>
+          <SettingsStatus
+            tone={healthTone(server.health)}
+            label={healthLabel(server.health)}
+            description={
+              server.health === "healthy"
+                ? `${server.tool_count} tool${server.tool_count === 1 ? "" : "s"} available to new turns.`
+                : server.diagnostic ?? "This server is not connected."
+            }
+          />
+          {transportOf(server) === "gateway" ? (
+            <p className="text-sm text-muted-foreground">
+              Managed by the Model Gateway (endpoint{" "}
+              <code>{server.gateway_endpoint}</code>). Mount or unmount it from
+              the Model Gateway section.
+            </p>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              Configured before this device was managed. It is kept on file but
+              never started, and cannot be edited here.
+            </p>
+          )}
+        </SettingsSection>
+      ))}
+      <p className="text-sm leading-relaxed text-muted-foreground">
+        MCP tools are always sensitive and keep OpenWave&rsquo;s existing
+        approval boundary.
+      </p>
+    </>
   );
 }
 

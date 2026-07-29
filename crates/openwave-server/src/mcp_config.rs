@@ -44,11 +44,22 @@ const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(30);
 const VIEW_FRAME_TOKEN_TTL: Duration = Duration::from_secs(60);
 const MAX_VIEW_FRAME_TOKENS: usize = 64;
 
+/// The diagnostic every manual (command/url) server carries while managed
+/// policy holds. The definitions stay persisted — inert, not deleted — so an
+/// unprovisioned profile is byte-for-byte unaffected and the list stays
+/// legible instead of servers silently vanishing.
+pub(crate) const MANAGED_DISABLED_DIAGNOSTIC: &str =
+    "Disabled by managed policy. Gateway-managed MCP endpoints remain available.";
+
 /// Validated external servers selected by the legacy boot file.
 #[derive(Default)]
 pub(crate) struct ConfiguredMcpServers(Vec<McpServerDefinition>);
 
 impl ConfiguredMcpServers {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     pub(crate) fn from_env() -> Result<Self> {
         let Some(path) = std::env::var_os(CONFIG_ENV).filter(|path| !path.is_empty()) else {
             return Ok(Self::default());
@@ -358,6 +369,10 @@ pub(crate) struct McpRuntime {
     store: Arc<dyn Store>,
     /// Resolves gateway-managed endpoints at every connection.
     gateway: Arc<dyn GatewayEndpoints>,
+    /// The OS authority for managed-mode resolution. Managed policy locks the
+    /// manual transports; the gateway-endpoint transport is the sanctioned
+    /// path and stays open.
+    os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     next_epoch: AtomicU64,
     /// Outstanding single-use view-frame tokens: token → (server, uri, minted).
     view_frame_tokens: Mutex<HashMap<uuid::Uuid, (String, String, std::time::Instant)>>,
@@ -368,6 +383,7 @@ impl McpRuntime {
         base_tools: Arc<ToolRegistry>,
         store: Arc<dyn Store>,
         gateway: Arc<dyn GatewayEndpoints>,
+        os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     ) -> Self {
         Self {
             base_tools: (*base_tools).clone(),
@@ -379,9 +395,48 @@ impl McpRuntime {
             mutation: Mutex::new(()),
             store,
             gateway,
+            os_policy,
             next_epoch: AtomicU64::new(1),
             view_frame_tokens: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Whether managed policy currently locks the manual transports.
+    ///
+    /// Read per operation rather than cached at boot, like every other policy
+    /// consumer, so an MDM push or removal takes effect without a restart. An
+    /// unreadable policy fails closed to locked — the same judgment the BYOK
+    /// boot paths make.
+    async fn manual_transports_locked(&self) -> bool {
+        match crate::managed_policy::resolve(&*self.store, &*self.os_policy).await {
+            Ok(policy) => policy.managed,
+            Err(error) => {
+                tracing::warn!(
+                    "managed policy is unreadable; locking manual MCP transports: {error}"
+                );
+                true
+            }
+        }
+    }
+
+    /// The names in `candidate` that would add or change a manual (stdio or
+    /// HTTP) server relative to what is already configured.
+    ///
+    /// Managed lockdown refuses these rather than every manual definition in
+    /// the body: a profile that carried manual servers before it was managed
+    /// keeps them (inert, see [`MANAGED_DISABLED_DIAGNOSTIC`]), and the
+    /// gateway panel — which saves the complete server list to mount an
+    /// endpoint — is not blocked by their presence. Removing one is a
+    /// candidate without it, so nothing is trapped in the configuration.
+    pub(crate) async fn manual_additions(&self, candidate: &McpServersConfig) -> Vec<String> {
+        let existing = &self.state.lock().await.definitions;
+        candidate
+            .servers
+            .iter()
+            .filter(|server| server.gateway_endpoint.is_none())
+            .filter(|server| !existing.iter().any(|current| current == *server))
+            .map(|server| server.name.clone())
+            .collect()
     }
 
     /// Load persisted definitions when present, otherwise the legacy boot file.
@@ -399,7 +454,20 @@ impl McpRuntime {
                 self.replace_permissive(config.servers).await;
                 Ok(())
             }
-            None => self.replace_strict(boot.0, false).await.map(|_| ()),
+            None => {
+                // The boot file is a host-environment artifact: on a managed
+                // profile it is exactly the channel the lockdown exists to
+                // close, so it is inert rather than partially honored. The
+                // warning is the operator's diagnostic for the silence.
+                if !boot.is_empty() && self.manual_transports_locked().await {
+                    tracing::warn!(
+                        "{CONFIG_ENV} is ignored on a managed profile; \
+                         mount MCP endpoints from the model gateway instead"
+                    );
+                    return Ok(());
+                }
+                self.replace_strict(boot.0, false).await.map(|_| ())
+            }
         }
     }
 
@@ -511,9 +579,10 @@ impl McpRuntime {
     ) -> Result<()> {
         validate_servers(&definitions)?;
         let gateway = &*self.gateway;
+        let locked = self.manual_transports_locked().await;
         let mut servers = HashMap::new();
         let connections = join_all(definitions.iter().map(|definition| async move {
-            if definition.enabled {
+            if connects(definition, locked) {
                 definition.connect_with_views(gateway).await.map(Some)
             } else {
                 Ok(None)
@@ -557,7 +626,7 @@ impl McpRuntime {
                     ManagedServer {
                         client: None,
                         health: McpHealth::Disabled,
-                        diagnostic: None,
+                        diagnostic: managed_lockdown_diagnostic(definition, locked),
                         reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
                         epoch: self.fresh_epoch(),
                         reconnect_lock: Arc::new(Mutex::new(())),
@@ -595,9 +664,10 @@ impl McpRuntime {
 
     async fn replace_permissive(&self, definitions: Vec<McpServerDefinition>) {
         let gateway = &*self.gateway;
+        let locked = self.manual_transports_locked().await;
         let mut servers = HashMap::new();
         let connections = join_all(definitions.iter().map(|definition| async move {
-            if definition.enabled {
+            if connects(definition, locked) {
                 definition.connect_with_views(gateway).await.map(Some)
             } else {
                 Ok(None)
@@ -609,7 +679,7 @@ impl McpRuntime {
                 Ok(None) => ManagedServer {
                     client: None,
                     health: McpHealth::Disabled,
-                    diagnostic: None,
+                    diagnostic: managed_lockdown_diagnostic(definition, locked),
                     reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
                     epoch: self.fresh_epoch(),
                     reconnect_lock: Arc::new(Mutex::new(())),
@@ -678,6 +748,7 @@ impl McpRuntime {
         // blocking unrelated servers. A waiter captures the current epoch, so
         // it returns the first attempt's result instead of launching a duplicate
         // child after the lock becomes available.
+        let locked = self.manual_transports_locked().await;
         let (reconnect_lock, requested_epoch) = {
             let state = self.state.lock().await;
             let definition = state
@@ -685,6 +756,9 @@ impl McpRuntime {
                 .iter()
                 .find(|definition| definition.name == name)
                 .ok_or_else(|| AgentError::config("MCP server not found"))?;
+            if manual_lockdown_applies(definition, locked) {
+                return Err(AgentError::config(MANAGED_DISABLED_DIAGNOSTIC));
+            }
             if !definition.enabled {
                 return Err(AgentError::config("disabled MCP server cannot reconnect"));
             }
@@ -799,12 +873,13 @@ impl McpRuntime {
     pub(crate) async fn supervise(self: Arc<Self>) {
         loop {
             tokio::time::sleep(HEALTH_INTERVAL).await;
+            let locked = self.manual_transports_locked().await;
             let probes = {
                 let state = self.state.lock().await;
                 state
                     .definitions
                     .iter()
-                    .filter(|definition| definition.enabled)
+                    .filter(|definition| connects(definition, locked))
                     .filter_map(|definition| {
                         state.servers.get(&definition.name).map(|server| {
                             (
@@ -889,6 +964,31 @@ impl McpRuntime {
                 .collect(),
         }
     }
+}
+
+/// Whether this definition should hold a live connection right now.
+///
+/// Managed policy forces every manual transport down whatever its stored flag
+/// says; the definition itself is left untouched, so lifting the policy
+/// restores exactly what the profile had.
+fn connects(definition: &McpServerDefinition, manual_locked: bool) -> bool {
+    definition.enabled && !manual_lockdown_applies(definition, manual_locked)
+}
+
+/// Whether the managed lockdown applies to this definition: manual transports
+/// only. A gateway mount is the sanctioned path and is never forced down.
+fn manual_lockdown_applies(definition: &McpServerDefinition, manual_locked: bool) -> bool {
+    manual_locked && definition.gateway_endpoint.is_none()
+}
+
+/// The diagnostic a forced-down manual server carries, so the settings list
+/// says why it is off instead of showing an unexplained disabled row.
+fn managed_lockdown_diagnostic(
+    definition: &McpServerDefinition,
+    manual_locked: bool,
+) -> Option<String> {
+    manual_lockdown_applies(definition, manual_locked)
+        .then(|| MANAGED_DISABLED_DIAGNOSTIC.to_string())
 }
 
 fn validate_servers(servers: &[McpServerDefinition]) -> Result<()> {
@@ -1193,6 +1293,7 @@ mod tests {
                 Arc::new(ToolRegistry::new()),
                 store.clone(),
                 gateway,
+                Arc::new(crate::managed_policy::NoOsPolicy),
             )),
             store,
             directory,
@@ -1794,6 +1895,69 @@ mod tests {
             .ui_view_document("unknown", "ui://fixture/app.html")
             .await
             .is_none());
+    }
+
+    /// Managed lockdown at the runtime boundary: persisted manual servers stay
+    /// on file but never connect — disabled with a legible reason rather than
+    /// silently deleted — while gateway mounts still resolve, and the
+    /// host-environment boot file, the one channel the lockdown exists to
+    /// close, is ignored outright.
+    #[tokio::test]
+    async fn managed_policy_forces_manual_servers_down_and_ignores_the_boot_file() {
+        let (runtime, store, _directory) = test_runtime().await;
+        let mut manual = disabled_definition("private_docs", "/bin/docs");
+        manual.enabled = true;
+        store
+            .set_setting(
+                SETTING_KEY,
+                &serde_json::to_value(McpServersConfig {
+                    servers: vec![manual, gateway_definition("tools", "tools")],
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        crate::managed_policy::provision(&*store, "https://corp.gateway")
+            .await
+            .unwrap();
+
+        runtime
+            .initialize(ConfiguredMcpServers::default())
+            .await
+            .unwrap();
+        let info = runtime.info().await;
+        assert_eq!(info.servers[0].health, McpHealth::Disabled);
+        assert_eq!(
+            info.servers[0].diagnostic.as_deref(),
+            Some(MANAGED_DISABLED_DIAGNOSTIC)
+        );
+        assert!(
+            info.servers[0].definition.enabled,
+            "the stored definition is untouched, so lifting the policy restores it"
+        );
+        assert!(runtime
+            .snapshot()
+            .get("mcp__private_docs__lookup")
+            .is_none());
+        // The gateway mount is the sanctioned path and still attempts its
+        // session-backed connection (signed out here, so it degrades).
+        assert_eq!(info.servers[1].health, McpHealth::Degraded);
+        assert_eq!(
+            info.servers[1].diagnostic.as_deref(),
+            Some("Sign in to the model gateway to reconnect this server.")
+        );
+        assert!(runtime.reconnect("private_docs").await.is_err());
+
+        // A fresh profile whose only configuration is the boot file: managed,
+        // so the file is inert and nothing is configured or persisted.
+        let (runtime, store, _directory) = test_runtime().await;
+        crate::managed_policy::provision(&*store, "https://corp.gateway")
+            .await
+            .unwrap();
+        let boot = parse(r#"{"servers":[{"name":"docs","command":"/bin/docs"}]}"#).unwrap();
+        runtime.initialize(boot).await.unwrap();
+        assert!(runtime.info().await.servers.is_empty());
+        assert!(store.get_setting(SETTING_KEY).await.unwrap().is_none());
     }
 
     #[test]

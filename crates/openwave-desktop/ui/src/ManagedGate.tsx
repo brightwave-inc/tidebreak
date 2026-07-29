@@ -4,6 +4,7 @@ import { ExternalLink, RefreshCw } from "lucide-react";
 import type { ApiClient, GatewayStatus, ManagedPolicy } from "./api";
 import { Button } from "@/components/ui/button";
 import { Logomark } from "./Logomark";
+import { ManagedPolicyContext } from "./managedPolicy";
 import { openSignInPage } from "./openSignInPage";
 
 /** While the browser flow is pending the exchange lands out of band, so the
@@ -248,7 +249,10 @@ export function ManagedGate({
     );
   }
 
-  if (!managed) return <>{children}</>;
+  // Everything below the gate reads the same resolved policy the gate did:
+  // the settings surfaces gate themselves on it, and re-fetching `/policy`
+  // per panel could only produce disagreement.
+  if (!managed) return <Published policy={policy}>{children}</Published>;
 
   if (status === null && statusError === null) {
     return <BootScreen>starting…</BootScreen>;
@@ -260,7 +264,7 @@ export function ManagedGate({
   const lockedUrl = policy?.gateway_url ?? null;
   const sessionSatisfiesPolicy =
     status?.signed_in === true && sameGateway(status.base_url, lockedUrl);
-  if (sessionSatisfiesPolicy) return <>{children}</>;
+  if (sessionSatisfiesPolicy) return <Published policy={policy}>{children}</Published>;
 
   // The device's managed gateway is the policy's URL, wherever the provider
   // config currently points.
@@ -326,6 +330,21 @@ export function ManagedGate({
         never sees your identity provider credentials.
       </p>
     </div>
+  );
+}
+
+function Published({
+  policy,
+  children,
+}: {
+  policy: ManagedPolicy | null;
+  children: ReactNode;
+}) {
+  if (policy === null) return <>{children}</>;
+  return (
+    <ManagedPolicyContext.Provider value={policy}>
+      {children}
+    </ManagedPolicyContext.Provider>
   );
 }
 

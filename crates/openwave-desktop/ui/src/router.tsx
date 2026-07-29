@@ -1,17 +1,19 @@
+import { useEffect } from "react";
 import {
   createHashHistory,
   createRootRoute,
   createRoute,
   createRouter,
-  redirect,
+  useNavigate,
 } from "@tanstack/react-router";
 
 import { AppShell } from "./AppShell";
 import { ChatRoute } from "./ChatRoute";
 import { HomeRoute } from "./HomeRoute";
+import { useManagedPolicy } from "./managedPolicy";
 import type { PanelSearch } from "./panel/panelUrl";
 import { SettingsRoute } from "./SettingsRoute";
-import { DEFAULT_SETTINGS_PATH, SETTINGS_SECTIONS } from "./settings/sections";
+import { defaultSettingsPathFor, SETTINGS_SECTIONS } from "./settings/sections";
 
 const rootRoute = createRootRoute({ component: AppShell });
 
@@ -48,13 +50,25 @@ export const settingsRoute = createRoute({
   component: SettingsRoute,
 });
 
-/** A bare `/settings` has no section of its own; send it to the first one. */
+/**
+ * A bare `/settings` has no section of its own; send it to the first one this
+ * profile has. Which that is depends on the resolved policy, which only exists
+ * inside the tree the gate publishes it to — so the redirect is a component
+ * rather than a `beforeLoad`.
+ */
+function SettingsIndexRedirect() {
+  const navigate = useNavigate();
+  const { managed } = useManagedPolicy();
+  useEffect(() => {
+    void navigate({ to: defaultSettingsPathFor(managed), replace: true });
+  }, [managed, navigate]);
+  return null;
+}
+
 const settingsIndexRoute = createRoute({
   getParentRoute: () => settingsRoute,
   path: "/",
-  beforeLoad: () => {
-    throw redirect({ to: DEFAULT_SETTINGS_PATH });
-  },
+  component: SettingsIndexRedirect,
 });
 
 const settingsSectionRoutes = SETTINGS_SECTIONS.map((section) =>

@@ -112,16 +112,35 @@ impl GatewayRuntime {
     }
 
     /// The renderer-facing connection status.
+    ///
+    /// Where the deployment comes from follows [`connection`](Self::connection):
+    /// on a managed profile the resolved policy is the authority, so a
+    /// pure-MDM profile — which may have no stored provider row at all —
+    /// reads configured and enabled against its policy URL instead of
+    /// rendering "not configured" while everything works. A managed policy
+    /// whose URL is missing (misconfigured) reads unconfigured, honestly.
     pub(crate) async fn status(&self) -> Result<GatewayStatus> {
+        let policy = crate::managed_policy::resolve(&*self.store, &*self.os_policy).await?;
         let config = providers::read_config(&*self.store, ProviderKind::ModelGateway).await?;
+        let base_url = if policy.managed {
+            policy.gateway_url.clone()
+        } else {
+            config.base_url.clone()
+        };
         let credentials = match self.connection().await? {
             Some(connection) => connection.stored_credentials().await?,
             None => None,
         };
         Ok(GatewayStatus {
-            configured: config.base_url.is_some(),
-            enabled: config.enabled,
-            base_url: config.base_url,
+            configured: base_url.is_some(),
+            // A managed profile's gateway cannot be switched off from the
+            // stored row: policy decides whether it is on.
+            enabled: if policy.managed {
+                base_url.is_some()
+            } else {
+                config.enabled
+            },
+            base_url,
             signed_in: credentials.is_some(),
             account_hint: credentials
                 .as_ref()
@@ -676,6 +695,7 @@ mod tests {
             Arc::new(openwave_core::ToolRegistry::new()),
             store.clone(),
             runtime.clone(),
+            Arc::new(crate::managed_policy::NoOsPolicy),
         ));
         let definition = crate::mcp_config::McpServerDefinition {
             name: "tools".to_string(),
@@ -815,6 +835,68 @@ mod tests {
         )
         .await
         .unwrap());
+    }
+
+    /// An OS (MDM) authority asserting one gateway, as a device-managed
+    /// profile has.
+    struct OsManaged(String);
+
+    impl crate::managed_policy::OsPolicySource for OsManaged {
+        fn gateway_url(&self) -> Result<Option<String>> {
+            Ok(Some(self.0.clone()))
+        }
+    }
+
+    /// A pure-MDM profile has no stored provider row at all — nothing ever
+    /// wrote one — so reading the status from that row rendered "not
+    /// configured" while sign-in, routing, and mounts all worked. Policy is
+    /// the authority for a managed profile here, exactly as it is for the
+    /// connection itself.
+    #[tokio::test]
+    async fn a_pure_mdm_profile_reads_configured_from_policy_without_a_stored_row() {
+        let address = serve(Arc::new(FakeGateway::default())).await;
+        let base = format!("http://{address}");
+        let directory = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                directory.path().join("gateway.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let secrets: Arc<dyn SecretProvider> = Arc::new(MockSecrets::default());
+        let credentials: openwave_connectors::GatewayCredentials = serde_json::from_value(json!({
+            "base_url": base,
+            "installation_id": "install-1",
+            "user_id": "user-1",
+            "account_hint": "abaas@example.test",
+            "refresh_token": "mg_rt_seed",
+            "access_tokens": {}
+        }))
+        .unwrap();
+        CredentialVault::new(secrets.clone())
+            .save(&credentials)
+            .await
+            .unwrap();
+        let runtime =
+            GatewayRuntime::new(store.clone(), secrets, Arc::new(OsManaged(base.clone())));
+
+        assert!(
+            providers::read_config(&*store, ProviderKind::ModelGateway)
+                .await
+                .unwrap()
+                .base_url
+                .is_none(),
+            "the fixture must have no stored row for the assertion to mean anything"
+        );
+        let status = runtime.status().await.unwrap();
+        assert!(status.configured && status.enabled && status.signed_in);
+        assert_eq!(
+            status.base_url.as_deref(),
+            Some(format!("{base}/").as_str())
+        );
+        assert_eq!(status.account_hint.as_deref(), Some("abaas@example.test"));
     }
 
     #[tokio::test]
