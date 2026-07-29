@@ -6628,6 +6628,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "openwave-sandbox-agent"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "openwave-core",
+ "openwave-sandbox-protocol",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
 name = "openwave-sandbox-protocol"
 version = "0.0.0"
 dependencies = [
