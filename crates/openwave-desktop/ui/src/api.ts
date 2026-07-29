@@ -832,13 +832,29 @@ export class ApiClient {
     });
   }
 
-  createChat(model?: ModelSelectionKey, projectId?: string | null): Promise<Chat> {
+  /**
+   * Create a chat, optionally already set up the way it will run.
+   *
+   * The turn inputs are sent at creation rather than PATCHed afterwards: a
+   * correcting PATCH races the first turn, which reads the chat as it was
+   * created.
+   */
+  createChat(
+    model?: ModelSelectionKey,
+    projectId?: string | null,
+    settings?: {
+      reasoningEffort?: ReasoningEffort | null;
+      permissionMode?: PermissionMode | null;
+    },
+  ): Promise<Chat> {
     return this.json("/chats", {
       method: "POST",
       headers: this.headers(true),
       body: JSON.stringify({
         model: model || undefined,
         project_id: projectId || undefined,
+        reasoning_effort: settings?.reasoningEffort ?? undefined,
+        permission_mode: settings?.permissionMode ?? undefined,
       }),
     });
   }

@@ -6,6 +6,10 @@ import { ChatExplorer } from "./ChatExplorer";
 import { useChatListStore } from "./ChatListStore";
 import { Composer } from "./Composer";
 import { useFirstMessage } from "./FirstMessage";
+import { ModelMenu, ReasoningEffortMenu } from "./ModelMenu";
+import { modelForSelection } from "./ModelSelection";
+import { useNewChatSettings } from "./NewChatSettings";
+import { PermissionModeMenu } from "./PermissionModeMenu";
 import { RouteFrame } from "./RouteFrame";
 import { HomeSidebar } from "./sidebar/HomeSidebar";
 
@@ -25,11 +29,15 @@ const firstMessageActions = useFirstMessage.getState();
  */
 export function HomeRoute() {
   const navigate = useNavigate();
-  const { client } = useApp();
+  const { client, models, defaultModelKey } = useApp();
   const chatsLoaded = useChatListStore((state) => state.chatsLoaded);
   const creatingChat = useChatListStore((state) => state.creatingChat);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const newChat = useNewChatSettings();
+  // Only the levels the pending model accepts are offerable, the same rule the
+  // conversation composer follows.
+  const efforts = modelForSelection(models, newChat.model)?.reasoning_efforts ?? [];
 
   async function startChat() {
     const content = draft.trim();
@@ -37,7 +45,10 @@ export function HomeRoute() {
     chatListActions.setCreatingChat(true);
     setError(null);
     try {
-      const created = await client.createChat();
+      const created = await client.createChat(newChat.model ?? undefined, null, {
+        reasoningEffort: newChat.reasoningEffort,
+        permissionMode: newChat.permissionMode,
+      });
       chatListActions.prependChat(created);
       chatListActions.setChatsError(null);
       firstMessageActions.hold(created.id, content);
@@ -86,6 +97,30 @@ export function HomeRoute() {
             steerError={null}
             steerPending={false}
             steerStatus={null}
+            modelMenu={
+              <>
+                <ModelMenu
+                  models={models}
+                  value={newChat.model}
+                  defaultKey={defaultModelKey}
+                  disabled={creatingChat}
+                  onChange={newChat.setModel}
+                />
+                {efforts.length > 0 && (
+                  <ReasoningEffortMenu
+                    levels={efforts}
+                    value={newChat.reasoningEffort}
+                    disabled={creatingChat}
+                    onChange={newChat.setReasoningEffort}
+                  />
+                )}
+                <PermissionModeMenu
+                  value={newChat.permissionMode}
+                  disabled={creatingChat}
+                  onChange={newChat.setPermissionMode}
+                />
+              </>
+            }
             onDraftChange={setDraft}
             onSend={startChat}
             onSteer={async () => {}}
