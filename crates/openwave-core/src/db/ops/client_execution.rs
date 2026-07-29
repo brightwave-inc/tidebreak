@@ -7,8 +7,8 @@ use sea_orm::{
 use crate::error::{AgentError, Result};
 use crate::id::{CallId, ChatId};
 use crate::model::{
-    RetrievalEvidence, RetrievalEvidenceInput, RetrievalEvidenceSource, ToolCallExecution,
-    ToolCallRecord, ToolCallResolution, ToolCallStatus,
+    EvidenceLocation, RetrievalEvidence, RetrievalEvidenceInput, RetrievalEvidenceSource,
+    ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus,
 };
 use crate::storage::{
     AcceptClaimedToolCallOutcome, AcceptToolCallOutcome, ClaimClientToolCallOutcome,
@@ -772,10 +772,6 @@ fn validate_evidence_request(
 }
 
 fn validate_evidence_item(item: &RetrievalEvidenceInput, expected_rank: u16) -> Result<()> {
-    let heading_bytes = item
-        .heading_path
-        .iter()
-        .try_fold(0_usize, |total, heading| total.checked_add(heading.len()));
     let source_uri_valid = match &item.source {
         RetrievalEvidenceSource::Uri { uri } => {
             !uri.is_empty()
@@ -796,20 +792,14 @@ fn validate_evidence_item(item: &RetrievalEvidenceInput, expected_rank: u16) -> 
         || item.span.len() != item.snippet.len()
         || item.snippet.contains('\0')
         || item.snippet.len() > RetrievalEvidenceInput::MAX_SNIPPET_BYTES
-        || item.heading_path.len() > RetrievalEvidenceInput::MAX_HEADING_SEGMENTS
-        || heading_bytes.is_none_or(|bytes| bytes > RetrievalEvidenceInput::MAX_HEADING_BYTES)
-        || item
-            .heading_path
-            .iter()
-            .any(|heading| heading.contains('\0'))
-        || item.source_regions.len() > RetrievalEvidenceInput::MAX_SOURCE_REGIONS
+        || !item.location.is_well_formed()
         || item.chunk_id != crate::ChunkId::derive(item.document_id, item.span.start, item.span.end)
         || !source_uri_valid
     {
         return Err(AgentError::Store("invalid retrieval evidence".into()));
     }
     let mut previous_end = item.span.start;
-    for region in &item.source_regions {
+    for region in item.location.source_regions() {
         if region.span.is_empty()
             || region.span.start < item.span.start
             || region.span.end > item.span.end
@@ -863,6 +853,14 @@ where
                 RetrievalEvidenceSource::Uri { uri } => ("uri", Some(uri.clone())),
                 RetrievalEvidenceSource::Inline => ("inline", None),
             };
+            // Document content writes exactly the columns it always has, so a
+            // row written now is indistinguishable from one written before the
+            // taxonomy existed. Only the kinds those columns cannot express
+            // carry a location payload.
+            let location = match &item.location {
+                EvidenceLocation::DocumentContent { .. } => None,
+                other => Some(serde_json::to_value(other)?),
+            };
             Ok(entities::retrieval_evidence::ActiveModel {
                 call_id: Set(call.id),
                 rank: Set(i32::from(item.rank)),
@@ -880,10 +878,11 @@ where
                     AgentError::Store("retrieval evidence span exceeds storage range".into())
                 })?),
                 snippet: Set(item.snippet.clone()),
-                heading_path: Set(serde_json::to_value(&item.heading_path)?),
-                source_regions: Set(serde_json::to_value(&item.source_regions)?),
+                heading_path: Set(serde_json::to_value(item.location.heading_path())?),
+                source_regions: Set(serde_json::to_value(item.location.source_regions())?),
                 source_kind: Set(source_kind.into()),
                 source_uri: Set(source_uri),
+                location: Set(location),
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -916,8 +915,16 @@ pub(in crate::db) fn evidence_from_model(
         chunk_id: model.chunk_id.into(),
         span: crate::ByteSpan::new(span_start, span_end),
         snippet: model.snippet,
-        heading_path: serde_json::from_value(model.heading_path)?,
-        source_regions: serde_json::from_value(model.source_regions)?,
+        // No payload means document content, which is what every row written
+        // before evidence had kinds holds and where its headings and regions
+        // still live. That is what lets those rows read back unchanged.
+        location: match model.location {
+            None => EvidenceLocation::DocumentContent {
+                heading_path: serde_json::from_value(model.heading_path)?,
+                source_regions: serde_json::from_value(model.source_regions)?,
+            },
+            Some(location) => serde_json::from_value(location)?,
+        },
         source: match (model.source_kind.as_str(), model.source_uri) {
             ("uri", Some(uri)) => RetrievalEvidenceSource::Uri { uri },
             ("inline", None) => RetrievalEvidenceSource::Inline,

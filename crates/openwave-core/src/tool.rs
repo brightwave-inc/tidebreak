@@ -863,8 +863,10 @@ mod tests {
                 chunk_id: crate::ChunkId::derive(document_id, 0, 6),
                 span: crate::ByteSpan::new(0, 6),
                 snippet: "secret".into(),
-                heading_path: Vec::new(),
-                source_regions: Vec::new(),
+                location: crate::EvidenceLocation::DocumentContent {
+                    heading_path: Vec::new(),
+                    source_regions: Vec::new(),
+                },
                 source: crate::RetrievalEvidenceSource::Inline,
             }]);
         let json = serde_json::to_string(&output).unwrap();

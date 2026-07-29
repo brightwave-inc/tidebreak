@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use openwave_core::{
     citation_authoring_instruction, format_citation_reference, ApprovalClass,
     AssistantCitationReference, ByteSpan, CallId, ChunkId, DocumentId, DocumentProcessingStatus,
-    DocumentScope, Result, RetrievalEvidenceInput, RetrievalEvidenceSource, Store, Tool, ToolCtx,
-    ToolOutput, ToolSpec,
+    DocumentScope, EvidenceLocation, Result, RetrievalEvidenceInput, RetrievalEvidenceSource,
+    Store, Tool, ToolCtx, ToolOutput, ToolSpec,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -338,8 +338,10 @@ impl Tool for ReadSourceTool {
             chunk_id: ChunkId::derive(document_id, span.start, span.end),
             span,
             snippet: window.text.to_owned(),
-            heading_path: Vec::new(),
-            source_regions,
+            location: EvidenceLocation::DocumentContent {
+                heading_path: Vec::new(),
+                source_regions,
+            },
             source,
         };
         Ok(ToolOutput::text(content)
@@ -805,7 +807,7 @@ mod tests {
         assert_eq!(evidence.snippet, "é🌊\n");
         assert_eq!(evidence.span, ByteSpan::new(1, 8));
         assert_eq!(
-            evidence.source_regions,
+            evidence.location.source_regions(),
             [SourceRegion {
                 span: ByteSpan::new(1, 8),
                 location: SourceLocation::Page {

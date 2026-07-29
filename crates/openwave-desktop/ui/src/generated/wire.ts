@@ -118,13 +118,12 @@ document_id: DocumentId,
  * Half-open byte range of the cited passage in that document's canonical
  * text, which is the text the extracted-text view renders.
  */
-span: CitationSpan, excerpt: string, heading: string | null, pages: Array<number>, 
+span: CitationSpan, excerpt: string, heading: string | null, 
 /**
- * Where on those pages the passage sits, for sources whose parser resolved
- * it that finely. Empty for page-granular sources; `pages` is the complete
- * answer either way.
+ * Where the passage sits in its source, in the terms that source is
+ * addressed by.
  */
-bounds: Array<CitationPageBounds>, };
+location: CitationLocation, };
 
 /**
  * Where the Auto-mode judge stands on one parked call.
@@ -293,6 +292,21 @@ tool_activity: Array<ChatToolActivitySnapshot>, last_event_seq: number, };
  * meaning "follow the global default".
  */
 export type CitationFormat = "inline" | "sources_attached";
+
+/**
+ * Where a citation points, projected per evidence kind.
+ *
+ * The discriminant is the renderer's instruction for how to open the passage:
+ * pages and rectangles address a paginated document, a cell range addresses a
+ * sheet, and a path addresses a node. Only document content is produced today.
+ */
+export type CitationLocation = { "kind": "document_content", pages: Array<number>, 
+/**
+ * Where on those pages the passage sits, for sources whose parser
+ * resolved it that finely. Empty for page-granular sources; `pages`
+ * is the complete answer either way.
+ */
+bounds: Array<CitationPageBounds>, } | { "kind": "spreadsheet_cell_range", start_cell: string, end_cell: string | null, sheet_index: number, sheet_name: string, } | { "kind": "structured_path", path: string, path_type: StructuredPathType, };
 
 /**
  * One highlight rectangle of a citation, on a named page.
@@ -1037,6 +1051,11 @@ source_call_id: CallId, chat_id: ChatId,
  * Chat title for provenance; `None` when the chat is untitled.
  */
 chat_title: string | null, action: RendererToolName, approval: ToolApprovalKind, scope: GrantScope, granted_at: string, };
+
+/**
+ * How the `path` of a structured-path evidence location is written.
+ */
+export type StructuredPathType = "json_dot_notation" | "xml_xpath";
 
 /**
  * The action a call will take, in a form a human can inspect.
