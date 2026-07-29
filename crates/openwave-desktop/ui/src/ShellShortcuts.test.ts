@@ -2,8 +2,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  groupedShellShortcuts,
   isEditableTarget,
   resolveShellShortcut,
+  SHELL_SHORTCUTS,
+  shortcutKeycaps,
+  usesCommandModifier,
   type ShellShortcutAction,
 } from "./ShellShortcuts";
 
@@ -40,6 +44,7 @@ describe("shell shortcut resolution", () => {
       ["b", "toggle-sidebar"],
       ["n", "new-chat"],
       ["k", "focus-composer"],
+      ["/", "show-shortcuts"],
     ];
     for (const [key, id] of cases) {
       const resolved = resolveShellShortcut(keyEvent({ key }), {
@@ -81,5 +86,29 @@ describe("shell shortcut resolution", () => {
       modalOpen: true,
     });
     expect(resolved).toBeNull();
+  });
+});
+
+describe("shortcut help", () => {
+  it("names the modifier the reader's keyboard actually has", () => {
+    // The table records `mod: true` because the listener takes either modifier;
+    // the help dialog has to pick the one that is true where it is being read.
+    const zoomIn = SHELL_SHORTCUTS.find((def) => def.id === "zoom-in")!;
+    expect(shortcutKeycaps(zoomIn, true)).toEqual(["⌘", "="]);
+    expect(shortcutKeycaps(zoomIn, false)).toEqual(["Ctrl", "="]);
+    expect(usesCommandModifier("Mozilla/5.0 (Macintosh; Intel Mac OS X)")).toBe(
+      true,
+    );
+    expect(usesCommandModifier("Mozilla/5.0 (Windows NT 10.0; Win64)")).toBe(
+      false,
+    );
+  });
+
+  it("files every shortcut under a heading the dialog renders", () => {
+    // A shortcut grouped under a heading nobody lists would vanish from the
+    // help while still firing — the exact drift the dialog exists to prevent.
+    const listed = groupedShellShortcuts().flatMap(({ items }) => items);
+    expect(listed).toHaveLength(SHELL_SHORTCUTS.length);
+    expect(new Set(listed)).toEqual(new Set(SHELL_SHORTCUTS));
   });
 });
