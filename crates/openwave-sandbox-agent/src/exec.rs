@@ -333,8 +333,17 @@ async fn run_bounded(_command: &str, _workspace: &Path, _timeout: Duration) -> E
     }
 }
 
+/// The integer type `libc::setrlimit` takes for the resource selector. glibc
+/// types the `RLIMIT_*` constants as `__rlimit_resource_t` (a `u32`); every
+/// other unix we build for (musl, macOS, the BSDs) uses a plain `c_int`, so a
+/// single `c_int` signature fails to compile on the glibc Linux CI host.
+#[cfg(all(unix, target_os = "linux", target_env = "gnu"))]
+type RlimitResource = libc::__rlimit_resource_t;
+#[cfg(all(unix, not(all(target_os = "linux", target_env = "gnu"))))]
+type RlimitResource = libc::c_int;
+
 #[cfg(unix)]
-fn set_limit(resource: libc::c_int, value: u64) -> std::io::Result<()> {
+fn set_limit(resource: RlimitResource, value: u64) -> std::io::Result<()> {
     let limit = libc::rlimit {
         rlim_cur: value as libc::rlim_t,
         rlim_max: value as libc::rlim_t,
