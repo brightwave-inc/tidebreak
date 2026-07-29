@@ -127,7 +127,11 @@ async fn titling_app(
         Arc::new(resolver::ConfiguredResolver::new(
             store.clone(),
             secrets.clone(),
-            crate::gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone()),
+            crate::gateway_runtime::GatewayRuntime::new(
+                store.clone(),
+                secrets.clone(),
+                Arc::new(crate::managed_policy::NoOsPolicy),
+            ),
             Arc::new(crate::managed_policy::NoOsPolicy),
         )),
         secrets,

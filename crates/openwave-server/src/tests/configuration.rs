@@ -1089,7 +1089,11 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
         Arc::new(resolver::ConfiguredResolver::new(
             store.clone(),
             secrets.clone(),
-            crate::gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone()),
+            crate::gateway_runtime::GatewayRuntime::new(
+                store.clone(),
+                secrets.clone(),
+                Arc::new(crate::managed_policy::NoOsPolicy),
+            ),
             Arc::new(crate::managed_policy::NoOsPolicy),
         )),
         secrets,
@@ -1233,7 +1237,11 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         Arc::new(resolver::ConfiguredResolver::new(
             store.clone(),
             secrets.clone(),
-            crate::gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone()),
+            crate::gateway_runtime::GatewayRuntime::new(
+                store.clone(),
+                secrets.clone(),
+                Arc::new(crate::managed_policy::NoOsPolicy),
+            ),
             Arc::new(crate::managed_policy::NoOsPolicy),
         )),
         secrets,
@@ -1478,7 +1486,11 @@ async fn resolver_builds_a_router_from_enabled_providers() {
     let resolver = resolver::KeyedResolver::new(
         store.clone(),
         secrets.clone(),
-        crate::gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone()),
+        crate::gateway_runtime::GatewayRuntime::new(
+            store.clone(),
+            secrets.clone(),
+            Arc::new(crate::managed_policy::NoOsPolicy),
+        ),
         Arc::new(crate::managed_policy::NoOsPolicy),
     );
     let resolved = resolver.resolve().await;
@@ -1571,7 +1583,11 @@ async fn resolver_includes_configured_curated_api_key_providers() {
         let resolver = resolver::KeyedResolver::new(
             store.clone(),
             secrets.clone(),
-            crate::gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone()),
+            crate::gateway_runtime::GatewayRuntime::new(
+                store.clone(),
+                secrets.clone(),
+                Arc::new(crate::managed_policy::NoOsPolicy),
+            ),
             Arc::new(crate::managed_policy::NoOsPolicy),
         );
         let provider = resolver.resolve().await;
@@ -1619,18 +1635,21 @@ async fn malformed_gemini_service_account_never_advertises_or_builds_a_route() {
     .await
     .unwrap();
 
-    assert!(
-        !providers::provider_is_usable(&*store, &*secrets, providers::ProviderKind::Gemini,)
-            .await
-            .unwrap()
-    );
     let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
         .await
         .unwrap();
+    assert!(!providers::provider_is_usable(
+        &*store,
+        &*secrets,
+        providers::ProviderKind::Gemini,
+        &policy
+    )
+    .await
+    .unwrap());
     assert!(providers::collect_routes(&*store, &*secrets, None, &policy)
         .await
         .is_empty());
-    assert!(providers::catalog_models(&*store, &*secrets)
+    assert!(providers::catalog_models(&*store, &*secrets, &policy)
         .await
         .unwrap()
         .into_iter()
@@ -1681,6 +1700,33 @@ async fn openai_compatible_route_is_free_form_fallback() {
     );
 }
 
+/// Serializes and scopes process-environment mutation in tests: restores the
+/// previous value on drop (unwind included), and the lock keeps concurrent
+/// env-mutating tests from interleaving set/restore windows.
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+struct ScopedEnv {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+impl ScopedEnv {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var(key).ok();
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for ScopedEnv {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(previous) => std::env::set_var(self.key, previous),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
 /// The one behavioral fork managed lockdown introduces on the read path:
 /// route collection offers the gateway alone, aimed at the policy URL.
 #[tokio::test]
@@ -1708,7 +1754,8 @@ async fn a_managed_profile_offers_only_the_gateway_route() {
 
     // A fully configured BYOK spread: Anthropic on a stored key, Gemini on the
     // env-var fallback, and a gateway row whose stored base URL is stale.
-    std::env::set_var("GEMINI_API_KEY", "env-fallback-key");
+    let _env = ENV_LOCK.lock().await;
+    let _gemini_key = ScopedEnv::set("GEMINI_API_KEY", "env-fallback-key");
     providers::write_credential(
         &*secrets,
         providers::ProviderKind::Anthropic,
@@ -1760,13 +1807,89 @@ async fn a_managed_profile_offers_only_the_gateway_route() {
     let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
         .await
         .unwrap();
-    let routes = providers::collect_routes(&*store, &*secrets, Some(tokens), &policy).await;
+    let routes = providers::collect_routes(&*store, &*secrets, Some(tokens.clone()), &policy).await;
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].kind, openwave_router::RouteKind::ModelGateway);
     assert_eq!(
         routes[0].base_url.as_deref(),
         Some("https://corp.gateway/compat/anthropic")
     );
+
+    // The same authority on the picker side: no BYOK provider is usable.
+    assert!(!providers::provider_is_usable(
+        &*store,
+        &*secrets,
+        providers::ProviderKind::Anthropic,
+        &policy
+    )
+    .await
+    .unwrap());
+
+    // Even a disabled — or, for a pure-MDM profile, absent — stored gateway
+    // row cannot drop the managed route: policy is the authority.
+    providers::write_config(
+        &*store,
+        providers::ProviderKind::ModelGateway,
+        &providers::ProviderConfig::disabled(),
+    )
+    .await
+    .unwrap();
+    let routes = providers::collect_routes(&*store, &*secrets, Some(tokens), &policy).await;
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].kind, openwave_router::RouteKind::ModelGateway);
+}
+
+/// The resolver's fail-closed branch: a profile whose stored policy exists
+/// but cannot be read must resolve to no egress, not to its BYOK routes.
+#[tokio::test]
+async fn an_unreadable_policy_fails_the_resolver_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}/test.db?mode=rwc",
+            dir.path().display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
+    providers::write_credential(
+        &*secrets,
+        providers::ProviderKind::Anthropic,
+        &providers::ProviderCredential::api_key("sk-ready"),
+    )
+    .await
+    .unwrap();
+    providers::write_config(
+        &*store,
+        providers::ProviderKind::Anthropic,
+        &providers::ProviderConfig {
+            enabled: true,
+            base_url: None,
+            vertex_location: None,
+            models: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+    let resolver = resolver::KeyedResolver::new(
+        store.clone(),
+        secrets.clone(),
+        crate::gateway_runtime::GatewayRuntime::new(
+            store.clone(),
+            secrets.clone(),
+            Arc::new(crate::managed_policy::NoOsPolicy),
+        ),
+        Arc::new(crate::managed_policy::NoOsPolicy),
+    );
+    assert_eq!(resolver.resolve().await.id().0, "router");
+
+    // Corrupt the persisted policy record (the key is a persisted contract).
+    store
+        .set_setting("managed_policy_v1", &serde_json::json!({"gateway_url": 42}))
+        .await
+        .unwrap();
+    assert_eq!(resolver.resolve().await.id().0, "unconfigured");
 }
 
 async fn put_json(

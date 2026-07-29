@@ -27,6 +27,9 @@ const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 pub(crate) struct GatewayRuntime {
     store: Arc<dyn Store>,
     secrets: Arc<dyn SecretProvider>,
+    /// The OS authority for managed-mode resolution: a managed profile's
+    /// deployment URL comes from the resolved policy, not the stored row.
+    os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     /// One connection per configured base URL; rebuilt when the URL changes.
     cached: Mutex<Option<(String, Arc<GatewayConnection>)>>,
     /// The one in-flight browser sign-in, if any.
@@ -93,10 +96,15 @@ pub(crate) struct GatewayAppInfo {
 }
 
 impl GatewayRuntime {
-    pub(crate) fn new(store: Arc<dyn Store>, secrets: Arc<dyn SecretProvider>) -> Arc<Self> {
+    pub(crate) fn new(
+        store: Arc<dyn Store>,
+        secrets: Arc<dyn SecretProvider>,
+        os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             store,
             secrets,
+            os_policy,
             cached: Mutex::new(None),
             sign_in: Mutex::new(SignInProgress::Idle),
             sign_in_generation: std::sync::atomic::AtomicU64::new(0),
@@ -239,11 +247,25 @@ impl GatewayRuntime {
         Ok(())
     }
 
-    /// The connection for the configured gateway, or `None` when no base URL
-    /// is configured.
+    /// The connection for the effective gateway, or `None` when none is
+    /// configured.
+    ///
+    /// A managed profile's deployment comes from the resolved policy, never
+    /// from the stored provider row: the row is renderer-writable while
+    /// unmanaged, so honoring it here would let a pre-provisioning write
+    /// redirect sign-in and every minted bearer — and a merely diverged (or
+    /// absent) row would drop the connection a managed profile is entitled
+    /// to. Under managed policy the row is display/session-cache only.
     pub(crate) async fn connection(&self) -> Result<Option<Arc<GatewayConnection>>> {
-        let config = providers::read_config(&*self.store, ProviderKind::ModelGateway).await?;
-        let Some(base_url) = config.base_url else {
+        let policy = crate::managed_policy::resolve(&*self.store, &*self.os_policy).await?;
+        let base_url = if policy.managed {
+            policy.gateway_url
+        } else {
+            providers::read_config(&*self.store, ProviderKind::ModelGateway)
+                .await?
+                .base_url
+        };
+        let Some(base_url) = base_url else {
             return Ok(None);
         };
         let mut cached = self.cached.lock().await;
@@ -520,7 +542,11 @@ mod tests {
         .await
         .unwrap();
         (
-            GatewayRuntime::new(store.clone(), secrets),
+            GatewayRuntime::new(
+                store.clone(),
+                secrets,
+                Arc::new(crate::managed_policy::NoOsPolicy),
+            ),
             store,
             directory,
         )
@@ -727,6 +753,70 @@ mod tests {
         assert!(runtime.route_token_source().await.is_none());
     }
 
+    /// The managed counterpart of the divergence test above, through the
+    /// REAL token path: once provisioned, the policy — not the
+    /// renderer-writable row — names the deployment, so a diverged (or
+    /// stale) row can neither redirect sign-in and bearers nor drop the
+    /// session and route a managed profile is entitled to.
+    #[tokio::test]
+    async fn a_managed_profile_reaches_its_gateway_despite_a_diverged_stored_row() {
+        let address = serve(Arc::new(FakeGateway::default())).await;
+        let base = format!("http://{address}");
+        let (runtime, store, _directory) = signed_in_runtime(&base).await;
+        runtime.sync_models().await.unwrap();
+
+        // Provision to the real deployment, then re-point the stored row —
+        // the write `update_provider` would refuse, applied directly to
+        // model a row that pre-dates provisioning or was tampered with.
+        crate::managed_policy::provision(&*store, &base)
+            .await
+            .unwrap();
+        let mut config = providers::read_config(&*store, ProviderKind::ModelGateway)
+            .await
+            .unwrap();
+        config.base_url = Some("http://127.0.0.1:9".to_string());
+        providers::write_config(&*store, ProviderKind::ModelGateway, &config)
+            .await
+            .unwrap();
+
+        // Tokens still mint against the provisioned deployment.
+        let source = runtime
+            .route_token_source()
+            .await
+            .expect("a managed session follows policy, not the row");
+        let token = source.bearer_token().await.unwrap();
+        assert!(token.starts_with("mg_at_llm_"), "{token}");
+
+        // And the composite route aims at the policy URL, with the synced
+        // models still claimed and the gateway usable for the picker.
+        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+            .await
+            .unwrap();
+        let routes = providers::collect_routes(
+            &*store,
+            &*runtime.secrets,
+            runtime.route_token_source().await,
+            &policy,
+        )
+        .await;
+        assert_eq!(routes.len(), 1);
+        assert_eq!(
+            routes[0].base_url.as_deref(),
+            Some(format!("{base}/compat/anthropic").as_str())
+        );
+        assert!(routes[0]
+            .curated_models
+            .contains(&"sample-claude".to_string()));
+        assert!(providers::provider_is_usable(
+            &*store,
+            &*runtime.secrets,
+            ProviderKind::ModelGateway,
+            &policy
+        )
+        .await
+        .unwrap());
+    }
+
     #[tokio::test]
     async fn a_signed_out_runtime_offers_no_route() {
         let directory = tempfile::tempdir().unwrap();
@@ -751,7 +841,11 @@ mod tests {
         )
         .await
         .unwrap();
-        let runtime = GatewayRuntime::new(store.clone(), secrets);
+        let runtime = GatewayRuntime::new(
+            store.clone(),
+            secrets,
+            Arc::new(crate::managed_policy::NoOsPolicy),
+        );
 
         assert!(runtime.route_token_source().await.is_none());
         let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)

@@ -568,7 +568,7 @@ pub async fn update_provider(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
     kind: ProviderKind,
-    update: ProviderUpdate,
+    mut update: ProviderUpdate,
     policy: &crate::managed_policy::ManagedPolicy,
 ) -> std::result::Result<ProviderInfo, ServerError> {
     if policy.managed {
@@ -580,8 +580,15 @@ pub async fn update_provider(
             )));
         }
         if kind == ProviderKind::ModelGateway {
-            if let Some(base_url) = &update.base_url {
-                let locked = policy.gateway_url.as_deref().unwrap_or_default();
+            if let Some(base_url) = update.base_url.take() {
+                // Structurally fail closed: a managed policy without a URL
+                // (which resolution today never produces) locks the field
+                // outright rather than comparing against an empty string.
+                let Some(locked) = policy.gateway_url.as_deref() else {
+                    return Err(managed_profile_refusal(
+                        "this profile is managed; the model gateway base URL is locked",
+                    ));
+                };
                 let matches_locked = base_url.as_deref().is_some_and(|url| {
                     crate::managed_policy::validated_gateway_url(url)
                         .ok()
@@ -593,6 +600,11 @@ pub async fn update_provider(
                         "this profile is managed; the model gateway base URL is locked to {locked}"
                     )));
                 }
+                // Store the normalized contract form, not the raw input: the
+                // guard compared normalized, and downstream scheme checks
+                // must see the same shape (`HTTPS://…` would otherwise pass
+                // here and fail them).
+                update.base_url = Some(Some(locked.to_owned()));
             }
         }
     }
@@ -832,7 +844,10 @@ pub async fn collect_routes(
             Ok(c) => c,
             Err(_) => continue,
         };
-        if !config.enabled {
+        // A managed profile's gateway presence comes from policy, not the
+        // stored row: a pure-MDM profile may have no row at all (disabled
+        // default), and the row must not be able to turn the gateway off.
+        if !config.enabled && !policy.managed {
             continue;
         }
         if kind == ProviderKind::ModelGateway {
@@ -1016,11 +1031,22 @@ pub async fn resolve_model_policy(
 }
 
 /// Whether the provider can accept a new turn right now.
+///
+/// On a managed profile the gateway's presence is derived from policy — the
+/// stored row is display/session-cache only and may not exist at all — so it
+/// is usable exactly when a session is stored; BYOK kinds are never usable.
 pub async fn provider_is_usable(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
     kind: ProviderKind,
+    policy: &crate::managed_policy::ManagedPolicy,
 ) -> Result<bool> {
+    if policy.managed {
+        if kind != ProviderKind::ModelGateway {
+            return Ok(false);
+        }
+        return Ok(has_credential(secrets, kind).await);
+    }
     let config = read_config(store, kind).await?;
     if !config.enabled || !has_credential(secrets, kind).await {
         return Ok(false);
@@ -1052,11 +1078,12 @@ pub async fn provider_is_usable(
 pub async fn catalog_models(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
+    policy: &crate::managed_policy::ManagedPolicy,
 ) -> Result<Vec<CatalogModel>> {
     let mut models = Vec::new();
     for &kind in ProviderKind::ALL {
         let config = read_config(store, kind).await?;
-        let available = provider_is_usable(store, secrets, kind).await?;
+        let available = provider_is_usable(store, secrets, kind, policy).await?;
         models.extend(model_registry::models_for(kind).map(|spec| CatalogModel {
             policy: ResolvedModelPolicy::curated(spec),
             available,

@@ -604,7 +604,10 @@ async fn validate_model_selection(
             ),
         ));
     };
-    if !providers::provider_is_usable(&*state.store, &*state.secrets, policy.provider).await? {
+    let managed = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
+    if !providers::provider_is_usable(&*state.store, &*state.secrets, policy.provider, &managed)
+        .await?
+    {
         return Err(ServerError::conflict_kind(
             "model_provider_unavailable",
             format!(
@@ -812,7 +815,8 @@ pub async fn list_models(State(state): State<AppState>) -> Result<Json<ModelCata
             resolved_key,
         });
     }
-    let models = providers::catalog_models(&*state.store, &*state.secrets)
+    let policy = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
+    let models = providers::catalog_models(&*state.store, &*state.secrets, &policy)
         .await?
         .into_iter()
         .map(|entry| ModelInfo {
