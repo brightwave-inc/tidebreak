@@ -354,6 +354,9 @@ mod tests {
         generate::collect_from::<openwave_core::Chat>(&cfg, &mut out);
         generate::collect_from::<crate::routes::AgentRunSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::AgentRunCancellationSnapshot>(&cfg, &mut out);
+        // A separate endpoint root: the ordered activity history is returned by
+        // its own route, so the snapshot walk never reaches it.
+        generate::collect_from::<crate::routes::AgentActivityHistoryItem>(&cfg, &mut out);
         out
     }
 
@@ -550,6 +553,7 @@ mod tests {
             }),
             can_approve: true,
             can_remember: true,
+            prefix_rungs: vec![1],
         };
         // The same shape with the omittable field absent, because "the key is
         // missing" is a distinct case the validator has to survive and the one
@@ -564,6 +568,7 @@ mod tests {
             preview: None,
             can_approve: false,
             can_remember: false,
+            prefix_rungs: Vec::new(),
         };
 
         let folder_access = crate::routes::client_execution::PendingFolderAccessRequest {

@@ -5,6 +5,9 @@ import {
   type ChatMessageSnapshot,
   type PendingApprovalSnapshot,
   type AgentActivitySnapshot,
+  type AgentActivityHistoryItem,
+  type AgentActivityKind,
+  type AgentActivityOutcome,
   type AgentRunCancellationSnapshot,
   type AgentRunSnapshot,
   type Chat as WireChat,
@@ -112,6 +115,13 @@ export type DocumentDetail = {
   title: string | null;
   processing_status: DocumentProcessingStatus;
   searchable: boolean;
+  /**
+   * Whether the source kept the bytes it was made from. A source with none —
+   * a fetched web page, whose markup is not retained — has no original to draw,
+   * so the panel offers only the extracted text rather than a tab that can
+   * only fail.
+   */
+  has_original_bytes: boolean;
   updated_at: string;
   content: string;
 };
@@ -285,6 +295,15 @@ export type SandboxAgentCancellation = AgentRunCancellationSnapshot;
  */
 export type AgentActivity = AgentActivitySnapshot;
 
+/**
+ * One settled or live step in a background run's ordered activity history.
+ *
+ * Same closed vocabulary and posture as {@link AgentActivity}: the server
+ * sends only a fixed kind, a coarse outcome, and a timestamp — never tool
+ * inputs, queries, results, identities, paths, leases, or diagnostics.
+ */
+export type AgentActivityHistoryEntry = AgentActivityHistoryItem;
+
 
 
 /**
@@ -404,7 +423,7 @@ export function isApprovableKind(kind: RendererApprovalKind): boolean {
  */
 export type ApprovalGrantRung =
   | "exact_action"
-  | "any_args_for_command"
+  | { command_prefix: { tokens: number } }
   | "whole_tool";
 
 /** Approval kinds whose authority is stable enough to remember by tool name. */
@@ -423,6 +442,8 @@ export type PendingToolApproval = {
   preview: ToolActionPreview | null;
   canApprove: boolean;
   canRemember: boolean;
+  /** Token counts of the prefix rungs the server will honor for this call. */
+  prefixRungs: number[];
   /** Where the Auto-mode judge stands, or null when no judge was engaged. */
   autoJudgeStatus: "judging" | "approved" | "declined" | null;
 };
@@ -1094,6 +1115,24 @@ export class ApiClient {
     });
   }
 
+  /**
+   * The ordered, renderer-safe activity history for one background run.
+   *
+   * Malformed or unknown entries are dropped rather than trusted, keeping the
+   * closed vocabulary the server promises. A wrong-chat, foreground, or missing
+   * run answers `404`, which surfaces as a thrown error.
+   */
+  async listAgentRunActivity(
+    chatId: string,
+    runId: string,
+  ): Promise<AgentActivityHistoryEntry[]> {
+    const body = await this.json<unknown>(
+      `/chats/${encodeURIComponent(chatId)}/agent-runs/${encodeURIComponent(runId)}/activity`,
+      { headers: this.headers() },
+    );
+    return parseAgentActivityHistory(body);
+  }
+
   async cancelAgentRun(
     chatId: string,
     runId: string,
@@ -1543,6 +1582,55 @@ function nonEmptyBounded(value: unknown, maxChars: number): value is string {
   );
 }
 
+const AGENT_ACTIVITY_KINDS = new Set<AgentActivityKind>([
+  "web_search",
+  "read_delegated_file",
+  "list_connected_folders",
+  "list_folder",
+  "read_connected_file",
+  "import_connected_file",
+]);
+
+const AGENT_ACTIVITY_OUTCOMES = new Set<AgentActivityOutcome>([
+  "waiting",
+  "running",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+
+/**
+ * Keep only well-formed history entries in their server order. An entry whose
+ * kind or outcome falls outside the closed vocabulary, or whose timestamp is
+ * missing, is dropped rather than rendered — the same defensive discipline the
+ * transcript applies to every model-influenced projection.
+ */
+export function parseAgentActivityHistory(
+  value: unknown,
+): AgentActivityHistoryEntry[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (
+      !isRecord(entry) ||
+      typeof entry.kind !== "string" ||
+      !AGENT_ACTIVITY_KINDS.has(entry.kind as AgentActivityKind) ||
+      typeof entry.outcome !== "string" ||
+      !AGENT_ACTIVITY_OUTCOMES.has(entry.outcome as AgentActivityOutcome) ||
+      typeof entry.at !== "string" ||
+      entry.at.length === 0
+    ) {
+      return [];
+    }
+    return [
+      {
+        kind: entry.kind as AgentActivityKind,
+        outcome: entry.outcome as AgentActivityOutcome,
+        at: entry.at,
+      },
+    ];
+  });
+}
+
 export function parseSandboxAgentCancellation(
   value: unknown,
 ): SandboxAgentCancellation | null {
@@ -1577,6 +1665,7 @@ const PENDING_APPROVAL_KEYS = [
   "preview",
   "can_approve",
   "can_remember",
+  "prefix_rungs",
   "auto_judge_status",
 ] as const satisfies readonly (keyof PendingApprovalSnapshot)[];
 
@@ -1602,6 +1691,14 @@ export function parsePendingToolApproval(
     value.can_approve !== isApprovableKind(value.approval) ||
     typeof value.can_remember !== "boolean" ||
     value.can_remember !== isRememberableKind(value.approval) ||
+    // Absent reads as "no prefix rungs", which is the safe answer: the card
+    // offers nothing it was not told about.
+    (value.prefix_rungs !== undefined &&
+      (!Array.isArray(value.prefix_rungs) ||
+        value.prefix_rungs.some(
+          (tokens) =>
+            typeof tokens !== "number" || !Number.isInteger(tokens) || tokens < 1,
+        ))) ||
     !(
       value.auto_judge_status === undefined ||
       value.auto_judge_status === "judging" ||
@@ -1620,6 +1717,7 @@ export function parsePendingToolApproval(
     preview: parseToolActionPreview(value.preview),
     canApprove: value.can_approve,
     canRemember: value.can_remember,
+    prefixRungs: (value.prefix_rungs as number[] | undefined) ?? [],
     autoJudgeStatus: value.auto_judge_status ?? null,
   };
 }

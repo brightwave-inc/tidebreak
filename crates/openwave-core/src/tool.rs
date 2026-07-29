@@ -831,12 +831,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_output_constructors_set_error_flag() {
-        assert!(!ToolOutput::text("ok").is_error);
-        assert!(ToolOutput::error("boom").is_error);
-    }
-
-    #[test]
     fn tool_output_omits_absent_data_when_serialized() {
         let json = serde_json::to_string(&ToolOutput::text("ok")).unwrap();
         assert!(

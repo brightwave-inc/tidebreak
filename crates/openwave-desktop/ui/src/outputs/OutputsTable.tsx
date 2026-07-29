@@ -32,6 +32,7 @@ type Props = {
   busyOutputId: string | null;
   onOpen: (outputId: string) => void;
   onSave: (output: DeliverableSummary) => void;
+  onRevert: (output: DeliverableSummary) => void;
   /** Publishes "12" or "showing 3 of 12" for the panel header to draw. */
   onCountChange: (suffix: string) => void;
 };
@@ -42,6 +43,7 @@ export function OutputsTable({
   busyOutputId,
   onOpen,
   onSave,
+  onRevert,
   onCountChange,
 }: Props) {
   const [searchQuery, setSearchQuery] = useState("");
@@ -69,8 +71,8 @@ export function OutputsTable({
   const hasActiveFilters = searchQuery.length > 0 || types.selected.size > 0;
 
   const gridContext = useMemo<OutputGridContext>(
-    () => ({ onOpen, onSave, busyOutputId }),
-    [onOpen, onSave, busyOutputId],
+    () => ({ onOpen, onSave, onRevert, busyOutputId }),
+    [onOpen, onSave, onRevert, busyOutputId],
   );
 
   // Cell renderers read their actions off `context`, which the grid snapshots

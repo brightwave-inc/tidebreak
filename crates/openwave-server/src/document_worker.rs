@@ -973,6 +973,7 @@ mod tests {
 
     fn source(id: DocumentId, text: &str) -> DocumentUpsert {
         DocumentUpsert {
+            canonical_fingerprint: None,
             id,
             chat_id: None,
             project_id: None,

@@ -9,12 +9,33 @@
 // which a type can express. See docs/wire-types.md.
 
 /**
+ * One renderer-safe entry in a background run's ordered activity history.
+ *
+ * Built from durable sandbox tool calls, but it carries only the fixed
+ * [`AgentActivityKind`] vocabulary, a coarse lifecycle, and a timestamp. Tool
+ * arguments, queries, results, folder and file identities, host paths,
+ * provider identities, executor leases, and raw diagnostics all remain
+ * server-side, exactly as they do for the live `activity` projection.
+ */
+export type AgentActivityHistoryItem = { kind: AgentActivityKind, outcome: AgentActivityOutcome, at: string, };
+
+/**
  * Fixed, renderer-safe names for supported live work.
  *
  * Adding a durable tool does not automatically expose it to a renderer: it
  * must be deliberately admitted here with a safe label.
  */
 export type AgentActivityKind = "web_search" | "read_delegated_file" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file";
+
+/**
+ * Coarse, renderer-safe lifecycle for one historical activity entry.
+ *
+ * Unlike [`AgentActivityStatus`], which only names live work, this also
+ * admits the three terminal outcomes so a settled step can be shown in an
+ * ordered timeline. It carries no failure detail: a failed step is only
+ * "failed", never why.
+ */
+export type AgentActivityOutcome = "waiting" | "running" | "completed" | "failed" | "cancelled";
 
 /**
  * Renderer-safe projection of one live supported checkpoint.
@@ -68,7 +89,16 @@ last_error_code: string | null,
  * arguments, results, provider call identities, executor leases, or raw
  * executor diagnostics.
  */
-activity: AgentActivitySnapshot | null, created_at: string, updated_at: string, spawn_call_id: CallId | null, };
+activity: AgentActivitySnapshot | null, 
+/**
+ * Whether a completed background run committed an immutable terminal
+ * receipt, which happens atomically with its terminal state.
+ *
+ * This is presence only: the payload, its display text, and any merged
+ * deliverable never cross this boundary. A renderer uses it to offer a
+ * "view output" affordance and link to the outputs surface.
+ */
+produced_output: boolean, created_at: string, updated_at: string, spawn_call_id: CallId | null, };
 
 /**
  * Durable lifecycle of an [`AgentRun`].
@@ -501,7 +531,7 @@ export type GrantLevel = { "level": "chat", chat_id: ChatId, } | { "level": "pro
  * narrower variants exist because "don't ask me about commands again" is a
  * much larger thing to agree to than "don't ask me about `cargo` again".
  */
-export type GrantScope = { "scope": "exact_action" } & ToolActionPreview | { "scope": "any_args_for", command: string, } | { "scope": "whole_tool" };
+export type GrantScope = { "scope": "exact_action" } & ToolActionPreview | { "scope": "any_args_for", command: string, } | { "scope": "command_prefix", tokens: Array<string>, } | { "scope": "whole_tool" };
 
 /**
  * Opaque identifier for a folder registered with a host broker.
@@ -749,6 +779,16 @@ export type PendingApprovalSnapshot = { call_id: CallId, turn_id: TurnId, action
  */
 preview?: ToolActionPreview, can_approve: boolean, can_remember: boolean, 
 /**
+ * Token counts of the command-prefix rungs this call may be granted at,
+ * narrowest first.
+ *
+ * Derived server-side, because whether a prefix rung exists at all is a
+ * question only the analyzer can answer — a wrapper has none. The
+ * renderer slices the action's own tokens to these lengths for the
+ * labels rather than deciding for itself what to offer.
+ */
+prefix_rungs: Array<number>, 
+/**
  * Where the Auto-mode judge stands, when one was engaged. Absent means
  * no judge ever owned this card.
  */
@@ -884,6 +924,11 @@ export type RendererAgentEvent = { "type": "turn_started", turn_id: TurnId, } | 
  * automatically" hint.
  */
 auto_judging: boolean, 
+/**
+ * Token counts of the command-prefix rungs on offer, narrowest
+ * first. Empty when the action has none.
+ */
+prefix_rungs: Array<number>, 
 /**
  * The one deliberate opening in this boundary. A human cannot consent
  * to a command they are not shown, so a tool may project a closed,

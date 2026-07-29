@@ -59,9 +59,10 @@ pub struct Supervisor {
 impl Supervisor {
     /// Bind the transport listener on `addr` for the run behind `run`.
     ///
-    /// The host dials this listener; the per-run transport secret authenticating
-    /// the dial is delivered out of band through the provider control plane and
-    /// is a follow-up on this listener (see the crate docs).
+    /// The host dials this listener and authenticates the dial with the per-run
+    /// transport secret the backend injected; the run behind `run` holds the
+    /// expected secret and [`serve_connection`] refuses an attach that does not
+    /// present it, before installing the connection.
     ///
     /// # Errors
     /// Propagates the bind failure if the address cannot be listened on.

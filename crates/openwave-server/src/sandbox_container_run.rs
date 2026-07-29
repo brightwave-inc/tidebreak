@@ -550,16 +550,25 @@ impl SandboxContainerRunner {
             protocol_version: PROTOCOL_VERSION,
             run_id: protocol_run_id,
             resume_from: *cursor,
+            // Present the per-run secret the backend minted and injected into the
+            // container; the supervisor verifies it before installing this
+            // connection. Cloned from the resolved address rather than discarded.
+            transport_secret: address.transport_secret.clone(),
         };
         let mut conn = match WireClient::connect(stream, attach, host.clone()).await {
             Ok(conn) => conn,
             Err(error) => {
-                // A version refusal is terminal; a transport failure during
-                // attach is a disconnect the driver retries.
+                // A version or authentication refusal is terminal — retrying the
+                // same secret against the same container cannot succeed; a
+                // transport failure during attach is a disconnect the driver
+                // retries.
                 return match error {
                     ConnectError::VersionRefused(_) => {
                         DrainOutcome::Failed("container speaks an incompatible protocol".to_owned())
                     }
+                    ConnectError::Unauthenticated(_) => DrainOutcome::Failed(
+                        "container rejected the run's transport secret".to_owned(),
+                    ),
                     _ => DrainOutcome::Disconnected,
                 };
             }

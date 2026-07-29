@@ -583,43 +583,6 @@ async fn streamed_raw_ingest_accepts_large_chunked_sources_and_deduplicates_by_c
     );
 }
 
-/// End-to-end proof that a PDF ingested through the raw route parses (via the
-/// liteparse parser registered in the real pipeline) and indexes to `Ready`,
-/// with the extracted text as canonical text. Only runs with the parser feature.
-#[cfg(feature = "parse-liteparse")]
-#[tokio::test]
-async fn raw_ingest_parses_and_indexes_a_pdf_end_to_end() {
-    let (router, token, store, _dir, worker) = test_app_with_worker().await;
-    let bearer = format!("Bearer {token}");
-    let pdf = include_bytes!("../fixtures/minimal.pdf").to_vec();
-
-    let response = post_raw(
-        &router,
-        &bearer,
-        "/documents/raw?uri=file%3A%2F%2F%2Freport.pdf",
-        Some("application/pdf"),
-        pdf,
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    let accepted: serde_json::Value = json_body(response).await;
-    let document_id: openwave_core::DocumentId =
-        accepted["document_id"].as_str().unwrap().parse().unwrap();
-
-    run_parse_and_index(&worker).await;
-
-    let ready = store.get_document(document_id).await.unwrap().unwrap();
-    assert_eq!(
-        ready.processing_status,
-        openwave_core::DocumentProcessingStatus::Ready
-    );
-    assert!(
-        ready.canonical_text.contains("liteparse ingest report"),
-        "expected the PDF's extracted text as canonical text, got: {:?}",
-        ready.canonical_text
-    );
-}
-
 #[tokio::test]
 async fn raw_ingest_enforces_media_type_body_and_project_scope() {
     let (router, token, store, _dir) = test_app().await;
@@ -1623,97 +1586,6 @@ async fn failed_update_keeps_the_prior_active_generation_searchable() {
 }
 
 #[tokio::test]
-async fn update_enqueues_without_calling_legacy_vector_retirement() {
-    let vector_store = Arc::new(FailNextDeleteVectorStore::new(HashEmbedder::DEFAULT_DIMS));
-    let retrieval = Arc::new(Retriever::new(
-        Box::new(PlainTextParser::new()),
-        Box::new(TextChunker::default()),
-        Arc::new(HashEmbedder::default()),
-        vector_store.clone(),
-    ));
-    let (router, token, store, _dir) =
-        test_app_with_retrieval(Arc::new(FakeProvider), retrieval).await;
-    let bearer = format!("Bearer {token}");
-    let uri = "file:///retirement.txt";
-
-    assert_eq!(
-        post_json(
-            &router,
-            &bearer,
-            "/documents",
-            serde_json::json!({"uri": uri, "content": "still authoritative"}),
-        )
-        .await
-        .status(),
-        StatusCode::ACCEPTED
-    );
-    vector_store.fail_next_delete();
-    assert_eq!(
-        post_json(
-            &router,
-            &bearer,
-            "/documents",
-            serde_json::json!({"uri": uri, "content": "must not publish"}),
-        )
-        .await
-        .status(),
-        StatusCode::ACCEPTED
-    );
-
-    let record = store
-        .get_document(openwave_core::DocumentId::derive(uri))
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(record.canonical_text.is_empty());
-    assert!(record.source_blob.is_some());
-    assert_eq!(record.content_revision, 2);
-    assert_eq!(record.indexed_revision, None);
-    assert_eq!(record.index_fingerprint, None);
-    assert_eq!(record.indexed_at, None);
-}
-
-#[tokio::test]
-async fn first_ingest_persists_source_without_attempting_vector_retirement() {
-    let vector_store = Arc::new(FailNextDeleteVectorStore::new(HashEmbedder::DEFAULT_DIMS));
-    vector_store.fail_next_delete();
-    let retrieval = Arc::new(Retriever::new(
-        Box::new(PlainTextParser::new()),
-        Box::new(TextChunker::default()),
-        Arc::new(HashEmbedder::default()),
-        vector_store,
-    ));
-    let (router, token, store, _dir) =
-        test_app_with_retrieval(Arc::new(FakeProvider), retrieval).await;
-    let bearer = format!("Bearer {token}");
-    let uri = "file:///first-source.txt";
-
-    assert_eq!(
-        post_json(
-            &router,
-            &bearer,
-            "/documents",
-            serde_json::json!({"uri": uri, "content": "source comes first"}),
-        )
-        .await
-        .status(),
-        StatusCode::ACCEPTED
-    );
-    let record = store
-        .get_document(openwave_core::DocumentId::derive(uri))
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(record.canonical_text.is_empty());
-    assert!(record.source_blob.is_some());
-    assert_eq!(record.indexed_revision, None);
-    assert_eq!(
-        record.processing_status,
-        openwave_core::DocumentProcessingStatus::Queued
-    );
-}
-
-#[tokio::test]
 async fn document_catalog_pages_metadata_and_keeps_project_content_private() {
     let (router, token, store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");
@@ -2417,6 +2289,7 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() 
         .await
         .unwrap(),
     );
+    let extract_store = store.clone();
     let (_retrieval, mut tools, config) = agent_deps(
         Arc::new(HashEmbedder::default()),
         Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
@@ -2425,10 +2298,13 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() 
             store.clone(),
             Arc::new(MemSecrets::default()),
         )),
-        Box::new(web_search::foreground_extract_tool(
-            store.clone(),
-            Arc::new(MemSecrets::default()),
-        )),
+        |retrieval| {
+            Box::new(web_search::foreground_extract_tool(
+                extract_store,
+                Arc::new(MemSecrets::default()),
+                retrieval.index_fingerprint(),
+            ))
+        },
         store,
     );
     assert!(

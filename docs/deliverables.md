@@ -112,6 +112,49 @@ it, and acceptance is a host-side operation the model cannot perform for itself.
 Acceptance changes nothing about export: a person still chooses the destination
 through **Save As…**, and the bytes never leave private app data until then.
 
+## Auto-merging a background agent's result
+
+A background agent finishes by submitting one immutable text result to its
+foreground parent. That result also becomes conversation output: when the run
+completes, the **host** merges the text into the output record as a durable
+revision. The merge is host-side by construction — it runs on the already
+committed result text, so the sandbox model can neither author, decline, nor
+steer it, and there is no pre-accept prompt. Safety comes from the merge being a
+versioned, revertible output rather than from a human gate.
+
+- The merge happens at result-commit time, right after the fenced result
+  transition. Its output and revision identities are derived from the producing
+  run, so an ambiguous submit retry re-runs the merge onto the same record
+  instead of forking a second output. The revision records the background run as
+  its producer, exactly like an accepted binary artifact, so the agent-run
+  surface can correlate a completed run with the output it produced.
+- The merged output is bounded and media-typed like every other deliverable: a
+  text result becomes a `text/markdown` output under the 512 KiB text ceiling,
+  written once at the same revision path a foreground deliverable uses. A folder
+  proposal or a cancellation is not conversation content and is never merged.
+- The merge is best-effort after the result has committed and delivered: a
+  failure to publish never fails a run whose result the parent can already
+  consume.
+
+## Versioning and revert
+
+Auto-merge is safe because every merged output is a durable, reversible version,
+so the host can always undo it:
+
+- **Revert to a prior revision.** An output's current-revision pointer is
+  independent of its newest revision, so republishing an earlier revision is a
+  pointer move that appends and destroys nothing. Every superseded revision
+  stays addressable, so a revert can be followed forward again.
+- **Retract the merge.** An auto-merged output that has only its initial
+  revision has no earlier version to fall back to, so reverting it retracts the
+  merge — a soft delete that hides the output while retaining its revision. The
+  desktop offers an inline undo, and restoring is the exact inverse of the
+  retraction, so nothing about the history changes.
+
+Both operations are host actions the model cannot perform, and neither is
+destructive: the revision history is insert-only, so a revert or a retract only
+moves pointers a person can move back.
+
 ## Deliberate limits
 
 An export is a synchronous user action, so it is not automatically retried and

@@ -29,6 +29,14 @@ pub const MAX_OUTPUT_BYTES: usize = 16_000;
 /// content budget as single-byte text; a page dense in multi-byte script is
 /// trimmed to fit and says so through `truncated`.
 pub const MAX_EXTRACT_OUTPUT_BYTES: usize = 64_000;
+/// Marker an extraction engine inserts between the head and tail of content it
+/// had to shorten from the middle.
+///
+/// It is public and lives here rather than beside the native engine because it
+/// is a boundary in the extracted text, not an implementation detail of one
+/// producer: text either side of it was not adjacent on the page, so anything
+/// that quotes a run of the content has to know where it is.
+pub const EXTRACT_TRUNCATION_MARKER: &str = "\n\n[... content truncated ...]\n\n";
 /// Below this many extracted words a page has no readable content.
 ///
 /// The floor is engine-neutral on purpose: a vendor that answers with a cookie
@@ -558,11 +566,16 @@ impl WebExtractResponse {
         truncated: bool,
     ) -> Result<Self, WebSearchError> {
         let url = canonical_http_url(url.as_ref())?;
+        // Sanitized here rather than in one engine, because every engine's
+        // output is a stranger's page: a vendor's rendered extraction can carry
+        // a bidirectional override or a zero-width mark exactly as a local parse
+        // can, and this is the one constructor both routes pass through before
+        // the text reaches a model, a durable source, or a reader.
         let mut response = Self {
             extraction_method,
             url,
-            title: truncate(title.as_ref().trim(), MAX_RESULT_TITLE_CHARS),
-            content: content.into(),
+            title: truncate(&sanitized_title(title.as_ref()), MAX_RESULT_TITLE_CHARS),
+            content: sanitized_content(&content.into()),
             word_count,
             truncated,
         };
@@ -720,6 +733,43 @@ fn canonical_http_url(value: &str) -> Result<String, WebSearchError> {
 
 pub(crate) fn truncate(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
+}
+
+/// A character that can misrepresent what a reader is looking at: a control
+/// code, a zero-width mark, or a bidirectional override.
+pub(crate) fn is_display_hazard(value: char) -> bool {
+    (value.is_control() && value != '\n' && value != '\t')
+        || matches!(value,
+            '\u{200b}'..='\u{200f}'   // zero-width and directional marks
+            | '\u{202a}'..='\u{202e}' // bidirectional embedding and override
+            | '\u{2066}'..='\u{2069}' // bidirectional isolates
+            | '\u{feff}') // zero-width no-break space
+}
+
+/// Strip display hazards from extracted content.
+///
+/// The sibling search-result path rejects a whole result that carries a
+/// control character. Extraction sanitizes instead: it holds one page that
+/// cost a fetch and a parse, and a single stray control character somewhere in
+/// a long article is not a reason to return nothing. The characters that could
+/// mislead a reader are removed; the article survives.
+pub(crate) fn sanitized_content(value: &str) -> String {
+    value
+        .chars()
+        .filter(|value| !is_display_hazard(*value))
+        .collect()
+}
+
+/// Reduce an extracted title to one clean line.
+///
+/// A title is a single-line field, so every hazard becomes a space and runs of
+/// whitespace collapse — a title cannot smuggle line breaks into a list.
+pub(crate) fn sanitized_title(value: &str) -> String {
+    let cleaned: String = value
+        .chars()
+        .map(|value| if is_display_hazard(value) { ' ' } else { value })
+        .collect();
+    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Words carrying at least one alphanumeric character.

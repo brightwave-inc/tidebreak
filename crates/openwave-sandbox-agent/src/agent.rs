@@ -26,6 +26,8 @@
 //! (or, in tests, a mock host model) is what decides the directive, so the loop
 //! is genuinely driven from the model over the reverse channel.
 
+use std::path::PathBuf;
+
 use openwave_core::{ChatId, ToolCtx, ToolRegistry};
 use openwave_sandbox_protocol::{ids::OperationId, SandboxRun};
 
@@ -47,19 +49,30 @@ pub enum AgentRunError {
     /// The loop hit its step bound without the model submitting a final answer.
     #[error("the agent loop exceeded {MAX_STEPS} model steps without a result")]
     StepLimit,
+    /// The agent's workspace directory could not be prepared.
+    #[error("the sandbox workspace directory is unavailable")]
+    Workspace,
 }
 
 /// Run the sandbox-resident agent loop for one `task`, driving it through `run`.
 ///
-/// Emits progress events as it works and submits the final answer as the run's
-/// terminal [`Result`](openwave_sandbox_protocol::events::EventPayload::Result)
-/// event. Returns the final answer text.
+/// `workspace` is the agent's in-container workspace directory; it is created if
+/// absent and canonicalized, and the sandbox-resident tool registry (`exec`, the
+/// filesystem tools) is scoped to it. Emits progress events as it works and
+/// submits the final answer as the run's terminal
+/// [`Result`](openwave_sandbox_protocol::events::EventPayload::Result) event.
+/// Returns the final answer text.
 ///
 /// # Errors
+/// [`AgentRunError::Workspace`] if the workspace cannot be prepared,
 /// [`AgentRunError::Model`] if a model step fails, or [`AgentRunError::StepLimit`]
 /// if the model never submits a final answer within the step bound.
-pub async fn run_agent(run: SandboxRun, task: impl Into<String>) -> Result<String, AgentRunError> {
-    let outcome = run_loop(run.clone(), task.into()).await;
+pub async fn run_agent(
+    run: SandboxRun,
+    task: impl Into<String>,
+    workspace: impl Into<PathBuf>,
+) -> Result<String, AgentRunError> {
+    let outcome = run_loop(run.clone(), task.into(), workspace.into()).await;
     // Every exit from the loop must put a terminal event on the stream. The
     // supervisor keeps serving the connection after this returns, so a host that
     // saw neither a result nor a failure would wait on an open socket forever
@@ -71,8 +84,16 @@ pub async fn run_agent(run: SandboxRun, task: impl Into<String>) -> Result<Strin
     outcome
 }
 
-async fn run_loop(run: SandboxRun, task: String) -> Result<String, AgentRunError> {
-    let tools = sandbox_tool_registry();
+async fn run_loop(
+    run: SandboxRun,
+    task: String,
+    workspace: PathBuf,
+) -> Result<String, AgentRunError> {
+    // The workspace is the tools' root: create it if the host has not, then
+    // canonicalize so path validation compares against the real directory.
+    std::fs::create_dir_all(&workspace).map_err(|_| AgentRunError::Workspace)?;
+    let workspace = std::fs::canonicalize(&workspace).map_err(|_| AgentRunError::Workspace)?;
+    let tools = sandbox_tool_registry(workspace);
     let model = HostModel::new(run.clone());
     // The sandbox loop has no host chat identity or filesystem scratch; a fresh
     // chat id and no private scratch keep the tool context self-contained.
@@ -147,9 +168,9 @@ mod tests {
 
     #[test]
     fn parses_a_tool_directive_and_ignores_a_final_answer() {
-        let directive = parse_tool_directive("use-tool:word_count:{\"text\":\"a b\"}").unwrap();
-        assert_eq!(directive.name, "word_count");
-        assert_eq!(directive.args, "{\"text\":\"a b\"}");
+        let directive = parse_tool_directive("use-tool:read_file:{\"path\":\"a.txt\"}").unwrap();
+        assert_eq!(directive.name, "read_file");
+        assert_eq!(directive.args, "{\"path\":\"a.txt\"}");
 
         assert!(parse_tool_directive("the final answer is 2").is_none());
         // An empty tool name is not a directive.

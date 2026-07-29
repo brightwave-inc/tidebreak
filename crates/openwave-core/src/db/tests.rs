@@ -33,10 +33,51 @@ fn document_content_placement(
     }
 }
 
+struct MigratedSqliteTemplate {
+    _directory: tempfile::TempDir,
+    database: std::path::PathBuf,
+}
+
+static MIGRATED_SQLITE_TEMPLATE: tokio::sync::OnceCell<MigratedSqliteTemplate> =
+    tokio::sync::OnceCell::const_new();
+
+/// Build the current empty schema once, then clone it for ordinary store tests.
+///
+/// Every caller still owns a distinct writable file. Tests that exercise the
+/// migration chain itself create their historical/raw schemas directly and do
+/// not use this helper.
+async fn migrated_sqlite_template() -> &'static MigratedSqliteTemplate {
+    MIGRATED_SQLITE_TEMPLATE
+        .get_or_init(|| async {
+            let directory = tempfile::tempdir().unwrap();
+            let database = directory.path().join("template.db");
+            let url = format!("sqlite://{}?mode=rwc", database.display());
+            let store = DbStore::connect(&url).await.unwrap();
+            store
+                .conn
+                .execute_unprepared("PRAGMA wal_checkpoint(TRUNCATE);")
+                .await
+                .unwrap();
+            drop(store);
+            MigratedSqliteTemplate {
+                _directory: directory,
+                database,
+            }
+        })
+        .await
+}
+
 async fn temp_store() -> (tempfile::TempDir, DbStore) {
+    let template = migrated_sqlite_template().await;
     let dir = tempfile::tempdir().unwrap();
-    let url = format!("sqlite://{}?mode=rwc", dir.path().join("test.db").display());
-    let store = DbStore::connect(&url).await.unwrap();
+    let database = dir.path().join("test.db");
+    std::fs::copy(&template.database, &database).unwrap();
+    let url = format!("sqlite://{}?mode=rw", database.display());
+    let conn = Database::connect(&url).await.unwrap();
+    conn.execute_unprepared("PRAGMA journal_mode=WAL;")
+        .await
+        .unwrap();
+    let store = DbStore { conn };
     (dir, store)
 }
 
@@ -801,6 +842,7 @@ async fn every_project_scoped_first_write_reports_a_typed_missing_project() {
     ));
 
     let canonical = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: Some(missing),
@@ -873,6 +915,7 @@ async fn documents_roundtrip_and_list_by_corpus_scope() {
     in_b = store.get_document(in_b.id).await.unwrap().unwrap();
 
     let legacy_replacement = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: in_b.id,
         project_id: in_b.project_id,
@@ -1094,6 +1137,7 @@ async fn live_document_cannot_move_between_project_corpora() {
     store.create_project(&project_a).await.unwrap();
     store.create_project(&project_b).await.unwrap();
     let source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: Some(project_a.id),
@@ -1109,6 +1153,7 @@ async fn live_document_cannot_move_between_project_corpora() {
         .await
         .unwrap();
     let moved = DocumentUpsert {
+        canonical_fingerprint: None,
         project_id: Some(project_b.id),
         canonical_text: "must not move".into(),
         source_regions: Vec::new(),
@@ -1230,6 +1275,7 @@ async fn source_regions_roundtrip_and_provenance_changes_advance_revision() {
         },
     };
     let source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -1260,6 +1306,7 @@ async fn source_regions_roundtrip_and_provenance_changes_advance_revision() {
     assert_eq!(same_job.id, first_job.id);
 
     let changed = DocumentUpsert {
+        canonical_fingerprint: None,
         source_regions: vec![page(2)],
         updated_at: Utc::now(),
         ..source
@@ -2592,6 +2639,7 @@ async fn ensure_parse_job_advances_parser_changes_and_reuses_the_transition() {
     );
 
     let canonical = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -2950,6 +2998,7 @@ async fn ready_document(store: &DbStore, source: &DocumentUpsert) -> DocumentRec
 async fn missing_derived_state_requeues_succeeded_job_without_advancing_generation() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -2991,6 +3040,7 @@ async fn missing_derived_state_requeues_succeeded_job_without_advancing_generati
 async fn index_maintenance_does_not_implicitly_revive_failed_job() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -3056,6 +3106,7 @@ async fn index_maintenance_does_not_implicitly_revive_failed_job() {
 async fn incomplete_succeeded_generation_advances_once_and_reuses_the_new_job() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -3111,6 +3162,7 @@ async fn incomplete_succeeded_generation_advances_once_and_reuses_the_new_job() 
 async fn concurrent_pipeline_change_advances_once_and_preserves_source() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -3181,6 +3233,7 @@ async fn source_revision_and_index_job_commit_and_supersede_together() {
     let document_id = DocumentId::new();
     let first_at = DateTime::<Utc>::from_timestamp(10_000, 0).unwrap();
     let first_source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: document_id,
         project_id: None,
@@ -3212,6 +3265,7 @@ async fn source_revision_and_index_job_commit_and_supersede_together() {
     // A request retry after an ambiguous response must return the exact
     // committed revision/job even when the source timestamp was refreshed.
     let retry_source = DocumentUpsert {
+        canonical_fingerprint: None,
         updated_at: first_at + chrono::Duration::seconds(1),
         ..first_source.clone()
     };
@@ -3257,6 +3311,7 @@ async fn source_revision_and_index_job_commit_and_supersede_together() {
 
     let second_at = DateTime::<Utc>::from_timestamp(20_000, 0).unwrap();
     let second_source = DocumentUpsert {
+        canonical_fingerprint: None,
         canonical_text: "second".into(),
         source_regions: Vec::new(),
         updated_at: second_at,
@@ -3282,6 +3337,7 @@ async fn source_revision_and_index_job_commit_and_supersede_together() {
     assert_eq!(jobs[1], second_job);
 
     let unknown = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         ..second_source
@@ -3298,6 +3354,7 @@ async fn source_revision_and_index_job_commit_and_supersede_together() {
     assert_eq!(store.list_document_jobs(unknown.id).await.unwrap(), vec![]);
 
     let orphan = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: Some(ProjectId::new()),
@@ -3327,6 +3384,7 @@ async fn enqueue_rolls_back_source_when_job_insert_fails() {
         .unwrap();
 
     let source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -3353,6 +3411,7 @@ async fn enqueue_rolls_back_source_when_job_insert_fails() {
 async fn replacement_enqueue_failure_restores_source_and_live_job() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -3423,6 +3482,7 @@ async fn replacement_enqueue_failure_restores_source_and_live_job() {
         .await
         .unwrap();
     let replacement = DocumentUpsert {
+        canonical_fingerprint: None,
         canonical_text: "replacement".into(),
         source_regions: Vec::new(),
         updated_at: source.updated_at + chrono::Duration::seconds(1),
@@ -3455,6 +3515,7 @@ async fn replacement_enqueue_failure_restores_source_and_live_job() {
 async fn document_delete_failure_rolls_back_tombstone_source_and_jobs() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -3504,6 +3565,7 @@ async fn concurrent_source_enqueues_leave_one_current_revision_and_job() {
             store
                 .upsert_document_and_enqueue_index(
                     &DocumentUpsert {
+                        canonical_fingerprint: None,
                         chat_id: None,
                         id: document_id,
                         project_id: None,
@@ -3560,6 +3622,7 @@ async fn concurrent_identical_first_enqueues_reuse_one_revision_and_job() {
             store
                 .upsert_document_and_enqueue_index(
                     &DocumentUpsert {
+                        canonical_fingerprint: None,
                         chat_id: None,
                         id: document_id,
                         project_id: None,
@@ -3595,6 +3658,7 @@ async fn concurrent_identical_first_enqueues_reuse_one_revision_and_job() {
 async fn document_job_claim_and_heartbeat_require_the_live_lease() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -3692,6 +3756,7 @@ async fn document_job_claim_and_heartbeat_require_the_live_lease() {
 async fn live_document_job_completion_atomically_publishes_ready_watermark() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -3753,6 +3818,7 @@ async fn live_document_job_completion_atomically_publishes_ready_watermark() {
 async fn live_document_job_failure_retries_then_fails_permanently() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -3853,6 +3919,7 @@ async fn live_document_job_failure_retries_then_fails_permanently() {
 async fn document_job_failure_validates_details_and_exhausts_retry_budget() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -3945,6 +4012,7 @@ async fn document_job_failure_validates_details_and_exhausts_retry_budget() {
 async fn explicit_retry_only_revives_current_failed_index_job() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -4092,6 +4160,7 @@ async fn explicit_retry_only_revives_current_failed_index_job() {
     );
 
     let replacement = DocumentUpsert {
+        canonical_fingerprint: None,
         canonical_text: "replacement".into(),
         source_regions: Vec::new(),
         updated_at: source.updated_at + chrono::Duration::seconds(1),
@@ -4117,6 +4186,7 @@ async fn explicit_retry_only_revives_current_failed_index_job() {
     let (newer_document, _) = store
         .upsert_document_and_enqueue_index(
             &DocumentUpsert {
+                canonical_fingerprint: None,
                 canonical_text: "newer replacement".into(),
                 source_regions: Vec::new(),
                 updated_at: source.updated_at + chrono::Duration::seconds(2),
@@ -4262,6 +4332,7 @@ async fn explicit_retry_revives_only_the_pending_parse_stage() {
 async fn completion_document_failure_rolls_back_the_job_transition() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -4316,6 +4387,7 @@ async fn completion_document_failure_rolls_back_the_job_transition() {
 async fn expired_document_job_leases_are_reclaimed_then_fail_at_the_attempt_limit() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -4360,6 +4432,7 @@ async fn expired_document_job_leases_are_reclaimed_then_fail_at_the_attempt_limi
         .unwrap());
 
     let fallback_source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         source_uri: Some("file:///after-exhausted-lease.txt".into()),
@@ -4414,6 +4487,7 @@ async fn expired_document_job_leases_are_reclaimed_then_fail_at_the_attempt_limi
 async fn claim_cancels_a_superseded_candidate_then_claims_the_next_job() {
     let (_dir, store) = temp_store().await;
     let first_source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -4429,6 +4503,7 @@ async fn claim_cancels_a_superseded_candidate_then_claims_the_next_job() {
         .await
         .unwrap();
     let second_source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         source_uri: Some("file:///next-claim.txt".into()),
@@ -4477,6 +4552,7 @@ async fn claim_cancels_a_superseded_candidate_then_claims_the_next_job() {
 async fn claim_reports_exact_identity_status_corruption_without_cancelling() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -4516,6 +4592,7 @@ async fn claim_reports_exact_identity_status_corruption_without_cancelling() {
 async fn claim_orders_expired_and_queued_jobs_by_effective_due_time() {
     let (_dir, store) = temp_store().await;
     let running_source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -4539,6 +4616,7 @@ async fn claim_orders_expired_and_queued_jobs_by_effective_due_time() {
         .unwrap();
 
     let queued_source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         source_uri: Some("file:///queued-second.txt".into()),
@@ -4591,6 +4669,7 @@ async fn concurrent_document_job_claimers_never_share_a_job() {
         let (_, job) = store
             .upsert_document_and_enqueue_index(
                 &DocumentUpsert {
+                    canonical_fingerprint: None,
                     chat_id: None,
                     id: DocumentId::new(),
                     project_id: None,
@@ -4636,6 +4715,7 @@ async fn concurrent_claim_and_replacement_enqueue_preserve_one_current_job() {
     let store = std::sync::Arc::new(store);
     for iteration in 0..8 {
         let source = DocumentUpsert {
+            canonical_fingerprint: None,
             chat_id: None,
             id: DocumentId::new(),
             project_id: None,
@@ -4664,6 +4744,7 @@ async fn concurrent_claim_and_replacement_enqueue_preserve_one_current_job() {
         let enqueue_store = store.clone();
         let enqueue_barrier = barrier.clone();
         let replacement = DocumentUpsert {
+            canonical_fingerprint: None,
             canonical_text: "replacement".into(),
             source_regions: Vec::new(),
             updated_at: source.updated_at + chrono::Duration::seconds(1),
@@ -4697,6 +4778,7 @@ async fn concurrent_delete_and_enqueue_leave_one_coherent_generation() {
     let store = std::sync::Arc::new(store);
     for iteration in 0..8 {
         let source = DocumentUpsert {
+            canonical_fingerprint: None,
             chat_id: None,
             id: DocumentId::new(),
             project_id: None,
@@ -4724,6 +4806,7 @@ async fn concurrent_delete_and_enqueue_leave_one_coherent_generation() {
         let enqueue_store = store.clone();
         let enqueue_barrier = barrier.clone();
         let replacement = DocumentUpsert {
+            canonical_fingerprint: None,
             canonical_text: "replacement".into(),
             source_regions: Vec::new(),
             updated_at: source.updated_at + chrono::Duration::seconds(1),
@@ -4774,6 +4857,7 @@ async fn document_upsert_revisions_and_index_watermark_are_compare_and_set() {
     let id = DocumentId::derive("file:///report.txt");
     let first_at = DateTime::<Utc>::from_timestamp(10_000, 0).unwrap();
     let first = DocumentUpsert {
+        canonical_fingerprint: None,
         id,
         chat_id: None,
         project_id: None,
@@ -4814,6 +4898,7 @@ async fn document_upsert_revisions_and_index_watermark_are_compare_and_set() {
 
     let second_at = DateTime::<Utc>::from_timestamp(20_000, 0).unwrap();
     let second = DocumentUpsert {
+        canonical_fingerprint: None,
         canonical_text: "second version".into(),
         source_regions: Vec::new(),
         updated_at: second_at,
@@ -4876,6 +4961,7 @@ async fn document_upsert_revisions_and_index_watermark_are_compare_and_set() {
 async fn stale_revision_token_cannot_mark_a_recreated_document_indexed() {
     let (_dir, store) = temp_store().await;
     let first = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -4891,6 +4977,7 @@ async fn stale_revision_token_cannot_mark_a_recreated_document_indexed() {
     let recreated_at = DateTime::<Utc>::from_timestamp(2, 0).unwrap();
     let recreated = store
         .upsert_document(&DocumentUpsert {
+            canonical_fingerprint: None,
             chat_id: None,
             id: old.id,
             project_id: old.project_id,
@@ -4943,6 +5030,7 @@ async fn document_generation_clock_survives_unknown_delete_and_recreation() {
     assert_eq!(store.get_document(id).await.unwrap(), None);
 
     let source = DocumentUpsert {
+        canonical_fingerprint: None,
         id,
         chat_id: None,
         project_id: None,
@@ -4958,6 +5046,7 @@ async fn document_generation_clock_survives_unknown_delete_and_recreation() {
     assert_ne!(first.revision_token, unknown_tombstone.revision_token);
     let second = store
         .upsert_document(&DocumentUpsert {
+            canonical_fingerprint: None,
             canonical_text: "second live source".into(),
             source_regions: Vec::new(),
             ..source.clone()
@@ -4987,6 +5076,7 @@ async fn pending_document_retirement_survives_reopen_and_uses_exact_cas() {
     );
     let id = DocumentId::new();
     let source = DocumentUpsert {
+        canonical_fingerprint: None,
         id,
         chat_id: None,
         project_id: None,
@@ -5021,6 +5111,7 @@ async fn pending_document_retirement_survives_reopen_and_uses_exact_cas() {
 
     let recreated = store
         .upsert_document(&DocumentUpsert {
+            canonical_fingerprint: None,
             canonical_text: "new lifecycle".into(),
             source_regions: Vec::new(),
             updated_at: DateTime::<Utc>::from_timestamp(2, 0).unwrap(),
@@ -5113,6 +5204,7 @@ async fn pending_document_retirement_cursor_advances_and_can_wrap() {
 async fn document_generation_overflow_leaves_source_and_clock_unchanged() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -5185,6 +5277,7 @@ async fn document_generation_overflow_leaves_source_and_clock_unchanged() {
 async fn concurrent_first_document_upserts_allocate_distinct_revisions() {
     let (_dir, store) = temp_store().await;
     let first = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -5196,6 +5289,7 @@ async fn concurrent_first_document_upserts_allocate_distinct_revisions() {
         updated_at: DateTime::<Utc>::from_timestamp(1, 0).unwrap(),
     };
     let second = DocumentUpsert {
+        canonical_fingerprint: None,
         canonical_text: "b".into(),
         source_regions: Vec::new(),
         ..first.clone()
@@ -5217,6 +5311,7 @@ async fn concurrent_first_document_upserts_allocate_distinct_revisions() {
 async fn document_upsert_rolls_back_when_project_is_unknown() {
     let (_dir, store) = temp_store().await;
     let upsert = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: Some(ProjectId::new()),
@@ -5239,6 +5334,7 @@ async fn document_upsert_rolls_back_when_project_is_unknown() {
 async fn concurrent_document_upserts_allocate_distinct_revisions() {
     let (_dir, store) = temp_store().await;
     let base = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -5255,12 +5351,14 @@ async fn concurrent_document_upserts_allocate_distinct_revisions() {
         1
     );
     let a = DocumentUpsert {
+        canonical_fingerprint: None,
         canonical_text: "a".into(),
         source_regions: Vec::new(),
         updated_at: DateTime::<Utc>::from_timestamp(2, 0).unwrap(),
         ..base.clone()
     };
     let b = DocumentUpsert {
+        canonical_fingerprint: None,
         canonical_text: "b".into(),
         source_regions: Vec::new(),
         updated_at: DateTime::<Utc>::from_timestamp(3, 0).unwrap(),
@@ -5286,6 +5384,7 @@ async fn high_contention_document_upserts_do_not_drop_writers() {
         async move {
             store
                 .upsert_document(&DocumentUpsert {
+                    canonical_fingerprint: None,
                     id,
                     chat_id: None,
                     project_id: None,
@@ -10656,6 +10755,7 @@ async fn document_chat_scope_is_isolated_and_mutually_exclusive_with_project_sco
     ] {
         store
             .upsert_document(&DocumentUpsert {
+                canonical_fingerprint: None,
                 id,
                 chat_id: Some(chat_id),
                 project_id: None,
@@ -10686,6 +10786,7 @@ async fn document_chat_scope_is_isolated_and_mutually_exclusive_with_project_sco
 
     let error = store
         .upsert_document(&DocumentUpsert {
+            canonical_fingerprint: None,
             id: DocumentId::new(),
             chat_id: Some(first_chat.id),
             project_id: Some(project.id),
@@ -11408,6 +11509,7 @@ async fn retrieval_evidence_is_atomic_generation_fenced_and_survives_source_chan
     store.create_chat(&chat).await.unwrap();
     let updated_at = DateTime::<Utc>::from_timestamp(1_700_001_000, 0).unwrap();
     let source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -11764,6 +11866,7 @@ async fn retrieval_evidence_is_atomic_generation_fenced_and_survives_source_chan
     );
 
     let replacement = DocumentUpsert {
+        canonical_fingerprint: None,
         canonical_text: "new text".into(),
         updated_at: updated_at + chrono::Duration::seconds(2),
         ..source.clone()

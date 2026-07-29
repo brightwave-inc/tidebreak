@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 
 import type { CitationPageBounds, StructuredPathType } from "@/api";
+import type { SheetCellRange } from "@/AssistantSources";
 import { useChatSessionStore } from "@/ChatSessionStore";
 import type { CitationSpan } from "@/components/document/citationSpan";
 import type { ChatMessage } from "@/MessageList";
@@ -23,6 +24,12 @@ export type CitationPlacement = {
    * extracted text, and the path is what the original view opens at.
    */
   structuredPath?: Readonly<{ path: string; pathType: StructuredPathType }>;
+  /**
+   * The cells the passage came from, for a source read as a grid. Carried
+   * beside the span for the same reason a node path is: the span addresses the
+   * extracted text, and the range is what the workbook view opens at.
+   */
+  cellRange?: SheetCellRange;
 };
 
 /**
@@ -49,6 +56,7 @@ export function findCitationPlacement(
         page: earliestPage(source.pages, source.bounds),
         bounds: source.bounds,
         structuredPath: source.structuredPath,
+        cellRange: source.cellRange,
       };
     }
   }

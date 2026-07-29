@@ -11,7 +11,10 @@ import {
 } from "@/components/document/document-details";
 import { DocumentError } from "@/components/document/error";
 import { Button } from "@/components/ui/button";
-import { isPaginatedOriginalViewer } from "@/document/DocumentViewer";
+import {
+  isGridOriginalViewer,
+  isPaginatedOriginalViewer,
+} from "@/document/DocumentViewer";
 import { exportLibraryDocument } from "@/documents";
 import { hasNativeHost } from "@/host";
 import { PanelFrame } from "@/panel/PanelFrame";
@@ -77,7 +80,10 @@ export function DocumentDetailRoot({
   }, [client, chatId, documentID, reloads]);
 
   const hasOriginalDocumentTab =
-    info != null && info.processing_status !== "failed" && isDocumentRenderable(info.media_type);
+    info != null &&
+    info.processing_status !== "failed" &&
+    info.has_original_bytes &&
+    isDocumentRenderable(info.media_type);
 
   const [view, setView] = useState<DocumentView>("original_doc");
 
@@ -107,10 +113,23 @@ export function DocumentDetailRoot({
       ? placement.structuredPath.path
       : undefined;
 
+  // A cell range only opens a source the panel draws as a grid. A workbook
+  // format with no viewer here — OpenDocument today — still carries the range on
+  // its citation, and lands on the extracted text where the rows it quoted are
+  // highlighted instead.
+  const citationCellRange =
+    placement?.cellRange != null &&
+    hasOriginalDocumentTab &&
+    info != null &&
+    isGridOriginalViewer(info.media_type)
+      ? placement.cellRange
+      : undefined;
+
   // Arriving from a citation, land on whichever view can show where it points:
-  // the recorded page of a paginated original, or else the extracted text,
-  // where the passage itself is highlighted. A citation the transcript cannot
-  // resolve opens the document the same way the source list does.
+  // the recorded page of a paginated original, the range of a grid one, or else
+  // the extracted text, where the passage itself is highlighted. A citation the
+  // transcript cannot resolve opens the document the same way the source list
+  // does.
   //
   // The original view is only worth landing on where there is one: a source
   // whose processing failed has no viewer behind that tab, however precisely
@@ -118,7 +137,10 @@ export function DocumentDetailRoot({
   // showing nothing at all rather than saying what went wrong.
   const citationView: DocumentView | null = !placement
     ? null
-    : (citationPage != null || citationPath != null) && hasOriginalDocumentTab
+    : (citationPage != null ||
+          citationPath != null ||
+          citationCellRange != null) &&
+        hasOriginalDocumentTab
       ? "original_doc"
       : "extracted_text";
 
@@ -198,6 +220,7 @@ export function DocumentDetailRoot({
           highlightPath={citationPath}
           targetPage={citationPage}
           citationBounds={citationBounds}
+          citationCellRange={citationCellRange}
         />
       ) : (
         <p className="p-6 text-sm text-muted-foreground" role="status">

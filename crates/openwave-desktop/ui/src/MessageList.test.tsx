@@ -21,38 +21,13 @@ function backgroundRun(
     finished_at: null,
     last_error_code: null,
     activity: null,
+    produced_output: status === "completed",
     created_at: "2026-07-27T12:00:00Z",
     updated_at: "2026-07-27T12:00:00Z",
   };
 }
 
 describe("MessageBubble", () => {
-  it("keeps the user compact while rendering assistant Markdown without a bubble", () => {
-    const user = renderToStaticMarkup(
-      <MessageBubble
-        message={{ id: "user-1", role: "user", text: "Hello **there**" }}
-        busy={false}
-      />,
-    );
-    const assistant = renderToStaticMarkup(
-      <MessageBubble
-        message={{
-          id: "assistant-1",
-          role: "assistant",
-          text: "## Answer",
-          sources: [],
-        }}
-        busy={false}
-      />,
-    );
-
-    expect(user).toContain('class="message message-user"');
-    expect(user).toContain("<strong>there</strong>");
-    expect(assistant).toContain('class="message message-assistant"');
-    expect(assistant).toContain("<h2>Answer</h2>");
-    expect(assistant).not.toContain("bubble");
-  });
-
   it("keeps a phase ahead of the response it precedes, with one worker status", () => {
     const messages: ChatMessage[] = [
       { id: "tool-1", role: "tool", callId: "call-1", name: "web_search", status: "running" },

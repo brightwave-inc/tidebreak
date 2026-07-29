@@ -28,6 +28,8 @@ type ApprovalCardProps = {
   canRemember: boolean;
   /** How far a remembered answer will reach, for the option labels. */
   grantScope?: GrantScopeName;
+  /** Token counts of the prefix rungs the server will honor for this call. */
+  prefixRungs?: readonly number[];
   /** The Auto-mode judge is deciding. Advisory only: the card stays live. */
   autoJudging?: boolean;
   deciding: boolean;
@@ -58,13 +60,21 @@ export function ApprovalCard({
   canApprove,
   canRemember,
   grantScope = "chat",
+  prefixRungs = [],
   autoJudging,
   deciding,
   error,
   onDecide,
 }: ApprovalCardProps) {
   const [expanded, setExpanded] = useState(false);
-  const options = approvalOptions(preview, canApprove, canRemember, expanded, grantScope);
+  const options = approvalOptions(
+    preview,
+    canApprove,
+    canRemember,
+    expanded,
+    grantScope,
+    prefixRungs,
+  );
   const [highlight, setHighlight] = useState(0);
   const rowRefs = useRef<Array<HTMLDivElement | null>>([]);
   const hasAutoFocused = useRef(false);
@@ -261,6 +271,7 @@ export function approvalOptions(
   canRemember: boolean,
   expanded = false,
   scope: GrantScopeName = "chat",
+  prefixRungs: readonly number[] = [],
 ): ApprovalOption[] {
   if (!canApprove) return [declineOption()];
 
@@ -277,7 +288,7 @@ export function approvalOptions(
     },
   ];
 
-  const grants = canRemember ? grantLadder(preview, scope) : [];
+  const grants = canRemember ? grantLadder(preview, scope, prefixRungs) : [];
   const visible = expanded ? grants : grants.slice(0, INLINE_GRANTS);
   options.push(...visible);
   if (grants.length > visible.length) {
@@ -308,6 +319,7 @@ function declineOption(): ApprovalOption {
 export function grantLadder(
   preview: ToolActionPreview | null,
   scope: GrantScopeName = "chat",
+  prefixRungs: readonly number[] = [],
 ): ApprovalOption[] {
   // The label names the level the server will actually write. A chat filed
   // under a project grants across it, and saying "this chat" while writing
@@ -332,23 +344,23 @@ export function grantLadder(
     decision: "approve",
     grant: "exact_action",
   };
-  // A command is the one action with a rung between itself and its whole tool:
-  // the executable it runs. With no arguments even that would be the same
-  // grant as the exact one.
-  if (preview.tool !== "exec" || preview.args.length === 0) {
+  if (preview.tool !== "exec") {
     return [exact, wholeTool];
   }
-  return [
-    exact,
-    {
+  // Which token runs may be granted is the server's answer, not a guess made
+  // here: a command the analyzer would never auto-run under a prefix rule has
+  // none, and offering one anyway would promise something the gate refuses.
+  const argv = [preview.command, ...preview.args];
+  const prefixes: ApprovalOption[] = prefixRungs
+    .filter((tokens) => tokens > 0 && tokens <= argv.length)
+    .map((tokens) => ({
       kind: "decide",
-      key: "any-args",
-      label: `Yes, and always allow any \u201c${preview.command}\u201d command`,
+      key: `prefix-${tokens}`,
+      label: `Yes, and always allow any \u201c${argv.slice(0, tokens).join(" ")}\u201d command`,
       decision: "approve",
-      grant: "any_args_for_command",
-    },
-    wholeTool,
-  ];
+      grant: { command_prefix: { tokens } },
+    }));
+  return [exact, ...prefixes, wholeTool];
 }
 
 /** How much of an action fits in one row of the option list. */

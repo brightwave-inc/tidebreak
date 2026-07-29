@@ -13,7 +13,6 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
 type ToolsMenuProps = {
@@ -40,18 +39,16 @@ export function ToolsMenu({
 
   return (
     <DropdownMenu>
-      <WithTooltip label={attaching ? "Attaching…" : "Add"}>
-        <DropdownMenuTrigger asChild>
-          <Button
-            variant="outline"
-            size="icon-8"
-            aria-label={attaching ? "Attaching" : "Add"}
-            disabled={disabled || attaching}
-          >
-            <Plus aria-hidden="true" />
-          </Button>
-        </DropdownMenuTrigger>
-      </WithTooltip>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="outline"
+          size="icon-8"
+          aria-label={attaching ? "Attaching" : "Add"}
+          disabled={disabled || attaching}
+        >
+          <Plus aria-hidden="true" />
+        </Button>
+      </DropdownMenuTrigger>
       <DropdownMenuContent align="start" side="top" className="w-56">
         {onAttach && (
           <>
@@ -74,7 +71,7 @@ export function ToolsMenu({
               {citationLabel}
             </span>
           </DropdownMenuSubTrigger>
-          <DropdownMenuSubContent className="w-72 p-0">
+          <DropdownMenuSubContent className="w-72 p-0" collisionPadding={8}>
             <div className="flex flex-col gap-1 p-1">
               <DefaultRow
                 isDefault={isDefault}

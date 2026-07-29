@@ -142,6 +142,113 @@ test("Rust CI requires the same PostgreSQL lane on pull requests and main", () =
   }
   assert.match(testJob, /save-if: \$\{\{ github\.ref == 'refs\/heads\/main' \}\}/);
   assert.match(testJob, /cache-on-failure: true/);
+  assert.match(
+    testJob,
+    /cargo test --workspace --exclude openwave-desktop\n\s+--no-default-features\n\s+--features\n\s+openwave-core\/default,openwave-retrieval\/default,openwave-router\/default\n\s+--locked/,
+  );
+  const desktop = workflowJob(ci, "desktop");
+  assert.match(
+    desktop,
+    /parser_features="parse-liteparse,parse-office,parse-image,parse-spreadsheet"/,
+  );
+  assert.match(desktop, /liteparse_parser::tests/);
+  assert.match(desktop, /liteparse_office_parser::tests/);
+  assert.match(desktop, /liteparse_image_parser::tests/);
+  assert.match(desktop, /spreadsheet_parser::tests/);
+  assert.match(
+    desktop,
+    /production_registry_routes_rich_formats_to_the_intended_parser/,
+  );
+  assert.match(desktop, /--test liteparse_pdf/);
+  assert.doesNotMatch(desktop, /cargo test -p openwave-server/);
+});
+
+test("UI tests and production build run as parallel matrix jobs", () => {
+  const ci = workflows["ci.yml"];
+  const ui = workflowJob(ci, "ui");
+  const aggregate = workflowJob(ci, "rust");
+
+  assert.match(ui, /name: desktop UI · \$\{\{ matrix\.task \}\}/);
+  assert.match(ui, /strategy:\n\s+fail-fast: false\n\s+matrix:\n\s+task: \[test, build\]/);
+  assert.match(ui, /run: pnpm install --frozen-lockfile/);
+  assert.match(ui, /run: pnpm \$\{\{ matrix\.task \}\}/);
+  assert.match(aggregate, /UI_RESULT: \$\{\{ needs\.ui\.result \}\}/);
+  assert.match(aggregate, /true\) test "\$UI_RESULT" = success ;;/);
+});
+
+test("PR compiler caches are writable, isolated, and deleted on close", () => {
+  const ci = workflows["ci.yml"];
+  for (const name of ["lint", "desktop", "test", "vectors", "postgres"]) {
+    assert.match(workflowJob(ci, name), /SCCACHE_GHA_RW_MODE: READ_WRITE/);
+  }
+  assert.doesNotMatch(
+    ci,
+    /github\.event_name == 'pull_request' && 'READ_ONLY' \|\| 'READ_WRITE'/,
+  );
+
+  const cleanup = workflows["cache-cleanup.yml"];
+  assert.ok(cleanup);
+  assert.match(
+    cleanup,
+    /^on:\n(?:  #.*\n)+  pull_request_target:\n    types: \[closed\]/m,
+  );
+  assert.match(cleanup, /^permissions:\n  actions: write\n  contents: read$/m);
+  assert.match(
+    cleanup,
+    /gh cache delete --repo "\$GITHUB_REPOSITORY"\n\s+--all --succeed-on-no-caches\n\s+--ref "refs\/pull\/\$\{PR_NUMBER\}\/merge"/,
+  );
+  assert.doesNotMatch(cleanup, /actions\/checkout|secrets\./);
+});
+
+test("heavy capability lanes run only for relevant merges and scheduled backstops", () => {
+  const ci = workflows["ci.yml"];
+  const changes = workflowJob(ci, "changes");
+  const vectors = workflowJob(ci, "vectors");
+  const sandboxContainer = workflowJob(ci, "sandbox-container");
+  const aggregate = workflowJob(ci, "rust");
+
+  assert.match(ci, /^  schedule:\n    - cron: "17 6 \* \* 1"$/m);
+  assert.match(changes, /schedule\|workflow_dispatch\)/);
+  assert.match(changes, /echo "vectors=true"/);
+  assert.match(changes, /echo "sandbox_container=true"/);
+
+  // Positive scopes: feature implementations, production wiring, packaging,
+  // and dependency/toolchain inputs all exercise their expensive capability.
+  assert.match(changes, /crates\/openwave-retrieval\/\*\)/);
+  assert.match(
+    changes,
+    /crates\/openwave-server\/build\.rs\|crates\/openwave-server\/src\/lib\.rs\|crates\/openwave-server\/src\/tests\/documents\.rs\)/,
+  );
+  assert.match(changes, /crates\/openwave-sandbox-agent\/\*/);
+  assert.match(changes, /crates\/openwave-sandbox-protocol\/\*/);
+  assert.match(changes, /\.cargo\/\*\|Cargo\.lock\|Cargo\.toml\|rust-toolchain\.toml\)/);
+
+  // Negative scope: the generic Rust/workspace fallback deliberately does not
+  // turn either heavyweight capability on.
+  assert.match(changes, /\*\) rust=true; workspace=true ;;/);
+
+  assert.match(
+    vectors,
+    /if:.*needs\.changes\.outputs\.vectors == 'true'.*github\.event_name != 'pull_request'/,
+  );
+  assert.match(
+    vectors,
+    /cargo test -p openwave-server --features vec-lance --locked --lib \\\n\s+tests::documents::connect_vector_store_opens_a_durable_lance_index_under_data_dir \\\n\s+-- --exact/,
+  );
+  assert.match(
+    sandboxContainer,
+    /if:.*needs\.changes\.outputs\.sandbox_container == 'true'.*github\.event_name != 'pull_request'/,
+  );
+  assert.match(aggregate, /case "\$VECTORS_CHANGED" in/);
+  assert.match(aggregate, /case "\$SANDBOX_CONTAINER_CHANGED" in/);
+  assert.match(
+    aggregate,
+    /vector scope without workspace scope; the detector is wrong/,
+  );
+  assert.match(
+    aggregate,
+    /sandbox-container scope without workspace scope; the detector is wrong/,
+  );
 });
 
 test("production secrets remain isolated to the release workflow", () => {

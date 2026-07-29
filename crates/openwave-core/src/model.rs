@@ -116,6 +116,25 @@ pub enum SourceLocation {
         /// How to read the path.
         path_type: StructuredPathType,
     },
+    /// Cells of one sheet of a workbook.
+    ///
+    /// A workbook has no pages either: its canonical text is a rendering of the
+    /// grid, and the position a reader opens is a range of that grid. A parser
+    /// emits one region per cell, so a passage that later covers many of them
+    /// can be reduced to the rectangle it occupies rather than to the first cell
+    /// it touched.
+    SpreadsheetCells {
+        /// Zero-based position of the sheet in the workbook.
+        sheet_index: i32,
+        /// The sheet's own name, which is what a reader is shown.
+        sheet_name: String,
+        /// First cell of the range, in A1 notation.
+        start_cell: String,
+        /// Last cell of the range, in A1 notation, for a range wider than one
+        /// cell.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_cell: Option<String>,
+    },
 }
 
 impl SourceLocation {
@@ -126,6 +145,100 @@ impl SourceLocation {
             Self::StructuredPath { path, path_type } => Some((path.as_str(), *path_type)),
             _ => None,
         }
+    }
+
+    /// The cells of a sheet this location names, where it names some.
+    #[must_use]
+    pub fn spreadsheet_cells(&self) -> Option<SpreadsheetCells<'_>> {
+        match self {
+            Self::SpreadsheetCells {
+                sheet_index,
+                sheet_name,
+                start_cell,
+                end_cell,
+            } => Some(SpreadsheetCells {
+                sheet_index: *sheet_index,
+                sheet_name: sheet_name.as_str(),
+                start_cell: start_cell.as_str(),
+                end_cell: end_cell.as_deref(),
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// A borrowed view of the cells a [`SourceLocation::SpreadsheetCells`] names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpreadsheetCells<'a> {
+    /// Zero-based position of the sheet in the workbook.
+    pub sheet_index: i32,
+    /// The sheet's own name.
+    pub sheet_name: &'a str,
+    /// First cell of the range, in A1 notation.
+    pub start_cell: &'a str,
+    /// Last cell of the range, for a range wider than one cell.
+    pub end_cell: Option<&'a str>,
+}
+
+/// A cell's zero-based column and row, which is the form a range is compared and
+/// combined in. A1 notation is what a reader reads; this is what arithmetic
+/// works on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CellAddress {
+    /// Zero-based column, so `A` is 0.
+    pub column: u32,
+    /// Zero-based row, so row `1` is 0.
+    pub row: u32,
+}
+
+impl CellAddress {
+    /// Read an A1 reference — `B5`, `AA10` — into column and row.
+    ///
+    /// Returns `None` for anything `is_a1_reference` would reject, so a
+    /// malformed reference never becomes an arbitrary cell. Column letters are
+    /// read case-insensitively, which is how a spreadsheet reads them.
+    #[must_use]
+    pub fn parse(cell: &str) -> Option<Self> {
+        if !is_a1_reference(cell) {
+            return None;
+        }
+        let split = cell.bytes().take_while(u8::is_ascii_alphabetic).count();
+        let (letters, digits) = cell.split_at(split);
+        let column = letters.bytes().try_fold(0_u32, |column, letter| {
+            column
+                .checked_mul(26)?
+                .checked_add(u32::from(letter.to_ascii_uppercase() - b'A') + 1)
+        })?;
+        let row: u32 = digits.parse().ok()?;
+        Some(Self {
+            // Both are one-based on the page and zero-based here; the guard
+            // above has already rejected a zero row.
+            column: column - 1,
+            row: row.checked_sub(1)?,
+        })
+    }
+
+    /// Write this address back as A1 notation.
+    ///
+    /// `None` for an address past the widest and tallest worksheet A1 addresses,
+    /// which no real sheet reaches but a malformed file can claim. Producers
+    /// leave such a cell out rather than recording a reference that would be
+    /// rejected downstream, taking the whole document with it.
+    #[must_use]
+    pub fn to_a1(self) -> Option<String> {
+        let mut letters = Vec::new();
+        let mut column = self.column;
+        loop {
+            letters.push(b'A' + u8::try_from(column % 26).expect("a remainder of 26 fits u8"));
+            match column / 26 {
+                0 => break,
+                next => column = next - 1,
+            }
+        }
+        letters.reverse();
+        let letters = String::from_utf8(letters).expect("ASCII column letters are UTF-8");
+        let cell = format!("{letters}{}", self.row.checked_add(1)?);
+        is_a1_reference(&cell).then_some(cell)
     }
 }
 
@@ -172,6 +285,22 @@ pub fn validate_source_regions(
                     || path.contains('\0')
                 {
                     return Err("structured source region paths must be nonempty and bounded");
+                }
+            }
+            SourceLocation::SpreadsheetCells {
+                sheet_index,
+                sheet_name,
+                start_cell,
+                end_cell,
+            } => {
+                if !is_a1_reference(start_cell)
+                    || !end_cell.as_deref().is_none_or(is_a1_reference)
+                    || *sheet_index < 0
+                    || sheet_name.is_empty()
+                    || sheet_name.len() > EvidenceLocation::MAX_SHEET_NAME_BYTES
+                    || sheet_name.contains('\0')
+                {
+                    return Err("spreadsheet source regions must name a sheet and A1 cells");
                 }
             }
         }
@@ -926,14 +1055,21 @@ impl EvidenceLocation {
     /// node that contains them all — the enclosing record of three quoted
     /// fields, not the first of the three. When the passage covers so much of
     /// the tree that the only common node is the root, which has no path, the
-    /// first node it touches is where a reader is sent instead. Anything else
-    /// is document content, which is what pages, headings, and geometry
-    /// describe.
+    /// first node it touches is where a reader is sent instead. A parser that
+    /// resolved a workbook hands back cells, and a passage covering several is
+    /// the rectangle enclosing them. Anything else is document content, which
+    /// is what pages, headings, and geometry describe.
     #[must_use]
     pub fn for_source_regions(
         heading_path: Vec<String>,
         source_regions: Vec<SourceRegion>,
     ) -> Self {
+        if let Some(cells) = source_regions
+            .first()
+            .and_then(|region| region.location.spreadsheet_cells())
+        {
+            return Self::spreadsheet_cell_range(cells, &source_regions);
+        }
         let Some((first, path_type)) = source_regions
             .first()
             .and_then(|region| region.location.structured_path())
@@ -957,6 +1093,72 @@ impl EvidenceLocation {
         Self::StructuredPath {
             path: path.to_owned(),
             path_type,
+        }
+    }
+
+    /// The rectangle of `sheet` that `regions` occupy, given the first of them.
+    ///
+    /// A cell range names one sheet, so only the regions on the sheet the
+    /// passage started on widen it. A passage that runs off the end of one sheet
+    /// and into the next is located on the first, covering the cells it read
+    /// there — the alternative is a range spanning two grids, which addresses
+    /// nothing a reader can be shown.
+    fn spreadsheet_cell_range(sheet: SpreadsheetCells<'_>, regions: &[SourceRegion]) -> Self {
+        let mut top_left = CellAddress::parse(sheet.start_cell);
+        let mut bottom_right = sheet.end_cell.map_or(top_left, CellAddress::parse);
+        for region in regions {
+            let Some(cells) = region.location.spreadsheet_cells() else {
+                continue;
+            };
+            if cells.sheet_index != sheet.sheet_index {
+                continue;
+            }
+            for cell in [Some(cells.start_cell), cells.end_cell]
+                .into_iter()
+                .flatten()
+                .filter_map(CellAddress::parse)
+            {
+                top_left = Some(match top_left {
+                    Some(corner) => CellAddress {
+                        column: corner.column.min(cell.column),
+                        row: corner.row.min(cell.row),
+                    },
+                    None => cell,
+                });
+                bottom_right = Some(match bottom_right {
+                    Some(corner) => CellAddress {
+                        column: corner.column.max(cell.column),
+                        row: corner.row.max(cell.row),
+                    },
+                    None => cell,
+                });
+            }
+        }
+        // Cells that do not read as A1, or a rectangle whose corners cannot be
+        // written back as A1, leave the range unresolved. Passing the parser's
+        // own text through keeps the location honest — it is checked by
+        // `is_well_formed` like any other, and a reader is not sent to a cell
+        // that was invented here.
+        let resolved = top_left.zip(bottom_right).and_then(|(start, end)| {
+            let start_cell = start.to_a1()?;
+            let end_cell = if start == end {
+                None
+            } else {
+                Some(end.to_a1()?)
+            };
+            Some((start_cell, end_cell))
+        });
+        let (start_cell, end_cell) = resolved.unwrap_or_else(|| {
+            (
+                sheet.start_cell.to_owned(),
+                sheet.end_cell.map(str::to_owned),
+            )
+        });
+        Self::SpreadsheetCellRange {
+            start_cell,
+            end_cell,
+            sheet_index: sheet.sheet_index,
+            sheet_name: sheet.sheet_name.to_owned(),
         }
     }
 }
@@ -1371,6 +1573,16 @@ pub struct DocumentUpsert {
     pub title: Option<String>,
     /// Parsed text-of-record.
     pub canonical_text: String,
+    /// Identity of whatever produced [`Self::canonical_text`], when the caller
+    /// knows it.
+    ///
+    /// Blob-backed sources get this from the parse job, which is the only thing
+    /// that can answer for them. A caller of this path already holds parsed
+    /// text, so it is the only one who can say where the text came from — and
+    /// for a source with no retained original, the answer is unrecoverable
+    /// afterwards. `None` means "not tracked", which is what every historical
+    /// row of this shape holds.
+    pub canonical_fingerprint: Option<String>,
     /// Parser-produced mappings from canonical text to original source pages.
     pub source_regions: Vec<SourceRegion>,
     /// Time of this authoritative write.
@@ -3235,6 +3447,48 @@ mod tests {
             sheet_index,
             sheet_name: sheet_name.into(),
         }
+    }
+
+    /// Column letters are bijective base-26, not base-26: `Z` is followed by
+    /// `AA`, not by `BA`, and there is no zero digit. Getting the carry wrong
+    /// sends a citation to a cell nobody meant, silently and plausibly, which is
+    /// exactly the failure a reader cannot detect.
+    #[test]
+    fn a_cell_survives_the_round_trip_through_column_and_row() {
+        for (cell, column, row) in [
+            ("A1", 0, 0),
+            ("B5", 1, 4),
+            ("Z1", 25, 0),
+            ("AA1", 26, 0),
+            ("AZ10", 51, 9),
+            ("BA1", 52, 0),
+            ("XFD1048576", 16_383, 1_048_575),
+        ] {
+            let address = CellAddress::parse(cell).expect("an A1 reference parses");
+            assert_eq!(address, CellAddress { column, row }, "{cell}");
+            assert_eq!(address.to_a1().as_deref(), Some(cell));
+        }
+        assert_eq!(CellAddress::parse("aa1"), CellAddress::parse("AA1"));
+        assert_eq!(CellAddress::parse("A0"), None);
+        // No worksheet is this wide or tall, but a malformed file can claim a
+        // cell that is. It has no A1 form, and a producer that wrote one anyway
+        // would fail validation for the whole document rather than that cell.
+        assert_eq!(
+            CellAddress {
+                column: 18_278,
+                row: 0
+            }
+            .to_a1(),
+            None
+        );
+        assert_eq!(
+            CellAddress {
+                column: 0,
+                row: 10_000_000
+            }
+            .to_a1(),
+            None
+        );
     }
 
     #[test]

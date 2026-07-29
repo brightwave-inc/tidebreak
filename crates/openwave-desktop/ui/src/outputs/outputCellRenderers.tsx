@@ -1,6 +1,6 @@
 import type { CustomCellRendererProps } from "ag-grid-react";
 import { format } from "date-fns";
-import { DownloadIcon, MoreHorizontalIcon } from "lucide-react";
+import { BotIcon, DownloadIcon, MoreHorizontalIcon, Undo2Icon } from "lucide-react";
 import { useState } from "react";
 
 import { DocumentIcon } from "@/components/document-table/DocumentIcon";
@@ -9,6 +9,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -25,7 +26,9 @@ import { outputTypeLabel, revisionLabel } from "./outputFormat";
 export type OutputGridContext = {
   onOpen: (outputId: string) => void;
   onSave: (output: DeliverableSummary) => void;
-  /** The output with a save in flight, whose actions are disabled. */
+  /** Revert a merged output: step back a revision, or retract the merge. */
+  onRevert: (output: DeliverableSummary) => void;
+  /** The output with a save or revert in flight, whose actions are disabled. */
   busyOutputId: string | null;
 };
 
@@ -54,6 +57,14 @@ export function NameCellRenderer(props: CellProps) {
         </WithTooltip>
         <span className="truncate">{output.filename}</span>
       </button>
+      {output.producingRunId !== null && (
+        <WithTooltip label="Auto-merged from a background agent">
+          <span className="ml-2 flex shrink-0 items-center gap-1 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+            <BotIcon className="size-3" />
+            Agent
+          </span>
+        </WithTooltip>
+      )}
     </div>
   );
 }
@@ -129,6 +140,11 @@ export function ActionsCellRenderer(props: CellProps) {
           <DropdownMenuItem onClick={() => context.onSave(output)}>
             <DownloadIcon />
             <span>Save as…</span>
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem variant="destructive" onClick={() => context.onRevert(output)}>
+            <Undo2Icon />
+            <span>{output.revisionCount > 1 ? "Revert version" : "Revert"}</span>
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>

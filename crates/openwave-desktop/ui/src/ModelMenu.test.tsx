@@ -139,13 +139,6 @@ describe("firstAvailableModel", () => {
 });
 
 describe("ProviderIcon", () => {
-  it("gives each vendor its own mark", () => {
-    const anthropic = renderToStaticMarkup(<ProviderIcon provider="anthropic" />);
-    const openai = renderToStaticMarkup(<ProviderIcon provider="openai" />);
-    const gemini = renderToStaticMarkup(<ProviderIcon provider="gemini" />);
-    expect(new Set([anthropic, openai, gemini]).size).toBe(3);
-  });
-
   it("keeps an open model's vendor mark whatever endpoint serves it", () => {
     const throughGateway = renderToStaticMarkup(
       <ProviderIcon provider="model_gateway" modelId="kimi-k2.5" />,

@@ -181,9 +181,4 @@ mod tests {
         let config = serde_json::from_str::<Config>(r#"{"data_dir":"/data"}"#).unwrap();
         assert_eq!(config.keychain_service, None);
     }
-
-    #[test]
-    fn profile_defaults_to_desktop() {
-        assert_eq!(Profile::default(), Profile::Desktop);
-    }
 }

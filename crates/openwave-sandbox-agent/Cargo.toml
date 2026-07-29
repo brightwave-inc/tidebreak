@@ -20,15 +20,21 @@ openwave-sandbox-protocol = { path = "../openwave-sandbox-protocol" }
 # provider vocabulary, not the host-side persistence stack. `default-features =
 # false` keeps sea-orm, the keychain, and the fs tools out of the container image.
 openwave-core = { path = "../openwave-core", default-features = false }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "process", "time"] }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 schemars = { workspace = true }
 thiserror = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+# The in-container `exec` tool bounds its child the way the local exec adapter
+# does: own process group, wall-time kill of the group, and rlimit ceilings.
+libc = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

@@ -32,7 +32,7 @@ use thiserror::Error;
 use url::{Host, Url};
 
 use crate::fetch_policy::{admit_fetch_address, admit_fetch_url, FetchPolicyViolation};
-use crate::types::count_words;
+use crate::types::{count_words, sanitized_content, sanitized_title, EXTRACT_TRUNCATION_MARKER};
 use crate::MIN_EXTRACT_WORDS;
 
 /// Largest response body retained for one native page fetch.
@@ -46,8 +46,6 @@ pub const MAX_EXTRACT_CONTENT_CHARS: usize = 24_000;
 pub const NATIVE_FETCH_USER_AGENT: &str =
     "OpenWavePageExtractor/1.0 (+https://github.com/brightwave-inc/openwave)";
 
-/// Marker inserted between the head and tail of over-budget content.
-const TRUNCATION_MARKER: &str = "\n\n[... content truncated ...]\n\n";
 /// Most document elements the readability pass will parse.
 ///
 /// With [`MAX_PARSE_DEPTH`] this bounds the markdown serializer's worst case:
@@ -504,47 +502,6 @@ fn looks_like_script_shell(extracted: &str) -> bool {
     .any(|tell| lower.contains(tell))
 }
 
-/// Characters extracted text must never carry to a renderer: the C0/C1
-/// controls that carry ANSI escape sequences, and the Unicode bidirectional
-/// and zero-width formatting characters that let a page display something
-/// other than what it says.
-///
-/// Line breaks and tabs are structure in markdown, not hazard, so they stay.
-fn is_display_hazard(value: char) -> bool {
-    (value.is_control() && value != '\n' && value != '\t')
-        || matches!(value,
-            '\u{200b}'..='\u{200f}'   // zero-width and directional marks
-            | '\u{202a}'..='\u{202e}' // bidirectional embedding and override
-            | '\u{2066}'..='\u{2069}' // bidirectional isolates
-            | '\u{feff}') // zero-width no-break space
-}
-
-/// Strip display hazards from extracted content.
-///
-/// The sibling search-result path rejects a whole result that carries a
-/// control character. Extraction sanitizes instead: it holds one page that
-/// cost a fetch and a parse, and a single stray control character somewhere in
-/// a long article is not a reason to return nothing. The characters that could
-/// mislead a reader are removed; the article survives.
-fn sanitized_content(value: &str) -> String {
-    value
-        .chars()
-        .filter(|value| !is_display_hazard(*value))
-        .collect()
-}
-
-/// Reduce an extracted title to one clean line.
-///
-/// A title is a single-line field, so every hazard becomes a space and runs of
-/// whitespace collapse — a title cannot smuggle line breaks into a list.
-fn sanitized_title(value: &str) -> String {
-    let cleaned: String = value
-        .chars()
-        .map(|value| if is_display_hazard(value) { ' ' } else { value })
-        .collect();
-    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 /// Words that carry content: whitespace-separated tokens with at least one
 /// alphanumeric character, so markdown punctuation does not inflate the count.
 /// Keep the head and tail of over-budget content with an explicit marker in
@@ -554,13 +511,13 @@ fn truncate_head_tail(value: &str, budget: usize) -> (String, bool) {
     if total <= budget {
         return (value.to_owned(), false);
     }
-    let marker_chars = TRUNCATION_MARKER.chars().count();
+    let marker_chars = EXTRACT_TRUNCATION_MARKER.chars().count();
     let keep = budget.saturating_sub(marker_chars);
     let head_chars = keep * 2 / 3;
     let tail_chars = keep - head_chars;
     let head: String = value.chars().take(head_chars).collect();
     let tail: String = value.chars().skip(total - tail_chars).collect();
-    (format!("{head}{TRUNCATION_MARKER}{tail}"), true)
+    (format!("{head}{EXTRACT_TRUNCATION_MARKER}{tail}"), true)
 }
 
 /// Page transport that builds one pinned `reqwest` client per request.
@@ -1050,7 +1007,9 @@ relationships between references are ambiguous.</p>
 
         assert!(extraction.truncated);
         assert!(extraction.content.chars().count() <= MAX_EXTRACT_CONTENT_CHARS);
-        assert!(extraction.content.contains(TRUNCATION_MARKER.trim()));
+        assert!(extraction
+            .content
+            .contains(EXTRACT_TRUNCATION_MARKER.trim()));
         assert!(extraction.content.starts_with("alpha"));
         assert!(extraction.content.ends_with("omega") || extraction.content.ends_with("omega "));
         assert_eq!(extraction.word_count, 12_000);

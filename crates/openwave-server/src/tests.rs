@@ -31,6 +31,7 @@ use openwave_web_search::{
     WebSearchResolverError, WebSearchResponse, WebSearchResult, WebSearchTool,
 };
 use resolver::ProviderResolver;
+use sea_orm::ConnectionTrait;
 use serde::de::DeserializeOwned;
 use tokio::sync::Notify;
 use tower::ServiceExt;
@@ -48,6 +49,53 @@ mod workers;
 
 use conversations::patch_chat;
 use lifecycle::{post_json, post_native_json, steer_turn, steer_turn_with_id};
+
+struct MigratedSqliteTemplate {
+    _directory: tempfile::TempDir,
+    database: std::path::PathBuf,
+}
+
+static MIGRATED_SQLITE_TEMPLATE: tokio::sync::OnceCell<MigratedSqliteTemplate> =
+    tokio::sync::OnceCell::const_new();
+
+/// Build the current empty schema once, then copy it into isolated server tests.
+///
+/// Tests that exercise restart, locking, or unusual database setup keep their
+/// explicit connection path rather than using this helper.
+async fn migrated_sqlite_template() -> &'static MigratedSqliteTemplate {
+    MIGRATED_SQLITE_TEMPLATE
+        .get_or_init(|| async {
+            let directory = tempfile::tempdir().unwrap();
+            let database = directory.path().join("template.db");
+            let url = format!("sqlite://{}?mode=rwc", database.display());
+            let store = DbStore::connect(&url).await.unwrap();
+            drop(store);
+
+            let checkpoint = sea_orm::Database::connect(&url).await.unwrap();
+            checkpoint
+                .execute_unprepared("PRAGMA wal_checkpoint(TRUNCATE);")
+                .await
+                .unwrap();
+            checkpoint.close().await.unwrap();
+
+            MigratedSqliteTemplate {
+                _directory: directory,
+                database,
+            }
+        })
+        .await
+}
+
+async fn temp_db_store(database_name: &str) -> (tempfile::TempDir, DbStore) {
+    let template = migrated_sqlite_template().await;
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join(database_name);
+    std::fs::copy(&template.database, &database).unwrap();
+    let store = DbStore::connect(&format!("sqlite://{}?mode=rw", database.display()))
+        .await
+        .unwrap();
+    (directory, store)
+}
 
 #[test]
 fn transcript_citation_json_is_closed_and_renderer_bounded() {
@@ -268,15 +316,8 @@ impl ModelProvider for AmbiguousCitationProvider {
 
 #[tokio::test]
 async fn assistant_retry_and_stream_redaction_survive_durable_replay() {
-    let dir = tempfile::tempdir().unwrap();
-    let database = Arc::new(
-        DbStore::connect(&format!(
-            "sqlite://{}?mode=rwc",
-            dir.path().join("citation-retry.db").display()
-        ))
-        .await
-        .unwrap(),
-    );
+    let (_dir, database) = temp_db_store("citation-retry.db").await;
+    let database = Arc::new(database);
     let chat = Chat {
         id: ChatId::new(),
         project_id: None,
@@ -2021,15 +2062,8 @@ async fn test_app_with_retrieval(
     provider: Arc<dyn ModelProvider>,
     retrieval: Arc<Retriever>,
 ) -> (Router, Arc<str>, Arc<dyn Store>, tempfile::TempDir) {
-    let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
-            "sqlite://{}?mode=rwc",
-            dir.path().join("t.db").display()
-        ))
-        .await
-        .unwrap(),
-    );
+    let (dir, store) = temp_db_store("t.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
     test_app_from_parts(provider, retrieval, store, dir)
 }
 
@@ -2057,15 +2091,8 @@ async fn test_app_with_retrieval_and_worker(
     tempfile::TempDir,
     document_worker::DocumentWorker,
 ) {
-    let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
-            "sqlite://{}?mode=rwc",
-            dir.path().join("t.db").display()
-        ))
-        .await
-        .unwrap(),
-    );
+    let (dir, store) = temp_db_store("t.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -2143,15 +2170,8 @@ async fn test_app_with_scanner_resolution_race(
     provider: Arc<dyn ModelProvider>,
     configure: impl FnOnce(&PauseTerminalStore),
 ) -> (Router, Arc<str>, Arc<dyn Store>, tempfile::TempDir) {
-    let dir = tempfile::tempdir().unwrap();
-    let inner: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
-            "sqlite://{}?mode=rwc",
-            dir.path().join("t.db").display()
-        ))
-        .await
-        .unwrap(),
-    );
+    let (dir, inner) = temp_db_store("t.db").await;
+    let inner: Arc<dyn Store> = Arc::new(inner);
     let injected = Arc::new(PauseTerminalStore::new(
         inner,
         Arc::new(Notify::new()),
@@ -2221,15 +2241,8 @@ async fn test_app_with_state() -> (
     Arc<dyn Store>,
     tempfile::TempDir,
 ) {
-    let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
-            "sqlite://{}?mode=rwc",
-            dir.path().join("stateful-test.db").display()
-        ))
-        .await
-        .unwrap(),
-    );
+    let (dir, store) = temp_db_store("stateful-test.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
     let (retrieval, _search) = build_retrieval(
         Arc::new(HashEmbedder::default()),
         Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
@@ -2295,15 +2308,8 @@ async fn admit_sandbox_for_test(
 /// A normal authenticated local API plus a handle to its test-only secret
 /// store, for asserting web-search credential routes never touch other keys.
 async fn test_app_with_secrets() -> (Router, Arc<str>, Arc<MemSecrets>, tempfile::TempDir) {
-    let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
-            "sqlite://{}?mode=rwc",
-            dir.path().join("t.db").display()
-        ))
-        .await
-        .unwrap(),
-    );
+    let (dir, store) = temp_db_store("t.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
     let (retrieval, _search) = build_retrieval(
         Arc::new(HashEmbedder::default()),
         Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
@@ -2328,15 +2334,8 @@ async fn test_app_with_secrets() -> (Router, Arc<str>, Arc<MemSecrets>, tempfile
 
 #[tokio::test]
 async fn app_state_roots_blob_storage_under_the_data_directory() {
-    let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
-            "sqlite://{}?mode=rwc",
-            dir.path().join("t.db").display()
-        ))
-        .await
-        .unwrap(),
-    );
+    let (dir, store) = temp_db_store("t.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
     let (retrieval, _search) = build_retrieval(
         Arc::new(HashEmbedder::default()),
         Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),

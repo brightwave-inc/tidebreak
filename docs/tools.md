@@ -21,7 +21,7 @@ The current foreground agent surface contains nineteen tools:
 | `read_source` | Read a bounded canonical-text range from one source and create citable evidence | Server, read-only |
 | `read_tool_result` | Read past the point a large tool result was cut short for the turn | Server, read-only |
 | `web_search` | Search the public web through the configured provider (Exa, Tavily, Brave, or a self-hosted SearXNG) | Server, sensitive approval |
-| `web_extract` | Fetch one exact public page URL and return its readable content, through the configured provider or the built-in engine | Server, sensitive approval |
+| `web_extract` | Fetch one exact public page URL, return its readable content through the configured provider or the built-in engine, and keep it as a citable source of the conversation | Server, sensitive approval |
 | `request_folder_access` | Ask the trusted desktop host to connect another folder | Client continuation |
 | `list_connected_folders` | List roots already attached to this chat | Native client continuation |
 | `list_folder` | List one directory below an attached root | Native client continuation |
@@ -94,6 +94,13 @@ bounded Unicode-character range as soon as parser output exists—even while the
 embedding job is still running—and returns an opaque reference that produces
 the same durable citation cards as `search`. Semantic search remains the
 efficient choice for finding passages across a large ready corpus.
+
+`web_extract` joins that tier from the other direction: a page it fetches is
+stored as a source of the conversation, so it too returns opaque references and
+produces the same citation cards, and `read_source` and `search` can reach the
+page afterwards. Those three are the only server calls permitted to retain
+retrieval evidence at all, which is what keeps a citation traceable to a call
+that was allowed to make one. See [Web search](web-search.md#fetched-pages-as-sources).
 
 ## Core module layout
 
@@ -305,7 +312,7 @@ only then resolves current host policy and credentials. `web_extract` sits
 beside it on the same terms: Sensitive, with the exact page URL on the
 approval card, and routed deterministically to the configured provider when it
 implements the extract contract or to the built-in native extraction engine
-otherwise. Exa and Tavily both implement it, so a configured host extracts
+otherwise. Each page it returns is also kept as a citable conversation source. Exa and Tavily both implement it, so a configured host extracts
 through the vendor and falls back to native — except on a rejected key, which
 surfaces for repair rather than degrading silently. Brave and SearXNG are
 search-only, so a host on either extracts natively. See

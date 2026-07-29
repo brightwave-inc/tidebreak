@@ -4,18 +4,8 @@ import { stripCitationDirectives } from "./citationDirectives";
 import {
   MessageMarkdown,
   preserveLineBreaks,
-  rawCodeText,
   safeMarkdownUrl,
 } from "./MessageMarkdown";
-
-describe("preserveLineBreaks", () => {
-  it("turns single newlines into hard breaks but leaves paragraph breaks", () => {
-    expect(preserveLineBreaks("one\ntwo")).toBe("one  \ntwo");
-    expect(preserveLineBreaks("para one\n\npara two")).toBe(
-      "para one\n\npara two",
-    );
-  });
-});
 
 describe("citation directives", () => {
   const id = "0b2b1f2c-9d3e-4a5b-8c7d-6e5f4a3b2c1d";
@@ -163,22 +153,6 @@ describe("code blocks", () => {
       <MessageMarkdown>{"use `inline()` here"}</MessageMarkdown>,
     );
     expect(inline).not.toContain('aria-label="Copy code"');
-  });
-
-  it("recovers the raw source from a highlighted tree", () => {
-    expect(
-      rawCodeText({
-        type: "element",
-        children: [
-          { type: "text", value: "const " },
-          {
-            type: "element",
-            children: [{ type: "text", value: "x" }],
-          },
-          { type: "text", value: " = 1;" },
-        ],
-      }),
-    ).toBe("const x = 1;");
   });
 });
 

@@ -1,74 +1,101 @@
-//! The sandbox-resident tool registry.
+//! The sandbox-resident tool registry — a closed, test-pinned set.
 //!
 //! Running the agent loop inside a sandbox is "the same code with a different
 //! tool registry and transport" (see
 //! [sandbox-providers.md](../../docs/sandbox-providers.md)). This module builds
-//! that registry from OpenWave's own [`Tool`] trait, so the tools the sandbox
-//! loop invokes are ordinary [`openwave_core`] tools — not a parallel
-//! abstraction.
+//! that registry from OpenWave's own [`Tool`](openwave_core::Tool) trait, so the
+//! tools the sandbox loop invokes are ordinary [`openwave_core`] tools — not a
+//! parallel abstraction.
 //!
-//! The set is deliberately **closed and minimal** for this slice: model
-//! inference is dialed back to the host over reverse RPC (the first host-mediated
-//! capability), and the only sandbox-local tool is a trivial, dependency-free,
-//! read-only computation that demonstrates the loop actually invoking a tool.
-//! Widening the sandbox-resident registry is a separate design, gated on the
-//! entry conditions the delivery sequence names; nothing here reaches the network
-//! or the filesystem, so no credential or egress boundary is engaged yet.
+//! # The closed set is the design gate
+//!
+//! The design makes widening the sandbox-resident surface a deliberate, reviewed
+//! change: "a sandbox-resident run gets its own pinned tool registry, and
+//! widening that registry is a separate design gated on this document." The gate
+//! is mechanical — [`SANDBOX_REGISTRY_TOOL_NAMES`] names the exact set and a
+//! test asserts the built registry matches it. Adding a tool that is not a
+//! drive-by change means editing that named invariant, which review sees.
+//!
+//! For this slice the surface is:
+//!
+//! - **model inference** — dialed back to the host over reverse RPC (not a
+//!   registered [`Tool`]; the run's granted reverse capability, so no model
+//!   credential lives in the container);
+//! - **[`exec`](crate::exec)** — a bounded, model-authored command run *inside*
+//!   the container (the container is the containment);
+//! - **[`read_file`](crate::fs), [`write_file`](crate::fs),
+//!   [`list_dir`](crate::fs)** — path-validated filesystem access within the
+//!   agent's workspace directory.
+//!
+//! # NOT YET FOR CREDENTIAL-BEARING WORK
+//!
+//! `exec` can make network calls. Egress is meant to be routed through the
+//! sandbox supervisor (credential separation + an egress proxy), which is a
+//! **stub** in this crate. In-container execution keeps model output from
+//! reaching host authority, but egress *from the container* is not yet
+//! externally enforced, so this surface must not be routed to production
+//! credential-bearing work until externally-enforced egress and the
+//! transport-auth gate land.
 
-use async_trait::async_trait;
-use openwave_core::{ApprovalClass, Result, Tool, ToolCtx, ToolOutput, ToolSpec};
-use schemars::JsonSchema;
-use serde::Deserialize;
-use serde_json::Value;
+use std::path::PathBuf;
 
-/// The name the model uses to invoke the word-count tool.
-pub const WORD_COUNT_TOOL: &str = "word_count";
+use openwave_core::ToolRegistry;
 
-/// Arguments for [`WordCount`].
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct WordCountArgs {
-    /// The text whose words to count.
-    text: String,
-}
+use crate::exec::{ExecTool, DEFAULT_EXEC_TIMEOUT, EXEC_TOOL};
+use crate::fs::{
+    ListDirTool, ReadFileTool, WriteFileTool, LIST_DIR_TOOL, READ_FILE_TOOL, WRITE_FILE_TOOL,
+};
 
-/// A trivial, read-only local tool: count the whitespace-separated words in a
-/// piece of text.
+/// The exact, closed set of tool names the sandbox-resident registry registers.
 ///
-/// It exists to prove the sandbox loop can invoke a real [`Tool`] locally, not to
-/// be useful. It touches no filesystem, network, or credential, so it needs no
-/// approval beyond the auto-approving [`ApprovalClass::ReadOnly`] class.
-pub struct WordCount;
+/// This is the named invariant the design gate rides on: the reverse-RPC model
+/// inference capability is granted separately (it is not a registered tool), and
+/// every *local* tool the sandbox loop can invoke is one of these. Widening it is
+/// a deliberate edit here, seen in review.
+pub const SANDBOX_REGISTRY_TOOL_NAMES: [&str; 4] =
+    [EXEC_TOOL, READ_FILE_TOOL, WRITE_FILE_TOOL, LIST_DIR_TOOL];
 
-#[async_trait]
-impl Tool for WordCount {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::for_args::<WordCountArgs>(
-            WORD_COUNT_TOOL,
-            "Count the whitespace-separated words in a piece of text.",
-        )
-    }
-
-    fn approval_class(&self) -> ApprovalClass {
-        ApprovalClass::ReadOnly
-    }
-
-    async fn execute(&self, _ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
-        // Arguments are untrusted input; a malformed call is a tool failure the
-        // model sees and can correct, not a process error.
-        let args: WordCountArgs = match serde_json::from_value(args) {
-            Ok(args) => args,
-            Err(error) => return Ok(ToolOutput::error(format!("invalid arguments: {error}"))),
-        };
-        let count = args.text.split_whitespace().count();
-        Ok(ToolOutput::text(count.to_string()))
-    }
+/// Build the closed sandbox-resident tool registry rooted at `workspace`.
+///
+/// `workspace` is the agent's in-container workspace directory; the filesystem
+/// tools are scoped to it and `exec` runs commands inside it. The exec tool is
+/// bounded by [`DEFAULT_EXEC_TIMEOUT`].
+#[must_use]
+pub fn sandbox_tool_registry(workspace: impl Into<PathBuf>) -> ToolRegistry {
+    let workspace = workspace.into();
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(ExecTool::new(
+        workspace.clone(),
+        DEFAULT_EXEC_TIMEOUT,
+    )));
+    registry.register(Box::new(ReadFileTool::new(workspace.clone())));
+    registry.register(Box::new(WriteFileTool::new(workspace.clone())));
+    registry.register(Box::new(ListDirTool::new(workspace)));
+    registry
 }
 
-/// Build the closed sandbox-resident tool registry for this slice.
-#[must_use]
-pub fn sandbox_tool_registry() -> openwave_core::ToolRegistry {
-    let mut registry = openwave_core::ToolRegistry::new();
-    registry.register(Box::new(WordCount));
-    registry
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The design gate: the built registry advertises exactly the pinned closed
+    /// set — no more, no fewer. A new tool must edit
+    /// [`SANDBOX_REGISTRY_TOOL_NAMES`] to pass, which is the reviewed change the
+    /// design requires.
+    #[test]
+    fn the_registry_is_the_pinned_closed_set() {
+        let registry = sandbox_tool_registry(std::env::temp_dir());
+        let mut built: Vec<String> = registry.specs().into_iter().map(|spec| spec.name).collect();
+        built.sort();
+        let mut pinned: Vec<String> = SANDBOX_REGISTRY_TOOL_NAMES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+        pinned.sort();
+        assert_eq!(
+            built, pinned,
+            "the sandbox-resident registry must match its pinned closed set; \
+             widening it is a deliberate edit to SANDBOX_REGISTRY_TOOL_NAMES"
+        );
+    }
 }

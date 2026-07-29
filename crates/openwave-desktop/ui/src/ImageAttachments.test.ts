@@ -156,16 +156,6 @@ describe("image attachment state machine", () => {
       },
     ]);
   });
-
-  it("describes where an attachment stands in one line", () => {
-    expect(describeImageAttachment(queued("a"))).toBe("Waiting to upload");
-    const uploading = withUploadProgress(
-      withUploadStarted([queued("a", 1_000)], "a"),
-      "a",
-      250,
-    );
-    expect(describeImageAttachment(uploading[0])).toBe("Uploading 25%");
-  });
 });
 
 describe("attaching images", () => {

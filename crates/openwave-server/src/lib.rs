@@ -85,9 +85,10 @@ use openwave_core::{
 };
 #[cfg(feature = "vec-lance")]
 use openwave_retrieval::LanceVectorStore;
+#[cfg(test)]
+use openwave_retrieval::PlainTextParser;
 use openwave_retrieval::{
-    Embedder, FallbackParser, HashEmbedder, OpenAiEmbedder, ParserRegistry, PlainTextParser,
-    Retriever, SearchTool, TextChunker, VectorStore,
+    Embedder, HashEmbedder, OpenAiEmbedder, Retriever, SearchTool, TextChunker, VectorStore,
 };
 
 use resolver::KeyedResolver;
@@ -376,6 +377,10 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/chats/{id}/messages", get(routes::list_chat_messages))
         .route("/chats/{id}/agent-runs", get(routes::list_agent_runs))
+        .route(
+            "/chats/{chat_id}/agent-runs/{run_id}/activity",
+            get(routes::list_agent_run_activity),
+        )
         .route(
             "/chats/{chat_id}/agent-runs/{run_id}/cancel",
             post(routes::post_agent_run_cancel),
@@ -705,16 +710,20 @@ async fn bind_inner(
     ));
     let foreground_web_search =
         Box::new(web_search::foreground_tool(store.clone(), secrets.clone()));
-    let foreground_web_extract = Box::new(web_search::foreground_extract_tool(
-        store.clone(),
-        secrets.clone(),
-    ));
+    let extract_store = store.clone();
+    let extract_secrets = secrets.clone();
     let (retrieval, tools, agent_config) = agent_deps(
         embedder,
         vector_store,
         code_execution,
         foreground_web_search,
-        foreground_web_extract,
+        |retrieval| {
+            Box::new(web_search::foreground_extract_tool(
+                extract_store,
+                extract_secrets,
+                retrieval.index_fingerprint(),
+            ))
+        },
         store.clone(),
     );
     let tools = Arc::new(tools);
@@ -875,10 +884,15 @@ fn agent_deps(
     store: Arc<dyn VectorStore>,
     code_execution: Arc<dyn openwave_code_execution::CodeExecutionProvider>,
     web_search: Box<dyn Tool>,
-    web_extract: Box<dyn Tool>,
+    // Built from the retriever rather than handed in ready-made: extraction now
+    // files each fetched page as a source, which means queueing it for the same
+    // index every other source goes to, and that identity does not exist until
+    // the retriever does.
+    web_extract: impl FnOnce(&Retriever) -> Box<dyn Tool>,
     source_store: Arc<dyn Store>,
 ) -> (Arc<Retriever>, ToolRegistry, AgentConfig) {
     let (retrieval, search) = build_retrieval(embedder, store);
+    let web_extract = web_extract(&retrieval);
     // The document store lets the search card name matched documents (title,
     // media type) instead of listing anonymous passages.
     let search = Box::new(search.with_source_catalog(source_store.clone()));
@@ -1002,39 +1016,13 @@ fn build_retrieval(
     store: Arc<dyn VectorStore>,
 ) -> (Arc<Retriever>, Box<SearchTool>) {
     let retrieval = Arc::new(Retriever::new(
-        Box::new(document_parser_registry()),
+        Box::new(openwave_retrieval::document_parser_registry()),
         Box::new(TextChunker::default()),
         embedder.clone(),
         store.clone(),
     ));
     let search = Box::new(SearchTool::new(embedder, store));
     (retrieval, search)
-}
-
-/// Assemble the document parsers, narrowest first. With the `parse-liteparse`
-/// feature, the PDF parser claims `application/pdf`; with `parse-office`, the
-/// Office parser claims Word/Excel/PowerPoint/OpenDocument types (converting via
-/// LibreOffice when present, storing without searchable text when not); with
-/// `parse-image`, the image parser claims common raster types (PNG/JPEG/WebP/GIF/
-/// TIFF/BMP), stored without searchable text until OCR lands; the
-/// `StructuredTextParser` claims the tree-shaped text types (JSON, XML, HTML),
-/// whose text it passes through unchanged while recording which node each part
-/// of it came from; `PlainTextParser` claims the rest of `text/*`; the
-/// `FallbackParser` claims everything else so **any** upload is accepted —
-/// text-like unknown types stay searchable and binary ones are stored without
-/// polluting the index.
-fn document_parser_registry() -> ParserRegistry {
-    let registry = ParserRegistry::new();
-    #[cfg(feature = "parse-liteparse")]
-    let registry = registry.with_parser(openwave_retrieval::LiteParsePdfParser::new());
-    #[cfg(feature = "parse-office")]
-    let registry = registry.with_parser(openwave_retrieval::LiteParseOfficeParser::new());
-    #[cfg(feature = "parse-image")]
-    let registry = registry.with_parser(openwave_retrieval::LiteParseImageParser::new());
-    registry
-        .with_parser(openwave_retrieval::StructuredTextParser::new())
-        .with_parser(PlainTextParser::new())
-        .with_parser(FallbackParser::new())
 }
 
 /// Open the persistent vector store for this launch: a LanceDB dataset under

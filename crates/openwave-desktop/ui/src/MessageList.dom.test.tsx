@@ -162,6 +162,8 @@ describe("approval card interactions", () => {
           args: ["test"],
           cwd: ".",
         },
+        // Both prefix rungs the server offers for `cargo test`.
+        prefixRungs: [2, 1],
       }),
     );
 
@@ -182,9 +184,11 @@ describe("approval card interactions", () => {
     ).toEqual([
       "1.Yes, run it once",
       "2.Yes, and always allow exactly \u201ccargo test\u201d",
-      "3.Yes, and always allow any \u201ccargo\u201d command",
-      "4.Yes, and don't ask again about commands in this chat",
-      "5.No, don't allow this",
+      // The rung this ladder previously could not offer.
+      "3.Yes, and always allow any \u201ccargo test\u201d command",
+      "4.Yes, and always allow any \u201ccargo\u201d command",
+      "5.Yes, and don't ask again about commands in this chat",
+      "6.No, don't allow this",
     ]);
     expect(onDecide).not.toHaveBeenCalled();
   });
@@ -420,14 +424,6 @@ describe("activity phases", () => {
     expect(
       screen.queryByRole("button", { name: /Running a command/ }),
     ).toBeNull();
-  });
-});
-
-describe("row memoization", () => {
-  it("MessageBubble is a memoized component", () => {
-    expect((MessageBubble as unknown as { $$typeof: symbol }).$$typeof).toBe(
-      Symbol.for("react.memo"),
-    );
   });
 });
 

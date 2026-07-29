@@ -35,6 +35,10 @@ function detailApis(overrides: Partial<OutputDetailApis> = {}): OutputDetailApis
       revisionId,
       status: "completed" as const,
     }),
+    revert: vi.fn().mockResolvedValue({
+      status: "retracted" as const,
+      outputId,
+    }),
     ...overrides,
   };
 }

@@ -1510,6 +1510,13 @@ pub struct AgentRunSnapshot {
     /// arguments, results, provider call identities, executor leases, or raw
     /// executor diagnostics.
     pub activity: Option<AgentActivitySnapshot>,
+    /// Whether a completed background run committed an immutable terminal
+    /// receipt, which happens atomically with its terminal state.
+    ///
+    /// This is presence only: the payload, its display text, and any merged
+    /// deliverable never cross this boundary. A renderer uses it to offer a
+    /// "view output" affordance and link to the outputs surface.
+    pub produced_output: bool,
     pub created_at: chrono::DateTime<Utc>,
     pub updated_at: chrono::DateTime<Utc>,
     // This is an OpenWave call id, not a provider call identity. It lets a
@@ -1520,6 +1527,11 @@ pub struct AgentRunSnapshot {
 
 impl AgentRunSnapshot {
     fn from_run(run: AgentRun, activity: Option<AgentActivitySnapshot>) -> Self {
+        // A background child commits its final result receipt in the same
+        // transaction as its terminal `Completed` state, so the terminal state
+        // is an exact, renderer-safe proxy for output presence.
+        let produced_output =
+            run.tier == AgentRunTier::Background && run.status == AgentRunStatus::Completed;
         Self {
             id: run.id,
             parent_id: run.parent_id,
@@ -1531,6 +1543,7 @@ impl AgentRunSnapshot {
             finished_at: run.finished_at,
             last_error_code: run.last_error_code,
             activity,
+            produced_output,
             created_at: run.created_at,
             updated_at: run.updated_at,
         }
@@ -1590,6 +1603,81 @@ fn sandbox_activity(calls: &[SandboxToolCall]) -> Option<AgentActivitySnapshot> 
         _ => return None,
     };
     Some(AgentActivitySnapshot { kind, status })
+}
+
+/// Coarse, renderer-safe lifecycle for one historical activity entry.
+///
+/// Unlike [`AgentActivityStatus`], which only names live work, this also
+/// admits the three terminal outcomes so a settled step can be shown in an
+/// ordered timeline. It carries no failure detail: a failed step is only
+/// "failed", never why.
+#[derive(Debug, Clone, Copy, Serialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentActivityOutcome {
+    Waiting,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+/// One renderer-safe entry in a background run's ordered activity history.
+///
+/// Built from durable sandbox tool calls, but it carries only the fixed
+/// [`AgentActivityKind`] vocabulary, a coarse lifecycle, and a timestamp. Tool
+/// arguments, queries, results, folder and file identities, host paths,
+/// provider identities, executor leases, and raw diagnostics all remain
+/// server-side, exactly as they do for the live `activity` projection.
+#[derive(Debug, Clone, Copy, Serialize, ts_rs::TS)]
+pub struct AgentActivityHistoryItem {
+    pub kind: AgentActivityKind,
+    pub outcome: AgentActivityOutcome,
+    pub at: chrono::DateTime<Utc>,
+}
+
+/// Project a background run's durable sandbox tool calls into an ordered,
+/// renderer-safe activity history.
+///
+/// The store returns calls in durable creation order, so the projection keeps
+/// that order. Tool names outside the admitted vocabulary are executor data,
+/// not a renderer contract, and are skipped rather than leaked as raw labels.
+fn sandbox_activity_history(calls: &[SandboxToolCall]) -> Vec<AgentActivityHistoryItem> {
+    calls
+        .iter()
+        .filter_map(sandbox_activity_history_item)
+        .collect()
+}
+
+fn sandbox_activity_history_item(call: &SandboxToolCall) -> Option<AgentActivityHistoryItem> {
+    let kind = match call.name.as_str() {
+        "web_search" => AgentActivityKind::WebSearch,
+        openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL => AgentActivityKind::ReadDelegatedFile,
+        // Unknown tool names are executor data, not a renderer API contract.
+        _ => return None,
+    };
+    // A terminal step is dated by when it resolved; a live step by when it was
+    // admitted. `resolved_at` is always present once terminal, but fall back to
+    // the creation time rather than dropping a settled step from the timeline.
+    let (outcome, at) = match call.status {
+        SandboxToolCallStatus::Accepted => (AgentActivityOutcome::Waiting, call.created_at),
+        SandboxToolCallStatus::Claimed => (AgentActivityOutcome::Running, call.created_at),
+        SandboxToolCallStatus::Completed => (
+            AgentActivityOutcome::Completed,
+            call.resolved_at.unwrap_or(call.created_at),
+        ),
+        SandboxToolCallStatus::Failed => (
+            AgentActivityOutcome::Failed,
+            call.resolved_at.unwrap_or(call.created_at),
+        ),
+        SandboxToolCallStatus::Cancelled => (
+            AgentActivityOutcome::Cancelled,
+            call.resolved_at.unwrap_or(call.created_at),
+        ),
+        // `SandboxToolCallStatus` is non-exhaustive; an unrecognized future
+        // state is executor data, not a renderer contract.
+        _ => return None,
+    };
+    Some(AgentActivityHistoryItem { kind, outcome, at })
 }
 
 fn foreground_activity(
@@ -1653,6 +1741,40 @@ pub async fn list_agent_runs(
         snapshots.push(AgentRunSnapshot::from_run(run, activity));
     }
     Ok(Json(snapshots))
+}
+
+/// `GET /chats/{id}/agent-runs/{run_id}/activity` — ordered, renderer-safe
+/// activity history for one background run.
+///
+/// This is the durable companion to the live `activity` field on a run
+/// snapshot: where that field names only the single current checkpoint, this
+/// returns every admitted step in order, each with a coarse terminal outcome
+/// and timestamp. It keeps the same posture — no tool arguments, queries,
+/// results, identities, leases, or diagnostics cross the boundary. A missing,
+/// wrong-chat, or foreground run returns `404` rather than revealing whether an
+/// unrelated run identifier exists.
+pub async fn list_agent_run_activity(
+    State(state): State<AppState>,
+    Path((chat_id, run_id)): Path<(ChatId, openwave_core::AgentRunId)>,
+) -> Result<Json<Vec<AgentActivityHistoryItem>>, ServerError> {
+    if state.store.get_chat(chat_id).await?.is_none() {
+        return Err(ServerError::not_found(format!("chat {chat_id} not found")));
+    }
+    let run = state
+        .store
+        .get_agent_run(run_id)
+        .await?
+        .filter(|run| run.chat_id == chat_id && run.tier == AgentRunTier::Background);
+    let Some(run) = run else {
+        return Err(ServerError::not_found(format!(
+            "agent run {run_id} not found"
+        )));
+    };
+    let calls = state
+        .store
+        .list_sandbox_tool_calls_for_agent_run(run.id)
+        .await?;
+    Ok(Json(sandbox_activity_history(&calls)))
 }
 
 /// Closed renderer-safe acknowledgement for sandbox cancellation.
@@ -2300,8 +2422,14 @@ pub struct ApprovalBody {
 pub enum ApprovalGrantRung {
     /// Exactly the action the card showed.
     ExactAction,
-    /// This executable, with any arguments.
-    AnyArgsForCommand,
+    /// A leading run of the command's argv tokens, with any arguments after
+    /// it — "any `cargo test`", not just "any `cargo`".
+    ///
+    /// The renderer names how many tokens it was offered rather than the
+    /// tokens themselves. The server derives the ladder from the parked
+    /// call's own arguments and honors the length only if it appears there,
+    /// so a client cannot invent a prefix the card never showed.
+    CommandPrefix { tokens: usize },
     /// Every call to this tool.
     WholeTool,
 }
@@ -2341,6 +2469,14 @@ pub(crate) struct PendingApprovalSnapshot {
     pub preview: Option<openwave_core::ToolActionPreview>,
     pub can_approve: bool,
     pub can_remember: bool,
+    /// Token counts of the command-prefix rungs this call may be granted at,
+    /// narrowest first.
+    ///
+    /// Derived server-side, because whether a prefix rung exists at all is a
+    /// question only the analyzer can answer — a wrapper has none. The
+    /// renderer slices the action's own tokens to these lengths for the
+    /// labels rather than deciding for itself what to offer.
+    pub prefix_rungs: Vec<usize>,
     /// Where the Auto-mode judge stands, when one was engaged. Absent means
     /// no judge ever owned this card.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2357,12 +2493,31 @@ impl PendingApprovalSnapshot {
             action: openwave_core::RendererToolName::from(approval.tool_name.as_str()),
             approval: kind,
             class: approval.class,
+            prefix_rungs: approval
+                .preview
+                .as_ref()
+                .map(prefix_rung_lengths)
+                .unwrap_or_default(),
             preview: approval.preview,
             can_approve: kind.is_approvable(),
             can_remember: kind.is_standing_grantable(),
             auto_judge_status: approval.auto_judge_status,
         }
     }
+}
+
+/// The command-prefix rungs on offer for an action, as token counts.
+///
+/// Empty for anything that is not a command, and for a command the analyzer
+/// would not auto-run under a prefix rule however it were granted.
+pub(crate) fn prefix_rung_lengths(action: &openwave_core::ToolActionPreview) -> Vec<usize> {
+    openwave_core::GrantScope::ladder_for_action(action)
+        .into_iter()
+        .filter_map(|scope| match scope {
+            openwave_core::GrantScope::CommandPrefix { tokens } => Some(tokens.len()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// `GET /chats/{id}/approvals` — recover a bounded page of pending cards.

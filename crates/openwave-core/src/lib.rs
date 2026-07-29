@@ -120,7 +120,10 @@ pub use deliverable::{
     MAX_OUTPUT_REVISIONS, OUTPUTS_DIRECTORY,
 };
 #[cfg(feature = "tools")]
-pub use deliverable_acceptance::{accept_workspace_artifact, WorkspaceArtifactProposal};
+pub use deliverable_acceptance::{
+    accept_workspace_artifact, merge_agent_run_result, AgentResultOutputMerge,
+    WorkspaceArtifactProposal,
+};
 pub use error::{AgentError, AgentErrorInfo, Result};
 pub use event::{AgentEvent, SequencedEvent};
 pub use id::{
@@ -138,7 +141,7 @@ pub use model::{
     AgentRunExecutionLocation, AgentRunInboxEntry, AgentRunInboxStatus, AgentRunResult,
     AgentRunResultPayload, AgentRunStatus, AgentRunTier, AgentRunWaitCondition,
     AgentRunWaitSetCandidate, AgentRunWaitSetCheckpointRequest, BeginRootAttachmentChange,
-    BlobRetirement, BlobRetirementStatus, ByteSpan, Chat, ChatRootAttachment,
+    BlobRetirement, BlobRetirementStatus, ByteSpan, CellAddress, Chat, ChatRootAttachment,
     ClientToolCallRequest, DelegatedFileReadClaim, DocumentGeneration, DocumentJob,
     DocumentJobKind, DocumentJobStatus, DocumentListCursor, DocumentParseOutput,
     DocumentProcessingStatus, DocumentRecord, DocumentScope, DocumentSourceBlob,
@@ -149,8 +152,8 @@ pub use model::{
     RootAttachmentChangeTerminal, RootAttachmentOrigin, RootAttachmentSubjectKind,
     SandboxAgentAdmission, SandboxSpawnCheckpoint, SandboxSpawnCheckpointRequest, SandboxToolCall,
     SandboxToolCallReceipt, SandboxToolCallRequest, SandboxToolCallStatus, SourceLocation,
-    SourceReadiness, SourceRegion, StructuredPathType, ToolCallExecution, ToolCallRecord,
-    ToolCallResolution, ToolCallStatus, TurnAgentRunWait, TurnAgentRunWaitSet,
+    SourceReadiness, SourceRegion, SpreadsheetCells, StructuredPathType, ToolCallExecution,
+    ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnAgentRunWait, TurnAgentRunWaitSet,
     TurnAgentRunWaitStatus, TurnCheckpointProgress, TurnClientWait, TurnClientWaitStatus,
     TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer, TurnSteerStatus,
     MAX_ATTACHMENT_REVISION, MAX_MESSAGE_ATTACHMENTS, MAX_ROOT_ATTACHMENTS, PAGE_BOUNDS_SCALE,

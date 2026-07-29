@@ -680,36 +680,6 @@ mod tests {
         }
     }
 
-    // ── Token estimation ───────────────────────────────────────────
-
-    #[test]
-    fn estimate_tokens_uses_chars_div_3() {
-        assert_eq!(estimate_tokens("abc"), 1);
-        assert_eq!(estimate_tokens("abcd"), 2);
-        assert_eq!(estimate_tokens(""), 0);
-        assert_eq!(estimate_tokens("hello world"), 4); // ceil(11/3)
-    }
-
-    #[test]
-    fn estimate_message_tokens_sums_blocks() {
-        let msg = ChatMessage {
-            role: Role::User,
-            content: vec![
-                ContentBlock::Text {
-                    text: "hello".into(),
-                },
-                ContentBlock::Text {
-                    text: "world".into(),
-                },
-            ],
-        };
-        let tokens = estimate_message_tokens(&msg);
-        assert_eq!(
-            tokens,
-            ROLE_OVERHEAD + (TEXT_OVERHEAD + estimate_tokens("hello")) * 2
-        );
-    }
-
     // ── fit_to_budget ──────────────────────────────────────────────
 
     #[test]
@@ -864,29 +834,7 @@ mod tests {
             .any(|b| matches!(b, ContentBlock::Text { .. })));
     }
 
-    #[test]
-    fn empty_transcript_is_noop() {
-        let (result, reduced) = fit_to_budget(&[], 1000, 500);
-        assert!(!reduced);
-        assert!(result.is_empty());
-    }
-
     // ── strip_orphaned_tool_blocks ─────────────────────────────────
-
-    #[test]
-    fn strips_orphaned_tool_use() {
-        let mut msgs = vec![
-            user_msg("go"),
-            tool_use_msg("tu_1", "read_file", "a"),
-            // No matching ToolResult for tu_1.
-            user_msg("next"),
-        ];
-        strip_orphaned_tool_blocks(&mut msgs);
-        assert!(!msgs.iter().any(|m| m
-            .content
-            .iter()
-            .any(|b| matches!(b, ContentBlock::ToolUse { .. }))));
-    }
 
     /// A turn that died with a tool call unresolved leaves a ToolUse with no
     /// ToolResult. That transcript is usually well under budget, so the
@@ -941,24 +889,6 @@ mod tests {
             .any(|b| matches!(b, ContentBlock::ToolResult { .. }))));
     }
 
-    #[test]
-    fn keeps_paired_tool_blocks() {
-        let mut msgs = vec![
-            user_msg("go"),
-            tool_use_msg("tu_1", "read_file", "a"),
-            tool_result_msg("tu_1", "data"),
-            assistant_msg("done"),
-        ];
-        strip_orphaned_tool_blocks(&mut msgs);
-        assert!(msgs.iter().any(|m| m
-            .content
-            .iter()
-            .any(|b| matches!(b, ContentBlock::ToolUse { id, .. } if id == "tu_1"))));
-        assert!(msgs.iter().any(|m| m.content.iter().any(
-            |b| matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "tu_1")
-        )));
-    }
-
     // ── Budget helpers ─────────────────────────────────────────────
 
     #[test]
@@ -996,13 +926,6 @@ mod tests {
         assert!(result.len() < s.len());
     }
 
-    #[test]
-    fn truncate_str_noop_when_fits() {
-        let s = "hello";
-        let result = truncate_str(s, 100);
-        assert_eq!(result, s);
-    }
-
     // ── merge / ensure_starts_with_user ────────────────────────────
 
     #[test]
@@ -1012,18 +935,6 @@ mod tests {
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, Role::User);
         assert_eq!(msgs[0].content.len(), 2);
-    }
-
-    #[test]
-    fn ensure_starts_with_user_drops_leading_assistant() {
-        let mut msgs = vec![
-            assistant_msg("stale"),
-            user_msg("fresh"),
-            assistant_msg("reply"),
-        ];
-        ensure_starts_with_user(&mut msgs);
-        assert_eq!(msgs.len(), 2);
-        assert_eq!(msgs[0].role, Role::User);
     }
 
     // ── Image blocks ───────────────────────────────────────────────

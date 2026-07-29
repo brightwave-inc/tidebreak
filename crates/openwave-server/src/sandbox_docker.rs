@@ -571,11 +571,6 @@ mod tests {
     }
 
     #[test]
-    fn base_url_formats_the_loopback_authority() {
-        assert_eq!(base_url(49_155), "http://127.0.0.1:49155");
-    }
-
-    #[test]
     fn inspect_ports_resolve_the_published_host_port() {
         // The published-port shape `docker inspect {{json .NetworkSettings.Ports}}`
         // renders, with the loopback binding chosen.

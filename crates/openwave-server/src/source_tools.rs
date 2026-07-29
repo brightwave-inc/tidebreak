@@ -564,6 +564,7 @@ mod tests {
         store.create_chat(&chat).await.unwrap();
         let canonical_text = "Aé🌊\nGrounded fact";
         let source = DocumentUpsert {
+            canonical_fingerprint: None,
             id: DocumentId::new(),
             chat_id: Some(chat.id),
             project_id: None,

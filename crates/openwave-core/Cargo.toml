@@ -35,6 +35,7 @@ tools = ["dep:cap-fs-ext", "dep:cap-std", "dep:tokio"]
 blob-fs = ["dep:async-stream", "dep:tokio", "dep:windows-sys"]
 
 [dependencies]
+openwave-shell-policy = { path = "../openwave-shell-policy" }
 async-trait = { workspace = true }
 async-stream = { workspace = true, optional = true }
 cap-std = { workspace = true, optional = true }

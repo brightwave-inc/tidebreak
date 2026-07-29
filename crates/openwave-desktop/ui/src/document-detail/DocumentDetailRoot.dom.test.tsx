@@ -14,6 +14,7 @@ import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import type { AssistantSource } from "@/AssistantSources";
 import { useChatSessionStore } from "@/ChatSessionStore";
 import { CITATION_MARK_CLASS } from "@/components/document/citationMark";
+import type { SheetHighlightRange } from "@/document/UniverSpreadsheetViewer";
 import { clearFileDownloadCache } from "@/document/useFileDownload";
 import { renderWithRouter } from "../test/router";
 import { DocumentDetailRoot } from "./DocumentDetailRoot";
@@ -55,6 +56,20 @@ vi.mock("@/document/PdfViewer", async () => {
   };
 });
 
+// Univer renders to a canvas through a worker, which jsdom has neither of. The
+// stand-in reports the range the panel handed it, which is the part the panel
+// is responsible for; selecting and scrolling to those cells is the viewer's
+// own, and it already did that before anything produced a range.
+vi.mock("@/document/UniverSpreadsheetViewer", () => ({
+  default: ({ highlightRange }: { highlightRange?: SheetHighlightRange }) => (
+    <div>
+      {highlightRange
+        ? `Sheet ${highlightRange.sheetName} ${highlightRange.startCell}:${highlightRange.endCell}`
+        : "Workbook"}
+    </div>
+  ),
+}));
+
 /** The boxes drawn over the page on screen, however many pages carry them. */
 function drawnHighlights(): Element[] {
   return [...document.querySelectorAll(`.${CITATION_MARK_CLASS}`)];
@@ -89,6 +104,7 @@ function detail(overrides: Partial<DocumentDetail> = {}): DocumentDetail {
     title: "Floor plan.png",
     processing_status: "ready",
     searchable: false,
+    has_original_bytes: true,
     updated_at: "2026-07-24T00:00:00Z",
     content: "",
     ...overrides,
@@ -280,6 +296,26 @@ describe("DocumentDetailRoot", () => {
     expect(client.getChatDocumentFile).not.toHaveBeenCalled();
   });
 
+  // A fetched web page is stored as the readable text extraction produced; the
+  // markup it came from is not kept. Its media type says `text/markdown`, which
+  // a viewer would happily accept, so the tab has to be gated on whether there
+  // are bytes rather than on whether something could draw them.
+  it("offers no original for a source that retained no bytes", async () => {
+    const { client } = await openPanel(
+      detail({
+        media_type: "text/markdown",
+        title: "Ownership Explained",
+        has_original_bytes: false,
+        content: "Ownership moves.",
+        searchable: true,
+      }),
+    );
+
+    expect(await screen.findByText("Ownership moves.")).toBeVisible();
+    expect(screen.queryByRole("tab", { name: "Original document" })).toBeNull();
+    expect(client.getChatDocumentFile).not.toHaveBeenCalled();
+  });
+
   // The tree viewers are reached by media type, and two of these four used to
   // land on the plain-text viewer instead: `text/xml` because it is a text type,
   // and the suffixed types because only the base types were recognised.
@@ -332,6 +368,54 @@ describe("DocumentDetailRoot", () => {
       expect(scrolledTo).toContain(cited.closest("div"));
     },
   );
+
+  // A workbook is opened at a range on a sheet, which is what a citation into
+  // one records. A workbook format the panel has no grid viewer for keeps the
+  // range on the citation and lands on the extracted text, where the rows it
+  // quoted are highlighted instead.
+  const CELL_RANGE = {
+    startCell: "B2",
+    endCell: "D10",
+    sheetIndex: 0,
+    sheetName: "Q4 Results",
+  } as const;
+  const SHEET_TEXT = "## Q4 Results\n\n| North | 1204.5 |\n";
+
+  it("opens a citation into a workbook at the range it quoted", async () => {
+    seedTranscript({ id: "cite-cells", cellRange: CELL_RANGE });
+    await openCitation(
+      detail({
+        media_type:
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        title: "Q4.xlsx",
+        content: SHEET_TEXT,
+      }),
+      "cite-cells",
+    );
+
+    expect(
+      await screen.findByText("Sheet Q4 Results B2:D10"),
+    ).toBeVisible();
+  });
+
+  it("falls back to the extracted text for a workbook it cannot draw", async () => {
+    seedTranscript({
+      id: "cite-ods",
+      cellRange: CELL_RANGE,
+      span: { start: 3, end: 13 },
+    });
+    await openCitation(
+      detail({
+        media_type: "application/vnd.oasis.opendocument.spreadsheet",
+        title: "Q4.ods",
+        content: SHEET_TEXT,
+      }),
+      "cite-ods",
+    );
+
+    expect(await screen.findByText("Q4 Results")).toBeVisible();
+    expect(screen.queryByText(/^Sheet /)).toBeNull();
+  });
 
   it("opens a tree collapsed when nothing pointed into it", async () => {
     await openPanel(
