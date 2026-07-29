@@ -1,4 +1,5 @@
 import type { ComponentType, FunctionComponent } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import {
   Cpu,
   Globe,
@@ -45,7 +46,17 @@ function ProvidersSection() {
 
 function GatewaySection() {
   const { client, refreshCatalog } = useApp();
-  return <GatewayPanel client={client} onChanged={() => void refreshCatalog()} />;
+  const navigate = useNavigate();
+  // Settings sections are registered from a runtime table, so TanStack's
+  // generated route union contains `/settings` but not each literal child.
+  const mcpPath: string = "/settings/mcp";
+  return (
+    <GatewayPanel
+      client={client}
+      onChanged={() => void refreshCatalog()}
+      onOpenMcpSettings={() => void navigate({ to: mcpPath })}
+    />
+  );
 }
 
 function ModelsSection() {
@@ -153,8 +164,8 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
  *
  * A managed profile has no bring-your-own credentials to manage, so the
  * Providers section is dropped and the Model Gateway — the one place its
- * models, session, and MCP mounts come from — becomes the first section, and
- * therefore where settings opens.
+ * models and session come from — becomes the first section, and therefore
+ * where settings opens.
  */
 export function settingsSectionsFor(managed: boolean): SettingsSectionDef[] {
   return managed
