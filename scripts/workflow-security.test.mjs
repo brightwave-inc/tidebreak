@@ -157,6 +157,30 @@ test("UI tests and production build run as parallel matrix jobs", () => {
   assert.match(aggregate, /true\) test "\$UI_RESULT" = success ;;/);
 });
 
+test("PR compiler caches are writable, isolated, and deleted on close", () => {
+  const ci = workflows["ci.yml"];
+  for (const name of ["lint", "desktop", "test", "vectors", "postgres"]) {
+    assert.match(workflowJob(ci, name), /SCCACHE_GHA_RW_MODE: READ_WRITE/);
+  }
+  assert.doesNotMatch(
+    ci,
+    /github\.event_name == 'pull_request' && 'READ_ONLY' \|\| 'READ_WRITE'/,
+  );
+
+  const cleanup = workflows["cache-cleanup.yml"];
+  assert.ok(cleanup);
+  assert.match(
+    cleanup,
+    /^on:\n(?:  #.*\n)+  pull_request_target:\n    types: \[closed\]/m,
+  );
+  assert.match(cleanup, /^permissions:\n  actions: write\n  contents: read$/m);
+  assert.match(
+    cleanup,
+    /gh cache delete --all --ref "refs\/pull\/\$\{PR_NUMBER\}\/merge"/,
+  );
+  assert.doesNotMatch(cleanup, /actions\/checkout|secrets\./);
+});
+
 test("heavy capability lanes run only for relevant merges and scheduled backstops", () => {
   const ci = workflows["ci.yml"];
   const changes = workflowJob(ci, "changes");

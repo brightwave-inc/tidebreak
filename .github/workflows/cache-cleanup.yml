@@ -1,0 +1,27 @@
+name: PR compiler cache cleanup
+
+on:
+  # This trusted default-branch workflow never checks out or runs PR code. The
+  # target event keeps Actions deletion permission for caches created by forks.
+  pull_request_target:
+    types: [closed]
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: pr-cache-cleanup-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: delete closed PR caches
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Delete the PR merge-ref cache scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh cache delete --all --ref "refs/pull/${PR_NUMBER}/merge"
