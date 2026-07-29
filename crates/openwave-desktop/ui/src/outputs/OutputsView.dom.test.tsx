@@ -23,6 +23,7 @@ function output(overrides: Partial<DeliverableSummary> = {}): DeliverableSummary
     sizeBytes: 42,
     revisionCount: 1,
     updatedAt: "2026-07-24T00:00:00Z",
+    producingRunId: null,
     ...overrides,
   };
 }
@@ -36,6 +37,11 @@ function outputApis(deliverables: DeliverableSummary[]): OutputsApis {
       revisionId,
       status: "completed" as const,
     }),
+    revert: vi.fn().mockResolvedValue({
+      status: "retracted" as const,
+      outputId: ids.brief,
+    }),
+    restore: vi.fn().mockResolvedValue(output()),
   };
 }
 
@@ -85,6 +91,30 @@ describe("OutputsView", () => {
 
     await waitFor(() => expect(apis.export).toHaveBeenCalledWith("chat-1", ids.brief));
     expect(await screen.findByText("Research brief.md was saved.")).toBeVisible();
+  });
+
+  it("retracts a merged output and offers an undo that restores it", async () => {
+    const apis = outputApis([output({ producingRunId: ids.sheet })]);
+    const user = userEvent.setup();
+
+    render(<OutputsView chatId="chat-1" apis={apis} />);
+    // The auto-merged output is badged as coming from a background agent.
+    expect(await screen.findByText("Agent")).toBeVisible();
+
+    await user.click(
+      await screen.findByRole("button", { name: "More options for Research brief.md" }),
+    );
+    await user.click(await screen.findByRole("menuitem", { name: "Revert" }));
+
+    await waitFor(() => expect(apis.revert).toHaveBeenCalledWith("chat-1", ids.brief));
+    expect(
+      await screen.findByText("Research brief.md was retracted from this conversation."),
+    ).toBeVisible();
+
+    // The retract is reversible: Undo restores the exact output.
+    await user.click(screen.getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(apis.restore).toHaveBeenCalledWith("chat-1", ids.brief));
+    expect(await screen.findByText("Research brief.md was restored.")).toBeVisible();
   });
 
   it("names the reason a save failed rather than reporting it as saved", async () => {

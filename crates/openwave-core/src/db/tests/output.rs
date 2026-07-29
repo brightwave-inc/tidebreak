@@ -285,6 +285,89 @@ async fn deleting_an_output_hides_it_but_retains_its_revisions() {
 }
 
 #[tokio::test]
+async fn reverting_republishes_a_prior_revision_without_losing_history() {
+    let (_dir, store, chat) = store_with_chat().await;
+    let first = store
+        .create_output(&create_request(chat.id, "brief.md", 1))
+        .await
+        .unwrap();
+    let second = revision(2, 30);
+    let updated = store
+        .append_output_revision(first.id, &second)
+        .await
+        .unwrap();
+    assert_eq!(updated.current_revision, second.id);
+    assert_eq!(updated.revision_count, 2);
+
+    // Revert steps the current pointer back to the first revision. Nothing is
+    // appended or destroyed: the revision count is unchanged and the superseded
+    // revision stays addressable.
+    let reverted = store
+        .set_current_output_revision(first.id, first.current_revision, at(60))
+        .await
+        .unwrap();
+    assert_eq!(reverted.current_revision, first.current_revision);
+    assert_eq!(reverted.revision_count, 2, "revert never mints a revision");
+    assert_eq!(reverted.updated_at, at(60));
+    assert_eq!(
+        store.list_output_revisions(first.id).await.unwrap().len(),
+        2
+    );
+
+    // Revert is reversible: the newer revision can be republished again.
+    let forward = store
+        .set_current_output_revision(first.id, second.id, at(90))
+        .await
+        .unwrap();
+    assert_eq!(forward.current_revision, second.id);
+    assert_eq!(forward.revision_count, 2);
+
+    // A revision that belongs to another output can never become current.
+    let other = store
+        .create_output(&create_request(chat.id, "other.md", 3))
+        .await
+        .unwrap();
+    assert!(store
+        .set_current_output_revision(first.id, other.current_revision, at(120))
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn restoring_a_retracted_output_is_the_exact_inverse_of_deleting_it() {
+    let (_dir, store, chat) = store_with_chat().await;
+    let created = store
+        .create_output(&create_request(chat.id, "brief.md", 1))
+        .await
+        .unwrap();
+    store.delete_output(created.id, at(60)).await.unwrap();
+    assert!(store.list_outputs(chat.id, 10).await.unwrap().is_empty());
+
+    assert!(store.restore_output(created.id, at(90)).await.unwrap());
+    let restored = store.get_output(created.id).await.unwrap().unwrap();
+    assert!(restored.deleted_at.is_none(), "the retraction is cleared");
+    assert_eq!(
+        store.list_outputs(chat.id, 10).await.unwrap().len(),
+        1,
+        "the output returns to the catalog"
+    );
+    // Reverting again after restore still works: the history was untouched.
+    assert!(store
+        .append_output_revision(created.id, &revision(2, 120))
+        .await
+        .is_ok());
+
+    assert!(
+        store.restore_output(created.id, at(150)).await.unwrap(),
+        "restoring a live output is the same durable outcome"
+    );
+    assert!(
+        !store.restore_output(OutputId::new(), at(60)).await.unwrap(),
+        "an unknown output reports no restore"
+    );
+}
+
+#[tokio::test]
 async fn a_deleted_output_refuses_further_revisions() {
     let (_dir, store, chat) = store_with_chat().await;
     let created = store
@@ -621,6 +704,65 @@ async fn a_binary_workspace_artifact_is_accepted_published_and_attributed_to_its
         revision.sha256,
         <[u8; 32]>::from(sha2::Sha256::digest(&content))
     );
+}
+
+#[cfg(feature = "tools")]
+#[tokio::test]
+async fn a_background_run_result_auto_merges_into_a_revertible_text_output() {
+    use crate::deliverable::output_revision_relative_path;
+    use crate::deliverable_acceptance::{merge_agent_run_result, AgentResultOutputMerge};
+    use crate::id::AgentRunId;
+
+    let (_dir, store, chat) = store_with_chat().await;
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = open_scratch(scratch.path());
+
+    let run_id = AgentRunId::new();
+    let merge = AgentResultOutputMerge {
+        run_id,
+        chat_id: chat.id,
+        filename: "Agent result.md".into(),
+        text: "# Findings\n\nThe background agent finished.".into(),
+        created_at: at(0),
+    };
+
+    let record = merge_agent_run_result(&store, &dir, &merge).await.unwrap();
+    assert_eq!(record.chat_id, chat.id);
+    assert_eq!(record.media_type, "text/markdown");
+    assert_eq!(record.revision_count, 1);
+    // Identity is derived from the run, so it is stable and idempotent.
+    assert_eq!(record.id, OutputId::for_run(run_id));
+    assert_eq!(record.current_revision, OutputRevisionId::for_run(run_id));
+
+    // The bytes landed at the write-once revision path the desktop reads.
+    let published = scratch.path().join(output_revision_relative_path(
+        record.id,
+        record.current_revision,
+    ));
+    assert_eq!(std::fs::read(&published).unwrap(), merge.text.as_bytes());
+
+    // The revision is attributed to the producing run, never a turn — this is
+    // what the agent-run surface correlates against.
+    let revision = store
+        .get_output_revision(record.current_revision)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(revision.producing_run_id, Some(run_id));
+    assert_eq!(revision.turn_id, None);
+
+    // An ambiguous submit retry re-runs the merge without forking a second
+    // output or revision.
+    let retried = merge_agent_run_result(&store, &dir, &merge).await.unwrap();
+    assert_eq!(retried, record);
+    assert_eq!(store.list_outputs(chat.id, 10).await.unwrap().len(), 1);
+
+    // The auto-merge is safe because it is revertible: retracting it hides the
+    // output while keeping its revision, and restoring brings it back.
+    assert!(store.delete_output(record.id, at(30)).await.unwrap());
+    assert!(store.list_outputs(chat.id, 10).await.unwrap().is_empty());
+    assert!(store.restore_output(record.id, at(60)).await.unwrap());
+    assert_eq!(store.list_outputs(chat.id, 10).await.unwrap().len(), 1);
 }
 
 #[cfg(feature = "tools")]

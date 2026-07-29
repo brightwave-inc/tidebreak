@@ -295,6 +295,92 @@ pub(in crate::db) async fn delete_output(
     Ok(true)
 }
 
+pub(in crate::db) async fn restore_output(
+    store: &DbStore,
+    id: OutputId,
+    restored_at: chrono::DateTime<chrono::Utc>,
+) -> Result<bool> {
+    let restored_at = canonical_db_timestamp(restored_at)?;
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    let Some(existing) = find_output_on(&transaction, id).await? else {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(false);
+    };
+    if existing.deleted_at.is_none() {
+        // Restoring a live output is the same durable outcome, not a conflict.
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(true);
+    }
+    // Clearing the soft-delete is the exact inverse of `delete_output`; the
+    // revision history is untouched. Surfacing the restored output as freshly
+    // updated keeps a reversed retraction visible at the top of the catalog.
+    entities::output::ActiveModel {
+        id: Set(id.0),
+        deleted_at: Set(None),
+        updated_at: Set(restored_at),
+        ..Default::default()
+    }
+    .update(&transaction)
+    .await
+    .map_err(store_err)?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(true)
+}
+
+pub(in crate::db) async fn set_current_output_revision(
+    store: &DbStore,
+    output_id: OutputId,
+    revision_id: OutputRevisionId,
+    updated_at: chrono::DateTime<chrono::Utc>,
+) -> Result<OutputRecord> {
+    let updated_at = canonical_db_timestamp(updated_at)?;
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    let Some(existing) = find_output_on(&transaction, output_id).await? else {
+        transaction.rollback().await.map_err(store_err)?;
+        return Err(AgentError::Store(format!("output {output_id} not found")));
+    };
+    // Serialize against a concurrent append so a revert and a new revision
+    // cannot both publish a current revision from the same starting point.
+    if !acquire_chat_write_lock(&transaction, existing.chat_id).await? {
+        transaction.rollback().await.map_err(store_err)?;
+        return Err(AgentError::Store(format!(
+            "chat {} does not exist",
+            existing.chat_id
+        )));
+    }
+    if existing.deleted_at.is_some() {
+        transaction.rollback().await.map_err(store_err)?;
+        return Err(AgentError::Store(format!("output {output_id} is deleted")));
+    }
+    // The target must be a revision already recorded for this exact output.
+    // Reverting never mints a revision, so an unknown or foreign id is a caller
+    // bug rather than a new version.
+    let Some(revision) = find_revision_on(&transaction, revision_id).await? else {
+        transaction.rollback().await.map_err(store_err)?;
+        return Err(AgentError::Store(format!(
+            "output revision {revision_id} not found"
+        )));
+    };
+    if revision.output_id != output_id {
+        transaction.rollback().await.map_err(store_err)?;
+        return Err(AgentError::Store(format!(
+            "output revision {revision_id} does not belong to output {output_id}"
+        )));
+    }
+    entities::output::ActiveModel {
+        id: Set(output_id.0),
+        current_revision_id: Set(revision_id.0),
+        updated_at: Set(updated_at),
+        ..Default::default()
+    }
+    .update(&transaction)
+    .await
+    .map_err(store_err)?;
+    let record = require_output_on(&transaction, output_id).await?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(record)
+}
+
 fn validate_new_output(request: &CreateOutput) -> Result<String> {
     let media_type = match &request.kind {
         DeliverableKind::Text => {

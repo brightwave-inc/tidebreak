@@ -14,9 +14,12 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import {
   exportDeliverable,
   listDeliverables,
+  restoreOutput,
+  revertOutput,
   type DeliverableSummary,
   type DeliverablesCatalog,
   type OutputExportResult,
+  type OutputRevertResult,
 } from "@/deliverables";
 import {
   PICKER_BUSY_MESSAGE,
@@ -28,11 +31,15 @@ import { OutputsTable } from "./OutputsTable";
 export type OutputsApis = {
   list: (chatId: string) => Promise<DeliverablesCatalog>;
   export: (chatId: string, outputId: string) => Promise<OutputExportResult>;
+  revert: (chatId: string, outputId: string) => Promise<OutputRevertResult>;
+  restore: (chatId: string, outputId: string) => Promise<DeliverableSummary>;
 };
 
 const defaultApis: OutputsApis = {
   list: listDeliverables,
   export: exportDeliverable,
+  revert: revertOutput,
+  restore: restoreOutput,
 };
 
 /**
@@ -64,6 +71,8 @@ export function OutputsView({
   const [saveStatus, setSaveStatus] = useState<{
     message: string;
     error: boolean;
+    /** A retract offers an inline undo that restores the output. */
+    undo?: () => void;
   } | null>(null);
   const [countSuffix, setCountSuffix] = useState("");
   const generationRef = useRef(0);
@@ -124,6 +133,54 @@ export function OutputsView({
     [apis, chatId, busyOutputId],
   );
 
+  const onRestore = useCallback(
+    async (output: DeliverableSummary) => {
+      try {
+        await apis.restore(chatId, output.outputId);
+        setSaveStatus({ message: `${output.filename} was restored.`, error: false });
+        void refresh();
+      } catch (caught) {
+        setSaveStatus({
+          message: friendlyOutputError(caught, "Could not restore that output."),
+          error: true,
+        });
+      }
+    },
+    [apis, chatId],
+  );
+
+  const onRevert = useCallback(
+    async (output: DeliverableSummary) => {
+      if (busyOutputId) return;
+      setBusyOutputId(output.outputId);
+      setSaveStatus(null);
+      try {
+        const result = await apis.revert(chatId, output.outputId);
+        if (result.status === "retracted") {
+          setSaveStatus({
+            message: `${output.filename} was retracted from this conversation.`,
+            error: false,
+            undo: () => void onRestore(output),
+          });
+        } else {
+          setSaveStatus({
+            message: `${output.filename} was reverted to its previous version.`,
+            error: false,
+          });
+        }
+        void refresh();
+      } catch (caught) {
+        setSaveStatus({
+          message: friendlyOutputError(caught, "Could not revert that output."),
+          error: true,
+        });
+      } finally {
+        setBusyOutputId(null);
+      }
+    },
+    [apis, chatId, busyOutputId, onRestore],
+  );
+
   const hasOutputs = catalog.deliverables.length > 0;
 
   return (
@@ -156,12 +213,22 @@ export function OutputsView({
           <div
             className={
               saveStatus.error
-                ? "mx-4 shrink-0 rounded-md bg-critical-background px-3 py-2 text-sm text-critical-foreground-muted"
-                : "mx-4 shrink-0 rounded-md bg-info-background px-3 py-2 text-sm text-info-foreground-muted"
+                ? "mx-4 flex shrink-0 items-center justify-between gap-3 rounded-md bg-critical-background px-3 py-2 text-sm text-critical-foreground-muted"
+                : "mx-4 flex shrink-0 items-center justify-between gap-3 rounded-md bg-info-background px-3 py-2 text-sm text-info-foreground-muted"
             }
             role={saveStatus.error ? "alert" : "status"}
           >
-            {saveStatus.message}
+            <span>{saveStatus.message}</span>
+            {saveStatus.undo && (
+              <Button
+                variant="outline"
+                size="xs"
+                className="shrink-0"
+                onClick={saveStatus.undo}
+              >
+                Undo
+              </Button>
+            )}
           </div>
         )}
         {error && (
@@ -209,6 +276,7 @@ export function OutputsView({
             busyOutputId={busyOutputId}
             onOpen={onOpen}
             onSave={(output) => void onSave(output)}
+            onRevert={(output) => void onRevert(output)}
             onCountChange={setCountSuffix}
           />
         )}

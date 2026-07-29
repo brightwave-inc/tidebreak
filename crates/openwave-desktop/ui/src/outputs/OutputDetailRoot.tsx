@@ -1,4 +1,4 @@
-import { DownloadIcon } from "lucide-react";
+import { DownloadIcon, Undo2Icon } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { PanelBreadcrumb } from "@/components/PanelHeader";
@@ -7,8 +7,10 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import {
   exportDeliverable,
   readDeliverable,
+  revertOutput,
   type DeliverablePreview,
   type OutputExportResult,
+  type OutputRevertResult,
 } from "@/deliverables";
 import { MessageMarkdown } from "@/MessageMarkdown";
 import {
@@ -25,11 +27,13 @@ import { exportFailureMessage, friendlyOutputError } from "./OutputsView";
 export type OutputDetailApis = {
   read: (chatId: string, outputId: string) => Promise<DeliverablePreview>;
   export: (chatId: string, outputId: string) => Promise<OutputExportResult>;
+  revert: (chatId: string, outputId: string) => Promise<OutputRevertResult>;
 };
 
 const defaultApis: OutputDetailApis = {
   read: readDeliverable,
   export: exportDeliverable,
+  revert: revertOutput,
 };
 
 /**
@@ -55,6 +59,7 @@ export function OutputDetailRoot({
   const [preview, setPreview] = useState<DeliverablePreview | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [reverting, setReverting] = useState(false);
   const [saveStatus, setSaveStatus] = useState<{
     message: string;
     error: boolean;
@@ -107,6 +112,34 @@ export function OutputDetailRoot({
     }
   }
 
+  async function onRevert() {
+    if (reverting) return;
+    setReverting(true);
+    setSaveStatus(null);
+    try {
+      const result = await apis.revert(chatId, outputId);
+      if (result.status === "retracted") {
+        // The output no longer exists in the conversation; there is nothing left
+        // to preview here, so return to the catalog where Undo is offered.
+        openPanel({ type: "outputs" });
+        return;
+      }
+      const next = await apis.read(chatId, outputId);
+      setPreview(next);
+      setSaveStatus({
+        message: "Reverted to the previous version.",
+        error: false,
+      });
+    } catch (caught) {
+      setSaveStatus({
+        message: friendlyOutputError(caught, "Could not revert that output."),
+        error: true,
+      });
+    } finally {
+      setReverting(false);
+    }
+  }
+
   return (
     <PanelFrame
       position={position}
@@ -126,17 +159,30 @@ export function OutputDetailRoot({
         />
       }
       headerRightSlot={
-        <WithTooltip label="Save as…">
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            disabled={!preview || saving}
-            onClick={() => void onSave()}
-          >
-            <DownloadIcon className="size-4" />
-            <span className="sr-only">Save as…</span>
-          </Button>
-        </WithTooltip>
+        <div className="flex items-center gap-1">
+          <WithTooltip label="Revert">
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              disabled={!preview || reverting}
+              onClick={() => void onRevert()}
+            >
+              <Undo2Icon className="size-4" />
+              <span className="sr-only">Revert</span>
+            </Button>
+          </WithTooltip>
+          <WithTooltip label="Save as…">
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              disabled={!preview || saving}
+              onClick={() => void onSave()}
+            >
+              <DownloadIcon className="size-4" />
+              <span className="sr-only">Save as…</span>
+            </Button>
+          </WithTooltip>
+        </div>
       }
     >
       {loadError ? (

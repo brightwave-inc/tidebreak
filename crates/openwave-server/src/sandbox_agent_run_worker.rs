@@ -566,9 +566,7 @@ impl SandboxAgentRunWorker {
                 .await;
         };
         match completion_result {
-            Ok(SandboxCompletion::Final(text)) => {
-                self.submit_result(run.id, lease_token, text).await
-            }
+            Ok(SandboxCompletion::Final(text)) => self.submit_result(&run, lease_token, text).await,
             Ok(SandboxCompletion::WebSearch {
                 provider_id,
                 arguments,
@@ -657,23 +655,79 @@ impl SandboxAgentRunWorker {
 
     async fn submit_result(
         &self,
-        id: openwave_core::AgentRunId,
+        run: &AgentRun,
         lease_token: uuid::Uuid,
         text: String,
     ) -> Result<SandboxAgentRunWorkerOutcome> {
+        let id = run.id;
         match self
             .store
             .submit_agent_run_result(id, lease_token, &text)
             .await?
         {
-            Some(SubmitAgentRunResultOutcome::Completed(_))
-            | Some(SubmitAgentRunResultOutcome::Existing(_)) => {
+            Some(SubmitAgentRunResultOutcome::Completed(result))
+            | Some(SubmitAgentRunResultOutcome::Existing(result)) => {
+                // The result is durably committed and delivered to the parent
+                // inbox. Now the host — never the model — merges it into the
+                // conversation's output record as a revertible version. The
+                // merge runs on the committed text, so the model that produced
+                // it cannot author, decline, or steer the merge.
+                self.auto_merge_result_output(run, &result).await;
                 Ok(SandboxAgentRunWorkerOutcome::Completed(id))
             }
             None => {
                 self.acknowledge_cancellation_or_lease_loss(id, lease_token)
                     .await
             }
+        }
+    }
+
+    /// Auto-merge a completed background run's text result into its
+    /// conversation's outputs.
+    ///
+    /// This is best-effort after the result has already committed: the merge is
+    /// idempotent on the run's derived output identity, so an ambiguous submit
+    /// retry re-runs it harmlessly, and a failure here never fails a run whose
+    /// result is already delivered. Only a `FinalText` result becomes an output;
+    /// a folder-access proposal or cancellation is not conversation content.
+    async fn auto_merge_result_output(
+        &self,
+        run: &AgentRun,
+        result: &openwave_core::AgentRunResult,
+    ) {
+        let openwave_core::AgentRunResultPayload::FinalText { text } = &result.payload else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        let Some(root) = &self.private_scratch_root else {
+            return;
+        };
+        let scratch = match open_chat_scratch(root, run.chat_id) {
+            Ok(scratch) => scratch,
+            Err(error) => {
+                tracing::warn!(
+                    "could not open scratch to auto-merge agent run {} output: {error}",
+                    run.id
+                );
+                return;
+            }
+        };
+        let merge = openwave_core::AgentResultOutputMerge {
+            run_id: run.id,
+            chat_id: run.chat_id,
+            filename: agent_result_filename(run.id),
+            text: text.clone(),
+            created_at: result.submitted_at,
+        };
+        if let Err(error) =
+            openwave_core::merge_agent_run_result(&*self.store, &scratch, &merge).await
+        {
+            tracing::warn!(
+                "could not auto-merge agent run {} result into outputs: {error}",
+                run.id
+            );
         }
     }
 
@@ -889,6 +943,53 @@ impl SandboxAgentRunWorker {
         }
         Ok(())
     }
+}
+
+/// Open one conversation's private-scratch directory as a capability root.
+///
+/// This is the same `<scratch root>/<chat id>` directory the desktop reads an
+/// output revision from; the merge writes the revision bytes below it under
+/// `outputs/`. The directory is created and locked to the owner on first use.
+fn open_chat_scratch(
+    root: &std::path::Path,
+    chat_id: openwave_core::ChatId,
+) -> Result<cap_std::fs::Dir> {
+    let path = root.join(chat_id.to_string());
+    std::fs::create_dir_all(&path).map_err(|error| {
+        AgentError::Store(format!(
+            "failed to create chat scratch {}: {error}",
+            path.display()
+        ))
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).map_err(
+            |error| {
+                AgentError::Store(format!(
+                    "failed to secure chat scratch {}: {error}",
+                    path.display()
+                ))
+            },
+        )?;
+    }
+    cap_std::fs::Dir::open_ambient_dir(&path, cap_std::ambient_authority()).map_err(|error| {
+        AgentError::Store(format!(
+            "failed to open chat scratch {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+/// Host-derived, portable display filename for an auto-merged agent result.
+///
+/// The model never names the output. A short, run-derived suffix keeps several
+/// background results in one conversation distinguishable while the record's
+/// opaque identity remains the authority.
+fn agent_result_filename(run_id: openwave_core::AgentRunId) -> String {
+    let id = run_id.to_string();
+    let short = id.get(..8).unwrap_or(id.as_str());
+    format!("Agent result {short}.md")
 }
 
 fn delegated_file_admission_matches(

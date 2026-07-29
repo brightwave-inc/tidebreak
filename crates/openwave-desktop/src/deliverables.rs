@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
+use chrono::Utc;
 use openwave_core::{
     deliverable_media_type, media_type_is_text, revision_byte_ceiling, ChatId, OutputId,
     OutputRecord, OutputRevision, OutputRevisionId, Store, MAX_BINARY_DELIVERABLE_BYTES,
@@ -64,6 +65,29 @@ pub(crate) struct DeliverableSummary {
     size_bytes: u64,
     revision_count: u32,
     updated_at: String,
+    /// Background run that produced the current revision, when the output was
+    /// auto-merged from a background agent rather than a foreground turn. The
+    /// renderer uses it to badge the output and correlate it with the agent-run
+    /// surface; it is a display key, not authority.
+    producing_run_id: Option<Uuid>,
+}
+
+/// Outcome of reverting a merged output.
+///
+/// Reverting an output with earlier revisions republishes the previous one;
+/// reverting one that has only its initial merge retracts it. Both are durable
+/// and reversible — a retract is undone by `restore_output`, and a revert can be
+/// followed forward again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub(crate) enum OutputRevertResult {
+    Reverted {
+        output_id: OutputId,
+        revision_id: OutputRevisionId,
+    },
+    Retracted {
+        output_id: OutputId,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -284,6 +308,76 @@ pub(crate) async fn export_deliverable(
     terminalize_output_export(&host_access.receipts, &mut receipt, terminal)
 }
 
+#[tauri::command]
+pub(crate) async fn revert_output(
+    host_access: State<'_, HostAccess>,
+    request: DeliverableRequest,
+) -> Result<OutputRevertResult, String> {
+    let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
+    let store = host_access
+        .store()
+        .ok_or_else(|| "OpenWave is still starting".to_owned())?;
+    let (output, current) =
+        require_live_output(host_access.store(), chat_id, request.output_id).await?;
+    // Reverting is a host action, never the model's. An output that has only its
+    // initial merge cannot step back to an earlier version, so reverting it
+    // retracts the merge entirely — a soft delete that `restore_output` undoes.
+    if current.ordinal <= 1 {
+        store
+            .delete_output(output.id, Utc::now())
+            .await
+            .map_err(|_| "Could not revert that output".to_owned())?;
+        return Ok(OutputRevertResult::Retracted {
+            output_id: output.id,
+        });
+    }
+    // Otherwise step the current pointer back to the immediately previous
+    // revision. The superseded revision is retained and addressable, so a revert
+    // destroys nothing and can be followed forward again.
+    let previous = store
+        .list_output_revisions(output.id)
+        .await
+        .map_err(|_| "Could not revert that output".to_owned())?
+        .into_iter()
+        .find(|revision| revision.ordinal == current.ordinal - 1)
+        .ok_or_else(|| "That output has no earlier revision to revert to".to_owned())?;
+    let record = store
+        .set_current_output_revision(output.id, previous.id, Utc::now())
+        .await
+        .map_err(|_| "Could not revert that output".to_owned())?;
+    Ok(OutputRevertResult::Reverted {
+        output_id: record.id,
+        revision_id: previous.id,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn restore_output(
+    host_access: State<'_, HostAccess>,
+    request: DeliverableRequest,
+) -> Result<DeliverableSummary, String> {
+    let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
+    let store = host_access
+        .store()
+        .ok_or_else(|| "OpenWave is still starting".to_owned())?;
+    // A restore targets a soft-deleted output, so it cannot go through the
+    // live-only `require_live_output`. Bind it to the exact conversation before
+    // clearing the retraction.
+    let output = store
+        .get_output(request.output_id)
+        .await
+        .map_err(|_| "Could not restore that output".to_owned())?
+        .filter(|output| output.chat_id == chat_id)
+        .ok_or_else(|| "Output not found in this conversation".to_owned())?;
+    store
+        .restore_output(output.id, Utc::now())
+        .await
+        .map_err(|_| "Could not restore that output".to_owned())?;
+    let (output, revision) =
+        require_live_output(host_access.store(), chat_id, request.output_id).await?;
+    summary_from_record(&output, &revision)
+}
+
 pub(crate) async fn require_live_output(
     store: Option<&std::sync::Arc<dyn Store>>,
     chat_id: ChatId,
@@ -364,6 +458,7 @@ fn summary_from_record(
         size_bytes: revision.byte_len,
         revision_count: output.revision_count,
         updated_at: output.updated_at.to_rfc3339(),
+        producing_run_id: revision.producing_run_id.map(|run_id| *run_id.as_uuid()),
     })
 }
 

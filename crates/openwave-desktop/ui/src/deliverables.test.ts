@@ -8,6 +8,7 @@ import {
   parseDeliverablePreview,
   parseDeliverablesCatalog,
   parseOutputExportResult,
+  parseOutputRevertResult,
 } from "./deliverables";
 
 const outputId = "550062d4-2528-5cc6-90f8-a788e119bf36";
@@ -27,6 +28,7 @@ describe("deliverable renderer projections", () => {
             sizeBytes: 42,
             revisionCount: 2,
             updatedAt: "2026-07-24T00:00:00Z",
+            producingRunId: null,
           },
         ],
         truncated: false,
@@ -40,10 +42,66 @@ describe("deliverable renderer projections", () => {
           sizeBytes: 42,
           revisionCount: 2,
           updatedAt: "2026-07-24T00:00:00Z",
+          producingRunId: null,
         },
       ],
       truncated: false,
     });
+  });
+
+  it("carries an auto-merged output's producing run and rejects a malformed one", () => {
+    const runId = "ce116263-15b5-5df2-b472-269378e9da58";
+    const [summary] = parseDeliverablesCatalog({
+      deliverables: [
+        {
+          outputId,
+          filename: "Agent result ce116263.md",
+          mediaType: "text/markdown",
+          sizeBytes: 42,
+          revisionCount: 1,
+          updatedAt: "2026-07-24T00:00:00Z",
+          producingRunId: runId,
+        },
+      ],
+      truncated: false,
+    }).deliverables;
+    expect(summary.producingRunId).toBe(runId);
+    expect(() =>
+      parseDeliverablesCatalog({
+        deliverables: [
+          {
+            outputId,
+            filename: "brief.md",
+            mediaType: "text/markdown",
+            sizeBytes: 42,
+            revisionCount: 1,
+            updatedAt: "2026-07-24T00:00:00Z",
+            producingRunId: "not-a-uuid",
+          },
+        ],
+        truncated: false,
+      }),
+    ).toThrow("Invalid output response");
+  });
+
+  it("accepts both revert outcomes and rejects a mismatched output", () => {
+    expect(
+      parseOutputRevertResult(
+        { status: "reverted", outputId, revisionId },
+        outputId,
+      ),
+    ).toEqual({ status: "reverted", outputId, revisionId });
+    expect(
+      parseOutputRevertResult({ status: "retracted", outputId }, outputId),
+    ).toEqual({ status: "retracted", outputId });
+    // A reverted outcome must carry the revision it republished.
+    expect(() =>
+      parseOutputRevertResult({ status: "reverted", outputId }, outputId),
+    ).toThrow("Invalid output revert response");
+    // The response must be for the output the caller reverted.
+    expect(() =>
+      parseOutputRevertResult({ status: "retracted", outputId }, revisionId),
+    ).toThrow("Invalid output revert response");
   });
 
   it.each([
@@ -63,6 +121,7 @@ describe("deliverable renderer projections", () => {
             sizeBytes: 1,
             revisionCount: 1,
             updatedAt: "2026-07-24T00:00:00Z",
+            producingRunId: null,
           },
         ],
         truncated: false,

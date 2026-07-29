@@ -120,7 +120,10 @@ pub use deliverable::{
     MAX_OUTPUT_REVISIONS, OUTPUTS_DIRECTORY,
 };
 #[cfg(feature = "tools")]
-pub use deliverable_acceptance::{accept_workspace_artifact, WorkspaceArtifactProposal};
+pub use deliverable_acceptance::{
+    accept_workspace_artifact, merge_agent_run_result, AgentResultOutputMerge,
+    WorkspaceArtifactProposal,
+};
 pub use error::{AgentError, AgentErrorInfo, Result};
 pub use event::{AgentEvent, SequencedEvent};
 pub use id::{
