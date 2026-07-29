@@ -22,6 +22,8 @@ import { OutputWritebackCard } from "./OutputWritebackCard";
 import { MessageMarkdown } from "./MessageMarkdown";
 import { MessageFooter } from "./MessageFooter";
 import { AssistantSources, type AssistantSource } from "./AssistantSources";
+import { stripCitationDirectives } from "./citationDirectives";
+import { MessageCitationsProvider } from "./InlineCitation";
 import { McpAppCard } from "./McpAppCard";
 import { ToolCommandCard, type ToolCallStatus } from "./ToolCallCard";
 import { ToolEntriesCard } from "./ToolEntriesCard";
@@ -621,6 +623,9 @@ function AssistantMessageBody({
  */
 export const MessageBubble = memo(MessageBubbleImpl);
 
+/** A stable stand-in for the roles that carry no citations. */
+const EMPTY_SOURCES: readonly AssistantSource[] = [];
+
 /**
  * One conversational turn. Tool calls and approvals are not turns — they belong
  * to an activity phase, which owns both the rail and the cards below it.
@@ -637,6 +642,24 @@ function MessageBubbleImpl({
   chatId?: string;
 }) {
   const sourceNav = useSourceNav();
+  // One way into the source panel for both anchors a citation has: the phrase
+  // in the prose and the row at the foot of the message open the same place.
+  const openSource = useMemo(
+    () =>
+      sourceNav
+        ? (source: AssistantSource) =>
+            sourceNav.openCitation({
+              documentId: source.documentId,
+              citationId: source.id,
+            })
+        : undefined,
+    [sourceNav],
+  );
+  const sources = message.role === "assistant" ? message.sources : EMPTY_SOURCES;
+  const citations = useMemo(
+    () => ({ sources, onOpenSource: openSource }),
+    [sources, openSource],
+  );
 
   if (message.role === "assistant") {
     if (!message.text && message.sources.length === 0) return null;
@@ -653,29 +676,25 @@ function MessageBubbleImpl({
     }
 
     return (
-      <article className="message message-assistant" aria-label="Assistant">
-        {message.text && (
-          <AssistantMessageBody text={message.text} streaming={busy} />
-        )}
-        <AssistantSources
-          sources={message.sources}
-          onOpenSource={
-            sourceNav
-              ? (source) =>
-                  sourceNav.openCitation({
-                    documentId: source.documentId,
-                    citationId: source.id,
-                  })
-              : undefined
-          }
-        />
-        <MessageFooter
-          role="assistant"
-          text={message.text}
-          createdAt={message.createdAt}
-          settled={!busy}
-        />
-      </article>
+      <MessageCitationsProvider value={citations}>
+        <article className="message message-assistant" aria-label="Assistant">
+          {message.text && (
+            <AssistantMessageBody text={message.text} streaming={busy} />
+          )}
+          <AssistantSources
+            sources={message.sources}
+            onOpenSource={openSource}
+          />
+          <MessageFooter
+            role="assistant"
+            // The clipboard yields what the message reads as, not how a
+            // citation is stored.
+            text={stripCitationDirectives(message.text)}
+            createdAt={message.createdAt}
+            settled={!busy}
+          />
+        </article>
+      </MessageCitationsProvider>
     );
   }
 
