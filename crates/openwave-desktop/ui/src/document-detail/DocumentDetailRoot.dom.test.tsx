@@ -3,7 +3,7 @@ import { cleanup, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
-import type { ApiClient, DocumentDetail } from "@/api";
+import { HttpError, type ApiClient, type DocumentDetail } from "@/api";
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import type { AssistantSource } from "@/AssistantSources";
 import { useChatSessionStore } from "@/ChatSessionStore";
@@ -100,6 +100,20 @@ async function openPanel(
     { initialUrl: "/c/chat-1?left=sources.doc-1&right=chat" },
   );
   return { ...rendered, client: client as unknown as ApiClient & typeof client, download };
+}
+
+async function openFailingPanel(rejection: unknown) {
+  const client = {
+    getChatDocument: vi.fn().mockRejectedValue(rejection),
+    getChatDocumentFile: vi.fn(),
+  };
+  const rendered = await renderWithRouter(
+    <AppContextProvider value={{ client } as unknown as AppContextValue}>
+      <DocumentDetailRoot chatId="chat-1" documentID="doc-1" position="left" />
+    </AppContextProvider>,
+    { initialUrl: "/c/chat-1?left=sources.doc-1&right=chat" },
+  );
+  return { ...rendered, client };
 }
 
 /**
@@ -404,5 +418,48 @@ describe("DocumentDetailRoot", () => {
     );
 
     expect(await screen.findByText("Unable to parse JSON")).toBeVisible();
+  });
+});
+
+// Every way this load can fail used to read as "the document is no longer
+// available", which is a claim about the document that only a 404 supports.
+describe("DocumentDetailRoot load failures", () => {
+  it("says a source is gone only when the server says it is gone", async () => {
+    await openFailingPanel(new HttpError(404, "404: document not found"));
+
+    expect(
+      await screen.findByText("The document is no longer available."),
+    ).toBeVisible();
+    // Nothing to retry: asking again cannot bring it back.
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+  });
+
+  it("reports a server failure as a failure, and asks again on request", async () => {
+    const { client } = await openFailingPanel(new HttpError(500, "500: internal error"));
+
+    expect(
+      await screen.findByText("The document could not be loaded (500)."),
+    ).toBeVisible();
+    expect(screen.queryByText("The document is no longer available.")).toBeNull();
+
+    // A retry that succeeds leaves the reader on the document. A format with no
+    // viewer opens on its extracted text, so no byte fetch is needed to see it.
+    client.getChatDocument.mockResolvedValue(
+      detail({
+        media_type: "application/vnd.ms-outlook",
+        title: "Mailbox.pst",
+        content: "Recovered.",
+        searchable: true,
+      }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Recovered.")).toBeVisible();
+  });
+
+  it("reports a dropped connection as a failure rather than a deletion", async () => {
+    await openFailingPanel(new TypeError("Load failed"));
+
+    expect(await screen.findByText("The document could not be loaded.")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
   });
 });

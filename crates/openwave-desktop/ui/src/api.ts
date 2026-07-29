@@ -486,6 +486,23 @@ function throttle(
   };
 }
 
+/**
+ * A rejected response, carrying the status so a caller can tell why.
+ *
+ * The status is what separates "this is gone" from "we could not reach the
+ * server": a panel that cannot tell those apart has to guess, and guessing
+ * wrong tells a reader their file was deleted when it was not.
+ */
+export class HttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "HttpError";
+  }
+}
+
 /** The server's own message for a failed response, or its status text. */
 async function throwIfNotOk(response: Response): Promise<void> {
   if (response.ok) return;
@@ -496,7 +513,7 @@ async function throwIfNotOk(response: Response): Promise<void> {
   } catch {
     /* ignore */
   }
-  throw new Error(`${response.status}: ${detail}`);
+  throw new HttpError(response.status, `${response.status}: ${detail}`);
 }
 
 export class ApiClient {
@@ -519,16 +536,7 @@ export class ApiClient {
     expectedStatus?: number,
   ): Promise<T> {
     const response = await fetch(`${this.baseUrl}${path}`, init);
-    if (!response.ok) {
-      let detail = response.statusText;
-      try {
-        const body = (await response.json()) as { message?: string };
-        if (body.message) detail = body.message;
-      } catch {
-        /* ignore */
-      }
-      throw new Error(`${response.status}: ${detail}`);
-    }
+    await throwIfNotOk(response);
     if (expectedStatus !== undefined && response.status !== expectedStatus) {
       throw new Error(
         `unexpected response status: expected ${expectedStatus}, received ${response.status}`,
