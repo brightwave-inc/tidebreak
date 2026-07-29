@@ -32,12 +32,12 @@ use crate::image::ImageRef;
 #[cfg(test)]
 use crate::model::Role;
 use crate::model::{
-    validate_project_root_projection, AgentRun, AgentRunExecution, AgentRunInboxEntry,
-    AgentRunStatus, AgentRunWaitSetCandidate, BeginRootAttachmentChange, BlobRetirement,
-    BlobRetirementStatus, Chat, DocumentGeneration, DocumentJob, DocumentJobKind,
-    DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentProcessingStatus,
-    DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord,
-    DocumentUpsert, Message, MessageAttachment, Project, ReasoningEffort, RootAttachmentChange,
+    validate_project_root_projection, AgentRun, AgentRunInboxEntry, AgentRunStatus, AgentRunTier,
+    AgentRunWaitSetCandidate, BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus,
+    Chat, DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
+    DocumentParseOutput, DocumentProcessingStatus, DocumentRecord, DocumentScope,
+    DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message,
+    MessageAttachment, Project, ReasoningEffort, RootAttachmentChange,
     RootAttachmentChangeTerminal, SandboxToolCall, SandboxToolCallReceipt, SandboxToolCallRequest,
     SourceRegion, ToolCallRecord, ToolCallResolution, TurnAgentRunWaitStatus,
     TurnCheckpointProgress, TurnClientWaitStatus, TurnFailureRetry, TurnRun, TurnRunStatus,
@@ -1918,19 +1918,11 @@ impl Store for DbStore {
         chat_id: ChatId,
         parent_id: Option<AgentRunId>,
         spawn_call_id: Option<CallId>,
-        execution: AgentRunExecution,
+        tier: AgentRunTier,
         input: Option<&str>,
     ) -> Result<AcceptAgentRunOutcome> {
-        ops::agent_run::accept_agent_run(
-            self,
-            id,
-            chat_id,
-            parent_id,
-            spawn_call_id,
-            execution,
-            input,
-        )
-        .await
+        ops::agent_run::accept_agent_run(self, id, chat_id, parent_id, spawn_call_id, tier, input)
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]

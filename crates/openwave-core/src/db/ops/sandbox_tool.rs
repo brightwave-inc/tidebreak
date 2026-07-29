@@ -11,9 +11,8 @@ use crate::agent_tools::{
 use crate::error::{AgentError, Result};
 use crate::id::{AgentRunId, CallId, ChatId, HostRootId};
 use crate::model::{
-    AgentRunExecution, AgentRunStatus, DelegatedFileReadClaim, SandboxToolCall,
-    SandboxToolCallReceipt, SandboxToolCallRequest, SandboxToolCallStatus, ToolCallRecord,
-    ToolCallResolution,
+    AgentRunStatus, AgentRunTier, DelegatedFileReadClaim, SandboxToolCall, SandboxToolCallReceipt,
+    SandboxToolCallRequest, SandboxToolCallStatus, ToolCallRecord, ToolCallResolution,
 };
 use crate::storage::{
     ClaimDelegatedFileReadOutcome, ClaimSandboxToolCallOutcome, ParkSandboxToolCallOutcome,
@@ -86,7 +85,7 @@ pub(in crate::db) async fn park_agent_run_for_sandbox_tool_call(
         return Ok(ParkSandboxToolCallOutcome::DelegatedResourceUnavailable);
     }
     if run.chat_id != call.chat_id.0
-        || run.execution != AgentRunExecution::Sandbox.as_str()
+        || run.tier != AgentRunTier::Background.as_str()
         || run.status != AgentRunStatus::Running.as_str()
         || run.lease_token != Some(lease_token)
         || run.lease_expires_at.is_none_or(|expiry| expiry <= now)

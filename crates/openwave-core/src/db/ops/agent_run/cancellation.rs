@@ -6,8 +6,8 @@ use sea_orm::{
 use crate::error::{AgentError, Result};
 use crate::id::{AgentRunId, ChatId};
 use crate::model::{
-    AgentRunCancellationReason, AgentRunCancellationSignal, AgentRunExecution, AgentRunInboxStatus,
-    AgentRunResultPayload, AgentRunStatus,
+    AgentRunCancellationReason, AgentRunCancellationSignal, AgentRunInboxStatus,
+    AgentRunResultPayload, AgentRunStatus, AgentRunTier,
 };
 use crate::storage::{FinishAgentRunCancellationOutcome, RequestAgentRunCancellationOutcome};
 
@@ -58,7 +58,7 @@ pub(in crate::db) async fn request_agent_run_cancellation(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     };
-    if run.execution != AgentRunExecution::Sandbox.as_str() {
+    if run.tier != AgentRunTier::Background.as_str() {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
@@ -210,7 +210,7 @@ pub(in crate::db) async fn finish_agent_run_cancellation(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     };
-    let valid = run.execution == AgentRunExecution::Sandbox.as_str()
+    let valid = run.tier == AgentRunTier::Background.as_str()
         && run.status == AgentRunStatus::Cancelling.as_str()
         && run.lease_token == Some(lease_token)
         && Some(run.attempt_count) == claim.attempt_count
@@ -273,7 +273,7 @@ where
         };
         if child.parent_id != Some(turn.agent_run_id)
             || child.chat_id != turn.chat_id
-            || child.execution != AgentRunExecution::Sandbox.as_str()
+            || child.tier != AgentRunTier::Background.as_str()
             || child.spawn_call_id != Some(admission.spawn_call_id)
         {
             return Err(AgentError::Store(format!(
@@ -354,7 +354,7 @@ where
     })?;
     if parent.id != turn.agent_run_id
         || parent.chat_id != turn.chat_id
-        || parent.execution != AgentRunExecution::Foreground.as_str()
+        || parent.tier != AgentRunTier::Foreground.as_str()
         || parent.depth != 0
         || parent.parent_id.is_some()
     {
@@ -391,7 +391,7 @@ where
         })?;
         if child.parent_id != Some(turn.agent_run_id)
             || child.chat_id != turn.chat_id
-            || child.execution != AgentRunExecution::Sandbox.as_str()
+            || child.tier != AgentRunTier::Background.as_str()
             || child.depth != 1
             || child.spawn_call_id != Some(admission.spawn_call_id)
         {
@@ -512,7 +512,7 @@ async fn terminalize_cancellation_on<C>(
 where
     C: sea_orm::ConnectionTrait,
 {
-    if run.execution != AgentRunExecution::Sandbox.as_str() {
+    if run.tier != AgentRunTier::Background.as_str() {
         return Err(AgentError::Store(
             "only sandbox runs can be cancelled".into(),
         ));
@@ -936,7 +936,7 @@ where
                 run.id
             ))
         })?;
-    let valid = run.execution == AgentRunExecution::Sandbox.as_str()
+    let valid = run.tier == AgentRunTier::Background.as_str()
         && run.status == AgentRunStatus::Cancelling.as_str()
         && run.lease_token == Some(receipt.lease_token)
         && run.attempt_count == receipt.attempt_count

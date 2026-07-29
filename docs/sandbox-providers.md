@@ -28,24 +28,26 @@ agent.
 
 Vocabulary rule for new code and docs: background agent run for the run tier,
 execution provider for the isolation tier; do not use bare "sandbox" as a tier
-name. Existing model-facing and persisted identifiers (`spawn_sandbox_agent`,
-`AgentRunExecution`) are not renamed by this rule. Two further terms defined
+name. Existing model-facing identifiers (`spawn_sandbox_agent`) are not
+renamed by this rule. Two further terms defined
 in [attachment and admission](#attachment-and-admission) — attached versus
 unattached, and detached admission versus attached-only — carry most of the
 weight in this document.
 
-The persisted schema has one field where two meanings will collide.
-`AgentRunExecution` is `foreground | sandbox`: its variants are documented by
-who advances the run (the coordinator or the sandbox scheduler), while
-[agent runs](agent-runs.md) describes the field as execution location. Both
-readings agree today only because every run executes in-process. Once a
-background run can execute either in-process or inside a provider boundary,
-one field would have to carry the scheduler axis and the location axis at
-once, so it splits into two before a second location exists. This is a
+The persisted schema had one field where the two meanings would have
+collided. `AgentRunExecution` was `foreground | sandbox`: its variants were
+documented by who advances the run (the coordinator or the sandbox
+scheduler), while [agent runs](agent-runs.md) described the field as
+execution location. Both readings agreed only because every run executed
+in-process. Once a background run can execute either in-process or inside a
+provider boundary, one field would have to carry the scheduler axis and the
+location axis at once, so it split into a run tier
+(`foreground | background`) and an execution location (`in_process` for
+everything today) before a second location exists. This was a
 persisted-value and generated-wire-type change (see
 [wire types](wire-types.md) and the pre-1.0 notes in [releases](releases.md));
 sandbox-resident runs add row fields later regardless, but keeping the two
-axes from fusing is what this early slice buys.
+axes from fusing is what that early slice bought.
 
 ## Target state
 
@@ -509,7 +511,7 @@ The implementation is intentionally incremental:
    and generated-wire-type change — existing `sandbox` rows map to
    `(background, in-process)` and `foreground` rows to
    `(foreground, in-process)` — with the read-model guards and the schema
-   shape constraints re-expressed over two fields.
+   shape constraints re-expressed over two fields. *(Shipped.)*
 2. Execution providers behind the provider-neutral `exec` contract: local,
    E2B, Daytona. *(Shipped.)*
 3. The egress decision layer, its capability-grant wiring, and the

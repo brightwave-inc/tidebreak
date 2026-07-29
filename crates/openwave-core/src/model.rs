@@ -1322,8 +1322,11 @@ pub struct AgentRun {
     pub parent_id: Option<crate::id::AgentRunId>,
     /// Exact tool-call identity that requested a sandbox child.
     pub spawn_call_id: Option<crate::id::CallId>,
-    /// Where and how the run executes.
-    pub execution: AgentRunExecution,
+    /// Who advances the run: the foreground coordinator or the background
+    /// scheduler.
+    pub tier: AgentRunTier,
+    /// Where the run's loop executes.
+    pub execution_location: AgentRunExecutionLocation,
     /// Explicit bounded hierarchy depth. OpenWave v1 permits only zero or one.
     pub depth: u8,
     /// Durable lifecycle state.
@@ -1627,24 +1630,52 @@ impl AgentRunInboxStatus {
     }
 }
 
-/// Execution boundary for an [`AgentRun`].
+/// Run tier of an [`AgentRun`]: who advances the run.
+///
+/// Formerly one half of `AgentRunExecution` (`foreground | sandbox`), which
+/// fused this axis with [`AgentRunExecutionLocation`]. The two agreed only
+/// while every run executed in-process, so the field split before a second
+/// location could exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
-pub enum AgentRunExecution {
+pub enum AgentRunTier {
     /// Conversation coordinator advanced by foreground turn work.
     Foreground,
-    /// Isolated background work advanced by the sandbox scheduler.
-    Sandbox,
+    /// Isolated background work advanced by the background-run scheduler.
+    Background,
 }
 
-impl AgentRunExecution {
+impl AgentRunTier {
     /// Stable database and wire representation.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Foreground => "foreground",
-            Self::Sandbox => "sandbox",
+            Self::Background => "background",
+        }
+    }
+}
+
+/// Where an [`AgentRun`]'s loop executes.
+///
+/// Every run executes inside the OpenWave server process today. A run
+/// executing inside an execution provider's boundary adds a variant here
+/// rather than a second meaning to [`AgentRunTier`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AgentRunExecutionLocation {
+    /// The loop runs inside the OpenWave server process.
+    InProcess,
+}
+
+impl AgentRunExecutionLocation {
+    /// Stable database and wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InProcess => "in_process",
         }
     }
 }

@@ -8,8 +8,8 @@ use crate::agent_tools::SandboxAgentFileResource;
 use crate::error::{AgentError, Result};
 use crate::id::{AgentRunId, CallId, ChatId, MessageId, TurnId};
 use crate::model::{
-    AgentRun, AgentRunCancellationReason, AgentRunExecution, AgentRunInboxEntry,
-    AgentRunInboxStatus, AgentRunResult, AgentRunResultPayload, AgentRunStatus,
+    AgentRun, AgentRunCancellationReason, AgentRunExecutionLocation, AgentRunInboxEntry,
+    AgentRunInboxStatus, AgentRunResult, AgentRunResultPayload, AgentRunStatus, AgentRunTier,
     SandboxAgentAdmission, TurnRun, TurnRunStatus, TurnSteerStatus,
 };
 use crate::storage::{
@@ -55,7 +55,8 @@ where
         parent_id: Set(None),
         parent_depth: Set(None),
         spawn_call_id: Set(None),
-        execution: Set(AgentRunExecution::Foreground.as_str().into()),
+        tier: Set(AgentRunTier::Foreground.as_str().into()),
+        execution_location: Set(AgentRunExecutionLocation::InProcess.as_str().into()),
         depth: Set(0),
         status: Set(AgentRunStatus::Active.as_str().into()),
         input: Set(None),
@@ -101,15 +102,15 @@ pub(in crate::db) async fn accept_agent_run(
     chat_id: ChatId,
     parent_id: Option<AgentRunId>,
     spawn_call_id: Option<CallId>,
-    execution: AgentRunExecution,
+    tier: AgentRunTier,
     input: Option<&str>,
 ) -> Result<AcceptAgentRunOutcome> {
-    if execution == AgentRunExecution::Sandbox {
+    if tier == AgentRunTier::Background {
         return Err(AgentError::Store(
             "sandbox agent runs require exact turn-bound admission".into(),
         ));
     }
-    validate_request(id, parent_id, spawn_call_id, execution, input)?;
+    validate_request(id, parent_id, spawn_call_id, tier, input)?;
 
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_chat_write_lock(&transaction, chat_id).await? {
@@ -117,14 +118,8 @@ pub(in crate::db) async fn accept_agent_run(
     }
 
     if let Some(existing) = find_by_id_on(&transaction, id).await? {
-        let outcome = existing_request_outcome(
-            existing,
-            chat_id,
-            parent_id,
-            spawn_call_id,
-            execution,
-            input,
-        )?;
+        let outcome =
+            existing_request_outcome(existing, chat_id, parent_id, spawn_call_id, tier, input)?;
         transaction.commit().await.map_err(store_err)?;
         return Ok(outcome);
     }
@@ -135,7 +130,7 @@ pub(in crate::db) async fn accept_agent_run(
                 chat_id,
                 parent_id,
                 Some(spawn_call_id),
-                execution,
+                tier,
                 input,
             )?;
             transaction.commit().await.map_err(store_err)?;
@@ -143,14 +138,11 @@ pub(in crate::db) async fn accept_agent_run(
         }
     }
 
-    let (depth, status) = match execution {
-        AgentRunExecution::Foreground => {
+    let (depth, status) = match tier {
+        AgentRunTier::Foreground => {
             if let Some(existing) = entities::agent_run::Entity::find()
                 .filter(entities::agent_run::Column::ChatId.eq(chat_id.0))
-                .filter(
-                    entities::agent_run::Column::Execution
-                        .eq(AgentRunExecution::Foreground.as_str()),
-                )
+                .filter(entities::agent_run::Column::Tier.eq(AgentRunTier::Foreground.as_str()))
                 .one(&transaction)
                 .await
                 .map_err(store_err)?
@@ -161,7 +153,7 @@ pub(in crate::db) async fn accept_agent_run(
             }
             (0_i16, AgentRunStatus::Active)
         }
-        AgentRunExecution::Sandbox => {
+        AgentRunTier::Background => {
             let Some(parent_id) = parent_id else {
                 unreachable!("validated sandbox parent")
             };
@@ -170,7 +162,7 @@ pub(in crate::db) async fn accept_agent_run(
                 parent.chat_id == chat_id.0
                     && parent.parent_id.is_none()
                     && parent.depth == 0
-                    && parent.execution == AgentRunExecution::Foreground.as_str()
+                    && parent.tier == AgentRunTier::Foreground.as_str()
                     && parent.status == AgentRunStatus::Active.as_str()
             });
             if !available {
@@ -188,7 +180,8 @@ pub(in crate::db) async fn accept_agent_run(
         parent_id: Set(parent_id.map(|parent| parent.0)),
         parent_depth: Set(parent_id.map(|_| 0)),
         spawn_call_id: Set(spawn_call_id.map(|call| call.0)),
-        execution: Set(execution.as_str().into()),
+        tier: Set(tier.as_str().into()),
+        execution_location: Set(AgentRunExecutionLocation::InProcess.as_str().into()),
         depth: Set(depth),
         status: Set(status.as_str().into()),
         input: Set(input.map(ToOwned::to_owned)),
@@ -196,15 +189,15 @@ pub(in crate::db) async fn accept_agent_run(
         // rejects sandbox execution outright.
         model: NotSet,
         attempt_count: Set(0),
-        max_attempts: Set(match execution {
-            AgentRunExecution::Foreground => 0,
-            AgentRunExecution::Sandbox => AgentRun::DEFAULT_MAX_ATTEMPTS,
+        max_attempts: Set(match tier {
+            AgentRunTier::Foreground => 0,
+            AgentRunTier::Background => AgentRun::DEFAULT_MAX_ATTEMPTS,
         }),
         claim_count: Set(0),
         available_at: Set(now),
-        deadline_at: Set(match execution {
-            AgentRunExecution::Foreground => None,
-            AgentRunExecution::Sandbox => Some(now + AgentRun::DEFAULT_MAX_DURATION),
+        deadline_at: Set(match tier {
+            AgentRunTier::Foreground => None,
+            AgentRunTier::Background => Some(now + AgentRun::DEFAULT_MAX_DURATION),
         }),
         lease_token: Set(None),
         lease_expires_at: Set(None),
@@ -225,7 +218,7 @@ pub(in crate::db) async fn accept_agent_run(
                     chat_id,
                     parent_id,
                     spawn_call_id,
-                    execution,
+                    tier,
                     input,
                 );
             }
@@ -236,12 +229,12 @@ pub(in crate::db) async fn accept_agent_run(
                         chat_id,
                         parent_id,
                         Some(spawn_call_id),
-                        execution,
+                        tier,
                         input,
                     );
                 }
             }
-            if execution == AgentRunExecution::Foreground {
+            if tier == AgentRunTier::Foreground {
                 if let Some(existing) = find_foreground_on(&store.conn, chat_id).await? {
                     return Ok(AcceptAgentRunOutcome::ForegroundExists(
                         agent_run_from_model(existing)?,
@@ -423,7 +416,7 @@ where
         parent.chat_id == chat_id.0
             && parent.parent_id.is_none()
             && parent.depth == 0
-            && parent.execution == AgentRunExecution::Foreground.as_str()
+            && parent.tier == AgentRunTier::Foreground.as_str()
             && parent.status == AgentRunStatus::Active.as_str()
     });
     if !parent_available {
@@ -461,7 +454,8 @@ where
         parent_id: Set(Some(parent_id.0)),
         parent_depth: Set(Some(0)),
         spawn_call_id: Set(Some(spawn_call_id.0)),
-        execution: Set(AgentRunExecution::Sandbox.as_str().into()),
+        tier: Set(AgentRunTier::Background.as_str().into()),
+        execution_location: Set(AgentRunExecutionLocation::InProcess.as_str().into()),
         depth: Set(i16::from(AgentRun::MAX_DEPTH)),
         status: Set(AgentRunStatus::Queued.as_str().into()),
         input: Set(Some(input.into())),
@@ -542,7 +536,7 @@ where
                 child.chat_id == chat_id.0
                     && child.parent_id == Some(parent_id.0)
                     && child.spawn_call_id == Some(spawn_call_id.0)
-                    && child.execution == AgentRunExecution::Sandbox.as_str()
+                    && child.tier == AgentRunTier::Background.as_str()
                     && child.input.as_deref() == Some(input)
             });
         return Ok(Some(if exact {
@@ -804,7 +798,7 @@ pub(in crate::db) async fn claim_agent_run(
                 .await?
                 .filter(|run| {
                     admitted
-                        && run.execution == AgentRunExecution::Sandbox.as_str()
+                        && run.tier == AgentRunTier::Background.as_str()
                         && matches!(run.status.as_str(), "running" | "cancelling")
                         && Some(run.attempt_count) == receipt.attempt_count
                         && Some(run.claim_count) == receipt.claim_count
@@ -862,7 +856,7 @@ pub(in crate::db) async fn claim_agent_run(
         }
 
         let live = entities::agent_run::Entity::find()
-            .filter(entities::agent_run::Column::Execution.eq(AgentRunExecution::Sandbox.as_str()))
+            .filter(entities::agent_run::Column::Tier.eq(AgentRunTier::Background.as_str()))
             .filter(entities::agent_run::Column::Id.in_subquery(admitted_child_id_subquery()))
             .filter(entities::agent_run::Column::Status.is_in([
                 AgentRunStatus::Running.as_str(),
@@ -1048,7 +1042,7 @@ pub(in crate::db) async fn heartbeat_agent_run(
             sea_orm::sea_query::Expr::value(now),
         )
         .filter(entities::agent_run::Column::Id.eq(id.0))
-        .filter(entities::agent_run::Column::Execution.eq(AgentRunExecution::Sandbox.as_str()))
+        .filter(entities::agent_run::Column::Tier.eq(AgentRunTier::Background.as_str()))
         .filter(entities::agent_run::Column::Status.eq(AgentRunStatus::Running.as_str()))
         .filter(entities::agent_run::Column::LeaseToken.eq(lease_token))
         .filter(entities::agent_run::Column::LeaseExpiresAt.gt(now))
@@ -1106,7 +1100,7 @@ pub(in crate::db) async fn fail_agent_run(
             && run.status == AgentRunStatus::Failed.as_str())
         .then_some(FailAgentRunOutcome::ExistingFailed(result)));
     }
-    let valid = run.execution == AgentRunExecution::Sandbox.as_str()
+    let valid = run.tier == AgentRunTier::Background.as_str()
         && run.status == AgentRunStatus::Running.as_str()
         && run.lease_token == Some(lease_token)
         && run.lease_expires_at.is_some_and(|expiry| expiry > now)
@@ -1297,7 +1291,7 @@ async fn submit_agent_run_result_payload(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     };
-    if run.execution != AgentRunExecution::Sandbox.as_str()
+    if run.tier != AgentRunTier::Background.as_str()
         || run.depth != 1
         || run.status != AgentRunStatus::Running.as_str()
         || run.lease_token != Some(lease_token)
@@ -1322,7 +1316,7 @@ async fn submit_agent_run_result_payload(
     };
     if parent.chat_id != run.chat_id
         || parent.depth != 0
-        || parent.execution != AgentRunExecution::Foreground.as_str()
+        || parent.tier != AgentRunTier::Foreground.as_str()
         || parent.status != AgentRunStatus::Active.as_str()
     {
         transaction.rollback().await.map_err(store_err)?;
@@ -1581,9 +1575,9 @@ pub(in crate::db) async fn list_agent_run_inbox_candidates(
         .and_where(
             sea_orm::sea_query::Expr::col((
                 entities::agent_run::Entity,
-                entities::agent_run::Column::Execution,
+                entities::agent_run::Column::Tier,
             ))
-            .eq(AgentRunExecution::Foreground.as_str()),
+            .eq(AgentRunTier::Foreground.as_str()),
         )
         .to_owned();
     let entries = entities::agent_run_inbox::Entity::find()
@@ -2008,7 +2002,7 @@ where
     C: sea_orm::ConnectionTrait,
 {
     entities::agent_run::Entity::find()
-        .filter(entities::agent_run::Column::Execution.eq(AgentRunExecution::Sandbox.as_str()))
+        .filter(entities::agent_run::Column::Tier.eq(AgentRunTier::Background.as_str()))
         .filter(entities::agent_run::Column::Id.in_subquery(admitted_child_id_subquery()))
         .filter(entities::agent_run::Column::Status.is_in([
             AgentRunStatus::Queued.as_str(),
@@ -2040,7 +2034,14 @@ where
     let mut offset = 0;
     loop {
         let page = entities::agent_run::Entity::find()
-            .filter(entities::agent_run::Column::Execution.eq(AgentRunExecution::Sandbox.as_str()))
+            .filter(entities::agent_run::Column::Tier.eq(AgentRunTier::Background.as_str()))
+            // The in-process scheduler only advances runs that execute in
+            // process; a run resident in a provider boundary has its own
+            // lifecycle machinery.
+            .filter(
+                entities::agent_run::Column::ExecutionLocation
+                    .eq(AgentRunExecutionLocation::InProcess.as_str()),
+            )
             .filter(entities::agent_run::Column::Id.in_subquery(admitted_child_id_subquery()))
             .filter(
                 sea_orm::Condition::any()
@@ -2096,7 +2097,7 @@ where
     C: sea_orm::ConnectionTrait,
 {
     entities::agent_run::Entity::find()
-        .filter(entities::agent_run::Column::Execution.eq(AgentRunExecution::Sandbox.as_str()))
+        .filter(entities::agent_run::Column::Tier.eq(AgentRunTier::Background.as_str()))
         .filter(entities::agent_run::Column::Id.in_subquery(admitted_child_id_subquery()))
         .filter(
             sea_orm::Condition::any()
@@ -2342,26 +2343,26 @@ fn validate_request(
     id: AgentRunId,
     parent_id: Option<AgentRunId>,
     spawn_call_id: Option<CallId>,
-    execution: AgentRunExecution,
+    tier: AgentRunTier,
     input: Option<&str>,
 ) -> Result<()> {
     if id.0.is_nil() {
         return Err(AgentError::Store("agent-run id must not be nil".into()));
     }
-    match execution {
-        AgentRunExecution::Foreground
+    match tier {
+        AgentRunTier::Foreground
             if parent_id.is_some() || spawn_call_id.is_some() || input.is_some() =>
         {
             Err(AgentError::Store(
                 "foreground agent runs cannot have a parent, spawn call, or delegated task".into(),
             ))
         }
-        AgentRunExecution::Sandbox if parent_id.is_none() || spawn_call_id.is_none() => {
+        AgentRunTier::Background if parent_id.is_none() || spawn_call_id.is_none() => {
             Err(AgentError::Store(
                 "sandbox agent runs require a foreground parent and spawn-call identity".into(),
             ))
         }
-        AgentRunExecution::Sandbox => {
+        AgentRunTier::Background => {
             if parent_id.is_some_and(|parent| parent.0.is_nil())
                 || spawn_call_id.is_some_and(|call| call.0.is_nil())
             {
@@ -2383,7 +2384,7 @@ fn validate_request(
             }
             Ok(())
         }
-        AgentRunExecution::Foreground => Ok(()),
+        AgentRunTier::Foreground => Ok(()),
     }
 }
 
@@ -2416,23 +2417,28 @@ fn validate_admission_request(
 }
 
 pub(in crate::db) fn agent_run_from_model(model: entities::agent_run::Model) -> Result<AgentRun> {
-    let execution = match model.execution.as_str() {
-        "foreground" => AgentRunExecution::Foreground,
-        "sandbox" => AgentRunExecution::Sandbox,
+    let tier = match model.tier.as_str() {
+        "foreground" => AgentRunTier::Foreground,
+        "background" => AgentRunTier::Background,
+        value => return Err(AgentError::Store(format!("invalid agent-run tier {value}"))),
+    };
+    let execution_location = match model.execution_location.as_str() {
+        "in_process" => AgentRunExecutionLocation::InProcess,
         value => {
             return Err(AgentError::Store(format!(
-                "invalid agent-run execution {value}"
+                "invalid agent-run execution location {value}"
             )))
         }
     };
     let status = agent_run_status_from_db(&model.status)?;
-    validate_stored_shape(&model, execution, status)?;
+    validate_stored_shape(&model, tier, status)?;
     Ok(AgentRun {
         id: AgentRunId(model.id),
         chat_id: ChatId(model.chat_id),
         parent_id: model.parent_id.map(AgentRunId),
         spawn_call_id: model.spawn_call_id.map(CallId),
-        execution,
+        tier,
+        execution_location,
         depth: u8::try_from(model.depth)
             .map_err(|_| AgentError::Store("invalid negative agent-run depth".into()))?,
         status,
@@ -2782,7 +2788,7 @@ where
     let parent = find_by_id_on(conn, parent_run_id).await?;
     Ok(parent.is_some_and(|parent| {
         parent.depth == 0
-            && parent.execution == AgentRunExecution::Foreground.as_str()
+            && parent.tier == AgentRunTier::Foreground.as_str()
             && parent.status == AgentRunStatus::Active.as_str()
     }))
 }
@@ -2812,7 +2818,7 @@ where
         })?;
     if child.chat_id != entry.chat_id.0
         || child.parent_id != Some(entry.parent_run_id.0)
-        || child.execution != AgentRunExecution::Sandbox.as_str()
+        || child.tier != AgentRunTier::Background.as_str()
         || child.depth != 1
     {
         return Err(AgentError::Store(format!(
@@ -2977,7 +2983,7 @@ where
 {
     entities::agent_run::Entity::find()
         .filter(entities::agent_run::Column::ChatId.eq(chat_id.0))
-        .filter(entities::agent_run::Column::Execution.eq(AgentRunExecution::Foreground.as_str()))
+        .filter(entities::agent_run::Column::Tier.eq(AgentRunTier::Foreground.as_str()))
         .one(conn)
         .await
         .map_err(store_err)
@@ -2988,13 +2994,13 @@ fn existing_request_outcome(
     chat_id: ChatId,
     parent_id: Option<AgentRunId>,
     spawn_call_id: Option<CallId>,
-    execution: AgentRunExecution,
+    tier: AgentRunTier,
     input: Option<&str>,
 ) -> Result<AcceptAgentRunOutcome> {
     let exact = existing.chat_id == chat_id.0
         && existing.parent_id == parent_id.map(|parent| parent.0)
         && existing.spawn_call_id == spawn_call_id.map(|call| call.0)
-        && existing.execution == execution.as_str()
+        && existing.tier == tier.as_str()
         && existing.input.as_deref() == input;
     Ok(if exact {
         AcceptAgentRunOutcome::Existing(agent_run_from_model(existing)?)
@@ -3005,7 +3011,7 @@ fn existing_request_outcome(
 
 fn validate_stored_shape(
     model: &entities::agent_run::Model,
-    execution: AgentRunExecution,
+    tier: AgentRunTier,
     status: AgentRunStatus,
 ) -> Result<()> {
     if model.id.is_nil() || model.updated_at < model.created_at {
@@ -3023,8 +3029,8 @@ fn validate_stored_shape(
             "invalid persisted agent-run model".into(),
         ));
     }
-    let valid = match execution {
-        AgentRunExecution::Foreground => {
+    let valid = match tier {
+        AgentRunTier::Foreground => {
             model.depth == 0
                 && model.parent_id.is_none()
                 && model.parent_depth.is_none()
@@ -3046,7 +3052,7 @@ fn validate_stored_shape(
                         | AgentRunStatus::Cancelled
                 )
         }
-        AgentRunExecution::Sandbox => {
+        AgentRunTier::Background => {
             model.depth == i16::from(AgentRun::MAX_DEPTH)
                 && model.parent_id.is_some()
                 && model.parent_depth == Some(0)

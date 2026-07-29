@@ -70,7 +70,7 @@ export function useAgentRuns(
   }, [client, chatId, spawnKey]);
 
   const matchesVisibleSpawn = (run: AgentRun) =>
-    run.execution === "sandbox" &&
+    run.tier === "background" &&
     spawnKeys.some((key) => run.id === key || run.spawn_call_id === key);
   const hasLiveSandbox = runs.some(
     (run) => matchesVisibleSpawn(run) && RUNNING_AGENT_STATUSES.has(run.status),

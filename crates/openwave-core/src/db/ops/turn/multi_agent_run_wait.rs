@@ -13,7 +13,7 @@ use crate::agent_tools::{
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::model::{
-    AgentRunExecution, AgentRunInboxStatus, AgentRunWaitCondition, AgentRunWaitSetCandidate,
+    AgentRunInboxStatus, AgentRunTier, AgentRunWaitCondition, AgentRunWaitSetCandidate,
     AgentRunWaitSetCheckpointRequest, ToolCallExecution, ToolCallRecord, ToolCallStatus,
     TurnAgentRunWaitSet, TurnAgentRunWaitStatus, TurnCheckpointProgress, TurnRunStatus,
     TurnSteerStatus,
@@ -104,14 +104,14 @@ WHERE w.status = 'waiting' AND w.condition = 'all'
   AND t.output_tokens >= w.output_tokens
   AND t.cache_read_input_tokens >= w.cache_read_input_tokens
   AND t.cache_creation_input_tokens >= w.cache_creation_input_tokens
-  AND p.execution = 'foreground' AND p.status = 'active' AND p.parent_id IS NULL
+  AND p.tier = 'foreground' AND p.status = 'active' AND p.parent_id IS NULL
   AND tc.provider_id = w.provider_id AND tc.name = 'wait_for_agents'
   AND tc.arguments = w.arguments AND tc.execution = 'orchestration'
   AND tc.status = 'pending' AND tc.result IS NULL AND tc.error_code IS NULL
   AND tc.error_detail IS NULL AND tc.resolved_at IS NULL
   AND tc.client_executor_id IS NULL AND tc.client_lease_token IS NULL
   AND tc.client_lease_expires_at IS NULL AND tc.created_at = w.parked_at
-  AND c.execution = 'sandbox' AND c.status IN ('completed', 'failed', 'cancelled')
+  AND c.tier = 'background' AND c.status IN ('completed', 'failed', 'cancelled')
   AND m.open = TRUE
   AND i.status = 'pending' AND i.claim_count = 0
   AND i.lease_token IS NULL AND i.lease_expires_at IS NULL
@@ -338,7 +338,7 @@ pub(in crate::db) async fn park_turn_for_agent_run_wait_set(
                 && admission.child_run_id == child.id
                 && child.parent_id == Some(turn.agent_run_id)
                 && child.chat_id == turn.chat_id
-                && child.execution == AgentRunExecution::Sandbox.as_str()
+                && child.tier == AgentRunTier::Background.as_str()
                 && child.spawn_call_id == Some(admission.spawn_call_id)
         });
         if !valid {
@@ -664,7 +664,7 @@ pub(in crate::db) async fn resume_turn_for_agent_run_wait_set(
         .await
         .map_err(store_err)?;
     if !parent.is_some_and(|parent| {
-        parent.execution == AgentRunExecution::Foreground.as_str()
+        parent.tier == AgentRunTier::Foreground.as_str()
             && parent.status == crate::model::AgentRunStatus::Active.as_str()
             && parent.chat_id == stored.chat_id
     }) {

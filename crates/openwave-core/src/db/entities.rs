@@ -407,7 +407,8 @@ pub mod agent_run {
         pub parent_id: Option<Uuid>,
         pub parent_depth: Option<i16>,
         pub spawn_call_id: Option<Uuid>,
-        pub execution: String,
+        pub tier: String,
+        pub execution_location: String,
         #[sea_orm(primary_key, auto_increment = false)]
         pub depth: i16,
         pub status: String,

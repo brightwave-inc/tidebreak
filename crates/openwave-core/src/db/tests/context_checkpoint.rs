@@ -68,7 +68,7 @@ async fn m0018_preserves_existing_checkpoints_with_zero_maintenance_usage() {
     migration::Migrator::up(&conn, Some(17)).await.unwrap();
     let store = DbStore { conn: conn.clone() };
     let chat = sample_chat();
-    store.create_chat(&chat).await.unwrap();
+    super::create_chat_before_agent_run_split(&store, &chat).await;
     let source = Message {
         id: MessageId::new(),
         chat_id: chat.id,

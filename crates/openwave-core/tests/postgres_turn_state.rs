@@ -5,8 +5,8 @@ use std::{sync::Arc, time::Duration as StdDuration};
 use chrono::{Duration, Utc};
 use openwave_core::{
     AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentError, AgentEvent,
-    AgentRunCancellationReason, AgentRunExecution, AgentRunId, AgentRunInboxStatus,
-    AgentRunResultPayload, AgentRunStatus, AgentRunWaitCondition, AgentRunWaitSetCheckpointRequest,
+    AgentRunCancellationReason, AgentRunId, AgentRunInboxStatus, AgentRunResultPayload,
+    AgentRunStatus, AgentRunTier, AgentRunWaitCondition, AgentRunWaitSetCheckpointRequest,
     AnswerUserQuestions, AnswerUserQuestionsOutcome, AnswerUserQuestionsRequest,
     ApplyTurnSteerOutcome, AssistantCitationReference, BeginRootAttachmentChange,
     BeginRootAttachmentChangeOutcome, ByteSpan, CallId, Chat, ChatId, ChatRootAttachment,
@@ -394,7 +394,7 @@ async fn cleanup_postgres_sandbox_chat(store: &DbStore, chat_id: ChatId) {
         .await
         .unwrap()
         .into_iter()
-        .filter(|run| run.execution == AgentRunExecution::Sandbox)
+        .filter(|run| run.tier == AgentRunTier::Background)
     {
         let lease_token = run.lease_token;
         store.request_agent_run_cancellation(run.id).await.unwrap();
@@ -649,7 +649,7 @@ async fn postgres_nonblocking_spawn_and_parent_cancellation_are_one_ordered_tran
         .await
         .unwrap()
         .into_iter()
-        .filter(|run| run.execution == AgentRunExecution::Sandbox)
+        .filter(|run| run.tier == AgentRunTier::Background)
         .collect::<Vec<_>>();
     match (checkpoint, cancellation) {
         (
@@ -935,7 +935,7 @@ async fn postgres_parent_completion_and_child_admission_form_one_terminal_bounda
         .await
         .unwrap()
         .into_iter()
-        .filter(|run| run.execution == AgentRunExecution::Sandbox)
+        .filter(|run| run.tier == AgentRunTier::Background)
         .collect::<Vec<_>>();
     match completion {
         CompleteTurnRunOutcome::Completed(_) => {
@@ -1112,8 +1112,8 @@ async fn postgres_parent_cancellation_uses_time_after_admission_and_heartbeat_lo
         .execute_raw(Statement::from_string(
             DatabaseBackend::Postgres,
             format!(
-                "INSERT INTO agent_run (id, chat_id, parent_id, parent_depth, spawn_call_id, execution, depth, status, input, attempt_count, max_attempts, claim_count, available_at, deadline_at, lease_token, lease_expires_at, started_at, finished_at, last_error_code, last_error_detail, created_at, updated_at) \
-                 SELECT '{}', '{}', '{}', 0, '{}', 'sandbox', 1, 'queued', 'admitted while cancellation waited', 0, 3, 0, admitted_at, admitted_at + interval '30 minutes', NULL, NULL, NULL, NULL, NULL, NULL, admitted_at, admitted_at \
+                "INSERT INTO agent_run (id, chat_id, parent_id, parent_depth, spawn_call_id, tier, execution_location, depth, status, input, attempt_count, max_attempts, claim_count, available_at, deadline_at, lease_token, lease_expires_at, started_at, finished_at, last_error_code, last_error_detail, created_at, updated_at) \
+                 SELECT '{}', '{}', '{}', 0, '{}', 'background', 'in_process', 1, 'queued', 'admitted while cancellation waited', 0, 3, 0, admitted_at, admitted_at + interval '30 minutes', NULL, NULL, NULL, NULL, NULL, NULL, admitted_at, admitted_at \
                  FROM (SELECT clock_timestamp() AS admitted_at) AS admission_clock",
                 child_id.0,
                 chat.id.0,
@@ -1283,7 +1283,7 @@ async fn postgres_agent_runs_enforce_foreground_parentage_and_idempotency() {
             chat.id,
             Some(child_id),
             Some(CallId::new()),
-            AgentRunExecution::Sandbox,
+            AgentRunTier::Background,
             Some("forbidden grandchild"),
         )
         .await
@@ -1398,7 +1398,7 @@ async fn postgres_concurrent_sandbox_admission_respects_origin_turn_cap() {
         .await
         .unwrap()
         .into_iter()
-        .filter(|run| run.execution == AgentRunExecution::Sandbox)
+        .filter(|run| run.tier == AgentRunTier::Background)
         .collect::<Vec<_>>();
     assert_eq!(sandbox_runs.len(), 2);
     cleanup_postgres_sandbox_chat(&store, chat.id).await;

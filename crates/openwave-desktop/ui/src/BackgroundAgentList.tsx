@@ -37,7 +37,7 @@ export function BackgroundAgentList({
   onRetry,
 }: BackgroundAgentListProps) {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
-  const sandboxRuns = runs.filter((run) => run.execution === "sandbox");
+  const sandboxRuns = runs.filter((run) => run.tier === "background");
   const matchedRuns = sandboxRuns.filter((run) =>
     spawns.some(
       (spawn) =>

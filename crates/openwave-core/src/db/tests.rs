@@ -28,6 +28,41 @@ async fn temp_store() -> (tempfile::TempDir, DbStore) {
     (dir, store)
 }
 
+/// Seed a chat the way `create_chat` did before the agent-run tier/location
+/// split, for upgrade tests that write against a partially migrated schema.
+///
+/// The chat row still matches the current entity, but the foreground run must
+/// go through the retired single `execution` column that the split migration
+/// later maps onto `(tier, execution_location)`.
+async fn create_chat_before_agent_run_split(store: &DbStore, chat: &Chat) {
+    entities::chat::ActiveModel {
+        id: Set(chat.id.0),
+        project_id: Set(chat.project_id.map(|p| p.0)),
+        title: Set(chat.title.clone()),
+        model: Set(chat.model.clone()),
+        reasoning_effort: sea_orm::ActiveValue::NotSet,
+        attachment_revision: Set(chat.attachment_revision),
+        created_at: Set(chat.created_at),
+    }
+    .insert(&store.conn)
+    .await
+    .unwrap();
+    store
+        .conn
+        .execute_unprepared(&format!(
+            "INSERT INTO agent_run \
+             (id, chat_id, execution, depth, status, attempt_count, max_attempts, claim_count, \
+              available_at, created_at, updated_at) \
+             VALUES (X'{id}', X'{chat_id}', 'foreground', 0, 'active', 0, 0, 0, \
+              '2023-11-14 22:13:20+00:00', '2023-11-14 22:13:20+00:00', \
+              '2023-11-14 22:13:20+00:00')",
+            id = AgentRunId::foreground_for_chat(chat.id).0.simple(),
+            chat_id = chat.id.0.simple(),
+        ))
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn bundled_sqlite_supports_fts5() {
     let (_dir, store) = temp_store().await;
@@ -5238,7 +5273,7 @@ async fn m0006_upgrades_an_existing_store_without_losing_records() {
     migration::Migrator::up(&conn, Some(5)).await.unwrap();
     let store = DbStore { conn: conn.clone() };
     let chat = sample_chat();
-    store.create_chat(&chat).await.unwrap();
+    create_chat_before_agent_run_split(&store, &chat).await;
 
     migration::Migrator::up(&conn, None).await.unwrap();
 
@@ -5322,7 +5357,7 @@ async fn m0013_adds_outputs_to_an_existing_conversation_store() {
     migration::Migrator::up(&conn, Some(12)).await.unwrap();
     let store = DbStore { conn: conn.clone() };
     let chat = sample_chat();
-    store.create_chat(&chat).await.unwrap();
+    create_chat_before_agent_run_split(&store, &chat).await;
 
     migration::Migrator::up(&conn, None).await.unwrap();
 
@@ -5360,7 +5395,7 @@ async fn m0015_adds_output_citations_without_changing_existing_outputs() {
     migration::Migrator::up(&conn, Some(14)).await.unwrap();
     let store = DbStore { conn: conn.clone() };
     let chat = sample_chat();
-    store.create_chat(&chat).await.unwrap();
+    create_chat_before_agent_run_split(&store, &chat).await;
     let request = crate::deliverable::CreateOutput {
         id: crate::id::OutputId::new(),
         chat_id: chat.id,
