@@ -2172,6 +2172,18 @@ body {
   padding-top: 0;
 }
 
+/* Full-window surfaces that replace the shell (boot and error screens, the
+   managed sign-in gate) render this so the window stays draggable where the
+   traffic lights sit. Same height as the titlebar it stands in for. */
+.window-drag-strip {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 52px;
+  z-index: 50;
+}
+
 .app-body {
   display: flex;
   flex: 1;

@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Logomark } from "./Logomark";
 import { ManagedPolicyContext } from "./managedPolicy";
 import { openSignInPage } from "./openSignInPage";
+import { WindowDragStrip } from "./WindowDragStrip";
 
 /** While the browser flow is pending the exchange lands out of band, so the
  * poll is what turns the gate off. Matches the settings panel's cadence. */
@@ -255,6 +256,7 @@ export function ManagedGate({
   if (policyState.kind === "blocked" || policyMisconfigured) {
     return (
       <div className="boot" aria-label="Managed policy unavailable">
+        <WindowDragStrip />
         <div className="boot-brand">
           <Logomark />
           <h1>OpenWave</h1>
@@ -306,6 +308,7 @@ export function ManagedGate({
 
   return (
     <div className="boot" aria-label="Sign in required">
+      <WindowDragStrip />
       <div className="boot-brand">
         <Logomark />
         <h1>OpenWave</h1>
@@ -379,6 +382,7 @@ function Published({
 function BootScreen({ children }: { children: ReactNode }) {
   return (
     <div className="boot">
+      <WindowDragStrip />
       <div className="boot-brand">
         <Logomark />
         <h1>OpenWave</h1>
