@@ -127,6 +127,15 @@ span: CitationSpan, excerpt: string, heading: string | null, pages: Array<number
 bounds: Array<CitationPageBounds>, };
 
 /**
+ * Where the Auto-mode judge stands on one parked call.
+ *
+ * The marker is load-bearing for the renderer: without it, "the judge is
+ * still deciding" and "the judge declined, a human is needed" are both just
+ * `Pending`, indistinguishable except by waiting.
+ */
+export type AutoJudgeStatus = "judging" | "approved" | "declined";
+
+/**
  * Identifies one tool call, stable across its request/approval/result.
  */
 export type CallId = string;
@@ -690,7 +699,12 @@ export type PendingApprovalSnapshot = { call_id: CallId, turn_id: TurnId, action
 /**
  * Absent, not null, when the tool projects no action.
  */
-preview?: ToolActionPreview, can_approve: boolean, can_remember: boolean, };
+preview?: ToolActionPreview, can_approve: boolean, can_remember: boolean, 
+/**
+ * Where the Auto-mode judge stands, when one was engaged. Absent means
+ * no judge ever owned this card.
+ */
+auto_judge_status?: AutoJudgeStatus, };
 
 /**
  * One folder-access request that is safe for an untrusted renderer to present.
@@ -816,6 +830,12 @@ export type ProviderKind = "anthropic" | "openai" | "gemini" | "openai_compatibl
 export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export type RendererAgentEvent = { "type": "turn_started", turn_id: TurnId, } | { "type": "text_delta", text: string, } | { "type": "reasoning_delta" } | { "type": "stream_interrupted" } | { "type": "tool_call_started", call_id: CallId, name: RendererToolName, } | { "type": "tool_call_args_delta", call_id: CallId, } | { "type": "user_questions_asked", call_id: CallId, turn_id: TurnId, } | { "type": "approval_required", call_id: CallId, action: RendererToolName, approval: ToolApprovalKind, class: ApprovalClass, 
+/**
+ * Whether the Auto-mode judge owns this card right now. The card
+ * stays fully actionable either way; this only adds the "deciding
+ * automatically" hint.
+ */
+auto_judging: boolean, 
 /**
  * The one deliberate opening in this boundary. A human cannot consent
  * to a command they are not shown, so a tool may project a closed,

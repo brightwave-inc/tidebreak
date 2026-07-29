@@ -38,6 +38,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddOperationLog),
             Box::new(ExtendOutputRevisionsForBinary),
             Box::new(AddChatPermissionMode),
+            Box::new(AddToolCallAutoJudgeStatus),
         ]
     }
 }
@@ -6730,6 +6731,45 @@ impl MigrationTrait for AddClaimedTurnEffectLeases {
     }
 }
 
+/// Adds `tool_call.auto_judge_status` (issue #756): where the Auto-mode judge
+/// stands on a parked approval (`judging` / `approved` / `declined`, `NULL`
+/// when no judge was engaged). Values are code-enforced; the column carries no
+/// CHECK so the vocabulary can grow without a table rebuild.
+struct AddToolCallAutoJudgeStatus;
+
+impl MigrationName for AddToolCallAutoJudgeStatus {
+    fn name(&self) -> &str {
+        "m20260729_000024_add_tool_call_auto_judge_status"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddToolCallAutoJudgeStatus {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(ToolCall::Table)
+                    .add_column(ColumnDef::new(ToolCall::AutoJudgeStatus).text())
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(ToolCall::Table)
+                    .drop_column(ToolCall::AutoJudgeStatus)
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+}
+
 /// Adds the optional per-chat `permission_mode` (issue #756): how much the
 /// chat lets the agent do between approvals. `NULL` reads as `ask`.
 struct AddChatPermissionMode;
@@ -7510,6 +7550,7 @@ enum ToolCall {
     ApprovalDecidedAt,
     ApprovalEventSeq,
     ApprovalGrantSourceCallId,
+    AutoJudgeStatus,
     ClientExecutorId,
     ClientLeaseToken,
     ClientLeaseExpiresAt,

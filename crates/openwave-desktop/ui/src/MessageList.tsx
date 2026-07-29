@@ -86,6 +86,8 @@ export type ChatMessage =
       preview?: ToolActionPreview | null;
       canApprove: boolean;
       canRemember: boolean;
+      /** The Auto-mode judge is deciding; the card stays fully actionable. */
+      autoJudging?: boolean;
       resolved?: boolean;
     }
   | { id: string; role: "error"; text: string };
@@ -517,6 +519,7 @@ function surfacedCards(
           preview={entry.preview ?? null}
           canApprove={entry.canApprove}
           canRemember={entry.canRemember}
+          autoJudging={entry.autoJudging ?? false}
           deciding={
             approvalState?.decidingApprovalCalls.has(entry.callId) ?? false
           }

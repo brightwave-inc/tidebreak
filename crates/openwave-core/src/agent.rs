@@ -2498,23 +2498,34 @@ impl Agent {
         // A recovered call re-enters the gate whatever the mode now says: its
         // durable approval may already hold a rejection the mode must not
         // outrun, and a still-pending card must resolve, not dangle.
+        let mode = chat.permission_mode.unwrap_or(PermissionMode::Ask);
         let gate_required = durable_approval.is_some()
             || match approval_class {
                 ApprovalClass::ReadOnly => false,
-                ApprovalClass::Workspace => matches!(
-                    chat.permission_mode.unwrap_or(PermissionMode::Ask),
-                    PermissionMode::Ask
-                ),
-                ApprovalClass::Sensitive => !matches!(
-                    chat.permission_mode.unwrap_or(PermissionMode::Ask),
-                    PermissionMode::Allow
-                ),
+                ApprovalClass::Workspace => matches!(mode, PermissionMode::Ask),
+                ApprovalClass::Sensitive => !matches!(mode, PermissionMode::Allow),
             };
         if gate_required && !bypass_by_explicit_grant {
             let summary = format!("{} requires approval", call.name);
             let kind = durable_approval
                 .map(|approval| approval.kind)
                 .unwrap_or(kind_for_call);
+            // In Auto, an uncovered judgeable call is offered to the judge as
+            // it parks, so the placeholder is on the card from its first
+            // frame. Only an exactly-describable action qualifies: the judge
+            // must see the real query, never a clamped rendering of it.
+            let auto_judge = matches!(mode, PermissionMode::Auto)
+                && durable_approval.is_none()
+                && kind.is_auto_judgeable()
+                && serde_json::from_str::<Value>(&call.args).is_ok_and(|arguments| {
+                    ToolActionPreview::describes_exactly(&call.name, &arguments)
+                });
+            let auto_judging = durable_approval.map_or(auto_judge, |approval| {
+                matches!(
+                    approval.auto_judge_status,
+                    Some(crate::approval::AutoJudgeStatus::Judging)
+                )
+            });
             // A recovered call re-presents the preview durable state already
             // holds, so a reconnecting client sees the same command it was
             // asked about before the restart.
@@ -2544,6 +2555,7 @@ impl Agent {
                     kind,
                     preview: preview.clone(),
                     summary: summary.clone(),
+                    auto_judge,
                 },
                 journal,
             );
@@ -2557,6 +2569,7 @@ impl Agent {
                 }
             };
             let required = AgentEvent::ApprovalRequired {
+                auto_judging,
                 call_id: call.call_id,
                 tool_name: call.name.clone(),
                 class: approval_class,
@@ -8786,6 +8799,7 @@ mod tests {
         store
             .request_tool_call_approval(
                 &ApprovalRequest {
+                    auto_judge: false,
                     call_id: call.id,
                     chat_id: chat.id,
                     turn_id,
@@ -8984,6 +8998,7 @@ mod tests {
         store
             .request_tool_call_approval(
                 &ApprovalRequest {
+                    auto_judge: false,
                     call_id: call.id,
                     chat_id: chat.id,
                     turn_id,

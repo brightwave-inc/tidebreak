@@ -5,8 +5,8 @@ use sea_orm::{
 };
 
 use crate::approval::{
-    ApprovalDecision, ApprovalRequest, GrantScope, StandingGrant, ToolApproval, ToolApprovalKind,
-    ToolApprovalStatus,
+    ApprovalDecision, ApprovalRequest, AutoJudgeStatus, GrantScope, StandingGrant, ToolApproval,
+    ToolApprovalKind, ToolApprovalStatus,
 };
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
@@ -142,6 +142,7 @@ pub(in crate::db) async fn request_and_append_event(
         ));
     }
     let event = AgentEvent::ApprovalRequired {
+        auto_judging: request.auto_judge,
         call_id: request.call_id,
         tool_name: request.tool_name.clone(),
         class: request.class,
@@ -279,6 +280,9 @@ pub(in crate::db) async fn request_and_append_event(
     active.approval_kind = Set(Some(request.kind.as_str().into()));
     active.approval_requested_at = Set(Some(requested_at));
     active.approval_event_seq = Set(Some(seq));
+    if request.auto_judge {
+        active.auto_judge_status = Set(Some(AutoJudgeStatus::Judging.as_str().into()));
+    }
     let approval = approval_from_model(&active.update(&transaction).await.map_err(store_err)?)?;
     transaction.commit().await.map_err(store_err)?;
     Ok(JournaledToolApprovalOutcome {
@@ -465,6 +469,9 @@ pub(in crate::db) async fn request(
     active.approval_class = Set(Some(stored_approval_class(request.class).into()));
     active.approval_kind = Set(Some(request.kind.as_str().into()));
     active.approval_requested_at = Set(Some(requested_at));
+    if request.auto_judge {
+        active.auto_judge_status = Set(Some(AutoJudgeStatus::Judging.as_str().into()));
+    }
     let inserted = active.update(&transaction).await.map_err(store_err)?;
     let approval = approval_from_model(&inserted)?;
     transaction.commit().await.map_err(store_err)?;
@@ -518,11 +525,18 @@ pub(in crate::db) async fn decide(
     let decided_at = super::agent_run::database_now(&transaction)
         .await?
         .max(current.requested_at);
+    let judge_owned = existing.auto_judge_status.as_deref() == Some("judging");
     let mut active: entities::tool_call::ActiveModel = existing.into();
     active.approval_status = Set(Some(decision.status().as_str().into()));
     active.approval_reason = Set(decision.reason().map(str::to_owned));
     active.approval_decided_at = Set(Some(decided_at));
     active.approval_grant_source_call_id = Set(None);
+    // A human decision releases a judge that has not answered yet, so the
+    // verdict CAS no-ops and the decision is never relabeled as automatic. A
+    // terminal `declined` marker stays: it is history, not ownership.
+    if judge_owned {
+        active.auto_judge_status = Set(None);
+    }
     let decided = active.update(&transaction).await.map_err(store_err)?;
     let approval = approval_from_model(&decided)?;
     transaction.commit().await.map_err(store_err)?;
@@ -591,11 +605,17 @@ pub(in crate::db) async fn decide_with_grant(
         .await?
         .max(current.requested_at);
     insert_standing_grant(&transaction, call_id, grant, decided_at).await?;
+    let judge_owned = existing.auto_judge_status.as_deref() == Some("judging");
     let mut active: entities::tool_call::ActiveModel = existing.into();
     active.approval_status = Set(Some(ToolApprovalStatus::Approved.as_str().into()));
     active.approval_reason = Set(None);
     active.approval_decided_at = Set(Some(decided_at));
     active.approval_grant_source_call_id = Set(None);
+    // Same release as the plain human decision: an unanswered judge loses
+    // ownership so its verdict CAS no-ops.
+    if judge_owned {
+        active.auto_judge_status = Set(None);
+    }
     let decided = active.update(&transaction).await.map_err(store_err)?;
     let approval = approval_from_model(&decided)?;
     transaction.commit().await.map_err(store_err)?;
@@ -687,6 +707,71 @@ pub(in crate::db) async fn list_pending(
         .collect()
 }
 
+/// A bounded page of calls the Auto-mode judge currently owns, oldest first.
+pub(in crate::db) async fn list_judging(store: &DbStore, limit: u64) -> Result<Vec<ToolApproval>> {
+    let rows = entities::tool_call::Entity::find()
+        .filter(entities::tool_call::Column::AutoJudgeStatus.eq(AutoJudgeStatus::Judging.as_str()))
+        .filter(
+            entities::tool_call::Column::ApprovalStatus.eq(ToolApprovalStatus::Pending.as_str()),
+        )
+        .order_by_asc(entities::tool_call::Column::ApprovalRequestedAt)
+        .limit(limit)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?;
+    rows.iter().map(approval_from_model).collect()
+}
+
+/// Land the Auto-mode judge's verdict on one parked call.
+///
+/// Approval is a compare-and-set on the `(pending, judging)` pair, so a human
+/// decision that already landed always wins and can never be relabeled as
+/// automatic. A decline moves only the marker; the call stays pending for the
+/// human card, and the marker never returns to `judging`. `false` means the
+/// judge no longer owned the call.
+pub(in crate::db) async fn resolve_from_judge(
+    store: &DbStore,
+    chat_id: ChatId,
+    call_id: CallId,
+    approved: bool,
+) -> Result<bool> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_chat_write_lock(&transaction, chat_id).await?
+        || !acquire_tool_call_write_lock(&transaction, call_id).await?
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(false);
+    }
+    let existing = entities::tool_call::Entity::find_by_id(call_id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .expect("locked tool call exists");
+    if existing.chat_id != chat_id.0
+        || existing.status != ToolCallStatus::Pending.as_str()
+        || existing.approval_status.as_deref() != Some(ToolApprovalStatus::Pending.as_str())
+        || existing.auto_judge_status.as_deref() != Some(AutoJudgeStatus::Judging.as_str())
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(false);
+    }
+    let requested_at = existing.approval_requested_at;
+    let mut active: entities::tool_call::ActiveModel = existing.into();
+    if approved {
+        let decided_at = super::agent_run::database_now(&transaction)
+            .await?
+            .max(requested_at.unwrap_or_default());
+        active.approval_status = Set(Some(ToolApprovalStatus::Approved.as_str().into()));
+        active.approval_decided_at = Set(Some(decided_at));
+        active.auto_judge_status = Set(Some(AutoJudgeStatus::Approved.as_str().into()));
+    } else {
+        active.auto_judge_status = Set(Some(AutoJudgeStatus::Declined.as_str().into()));
+    }
+    active.update(&transaction).await.map_err(store_err)?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(true)
+}
+
 fn validate_request(request: &ApprovalRequest) -> Result<()> {
     if request.call_id.0.is_nil()
         || request.chat_id.0.is_nil()
@@ -696,6 +781,9 @@ fn validate_request(request: &ApprovalRequest) -> Result<()> {
         // ReadOnly never parks: only the classes the permission mode can gate
         // may request approval.
         || request.class == ApprovalClass::ReadOnly
+        // The judge may only ever own a judgeable kind. Enforced here, below
+        // every caller, so no path can put `exec` or MCP in front of the LLM.
+        || (request.auto_judge && !request.kind.is_auto_judgeable())
     {
         return Err(AgentError::Store("invalid tool approval request".into()));
     }
@@ -765,6 +853,17 @@ fn approval_from_model(model: &entities::tool_call::Model) -> Result<ToolApprova
             ))
         }
     };
+    let auto_judge_status = match model.auto_judge_status.as_deref() {
+        None => None,
+        Some("judging") => Some(crate::approval::AutoJudgeStatus::Judging),
+        Some("approved") => Some(crate::approval::AutoJudgeStatus::Approved),
+        Some("declined") => Some(crate::approval::AutoJudgeStatus::Declined),
+        _ => {
+            return Err(AgentError::Store(
+                "invalid durable auto-judge status".into(),
+            ))
+        }
+    };
     let approved_by_standing_grant = model.approval_grant_source_call_id.is_some();
     if approved_by_standing_grant && status != ToolApprovalStatus::Approved {
         return Err(AgentError::Store(
@@ -784,6 +883,7 @@ fn approval_from_model(model: &entities::tool_call::Model) -> Result<ToolApprova
         preview: ToolActionPreview::build(&model.name, &model.arguments),
         action_is_exact: ToolActionPreview::describes_exactly(&model.name, &model.arguments),
         approved_by_standing_grant,
+        auto_judge_status,
         status,
         reason: model.approval_reason.clone(),
         requested_at: model

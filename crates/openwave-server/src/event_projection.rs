@@ -98,6 +98,11 @@ pub(crate) enum RendererAgentEvent {
         action: RendererToolName,
         approval: ToolApprovalKind,
         class: ApprovalClass,
+        /// Whether the Auto-mode judge owns this card right now. The card
+        /// stays fully actionable either way; this only adds the "deciding
+        /// automatically" hint.
+        #[serde(default)]
+        auto_judging: bool,
         /// The one deliberate opening in this boundary. A human cannot consent
         /// to a command they are not shown, so a tool may project a closed,
         /// field-by-field view of the action under review. Tools without one
@@ -173,6 +178,7 @@ impl From<&SequencedEvent> for RendererSequencedEvent {
                 }
             }
             AgentEvent::ApprovalRequired {
+                auto_judging,
                 call_id,
                 tool_name,
                 class,
@@ -184,6 +190,7 @@ impl From<&SequencedEvent> for RendererSequencedEvent {
                 action: tool_name.as_str().into(),
                 approval: *kind,
                 class: *class,
+                auto_judging: *auto_judging,
                 preview: preview.clone(),
             },
             AgentEvent::ApprovalDecided { call_id, approved } => {
@@ -287,6 +294,7 @@ mod tests {
                 fragment: r#"{\"path\":\"/Users/private\"}"#.into(),
             },
             AgentEvent::ApprovalRequired {
+                auto_judging: false,
                 call_id,
                 tool_name: "provider_tool_with_secret".into(),
                 class: ApprovalClass::Sensitive,
@@ -368,6 +376,7 @@ mod tests {
         let projected = RendererSequencedEvent::from(&SequencedEvent {
             seq: 10,
             event: AgentEvent::ApprovalRequired {
+                auto_judging: false,
                 call_id: CallId::new(),
                 tool_name: "exec".into(),
                 class: ApprovalClass::Sensitive,
@@ -505,6 +514,7 @@ mod tests {
         let projected = RendererSequencedEvent::from(&SequencedEvent {
             seq: 11,
             event: AgentEvent::ApprovalRequired {
+                auto_judging: false,
                 call_id: CallId::new(),
                 tool_name: "write_file".into(),
                 class: ApprovalClass::Workspace,
@@ -532,6 +542,7 @@ mod tests {
         let projected = RendererSequencedEvent::from(&SequencedEvent {
             seq: 11,
             event: AgentEvent::ApprovalRequired {
+                auto_judging: false,
                 call_id: CallId::new(),
                 tool_name: "web_search".into(),
                 class: ApprovalClass::Sensitive,
@@ -615,6 +626,7 @@ mod tests {
         let projected = RendererSequencedEvent::from(&SequencedEvent {
             seq: 7,
             event: AgentEvent::ApprovalRequired {
+                auto_judging: false,
                 call_id: CallId::new(),
                 tool_name: "search".into(),
                 class: ApprovalClass::Sensitive,
@@ -634,6 +646,7 @@ mod tests {
         let projected = RendererSequencedEvent::from(&SequencedEvent {
             seq: 8,
             event: AgentEvent::ApprovalRequired {
+                auto_judging: false,
                 call_id: CallId::new(),
                 tool_name: "web_search".into(),
                 class: ApprovalClass::Sensitive,
@@ -654,6 +667,7 @@ mod tests {
         let projected = RendererSequencedEvent::from(&SequencedEvent {
             seq: 9,
             event: AgentEvent::ApprovalRequired {
+                auto_judging: false,
                 call_id: CallId::new(),
                 tool_name: "mcp__private_server__private_tool".into(),
                 class: ApprovalClass::Sensitive,

@@ -40,6 +40,7 @@ describe("validators against real server output", () => {
       preview: { tool: "exec", command: "git", args: ["status"], cwd: "." },
       canApprove: true,
       canRemember: true,
+      autoJudgeStatus: null,
     });
   });
 

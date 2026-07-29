@@ -199,6 +199,23 @@ impl ToolApprovalKind {
         )
     }
 
+    /// Whether an uncovered call of this kind may be offered to the Auto-mode
+    /// judge instead of parking straight on the human card.
+    ///
+    /// Deliberately only the query-egress kinds. `exec` has no deterministic
+    /// safety floor here — no command parser, no guaranteed network-blocked
+    /// jail — so a judge would be the *sole* gate on arbitrary networked
+    /// shell, which is exactly the position a fail-closed judge must never
+    /// hold. MCP is excluded on the same replaceable-executable grounds as
+    /// standing grants.
+    #[must_use]
+    pub const fn is_auto_judgeable(self) -> bool {
+        matches!(
+            self,
+            Self::SearchMayShareQueryAndExcerpts | Self::WebSearchMayShareQuery
+        )
+    }
+
     /// Whether approval may be remembered for later calls in the same chat.
     ///
     /// MCP is intentionally one-shot: its configured executable can change
@@ -229,6 +246,36 @@ impl ToolApprovalStatus {
     }
 }
 
+/// Where the Auto-mode judge stands on one parked call.
+///
+/// The marker is load-bearing for the renderer: without it, "the judge is
+/// still deciding" and "the judge declined, a human is needed" are both just
+/// `Pending`, indistinguishable except by waiting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoJudgeStatus {
+    /// A judge owns this call; its verdict or failure will move the marker.
+    Judging,
+    /// The judge approved. Doubles as the "decided automatically" badge and
+    /// as the guard that a later human click cannot be mislabeled as one.
+    Approved,
+    /// The judge declined (or failed — failure is a decline). The card is a
+    /// human's to decide; the marker never returns to `Judging`.
+    Declined,
+}
+
+impl AutoJudgeStatus {
+    /// Stable database representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Judging => "judging",
+            Self::Approved => "approved",
+            Self::Declined => "declined",
+        }
+    }
+}
+
 /// Private durable approval state. Canonical tool arguments and model summaries
 /// deliberately remain outside this read model; only the closed
 /// [`ToolActionPreview`] projection of those arguments is presentable.
@@ -253,6 +300,8 @@ pub struct ToolApproval {
     /// this call. The source is retained so crash recovery does not invent an
     /// approval-card decision for an automatically authorized call.
     pub approved_by_standing_grant: bool,
+    /// Where the Auto-mode judge stands on this call, when one was engaged.
+    pub auto_judge_status: Option<AutoJudgeStatus>,
     pub status: ToolApprovalStatus,
     pub reason: Option<String>,
     pub requested_at: DateTime<Utc>,
@@ -578,6 +627,11 @@ pub struct ApprovalRequest {
     pub preview: Option<ToolActionPreview>,
     /// Short human-readable summary of what will happen.
     pub summary: String,
+    /// Whether the Auto-mode judge should own this call once parked. Stamped
+    /// inside the park transaction so the renderer never flashes a bare human
+    /// card before the judge's placeholder. Storage refuses the flag for any
+    /// kind that is not [`ToolApprovalKind::is_auto_judgeable`].
+    pub auto_judge: bool,
 }
 
 /// A future that resolves to an [`ApprovalDecision`].

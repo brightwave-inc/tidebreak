@@ -70,6 +70,14 @@ pub enum AgentEvent {
     /// A tool call needs explicit approval before it can run; the turn parks
     /// until an approval decision arrives.
     ApprovalRequired {
+        /// Whether the Auto-mode judge owns this card right now.
+        ///
+        /// Absent both in journals written before the judge existed and on
+        /// every ordinary card since — the row is written only when a judge
+        /// actually owns it, so the stored shape of a human-decided approval
+        /// is unchanged and old rows read back identically.
+        #[serde(default, skip_serializing_if = "is_false")]
+        auto_judging: bool,
         /// The call awaiting a decision.
         call_id: CallId,
         /// Canonical registered tool identity. Renderer boundaries must map
@@ -150,6 +158,12 @@ pub enum AgentEvent {
         /// Estimated tokens after fitting to the budget.
         fitted_tokens: u32,
     },
+}
+
+/// Whether to omit a defaulted `false` flag from a journal row.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// An [`AgentEvent`] paired with its per-chat sequence number, as stored in
@@ -282,6 +296,7 @@ mod tests {
                 turn_id: TurnId(id(1)),
             },
             AgentEvent::ApprovalRequired {
+                auto_judging: false,
                 call_id: CallId(id(2)),
                 tool_name: "exec".into(),
                 class: ApprovalClass::Sensitive,

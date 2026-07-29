@@ -201,6 +201,7 @@ describe("tool call lifecycle", () => {
       START_SEARCH,
       {
         type: "approval_required",
+      auto_judging: false,
         call_id: "call-1",
         action: "search",
         approval: "search_may_share_query_and_excerpts",
@@ -227,6 +228,7 @@ describe("tool call lifecycle", () => {
       START_SEARCH,
       {
         type: "approval_required",
+      auto_judging: false,
         call_id: "call-1",
         action: "search",
         approval: "search_may_share_query_and_excerpts",
@@ -244,6 +246,7 @@ describe("tool call lifecycle", () => {
 describe("approvals", () => {
   const APPROVAL: AgentEvent = {
     type: "approval_required",
+      auto_judging: false,
     call_id: "call-1",
     action: "search",
     approval: "search_may_share_query_and_excerpts",
@@ -432,6 +435,7 @@ describe("terminal events", () => {
       { type: "tool_call_started", call_id: "call-1", name: "search" },
       {
         type: "approval_required",
+      auto_judging: false,
         call_id: "call-1",
         action: "search",
         approval: "search_may_share_query_and_excerpts",
