@@ -65,6 +65,7 @@ impl Capture {
             timed_out,
             output_truncated: self.truncated,
             duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            sync_notes: Vec::new(),
         }
     }
 }

@@ -18,6 +18,7 @@ mod local;
 mod output;
 mod receipt;
 mod remote;
+pub mod sync;
 mod tool;
 mod types;
 

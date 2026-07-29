@@ -315,6 +315,11 @@ pub struct CodeExecutionResponse {
     pub timed_out: bool,
     pub output_truncated: bool,
     pub duration_ms: u64,
+    /// What the scratch↔workspace mirror around this execution left behind
+    /// (oversized files, truncated listings, a failed pull). Empty when the
+    /// provider shares the host filesystem or the mirror was complete.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sync_notes: Vec<String>,
 }
 
 /// A configured execution provider. Implementations must treat

@@ -12,11 +12,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use openwave_code_execution::{
-    CodeExecutionError, CodeExecutionProvider, CodeExecutionProviderKind, CodeExecutionRequest,
-    CodeExecutionResponse, DaytonaCredential, DaytonaExecutionProvider, E2BCredential,
-    E2BExecutionProvider, ExecutionWorkspaceId, LocalExecutionProvider, RemoteSessionPool,
-    WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing, DAYTONA_CREDENTIAL_KEY,
-    E2B_CREDENTIAL_KEY,
+    sync, CodeExecutionError, CodeExecutionProvider, CodeExecutionProviderKind,
+    CodeExecutionRequest, CodeExecutionResponse, DaytonaCredential, DaytonaExecutionProvider,
+    E2BCredential, E2BExecutionProvider, ExecutionWorkspaceId, LocalExecutionProvider,
+    RemoteSessionPool, WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing,
+    DAYTONA_CREDENTIAL_KEY, E2B_CREDENTIAL_KEY,
 };
 use openwave_core::{Result, SecretProvider, Store};
 use openwave_egress::{
@@ -568,44 +568,50 @@ impl ConfiguredCodeExecutionProvider {
     /// Resolve the currently selected adapter at the last boundary before use.
     async fn resolve(
         &self,
-    ) -> std::result::Result<Box<dyn CodeExecutionProvider>, CodeExecutionError> {
+    ) -> std::result::Result<
+        (CodeExecutionProviderKind, Box<dyn CodeExecutionProvider>),
+        CodeExecutionError,
+    > {
         let config = read_config(&*self.store).await.map_err(|_| {
             CodeExecutionError::Unavailable("configuration storage is unavailable".into())
         })?;
         let Some(provider) = config.provider else {
             return Err(CodeExecutionError::NotConfigured);
         };
-        match provider {
-            CodeExecutionProviderKind::Local => Ok(Box::new(LocalExecutionProvider::new(
+        let resolved: Box<dyn CodeExecutionProvider> = match provider {
+            CodeExecutionProviderKind::Local => Box::new(LocalExecutionProvider::new(
                 &self.scratch_root,
                 Duration::from_millis(config.timeout_ms),
-            )?)),
+            )?),
             CodeExecutionProviderKind::E2b => {
                 let credential = E2BCredential::load(&*self.secrets)
                     .await?
                     .ok_or(CodeExecutionError::NotConfigured)?;
-                Ok(Box::new(configured_e2b(
+                Box::new(configured_e2b(
                     credential,
                     Duration::from_millis(config.timeout_ms),
                     self.remote_sessions.clone(),
                     &config.egress,
-                )?))
+                )?)
             }
             CodeExecutionProviderKind::Daytona => {
                 let credential = DaytonaCredential::load(&*self.secrets)
                     .await?
                     .ok_or(CodeExecutionError::NotConfigured)?;
-                Ok(Box::new(configured_daytona(
+                Box::new(configured_daytona(
                     credential,
                     Duration::from_millis(config.timeout_ms),
                     self.remote_sessions.clone(),
                     &config.egress,
-                )?))
+                )?)
             }
-            _ => Err(CodeExecutionError::Unavailable(
-                "selected provider is not supported by this build".into(),
-            )),
-        }
+            _ => {
+                return Err(CodeExecutionError::Unavailable(
+                    "selected provider is not supported by this build".into(),
+                ))
+            }
+        };
+        Ok((provider, resolved))
     }
 
     /// The configured provider's optional durable-workspace surface.
@@ -618,7 +624,7 @@ impl ConfiguredCodeExecutionProvider {
         &self,
     ) -> std::result::Result<Option<ConfiguredWorkspace>, CodeExecutionError> {
         let provider = match self.resolve().await {
-            Ok(provider) => provider,
+            Ok((_, provider)) => provider,
             Err(CodeExecutionError::NotConfigured) => return Ok(None),
             Err(error) => return Err(error),
         };
@@ -635,7 +641,37 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
         &self,
         request: CodeExecutionRequest,
     ) -> std::result::Result<CodeExecutionResponse, CodeExecutionError> {
-        self.resolve().await?.execute(request).await
+        let (kind, provider) = self.resolve().await?;
+        // A remote sandbox has its own filesystem, but the model is shown one
+        // path vocabulary across the file tools and exec. Mirror the chat's
+        // private scratch into the workspace before the command and back out
+        // after it, so a file written by either side is visible to the other.
+        // The local provider already runs inside scratch; mirroring there
+        // would only copy the directory onto itself.
+        let lifecycle = match kind {
+            CodeExecutionProviderKind::Local => None,
+            _ => provider.workspace_lifecycle(),
+        };
+        let Some(lifecycle) = lifecycle else {
+            return provider.execute(request).await;
+        };
+        let host_dir = self.scratch_root.join(request.workspace_id.as_str());
+        // A failed push fails the execution: running against files the model
+        // believes are present would answer with misleading not-found errors.
+        let mut notes = sync::push_host_dir(lifecycle, &request.workspace_id, &host_dir)
+            .await?
+            .notes;
+        let mut response = provider.execute(request.clone()).await?;
+        // A failed pull keeps the execution's output — the command did run —
+        // and says the host copies are stale instead of failing the call.
+        match sync::pull_into_host_dir(lifecycle, &request.workspace_id, &host_dir).await {
+            Ok(pulled) => notes.extend(pulled.notes),
+            Err(error) => notes.push(format!(
+                "workspace files were not copied back to private scratch: {error}"
+            )),
+        }
+        response.sync_notes.extend(notes);
+        Ok(response)
     }
 
     // `workspace_lifecycle` stays `None` here on purpose: the capability of
