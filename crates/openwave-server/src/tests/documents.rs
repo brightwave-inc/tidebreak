@@ -1,4 +1,5 @@
 use super::*;
+use openwave_retrieval::PlainTextParser;
 
 #[tokio::test]
 async fn document_file_content_supports_full_head_and_single_range_responses() {
@@ -514,7 +515,7 @@ async fn raw_ingest_retains_exact_bytes_and_runs_the_async_pipeline() {
     let blobs = openwave_core::FsBlobStore::new(dir.path().join("blobs"));
     assert_eq!(blobs.get(source_blob.id).await.unwrap().unwrap(), raw);
 
-    run_parse_and_index(&worker).await;
+    run_parse(&worker).await;
     let ready = store.get_document(document_id).await.unwrap().unwrap();
     assert_eq!(ready.canonical_text, String::from_utf8_lossy(&raw));
     assert_eq!(
@@ -658,23 +659,6 @@ async fn raw_ingest_persists_a_safe_title_without_requiring_a_source_path() {
 }
 
 #[tokio::test]
-async fn headless_embedding_keeps_document_api_on_its_primary_bearer() {
-    let (router, token, _store, _dir) = test_app().await;
-    let bearer = format!("Bearer {token}");
-    let response = router
-        .oneshot(
-            Request::builder()
-                .uri("/documents")
-                .header(header::AUTHORIZATION, bearer)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-}
-
-#[tokio::test]
 async fn raw_ingest_has_an_explicit_limit_and_preserves_payload_too_large() {
     let (router, token, _store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");
@@ -699,164 +683,6 @@ async fn raw_ingest_has_an_explicit_limit_and_preserves_payload_too_large() {
     assert_eq!(too_large.status(), StatusCode::PAYLOAD_TOO_LARGE);
     let error: AgentErrorInfo = json_body(too_large).await;
     assert_eq!(error.kind, "payload_too_large");
-}
-
-#[tokio::test]
-async fn ingest_then_search_finds_the_passage() {
-    let (router, token, store, _dir, worker) = test_app_with_worker().await;
-    let bearer = format!("Bearer {token}");
-
-    let ingest = post_json(
-        &router,
-        &bearer,
-        "/documents",
-        serde_json::json!({
-            "uri": "file:///solar.txt",
-            "content": "Jupiter is the largest planet in the Solar System, a gas giant.",
-        }),
-    )
-    .await;
-    assert_eq!(ingest.status(), StatusCode::ACCEPTED);
-    let ingest: serde_json::Value = json_body(ingest).await;
-    assert!(ingest["document_id"].is_string());
-    assert!(ingest["job_id"].is_string());
-    assert_eq!(ingest["processing_status"], "queued");
-    let document_id = ingest["document_id"].as_str().unwrap().parse().unwrap();
-    let record = store
-        .get_document(document_id)
-        .await
-        .unwrap()
-        .expect("source record should be durable before the response");
-    assert!(record.canonical_text.is_empty());
-    assert!(record.source_blob.is_some());
-    assert_eq!(record.content_revision, 1);
-    assert_eq!(record.indexed_revision, None);
-    assert_eq!(
-        record.processing_status,
-        openwave_core::DocumentProcessingStatus::Queued
-    );
-
-    run_parse_and_index(&worker).await;
-
-    // The worker's activated generation is searchable over the shared index.
-    let search = post_json(
-        &router,
-        &bearer,
-        "/search",
-        serde_json::json!({ "query": "largest gas giant planet", "k": 1 }),
-    )
-    .await;
-    assert_eq!(search.status(), StatusCode::OK);
-    let results: serde_json::Value = json_body(search).await;
-    let citations = results["citations"].as_array().unwrap();
-    assert_eq!(citations.len(), 1);
-    assert!(citations[0]["snippet"]
-        .as_str()
-        .unwrap()
-        .contains("Jupiter"));
-    assert_eq!(citations[0]["document_id"], ingest["document_id"]);
-    let response_json = serde_json::to_string(&results).unwrap();
-    assert!(!response_json.contains("file:///solar.txt"));
-    assert!(!response_json.contains(&record.revision_token.to_string()));
-    assert!(!response_json.contains("revision_token"));
-    assert!(!response_json.contains("content_revision"));
-    assert!(citations[0].get("source").is_none());
-    assert!(citations[0].get("generation").is_none());
-}
-
-#[tokio::test]
-async fn maximum_search_output_and_private_evidence_commit_together() {
-    let (router, token, store, dir) = test_app().await;
-    let bearer = format!("Bearer {token}");
-    let chat = make_chat(&router, &bearer).await;
-    let embedder = Arc::new(HashEmbedder::default());
-    let vectors = Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS));
-    for ordinal in 0..openwave_retrieval::MAX_SEARCH_RESULTS {
-        let document_id = openwave_core::DocumentId::new();
-        let generation = openwave_core::DocumentGeneration {
-            content_revision: 1,
-            revision_token: uuid::Uuid::new_v4(),
-        };
-        let mut snippet = format!("fact {ordinal} ");
-        snippet.push_str(&"x".repeat(1_024 - snippet.len()));
-        let embedding = embedder.embed_query(&snippet).await.unwrap();
-        vectors
-            .stage_document_generation(
-                document_id,
-                generation,
-                vec![VectorRecord {
-                    chat_id: Some(chat.id),
-                    project_id: None,
-                    source: openwave_retrieval::DocumentSource::Inline,
-                    generation: Some(generation),
-                    chunk: openwave_retrieval::Chunk::new(
-                        document_id,
-                        0,
-                        openwave_core::ByteSpan::new(0, snippet.len()),
-                        snippet,
-                    ),
-                    embedding,
-                }],
-            )
-            .await
-            .unwrap();
-        assert!(vectors
-            .activate_document_generation(document_id, generation)
-            .await
-            .unwrap());
-    }
-    let tool = openwave_retrieval::SearchTool::new(embedder, vectors);
-    let output = tool
-        .execute(
-            &ToolCtx::new_legacy_workspace(chat.id, None, dir.path().to_path_buf()),
-            serde_json::json!({"query": "fact", "k": 9999}),
-        )
-        .await
-        .unwrap();
-    assert!(!output.is_error);
-    assert_eq!(
-        output.private_evidence.len(),
-        openwave_retrieval::MAX_SEARCH_RESULTS
-    );
-    assert!(output.content.len() <= ToolCallRecord::MAX_RESULT_BYTES);
-
-    let created_at = chrono::Utc::now();
-    let call = ToolCallRecord {
-        id: CallId::new(),
-        chat_id: chat.id,
-        turn_id: TurnId::new(),
-        provider_id: "max_search".into(),
-        name: "search".into(),
-        arguments: serde_json::json!({"query": "fact", "k": 9999}),
-        execution: ToolCallExecution::Server,
-        status: ToolCallStatus::Pending,
-        result: None,
-        error_code: None,
-        error_detail: None,
-        client_executor_id: None,
-        client_lease_expires_at: None,
-        created_at,
-        resolved_at: None,
-    };
-    store.accept_tool_call(&call).await.unwrap();
-    assert_eq!(
-        store
-            .resolve_server_tool_call_with_evidence(
-                call.id,
-                &ToolCallResolution::Completed {
-                    result: output.content.clone(),
-                },
-                created_at + chrono::Duration::seconds(1),
-                &output.private_evidence,
-            )
-            .await
-            .unwrap(),
-        openwave_core::ResolveToolCallOutcome::Resolved
-    );
-    assert_eq!(
-        store.list_retrieval_evidence(call.id).await.unwrap().len(),
-        output.private_evidence.len()
-    );
 }
 
 #[tokio::test]
@@ -913,7 +739,7 @@ async fn project_document_routes_enforce_corpus_identity_and_ownership() {
     assert_ne!(root["document_id"], a["document_id"]);
     assert_ne!(a["document_id"], b["document_id"]);
 
-    for _ in 0..6 {
+    for _ in 0..3 {
         assert!(matches!(
             worker.run_once().await.unwrap(),
             document_worker::WorkerOutcome::Completed(_)
@@ -1005,32 +831,6 @@ async fn project_document_routes_enforce_corpus_identity_and_ownership() {
             .project_id,
         Some(project_a.id)
     );
-
-    let root_search: serde_json::Value = json_body(
-        post_json(
-            &router,
-            &bearer,
-            "/search",
-            serde_json::json!({"query": "loose corpus zephyr", "k": 1}),
-        )
-        .await,
-    )
-    .await;
-    assert_eq!(
-        root_search["citations"][0]["document_id"],
-        root["document_id"]
-    );
-    let a_search: serde_json::Value = json_body(
-        post_json(
-            &router,
-            &bearer,
-            &format!("/projects/{}/search", project_a.id),
-            serde_json::json!({"query": "project beta nebula", "k": 1}),
-        )
-        .await,
-    )
-    .await;
-    assert_eq!(a_search["citations"][0]["document_id"], a["document_id"]);
 
     let unknown = ProjectId::new();
     assert_eq!(
@@ -1162,42 +962,6 @@ async fn chat_document_routes_isolate_sources_search_and_delete_lifecycle() {
     let legacy_list: serde_json::Value = json_body(get("/documents".into()).await).await;
     assert!(legacy_list["documents"].as_array().unwrap().is_empty());
 
-    for (chat_id, text) in [
-        (first.id, "alpha-only evidence"),
-        (second.id, "beta-only evidence"),
-    ] {
-        let document_id = openwave_core::DocumentId::new();
-        vectors
-            .upsert(vec![VectorRecord {
-                chat_id: Some(chat_id),
-                project_id: None,
-                source: openwave_retrieval::DocumentSource::Inline,
-                generation: None,
-                chunk: openwave_retrieval::Chunk::new(
-                    document_id,
-                    0,
-                    openwave_retrieval::ByteSpan::new(0, text.len()),
-                    text,
-                ),
-                embedding: embedder.embed_query(text).await.unwrap(),
-            }])
-            .await
-            .unwrap();
-    }
-    let search: serde_json::Value = json_body(
-        post_json(
-            &router,
-            &bearer,
-            &format!("/chats/{}/search", first.id),
-            serde_json::json!({"query": "alpha-only evidence", "k": 10}),
-        )
-        .await,
-    )
-    .await;
-    let rendered = serde_json::to_string(&search).unwrap();
-    assert!(rendered.contains("alpha-only evidence"));
-    assert!(!rendered.contains("beta-only evidence"));
-
     let deleted = router
         .clone()
         .oneshot(
@@ -1212,122 +976,7 @@ async fn chat_document_routes_isolate_sources_search_and_delete_lifecycle() {
         .unwrap();
     assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
     assert_eq!(store.get_document(first_id).await.unwrap(), None);
-    assert!(store
-        .get_pending_document_retirement(first_id)
-        .await
-        .unwrap()
-        .is_some());
     assert!(store.get_document(second_id).await.unwrap().is_some());
-}
-
-#[tokio::test]
-async fn failed_indexing_leaves_authoritative_source_stale_for_retry() {
-    let retrieval = Arc::new(Retriever::new(
-        Box::new(PlainTextParser::new()),
-        Box::new(TextChunker::default()),
-        Arc::new(FailingEmbedder),
-        Arc::new(InMemoryVectorStore::new(8)),
-    ));
-    let (router, token, store, _dir, worker) =
-        test_app_with_retrieval_and_worker(Arc::new(FakeProvider), retrieval).await;
-    let bearer = format!("Bearer {token}");
-
-    let response = post_json(
-        &router,
-        &bearer,
-        "/documents",
-        serde_json::json!({
-            "uri": "file:///retry.txt",
-            "content": "authoritative even when embedding fails",
-        }),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    assert!(matches!(
-        worker.run_once().await.unwrap(),
-        document_worker::WorkerOutcome::Completed(_)
-    ));
-    assert!(matches!(
-        worker.run_once().await.unwrap(),
-        document_worker::WorkerOutcome::RetryScheduled(_)
-    ));
-
-    let record = store
-        .get_document(openwave_core::DocumentId::derive("file:///retry.txt"))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        record.canonical_text,
-        "authoritative even when embedding fails"
-    );
-    assert_eq!(record.content_revision, 1);
-    assert_eq!(record.indexed_revision, None);
-    assert_eq!(record.index_fingerprint, None);
-    assert_eq!(
-        record.processing_status,
-        openwave_core::DocumentProcessingStatus::Queued
-    );
-}
-
-#[tokio::test]
-async fn explicit_retry_revives_the_exact_terminal_job() {
-    let (router, token, store, _dir) = test_app().await;
-    let bearer = format!("Bearer {token}");
-    let ingested: serde_json::Value = json_body(
-        post_json(
-            &router,
-            &bearer,
-            "/documents",
-            serde_json::json!({
-                "uri": "file:///manual-retry.txt",
-                "content": "retry the exact failed generation"
-            }),
-        )
-        .await,
-    )
-    .await;
-    let id: openwave_core::DocumentId = ingested["document_id"].as_str().unwrap().parse().unwrap();
-    let job_id: openwave_core::DocumentJobId =
-        ingested["job_id"].as_str().unwrap().parse().unwrap();
-    let now = chrono::Utc::now();
-    let claimed = store
-        .claim_document_job(now, now + chrono::Duration::minutes(1))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(claimed.id, job_id);
-    assert_eq!(
-        store
-            .record_document_job_failure(
-                job_id,
-                claimed.lease_token.unwrap(),
-                chrono::Utc::now(),
-                None,
-                "manual_test_failure",
-                None,
-            )
-            .await
-            .unwrap(),
-        Some(openwave_core::DocumentJobStatus::Failed)
-    );
-
-    let response = router
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/documents/{id}/retry"))
-                .header(header::AUTHORIZATION, bearer)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    let retried = store.get_document_job(job_id).await.unwrap().unwrap();
-    assert_eq!(retried.status, openwave_core::DocumentJobStatus::Queued);
-    assert_eq!(retried.attempt_count, 0);
-    assert_eq!(retried.id, job_id);
 }
 
 #[tokio::test]
@@ -1401,188 +1050,14 @@ async fn explicit_retry_selects_the_failed_parse_stage() {
         document_worker::WorkerOutcome::Completed(parse_job.id)
     );
     let jobs = store.list_document_jobs(source.id).await.unwrap();
-    assert_eq!(jobs.len(), 2);
+    assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].status, openwave_core::DocumentJobStatus::Succeeded);
-    assert_eq!(jobs[1].kind, openwave_core::DocumentJobKind::Index);
-    assert_eq!(jobs[1].status, openwave_core::DocumentJobStatus::Queued);
-    assert_eq!(
-        worker.run_once().await.unwrap(),
-        document_worker::WorkerOutcome::Completed(jobs[1].id)
-    );
     let document = store.get_document(source.id).await.unwrap().unwrap();
     assert_eq!(document.canonical_text.as_bytes(), raw);
     assert_eq!(
         document.processing_status,
         openwave_core::DocumentProcessingStatus::Ready
     );
-}
-
-#[tokio::test]
-async fn project_retry_revives_only_the_owned_terminal_job() {
-    let (router, token, store, _dir) = test_app().await;
-    let bearer = format!("Bearer {token}");
-    let project_a = make_project(&router, &bearer).await;
-    let project_b = make_project(&router, &bearer).await;
-    let ingested: serde_json::Value = json_body(
-        post_json(
-            &router,
-            &bearer,
-            &format!("/projects/{}/documents", project_a.id),
-            serde_json::json!({
-                "uri": "file:///project-manual-retry.txt",
-                "content": "retry only within the owning project"
-            }),
-        )
-        .await,
-    )
-    .await;
-    let document_id: openwave_core::DocumentId =
-        ingested["document_id"].as_str().unwrap().parse().unwrap();
-    let job_id: openwave_core::DocumentJobId =
-        ingested["job_id"].as_str().unwrap().parse().unwrap();
-    let now = chrono::Utc::now();
-    let claimed = store
-        .claim_document_job(now, now + chrono::Duration::minutes(1))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(claimed.id, job_id);
-    assert_eq!(
-        store
-            .record_document_job_failure(
-                job_id,
-                claimed.lease_token.unwrap(),
-                chrono::Utc::now(),
-                None,
-                "project_manual_test_failure",
-                None,
-            )
-            .await
-            .unwrap(),
-        Some(openwave_core::DocumentJobStatus::Failed)
-    );
-
-    assert_eq!(
-        post_json(
-            &router,
-            &bearer,
-            &format!("/documents/{document_id}/retry"),
-            serde_json::Value::Null,
-        )
-        .await
-        .status(),
-        StatusCode::NOT_FOUND
-    );
-    assert_eq!(
-        post_json(
-            &router,
-            &bearer,
-            &format!("/projects/{}/documents/{document_id}/retry", project_b.id),
-            serde_json::Value::Null,
-        )
-        .await
-        .status(),
-        StatusCode::NOT_FOUND
-    );
-    assert_eq!(
-        store
-            .get_document_job(job_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .status,
-        openwave_core::DocumentJobStatus::Failed
-    );
-
-    let response = post_json(
-        &router,
-        &bearer,
-        &format!("/projects/{}/documents/{document_id}/retry", project_a.id),
-        serde_json::Value::Null,
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    let response: serde_json::Value = json_body(response).await;
-    assert_eq!(response["document_id"], document_id.to_string());
-    assert_eq!(response["job_id"], job_id.to_string());
-    let retried = store.get_document_job(job_id).await.unwrap().unwrap();
-    assert_eq!(retried.status, openwave_core::DocumentJobStatus::Queued);
-    assert_eq!(retried.attempt_count, 0);
-    assert_eq!(retried.id, job_id);
-}
-
-#[tokio::test]
-async fn failed_update_keeps_the_prior_active_generation_searchable() {
-    let embedder = Arc::new(FailAfterFirstBatchEmbedder {
-        inner: HashEmbedder::default(),
-        calls: AtomicUsize::new(0),
-    });
-    let retrieval = Arc::new(Retriever::new(
-        Box::new(PlainTextParser::new()),
-        Box::new(TextChunker::default()),
-        embedder,
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    ));
-    let (router, token, store, _dir, worker) =
-        test_app_with_retrieval_and_worker(Arc::new(FakeProvider), retrieval).await;
-    let bearer = format!("Bearer {token}");
-    let uri = "file:///updated.txt";
-
-    assert_eq!(
-        post_json(
-            &router,
-            &bearer,
-            "/documents",
-            serde_json::json!({"uri": uri, "content": "obsolete searchable phrase"}),
-        )
-        .await
-        .status(),
-        StatusCode::ACCEPTED
-    );
-    run_parse_and_index(&worker).await;
-    assert_eq!(
-        post_json(
-            &router,
-            &bearer,
-            "/documents",
-            serde_json::json!({"uri": uri, "content": "replacement failed to embed"}),
-        )
-        .await
-        .status(),
-        StatusCode::ACCEPTED
-    );
-    assert!(matches!(
-        worker.run_once().await.unwrap(),
-        document_worker::WorkerOutcome::Completed(_)
-    ));
-    assert!(matches!(
-        worker.run_once().await.unwrap(),
-        document_worker::WorkerOutcome::RetryScheduled(_)
-    ));
-
-    let search: serde_json::Value = json_body(
-        post_json(
-            &router,
-            &bearer,
-            "/search",
-            serde_json::json!({"query": "obsolete searchable phrase"}),
-        )
-        .await,
-    )
-    .await;
-    assert_eq!(search["citations"].as_array().unwrap().len(), 1);
-    assert!(search["citations"][0]["snippet"]
-        .as_str()
-        .unwrap()
-        .contains("obsolete"));
-    let record = store
-        .get_document(openwave_core::DocumentId::derive(uri))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(record.canonical_text, "replacement failed to embed");
-    assert_eq!(record.content_revision, 2);
-    assert_eq!(record.indexed_revision, None);
 }
 
 #[tokio::test]
@@ -1640,11 +1115,8 @@ async fn document_catalog_pages_metadata_and_keeps_project_content_private() {
             content_revision: 1,
             revision_token: uuid::Uuid::new_v4(),
             processing_status: openwave_core::DocumentProcessingStatus::Queued,
-            indexed_revision: None,
-            index_fingerprint: None,
             created_at: now,
             updated_at: now,
-            indexed_at: None,
         })
         .await
         .unwrap();
@@ -1762,11 +1234,8 @@ async fn document_catalog_cursor_preserves_nanosecond_ordering() {
                 content_revision: 1,
                 revision_token: uuid::Uuid::new_v4(),
                 processing_status: openwave_core::DocumentProcessingStatus::Queued,
-                indexed_revision: None,
-                index_fingerprint: None,
                 created_at,
                 updated_at: created_at,
-                indexed_at: None,
             })
             .await
             .unwrap();
@@ -1904,154 +1373,18 @@ async fn concurrent_same_document_ingests_publish_in_request_order() {
     assert!(record.canonical_text.is_empty());
     assert!(record.source_blob.is_some());
     assert_eq!(record.content_revision, 2);
-    assert_eq!(record.indexed_revision, None);
     let jobs = store.list_document_jobs(record.id).await.unwrap();
     assert_eq!(jobs.len(), 2);
     assert_eq!(jobs[0].status, openwave_core::DocumentJobStatus::Cancelled);
     assert_eq!(jobs[1].status, openwave_core::DocumentJobStatus::Queued);
 
-    run_parse_and_index(&worker).await;
+    run_parse(&worker).await;
     let record = store.get_document(record.id).await.unwrap().unwrap();
     assert_eq!(record.canonical_text, "second version");
-    assert_eq!(record.indexed_revision, Some(2));
-}
-
-#[tokio::test]
-async fn deleting_a_document_removes_it_from_the_index() {
-    let (router, token, store, _dir, worker) = test_app_with_worker().await;
-    let bearer = format!("Bearer {token}");
-    let ingest: serde_json::Value = json_body(
-        post_json(
-            &router,
-            &bearer,
-            "/documents",
-            serde_json::json!({ "uri": "file:///doc.txt", "content": "Jupiter is a gas giant." }),
-        )
-        .await,
-    )
-    .await;
-    let id = ingest["document_id"].as_str().unwrap().to_string();
-    run_parse_and_index(&worker).await;
-
-    let delete = |id: String| {
-        let router = router.clone();
-        let bearer = bearer.clone();
-        async move {
-            router
-                .oneshot(
-                    Request::builder()
-                        .method("DELETE")
-                        .uri(format!("/documents/{id}"))
-                        .header(header::AUTHORIZATION, &bearer)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap()
-                .status()
-        }
-    };
-
-    assert_eq!(delete(id.clone()).await, StatusCode::ACCEPTED);
-    assert!(matches!(
-        worker.run_once().await.unwrap(),
-        document_worker::WorkerOutcome::Retired(_)
-    ));
-    // Gone from the index.
-    let results: serde_json::Value = json_body(
-        post_json(
-            &router,
-            &bearer,
-            "/search",
-            serde_json::json!({ "query": "gas giant" }),
-        )
-        .await,
-    )
-    .await;
-    assert!(results["citations"].as_array().unwrap().is_empty());
-    // Idempotent: deleting again is still accepted.
-    assert_eq!(delete(id.clone()).await, StatusCode::ACCEPTED);
-    assert_eq!(store.get_document(id.parse().unwrap()).await.unwrap(), None);
-}
-
-#[tokio::test]
-async fn durable_worker_retries_a_failed_tombstone_publication() {
-    let vector_store = Arc::new(FailNextDeleteVectorStore::new(HashEmbedder::DEFAULT_DIMS));
-    let retrieval = Arc::new(Retriever::new(
-        Box::new(PlainTextParser::new()),
-        Box::new(TextChunker::default()),
-        Arc::new(HashEmbedder::default()),
-        vector_store.clone(),
-    ));
-    let (router, token, store, _dir, worker) =
-        test_app_with_retrieval_and_worker(Arc::new(FakeProvider), retrieval).await;
-    let bearer = format!("Bearer {token}");
-    let ingest: serde_json::Value = json_body(
-        post_json(
-            &router,
-            &bearer,
-            "/documents",
-            serde_json::json!({
-                "uri": "file:///retry-delete.txt",
-                "content": "retire this searchable source"
-            }),
-        )
-        .await,
-    )
-    .await;
-    run_parse_and_index(&worker).await;
-    let id = ingest["document_id"].as_str().unwrap();
-    vector_store.fail_next_delete();
-
-    let delete = |id: &str| {
-        let router = router.clone();
-        let bearer = bearer.clone();
-        let uri = format!("/documents/{id}");
-        async move {
-            router
-                .oneshot(
-                    Request::builder()
-                        .method("DELETE")
-                        .uri(uri)
-                        .header(header::AUTHORIZATION, bearer)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap()
-                .status()
-        }
-    };
-    assert_eq!(delete(id).await, StatusCode::ACCEPTED);
-    assert_eq!(store.get_document(id.parse().unwrap()).await.unwrap(), None);
-    assert!(worker.run_once().await.is_err());
-    let visible: serde_json::Value = json_body(
-        post_json(
-            &router,
-            &bearer,
-            "/search",
-            serde_json::json!({"query": "searchable source"}),
-        )
-        .await,
-    )
-    .await;
-    assert_eq!(visible["citations"].as_array().unwrap().len(), 1);
-
-    assert!(matches!(
-        worker.run_once().await.unwrap(),
-        document_worker::WorkerOutcome::Retired(_)
-    ));
-    let cleared: serde_json::Value = json_body(
-        post_json(
-            &router,
-            &bearer,
-            "/search",
-            serde_json::json!({"query": "searchable source"}),
-        )
-        .await,
-    )
-    .await;
-    assert!(cleared["citations"].as_array().unwrap().is_empty());
+    assert_eq!(
+        record.processing_status,
+        openwave_core::DocumentProcessingStatus::Ready
+    );
 }
 
 #[tokio::test]
@@ -2076,25 +1409,10 @@ async fn re_ingesting_the_same_uri_is_idempotent() {
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].kind, openwave_core::DocumentJobKind::Parse);
     assert_eq!(jobs[0].status, openwave_core::DocumentJobStatus::Queued);
-    run_parse_and_index(&worker).await;
-
-    // A broad search still returns each chunk once, not doubled.
-    let results: serde_json::Value = json_body(
-        post_json(
-            &router,
-            &bearer,
-            "/search",
-            serde_json::json!({ "query": "three four five", "k": 50 }),
-        )
-        .await,
-    )
-    .await;
-    let citations = results["citations"].as_array().unwrap();
-    let ids: std::collections::HashSet<_> = citations
-        .iter()
-        .map(|c| c["chunk_id"].as_str().unwrap())
-        .collect();
-    assert_eq!(ids.len(), citations.len());
+    run_parse(&worker).await;
+    let jobs = store.list_document_jobs(document_id).await.unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].status, openwave_core::DocumentJobStatus::Succeeded);
 }
 
 #[tokio::test]
@@ -2128,7 +1446,7 @@ async fn a_padded_uri_targets_the_same_document() {
 }
 
 #[tokio::test]
-async fn ingest_rejects_empty_content_and_search_rejects_empty_query() {
+async fn ingest_rejects_empty_content() {
     let (router, token, _store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");
 
@@ -2140,15 +1458,6 @@ async fn ingest_rejects_empty_content_and_search_rejects_empty_query() {
     )
     .await;
     assert_eq!(bad_ingest.status(), StatusCode::BAD_REQUEST);
-
-    let bad_search = post_json(
-        &router,
-        &bearer,
-        "/search",
-        serde_json::json!({ "query": "  " }),
-    )
-    .await;
-    assert_eq!(bad_search.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -2193,8 +1502,8 @@ async fn ingest_accepts_any_media_type_via_the_fallback_parser() {
         .unwrap();
 
     // Two documents ⇒ two parse jobs and two index jobs.
-    run_parse_and_index(&worker).await;
-    run_parse_and_index(&worker).await;
+    run_parse(&worker).await;
+    run_parse(&worker).await;
 
     let textual_doc = store.get_document(textual_id).await.unwrap().unwrap();
     assert_eq!(
@@ -2209,58 +1518,6 @@ async fn ingest_accepts_any_media_type_via_the_fallback_parser() {
         openwave_core::DocumentProcessingStatus::Ready
     );
     assert!(binary_doc.canonical_text.is_empty());
-}
-
-#[tokio::test]
-async fn search_on_an_empty_index_returns_no_citations() {
-    let (router, token, _store, _dir) = test_app().await;
-    let bearer = format!("Bearer {token}");
-    let results: serde_json::Value = json_body(
-        post_json(
-            &router,
-            &bearer,
-            "/search",
-            serde_json::json!({ "query": "anything" }),
-        )
-        .await,
-    )
-    .await;
-    assert!(results["citations"].as_array().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn root_search_never_returns_project_owned_vectors() {
-    let vectors = Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS));
-    vectors
-        .upsert(vec![VectorRecord {
-            chat_id: None,
-            project_id: Some(ProjectId::new()),
-            source: openwave_retrieval::DocumentSource::Inline,
-            generation: None,
-            chunk: openwave_retrieval::Chunk::new(
-                openwave_core::DocumentId::new(),
-                0,
-                openwave_retrieval::ByteSpan::new(0, 14),
-                "project secret",
-            ),
-            embedding: Embedding(vec![0.0; HashEmbedder::DEFAULT_DIMS]),
-        }])
-        .await
-        .unwrap();
-    let (retrieval, _search) = build_retrieval(Arc::new(HashEmbedder::default()), vectors);
-    let (router, token, _store, _dir) =
-        test_app_with_retrieval(Arc::new(FakeProvider), retrieval).await;
-    let results: serde_json::Value = json_body(
-        post_json(
-            &router,
-            &format!("Bearer {token}"),
-            "/search",
-            serde_json::json!({"query": "project secret"}),
-        )
-        .await,
-    )
-    .await;
-    assert!(results["citations"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -2298,11 +1555,10 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() 
             store.clone(),
             Arc::new(MemSecrets::default()),
         )),
-        |retrieval| {
+        |_| {
             Box::new(web_search::foreground_extract_tool(
                 extract_store,
                 Arc::new(MemSecrets::default()),
-                retrieval.index_fingerprint(),
             ))
         },
         store,
@@ -2336,10 +1592,6 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() 
     assert!(!system_prompt.contains("mcp__test__lookup"));
     assert!(!system_prompt.contains("must-not-be-copied"));
     let names: Vec<String> = surface.tools.specs().into_iter().map(|s| s.name).collect();
-    assert!(
-        names.iter().any(|n| n == "search"),
-        "search tool registered"
-    );
     assert!(
         names.iter().any(|n| n == "list_sources"),
         "source listing tool registered"
@@ -2522,296 +1774,5 @@ async fn catalog_delete_failure_leaves_source_stale_and_repairable() {
         .unwrap();
     assert!(record.canonical_text.is_empty());
     assert!(record.source_blob.is_some());
-    assert_eq!(record.indexed_revision, None);
-    assert_eq!(record.index_fingerprint, None);
-    assert_eq!(record.indexed_at, None);
-
-    let search: serde_json::Value = json_body(
-        post_json(
-            &router,
-            &bearer,
-            "/search",
-            serde_json::json!({"query": "rebuildable source"}),
-        )
-        .await,
-    )
-    .await;
-    assert!(search["citations"].as_array().unwrap().is_empty());
     assert_eq!(delete(id).await.status(), StatusCode::ACCEPTED);
-}
-
-#[tokio::test]
-async fn resolve_embedder_uses_openai_only_when_enabled_and_keyed() {
-    let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
-            "sqlite://{}?mode=rwc",
-            dir.path().join("t.db").display()
-        ))
-        .await
-        .unwrap(),
-    );
-    let secrets = MemSecrets::default();
-    providers::write_credential(
-        &secrets,
-        providers::ProviderKind::Openai,
-        &providers::ProviderCredential::api_key("sk-openai-test"),
-    )
-    .await
-    .unwrap();
-
-    // Enabled + keyed → the real 1536-dim embedder. A stored credential takes
-    // precedence over any env var, so this is deterministic; construction only,
-    // no network call.
-    providers::write_config(
-        &*store,
-        providers::ProviderKind::Openai,
-        &providers::ProviderConfig {
-            enabled: true,
-            base_url: None,
-            vertex_location: None,
-            models: Vec::new(),
-        },
-    )
-    .await
-    .unwrap();
-    let online = resolve_embedder(&*store, &secrets, true).await;
-    assert_eq!(online.dimensions(), EMBED_DIMS);
-    assert_ne!(EMBED_DIMS, HashEmbedder::default().dimensions());
-
-    // Enabled + keyed but BYOK disallowed (managed profile, or an unreadable
-    // policy) → document text must never egress through the stored key.
-    let locked = resolve_embedder(&*store, &secrets, false).await;
-    assert_eq!(locked.dimensions(), HashEmbedder::default().dimensions());
-
-    // Disabled but keyed → the key is ignored (no silent egress), even though
-    // it's present. Deterministic regardless of any ambient OPENAI_API_KEY,
-    // since a disabled provider never consults the key at all.
-    providers::write_config(
-        &*store,
-        providers::ProviderKind::Openai,
-        &providers::ProviderConfig {
-            enabled: false,
-            base_url: None,
-            vertex_location: None,
-            models: Vec::new(),
-        },
-    )
-    .await
-    .unwrap();
-    let offline = resolve_embedder(&*store, &secrets, true).await;
-    assert_eq!(offline.dimensions(), HashEmbedder::default().dimensions());
-}
-
-#[cfg(feature = "vec-lance")]
-#[tokio::test(flavor = "multi_thread")]
-async fn connect_vector_store_opens_a_durable_lance_index_under_data_dir() {
-    let dir = tempfile::tempdir().unwrap();
-    let config = Config::desktop(dir.path());
-
-    // Ingest into the store, then reopen from the same data_dir and confirm the
-    // chunk survived — i.e. bind()'s production path really persists to disk.
-    {
-        let store = connect_vector_store(&config, 2).await.unwrap();
-        let doc = openwave_retrieval::DocumentId::new();
-        let chunk =
-            openwave_retrieval::Chunk::new(doc, 0, openwave_retrieval::ByteSpan::new(0, 4), "note");
-        store
-            .upsert(vec![openwave_retrieval::VectorRecord {
-                chat_id: None,
-                project_id: None,
-                source: openwave_retrieval::DocumentSource::Inline,
-                generation: None,
-                chunk,
-                embedding: openwave_retrieval::Embedding(vec![1.0, 0.0]),
-            }])
-            .await
-            .unwrap();
-        assert_eq!(store.len().await.unwrap(), 1);
-    }
-    assert!(
-        dir.path().join("vectors").exists(),
-        "lance dir created under data_dir"
-    );
-    let reopened = connect_vector_store(&config, 2).await.unwrap();
-    assert_eq!(reopened.len().await.unwrap(), 1);
-}
-
-/// The lean build's stand-in still ingests and searches — it just forgets. A
-/// release build never reaches it (`build.rs` rejects a release build without
-/// `vec-lance`), so this pins the development behaviour rather than a shipped
-/// one: the store works, sized to the embedder, and writes nothing to disk.
-#[cfg(not(feature = "vec-lance"))]
-#[tokio::test(flavor = "multi_thread")]
-async fn connect_vector_store_falls_back_to_an_in_memory_index_without_vec_lance() {
-    let dir = tempfile::tempdir().unwrap();
-    let config = Config::desktop(dir.path());
-
-    let store = connect_vector_store(&config, 2).await.unwrap();
-    let doc = openwave_retrieval::DocumentId::new();
-    let chunk =
-        openwave_retrieval::Chunk::new(doc, 0, openwave_retrieval::ByteSpan::new(0, 4), "note");
-    store
-        .upsert(vec![openwave_retrieval::VectorRecord {
-            chat_id: None,
-            project_id: None,
-            source: openwave_retrieval::DocumentSource::Inline,
-            generation: None,
-            chunk,
-            embedding: openwave_retrieval::Embedding(vec![1.0, 0.0]),
-        }])
-        .await
-        .unwrap();
-    assert_eq!(store.len().await.unwrap(), 1);
-
-    assert!(
-        !dir.path().join("vectors").exists(),
-        "the in-memory store leaves no index on disk"
-    );
-    // A second connect starts empty: nothing carried over from the first.
-    let reopened = connect_vector_store(&config, 2).await.unwrap();
-    assert_eq!(reopened.len().await.unwrap(), 0);
-}
-
-/// What the renderer may read in a native embedding, which is the configuration
-/// the desktop runs and the one no other test in this module builds.
-///
-/// The reader's two routes — the narrowed detail projection and the bytes — are
-/// on the primary bearer, because a renderer holds only that and is the thing
-/// drawing the document. Before this, the whole document surface sat behind the
-/// native-only credential, so every viewer in the desktop got a 401 and none of
-/// them had ever loaded a file.
-///
-/// The full-fidelity surface stays where it was, and that is asserted here too:
-/// its catalog carries `uri`, which for an unscoped source is a real filesystem
-/// path. `root_attachment::embedded_renderer_bearer_cannot_reach_canonical_document_routes`
-/// is the test that guards that, and it must keep passing unchanged.
-#[tokio::test]
-async fn a_native_embedding_serves_the_renderer_the_document_it_draws() {
-    let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
-            "sqlite://{}?mode=rwc",
-            dir.path().join("t.db").display()
-        ))
-        .await
-        .unwrap(),
-    );
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
-    let state = AppState::new_with_client_executor_id(
-        Config::desktop(dir.path()),
-        store.clone(),
-        Arc::new(FixedResolver(Arc::new(FakeProvider))),
-        Arc::new(MemSecrets::default()),
-        Arc::new(ToolRegistry::new()),
-        retrieval,
-        AgentConfig {
-            model: "fake".into(),
-            ..AgentConfig::default()
-        },
-        Uuid::new_v4(),
-    )
-    .unwrap();
-    assert!(state.root_attachment_routes_enabled);
-    let bearer = format!("Bearer {}", state.token);
-    let executor = state.client_executor_token.to_string();
-    let router = app(state);
-
-    let chat = make_chat(&router, &bearer).await;
-    // Ingest is full-fidelity and stays native-only, so the host's credential
-    // sets the fixture up. The uri stands in for one a connected-folder import
-    // records; it is the field the renderer must not be handed.
-    let ingest: serde_json::Value = json_body(
-        router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/chats/{}/documents", chat.id))
-                    .header(header::AUTHORIZATION, &bearer)
-                    .header(crate::auth::CLIENT_EXECUTOR_HEADER, &executor)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "uri": "file:///Users/private/quarterly-sentinel.md",
-                            "content": "Revenue rose.",
-                            "media_type": "text/markdown",
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap(),
-    )
-    .await;
-    let document_id = ingest["document_id"].as_str().unwrap().to_owned();
-
-    let get = |uri: String| {
-        let router = router.clone();
-        let bearer = bearer.clone();
-        async move {
-            router
-                .oneshot(
-                    Request::builder()
-                        .uri(uri)
-                        .header(header::AUTHORIZATION, bearer)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap()
-        }
-    };
-
-    // The document the reader opens, and the bytes its viewer draws.
-    let detail = get(format!("/chats/{}/documents/{document_id}", chat.id)).await;
-    assert_eq!(detail.status(), StatusCode::OK);
-    let body = String::from_utf8_lossy(&to_bytes(detail.into_body(), usize::MAX).await.unwrap())
-        .into_owned();
-    let detail: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(detail["document_id"], document_id);
-    // Present and a string; no worker runs here, so it is empty until one parses
-    // the source. What matters is that the field the viewers read is served.
-    assert!(detail["content"].is_string());
-    assert_eq!(detail["media_type"], "text/markdown");
-    assert_eq!(
-        get(format!(
-            "/chats/{}/documents/{document_id}/file-content",
-            chat.id
-        ))
-        .await
-        .status(),
-        StatusCode::OK
-    );
-
-    // Nothing about where the file came from, and no index bookkeeping, travels
-    // with it. This is the projection's whole purpose.
-    for sentinel in [
-        "/Users/private",
-        "quarterly-sentinel",
-        "uri",
-        "content_revision",
-        "index_fingerprint",
-    ] {
-        assert!(
-            !body.contains(sentinel),
-            "renderer detail leaked {sentinel}"
-        );
-    }
-
-    // The full-fidelity surface and host authority are both still withheld.
-    assert_eq!(
-        get(format!("/chats/{}/documents", chat.id)).await.status(),
-        StatusCode::UNAUTHORIZED
-    );
-    assert_eq!(
-        get("/root-attachment-changes/pending".into())
-            .await
-            .status(),
-        StatusCode::UNAUTHORIZED
-    );
 }

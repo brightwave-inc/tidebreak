@@ -83,12 +83,8 @@ use openwave_core::{
     Config, CreateDeliverable, KeychainSecretProvider, ListDir, Profile, ReadFile, Result,
     SecretProvider, Store, Tool, ToolRegistry, WriteFile,
 };
-#[cfg(feature = "vec-lance")]
-use openwave_retrieval::LanceVectorStore;
-#[cfg(test)]
-use openwave_retrieval::PlainTextParser;
 use openwave_retrieval::{
-    Embedder, HashEmbedder, OpenAiEmbedder, Retriever, SearchTool, TextChunker, VectorStore,
+    Embedder, HashEmbedder, InMemoryVectorStore, Retriever, TextChunker, VectorStore,
 };
 
 use resolver::KeyedResolver;
@@ -130,10 +126,6 @@ pub fn app(state: AppState) -> Router {
             post(routes::retry_chat_document),
         )
         .route(
-            "/chats/{chat_id}/search",
-            post(routes::search_chat_documents),
-        )
-        .route(
             "/projects/{project_id}/documents",
             post(routes::ingest_project_document).get(routes::list_project_documents),
         )
@@ -155,10 +147,6 @@ pub fn app(state: AppState) -> Router {
             post(routes::retry_project_document),
         )
         .route(
-            "/projects/{project_id}/search",
-            post(routes::search_project_documents),
-        )
-        .route(
             "/documents",
             post(routes::ingest_document).get(routes::list_documents),
         )
@@ -175,7 +163,6 @@ pub fn app(state: AppState) -> Router {
             get(routes::get_document_file_content),
         )
         .route("/documents/{id}/retry", post(routes::retry_document))
-        .route("/search", post(routes::search_documents))
         // Image attachments sit on the same trust boundary as raw document
         // ingest — both take bytes off the user's disk for one conversation —
         // so they follow it into whichever router that boundary lands on.
@@ -694,8 +681,10 @@ async fn bind_inner(
         gateway.clone(),
         os_policy.clone(),
     ));
-    let embedder = resolve_embedder(&*store, &*secrets, byok_boot_allowed).await;
-    let vector_store = connect_vector_store(&config, embedder.dimensions()).await?;
+    // The parsing retriever still accepts these until the follow-up removes them.
+    let embedder: Arc<dyn Embedder> = Arc::new(HashEmbedder::default());
+    let vector_store: Arc<dyn VectorStore> =
+        Arc::new(InMemoryVectorStore::new(embedder.dimensions()));
     let code_execution = Arc::new(code_execution::ConfiguredCodeExecutionProvider::new(
         store.clone(),
         secrets.clone(),
@@ -710,11 +699,10 @@ async fn bind_inner(
         vector_store,
         code_execution,
         foreground_web_search,
-        |retrieval| {
+        |_| {
             Box::new(web_search::foreground_extract_tool(
                 extract_store,
                 extract_secrets,
-                retrieval.index_fingerprint(),
             ))
         },
         store.clone(),
@@ -884,18 +872,14 @@ fn agent_deps(
     web_extract: impl FnOnce(&Retriever) -> Box<dyn Tool>,
     source_store: Arc<dyn Store>,
 ) -> (Arc<Retriever>, ToolRegistry, AgentConfig) {
-    let (retrieval, search) = build_retrieval(embedder, store);
+    let (retrieval, _) = build_retrieval(embedder, store);
     let web_extract = web_extract(&retrieval);
-    // The document store lets the search card name matched documents (title,
-    // media type) instead of listing anonymous passages.
-    let search = Box::new(search.with_source_catalog(source_store.clone()));
     let mut tools = ToolRegistry::new()
         .with(Box::new(ReadFile))
         .with(Box::new(ListDir))
         .with(Box::new(WriteFile))
         .with(Box::new(CreateDeliverable::new(source_store.clone())))
         .with(Box::new(ExecTool::new(code_execution)))
-        .with(search)
         .with(Box::new(source_tools::ListSourcesTool::new(
             source_store.clone(),
         )))
@@ -944,111 +928,17 @@ fn agent_deps(
     (retrieval, tools, agent_config)
 }
 
-/// The embeddings model used when an OpenAI credential is configured. Its native
-/// output width is [`EMBED_DIMS`]; kept fixed here (a configurable embeddings model
-/// is a later slice) so the declared dimensionality always matches the model.
-const EMBED_MODEL: &str = "text-embedding-3-small";
-/// Native output dimensionality of [`EMBED_MODEL`].
-const EMBED_DIMS: usize = 1536;
-
-/// Choose the embedder for this launch.
-///
-/// Use real semantic embeddings via [`OpenAiEmbedder`] when the OpenAI provider is
-/// both **enabled** and has a key configured (stored credential or `OPENAI_API_KEY`)
-/// — documents are then embedded through OpenAI's API, consistent with the
-/// bring-your-own-key egress model. Gating on `enabled` (the same flag that gates
-/// chat routing) means a user who disabled OpenAI doesn't silently get document
-/// text egressed for embeddings. Otherwise fall back to the offline, lexical
-/// [`HashEmbedder`], so search works with no credentials (just less well).
-///
-/// Chosen once at startup: the vector index is dimension-bound to the embedder, so
-/// enabling OpenAI (or adding a key) takes effect on restart — where a change in
-/// embedding width rebuilds the persistent index (see `connect_vector_store`).
-///
-/// `byok_allowed` is false on a managed profile (or when its policy could not
-/// be read — fail closed): document text then never egresses through a BYOK
-/// key, regardless of the stored OpenAI row or an ambient `OPENAI_API_KEY`.
-///
-/// Because the embedder is boot-scoped (the vector index is dimension-bound
-/// to it), a profile provisioned managed at runtime keeps a live BYOK
-/// embedder until the next app start. The desktop deep-link pairing flow
-/// therefore prompts for a restart when a pairing newly provisions the
-/// profile (keyed off `PairingOutcome::newly_provisioned` — #898); either
-/// way this gate closes at the next boot.
-async fn resolve_embedder(
-    store: &dyn Store,
-    secrets: &dyn SecretProvider,
-    byok_allowed: bool,
-) -> Arc<dyn Embedder> {
-    let enabled = byok_allowed
-        && providers::read_config(store, providers::ProviderKind::Openai)
-            .await
-            .map(|config| config.enabled)
-            .unwrap_or(false);
-    let key = if enabled {
-        providers::resolve_api_key(secrets, providers::ProviderKind::Openai).await
-    } else {
-        None
-    };
-    match key {
-        Some(key) => Arc::new(OpenAiEmbedder::new(key, EMBED_MODEL, EMBED_DIMS)),
-        None => Arc::new(HashEmbedder::default()),
-    }
-}
-
-/// Build the retrieval pipeline and the `search` tool over a shared embedder and
-/// vector store.
-///
-/// The [`Retriever`] (used to ingest and to serve `POST /search`) and the returned
-/// [`SearchTool`] (registered for the agent) hold the **same** embedder and store,
-/// so a document ingested through the API is immediately visible to the agent's
-/// search. The caller passes the store so production can persist to LanceDB while
-/// tests use an in-memory one; either way it must be sized to `embedder.dimensions()`.
 fn build_retrieval(
     embedder: Arc<dyn Embedder>,
     store: Arc<dyn VectorStore>,
-) -> (Arc<Retriever>, Box<SearchTool>) {
+) -> (Arc<Retriever>, ()) {
     let retrieval = Arc::new(Retriever::new(
         Box::new(openwave_retrieval::document_parser_registry()),
         Box::new(TextChunker::default()),
-        embedder.clone(),
-        store.clone(),
+        embedder,
+        store,
     ));
-    let search = Box::new(SearchTool::new(embedder, store));
-    (retrieval, search)
-}
-
-/// Open the persistent vector store for this launch: a LanceDB dataset under
-/// `data_dir/vectors`, kept separate from the SQLite operational database (the
-/// index is derived, rebuildable data with a different lifecycle). Sized to the
-/// embedder's dimensionality; a change in that width rebuilds the index (see
-/// [`LanceVectorStore::connect`]).
-#[cfg(feature = "vec-lance")]
-async fn connect_vector_store(config: &Config, dims: usize) -> Result<Arc<dyn VectorStore>> {
-    let dir = config.data_dir.join("vectors");
-    let uri = dir
-        .to_str()
-        .ok_or_else(|| AgentError::config("vector store path is not valid UTF-8"))?;
-    let store = LanceVectorStore::connect(uri, dims)
-        .await
-        .map_err(|e| AgentError::config(format!("failed to open vector store: {e}")))?;
-    Ok(Arc::new(store))
-}
-
-/// Stand in for the durable index when the build left LanceDB out.
-///
-/// Ingestion and search behave the same, but nothing survives the process, so a
-/// restart starts from an empty index. This exists to keep a lean build — the
-/// default for tests and dev — usable without compiling the LanceDB tree; a
-/// release build cannot take this path, because `build.rs` rejects a release
-/// build that does not enable `vec-lance`.
-#[cfg(not(feature = "vec-lance"))]
-async fn connect_vector_store(_config: &Config, dims: usize) -> Result<Arc<dyn VectorStore>> {
-    eprintln!(
-        "openwave: built without the `vec-lance` feature; document search runs on an \
-         in-memory index that is discarded when this process exits"
-    );
-    Ok(Arc::new(openwave_retrieval::InMemoryVectorStore::new(dims)))
+    (retrieval, ())
 }
 
 /// Open the durable store the profile selects.

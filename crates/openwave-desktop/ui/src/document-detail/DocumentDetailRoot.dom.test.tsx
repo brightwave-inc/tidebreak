@@ -103,7 +103,7 @@ function detail(overrides: Partial<DocumentDetail> = {}): DocumentDetail {
     media_type: "image/png",
     title: "Floor plan.png",
     processing_status: "ready",
-    searchable: false,
+    readable: false,
     has_original_bytes: true,
     updated_at: "2026-07-24T00:00:00Z",
     content: "",
@@ -286,7 +286,7 @@ describe("DocumentDetailRoot", () => {
         media_type: "application/vnd.ms-outlook",
         title: "Mailbox.pst",
         content: "Subject: quarterly numbers",
-        searchable: true,
+        readable: true,
       }),
     );
 
@@ -307,7 +307,7 @@ describe("DocumentDetailRoot", () => {
         title: "Ownership Explained",
         has_original_bytes: false,
         content: "Ownership moves.",
-        searchable: true,
+        readable: true,
       }),
     );
 
@@ -664,7 +664,7 @@ describe("DocumentDetailRoot", () => {
         media_type: "text/markdown",
         title: "Report.md",
         content: "The text of record.",
-        searchable: true,
+        readable: true,
       }),
       vi.fn(),
       "# Quarterly report\n",
@@ -718,7 +718,7 @@ describe("DocumentDetailRoot load failures", () => {
         media_type: "application/vnd.ms-outlook",
         title: "Mailbox.pst",
         content: "Recovered.",
-        searchable: true,
+        readable: true,
       }),
     );
     await userEvent.click(screen.getByRole("button", { name: "Try again" }));

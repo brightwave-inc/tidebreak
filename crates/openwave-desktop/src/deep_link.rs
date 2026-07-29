@@ -338,7 +338,7 @@ fn show_pairing_failure(app: &tauri::AppHandle, origin: &str, failure: &PairFail
 
 /// Offer the restart that completes enforcement, after the pairing that
 /// provisioned this profile. The embeddings client is boot-scoped (the
-/// vector index is dimension-bound to it — see `resolve_embedder` in
+/// vector index is dimension-bound to it — see `embedding setup` in
 /// `openwave-server`), so a BYOK embedder resolved at launch keeps serving
 /// until the next start. An idempotent re-pair never reaches here; the
 /// first pairing of a profile already OS-managed at boot does, and for it

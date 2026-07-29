@@ -91,11 +91,6 @@ async fn embedded_renderer_bearer_cannot_reach_canonical_document_routes() {
         ("GET", format!("/documents/{document_id}"), Body::empty()),
         (
             "POST",
-            "/search".to_owned(),
-            Body::from(r#"{"query":"private-content-sentinel"}"#),
-        ),
-        (
-            "POST",
             "/documents".to_owned(),
             Body::from(ingest_body.to_string()),
         ),
@@ -114,11 +109,6 @@ async fn embedded_renderer_bearer_cannot_reach_canonical_document_routes() {
             "GET",
             format!("/projects/{project_id}/documents/{document_id}"),
             Body::empty(),
-        ),
-        (
-            "POST",
-            format!("/projects/{project_id}/search"),
-            Body::from(r#"{"query":"private-content-sentinel"}"#),
         ),
     ] {
         let response = router
@@ -142,7 +132,6 @@ async fn embedded_renderer_bearer_cannot_reach_canonical_document_routes() {
             "review-sentinel",
             "private-content-sentinel",
             "content_revision",
-            "index_fingerprint",
         ] {
             assert!(
                 !body.contains(sentinel),

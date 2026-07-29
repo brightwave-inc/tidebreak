@@ -393,7 +393,7 @@ pub fn read_connected_file_tool_spec() -> ToolSpec {
 pub fn import_connected_file_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<ImportConnectedFileArgs>(
         IMPORT_CONNECTED_FILE_TOOL,
-        "Add one file below an already connected folder to this conversation as a source, so it can be searched and cited. Use this for a PDF, Office document, or any other file that read_connected_file cannot return as text. Use only an opaque root_id and a nonempty root-relative path; never use an absolute path or parent traversal. Importing the same file again recovers the same single source rather than adding a duplicate. The result is normally still processing: check list_sources for whether it became searchable.",
+        "Add one file below an already connected folder to this conversation as a source, so it can be read and cited. Use this for a PDF, Office document, or any other file that read_connected_file cannot return as text. Use only an opaque root_id and a nonempty root-relative path; never use an absolute path or parent traversal. Importing the same file again recovers the same single source rather than adding a duplicate. The result is normally still processing: check list_sources for whether it became readable.",
     )
 }
 

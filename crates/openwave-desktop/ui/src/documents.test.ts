@@ -67,7 +67,7 @@ describe("document library renderer projections", () => {
             mediaType: "text/markdown",
             sizeBytes: 1_024,
             processingStatus: "processing",
-            searchable: false,
+            readable: false,
             failure: null,
             updatedAt: "2026-07-18T12:00:00Z",
           },
@@ -107,7 +107,7 @@ describe("document library renderer projections", () => {
           mediaType: "application/pdf",
           sizeBytes: 2_048,
           processingStatus: "ready",
-          searchable: false,
+          readable: false,
           failure: null,
           updatedAt: "2026-07-18T12:00:00Z",
         },
@@ -115,9 +115,9 @@ describe("document library renderer projections", () => {
       truncated: false,
     }).documents[0];
     expect(stored?.processingStatus).toBe("ready");
-    expect(stored?.searchable).toBe(false);
+    expect(stored?.readable).toBe(false);
 
-    // Omitting the flag must not silently read as searchable.
+    // Omitting the flag must not silently read as readable.
     expect(() =>
       parseLibraryCatalog({
         documents: [
@@ -143,7 +143,7 @@ describe("document library renderer projections", () => {
       mediaType: "application/pdf",
       sizeBytes: 4_096,
       processingStatus: "failed",
-      searchable: false,
+      readable: false,
       failure: {
         message: "The local search index was unavailable. Retry preparing this source.",
         retriable: true,
@@ -199,7 +199,7 @@ describe("document library renderer projections", () => {
               mediaType: "text/markdown",
               sizeBytes: 42,
               processingStatus: "ready",
-              searchable: true,
+              readable: true,
               failure: null,
               updatedAt: "2026-07-18T12:00:00Z",
               [field]: "private",

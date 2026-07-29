@@ -2083,32 +2083,14 @@ async fn ingest_index_search_then_chat_through_the_approval_gate() {
     let document_id: openwave_core::DocumentId =
         accepted["document_id"].as_str().unwrap().parse().unwrap();
 
-    // 2. Drive the parse/index worker as the per-slice tests do.
-    run_parse_and_index(&worker).await;
+    // 2. Drive the parse worker as the per-slice tests do.
+    run_parse(&worker).await;
     let ready = store.get_document(document_id).await.unwrap().unwrap();
     assert_eq!(
         ready.processing_status,
         openwave_core::DocumentProcessingStatus::Ready
     );
     assert_eq!(ready.canonical_text, String::from_utf8_lossy(&raw));
-
-    // 3. Library search over the shared index returns a citation for the doc.
-    let search = post_json(
-        &router,
-        &bearer,
-        "/search",
-        serde_json::json!({ "query": "largest gas giant planet", "k": 1 }),
-    )
-    .await;
-    assert_eq!(search.status(), StatusCode::OK);
-    let results: serde_json::Value = json_body(search).await;
-    let citations = results["citations"].as_array().unwrap();
-    assert_eq!(citations.len(), 1);
-    assert_eq!(citations[0]["document_id"], accepted["document_id"]);
-    assert!(citations[0]["snippet"]
-        .as_str()
-        .unwrap()
-        .contains("Jupiter"));
 
     // 4a. A chat turn calls the Sensitive tool and parks on the approval gate.
     let chat = make_chat(&router, &bearer).await;

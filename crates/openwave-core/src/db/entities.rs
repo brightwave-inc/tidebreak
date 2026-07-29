@@ -37,9 +37,6 @@ pub mod document_generation {
         pub content_revision: i64,
         pub revision_token: Uuid,
         pub tombstone: bool,
-        pub retirement_pending: bool,
-        pub retirement_content_revision: Option<i64>,
-        pub retirement_revision_token: Option<Uuid>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -71,11 +68,8 @@ pub mod document {
         pub content_revision: i64,
         pub revision_token: Uuid,
         pub processing_status: String,
-        pub indexed_revision: Option<i64>,
-        pub index_fingerprint: Option<String>,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
-        pub indexed_at: Option<DateTimeUtc>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -715,7 +715,7 @@ pub enum DocumentProcessingStatus {
     Queued,
     /// A worker owns the current processing job.
     Processing,
-    /// The current revision is fully represented in the derived index.
+    /// The current revision's text of record is published and readable.
     Ready,
     /// Processing exhausted retries or hit a permanent failure.
     Failed,
@@ -736,39 +736,40 @@ impl DocumentProcessingStatus {
 
 /// What a caller can actually do with a source right now.
 ///
-/// The durable lifecycle and the searchability of the parsed result are two
+/// The durable lifecycle and whether parsing produced any text are two
 /// separate facts, and neither alone answers the question a caller has. `Ready`
 /// on its own says a pipeline finished, not that it found anything; a source
-/// that parsed to nothing is `Ready` and unsearchable forever. Collapsing both
-/// facts into one value keeps callers from reading "finished" as "usable".
+/// that parsed to nothing is `Ready` and holds no readable text forever.
+/// Collapsing both facts into one value keeps callers from reading "finished"
+/// as "usable".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum SourceReadiness {
-    /// Still being parsed or indexed. Checking again later may change this.
+    /// Still being parsed. Checking again later may change this.
     Processing,
-    /// Parsed, indexed, and matchable by a search of this conversation.
-    Searchable,
-    /// Durably stored and citable by name, but nothing in it can be searched.
+    /// Parsed to text a reader can be given.
+    Readable,
+    /// Durably stored and citable by name, but holding no text to read.
     ///
     /// A scan without OCR, or a format whose parser is not installed on this
     /// host. Waiting will not change this; reprocessing might.
-    StoredNotSearchable,
+    StoredNoText,
     /// Processing exhausted retries or hit a permanent failure.
     Failed,
 }
 
 impl SourceReadiness {
-    /// Combine the durable lifecycle with whether anything became searchable.
+    /// Combine the durable lifecycle with whether any text was extracted.
     #[must_use]
-    pub const fn of(status: DocumentProcessingStatus, searchable: bool) -> Self {
+    pub const fn of(status: DocumentProcessingStatus, readable: bool) -> Self {
         match status {
             DocumentProcessingStatus::Queued | DocumentProcessingStatus::Processing => {
                 Self::Processing
             }
             DocumentProcessingStatus::Failed => Self::Failed,
-            DocumentProcessingStatus::Ready if searchable => Self::Searchable,
-            DocumentProcessingStatus::Ready => Self::StoredNotSearchable,
+            DocumentProcessingStatus::Ready if readable => Self::Readable,
+            DocumentProcessingStatus::Ready => Self::StoredNoText,
         }
     }
 
@@ -777,8 +778,8 @@ impl SourceReadiness {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Processing => "processing",
-            Self::Searchable => "searchable",
-            Self::StoredNotSearchable => "stored_not_searchable",
+            Self::Readable => "readable",
+            Self::StoredNoText => "stored_no_text",
             Self::Failed => "failed",
         }
     }
@@ -791,8 +792,6 @@ impl SourceReadiness {
 pub enum DocumentJobKind {
     /// Parse immutable raw source bytes into canonical text and provenance.
     Parse,
-    /// Chunk and embed canonical content into the derived retrieval index.
-    Index,
 }
 
 impl DocumentJobKind {
@@ -801,7 +800,6 @@ impl DocumentJobKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Parse => "parse",
-            Self::Index => "index",
         }
     }
 }
@@ -1294,19 +1292,10 @@ pub struct DocumentRecord {
     pub revision_token: Uuid,
     /// Processing lifecycle of the current authoritative revision.
     pub processing_status: DocumentProcessingStatus,
-    /// Revision currently represented in the retrieval index, if any.
-    pub indexed_revision: Option<i64>,
-    /// Chunker/embedder fingerprint for the indexed revision.
-    ///
-    /// Parser provenance is separate because reparsing requires original source
-    /// bytes; canonical text alone can only be rechunked and re-embedded.
-    pub index_fingerprint: Option<String>,
     /// When this record was first created.
     pub created_at: DateTime<Utc>,
     /// When authoritative content or metadata last changed.
     pub updated_at: DateTime<Utc>,
-    /// When the current index watermark was recorded.
-    pub indexed_at: Option<DateTime<Utc>>,
 }
 
 impl DocumentRecord {
@@ -1319,13 +1308,13 @@ impl DocumentRecord {
         }
     }
 
-    /// Whether this revision contributed text a search can match.
+    /// Whether this revision holds text a reader can be given.
     ///
-    /// Empty canonical text means the parser ran and found nothing to index —
-    /// an image without OCR, or a format whose parser is not installed. The
-    /// bytes are still retained, so a later reprocess can change this answer.
+    /// Empty canonical text means the parser ran and found nothing — an image
+    /// without OCR, or a format whose parser is not installed. The bytes are
+    /// still retained, so a later reprocess can change this answer.
     #[must_use]
-    pub fn is_searchable(&self) -> bool {
+    pub fn is_readable(&self) -> bool {
         self.processing_status == DocumentProcessingStatus::Ready && !self.canonical_text.is_empty()
     }
 }
@@ -1335,8 +1324,7 @@ impl DocumentRecord {
 /// Expensive work happens outside the operational database transaction. Every
 /// operational-state mutation must therefore present `lease_token` and still
 /// match the job's `(document_id, content_revision, revision_token)`. This fences
-/// stale database completion; derived stores such as the vector index also need
-/// generation-aware publication before multi-worker execution is safe.
+/// stale database completion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocumentJob {
     /// Stable job identity.
@@ -1511,32 +1499,26 @@ pub struct DocumentSummaryRecord {
     pub content_revision: i64,
     /// Processing lifecycle of the current authoritative revision.
     pub processing_status: DocumentProcessingStatus,
-    /// Whether the current revision contributed text a search can match.
+    /// Whether the current revision holds text a reader can be given.
     ///
     /// Processing that finishes is not the same as processing that found
     /// something. A scanned image, or a format whose parser is not installed on
     /// this host, produces a document that is durably stored and citable by
-    /// name but that no query will ever return. Keeping this separate from
+    /// name but whose text no reader will ever see. Keeping this separate from
     /// [`DocumentProcessingStatus::Ready`] stops that outcome from being
     /// presented as a fully usable source.
-    pub searchable: bool,
-    /// Revision currently represented in the retrieval index, if any.
-    pub indexed_revision: Option<i64>,
-    /// Chunker/embedder fingerprint for the indexed revision.
-    pub index_fingerprint: Option<String>,
+    pub readable: bool,
     /// When this record was first created.
     pub created_at: DateTime<Utc>,
     /// When authoritative content or metadata last changed.
     pub updated_at: DateTime<Utc>,
-    /// When the current index watermark was recorded.
-    pub indexed_at: Option<DateTime<Utc>>,
 }
 
 impl DocumentSummaryRecord {
     /// What a caller can do with this source right now.
     #[must_use]
     pub const fn readiness(&self) -> SourceReadiness {
-        SourceReadiness::of(self.processing_status, self.searchable)
+        SourceReadiness::of(self.processing_status, self.readable)
     }
 }
 
@@ -3233,10 +3215,6 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&DocumentProcessingStatus::Processing).unwrap(),
             "\"processing\""
-        );
-        assert_eq!(
-            serde_json::to_string(&DocumentJobKind::Index).unwrap(),
-            "\"index\""
         );
         assert_eq!(
             serde_json::to_string(&DocumentJobKind::Parse).unwrap(),

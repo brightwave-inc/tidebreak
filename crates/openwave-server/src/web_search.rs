@@ -21,7 +21,6 @@ use openwave_web_search::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::document_worker::MAX_INDEX_ATTEMPTS;
 use crate::error::ServerError;
 
 /// Store key for the non-secret web-search configuration.
@@ -502,9 +501,6 @@ const MAX_EXTRACTED_PAGE_TITLE_CHARS: usize = 255;
 /// recovered later travels with it.
 struct HostExtractedPageSink {
     store: Arc<dyn Store>,
-    /// Chunker and embedder identity of the retriever this host runs, so the
-    /// page is queued for the same index every other source is queued for.
-    index_fingerprint: String,
 }
 
 /// Identity of the engine that produced a stored page's text.
@@ -554,9 +550,9 @@ impl ExtractedPageSink for HostExtractedPageSink {
             source_regions: Vec::new(),
             updated_at: fetched_at,
         };
-        let (record, _job) = self
+        let record = self
             .store
-            .upsert_document_and_enqueue_index(&source, &self.index_fingerprint, MAX_INDEX_ATTEMPTS)
+            .upsert_document(&source)
             .await
             .map_err(|_| ExtractedPageSinkError)?;
         // The contract the evidence spans rest on, checked rather than assumed:
@@ -582,7 +578,6 @@ impl ExtractedPageSink for HostExtractedPageSink {
 pub(crate) fn foreground_extract_tool(
     store: Arc<dyn Store>,
     secrets: Arc<dyn SecretProvider>,
-    index_fingerprint: String,
 ) -> WebExtractTool {
     WebExtractTool::new(
         Arc::new(HostWebSearchResolver {
@@ -593,10 +588,7 @@ pub(crate) fn foreground_extract_tool(
             store: store.clone(),
         })),
     )
-    .with_page_sink(Arc::new(HostExtractedPageSink {
-        store,
-        index_fingerprint,
-    }))
+    .with_page_sink(Arc::new(HostExtractedPageSink { store }))
 }
 
 #[cfg(test)]
@@ -915,12 +907,8 @@ mod extracted_source_tests {
     }
 
     fn extract_tool(store: Arc<dyn Store>, page: WebExtractResponse) -> WebExtractTool {
-        WebExtractTool::new(Arc::new(NoProvider), Some(Arc::new(FixedPage(page)))).with_page_sink(
-            Arc::new(HostExtractedPageSink {
-                store,
-                index_fingerprint: "chunker=test;embedder=test".into(),
-            }),
-        )
+        WebExtractTool::new(Arc::new(NoProvider), Some(Arc::new(FixedPage(page))))
+            .with_page_sink(Arc::new(HostExtractedPageSink { store }))
     }
 
     async fn extract(

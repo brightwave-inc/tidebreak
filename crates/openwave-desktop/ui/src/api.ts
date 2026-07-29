@@ -114,7 +114,7 @@ export type DocumentDetail = {
   media_type: string;
   title: string | null;
   processing_status: DocumentProcessingStatus;
-  searchable: boolean;
+  readable: boolean;
   /**
    * Whether the source kept the bytes it was made from. A source with none —
    * a fetched web page, whose markup is not retained — has no original to draw,

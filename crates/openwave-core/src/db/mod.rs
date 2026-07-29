@@ -52,17 +52,16 @@ use crate::storage::{
     ClaimAgentRunInboxOutcome, ClaimClientToolCallOutcome, ClaimDelegatedFileReadOutcome,
     ClaimSandboxToolCallOutcome, ClaimTurnRunOutcome, CompleteTurnRunOutcome,
     ConsumeAgentRunInboxAndResumeTurnOutcome, ConsumeAgentRunInboxOutcome,
-    DecideToolApprovalOutcome, DeleteChatOutcome, DeleteProjectOutcome, DocumentIndexJobReason,
-    EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, FailAgentRunOutcome,
-    FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
-    FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
-    JournaledToolApprovalOutcome, JournaledTurnOutcome, JournaledTurnSteerOutcome,
-    OperationClaimOutcome, OperationLogEntry, OperationLogWrite, ParkSandboxToolCallOutcome,
-    ParkTurnForAgentRunInboxOutcome, ParkTurnForAgentRunWaitSetOutcome,
-    ParkTurnForClientCallOutcome, RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome,
-    RequestToolApprovalOutcome, RequestTurnCancellationOutcome, ResolveSandboxToolCallOutcome,
-    ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome, Store,
-    SubmitAgentRunResultOutcome, TurnLeaseFence,
+    DecideToolApprovalOutcome, DeleteChatOutcome, DeleteProjectOutcome,
+    EnsureDocumentParseJobOutcome, FailAgentRunOutcome, FinishAgentRunCancellationOutcome,
+    FinishRootAttachmentChangeOutcome, FinishTurnCancellationOutcome,
+    HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome, JournaledToolApprovalOutcome,
+    JournaledTurnOutcome, JournaledTurnSteerOutcome, OperationClaimOutcome, OperationLogEntry,
+    OperationLogWrite, ParkSandboxToolCallOutcome, ParkTurnForAgentRunInboxOutcome,
+    ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome, RecordTurnFailureOutcome,
+    RequestAgentRunCancellationOutcome, RequestToolApprovalOutcome, RequestTurnCancellationOutcome,
+    ResolveSandboxToolCallOutcome, ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome,
+    Store, SubmitAgentRunResultOutcome, TurnLeaseFence,
 };
 
 mod ops;
@@ -95,11 +94,8 @@ struct DocumentSummaryRow {
     /// Emptiness of the canonical text, evaluated in the database so a listing
     /// still never transfers the text itself.
     has_canonical_text: bool,
-    indexed_revision: Option<i64>,
-    index_fingerprint: Option<String>,
     created_at: chrono::DateTime<Utc>,
     updated_at: chrono::DateTime<Utc>,
-    indexed_at: Option<chrono::DateTime<Utc>>,
 }
 
 impl DbStore {
@@ -257,9 +253,6 @@ impl Store for DbStore {
             content_revision: Set(document.content_revision),
             revision_token: Set(revision_token),
             tombstone: Set(false),
-            retirement_pending: Set(false),
-            retirement_content_revision: Set(None),
-            retirement_revision_token: Set(None),
         }
         .insert(&transaction)
         .await
@@ -283,11 +276,8 @@ impl Store for DbStore {
             content_revision: Set(document.content_revision),
             revision_token: Set(revision_token),
             processing_status: Set(document.processing_status.as_str().into()),
-            indexed_revision: Set(document.indexed_revision),
-            index_fingerprint: Set(document.index_fingerprint.clone()),
             created_at: Set(document.created_at),
             updated_at: Set(document.updated_at),
-            indexed_at: Set(document.indexed_at),
         }
         .insert(&transaction)
         .await
@@ -371,11 +361,8 @@ impl Store for DbStore {
                 entities::document::Column::SourceByteLen,
                 entities::document::Column::ContentRevision,
                 entities::document::Column::ProcessingStatus,
-                entities::document::Column::IndexedRevision,
-                entities::document::Column::IndexFingerprint,
                 entities::document::Column::CreatedAt,
                 entities::document::Column::UpdatedAt,
-                entities::document::Column::IndexedAt,
             ])
             .column_as(
                 sea_orm::sea_query::ExprTrait::ne(
@@ -497,105 +484,6 @@ impl Store for DbStore {
             }))
     }
 
-    async fn list_pending_document_retirements(
-        &self,
-        after: Option<DocumentId>,
-        limit: u64,
-    ) -> Result<Vec<(DocumentId, DocumentGeneration)>> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let mut query = entities::document_generation::Entity::find()
-            .select_only()
-            .column(entities::document_generation::Column::DocumentId)
-            .column(entities::document_generation::Column::RetirementContentRevision)
-            .column(entities::document_generation::Column::RetirementRevisionToken)
-            .filter(entities::document_generation::Column::RetirementPending.eq(true));
-        if let Some(after) = after {
-            query = query.filter(entities::document_generation::Column::DocumentId.gt(after.0));
-        }
-        Ok(query
-            .order_by_asc(entities::document_generation::Column::DocumentId)
-            .limit(limit)
-            .into_tuple::<(uuid::Uuid, i64, uuid::Uuid)>()
-            .all(&self.conn)
-            .await
-            .map_err(store_err)?
-            .into_iter()
-            .map(|(id, content_revision, revision_token)| {
-                (
-                    DocumentId(id),
-                    DocumentGeneration {
-                        content_revision,
-                        revision_token,
-                    },
-                )
-            })
-            .collect())
-    }
-
-    async fn complete_document_retirement(
-        &self,
-        id: DocumentId,
-        generation: DocumentGeneration,
-    ) -> Result<bool> {
-        let updated = entities::document_generation::Entity::update_many()
-            .col_expr(
-                entities::document_generation::Column::RetirementPending,
-                sea_orm::sea_query::Expr::value(false),
-            )
-            .col_expr(
-                entities::document_generation::Column::RetirementContentRevision,
-                sea_orm::sea_query::Expr::value(Option::<i64>::None),
-            )
-            .col_expr(
-                entities::document_generation::Column::RetirementRevisionToken,
-                sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
-            )
-            .filter(entities::document_generation::Column::DocumentId.eq(id.0))
-            .filter(
-                entities::document_generation::Column::RetirementContentRevision
-                    .eq(generation.content_revision),
-            )
-            .filter(
-                entities::document_generation::Column::RetirementRevisionToken
-                    .eq(generation.revision_token),
-            )
-            .filter(entities::document_generation::Column::RetirementPending.eq(true))
-            .exec(&self.conn)
-            .await
-            .map_err(store_err)?;
-        Ok(updated.rows_affected == 1)
-    }
-
-    async fn get_pending_document_retirement(
-        &self,
-        id: DocumentId,
-    ) -> Result<Option<DocumentGeneration>> {
-        let Some(generation) = entities::document_generation::Entity::find_by_id(id.0)
-            .one(&self.conn)
-            .await
-            .map_err(store_err)?
-        else {
-            return Ok(None);
-        };
-        if !generation.retirement_pending {
-            return Ok(None);
-        }
-        let (Some(content_revision), Some(revision_token)) = (
-            generation.retirement_content_revision,
-            generation.retirement_revision_token,
-        ) else {
-            return Err(AgentError::Store(format!(
-                "document {id} has an incomplete pending retirement watermark"
-            )));
-        };
-        Ok(Some(DocumentGeneration {
-            content_revision,
-            revision_token,
-        }))
-    }
-
     async fn delete_document(&self, id: DocumentId) -> Result<DocumentGeneration> {
         loop {
             let transaction = self.conn.begin().await.map_err(store_err)?;
@@ -680,137 +568,6 @@ impl Store for DbStore {
         }
     }
 
-    async fn upsert_document_and_enqueue_index(
-        &self,
-        document: &DocumentUpsert,
-        pipeline_fingerprint: &str,
-        max_attempts: i32,
-    ) -> Result<(DocumentRecord, DocumentJob)> {
-        validate_document_upsert(document)?;
-        if pipeline_fingerprint.is_empty()
-            || pipeline_fingerprint.chars().count() > DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN
-        {
-            return Err(AgentError::Store(
-                "document job pipeline fingerprint must contain 1 to 512 characters".into(),
-            ));
-        }
-        if max_attempts < 1 {
-            return Err(AgentError::Store(
-                "document job max_attempts must be at least one".into(),
-            ));
-        }
-
-        loop {
-            let transaction = self.conn.begin().await.map_err(store_err)?;
-            ops::require_document_scope_write_lock(
-                &transaction,
-                document.chat_id,
-                document.project_id,
-            )
-            .await?;
-            acquire_document_write_lock(&transaction, document.id).await?;
-            if let Some(current) = entities::document::Entity::find_by_id(document.id.0)
-                .one(&transaction)
-                .await
-                .map_err(store_err)?
-                .filter(|current| document_upsert_matches(current, document))
-            {
-                if let Some(job) = entities::document_job::Entity::find()
-                    .filter(entities::document_job::Column::DocumentId.eq(current.id))
-                    .filter(
-                        entities::document_job::Column::ContentRevision
-                            .eq(current.content_revision),
-                    )
-                    .filter(
-                        entities::document_job::Column::RevisionToken.eq(current.revision_token),
-                    )
-                    .filter(
-                        entities::document_job::Column::Kind.eq(DocumentJobKind::Index.as_str()),
-                    )
-                    .filter(
-                        entities::document_job::Column::PipelineFingerprint
-                            .eq(pipeline_fingerprint),
-                    )
-                    .one(&transaction)
-                    .await
-                    .map_err(store_err)?
-                {
-                    ensure_live_document_generation_on(&transaction, &current).await?;
-                    let current = document_from_model(current)?;
-                    let job = document_job_from_model(job)?;
-                    transaction.commit().await.map_err(store_err)?;
-                    return Ok((current, job));
-                }
-            }
-
-            let record = match try_upsert_document_on(&transaction, document).await? {
-                Some(record) => record,
-                None => {
-                    transaction.rollback().await.map_err(store_err)?;
-                    continue;
-                }
-            };
-            let workflow_now = Utc::now();
-            entities::document_job::Entity::update_many()
-                .col_expr(
-                    entities::document_job::Column::Status,
-                    sea_orm::sea_query::Expr::value(DocumentJobStatus::Cancelled.as_str()),
-                )
-                .col_expr(
-                    entities::document_job::Column::LeaseToken,
-                    sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
-                )
-                .col_expr(
-                    entities::document_job::Column::LeaseExpiresAt,
-                    sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<chrono::Utc>>::None),
-                )
-                .col_expr(
-                    entities::document_job::Column::FinishedAt,
-                    sea_orm::sea_query::Expr::value(Some(workflow_now)),
-                )
-                .col_expr(
-                    entities::document_job::Column::UpdatedAt,
-                    sea_orm::sea_query::Expr::value(workflow_now),
-                )
-                .filter(entities::document_job::Column::DocumentId.eq(record.id.0))
-                .filter(entities::document_job::Column::Status.is_in([
-                    DocumentJobStatus::Queued.as_str(),
-                    DocumentJobStatus::Running.as_str(),
-                    DocumentJobStatus::RetryWait.as_str(),
-                ]))
-                .exec(&transaction)
-                .await
-                .map_err(store_err)?;
-
-            let job = DocumentJob {
-                id: DocumentJobId::new(),
-                document_id: record.id,
-                content_revision: record.content_revision,
-                revision_token: record.revision_token,
-                kind: DocumentJobKind::Index,
-                status: DocumentJobStatus::Queued,
-                pipeline_fingerprint: pipeline_fingerprint.into(),
-                attempt_count: 0,
-                max_attempts,
-                available_at: workflow_now,
-                lease_token: None,
-                lease_expires_at: None,
-                started_at: None,
-                finished_at: None,
-                last_error_code: None,
-                last_error_detail: None,
-                created_at: workflow_now,
-                updated_at: workflow_now,
-            };
-            document_job_active_model(&job)
-                .insert(&transaction)
-                .await
-                .map_err(store_err)?;
-            transaction.commit().await.map_err(store_err)?;
-            return Ok((record, job));
-        }
-    }
-
     async fn accept_document_source_and_enqueue_parse(
         &self,
         document: &DocumentSourceUpsert,
@@ -826,25 +583,14 @@ impl Store for DbStore {
         .await
     }
 
-    async fn complete_document_parse_job_and_enqueue_index(
+    async fn complete_document_parse_job(
         &self,
         id: DocumentJobId,
         lease_token: uuid::Uuid,
         completed_at: chrono::DateTime<Utc>,
         output: &DocumentParseOutput,
-        index_fingerprint: &str,
-        index_max_attempts: i32,
-    ) -> Result<Option<(DocumentRecord, DocumentJob)>> {
-        ops::document::complete_parse_and_enqueue_index(
-            self,
-            id,
-            lease_token,
-            completed_at,
-            output,
-            index_fingerprint,
-            index_max_attempts,
-        )
-        .await
+    ) -> Result<Option<DocumentRecord>> {
+        ops::document::complete_parse(self, id, lease_token, completed_at, output).await
     }
 
     async fn get_document_job(&self, id: DocumentJobId) -> Result<Option<DocumentJob>> {
@@ -854,251 +600,6 @@ impl Store for DbStore {
             .map_err(store_err)?
             .map(document_job_from_model)
             .transpose()
-    }
-
-    async fn ensure_document_index_job(
-        &self,
-        document_id: DocumentId,
-        expected_generation: DocumentGeneration,
-        pipeline_fingerprint: &str,
-        max_attempts: i32,
-        reason: DocumentIndexJobReason,
-    ) -> Result<EnsureDocumentIndexJobOutcome> {
-        if pipeline_fingerprint.is_empty()
-            || pipeline_fingerprint.chars().count() > DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN
-        {
-            return Err(AgentError::Store(
-                "document job pipeline fingerprint must contain 1 to 512 characters".into(),
-            ));
-        }
-        if max_attempts < 1 {
-            return Err(AgentError::Store(
-                "document job max_attempts must be at least one".into(),
-            ));
-        }
-
-        loop {
-            let transaction = self.conn.begin().await.map_err(store_err)?;
-            acquire_document_write_lock(&transaction, document_id).await?;
-            let Some(document) = entities::document::Entity::find_by_id(document_id.0)
-                .one(&transaction)
-                .await
-                .map_err(store_err)?
-            else {
-                transaction.commit().await.map_err(store_err)?;
-                return Ok(EnsureDocumentIndexJobOutcome::MissingDocument);
-            };
-            ensure_live_document_generation_on(&transaction, &document).await?;
-            let current_generation = DocumentGeneration {
-                content_revision: document.content_revision,
-                revision_token: document.revision_token,
-            };
-
-            if current_generation != expected_generation {
-                if reason.advances_generation()
-                    && expected_generation
-                        .content_revision
-                        .checked_add(1)
-                        .is_some_and(|revision| revision == document.content_revision)
-                {
-                    if let Some(job) = find_exact_document_index_job_on(
-                        &transaction,
-                        document_id,
-                        current_generation,
-                        pipeline_fingerprint,
-                    )
-                    .await?
-                    {
-                        let job = document_job_from_model(job)?;
-                        transaction.commit().await.map_err(store_err)?;
-                        return Ok(if job.status == DocumentJobStatus::Failed {
-                            EnsureDocumentIndexJobOutcome::Failed(job)
-                        } else {
-                            EnsureDocumentIndexJobOutcome::Existing(job)
-                        });
-                    }
-                }
-                transaction.commit().await.map_err(store_err)?;
-                return Ok(EnsureDocumentIndexJobOutcome::GenerationChanged(
-                    current_generation,
-                ));
-            }
-
-            if document.source_blob_id.is_some() && document.canonical_fingerprint.is_none() {
-                let parse_job = entities::document_job::Entity::find()
-                    .filter(entities::document_job::Column::DocumentId.eq(document_id.0))
-                    .filter(
-                        entities::document_job::Column::ContentRevision
-                            .eq(current_generation.content_revision),
-                    )
-                    .filter(
-                        entities::document_job::Column::RevisionToken
-                            .eq(current_generation.revision_token),
-                    )
-                    .filter(
-                        entities::document_job::Column::Kind.eq(DocumentJobKind::Parse.as_str()),
-                    )
-                    .order_by_desc(entities::document_job::Column::CreatedAt)
-                    .order_by_desc(entities::document_job::Column::Id)
-                    .one(&transaction)
-                    .await
-                    .map_err(store_err)?
-                    .ok_or_else(|| {
-                        AgentError::Store(format!(
-                            "unparsed document {document_id} has no current parse job"
-                        ))
-                    })?;
-                let parse_job = document_job_from_model(parse_job)?;
-                let outcome = if parse_job.status == DocumentJobStatus::Failed {
-                    EnsureDocumentIndexJobOutcome::Failed(parse_job)
-                } else if matches!(
-                    parse_job.status,
-                    DocumentJobStatus::Queued
-                        | DocumentJobStatus::Running
-                        | DocumentJobStatus::RetryWait
-                ) {
-                    EnsureDocumentIndexJobOutcome::Parsing(parse_job)
-                } else {
-                    return Err(AgentError::Store(format!(
-                        "unparsed document {document_id} has terminal parse state {}",
-                        parse_job.status.as_str()
-                    )));
-                };
-                transaction.commit().await.map_err(store_err)?;
-                return Ok(outcome);
-            }
-
-            if let Some(candidate) = find_exact_document_index_job_on(
-                &transaction,
-                document_id,
-                current_generation,
-                pipeline_fingerprint,
-            )
-            .await?
-            {
-                let parsed = document_job_from_model(candidate.clone())?;
-                if matches!(
-                    parsed.status,
-                    DocumentJobStatus::Queued
-                        | DocumentJobStatus::Running
-                        | DocumentJobStatus::RetryWait
-                ) || (reason == DocumentIndexJobReason::PipelineChanged
-                    && parsed.status == DocumentJobStatus::Succeeded)
-                {
-                    transaction.commit().await.map_err(store_err)?;
-                    return Ok(EnsureDocumentIndexJobOutcome::Existing(parsed));
-                }
-                if parsed.status == DocumentJobStatus::Failed {
-                    transaction.commit().await.map_err(store_err)?;
-                    return Ok(EnsureDocumentIndexJobOutcome::Failed(parsed));
-                }
-                if reason == DocumentIndexJobReason::DerivedStateMissing {
-                    let now = Utc::now();
-                    reset_document_index_job_on(
-                        &transaction,
-                        candidate.id,
-                        &candidate.status,
-                        max_attempts,
-                        now,
-                    )
-                    .await?;
-                    clear_document_index_watermark_on(
-                        &transaction,
-                        document_id,
-                        current_generation,
-                    )
-                    .await?;
-                    let job = entities::document_job::Entity::find_by_id(candidate.id)
-                        .one(&transaction)
-                        .await
-                        .map_err(store_err)?
-                        .ok_or_else(|| {
-                            AgentError::Store("reset document job disappeared".into())
-                        })?;
-                    let job = document_job_from_model(job)?;
-                    transaction.commit().await.map_err(store_err)?;
-                    return Ok(EnsureDocumentIndexJobOutcome::Enqueued(job));
-                }
-            }
-
-            let target_generation = if reason.advances_generation() {
-                let Some(advanced) =
-                    try_advance_document_generation_on(&transaction, document_id, false).await?
-                else {
-                    transaction.rollback().await.map_err(store_err)?;
-                    continue;
-                };
-                if advanced.previous != Some(current_generation) {
-                    return Err(AgentError::Store(format!(
-                        "document {document_id} does not match its retained generation clock"
-                    )));
-                }
-                let updated = entities::document::Entity::update_many()
-                    .col_expr(
-                        entities::document::Column::ContentRevision,
-                        sea_orm::sea_query::Expr::value(advanced.current.content_revision),
-                    )
-                    .col_expr(
-                        entities::document::Column::RevisionToken,
-                        sea_orm::sea_query::Expr::value(advanced.current.revision_token),
-                    )
-                    .col_expr(
-                        entities::document::Column::ProcessingStatus,
-                        sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Queued.as_str()),
-                    )
-                    .col_expr(
-                        entities::document::Column::IndexedRevision,
-                        sea_orm::sea_query::Expr::value(Option::<i64>::None),
-                    )
-                    .col_expr(
-                        entities::document::Column::IndexFingerprint,
-                        sea_orm::sea_query::Expr::value(Option::<String>::None),
-                    )
-                    .col_expr(
-                        entities::document::Column::IndexedAt,
-                        sea_orm::sea_query::Expr::value(
-                            Option::<chrono::DateTime<chrono::Utc>>::None,
-                        ),
-                    )
-                    .filter(entities::document::Column::Id.eq(document_id.0))
-                    .filter(
-                        entities::document::Column::ContentRevision
-                            .eq(current_generation.content_revision),
-                    )
-                    .filter(
-                        entities::document::Column::RevisionToken
-                            .eq(current_generation.revision_token),
-                    )
-                    .exec(&transaction)
-                    .await
-                    .map_err(store_err)?;
-                if updated.rows_affected != 1 {
-                    transaction.rollback().await.map_err(store_err)?;
-                    continue;
-                }
-                advanced.current
-            } else {
-                clear_document_index_watermark_on(&transaction, document_id, current_generation)
-                    .await?;
-                current_generation
-            };
-
-            let now = Utc::now();
-            cancel_live_document_jobs_on(&transaction, document_id, now).await?;
-            let job = new_document_index_job(
-                document_id,
-                target_generation,
-                pipeline_fingerprint,
-                max_attempts,
-                now,
-            );
-            document_job_active_model(&job)
-                .insert(&transaction)
-                .await
-                .map_err(store_err)?;
-            transaction.commit().await.map_err(store_err)?;
-            return Ok(EnsureDocumentIndexJobOutcome::Enqueued(job));
-        }
     }
 
     async fn ensure_document_parse_job(
@@ -1451,125 +952,6 @@ impl Store for DbStore {
         Ok(result.rows_affected == 1)
     }
 
-    async fn complete_document_index_job(
-        &self,
-        id: DocumentJobId,
-        lease_token: uuid::Uuid,
-        completed_at: chrono::DateTime<Utc>,
-    ) -> Result<bool> {
-        loop {
-            let transaction = self.conn.begin().await.map_err(store_err)?;
-            acquire_document_job_write_lock(&transaction).await?;
-            let candidate = entities::document_job::Entity::find_by_id(id.0)
-                .one(&transaction)
-                .await
-                .map_err(store_err)?;
-            let Some(candidate) = candidate else {
-                transaction.rollback().await.map_err(store_err)?;
-                return Ok(false);
-            };
-            acquire_document_write_lock(&transaction, DocumentId(candidate.document_id)).await?;
-            let candidate = entities::document_job::Entity::find_by_id(id.0)
-                .one(&transaction)
-                .await
-                .map_err(store_err)?;
-            let Some(candidate) =
-                candidate.filter(|job| document_job_lease_is_live(job, lease_token, completed_at))
-            else {
-                transaction.rollback().await.map_err(store_err)?;
-                return Ok(false);
-            };
-            if candidate.kind != DocumentJobKind::Index.as_str() {
-                return Err(AgentError::Store(format!(
-                    "document job {id} is not an index job"
-                )));
-            }
-            ensure_resolution_document_matches(&transaction, &candidate).await?;
-
-            let resolved = entities::document_job::Entity::update_many()
-                .col_expr(
-                    entities::document_job::Column::Status,
-                    sea_orm::sea_query::Expr::value(DocumentJobStatus::Succeeded.as_str()),
-                )
-                .col_expr(
-                    entities::document_job::Column::LeaseToken,
-                    sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
-                )
-                .col_expr(
-                    entities::document_job::Column::LeaseExpiresAt,
-                    sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
-                )
-                .col_expr(
-                    entities::document_job::Column::FinishedAt,
-                    sea_orm::sea_query::Expr::value(Some(completed_at)),
-                )
-                .col_expr(
-                    entities::document_job::Column::LastErrorCode,
-                    sea_orm::sea_query::Expr::value(Option::<String>::None),
-                )
-                .col_expr(
-                    entities::document_job::Column::LastErrorDetail,
-                    sea_orm::sea_query::Expr::value(Option::<String>::None),
-                )
-                .col_expr(
-                    entities::document_job::Column::UpdatedAt,
-                    sea_orm::sea_query::Expr::value(completed_at),
-                )
-                .filter(entities::document_job::Column::Id.eq(candidate.id))
-                .filter(
-                    entities::document_job::Column::Status.eq(DocumentJobStatus::Running.as_str()),
-                )
-                .filter(entities::document_job::Column::LeaseToken.eq(Some(lease_token)))
-                .filter(
-                    entities::document_job::Column::LeaseExpiresAt.eq(candidate.lease_expires_at),
-                )
-                .filter(entities::document_job::Column::UpdatedAt.eq(candidate.updated_at))
-                .exec(&transaction)
-                .await
-                .map_err(store_err)?;
-            if resolved.rows_affected != 1 {
-                transaction.rollback().await.map_err(store_err)?;
-                continue;
-            }
-            let document_resolved = entities::document::Entity::update_many()
-                .col_expr(
-                    entities::document::Column::ProcessingStatus,
-                    sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Ready.as_str()),
-                )
-                .col_expr(
-                    entities::document::Column::IndexedRevision,
-                    sea_orm::sea_query::Expr::value(Some(candidate.content_revision)),
-                )
-                .col_expr(
-                    entities::document::Column::IndexFingerprint,
-                    sea_orm::sea_query::Expr::value(Some(candidate.pipeline_fingerprint.clone())),
-                )
-                .col_expr(
-                    entities::document::Column::IndexedAt,
-                    sea_orm::sea_query::Expr::value(Some(completed_at)),
-                )
-                .filter(entities::document::Column::Id.eq(candidate.document_id))
-                .filter(entities::document::Column::ContentRevision.eq(candidate.content_revision))
-                .filter(entities::document::Column::RevisionToken.eq(candidate.revision_token))
-                .filter(
-                    entities::document::Column::ProcessingStatus
-                        .eq(DocumentProcessingStatus::Processing.as_str()),
-                )
-                .exec(&transaction)
-                .await
-                .map_err(store_err)?;
-            if document_resolved.rows_affected != 1 {
-                transaction.rollback().await.map_err(store_err)?;
-                return Err(AgentError::Store(format!(
-                    "document job {} lost its exact processing document during completion",
-                    candidate.id
-                )));
-            }
-            transaction.commit().await.map_err(store_err)?;
-            return Ok(true);
-        }
-    }
-
     async fn record_document_job_failure(
         &self,
         id: DocumentJobId,
@@ -1700,79 +1082,6 @@ impl Store for DbStore {
             transaction.commit().await.map_err(store_err)?;
             return Ok(Some(next_status));
         }
-    }
-
-    async fn mark_document_indexed(
-        &self,
-        id: DocumentId,
-        revision: i64,
-        revision_token: uuid::Uuid,
-        fingerprint: &str,
-        indexed_at: chrono::DateTime<Utc>,
-    ) -> Result<bool> {
-        if fingerprint.is_empty()
-            || fingerprint.chars().count() > crate::model::DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN
-        {
-            return Err(AgentError::Store(
-                "document index fingerprint must contain 1 to 512 characters".into(),
-            ));
-        }
-        let result = entities::document::Entity::update_many()
-            .col_expr(
-                entities::document::Column::IndexedRevision,
-                sea_orm::sea_query::Expr::value(Some(revision)),
-            )
-            .col_expr(
-                entities::document::Column::IndexFingerprint,
-                sea_orm::sea_query::Expr::value(Some(fingerprint.to_string())),
-            )
-            .col_expr(
-                entities::document::Column::IndexedAt,
-                sea_orm::sea_query::Expr::value(Some(indexed_at)),
-            )
-            .col_expr(
-                entities::document::Column::ProcessingStatus,
-                sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Ready.as_str()),
-            )
-            .filter(entities::document::Column::Id.eq(id.0))
-            .filter(entities::document::Column::ContentRevision.eq(revision))
-            .filter(entities::document::Column::RevisionToken.eq(revision_token))
-            .exec(&self.conn)
-            .await
-            .map_err(store_err)?;
-        Ok(result.rows_affected == 1)
-    }
-
-    async fn clear_document_index(
-        &self,
-        id: DocumentId,
-        revision: i64,
-        revision_token: uuid::Uuid,
-    ) -> Result<bool> {
-        let result = entities::document::Entity::update_many()
-            .col_expr(
-                entities::document::Column::IndexedRevision,
-                sea_orm::sea_query::Expr::value(Option::<i64>::None),
-            )
-            .col_expr(
-                entities::document::Column::IndexFingerprint,
-                sea_orm::sea_query::Expr::value(Option::<String>::None),
-            )
-            .col_expr(
-                entities::document::Column::IndexedAt,
-                sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
-            )
-            .col_expr(
-                entities::document::Column::ProcessingStatus,
-                sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Queued.as_str()),
-            )
-            .filter(entities::document::Column::Id.eq(id.0))
-            .filter(entities::document::Column::ContentRevision.eq(revision))
-            .filter(entities::document::Column::RevisionToken.eq(revision_token))
-            .exec(&self.conn)
-            .await
-            .map_err(store_err)?;
-        Ok(result.rows_affected == 1)
     }
 
     async fn create_chat(&self, chat: &Chat) -> Result<()> {
@@ -3196,88 +2505,6 @@ impl Store for DbStore {
         ops::operation_log::len(self, run_id).await
     }
 }
-
-/// Acquire the database writer/row lock before the enqueue transaction reads.
-///
-/// On SQLite, even a no-match UPDATE starts the transaction as a writer, so two
-/// enqueues cannot both establish read snapshots and later fail their read→write
-/// upgrade with `SQLITE_BUSY_SNAPSHOT`. On Postgres an existing document row is
-/// locked; first inserts remain protected by the unique-key/CAS loop.
-async fn acquire_document_write_lock<C>(conn: &C, id: DocumentId) -> Result<()>
-where
-    C: ConnectionTrait,
-{
-    entities::document::Entity::update_many()
-        .col_expr(
-            entities::document::Column::UpdatedAt,
-            sea_orm::sea_query::Expr::col(entities::document::Column::UpdatedAt),
-        )
-        .filter(entities::document::Column::Id.eq(id.0))
-        .exec(conn)
-        .await
-        .map_err(store_err)?;
-    Ok(())
-}
-
-async fn find_exact_document_index_job_on<C>(
-    conn: &C,
-    document_id: DocumentId,
-    generation: DocumentGeneration,
-    pipeline_fingerprint: &str,
-) -> Result<Option<entities::document_job::Model>>
-where
-    C: ConnectionTrait,
-{
-    entities::document_job::Entity::find()
-        .filter(entities::document_job::Column::DocumentId.eq(document_id.0))
-        .filter(entities::document_job::Column::ContentRevision.eq(generation.content_revision))
-        .filter(entities::document_job::Column::RevisionToken.eq(generation.revision_token))
-        .filter(entities::document_job::Column::Kind.eq(DocumentJobKind::Index.as_str()))
-        .filter(entities::document_job::Column::PipelineFingerprint.eq(pipeline_fingerprint))
-        .one(conn)
-        .await
-        .map_err(store_err)
-}
-
-async fn clear_document_index_watermark_on<C>(
-    conn: &C,
-    document_id: DocumentId,
-    generation: DocumentGeneration,
-) -> Result<()>
-where
-    C: ConnectionTrait,
-{
-    let updated = entities::document::Entity::update_many()
-        .col_expr(
-            entities::document::Column::ProcessingStatus,
-            sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Queued.as_str()),
-        )
-        .col_expr(
-            entities::document::Column::IndexedRevision,
-            sea_orm::sea_query::Expr::value(Option::<i64>::None),
-        )
-        .col_expr(
-            entities::document::Column::IndexFingerprint,
-            sea_orm::sea_query::Expr::value(Option::<String>::None),
-        )
-        .col_expr(
-            entities::document::Column::IndexedAt,
-            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
-        )
-        .filter(entities::document::Column::Id.eq(document_id.0))
-        .filter(entities::document::Column::ContentRevision.eq(generation.content_revision))
-        .filter(entities::document::Column::RevisionToken.eq(generation.revision_token))
-        .exec(conn)
-        .await
-        .map_err(store_err)?;
-    if updated.rows_affected != 1 {
-        return Err(AgentError::Store(format!(
-            "document {document_id} generation changed during index maintenance"
-        )));
-    }
-    Ok(())
-}
-
 async fn cancel_live_document_jobs_on<C>(
     conn: &C,
     document_id: DocumentId,
@@ -3319,101 +2546,26 @@ where
     Ok(())
 }
 
-async fn reset_document_index_job_on<C>(
-    conn: &C,
-    id: uuid::Uuid,
-    expected_status: &str,
-    max_attempts: i32,
-    now: chrono::DateTime<Utc>,
-) -> Result<()>
+/// Acquire the database writer/row lock before the enqueue transaction reads.
+///
+/// On SQLite, even a no-match UPDATE starts the transaction as a writer, so two
+/// enqueues cannot both establish read snapshots and later fail their read→write
+/// upgrade with `SQLITE_BUSY_SNAPSHOT`. On Postgres an existing document row is
+/// locked; first inserts remain protected by the unique-key/CAS loop.
+async fn acquire_document_write_lock<C>(conn: &C, id: DocumentId) -> Result<()>
 where
     C: ConnectionTrait,
 {
-    let updated = entities::document_job::Entity::update_many()
+    entities::document::Entity::update_many()
         .col_expr(
-            entities::document_job::Column::Status,
-            sea_orm::sea_query::Expr::value(DocumentJobStatus::Queued.as_str()),
+            entities::document::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::col(entities::document::Column::UpdatedAt),
         )
-        .col_expr(
-            entities::document_job::Column::AttemptCount,
-            sea_orm::sea_query::Expr::value(0),
-        )
-        .col_expr(
-            entities::document_job::Column::MaxAttempts,
-            sea_orm::sea_query::Expr::value(max_attempts),
-        )
-        .col_expr(
-            entities::document_job::Column::AvailableAt,
-            sea_orm::sea_query::Expr::value(now),
-        )
-        .col_expr(
-            entities::document_job::Column::LeaseToken,
-            sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
-        )
-        .col_expr(
-            entities::document_job::Column::LeaseExpiresAt,
-            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
-        )
-        .col_expr(
-            entities::document_job::Column::StartedAt,
-            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
-        )
-        .col_expr(
-            entities::document_job::Column::FinishedAt,
-            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
-        )
-        .col_expr(
-            entities::document_job::Column::LastErrorCode,
-            sea_orm::sea_query::Expr::value(Option::<String>::None),
-        )
-        .col_expr(
-            entities::document_job::Column::LastErrorDetail,
-            sea_orm::sea_query::Expr::value(Option::<String>::None),
-        )
-        .col_expr(
-            entities::document_job::Column::UpdatedAt,
-            sea_orm::sea_query::Expr::value(now),
-        )
-        .filter(entities::document_job::Column::Id.eq(id))
-        .filter(entities::document_job::Column::Status.eq(expected_status))
+        .filter(entities::document::Column::Id.eq(id.0))
         .exec(conn)
         .await
         .map_err(store_err)?;
-    if updated.rows_affected != 1 {
-        return Err(AgentError::Store(format!(
-            "document job {id} changed during index maintenance"
-        )));
-    }
     Ok(())
-}
-
-fn new_document_index_job(
-    document_id: DocumentId,
-    generation: DocumentGeneration,
-    pipeline_fingerprint: &str,
-    max_attempts: i32,
-    now: chrono::DateTime<Utc>,
-) -> DocumentJob {
-    DocumentJob {
-        id: DocumentJobId::new(),
-        document_id,
-        content_revision: generation.content_revision,
-        revision_token: generation.revision_token,
-        kind: DocumentJobKind::Index,
-        status: DocumentJobStatus::Queued,
-        pipeline_fingerprint: pipeline_fingerprint.into(),
-        attempt_count: 0,
-        max_attempts,
-        available_at: now,
-        lease_token: None,
-        lease_expires_at: None,
-        started_at: None,
-        finished_at: None,
-        last_error_code: None,
-        last_error_detail: None,
-        created_at: now,
-        updated_at: now,
-    }
 }
 
 /// Start SQLite's write transaction before claim candidate reads.
@@ -3525,20 +2677,6 @@ fn validate_document_job_error(error_code: &str, error_detail: Option<&str>) -> 
     Ok(())
 }
 
-fn document_upsert_matches(current: &entities::document::Model, document: &DocumentUpsert) -> bool {
-    current.source_blob_id.is_none()
-        && current.source_sha256.is_none()
-        && current.source_byte_len.is_none()
-        && current.canonical_fingerprint == document.canonical_fingerprint
-        && current.chat_id == document.chat_id.map(|id| id.0)
-        && current.project_id == document.project_id.map(|id| id.0)
-        && current.source_uri == document.source_uri
-        && current.media_type == document.media_type
-        && current.title == document.title
-        && current.canonical_text == document.canonical_text
-        && current.source_regions == source_regions_to_db(&document.source_regions)
-}
-
 struct AdvancedDocumentGeneration {
     previous: Option<DocumentGeneration>,
     current: DocumentGeneration,
@@ -3586,7 +2724,7 @@ where
             .checked_add(1)
             .ok_or_else(|| AgentError::Store(format!("document {id} revision overflow")))?;
         let revision_token = uuid::Uuid::new_v4();
-        let mut update = entities::document_generation::Entity::update_many()
+        let update = entities::document_generation::Entity::update_many()
             .col_expr(
                 entities::document_generation::Column::ContentRevision,
                 sea_orm::sea_query::Expr::value(next_revision),
@@ -3599,21 +2737,6 @@ where
                 entities::document_generation::Column::Tombstone,
                 sea_orm::sea_query::Expr::value(tombstone),
             );
-        if tombstone {
-            update = update
-                .col_expr(
-                    entities::document_generation::Column::RetirementPending,
-                    sea_orm::sea_query::Expr::value(true),
-                )
-                .col_expr(
-                    entities::document_generation::Column::RetirementContentRevision,
-                    sea_orm::sea_query::Expr::value(next_revision),
-                )
-                .col_expr(
-                    entities::document_generation::Column::RetirementRevisionToken,
-                    sea_orm::sea_query::Expr::value(revision_token),
-                );
-        }
         let updated = update
             .filter(entities::document_generation::Column::DocumentId.eq(id.0))
             .filter(
@@ -3651,9 +2774,6 @@ where
             content_revision: Set(current.content_revision),
             revision_token: Set(current.revision_token),
             tombstone: Set(tombstone),
-            retirement_pending: Set(tombstone),
-            retirement_content_revision: Set(tombstone.then_some(current.content_revision)),
-            retirement_revision_token: Set(tombstone.then_some(current.revision_token)),
         })
         .on_conflict_do_nothing()
         .exec_without_returning(conn)
@@ -3762,23 +2882,11 @@ where
             )
             .col_expr(
                 entities::document::Column::ProcessingStatus,
-                sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Queued.as_str()),
-            )
-            .col_expr(
-                entities::document::Column::IndexedRevision,
-                sea_orm::sea_query::Expr::value(Option::<i64>::None),
-            )
-            .col_expr(
-                entities::document::Column::IndexFingerprint,
-                sea_orm::sea_query::Expr::value(Option::<String>::None),
+                sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Ready.as_str()),
             )
             .col_expr(
                 entities::document::Column::UpdatedAt,
                 sea_orm::sea_query::Expr::value(document.updated_at),
-            )
-            .col_expr(
-                entities::document::Column::IndexedAt,
-                sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
             )
             .filter(entities::document::Column::Id.eq(document.id.0))
             .filter(entities::document::Column::ContentRevision.eq(existing.content_revision))
@@ -3812,12 +2920,9 @@ where
         source_regions: Set(source_regions_to_db(&document.source_regions)),
         content_revision: Set(advanced.current.content_revision),
         revision_token: Set(advanced.current.revision_token),
-        processing_status: Set(DocumentProcessingStatus::Queued.as_str().into()),
-        indexed_revision: Set(None),
-        index_fingerprint: Set(None),
+        processing_status: Set(DocumentProcessingStatus::Ready.as_str().into()),
         created_at: Set(document.updated_at),
         updated_at: Set(document.updated_at),
-        indexed_at: Set(None),
     })
     .on_conflict_do_nothing()
     .exec_without_returning(conn)
@@ -4015,11 +3120,8 @@ fn document_from_model(model: entities::document::Model) -> Result<DocumentRecor
         content_revision: model.content_revision,
         revision_token: model.revision_token,
         processing_status: document_processing_status_from_db(&model.processing_status)?,
-        indexed_revision: model.indexed_revision,
-        index_fingerprint: model.index_fingerprint,
         created_at: model.created_at,
         updated_at: model.updated_at,
-        indexed_at: model.indexed_at,
     })
 }
 
@@ -4041,12 +3143,9 @@ fn document_summary_from_row(row: DocumentSummaryRow) -> Result<DocumentSummaryR
             })?,
         content_revision: row.content_revision,
         processing_status,
-        searchable: processing_status == DocumentProcessingStatus::Ready && row.has_canonical_text,
-        indexed_revision: row.indexed_revision,
-        index_fingerprint: row.index_fingerprint,
+        readable: processing_status == DocumentProcessingStatus::Ready && row.has_canonical_text,
         created_at: row.created_at,
         updated_at: row.updated_at,
-        indexed_at: row.indexed_at,
     })
 }
 
@@ -4069,12 +3168,9 @@ fn document_from_upsert(
         source_regions: document.source_regions.clone(),
         content_revision,
         revision_token,
-        processing_status: DocumentProcessingStatus::Queued,
-        indexed_revision: None,
-        index_fingerprint: None,
+        processing_status: DocumentProcessingStatus::Ready,
         created_at,
         updated_at: document.updated_at,
-        indexed_at: None,
     }
 }
 
@@ -4121,7 +3217,6 @@ fn document_job_from_model(model: entities::document_job::Model) -> Result<Docum
         revision_token: model.revision_token,
         kind: match model.kind.as_str() {
             "parse" => DocumentJobKind::Parse,
-            "index" => DocumentJobKind::Index,
             other => {
                 return Err(AgentError::Store(format!(
                     "unknown document job kind: {other}"

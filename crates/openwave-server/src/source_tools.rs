@@ -1,9 +1,7 @@
 //! Foreground tools for inspecting sources owned by the current conversation.
 //!
-//! Semantic [`openwave_retrieval::SearchTool`] remains the efficient path for a
-//! large corpus. These tools cover the smaller, more direct workflow: discover
-//! the files attached to this conversation and read a bounded range of one
-//! parsed source without waiting for its embedding stage.
+//! These tools discover files attached to the current conversation and read a
+//! bounded range of one parsed source.
 
 use std::sync::Arc;
 
@@ -94,10 +92,9 @@ impl Tool for ListSourcesTool {
             name: LIST_SOURCES_TOOL.into(),
             description: "List files added as sources to this exact conversation, newest first. \
                           Use this when the user refers to an added or attached file without an \
-                          exact document id; then use read_source for direct text or search for \
-                          relevant passages. Each source reports one status: `searchable` means \
-                          search and read_source can find its text; `processing` means checking \
-                          again shortly may change that; `stored_not_searchable` means the file \
+                          exact document id; then use read_source for direct text. Each source \
+                          reports one status: `readable` means read_source can return its text; \
+                          `processing` means checking again shortly may change that; `stored_no_text` means the file \
                           is kept and can be named but holds no text to find, so do not claim to \
                           have read it; `failed` means it could not be prepared."
                 .into(),
@@ -147,7 +144,7 @@ impl Tool for ListSourcesTool {
 
         let truncated = records.len() > MAX_LISTED_SOURCES as usize;
         // The readiness word is the one thing a reader has to see here: a
-        // source that is still processing, or that holds no searchable text,
+        // source that is still processing, or that holds no readable text,
         // is a source the next answer will quietly fail to use.
         let entries = records
             .iter()
@@ -361,13 +358,13 @@ impl Tool for ReadSourceTool {
 /// The readiness word a source row shows.
 ///
 /// Mapped rather than passed through: the tool's vocabulary is written for the
-/// model and says so — `stored_not_searchable` is a contract term, not
+/// model and says so — `stored_no_text` is a contract term, not
 /// something to put in front of a reader.
 fn readiness_label(readiness: &str) -> &'static str {
     match readiness {
-        "searchable" => "Searchable",
+        "readable" => "Readable",
         "processing" => "Processing",
-        "stored_not_searchable" => "No text",
+        "stored_no_text" => "No text",
         "failed" => "Failed",
         _ => "Unknown",
     }
@@ -581,10 +578,7 @@ mod tests {
             }],
             updated_at: Utc::now(),
         };
-        let (document, _) = store
-            .upsert_document_and_enqueue_index(&source, "test-pipeline", 3)
-            .await
-            .unwrap();
+        let document = store.upsert_document(&source).await.unwrap();
         (directory, store, chat, document.id)
     }
 
@@ -708,19 +702,19 @@ mod tests {
     }
 
     #[test]
-    fn readiness_never_reports_an_unsearchable_source_as_usable() {
+    fn readiness_never_reports_an_unreadable_source_as_usable() {
         use openwave_core::{DocumentProcessingStatus, SourceReadiness};
 
         // The case this exists for: the pipeline finished and found nothing.
         assert_eq!(
             SourceReadiness::of(DocumentProcessingStatus::Ready, false).as_str(),
-            "stored_not_searchable"
+            "stored_no_text"
         );
         assert_eq!(
             SourceReadiness::of(DocumentProcessingStatus::Ready, true).as_str(),
-            "searchable"
+            "readable"
         );
-        // Not-yet-searchable while queued must stay distinguishable from
+        // Not-yet-readable while queued must stay distinguishable from
         // finished-and-empty, because only one of them is worth waiting on.
         for pending in [
             DocumentProcessingStatus::Queued,
@@ -744,9 +738,10 @@ mod tests {
             .await
             .unwrap();
         assert!(!listed.is_error);
-        // Freshly upserted sources are still queued, and the agent-facing
-        // vocabulary says so without exposing the durable job lifecycle.
-        assert!(listed.content.contains("\"status\": \"processing\""));
+        // Canonical text is readable the moment it is upserted, and the
+        // agent-facing vocabulary says so without exposing the durable job
+        // lifecycle.
+        assert!(listed.content.contains("\"status\": \"readable\""));
         assert!(!listed.content.contains("queued"));
         assert!(!listed.content.contains("\"ready\""));
     }
