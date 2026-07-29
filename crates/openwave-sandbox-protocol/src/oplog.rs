@@ -63,6 +63,13 @@ pub enum OperationState {
     Recorded(ReverseResult),
     /// Terminal failure.
     Failed(ErrorResponse),
+    /// The operation completed terminally, but its recorded body has since been
+    /// evicted to a commit marker by retention (#859). It ran exactly once and
+    /// must not be re-executed; there is simply no body left to replay. This is
+    /// *not* the after-crash ambiguity — the outcome is known, only the payload
+    /// is gone — so it resolves to a distinct, non-ambiguous refusal, never
+    /// [`ClaimOutcome::ClaimedElsewhere`]. An in-memory store never produces it.
+    Evicted,
 }
 
 /// The result of claiming an operation identity against the store.

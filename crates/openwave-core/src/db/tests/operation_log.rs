@@ -202,7 +202,7 @@ async fn external_effect_flag_gates_a_foreign_claim() {
 }
 
 #[tokio::test]
-async fn eviction_removes_the_entry() {
+async fn eviction_leaves_a_marker_that_never_re_executes() {
     let (_dir, store) = temp_store().await;
     let run = Uuid::new_v4();
     let op = Uuid::new_v4();
@@ -212,9 +212,25 @@ async fn eviction_removes_the_entry() {
         .unwrap();
     store.record_operation(run, op, b"body").await.unwrap();
 
+    // Eviction keeps the row as a commit marker: state stays terminal, but the
+    // body is gone and `retained` is cleared. The row survives — a bare delete
+    // would let a re-issue re-execute.
     store.evict_operation(run, op).await.unwrap();
-    assert!(store.operation_state(run, op).await.unwrap().is_none());
-    assert_eq!(store.operation_log_len(run).await.unwrap(), 0);
+    let entry = store.operation_state(run, op).await.unwrap().unwrap();
+    assert_eq!(entry.state, OperationLogState::Recorded);
+    assert!(!entry.retained);
+    assert!(entry.body.is_none());
+    assert_eq!(store.operation_log_len(run).await.unwrap(), 1);
+
+    // A re-issue of an evicted op is answered "done, do not re-execute" — never
+    // a fresh claim, and never a decode-of-empty that would look ambiguous.
+    assert_eq!(
+        store
+            .claim_operation(run, op, b"fp", true, Uuid::new_v4())
+            .await
+            .unwrap(),
+        OperationClaimOutcome::TerminalEvicted
+    );
 }
 
 #[tokio::test]

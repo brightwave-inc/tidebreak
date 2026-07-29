@@ -1014,6 +1014,13 @@ pub enum OperationClaimOutcome {
     Recorded(Vec<u8>),
     /// The identity already failed terminally; the opaque error body to replay.
     Failed(Vec<u8>),
+    /// The identity is terminal (recorded or failed) but its body has been
+    /// evicted to a commit marker (#859) and is gone. It ran exactly once and
+    /// must not be re-executed; there is no body to replay. This is distinct
+    /// from a backend failure — the row is intact, only its body is absent — so
+    /// the caller answers "already done, do not re-execute", never the
+    /// after-crash ambiguity.
+    TerminalEvicted,
     /// The identity is `Claimed` by the caller's *own* epoch — a concurrent
     /// duplicate this process lifetime, which attaches to the live execution
     /// rather than re-executing.

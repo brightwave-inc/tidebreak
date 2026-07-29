@@ -82,14 +82,18 @@ pub(in crate::db) async fn claim(
         return Ok(OperationClaimOutcome::Fresh);
     }
 
+    // Re-reading the row the insert collided with assumes READ COMMITTED: the
+    // concurrently-committed row must be visible to this transaction. That holds
+    // on SQLite (writers serialize) and on Postgres at its default READ
+    // COMMITTED. Under REPEATABLE READ / SERIALIZABLE this read could miss the
+    // row and fall through to a spurious `Conflict` below — which still fails
+    // closed (never a second execution), but is wrong; do not raise the
+    // isolation level without revisiting this.
     let Some(existing) = entities::operation_log::Entity::find_by_id((run_id, operation_id))
         .one(&transaction)
         .await
         .map_err(store_err)?
     else {
-        // The row was evicted between the refused insert and this read. An
-        // evicted identity can never be re-issued, so refuse rather than
-        // silently re-claiming it.
         transaction.rollback().await.map_err(store_err)?;
         return Ok(OperationClaimOutcome::Conflict);
     };
@@ -99,13 +103,21 @@ pub(in crate::db) async fn claim(
         return Ok(OperationClaimOutcome::Conflict);
     }
 
+    // A terminal row carries its body only while retained; once retention (#859)
+    // evicts the body to a commit marker (`body IS NULL`), the outcome is still
+    // known — it ran once — so it must replay as evicted, never as an empty body
+    // (which would decode-fail and be mistaken for ambiguity) and never as a
+    // re-executable fresh claim. Keying off body presence matches the schema's
+    // `CHECK (retained OR body IS NULL)`.
     let outcome = match state_from_str(&existing.state) {
-        OperationLogState::Recorded => {
-            OperationClaimOutcome::Recorded(existing.body.unwrap_or_default())
-        }
-        OperationLogState::Failed => {
-            OperationClaimOutcome::Failed(existing.body.unwrap_or_default())
-        }
+        OperationLogState::Recorded => match existing.body {
+            Some(body) => OperationClaimOutcome::Recorded(body),
+            None => OperationClaimOutcome::TerminalEvicted,
+        },
+        OperationLogState::Failed => match existing.body {
+            Some(body) => OperationClaimOutcome::Failed(body),
+            None => OperationClaimOutcome::TerminalEvicted,
+        },
         OperationLogState::Claimed => {
             if existing.owner_epoch == owner_epoch {
                 OperationClaimOutcome::OwnedClaim
@@ -114,6 +126,12 @@ pub(in crate::db) async fn claim(
             } else {
                 // A foreign, no-external-effect claim is safe to re-drive: take
                 // over the claim for this lifetime and report it fresh.
+                //
+                // Unreachable today — every capability is external-effect — so
+                // there is no second concurrent lifetime to race here. When
+                // read-only capabilities arrive this take-over should become a
+                // CAS on the old `owner_epoch` (update ... WHERE owner_epoch =
+                // observed) so two lifetimes cannot both adopt the same claim.
                 let mut active = existing.into_active_model();
                 active.owner_epoch = Set(owner_epoch);
                 active.updated_at = Set(now);
@@ -210,13 +228,34 @@ pub(in crate::db) async fn state(
     Ok(entry)
 }
 
-/// Drop one entry. #859 owns the eviction policy; this removes the row.
+/// Evict a terminal entry's body down to a commit marker: keep the row and its
+/// state, but drop the recorded body and clear `retained`. A later re-issue then
+/// replays as [`OperationClaimOutcome::TerminalEvicted`] — "done, do not
+/// re-execute" — rather than re-running the effect.
+///
+/// This deliberately does *not* delete the row: a bare delete is the unsafe
+/// variant, because a re-issue of a deleted identity finds nothing, claims
+/// fresh, and re-executes an effect that already ran. Keeping the marker is what
+/// the schema (`body` nullable, `retained` flag) is shaped for. #859 owns the
+/// retention *policy* — when an entry may be evicted (an acknowledgement/cursor
+/// once the sandbox can no longer re-issue it), and whether very old markers are
+/// ever hard-deleted — layered over this safe primitive. A `Claimed` (still
+/// in-flight) entry is left untouched.
 pub(in crate::db) async fn evict(
     store: &DbStore,
     run_id: uuid::Uuid,
     operation_id: uuid::Uuid,
 ) -> Result<()> {
-    entities::operation_log::Entity::delete_by_id((run_id, operation_id))
+    entities::operation_log::Entity::update_many()
+        .col_expr(
+            operation_log::Column::Body,
+            Expr::value(Option::<Vec<u8>>::None),
+        )
+        .col_expr(operation_log::Column::Retained, Expr::value(false))
+        .col_expr(operation_log::Column::UpdatedAt, Expr::value(Utc::now()))
+        .filter(operation_log::Column::RunId.eq(run_id))
+        .filter(operation_log::Column::OperationId.eq(operation_id))
+        .filter(operation_log::Column::State.ne(STATE_CLAIMED))
         .exec(&store.conn)
         .await
         .map_err(store_err)?;

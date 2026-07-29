@@ -37,6 +37,7 @@
 //! | `Recorded`, same fingerprint | [`ClaimOutcome::Replay`] the recorded response |
 //! | `Failed`, same fingerprint | [`ClaimOutcome::Replay`] the recorded failure |
 //! | `Claimed`, same epoch | [`ClaimOutcome::Replay`]`(Claimed)` — concurrent duplicate attaches |
+//! | terminal, body evicted (#859) | [`ClaimOutcome::Replay`]`(Evicted)` — done, do not re-execute, no body |
 //! | `Claimed`, foreign epoch, external effect | [`ClaimOutcome::ClaimedElsewhere`] — after-crash refusal |
 //! | any state, different fingerprint | [`ClaimOutcome::Conflict`] |
 
@@ -112,6 +113,7 @@ impl DurableOperationStore {
             OperationClaimOutcome::Failed(body) => {
                 ClaimOutcome::Replay(OperationState::Failed(decode::<ErrorResponse>(&body)?))
             }
+            OperationClaimOutcome::TerminalEvicted => ClaimOutcome::Replay(OperationState::Evicted),
             OperationClaimOutcome::OwnedClaim => ClaimOutcome::Replay(OperationState::Claimed),
             OperationClaimOutcome::ForeignClaim => ClaimOutcome::ClaimedElsewhere,
             OperationClaimOutcome::Conflict => ClaimOutcome::Conflict,
@@ -154,20 +156,27 @@ impl DurableOperationStore {
         else {
             return Ok(None);
         };
-        let state = match entry.state {
-            OperationLogState::Claimed => OperationState::Claimed,
-            OperationLogState::Recorded => {
-                OperationState::Recorded(decode::<ReverseResult>(&terminal_body(entry.body)?)?)
+        // A terminal entry whose body has been evicted (#859) reports `Evicted`,
+        // exactly as `claim` does — the outcome is known, only the body is gone.
+        // Keeping the two read paths identical is the point of this arm.
+        let state = match (entry.state, entry.body) {
+            (OperationLogState::Claimed, _) => OperationState::Claimed,
+            (OperationLogState::Recorded, Some(body)) => {
+                OperationState::Recorded(decode::<ReverseResult>(&body)?)
             }
-            OperationLogState::Failed => {
-                OperationState::Failed(decode::<ErrorResponse>(&terminal_body(entry.body)?)?)
+            (OperationLogState::Failed, Some(body)) => {
+                OperationState::Failed(decode::<ErrorResponse>(&body)?)
+            }
+            (OperationLogState::Recorded | OperationLogState::Failed, None) => {
+                OperationState::Evicted
             }
         };
         Ok(Some(state))
     }
 
-    /// Drop a terminal entry once it can no longer be re-issued (#859 owns the
-    /// policy; this removes the row).
+    /// Evict a terminal entry's body down to a commit marker once it can no
+    /// longer be re-issued; a later re-issue then replays as `Evicted`, never
+    /// re-executing. #859 owns the retention policy over this safe primitive.
     pub async fn evict_op(&self, id: OperationId) -> Result<(), StoreError> {
         self.store
             .evict_operation(self.run_id.as_uuid(), id.as_uuid())
@@ -209,8 +218,17 @@ impl OperationStore for DurableOperationStore {
         block_on(self.fail_op(id, error))
     }
 
+    /// Reads fail *open*: a backend error becomes `None` ("unknown"), so this
+    /// must never gate execution — [`claim`](Self::claim) is the execution
+    /// predicate and fails closed. Use this for observation only.
     fn state(&self, id: OperationId) -> Option<OperationState> {
-        block_on(self.state_op(id)).unwrap_or_default()
+        match block_on(self.state_op(id)) {
+            Ok(state) => state,
+            Err(error) => {
+                eprintln!("openwave: durable operation-log state read failed: {error}");
+                None
+            }
+        }
     }
 
     fn evict(&self, id: OperationId) {
@@ -219,18 +237,44 @@ impl OperationStore for DurableOperationStore {
         }
     }
 
+    /// Reads fail *open*: a backend error becomes `0`. For accounting only;
+    /// never gate execution on it (that direction leans toward re-executing).
     fn len(&self) -> usize {
-        block_on(self.len_op()).unwrap_or(0)
+        match block_on(self.len_op()) {
+            Ok(len) => len,
+            Err(error) => {
+                eprintln!("openwave: durable operation-log length read failed: {error}");
+                0
+            }
+        }
     }
 }
 
 /// Drive an async store operation to completion from a synchronous trait method.
 ///
-/// `block_in_place` tells the multi-thread runtime this worker is about to block
-/// so other tasks migrate off it, then the current handle runs the future. The
-/// host runs on a multi-thread runtime, which `rt-multi-thread` guarantees.
-fn block_on<F: std::future::Future>(future: F) -> F::Output {
-    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(future))
+/// # Precondition (panic)
+///
+/// This uses [`tokio::task::block_in_place`], which **panics** on a
+/// current-thread runtime and outside any runtime. `rt-multi-thread` only makes
+/// the multi-thread flavor *available*; it does not guarantee the host built
+/// one. So this checks the running flavor and, when it is not multi-thread,
+/// fails closed with a [`StoreError`] rather than panicking. #823, which wires
+/// this seam under `CapabilityHost`, MUST drive it from a multi-thread runtime.
+fn block_on<T>(
+    future: impl std::future::Future<Output = Result<T, StoreError>>,
+) -> Result<T, StoreError> {
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    match Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| handle.block_on(future))
+        }
+        Ok(_) => Err(StoreError::Backend(
+            "durable operation store must run on a multi-thread tokio runtime".to_owned(),
+        )),
+        Err(_) => Err(StoreError::Backend(
+            "durable operation store called outside a tokio runtime".to_owned(),
+        )),
+    }
 }
 
 fn encode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, StoreError> {
@@ -243,12 +287,6 @@ fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, StoreError>
 
 fn backend(error: openwave_core::AgentError) -> StoreError {
     StoreError::Backend(error.to_string())
-}
-
-/// A terminal entry must carry its body for replay; a `None` here means #859 has
-/// evicted the body down to a commit marker, which cannot be replayed.
-fn terminal_body(body: Option<Vec<u8>>) -> Result<Vec<u8>, StoreError> {
-    body.ok_or_else(|| StoreError::Backend("terminal operation body was evicted".to_owned()))
 }
 
 fn settle(write: OperationLogWrite) -> Result<(), StoreError> {
@@ -314,6 +352,34 @@ mod tests {
         assert!(matches!(
             recovered.state_op(op).await.unwrap(),
             Some(OperationState::Claimed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_evicted_marker_replays_as_done_not_ambiguous() {
+        let (_dir, store) = store().await;
+        let run = RunId::new();
+        let op = OperationId::new();
+        let log = DurableOperationStore::new(store, run);
+
+        log.claim_op(op, &request("q")).await.unwrap();
+        log.record_op(op, result("done")).await.unwrap();
+        // Retention (#859) evicts the completed body down to a commit marker.
+        log.evict_op(op).await.unwrap();
+
+        // A re-issue is answered "already recorded, do not re-execute" — an
+        // `Evicted` replay, distinctly NOT the after-crash `ClaimedElsewhere`
+        // ambiguity, and NOT a fresh claim that would re-run the model call.
+        assert!(
+            matches!(
+                log.claim_op(op, &request("q")).await.unwrap(),
+                ClaimOutcome::Replay(OperationState::Evicted)
+            ),
+            "an evicted terminal op must replay as done, never ClaimedElsewhere"
+        );
+        assert!(matches!(
+            log.state_op(op).await.unwrap(),
+            Some(OperationState::Evicted)
         ));
     }
 
