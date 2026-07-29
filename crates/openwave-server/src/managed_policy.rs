@@ -259,6 +259,9 @@ impl OsPolicySource for ManagedPreferencesSource {
 /// honored — MDM materializes these as root, and a plist planted by an
 /// unprivileged user must never assert device policy. Ownership is taken
 /// from the opened handle, so the check and the read cannot be raced apart.
+// Portable so unit tests exercise it on every platform; the production
+// caller is the macOS reader.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[cfg_attr(not(unix), allow(unused_variables))]
 fn managed_plist_channel(path: &Path, trusted_owner: u32) -> Result<Option<String>> {
     use std::io::Read;
