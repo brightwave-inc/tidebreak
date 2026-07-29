@@ -1,10 +1,16 @@
 import { create } from "zustand";
 
-import type { ModelSelectionKey, PermissionMode, ReasoningEffort } from "./api";
+import type {
+  CitationFormat,
+  ModelSelectionKey,
+  PermissionMode,
+  ReasoningEffort,
+} from "./api";
 
 const MODEL_KEY = "openwave.new-chat-model";
 const REASONING_EFFORT_KEY = "openwave.new-chat-reasoning-effort";
 const PERMISSION_MODE_KEY = "openwave.new-chat-permission-mode";
+const CITATION_FORMAT_KEY = "openwave.new-chat-citation-format";
 
 const REASONING_EFFORTS: readonly ReasoningEffort[] = [
   "none",
@@ -16,6 +22,8 @@ const REASONING_EFFORTS: readonly ReasoningEffort[] = [
 ];
 
 const PERMISSION_MODES: readonly PermissionMode[] = ["ask", "auto", "allow"];
+
+const CITATION_FORMATS: readonly CitationFormat[] = ["inline", "sources_attached"];
 
 function read(key: string): string | null {
   try {
@@ -53,9 +61,11 @@ type NewChatSettings = {
   model: ModelSelectionKey | null;
   reasoningEffort: ReasoningEffort | null;
   permissionMode: PermissionMode | null;
+  citationFormat: CitationFormat | null;
   setModel: (model: ModelSelectionKey | null) => void;
   setReasoningEffort: (effort: ReasoningEffort | null) => void;
   setPermissionMode: (mode: PermissionMode) => void;
+  setCitationFormat: (format: CitationFormat | null) => void;
 };
 
 /**
@@ -77,6 +87,7 @@ export const useNewChatSettings = create<NewChatSettings>((set) => ({
   model: (read(MODEL_KEY) as ModelSelectionKey | null) ?? null,
   reasoningEffort: readEnum(REASONING_EFFORT_KEY, REASONING_EFFORTS),
   permissionMode: readEnum(PERMISSION_MODE_KEY, PERMISSION_MODES),
+  citationFormat: readEnum(CITATION_FORMAT_KEY, CITATION_FORMATS),
   setModel: (model) => {
     write(MODEL_KEY, model);
     set({ model });
@@ -88,5 +99,9 @@ export const useNewChatSettings = create<NewChatSettings>((set) => ({
   setPermissionMode: (permissionMode) => {
     write(PERMISSION_MODE_KEY, permissionMode);
     set({ permissionMode });
+  },
+  setCitationFormat: (citationFormat) => {
+    write(CITATION_FORMAT_KEY, citationFormat);
+    set({ citationFormat });
   },
 }));

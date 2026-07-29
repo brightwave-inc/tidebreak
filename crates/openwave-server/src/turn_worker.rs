@@ -485,6 +485,11 @@ impl TurnWorker {
                 )
                 .await;
         };
+        // Resolved per turn against the chat's choice and the install default,
+        // so a message answers in the format that was selected when it ran —
+        // earlier messages keep the format they were authored under.
+        let citation_format =
+            crate::citation_format::resolve(&*self.store, chat.citation_format).await?;
         let model_policy = if self.resolver.enforces_model_registry() {
             crate::providers::resolve_model_policy(&*self.store, &turn.model, true).await?
         } else {
@@ -583,6 +588,7 @@ impl TurnWorker {
                 config.model = turn.model.clone();
                 config.reasoning_effort = chat.reasoning_effort;
             }
+            config.citation_format = citation_format;
             config.utility_model = utility_model.clone();
             config.max_steps = remaining_steps;
             config.tool_scratch = self.private_scratch_root.as_deref().and_then(|root| {

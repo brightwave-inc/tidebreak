@@ -530,6 +530,9 @@ pub struct ToolCtx {
     /// Stable identity of the canonical tool call, when execution came from an
     /// agent turn. Legacy direct/MCP contexts leave this absent.
     pub call_id: Option<CallId>,
+    /// The citation grammar a source-bearing tool teaches this turn. Already
+    /// resolved against the chat's choice and the global default.
+    pub citation_format: crate::citation::CitationFormat,
     #[cfg(feature = "tools")]
     workspace: WorkspaceAccess,
 }
@@ -548,6 +551,7 @@ impl std::fmt::Debug for ToolCtx {
             .field("chat_id", &self.chat_id)
             .field("project_id", &self.project_id)
             .field("call_id", &self.call_id)
+            .field("citation_format", &self.citation_format)
             .field("private_scratch_available", &self.scratch_available())
             .finish_non_exhaustive()
     }
@@ -568,6 +572,7 @@ impl ToolCtx {
                 chat_id,
                 project_id,
                 call_id: None,
+                citation_format: crate::citation::CitationFormat::default(),
                 #[cfg(feature = "tools")]
                 workspace: WorkspaceAccess::Unavailable(_error.to_string().into()),
             },
@@ -586,6 +591,7 @@ impl ToolCtx {
             chat_id,
             project_id,
             call_id: None,
+            citation_format: crate::citation::CitationFormat::default(),
             #[cfg(feature = "tools")]
             workspace: WorkspaceAccess::Open(Arc::new(workspace)),
         })
@@ -602,6 +608,7 @@ impl ToolCtx {
             chat_id,
             project_id,
             call_id: None,
+            citation_format: crate::citation::CitationFormat::default(),
             #[cfg(feature = "tools")]
             workspace: WorkspaceAccess::Open(scratch.workspace),
         }
@@ -617,6 +624,7 @@ impl ToolCtx {
             chat_id,
             project_id,
             call_id: None,
+            citation_format: crate::citation::CitationFormat::default(),
             #[cfg(feature = "tools")]
             workspace: WorkspaceAccess::Unavailable("private scratch is unavailable".into()),
         }
@@ -626,6 +634,13 @@ impl ToolCtx {
     #[must_use]
     pub fn with_call_id(mut self, call_id: CallId) -> Self {
         self.call_id = Some(call_id);
+        self
+    }
+
+    /// Set the citation grammar source-bearing tools teach this turn.
+    #[must_use]
+    pub fn with_citation_format(mut self, format: crate::citation::CitationFormat) -> Self {
+        self.citation_format = format;
         self
     }
 

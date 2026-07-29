@@ -21,9 +21,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use openwave_core::{
-    format_citation_directive, ApprovalClass, AssistantCitationReference, ChatId, DocumentId,
-    DocumentScope, DocumentSummaryRecord, Result, ResultEntry, ResultEntryKind,
-    RetrievalEvidenceInput, RetrievalEvidenceSource, Store, Tool, ToolCtx, ToolOutput, ToolSpec,
+    citation_authoring_instruction, format_citation_reference, ApprovalClass,
+    AssistantCitationReference, ChatId, CitationFormat, DocumentId, DocumentScope,
+    DocumentSummaryRecord, Result, ResultEntry, ResultEntryKind, RetrievalEvidenceInput,
+    RetrievalEvidenceSource, Store, Tool, ToolCtx, ToolOutput, ToolSpec,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -117,17 +118,17 @@ fn parse_args<T: for<'de> Deserialize<'de>>(args: Value) -> std::result::Result<
 }
 
 /// Render citations into a compact, model-readable listing.
-fn render(citations: &[Citation], source_tokens: &[uuid::Uuid]) -> String {
+fn render(citations: &[Citation], source_tokens: &[uuid::Uuid], format: CitationFormat) -> String {
     debug_assert_eq!(citations.len(), source_tokens.len());
     let plural = if citations.len() == 1 { "" } else { "s" };
     let mut out = format!(
-        "Found {} passage{plural}. To cite a passage, wrap the wording it supports in \
-         that passage's citation directive: your phrasing goes in the brackets and may \
-         paraphrase the passage, and the reference is copied exactly.",
-        citations.len()
+        "Found {} passage{plural}. {}",
+        citations.len(),
+        citation_authoring_instruction(format, "passage")
     );
     for (i, c) in citations.iter().enumerate() {
-        let reference = format_citation_directive(
+        let reference = format_citation_reference(
+            format,
             "your phrasing",
             AssistantCitationReference {
                 source_token: source_tokens[i],
@@ -183,8 +184,8 @@ impl Tool for SearchTool {
             name: "search".into(),
             description: "Search the indexed documents for passages relevant to a query. \
                           Returns ranked, grounded citations (document id, byte span, source \
-                          pages when available, and text). Each result carries a citation \
-                          directive to wrap the wording it supports in."
+                          pages when available, and text). Each result carries the exact \
+                          reference to cite it by."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -263,7 +264,7 @@ impl Tool for SearchTool {
             .map(|_| uuid::Uuid::new_v4())
             .collect::<Vec<_>>();
         let content = loop {
-            let content = render(&citations, &source_tokens);
+            let content = render(&citations, &source_tokens, ctx.citation_format);
             if content.len() <= openwave_core::ToolCallRecord::MAX_RESULT_BYTES {
                 break content;
             }
@@ -684,7 +685,11 @@ mod tests {
             score: 0.5,
         });
 
-        let output = render(std::slice::from_ref(&citation), &[uuid::Uuid::new_v4()]);
+        let output = render(
+            std::slice::from_ref(&citation),
+            &[uuid::Uuid::new_v4()],
+            CitationFormat::Inline,
+        );
 
         assert!(output.contains("Section: Guide > Setup"));
         assert!(output.ends_with("body"));
@@ -710,7 +715,10 @@ mod tests {
             generation: None,
             score: 0.5,
         });
-        assert!(render(&[single], &[uuid::Uuid::new_v4()]).contains("\nPage: 7\nbody"));
+        assert!(
+            render(&[single], &[uuid::Uuid::new_v4()], CitationFormat::Inline)
+                .contains("\nPage: 7\nbody")
+        );
 
         let mut multi = Chunk::new(document_id, 0, ByteSpan::new(0, 4), "body");
         multi.source_regions = vec![page(0, 2, 7), page(2, 4, 8)];
@@ -720,7 +728,10 @@ mod tests {
             generation: None,
             score: 0.5,
         });
-        assert!(render(&[multi], &[uuid::Uuid::new_v4()]).contains("\nPages: 7, 8\nbody"));
+        assert!(
+            render(&[multi], &[uuid::Uuid::new_v4()], CitationFormat::Inline)
+                .contains("\nPages: 7, 8\nbody")
+        );
     }
 
     #[test]
@@ -732,10 +743,43 @@ mod tests {
             score: 0.5,
         });
 
-        let output = render(&[citation], &[uuid::Uuid::new_v4()]);
+        let output = render(&[citation], &[uuid::Uuid::new_v4()], CitationFormat::Inline);
 
         assert!(!output.contains("Section:"));
         assert!(output.ends_with("body"));
+    }
+
+    #[test]
+    fn the_citation_instruction_follows_the_turns_format() {
+        let citation = Citation::from(ScoredChunk {
+            chunk: Chunk::new(DocumentId::new(), 0, ByteSpan::new(0, 4), "body"),
+            source: DocumentSource::Inline,
+            generation: None,
+            score: 0.5,
+        });
+        let source_token = uuid::Uuid::new_v4();
+        let reference = AssistantCitationReference { source_token };
+
+        let inline = render(
+            std::slice::from_ref(&citation),
+            &[source_token],
+            CitationFormat::Inline,
+        );
+        let attached = render(
+            &[citation],
+            &[source_token],
+            CitationFormat::SourcesAttached,
+        );
+
+        // Each format offers only its own grammar. A result that showed both
+        // would invite one message to mix anchored and bare citations.
+        assert!(inline.contains(&openwave_core::format_citation_directive(
+            "your phrasing",
+            reference
+        )));
+        assert!(!inline.contains(&openwave_core::format_source_reference(reference)));
+        assert!(attached.contains(&openwave_core::format_source_reference(reference)));
+        assert!(!attached.contains(":cit["));
     }
 
     #[tokio::test]
@@ -778,7 +822,8 @@ mod tests {
         assert_eq!(out.private_evidence.len(), 1);
         assert!(out.private_evidence[0].snippet.contains("Jupiter"));
         assert_eq!(out.private_evidence[0].rank, 1);
-        assert!(out.content.contains(&format_citation_directive(
+        assert!(out.content.contains(&format_citation_reference(
+            CitationFormat::Inline,
             "your phrasing",
             AssistantCitationReference {
                 source_token: out.private_evidence[0].source_token,

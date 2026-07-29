@@ -85,8 +85,9 @@ pub use approval::{
 pub use blob::FsBlobStore;
 pub use cancel::{CancelToken, Cancelled};
 pub use citation::{
-    format_citation_directive, format_source_reference, parse_assistant_citations,
-    AssistantCitationReference, AssistantCitationSnapshot, CitationPageBounds, CitationSpan,
+    citation_authoring_instruction, format_citation_directive, format_citation_reference,
+    format_source_reference, parse_assistant_citations, AssistantCitationReference,
+    AssistantCitationSnapshot, CitationFormat, CitationPageBounds, CitationSpan,
     ParsedAssistantCitations, MAX_ASSISTANT_CITATIONS, MAX_CITATION_BOUNDS,
     MAX_CITATION_EXCERPT_CHARS, MAX_CITATION_HEADING_CHARS, MAX_CITATION_PAGES,
 };

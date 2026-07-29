@@ -1,6 +1,13 @@
 import { useState } from "react";
-import { Atom, Check, ChevronDown, Gauge, Info } from "lucide-react";
-import type { ModelInfo, ModelSelectionKey, ProviderKind, ReasoningEffort } from "./api";
+import { Atom, Check, ChevronDown, Gauge, Info, Quote } from "lucide-react";
+import type {
+  CitationFormat,
+  ModelInfo,
+  ModelSelectionKey,
+  ProviderKind,
+  ReasoningEffort,
+} from "./api";
+import { CITATION_FORMAT_LABELS, CITATION_FORMAT_OPTIONS } from "./CitationFormats";
 import { canonicalModelSelection, modelForSelection } from "./ModelSelection";
 import { Button } from "@/components/ui/button";
 import { ProviderIcon } from "./ProviderIcons";
@@ -402,6 +409,93 @@ export function ReasoningEffortMenu({
                 key={option.value}
                 disabled={disabled}
                 onSelect={() => {
+                  if (selected) return;
+                  void onChange(option.value);
+                }}
+                className={cn(
+                  "flex items-center gap-2",
+                  isDefault && "opacity-60",
+                )}
+              >
+                <span className="text-sm">{option.label}</span>
+                {selected && <Check className="ml-auto size-4" />}
+              </DropdownMenuItem>
+            );
+          })}
+        </div>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/**
+ * Per-chat citation-format selector, shown beside the model picker. `null`
+ * means "follow the global default", which is what a chat starts on.
+ *
+ * `defaultFormat` is the format that default currently resolves to, so the
+ * Default row can name it rather than describe it — the same reason the model
+ * picker names the model behind its own default.
+ */
+export function CitationFormatMenu({
+  value,
+  defaultFormat,
+  disabled,
+  onChange,
+}: {
+  value: CitationFormat | null;
+  defaultFormat: CitationFormat;
+  disabled?: boolean;
+  onChange: (format: CitationFormat | null) => void | Promise<void>;
+}) {
+  const isDefault = value === null;
+  const label = isDefault ? "Default" : CITATION_FORMAT_LABELS[value];
+  const triggerLabel = isDefault
+    ? `Citations: Default (${CITATION_FORMAT_LABELS[defaultFormat]})`
+    : `Citations: ${label}`;
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          className="model-menu-trigger"
+          disabled={disabled}
+          aria-label={triggerLabel}
+          title={triggerLabel}
+        >
+          <Quote className="size-3.5" />
+          <span className="model-menu-label">{label}</span>
+          <ChevronDown className="size-3.5" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="start"
+        side="top"
+        className="model-menu-content w-80 overflow-y-auto p-0"
+      >
+        <div className="flex flex-col gap-1 p-1">
+          <DefaultRow
+            isDefault={isDefault}
+            tooltip={
+              isDefault
+                ? `New turns cite the way Settings says. Currently: ${CITATION_FORMAT_LABELS[defaultFormat]}.`
+                : "Override active. Toggle Default to follow the setting again."
+            }
+            disabled={Boolean(disabled)}
+            onToggle={(useDefault) => {
+              void onChange(useDefault ? null : defaultFormat);
+            }}
+          />
+
+          <DropdownMenuSeparator />
+
+          {CITATION_FORMAT_OPTIONS.map((option) => {
+            const selected = !isDefault && value === option.value;
+            return (
+              <DropdownMenuItem
+                key={option.value}
+                disabled={disabled}
+                onSelect={(event) => {
+                  event.preventDefault();
                   if (selected) return;
                   void onChange(option.value);
                 }}

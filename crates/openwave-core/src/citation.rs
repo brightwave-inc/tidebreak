@@ -166,6 +166,92 @@ pub fn format_citation_directive(phrase: &str, reference: AssistantCitationRefer
     )
 }
 
+/// How a turn asks the model to cite the sources it read.
+///
+/// Only the authoring instruction changes. Both forms resolve through the same
+/// grammar and land in the same durable shape — an ordered reference list, with
+/// inline directives as an optional layer on top — so one conversation can hold
+/// messages authored under either, and each keeps rendering as it was written.
+///
+/// Persisted per chat as the token from [`Self::as_str`], with an absent value
+/// meaning "follow the global default".
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, ts_rs::TS,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CitationFormat {
+    /// Anchor each claim: the model wraps its own phrasing in a citation
+    /// directive, so a reader sees which words a source backs.
+    #[default]
+    Inline,
+    /// Answer plainly and cite by bare reference: nothing is anchored in the
+    /// prose, and the sources surface only in the row at the foot of the
+    /// message.
+    SourcesAttached,
+}
+
+impl CitationFormat {
+    /// Every format, in the order a picker lists them.
+    pub const ALL: &'static [Self] = &[Self::Inline, Self::SourcesAttached];
+
+    /// The wire/storage token for this format.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Inline => "inline",
+            Self::SourcesAttached => "sources_attached",
+        }
+    }
+
+    /// Parse a stored/wire token back into a format.
+    ///
+    /// Deliberately returns `Option` (an unknown token falls back to the
+    /// default rather than failing a turn), so this is not the `FromStr` trait.
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(value: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|format| format.as_str() == value)
+    }
+}
+
+/// The exact reference a result hands the model to copy under `format`.
+///
+/// Inline gets the directive that carries the phrasing it supports; the
+/// sources-attached form gets the bare marker, which the parser strips from the
+/// answer and keeps only in the reference order.
+#[must_use]
+pub fn format_citation_reference(
+    format: CitationFormat,
+    phrase: &str,
+    reference: AssistantCitationReference,
+) -> String {
+    match format {
+        CitationFormat::Inline => format_citation_directive(phrase, reference),
+        CitationFormat::SourcesAttached => format_source_reference(reference),
+    }
+}
+
+/// The sentence a tool result uses to teach `format`, where `subject` names
+/// what the result offers — a "passage", a "range".
+#[must_use]
+pub fn citation_authoring_instruction(format: CitationFormat, subject: &str) -> String {
+    match format {
+        CitationFormat::Inline => format!(
+            "To cite a {subject}, wrap the wording it supports in that {subject}'s citation \
+             directive: your phrasing goes in the brackets and may paraphrase the {subject}, \
+             and the reference is copied exactly."
+        ),
+        CitationFormat::SourcesAttached => format!(
+            "To cite a {subject}, write the answer plainly and put that {subject}'s reference \
+             immediately after the sentence it supports: wrap no phrasing, and copy the \
+             reference exactly. The sources you cite are listed at the end of the message."
+        ),
+    }
+}
+
 /// Resolve reserved references without interpreting Markdown.
 ///
 /// A citation directive whose token is well formed keeps its cited phrase and

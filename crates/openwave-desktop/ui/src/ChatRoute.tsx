@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 
 import type {
+  CitationFormat,
   ModelInfo,
   ModelSelectionKey,
   PermissionMode,
@@ -46,7 +47,7 @@ import {
 } from "./ImageAttachments";
 import { useImageAttachments } from "./useImageAttachments";
 import { modelForSelection } from "./ModelSelection";
-import { ModelMenu, ReasoningEffortMenu } from "./ModelMenu";
+import { CitationFormatMenu, ModelMenu, ReasoningEffortMenu } from "./ModelMenu";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import {
   PICKER_BUSY_MESSAGE,
@@ -91,7 +92,8 @@ const { signal: signalTurnLifecycle } = useTurnLifecycle.getState();
  */
 export function ChatRoute({ chatId }: { chatId: string }) {
   const navigate = useNavigate();
-  const { client, models, defaultModelKey, status, setStatus } = useApp();
+  const { client, models, defaultModelKey, defaultCitationFormat, status, setStatus } =
+    useApp();
   const { layout, openPanel } = usePanelNav();
   const sourceNav = useStableSourceNav(openPanel);
   const chats = useChatListStore((state) => state.chats);
@@ -355,6 +357,11 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     chatListActions.replaceChat(await client.patchChatPermissionMode(chatId, mode));
   }
 
+  async function onCitationFormatChange(format: CitationFormat | null) {
+    if (deletingChatId !== null) return;
+    chatListActions.replaceChat(await client.patchChatCitationFormat(chatId, format));
+  }
+
   if (!chat) return <div className="routed-surface-loading" />;
 
   function renderPanel(panel: PanelContent, position: "left" | "right" | "chat", visible: boolean) {
@@ -405,6 +412,12 @@ export function ChatRoute({ chatId }: { chatId: string }) {
                   value={chat!.permission_mode}
                   disabled={deletingChatId !== null}
                   onChange={onPermissionModeChange}
+                />
+                <CitationFormatMenu
+                  value={chat!.citation_format}
+                  defaultFormat={defaultCitationFormat}
+                  disabled={deletingChatId !== null}
+                  onChange={onCitationFormatChange}
                 />
               </>
             }

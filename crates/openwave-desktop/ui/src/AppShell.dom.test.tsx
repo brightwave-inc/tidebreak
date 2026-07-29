@@ -18,8 +18,22 @@ import { useUiStore } from "./UiStore";
  */
 
 const chats = [
-  { id: "chat-1", title: "Roadmap", model: null, reasoning_effort: null, project_id: null },
-  { id: "chat-2", title: null, model: null, reasoning_effort: null, project_id: null },
+  {
+    id: "chat-1",
+    title: "Roadmap",
+    model: null,
+    reasoning_effort: null,
+    citation_format: null,
+    project_id: null,
+  },
+  {
+    id: "chat-2",
+    title: null,
+    model: null,
+    reasoning_effort: null,
+    citation_format: null,
+    project_id: null,
+  },
 ];
 
 const listChats = vi.fn(async () => chats);
@@ -42,6 +56,11 @@ vi.mock("./api", () => ({
     getPolicy = vi.fn(async () => ({ managed: false, source: "unmanaged" }));
     listModels = vi.fn(async () => ({ models: [], roles: [] }));
     listProviders = vi.fn(async () => ({ providers: [] }));
+    getSettings = vi.fn(async () => ({
+      model: null,
+      citation_format: "inline",
+      has_api_key: false,
+    }));
     listChats = listChats;
     createChat = createChat;
     listPendingUserQuestions = listPendingUserQuestions;

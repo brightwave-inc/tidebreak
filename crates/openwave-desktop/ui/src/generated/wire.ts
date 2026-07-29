@@ -171,6 +171,11 @@ reasoning_effort: ReasoningEffort | null,
  */
 permission_mode: PermissionMode | null, 
 /**
+ * How turns in this chat ask the model to cite; `None` follows the global
+ * default.
+ */
+citation_format: CitationFormat | null, 
+/**
  * CAS revision of this conversation's exact root projection.
  */
 attachment_revision: number, 
@@ -275,6 +280,19 @@ export type ChatTranscript = { messages: Array<ChatMessageSnapshot>,
  * renderer-safe allowlist. Canonical tool records never cross this API.
  */
 tool_activity: Array<ChatToolActivitySnapshot>, last_event_seq: number, };
+
+/**
+ * How a turn asks the model to cite the sources it read.
+ *
+ * Only the authoring instruction changes. Both forms resolve through the same
+ * grammar and land in the same durable shape — an ordered reference list, with
+ * inline directives as an optional layer on top — so one conversation can hold
+ * messages authored under either, and each keeps rendering as it was written.
+ *
+ * Persisted per chat as the token from [`Self::as_str`], with an absent value
+ * meaning "follow the global default".
+ */
+export type CitationFormat = "inline" | "sources_attached";
 
 /**
  * One highlight rectangle of a citation, on a named page.
@@ -989,6 +1007,11 @@ export type Settings = {
  * The model turns run against, or `None` to use the server's default.
  */
 model: string | null, 
+/**
+ * The citation format new chats follow unless they carry their own.
+ * Always resolved, so a client never has to know the product default.
+ */
+citation_format: CitationFormat, 
 /**
  * Whether a model API key is configured (never the key itself).
  */

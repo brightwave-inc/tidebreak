@@ -39,6 +39,7 @@ impl MigratorTrait for Migrator {
             Box::new(ExtendOutputRevisionsForBinary),
             Box::new(AddChatPermissionMode),
             Box::new(AddToolCallAutoJudgeStatus),
+            Box::new(AddChatCitationFormat),
         ]
     }
 }
@@ -6807,6 +6808,43 @@ impl MigrationTrait for AddChatPermissionMode {
     }
 }
 
+/// Adds the optional per-chat `citation_format` override. An absent value
+/// follows the global default, so existing chats keep the behavior they had.
+struct AddChatCitationFormat;
+
+impl MigrationName for AddChatCitationFormat {
+    fn name(&self) -> &str {
+        "m20260729_000025_add_chat_citation_format"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddChatCitationFormat {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Chat::Table)
+                    .add_column(ColumnDef::new(Chat::CitationFormat).text())
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Chat::Table)
+                    .drop_column(Chat::CitationFormat)
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+}
+
 /// Adds the optional per-chat `reasoning_effort` override.
 struct AddChatReasoningEffort;
 
@@ -7113,6 +7151,7 @@ enum Chat {
     Model,
     ReasoningEffort,
     PermissionMode,
+    CitationFormat,
     AttachmentRevision,
     CreatedAt,
 }
