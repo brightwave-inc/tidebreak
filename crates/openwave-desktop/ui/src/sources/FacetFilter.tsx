@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import type { Facet } from "./useSourceTableFilters";
+import type { Facet } from "@/lib/facets";
 
 /**
  * One faceted filter: a dashed button that counts its selection, opening onto

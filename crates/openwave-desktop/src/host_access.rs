@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use openwave_core::{ChatId, Store};
 use openwave_host_broker::{
-    ControlRequest, ControlResult, ExecutionContext, GrantSubject, OperationEnvelope,
+    Capability, ControlRequest, ControlResult, ExecutionContext, GrantSubject, OperationEnvelope,
     OperationRequest, OperationResult, RootId, RootSummary,
 };
 use serde::{Deserialize, Serialize};
@@ -153,6 +153,37 @@ pub(crate) struct ConnectedFolder {
     pub(crate) display_name: String,
 }
 
+/// What the agent may do inside one connected folder.
+///
+/// The broker's own capability set also covers subject-wide discovery, which is
+/// not a property of a folder and so has no member here.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FolderCapability {
+    Read,
+    Write,
+}
+
+impl FolderCapability {
+    fn from_broker(capability: Capability) -> Option<Self> {
+        match capability {
+            Capability::ReadFiles => Some(Self::Read),
+            Capability::WriteFiles => Some(Self::Write),
+            _ => None,
+        }
+    }
+}
+
+/// A connected folder together with what this conversation may currently do in
+/// it, as the broker reports it rather than as the app assumes.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ConnectedFolderAccess {
+    pub(crate) root_id: RootId,
+    pub(crate) display_name: String,
+    pub(crate) capabilities: Vec<FolderCapability>,
+}
+
 #[tauri::command]
 pub(crate) async fn connect_folder(
     app: AppHandle,
@@ -184,7 +215,7 @@ pub(crate) async fn connect_folder(
 pub(crate) async fn list_connected_folders(
     state: State<'_, HostAccess>,
     chat_id: Uuid,
-) -> Result<Vec<ConnectedFolder>, String> {
+) -> Result<Vec<ConnectedFolderAccess>, String> {
     let context = state.context(chat_id).await?;
     let store = state
         .store()
@@ -219,9 +250,14 @@ pub(crate) async fn list_connected_folders(
     Ok(roots
         .into_iter()
         .filter(|root| product_roots.contains(&root.root_id.as_uuid()))
-        .map(|root| ConnectedFolder {
+        .map(|root| ConnectedFolderAccess {
             root_id: root.root_id,
             display_name: root.display_name,
+            capabilities: root
+                .capabilities
+                .into_iter()
+                .filter_map(FolderCapability::from_broker)
+                .collect(),
         })
         .collect())
 }

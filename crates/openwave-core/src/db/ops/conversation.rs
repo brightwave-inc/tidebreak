@@ -403,7 +403,7 @@ pub(in crate::db) async fn delete_chat(
         .is_some();
     let active_sandbox = entities::agent_run::Entity::find()
         .filter(entities::agent_run::Column::ChatId.eq(chat_id.0))
-        .filter(entities::agent_run::Column::Execution.eq("sandbox"))
+        .filter(entities::agent_run::Column::Tier.eq("background"))
         .filter(entities::agent_run::Column::Status.is_not_in(["completed", "failed", "cancelled"]))
         .one(&transaction)
         .await
@@ -1317,6 +1317,7 @@ mod tests {
 
     /// Calls that resolved before projections were retained still rebuild the
     /// one enumerated signal history could always recover.
+    ///
     #[test]
     fn a_call_with_no_retained_projection_falls_back_to_its_stored_signal() {
         let activity = tool_activity_from_call(

@@ -1,7 +1,7 @@
 use super::{sample_chat, temp_store};
 use crate::{
     AcceptAgentRunOutcome, AcceptSandboxAgentRunAndParkTurnOutcome, AcceptTurnOutcome, AgentRun,
-    AgentRunExecution, AgentRunId, AgentRunInboxStatus, AgentRunStatus, CallId, ChatId,
+    AgentRunId, AgentRunInboxStatus, AgentRunStatus, AgentRunTier, CallId, ChatId,
     ClaimAgentRunInboxOutcome, ClaimSandboxToolCallOutcome,
     ConsumeAgentRunInboxAndResumeTurnOutcome, ConsumeAgentRunInboxOutcome, DbStore,
     FinishAgentRunCancellationOutcome, MessageId, ParkSandboxToolCallOutcome,
@@ -738,7 +738,7 @@ async fn concurrent_sandbox_admission_never_oversubscribes_origin_turn() {
             .await
             .unwrap()
             .into_iter()
-            .filter(|run| run.execution == AgentRunExecution::Sandbox)
+            .filter(|run| run.tier == AgentRunTier::Background)
             .count(),
         2
     );
@@ -800,7 +800,7 @@ async fn concurrent_exact_sandbox_admission_converges_on_one_receipt() {
             .await
             .unwrap()
             .into_iter()
-            .filter(|run| run.execution == AgentRunExecution::Sandbox)
+            .filter(|run| run.tier == AgentRunTier::Background)
             .count(),
         1
     );
@@ -936,7 +936,7 @@ async fn foreground_and_sandbox_runs_roundtrip_with_exact_idempotency() {
     assert_eq!(foreground.chat_id, chat.id);
     assert_eq!(foreground.parent_id, None);
     assert_eq!(foreground.depth, 0);
-    assert_eq!(foreground.execution, AgentRunExecution::Foreground);
+    assert_eq!(foreground.tier, AgentRunTier::Foreground);
     assert_eq!(foreground.status, AgentRunStatus::Active);
     assert_eq!(foreground.input, None);
     assert_eq!(foreground.attempt_count, 0);
@@ -951,7 +951,7 @@ async fn foreground_and_sandbox_runs_roundtrip_with_exact_idempotency() {
                 chat.id,
                 None,
                 None,
-                AgentRunExecution::Foreground,
+                AgentRunTier::Foreground,
                 None,
             )
             .await
@@ -971,7 +971,7 @@ async fn foreground_and_sandbox_runs_roundtrip_with_exact_idempotency() {
     assert_eq!(sandbox.parent_id, Some(foreground_id));
     assert_eq!(sandbox.spawn_call_id, Some(spawn_call_id));
     assert_eq!(sandbox.depth, 1);
-    assert_eq!(sandbox.execution, AgentRunExecution::Sandbox);
+    assert_eq!(sandbox.tier, AgentRunTier::Background);
     assert_eq!(sandbox.status, AgentRunStatus::Queued);
     assert_eq!(sandbox.attempt_count, 0);
     assert_eq!(
@@ -1033,7 +1033,7 @@ async fn agent_run_acceptance_enforces_one_foreground_and_depth_one_children() {
                 chat.id,
                 None,
                 None,
-                AgentRunExecution::Foreground,
+                AgentRunTier::Foreground,
                 None,
             )
             .await
@@ -1057,7 +1057,7 @@ async fn agent_run_acceptance_enforces_one_foreground_and_depth_one_children() {
             other_chat.id,
             Some(foreground_id),
             Some(CallId::new()),
-            AgentRunExecution::Sandbox,
+            AgentRunTier::Background,
             Some("cross-chat child"),
         )
         .await
@@ -1077,7 +1077,7 @@ async fn agent_run_acceptance_rejects_invalid_shapes_and_identity_reuse() {
             chat.id,
             Some(foreground_id),
             None,
-            AgentRunExecution::Foreground,
+            AgentRunTier::Foreground,
             None,
         )
         .await
@@ -1088,7 +1088,7 @@ async fn agent_run_acceptance_rejects_invalid_shapes_and_identity_reuse() {
             chat.id,
             Some(foreground_id),
             None,
-            AgentRunExecution::Sandbox,
+            AgentRunTier::Background,
             Some("missing spawn identity"),
         )
         .await
@@ -1099,7 +1099,7 @@ async fn agent_run_acceptance_rejects_invalid_shapes_and_identity_reuse() {
             chat.id,
             Some(foreground_id),
             Some(CallId::new()),
-            AgentRunExecution::Sandbox,
+            AgentRunTier::Background,
             None,
         )
         .await
@@ -1110,7 +1110,7 @@ async fn agent_run_acceptance_rejects_invalid_shapes_and_identity_reuse() {
             chat.id,
             Some(foreground_id),
             Some(CallId::new()),
-            AgentRunExecution::Sandbox,
+            AgentRunTier::Background,
             Some(""),
         )
         .await
@@ -1121,7 +1121,7 @@ async fn agent_run_acceptance_rejects_invalid_shapes_and_identity_reuse() {
             chat.id,
             Some(foreground_id),
             Some(CallId::new()),
-            AgentRunExecution::Sandbox,
+            AgentRunTier::Background,
             Some("nil identity"),
         )
         .await
@@ -1133,7 +1133,7 @@ async fn agent_run_acceptance_rejects_invalid_shapes_and_identity_reuse() {
             chat.id,
             Some(foreground_id),
             Some(CallId::new()),
-            AgentRunExecution::Sandbox,
+            AgentRunTier::Background,
             Some("different immutable request"),
         )
         .await
@@ -1161,7 +1161,10 @@ async fn agent_run_schema_rejects_cross_chat_parentage() {
         parent_id: Set(Some(parent_id.0)),
         parent_depth: Set(Some(0)),
         spawn_call_id: Set(Some(CallId::new().0)),
-        execution: Set(AgentRunExecution::Sandbox.as_str().into()),
+        tier: Set(AgentRunTier::Background.as_str().into()),
+        execution_location: Set(crate::model::AgentRunExecutionLocation::InProcess
+            .as_str()
+            .into()),
         depth: Set(1),
         status: Set(AgentRunStatus::Queued.as_str().into()),
         input: Set(Some("cross-chat raw insert".into())),
@@ -1208,7 +1211,10 @@ async fn scheduler_never_claims_a_sandbox_row_without_an_admission_receipt() {
         parent_id: Set(Some(parent_id.0)),
         parent_depth: Set(Some(0)),
         spawn_call_id: Set(Some(spawn_call_id.0)),
-        execution: Set(AgentRunExecution::Sandbox.as_str().into()),
+        tier: Set(AgentRunTier::Background.as_str().into()),
+        execution_location: Set(crate::model::AgentRunExecutionLocation::InProcess
+            .as_str()
+            .into()),
         depth: Set(1),
         status: Set(AgentRunStatus::Queued.as_str().into()),
         input: Set(Some("receiptless corruption".into())),
@@ -2885,4 +2891,84 @@ async fn waiting_sandbox_deadline_fences_tool_and_delivers_parent_failure() {
             .len(),
         1
     );
+}
+
+/// The tier/location split is a persisted-value contract: every pre-split row
+/// must come back readable, with `sandbox` mapped to `(background, in_process)`
+/// and `foreground` to `(foreground, in_process)`.
+#[tokio::test]
+async fn m0021_maps_existing_execution_rows_onto_tier_and_location() {
+    use sea_orm::ConnectionTrait;
+    use sea_orm_migration::MigratorTrait;
+
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        dir.path().join("execution-split-upgrade.db").display()
+    );
+    let conn = sea_orm::Database::connect(&url).await.unwrap();
+    let split_index = crate::db::migration::Migrator::migrations()
+        .iter()
+        .position(|migration| migration.name() == "m20260728_000021_split_agent_run_execution")
+        .expect("the split migration is registered");
+    crate::db::migration::Migrator::up(&conn, Some(split_index as u32))
+        .await
+        .unwrap();
+
+    let chat_id = ChatId::new();
+    let foreground_id = AgentRunId::foreground_for_chat(chat_id);
+    let spawn_call_id = CallId::new();
+    let child_id = AgentRunId::sandbox_for_spawn_call(spawn_call_id);
+    // Seed pre-split rows through the old single execution column. The chat
+    // row is deliberately absent: this exercises exactly the agent_run
+    // mapping, and enforcement stays off on this connection for the batch.
+    conn.execute_unprepared(&format!(
+        "PRAGMA foreign_keys=OFF;\n\
+         INSERT INTO agent_run \
+         (id, chat_id, parent_id, parent_depth, spawn_call_id, execution, depth, status, input, \
+          attempt_count, max_attempts, claim_count, available_at, deadline_at, created_at, updated_at) \
+         VALUES (X'{foreground}', X'{chat}', NULL, NULL, NULL, 'foreground', 0, 'active', NULL, \
+          0, 0, 0, '2026-07-01 00:00:00+00:00', NULL, \
+          '2026-07-01 00:00:00+00:00', '2026-07-01 00:00:00+00:00');\n\
+         INSERT INTO agent_run \
+         (id, chat_id, parent_id, parent_depth, spawn_call_id, execution, depth, status, input, \
+          attempt_count, max_attempts, claim_count, available_at, deadline_at, created_at, updated_at) \
+         VALUES (X'{child}', X'{chat}', X'{foreground}', 0, X'{spawn}', 'sandbox', 1, 'queued', \
+          'legacy delegated task', 0, 3, 0, '2026-07-01 00:00:01+00:00', \
+          '2026-07-01 00:30:00+00:00', '2026-07-01 00:00:01+00:00', '2026-07-01 00:00:01+00:00');",
+        foreground = foreground_id.0.simple(),
+        chat = chat_id.0.simple(),
+        child = child_id.0.simple(),
+        spawn = spawn_call_id.0.simple(),
+    ))
+    .await
+    .unwrap();
+
+    crate::db::migration::Migrator::up(&conn, None)
+        .await
+        .unwrap();
+
+    let store = DbStore { conn };
+    let foreground = store
+        .get_agent_run(foreground_id)
+        .await
+        .unwrap()
+        .expect("the pre-split foreground run survives");
+    assert_eq!(foreground.tier, AgentRunTier::Foreground);
+    assert_eq!(
+        foreground.execution_location,
+        crate::AgentRunExecutionLocation::InProcess
+    );
+    let child = store
+        .get_agent_run(child_id)
+        .await
+        .unwrap()
+        .expect("the pre-split sandbox run survives");
+    assert_eq!(child.tier, AgentRunTier::Background);
+    assert_eq!(
+        child.execution_location,
+        crate::AgentRunExecutionLocation::InProcess
+    );
+    assert_eq!(child.parent_id, Some(foreground_id));
+    assert_eq!(child.input.as_deref(), Some("legacy delegated task"));
 }

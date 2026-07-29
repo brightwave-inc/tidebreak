@@ -15,6 +15,7 @@ async-trait = { workspace = true }
 base64 = { workspace = true }
 futures = { workspace = true }
 openwave-core = { path = "../openwave-core", default-features = false }
+openwave-egress = { path = "../openwave-egress" }
 reqwest = { workspace = true }
 serde = { workspace = true }
 ts-rs = { workspace = true }

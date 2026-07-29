@@ -3,6 +3,9 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use openwave_core::SecretProvider;
+use openwave_egress::{
+    EgressEnforcement, EgressPolicy, EnforcementException, ExceptionReach, ExceptionScope,
+};
 use reqwest::{Client, Response, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +29,10 @@ const DAYTONA_START_TIMEOUT: Duration = Duration::from_secs(60);
 const DAYTONA_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const DAYTONA_TRANSPORT_GRACE: Duration = Duration::from_secs(10);
 const MAX_DAYTONA_RESPONSE_BYTES: usize = 1024 * 1024;
+/// Daytona accepts at most this many CIDR entries per sandbox allowlist.
+const DAYTONA_MAX_NETWORK_ALLOW_ENTRIES: usize = 10;
+/// Daytona accepts at most this many domain entries per sandbox allowlist.
+const DAYTONA_MAX_DOMAIN_ALLOW_ENTRIES: usize = 20;
 
 /// Fixed key for Daytona credentials in OpenWave's host secret store.
 pub const DAYTONA_CREDENTIAL_KEY: &str = "code_execution.daytona.api_key";
@@ -71,6 +78,7 @@ pub struct DaytonaExecutionProvider {
     pool: RemoteSessionPool,
     client: Client,
     endpoints: DaytonaEndpoints,
+    egress: Option<EgressPolicy>,
 }
 
 #[derive(Clone)]
@@ -128,7 +136,54 @@ impl DaytonaExecutionProvider {
             pool,
             client,
             endpoints,
+            egress: None,
         })
+    }
+
+    /// Compile an egress policy into every sandbox this provider creates.
+    ///
+    /// Without a policy the provider keeps today's disclosed open-egress
+    /// creation. With one, sandboxes are created with Daytona's block-all
+    /// switch or its per-sandbox allowlists — subject to the vendor exception
+    /// list declared by [`Self::egress_enforcement`], and to Daytona's plan
+    /// gating on per-sandbox network overrides. Fails when the allowlist
+    /// exceeds Daytona's entry limits, before any sandbox is created.
+    pub fn with_egress_policy(mut self, policy: EgressPolicy) -> Result<Self, CodeExecutionError> {
+        if let EgressPolicy::Allowlist(allowlist) = &policy {
+            if allowlist.cidrs().len() > DAYTONA_MAX_NETWORK_ALLOW_ENTRIES {
+                return Err(CodeExecutionError::InvalidRequest(format!(
+                    "Daytona accepts at most {DAYTONA_MAX_NETWORK_ALLOW_ENTRIES} egress address blocks"
+                )));
+            }
+            if allowlist.domains().len() > DAYTONA_MAX_DOMAIN_ALLOW_ENTRIES {
+                return Err(CodeExecutionError::InvalidRequest(format!(
+                    "Daytona accepts at most {DAYTONA_MAX_DOMAIN_ALLOW_ENTRIES} egress domain patterns"
+                )));
+            }
+        }
+        self.egress = Some(policy);
+        Ok(self)
+    }
+
+    /// Host knowledge about Daytona's per-sandbox network enforcement,
+    /// declared as what it actually blocks. Daytona keeps a vendor-curated
+    /// "essential services" list reachable regardless of policy — package
+    /// registries, public git hosting, container registries, and AI APIs —
+    /// each a general-purpose destination, so this surface does not qualify
+    /// as a boundary for third-party-credential-bearing work.
+    #[must_use]
+    pub fn egress_enforcement() -> EgressEnforcement {
+        let curated = |purpose: &'static str| EnforcementException {
+            scope: ExceptionScope::VendorCurated,
+            reach: ExceptionReach::GeneralPurpose,
+            purpose,
+        };
+        EgressEnforcement::external(vec![
+            curated("package registries"),
+            curated("git hosting"),
+            curated("container registries"),
+            curated("AI APIs"),
+        ])
     }
 
     async fn create_sandbox(
@@ -144,7 +199,7 @@ impl DaytonaExecutionProvider {
                     ("openwave_workspace_id", workspace_id),
                     ("code-toolbox-language", "python"),
                 ]),
-                network_block_all: false,
+                network: daytona_network_settings(self.egress.as_ref()),
                 auto_stop_interval: DAYTONA_IDLE_MINUTES,
                 // Delete once the idle stop happens. A later command creates a
                 // fresh chat workspace instead of leaving stopped resources.
@@ -622,9 +677,73 @@ impl CodeExecutionProvider for DaytonaExecutionProvider {
 #[serde(rename_all = "camelCase")]
 struct CreateSandboxRequest<'a> {
     labels: HashMap<&'static str, &'a str>,
-    network_block_all: bool,
+    #[serde(flatten)]
+    network: DaytonaNetworkSettings,
     auto_stop_interval: u32,
     auto_delete_interval: u32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DaytonaNetworkSettings {
+    network_block_all: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    network_allow_list: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    domain_allow_list: Option<String>,
+}
+
+/// Compile the host policy into Daytona's creation-time network controls. No
+/// policy keeps today's disclosed open-egress sandbox. Block-all and the
+/// empty allowlist use the block-all switch; a non-empty allowlist becomes
+/// Daytona's comma-separated CIDR and wildcard-domain allowlists, which deny
+/// every other destination the vendor's exception list does not keep open.
+///
+/// A non-empty allowlist emits *both* the CIDR and the domain field, present
+/// but empty when that axis has no entries, rather than omitting the empty
+/// one. This mirrors E2B's explicit `allow_internet_access: false` baseline:
+/// a domain-only policy must still deny raw-IP egress, and an omitted CIDR
+/// field could read as "no restriction on that axis" and leave IP egress
+/// fully open — defeating deny-by-default. Present-but-empty is intended to
+/// mean "allow nothing on this axis."
+///
+/// Vendor semantics of an empty-but-present allowlist need live confirmation
+/// against Daytona before this surface is trusted as an enforcement boundary;
+/// the default (no policy → open egress) is not changed here.
+fn daytona_network_settings(policy: Option<&EgressPolicy>) -> DaytonaNetworkSettings {
+    let open = DaytonaNetworkSettings {
+        network_block_all: false,
+        network_allow_list: None,
+        domain_allow_list: None,
+    };
+    match policy {
+        None => open,
+        Some(EgressPolicy::BlockAll) => DaytonaNetworkSettings {
+            network_block_all: true,
+            ..open
+        },
+        Some(EgressPolicy::Allowlist(allowlist)) => {
+            if allowlist.is_empty() {
+                return DaytonaNetworkSettings {
+                    network_block_all: true,
+                    ..open
+                };
+            }
+            DaytonaNetworkSettings {
+                network_block_all: false,
+                network_allow_list: Some(comma_joined(allowlist.cidrs())),
+                domain_allow_list: Some(comma_joined(allowlist.domains())),
+            }
+        }
+    }
+}
+
+fn comma_joined<T: ToString>(entries: &[T]) -> String {
+    entries
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 #[derive(Deserialize)]
@@ -1055,6 +1174,8 @@ mod tests {
             .map(|(_, _, body)| body)
             .unwrap();
         assert_eq!(create_body["networkBlockAll"], false);
+        assert!(create_body.get("networkAllowList").is_none());
+        assert!(create_body.get("domainAllowList").is_none());
         assert_eq!(create_body["autoStopInterval"], DAYTONA_IDLE_MINUTES);
         assert_eq!(create_body["autoDeleteInterval"], 0);
         assert_eq!(create_body["labels"]["openwave_workspace_id"], "chat-123");
@@ -1070,6 +1191,76 @@ mod tests {
         assert_eq!(execute_body["cwd"], ".");
         assert_eq!(execute_body["timeout"], 5);
         server.abort();
+    }
+
+    #[test]
+    fn daytona_compiles_the_egress_policy_into_creation_network_fields() {
+        use openwave_egress::{CidrBlock, DomainPattern, EgressAllowlist};
+
+        let allowlist = |domains: &[&str], cidrs: &[&str]| {
+            EgressPolicy::Allowlist(EgressAllowlist::new(
+                domains
+                    .iter()
+                    .map(|pattern| DomainPattern::parse(pattern).unwrap())
+                    .collect(),
+                cidrs
+                    .iter()
+                    .map(|block| CidrBlock::parse(block).unwrap())
+                    .collect(),
+            ))
+        };
+
+        // The wire shape Daytona receives, pinned through the same serde
+        // struct the creation request embeds.
+        let policy = allowlist(&["*.pypi.org", "crates.io"], &["140.82.112.0/20"]);
+        let body = serde_json::to_value(daytona_network_settings(Some(&policy))).unwrap();
+        assert_eq!(body["networkBlockAll"], false);
+        assert_eq!(body["networkAllowList"], "140.82.112.0/20");
+        assert_eq!(body["domainAllowList"], "*.pypi.org,crates.io");
+
+        // A domain-only policy still expresses a deny-all baseline for raw-IP
+        // egress: the CIDR field is present but empty, never omitted, so an
+        // absent axis can't read as "no IP restriction".
+        let domain_only = allowlist(&["*.pypi.org"], &[]);
+        let body = serde_json::to_value(daytona_network_settings(Some(&domain_only))).unwrap();
+        assert_eq!(body["networkBlockAll"], false);
+        assert_eq!(body["networkAllowList"], "");
+        assert_eq!(body["domainAllowList"], "*.pypi.org");
+
+        // Symmetrically, a CIDR-only policy still denies every domain.
+        let cidr_only = allowlist(&[], &["140.82.112.0/20"]);
+        let body = serde_json::to_value(daytona_network_settings(Some(&cidr_only))).unwrap();
+        assert_eq!(body["networkAllowList"], "140.82.112.0/20");
+        assert_eq!(body["domainAllowList"], "");
+
+        // Block-all and the empty allowlist both fail closed on the switch.
+        for policy in [EgressPolicy::BlockAll, allowlist(&[], &[])] {
+            let body = serde_json::to_value(daytona_network_settings(Some(&policy))).unwrap();
+            assert_eq!(body, json!({ "networkBlockAll": true }));
+        }
+
+        // Vendor entry limits fail before any sandbox is created.
+        let provider = || {
+            DaytonaExecutionProvider::new(
+                DaytonaCredential::parse("test-daytona-key").unwrap(),
+                Duration::from_secs(5),
+            )
+            .unwrap()
+        };
+        let cidrs: Vec<String> = (0..11).map(|index| format!("10.0.{index}.0/24")).collect();
+        let cidr_refs: Vec<&str> = cidrs.iter().map(String::as_str).collect();
+        assert!(matches!(
+            provider().with_egress_policy(allowlist(&[], &cidr_refs)),
+            Err(CodeExecutionError::InvalidRequest(_))
+        ));
+        let domains: Vec<String> = (0..21)
+            .map(|index| format!("host{index}.example.com"))
+            .collect();
+        let domain_refs: Vec<&str> = domains.iter().map(String::as_str).collect();
+        assert!(matches!(
+            provider().with_egress_policy(allowlist(&domain_refs, &[])),
+            Err(CodeExecutionError::InvalidRequest(_))
+        ));
     }
 
     #[tokio::test]

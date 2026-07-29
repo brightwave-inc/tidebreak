@@ -213,7 +213,9 @@ describe("SourcesView catalog", () => {
   it("states what a conversation accepts when it has no sources yet", async () => {
     render(<SourcesView chatId="chat-1" apis={sourceApis([])} />);
     expect(await screen.findByText("No sources yet")).toBeVisible();
-    expect(screen.getByText(/PDFs, Office documents, Markdown/i)).toBeVisible();
+    // The two things a reader needs before dropping anything: that an
+    // unreadable format is still kept, and the size ceiling.
+    expect(screen.getByText(/still kept as a source/i)).toBeVisible();
     expect(screen.getByText(/Maximum file size: 16MB/i)).toBeVisible();
   });
 });

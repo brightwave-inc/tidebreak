@@ -17,10 +17,16 @@ import {
   DocumentViewer,
   hasOriginalViewer,
 } from "@/document/DocumentViewer";
+import { cn } from "@/lib/utils";
+import {
+  CITATION_MARK_CLASS,
+  CITATION_MARK_LABEL,
+  CITATION_MARK_STYLE,
+} from "./citationMark";
 import { charRangeForByteSpan, type CitationSpan } from "./citationSpan";
 import { DocumentError } from "./error";
 import { ImageViewer } from "./image-viewer";
-import { MarkdownViewer, type HighlightRange } from "./markdown-viewer";
+import { MarkdownViewer } from "./markdown-viewer";
 
 // Both tree viewers carry their own parsing and node machinery, and neither is
 // on the path of the formats readers open most, so they load on demand.
@@ -77,17 +83,20 @@ type DocumentDetailsProps = {
   info: DocumentDetail;
   view: DocumentView;
   hasOriginalDocumentTab?: boolean;
-  /** Character range in the original to reveal, when opened from a citation. */
-  highlightRange?: HighlightRange;
   /**
    * Node to reveal in a tree viewer, when opened from a citation: a
    * dot-notation path for JSON, an XPath expression for XML.
+   *
+   * Uncalled, and not derivable from a citation: a citation addresses a byte
+   * range of the text read out of the file, and which node of the parsed tree
+   * that range came from is not recorded anywhere. The viewers honour the prop,
+   * so a producer of node paths would only have to reach this far.
    */
   highlightPath?: string;
   /**
-   * Byte range in the extracted text to highlight and scroll to, when opened
-   * from a citation. Distinct from `highlightRange`, which addresses characters
-   * of the original file rather than bytes of the text read out of it.
+   * Byte range of the cited passage in the text of record, when opened from a
+   * citation. Highlighted in the extracted text, and in a text-shaped original,
+   * whose text of record is the file verbatim.
    */
   citationSpan?: CitationSpan;
   /** Page of a paginated original to open on, when opened from a citation. */
@@ -109,7 +118,6 @@ export function DocumentDetails({
   info,
   view,
   hasOriginalDocumentTab,
-  highlightRange,
   highlightPath,
   citationSpan,
   targetPage,
@@ -159,11 +167,14 @@ export function DocumentDetails({
               )}
             </Suspense>
           ) : (
+            // Everything that reaches here is a `text/*` source, and nothing is
+            // extracted out of those: the text of record is the file, so the
+            // citation's own offsets address what the viewer draws.
             <MarkdownViewer
               client={client}
               chatId={chatId}
               documentID={info.document_id}
-              highlightRange={highlightRange}
+              citationSpan={citationSpan}
               markdown={type === "text/markdown"}
               className="bg-page-background grow"
             />
@@ -242,8 +253,8 @@ function ExtractedText({
             {info.content.slice(0, cited.start)}
             <mark
               ref={citedRef}
-              aria-label="Cited passage"
-              className="rounded bg-yellow-200/60 dark:bg-yellow-500/25"
+              aria-label={CITATION_MARK_LABEL}
+              className={cn(CITATION_MARK_CLASS, CITATION_MARK_STYLE)}
             >
               {info.content.slice(cited.start, cited.end)}
             </mark>

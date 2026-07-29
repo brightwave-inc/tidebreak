@@ -130,11 +130,15 @@ function seedTranscript(source: Partial<AssistantSource> & { id: string }) {
   }));
 }
 
-async function openCitation(info: DocumentDetail, citationId: string) {
+async function openCitation(
+  info: DocumentDetail,
+  citationId: string,
+  body = "bytes",
+) {
   const client = {
     getChatDocument: vi.fn().mockResolvedValue(info),
     getChatDocumentFile: vi.fn().mockResolvedValue({
-      bytes: new TextEncoder().encode("bytes"),
+      bytes: new TextEncoder().encode(body),
       contentType: info.media_type,
     }),
   };
@@ -287,6 +291,65 @@ describe("DocumentDetailRoot", () => {
       await screen.findByRole("tab", { name: "Original document", selected: true }),
     ).toBeVisible();
     expect(document.querySelector("mark")).toBeNull();
+  });
+
+  // A text source is its own text of record — nothing is read out of it — so the
+  // citation's offsets address the original as well as the extracted text, and
+  // the mark follows the reader from one view to the other.
+  //
+  // The passage sits behind an accent and behind a single newline the renderer
+  // turns into a hard break, which are the two ways a source offset stops
+  // agreeing with the position it is drawn at: the first shifts the byte
+  // conversion, the second shifts the offsets the parser recorded.
+  const MARKDOWN_CONTENT =
+    "# Café notes\n\nQuarter one was flat.\nRevenue rose **12%** in the second quarter.\n";
+  const MARKDOWN_PASSAGE = "Revenue rose **12%** in the second";
+
+  it("marks the cited passage in a rendered markdown original", async () => {
+    const user = userEvent.setup();
+    seedTranscript({
+      id: "cite-3",
+      span: byteSpan(MARKDOWN_CONTENT, MARKDOWN_PASSAGE),
+    });
+    await openCitation(
+      detail({
+        media_type: "text/markdown",
+        title: "Report.md",
+        content: MARKDOWN_CONTENT,
+      }),
+      "cite-3",
+      MARKDOWN_CONTENT,
+    );
+
+    await user.click(await screen.findByRole("tab", { name: "Original document" }));
+    await screen.findByText(/Quarter one was flat/);
+
+    // The passage spans an emphasized word, which is three places in the
+    // rendered tree rather than one run: the words between them are not
+    // adjacent there, so each is marked where it stands.
+    const marks = Array.from(document.querySelectorAll("mark"));
+    expect(marks.map((mark) => mark.textContent).join("")).toBe(
+      "Revenue rose 12% in the second",
+    );
+    expect(document.querySelector("strong mark")?.textContent).toBe("12%");
+    expect(scrolledTo).toContain(marks[0]);
+  });
+
+  it("marks the cited passage in an original drawn as plain text", async () => {
+    const user = userEvent.setup();
+    seedTranscript({ id: "cite-4", span: byteSpan(CITED_CONTENT, CITED_PASSAGE) });
+    await openCitation(
+      detail({ media_type: "text/plain", title: "Notes.txt", content: CITED_CONTENT }),
+      "cite-4",
+      CITED_CONTENT,
+    );
+
+    await user.click(await screen.findByRole("tab", { name: "Original document" }));
+
+    const marks = await screen.findAllByText(CITED_PASSAGE);
+    expect(marks.every((mark) => mark.tagName === "MARK")).toBe(true);
+    // Drawn as written, the file still reads as one run around the mark.
+    expect(document.querySelector("pre")?.textContent).toBe(CITED_CONTENT);
   });
 
   it("opens a paginated citation on its recorded page, then lets the reader leave", async () => {

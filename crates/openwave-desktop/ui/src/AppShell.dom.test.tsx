@@ -75,8 +75,8 @@ vi.mock("./sources/SourcesView", () => ({
   SourcesView: () => <div data-testid="sources">sources</div>,
 }));
 
-vi.mock("./DeliverablesView", () => ({
-  DeliverablesView: () => <div data-testid="outputs">outputs</div>,
+vi.mock("./outputs/OutputsView", () => ({
+  OutputsView: () => <div data-testid="outputs">outputs</div>,
 }));
 
 vi.mock("./FoldersView", () => ({
