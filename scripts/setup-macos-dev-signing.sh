@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 
-# Create the local-only signing identity used when a macOS contributor does
-# not already have an openwave-dev or Apple Development identity.
+# Create the local-only signing identity used when a macOS contributor has no
+# team-identified code-signing identity at all — see the preference list in
+# macos-dev-sign-runner.sh.
 #
-# The identity lives in a dedicated keychain rather than the login keychain:
-# OpenWave can unlock it without asking for the login password, and routine
-# development never needs access to a Developer ID distribution key. The
-# certificate is self-signed and untrusted, which is sufficient for a stable
-# designated requirement on local binaries. Its private key has no value
-# outside this machine.
+# The identity lives in a dedicated keychain rather than the login keychain, so
+# OpenWave can unlock it without asking for the login password. Its private key
+# has no value outside this machine.
+#
+# Being self-signed, the certificate carries no team identifier, so a keychain
+# ACL granted to a binary it signed is pinned to that binary's cdhash and does
+# not survive a rebuild. It gives local binaries a stable identity for
+# everything else, but it cannot make credential approvals stick — which is why
+# the runner reaches for it last.
 
 set -euo pipefail
 
@@ -16,7 +20,6 @@ state_dir="${OPENWAVE_DEV_SIGNING_DIR:-${HOME}/Library/Application Support/OpenW
 keychain="$state_dir/openwave-dev.keychain-db"
 password_file="$state_dir/keychain-password"
 lock_dir="$state_dir/setup.lock"
-existing_only="${1:-}"
 
 umask 077
 mkdir -p "$state_dir"
@@ -52,10 +55,6 @@ ensure_searchable() {
 if keychain_is_ready; then
   ensure_searchable
   exit 0
-fi
-
-if [[ "$existing_only" == "--existing-only" ]]; then
-  exit 1
 fi
 
 acquired_lock=false
