@@ -1,7 +1,6 @@
 import { createContext, useContext } from "react";
 
 import type { ApiClient, Chat, CitationFormat, ModelInfo, ProviderInfo } from "./api";
-import type { ThemeMode } from "./theme";
 import type { DesktopUpdateState } from "./updates";
 
 /**
@@ -42,9 +41,6 @@ export type AppContextValue = {
   startRename: (chat: Chat) => void;
   commitRename: (chat: Chat) => void;
   cancelRename: () => void;
-  themeMode: ThemeMode;
-  setThemeMode: (mode: ThemeMode) => void;
-  cycleTheme: () => void;
   updateState: DesktopUpdateState;
   checkForUpdate: () => Promise<DesktopUpdateState>;
   restartForUpdate: () => Promise<void>;

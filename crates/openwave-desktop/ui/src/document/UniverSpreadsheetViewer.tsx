@@ -14,9 +14,8 @@ import type { HTMLAttributes, ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { ApiClient } from "@/api";
-import { useApp } from "@/AppContext";
 import { cn } from "@/lib/utils";
-import { resolveTheme } from "@/theme";
+import { useTheme } from "@/theme";
 import UniverFormulaWorker from "@/workers/univer-formula.worker?worker&inline";
 import { SpreadsheetShortcutsInfoBar } from "./SpreadsheetShortcutsInfo";
 import { parseCellAddress } from "./spreadsheet";
@@ -72,8 +71,7 @@ export default function UniverSpreadsheetViewer({
   highlightRangeRef.current = highlightRange;
   const [errorType, setErrorType] = useState<"parse" | "load" | null>(null);
   const univerWorker = useUniverWorker();
-  const { themeMode } = useApp();
-  const resolvedTheme = resolveTheme(themeMode);
+  const { resolved: resolvedTheme } = useTheme();
   const resolvedThemeRef = useRef(resolvedTheme);
   resolvedThemeRef.current = resolvedTheme;
 

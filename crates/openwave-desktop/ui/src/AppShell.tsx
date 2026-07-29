@@ -23,7 +23,6 @@ import { useInterfaceZoom } from "./InterfaceZoom";
 import { Logomark } from "./Logomark";
 import { ManagedGate } from "./ManagedGate";
 import { resolvedRoleKey } from "./ModelSelection";
-import { useTheme } from "./theme";
 import { Titlebar } from "./Titlebar";
 import { useActiveChatId } from "./useActiveChatId";
 import { useChatPromptWatcher } from "./useChatPromptWatcher";
@@ -75,7 +74,6 @@ export function AppShell() {
   const creationInFlightRef = useRef(false);
   const deletionInFlightRef = useRef(false);
   const { confirm, dialog: confirmDialog } = useConfirm();
-  const { mode: themeMode, cycle: cycleTheme, setMode: setThemeMode } = useTheme();
   const desktopUpdates = useDesktopUpdates();
   const zoom = useInterfaceZoom();
 
@@ -307,9 +305,6 @@ export function AppShell() {
           startRename: startChatRename,
           commitRename: (target) => void commitChatRename(target),
           cancelRename: cancelChatRename,
-          themeMode,
-          setThemeMode,
-          cycleTheme,
           updateState: desktopUpdates.state,
           checkForUpdate: desktopUpdates.check,
           restartForUpdate: onRestartForUpdate,
