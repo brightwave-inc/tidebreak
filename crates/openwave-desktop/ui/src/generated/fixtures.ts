@@ -15,6 +15,9 @@ export const PENDING_APPROVAL = {
   "can_approve": true,
   "can_remember": true,
   "class": "sensitive",
+  "prefix_rungs": [
+    1
+  ],
   "preview": {
     "args": [
       "status"
@@ -33,6 +36,7 @@ export const PENDING_APPROVAL_WITHOUT_PREVIEW = {
   "can_approve": false,
   "can_remember": false,
   "class": "read_only",
+  "prefix_rungs": [],
   "turn_id": "00000000-0000-0000-0000-000000000002"
 } as const;
 

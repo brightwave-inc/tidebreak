@@ -429,6 +429,15 @@ pub enum GrantScope {
     ExactAction(ToolActionPreview),
     /// This executable, with any arguments.
     AnyArgsFor { command: String },
+    /// A leading run of argv tokens: the executable plus its subcommand
+    /// chain, with any arguments after it.
+    ///
+    /// The rung people actually reach for — "any `cargo test`", not "any
+    /// `cargo`". It is matched token-wise rather than as a string prefix, and
+    /// only after the command has cleared the analyzer's floor, so a grant
+    /// for `cargo test` cannot be stretched to something that merely starts
+    /// with those letters or that smuggles a shell in behind them.
+    CommandPrefix { tokens: Vec<String> },
     /// Every call to the tool.
     WholeTool,
 }
@@ -448,23 +457,75 @@ impl GrantScope {
     /// asking.
     #[must_use]
     pub fn covers_call(&self, tool_name: &str, arguments: &serde_json::Value) -> bool {
-        if matches!(self, Self::WholeTool) {
-            return true;
-        }
         if !ToolActionPreview::describes_exactly(tool_name, arguments) {
-            return false;
+            // Nothing describable to match, so only the widest scope can
+            // apply — and it applies to a call the renderer could not show,
+            // which is exactly what granting the whole tool agreed to.
+            return matches!(self, Self::WholeTool);
         }
         let Some(action) = ToolActionPreview::build(tool_name, arguments) else {
-            return false;
+            return matches!(self, Self::WholeTool);
         };
+        // A command is matched against its argv rather than its rendering,
+        // and only once the analyzer says the call is safe to auto-run under
+        // this very rule. That check is what makes a widened rung honest: a
+        // grant for `cargo` stops covering `cargo` the moment the arguments
+        // reach somewhere they should not, instead of covering it forever
+        // because the executable still matches.
+        if let ToolActionPreview::Exec { command, args, .. } = &action {
+            return self.covers_argv(&action, command, args);
+        }
         match self {
             Self::WholeTool => true,
             Self::ExactAction(granted) => *granted == action,
-            Self::AnyArgsFor { command } => matches!(
-                &action,
-                ToolActionPreview::Exec { command: called, .. } if called == command
-            ),
+            // Only a command has an executable or a token run to name.
+            Self::AnyArgsFor { .. } | Self::CommandPrefix { .. } => false,
         }
+    }
+
+    /// Whether this scope authorizes one command invocation.
+    ///
+    /// Two independent questions, in order. Does the scope *name* this call —
+    /// for the exact rung that still means the whole projection, working
+    /// directory included, because "exactly this" was said about an action in
+    /// a place. And would the analyzer auto-run it under that rule — the
+    /// floor, which no rung escapes, so an interpreter or a path that climbs
+    /// out keeps asking however broadly it was granted.
+    fn covers_argv(&self, action: &ToolActionPreview, command: &str, args: &[String]) -> bool {
+        if let Self::ExactAction(granted) = self {
+            if granted != action {
+                return false;
+            }
+        }
+        let rule = match self {
+            Self::WholeTool => openwave_shell_policy::CommandRule::new(
+                openwave_shell_policy::CommandRuleKind::All,
+                Vec::new(),
+            ),
+            Self::AnyArgsFor { command } => openwave_shell_policy::CommandRule::new(
+                openwave_shell_policy::CommandRuleKind::Prefix,
+                vec![command.clone()],
+            ),
+            Self::CommandPrefix { tokens } => openwave_shell_policy::CommandRule::new(
+                openwave_shell_policy::CommandRuleKind::Prefix,
+                tokens.clone(),
+            ),
+            // The projection already matched above, so the analyzer is asked
+            // only whether this invocation clears the floor.
+            Self::ExactAction(_) => openwave_shell_policy::CommandRule::new(
+                openwave_shell_policy::CommandRuleKind::Exact,
+                exec_argv(command, args),
+            ),
+        };
+        let Ok(rule) = rule else {
+            return false;
+        };
+        let ruleset = openwave_shell_policy::ShellRuleSet {
+            allow: vec![rule],
+            deny: Vec::new(),
+        };
+        openwave_shell_policy::analyze_argv(&exec_argv(command, args), &ruleset).verdict
+            == openwave_shell_policy::ShellVerdict::Allow
     }
 
     /// The scopes offered for a call, narrowest first.
@@ -483,20 +544,52 @@ impl GrantScope {
         let Some(action) = ToolActionPreview::build(tool_name, arguments) else {
             return vec![Self::WholeTool];
         };
-        let mut ladder = vec![Self::ExactAction(action.clone())];
-        // A command is the one action with a rung between "this exact call" and
-        // "every call": the executable it runs. With no arguments even that
-        // would read as two names for one grant.
-        if let ToolActionPreview::Exec { command, args, .. } = &action {
-            if !args.is_empty() {
-                ladder.push(Self::AnyArgsFor {
-                    command: command.clone(),
-                });
-            }
-        }
-        ladder.push(Self::WholeTool);
-        ladder
+        Self::ladder_for_action(&action)
     }
+
+    /// The ladder for an action already projected from a parked call.
+    ///
+    /// The same rungs [`Self::ladder_for`] offers, reachable from the durable
+    /// action so a decision arriving later is rebuilt against exactly what
+    /// the card showed rather than against anything the client sent.
+    #[must_use]
+    pub fn ladder_for_action(action: &ToolActionPreview) -> Vec<Self> {
+        let action = action.clone();
+        // A command's ladder is built by the analyzer rather than assembled
+        // here, and every rung on it is verified: a rung appears only when
+        // granting exactly that rule would in fact stop the asking. That is
+        // what stops the card offering "always allow any `timeout`", which
+        // the gate would then refuse to honor.
+        if let ToolActionPreview::Exec { command, args, .. } = &action {
+            let argv = exec_argv(command, args);
+            let mut ladder: Vec<Self> = openwave_shell_policy::suggested_rungs_for_argv(&argv)
+                .into_iter()
+                .map(|rule| match rule.kind {
+                    openwave_shell_policy::CommandRuleKind::Exact => {
+                        Self::ExactAction(action.clone())
+                    }
+                    openwave_shell_policy::CommandRuleKind::Prefix => Self::CommandPrefix {
+                        tokens: rule.tokens,
+                    },
+                    openwave_shell_policy::CommandRuleKind::All => Self::WholeTool,
+                })
+                .collect();
+            // A command the analyzer will not auto-run under any rule has no
+            // ladder at all, and offering one anyway would promise something
+            // the gate refuses. Approving once stays available.
+            ladder.dedup();
+            return ladder;
+        }
+        vec![Self::ExactAction(action), Self::WholeTool]
+    }
+}
+
+/// One command invocation as the analyzer reads it.
+fn exec_argv(command: &str, args: &[String]) -> Vec<String> {
+    let mut argv = Vec::with_capacity(args.len() + 1);
+    argv.push(command.to_owned());
+    argv.extend(args.iter().cloned());
+    argv
 }
 
 impl StandingGrant {
@@ -976,28 +1069,26 @@ mod standing_grant_tests {
                 GrantLevel::Chat { chat_id: chat },
                 "exec",
                 kind,
-                exact_command("bash", &["-c", &long]),
+                exact_command("echo", &[&long]),
                 Utc::now(),
             )
             .unwrap(),
         );
 
-        // Truncation: a longer script sharing the granted prefix projects to
+        // Deliberately not an interpreter: the floor refuses those outright,
+        // which would pass this test for a reason that has nothing to do with
+        // the clamping it is here to check.
+        //
+        // Truncation: a longer argument sharing the granted prefix projects to
         // the same preview. Keying on the projection would run it unprompted.
         let appended = format!("{long}; rm -rf ~");
-        assert!(!grants.covers(
-            chat,
-            None,
-            "exec",
-            kind,
-            &exec_args("bash", &["-c", &appended])
-        ));
+        assert!(!grants.covers(chat, None, "exec", kind, &exec_args("echo", &[&appended])));
         // A value exactly at the bound is not truncated, so it stays faithful
         // and the grant still covers the command it was actually given for.
-        assert!(grants.covers(chat, None, "exec", kind, &exec_args("bash", &["-c", &long])));
+        assert!(grants.covers(chat, None, "exec", kind, &exec_args("echo", &[&long])));
         // Nothing at or past the bound can be turned into a narrow grant.
         assert_eq!(
-            GrantScope::ladder_for("exec", &exec_args("bash", &["-c", &appended])),
+            GrantScope::ladder_for("exec", &exec_args("echo", &[&appended])),
             vec![GrantScope::WholeTool]
         );
     }
@@ -1096,14 +1187,32 @@ mod standing_grant_tests {
         assert!(!grants.covers(chat, None, "exec", kind, &exec_args("rm", &["-rf"])));
     }
 
+    /// No rung outruns the floor, including the widest one.
+    ///
+    /// "Don't ask again about commands" used to mean every command, so a
+    /// grant taken for `cargo` also carried `rm -rf` and `bash -c`. It now
+    /// means every command the analyzer would run on its own — a grant is a
+    /// standing yes to the routine, never a blanket one.
     #[test]
-    fn a_whole_tool_grant_covers_an_action_it_cannot_read() {
+    fn the_widest_grant_still_stops_at_the_floor() {
         let chat = ChatId::new();
         let kind = ToolApprovalKind::for_tool_name("exec");
         let grants = StandingGrants::new();
         grants.record(grant(chat, "exec"));
 
-        assert!(grants.covers(chat, None, "exec", kind, &exec_args("rm", &["-rf"])));
+        assert!(grants.covers(chat, None, "exec", kind, &exec_args("cargo", &["test"])));
+        // Destructive, and an interpreter, and a path out of the workspace.
+        assert!(!grants.covers(chat, None, "exec", kind, &exec_args("rm", &["-rf", "/"])));
+        assert!(!grants.covers(chat, None, "exec", kind, &exec_args("bash", &["-c", "id"])));
+        assert!(!grants.covers(
+            chat,
+            None,
+            "exec",
+            kind,
+            &exec_args("cat", &["../../outside.txt"])
+        ));
+        // An action with nothing to read is still covered: that is what
+        // granting the whole tool agreed to.
         assert!(grants.covers(chat, None, "exec", kind, &no_args()));
     }
 
@@ -1113,17 +1222,29 @@ mod standing_grant_tests {
             GrantScope::ladder_for("exec", &exec_args("cargo", &["test"])),
             vec![
                 exact_command("cargo", &["test"]),
-                GrantScope::AnyArgsFor {
-                    command: "cargo".into(),
+                // The rung this ladder previously could not offer: the
+                // subcommand, not the whole executable.
+                GrantScope::CommandPrefix {
+                    tokens: vec!["cargo".into(), "test".into()],
+                },
+                GrantScope::CommandPrefix {
+                    tokens: vec!["cargo".into()],
                 },
                 GrantScope::WholeTool,
             ]
         );
-        // With no arguments, "exactly this" and "any arguments to this" would
-        // be two names for the same grant.
+        // With no arguments the two narrow rungs are still different grants:
+        // "exactly `true`" runs only that, while the prefix also covers
+        // `true --whatever`.
         assert_eq!(
             GrantScope::ladder_for("exec", &exec_args("true", &[])),
-            vec![exact_command("true", &[]), GrantScope::WholeTool,]
+            vec![
+                exact_command("true", &[]),
+                GrantScope::CommandPrefix {
+                    tokens: vec!["true".into()],
+                },
+                GrantScope::WholeTool,
+            ]
         );
         // Nothing to describe means nothing narrower to offer.
         assert_eq!(

@@ -6756,6 +6756,7 @@ dependencies = [
  "futures",
  "futures-timer",
  "keyring",
+ "openwave-shell-policy",
  "schemars 1.2.2",
  "sea-orm",
  "sea-orm-migration",

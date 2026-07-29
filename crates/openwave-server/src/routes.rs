@@ -2420,8 +2420,14 @@ pub struct ApprovalBody {
 pub enum ApprovalGrantRung {
     /// Exactly the action the card showed.
     ExactAction,
-    /// This executable, with any arguments.
-    AnyArgsForCommand,
+    /// A leading run of the command's argv tokens, with any arguments after
+    /// it — "any `cargo test`", not just "any `cargo`".
+    ///
+    /// The renderer names how many tokens it was offered rather than the
+    /// tokens themselves. The server derives the ladder from the parked
+    /// call's own arguments and honors the length only if it appears there,
+    /// so a client cannot invent a prefix the card never showed.
+    CommandPrefix { tokens: usize },
     /// Every call to this tool.
     WholeTool,
 }
@@ -2461,6 +2467,14 @@ pub(crate) struct PendingApprovalSnapshot {
     pub preview: Option<openwave_core::ToolActionPreview>,
     pub can_approve: bool,
     pub can_remember: bool,
+    /// Token counts of the command-prefix rungs this call may be granted at,
+    /// narrowest first.
+    ///
+    /// Derived server-side, because whether a prefix rung exists at all is a
+    /// question only the analyzer can answer — a wrapper has none. The
+    /// renderer slices the action's own tokens to these lengths for the
+    /// labels rather than deciding for itself what to offer.
+    pub prefix_rungs: Vec<usize>,
     /// Where the Auto-mode judge stands, when one was engaged. Absent means
     /// no judge ever owned this card.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2477,12 +2491,31 @@ impl PendingApprovalSnapshot {
             action: openwave_core::RendererToolName::from(approval.tool_name.as_str()),
             approval: kind,
             class: approval.class,
+            prefix_rungs: approval
+                .preview
+                .as_ref()
+                .map(prefix_rung_lengths)
+                .unwrap_or_default(),
             preview: approval.preview,
             can_approve: kind.is_approvable(),
             can_remember: kind.is_standing_grantable(),
             auto_judge_status: approval.auto_judge_status,
         }
     }
+}
+
+/// The command-prefix rungs on offer for an action, as token counts.
+///
+/// Empty for anything that is not a command, and for a command the analyzer
+/// would not auto-run under a prefix rule however it were granted.
+pub(crate) fn prefix_rung_lengths(action: &openwave_core::ToolActionPreview) -> Vec<usize> {
+    openwave_core::GrantScope::ladder_for_action(action)
+        .into_iter()
+        .filter_map(|scope| match scope {
+            openwave_core::GrantScope::CommandPrefix { tokens } => Some(tokens.len()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// `GET /chats/{id}/approvals` — recover a bounded page of pending cards.

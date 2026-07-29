@@ -205,15 +205,31 @@ fn grant_scope(
     match (rung, action?) {
         (ApprovalGrantRung::WholeTool, _) => Some(GrantScope::WholeTool),
         (ApprovalGrantRung::ExactAction, action) => Some(GrantScope::ExactAction(action.clone())),
-        (ApprovalGrantRung::AnyArgsForCommand, ToolActionPreview::Exec { command, .. }) => {
-            Some(GrantScope::AnyArgsFor {
-                command: command.clone(),
-            })
+        (ApprovalGrantRung::CommandPrefix { tokens }, action @ ToolActionPreview::Exec { .. }) => {
+            command_prefix_scope(action, tokens)
         }
-        // Only a command has an executable to name, so no other action can
+        // Only a command has a token run to name, so no other action can
         // reach the rung between exact and whole-tool.
-        (ApprovalGrantRung::AnyArgsForCommand, _) => None,
+        (ApprovalGrantRung::CommandPrefix { .. }, _) => None,
     }
+}
+
+/// Rebuild a prefix rung from the parked call rather than from the request.
+///
+/// The renderer sends only a length. The concrete tokens come from the
+/// action the call is actually parked on, and the length is honored only if
+/// the analyzer offered a prefix of exactly that many tokens for this
+/// command — so a client cannot name a wider prefix than the card showed, and
+/// cannot name one at all for a command whose ladder has none.
+fn command_prefix_scope(
+    action: &openwave_core::ToolActionPreview,
+    tokens: usize,
+) -> Option<GrantScope> {
+    openwave_core::GrantScope::ladder_for_action(action)
+        .into_iter()
+        .find(|scope| {
+            matches!(scope, GrantScope::CommandPrefix { tokens: offered } if offered.len() == tokens)
+        })
 }
 
 impl ApprovalGate for ApprovalBroker {
@@ -697,6 +713,75 @@ mod tests {
         drop(registration.decision);
     }
 
+    /// The rung the ladder exists for, end to end: a grant taken for
+    /// `cargo test` covers the next `cargo test` without asking, and does not
+    /// quietly become a grant for every `cargo`.
+    #[tokio::test]
+    async fn a_prefix_grant_covers_its_subcommand_and_no_more() {
+        let (store, request) = setup_with_arguments(
+            "exec",
+            json!({ "command": "cargo", "args": ["test", "--all"], "cwd": "." }),
+        )
+        .await;
+        let broker = ApprovalBroker::new(store.clone());
+        let pending = broker.register(request.clone(), None).await;
+        drop(pending.decision);
+        assert_eq!(
+            broker
+                .resolve_with_grant(
+                    request.chat_id,
+                    request.call_id,
+                    ApprovalDecision::Approve,
+                    // Two tokens: `cargo test`.
+                    Some(crate::routes::ApprovalGrantRung::CommandPrefix { tokens: 2 }),
+                )
+                .await
+                .unwrap(),
+            ResolveApprovalOutcome::Resolved
+        );
+
+        let exec = |args: &[&str]| json!({ "command": "cargo", "args": args, "cwd": "." });
+        // Another `cargo test` runs without asking...
+        let covered = request_for(&store, request.chat_id, "exec", exec(&["test", "--lib"])).await;
+        assert!(matches!(
+            broker.register(covered, None).await.publication,
+            openwave_core::ApprovalRequiredPublication::StandingGrant
+        ));
+        // ...but a different `cargo` subcommand still asks.
+        let uncovered = request_for(&store, request.chat_id, "exec", exec(&["publish"])).await;
+        let registration = broker.register(uncovered, None).await;
+        assert!(!matches!(
+            registration.publication,
+            openwave_core::ApprovalRequiredPublication::StandingGrant
+        ));
+        drop(registration.decision);
+    }
+
+    /// A prefix the card never offered cannot be claimed by asking for it.
+    #[tokio::test]
+    async fn a_prefix_longer_than_the_ladder_offered_is_refused() {
+        let (store, request) = setup_with_arguments(
+            "exec",
+            json!({ "command": "cargo", "args": ["test"], "cwd": "." }),
+        )
+        .await;
+        let broker = ApprovalBroker::new(store);
+        let _pending = broker.register(request.clone(), None).await;
+        assert_eq!(
+            broker
+                .resolve_with_grant(
+                    request.chat_id,
+                    request.call_id,
+                    ApprovalDecision::Approve,
+                    // The ladder offers 1 and 2 tokens; 9 is not on it.
+                    Some(crate::routes::ApprovalGrantRung::CommandPrefix { tokens: 9 }),
+                )
+                .await
+                .unwrap(),
+            ResolveApprovalOutcome::GrantNotAvailable
+        );
+    }
+
     #[tokio::test]
     async fn a_revoked_grant_leaves_the_list_and_stops_covering() {
         let exec_args = json!({ "command": "cargo", "args": ["test"], "cwd": "." });
@@ -1089,7 +1174,7 @@ mod tests {
                     request.chat_id,
                     request.call_id,
                     ApprovalDecision::Approve,
-                    Some(crate::routes::ApprovalGrantRung::AnyArgsForCommand),
+                    Some(crate::routes::ApprovalGrantRung::CommandPrefix { tokens: 1 }),
                 )
                 .await
                 .unwrap(),

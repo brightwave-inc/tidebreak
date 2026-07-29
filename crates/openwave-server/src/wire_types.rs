@@ -553,6 +553,7 @@ mod tests {
             }),
             can_approve: true,
             can_remember: true,
+            prefix_rungs: vec![1],
         };
         // The same shape with the omittable field absent, because "the key is
         // missing" is a distinct case the validator has to survive and the one
@@ -567,6 +568,7 @@ mod tests {
             preview: None,
             can_approve: false,
             can_remember: false,
+            prefix_rungs: Vec::new(),
         };
 
         let folder_access = crate::routes::client_execution::PendingFolderAccessRequest {
