@@ -53,6 +53,11 @@ pub enum ConnectError {
     /// established.
     #[error("attach refused: sandbox speaks protocol version {}", .0.protocol_version)]
     VersionRefused(AttachRefused),
+    /// The presented transport secret did not match; the sandbox answered with an
+    /// on-wire [`AttachRefused`], and no session was established or served. The
+    /// error text carries no secret.
+    #[error("attach refused: the sandbox rejected the transport secret")]
+    Unauthenticated(AttachRefused),
     /// The address resolves to no reachable sandbox.
     #[error("sandbox address is not reachable: {0}")]
     Unreachable(String),
@@ -473,9 +478,10 @@ impl ReferenceBackend {
     /// [`AttachRefused`] rather than an out-of-band decision.
     ///
     /// # Errors
-    /// [`ConnectError::VersionRefused`] on a version mismatch (carrying the
-    /// sandbox's on-wire refusal; the connection is not established), or
-    /// [`ConnectError::Unreachable`] if the address resolves to no sandbox.
+    /// [`ConnectError::VersionRefused`] on a version mismatch or
+    /// [`ConnectError::Unauthenticated`] on a rejected transport secret (each
+    /// carrying the sandbox's on-wire refusal; the connection is not established),
+    /// or [`ConnectError::Unreachable`] if the address resolves to no sandbox.
     pub fn connect(
         &self,
         address: &SandboxAddress,
@@ -493,12 +499,16 @@ impl ReferenceBackend {
         let accepted = match handshake(
             &attach,
             sandbox.protocol_version(),
+            Some(&self.secret),
             host.granted_capabilities(),
             sandbox.latest_sequence(),
         ) {
             HandshakeResponse::Accepted(accepted) => accepted,
             HandshakeResponse::Refused(refused) => {
-                return Err(ConnectError::VersionRefused(refused))
+                return Err(match refused.code {
+                    ErrorCode::Unauthenticated => ConnectError::Unauthenticated(refused),
+                    _ => ConnectError::VersionRefused(refused),
+                });
             }
         };
 

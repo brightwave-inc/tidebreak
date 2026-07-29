@@ -26,7 +26,7 @@ use crate::{
     events::SandboxEvent,
     host::CapabilityHost,
     ids::EventCursor,
-    protocol::{AttachAccepted, AttachRefused, AttachRequest, HandshakeResponse},
+    protocol::{AttachAccepted, AttachRefused, AttachRequest, ErrorCode, HandshakeResponse},
     reverse::{ControlFrame, RequestFrame, ReverseResponseEnvelope},
     wire::{read_frame, write_frame, write_prioritized, FrameError, WireFrame},
 };
@@ -39,6 +39,10 @@ pub enum ConnectError {
     /// established.
     #[error("attach refused: sandbox speaks protocol version {}", .0.protocol_version)]
     VersionRefused(AttachRefused),
+    /// The sandbox refused the presented transport secret; the connection is not
+    /// established and no capability was served. The error text carries no secret.
+    #[error("attach refused: the sandbox rejected the transport secret")]
+    Unauthenticated(AttachRefused),
     /// The handshake did not complete: the sandbox closed the connection or sent
     /// something other than a handshake frame first.
     #[error("the sandbox did not complete the attach handshake: {0}")]
@@ -79,10 +83,11 @@ impl WireClient {
     /// wired to `host`.
     ///
     /// # Errors
-    /// [`ConnectError::VersionRefused`] on a version mismatch (the connection is
-    /// not established), [`ConnectError::Handshake`] if the sandbox closes or
-    /// answers with a non-handshake frame, or [`ConnectError::Transport`] on a
-    /// transport failure during attach.
+    /// [`ConnectError::VersionRefused`] on a version mismatch or
+    /// [`ConnectError::Unauthenticated`] on a rejected transport secret (in either
+    /// case the connection is not established), [`ConnectError::Handshake`] if the
+    /// sandbox closes or answers with a non-handshake frame, or
+    /// [`ConnectError::Transport`] on a transport failure during attach.
     pub async fn connect<S>(
         stream: S,
         attach: AttachRequest,
@@ -132,7 +137,10 @@ impl WireClient {
             let accepted = match read_frame(&mut reader).await {
                 Ok(WireFrame::Handshake(HandshakeResponse::Accepted(accepted))) => accepted,
                 Ok(WireFrame::Handshake(HandshakeResponse::Refused(refused))) => {
-                    return Err(ConnectError::VersionRefused(refused));
+                    return Err(match refused.code {
+                        ErrorCode::Unauthenticated => ConnectError::Unauthenticated(refused),
+                        _ => ConnectError::VersionRefused(refused),
+                    });
                 }
                 Ok(_) => {
                     return Err(ConnectError::Handshake(
@@ -335,6 +343,7 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             run_id: RunId::new(),
             resume_from: EventCursor::START,
+            transport_secret: crate::provisioning::TransportSecret::new("event-lane-test"),
         }
     }
 

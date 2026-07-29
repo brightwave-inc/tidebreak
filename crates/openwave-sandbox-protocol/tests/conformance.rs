@@ -13,6 +13,11 @@ async fn version_mismatch_is_refused() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unauthenticated_attach_is_refused() {
+    conformance::unauthenticated_attach_is_refused().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deny_by_default_refuses_ungranted_capability() {
     conformance::deny_by_default_refuses_ungranted_capability().await;
 }

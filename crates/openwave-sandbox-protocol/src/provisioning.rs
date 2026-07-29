@@ -86,6 +86,10 @@ pub struct SandboxHandle {
 /// It is a bearer secret and a deduplication aid, not proof of sandbox
 /// authenticity: whoever carries it can impersonate the run to the host, which
 /// is a trust-model fact, not fine print. It is never logged or `Debug`-printed.
+///
+/// The sandbox supervisor holds the expected secret and checks a presented token
+/// against it with [`verify`](Self::verify) — a constant-time comparison — before
+/// it installs a connection or serves any capability.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct TransportSecret(String);
@@ -102,12 +106,50 @@ impl TransportSecret {
     pub fn expose(&self) -> &str {
         &self.0
     }
+
+    /// Whether a `presented` token equals this expected secret.
+    ///
+    /// The comparison runs in time independent of *where* the two tokens diverge:
+    /// it never returns on the first differing byte, so a caller cannot learn a
+    /// correct prefix from how long the check took. A length difference — the
+    /// length of a bearer token is not itself the secret — is the only early exit.
+    /// Neither operand is logged or `Debug`-printed.
+    #[must_use]
+    pub fn verify(&self, presented: &TransportSecret) -> bool {
+        constant_time_eq(self.0.as_bytes(), presented.0.as_bytes())
+    }
+}
+
+impl Default for TransportSecret {
+    /// The empty token: it authenticates against no configured secret. It stands
+    /// for "no secret presented" so an attach that omits one deserializes to this
+    /// and is refused, rather than being silently accepted.
+    fn default() -> Self {
+        Self(String::new())
+    }
 }
 
 impl std::fmt::Debug for TransportSecret {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("TransportSecret([redacted])")
     }
+}
+
+/// Byte equality in time independent of where the inputs differ.
+///
+/// The difference is accumulated across every byte rather than returned on the
+/// first mismatch, so two equal-length inputs are always compared in full; only a
+/// length difference short-circuits. [`std::hint::black_box`] keeps the optimizer
+/// from reintroducing an early exit over the accumulator.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut difference: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        difference |= x ^ y;
+    }
+    std::hint::black_box(difference) == 0
 }
 
 /// A reachable base URL plus the per-run credential the host presents.
@@ -151,4 +193,45 @@ pub trait SandboxBackend: Send + Sync {
     /// [`BackendError::Teardown`] if teardown could not be confirmed; the caller
     /// re-drives the obligation on the next sweep.
     async fn destroy(&self, handle: &SandboxHandle) -> Result<(), BackendError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_redacts_the_secret() {
+        let secret = TransportSecret::new("super-secret-token");
+        let rendered = format!("{secret:?}");
+        assert!(
+            !rendered.contains("super-secret-token"),
+            "Debug leaked the secret"
+        );
+        assert!(rendered.contains("redacted"));
+    }
+
+    #[test]
+    fn verify_accepts_the_matching_secret_and_rejects_others() {
+        let expected = TransportSecret::new("correct-horse-battery-staple");
+        assert!(expected.verify(&TransportSecret::new("correct-horse-battery-staple")));
+        // A wrong token of the SAME length is refused: the comparison examines
+        // every byte, so a shared prefix does not pass.
+        assert!(!expected.verify(&TransportSecret::new("Xorrect-horse-battery-staple")));
+        assert!(!expected.verify(&TransportSecret::new("correct-horse-battery-staplX")));
+        // A different length, and the empty (absent) token, are refused too.
+        assert!(!expected.verify(&TransportSecret::new("short")));
+        assert!(!expected.verify(&TransportSecret::default()));
+    }
+
+    #[test]
+    fn constant_time_eq_examines_every_byte() {
+        assert!(constant_time_eq(b"abcdef", b"abcdef"));
+        // A difference at the first byte is caught.
+        assert!(!constant_time_eq(b"Xbcdef", b"abcdef"));
+        // A difference only at the LAST byte is the short-circuit trap: a compare
+        // that returned `true` after the matching prefix would wrongly accept it.
+        assert!(!constant_time_eq(b"abcdeX", b"abcdef"));
+        // A length mismatch is refused.
+        assert!(!constant_time_eq(b"abc", b"abcdef"));
+    }
 }

@@ -8,9 +8,10 @@
 //! own fixture and panics on a contract violation, so `tests/conformance.rs` can
 //! surface them as individual CI checks.
 //!
-//! The four contract areas the suite must cover, and where:
+//! The contract areas the suite must cover, and where:
 //!
 //! - **version-mismatch refusal** — [`version_mismatch_is_refused`];
+//! - **authenticated attach** — [`unauthenticated_attach_is_refused`];
 //! - **deny-by-default** — [`deny_by_default_refuses_ungranted_capability`];
 //! - **the event-stream resumable-cursor contract** —
 //!   [`event_stream_resumes_from_committed_cursor`] and
@@ -130,10 +131,17 @@ fn provision_request() -> ProvisionRequest {
 }
 
 fn attach_request() -> AttachRequest {
+    attach_presenting(secret())
+}
+
+/// An attach presenting `secret`, so the backend's authenticated handshake
+/// accepts it (or, with a mismatched secret, refuses it).
+fn attach_presenting(secret: TransportSecret) -> AttachRequest {
     AttachRequest {
         protocol_version: PROTOCOL_VERSION,
         run_id: RunId::new(),
         resume_from: EventCursor::START,
+        transport_secret: secret,
     }
 }
 
@@ -155,6 +163,7 @@ async fn attach(
                 protocol_version: PROTOCOL_VERSION,
                 run_id: RunId::new(),
                 resume_from,
+                transport_secret: secret(),
             },
             host,
         )
@@ -181,6 +190,35 @@ pub async fn version_mismatch_is_refused() {
         }
         Err(other) => panic!("expected a version-mismatch refusal, got {other:?}"),
         Ok(_) => panic!("a version mismatch must refuse the connection"),
+    }
+}
+
+/// An attach presenting a wrong (or absent) transport secret is refused, and no
+/// session is established — the version gate passes, so the refusal is auth. This
+/// pins the authenticated attach on the reference-backend code path, distinct
+/// from the wire suite's socket path.
+pub async fn unauthenticated_attach_is_refused() {
+    let sandbox = ReferenceSandbox::new();
+    let backend = ReferenceBackend::self_hosted("inproc://authn", secret(), sandbox);
+    let handle = backend
+        .provision(provision_request())
+        .await
+        .expect("provision");
+    let address = backend.address(&handle).await.expect("address");
+
+    for bad in [
+        TransportSecret::new("not-the-secret"),
+        TransportSecret::default(),
+    ] {
+        let (host, _store) = host_with(vec![Capability::ModelInference], echo().0);
+        match backend.connect(&address, attach_presenting(bad), host) {
+            Err(crate::reference::ConnectError::Unauthenticated(refused)) => {
+                assert_eq!(refused.protocol_version, PROTOCOL_VERSION);
+                assert_eq!(refused.code, ErrorCode::Unauthenticated);
+            }
+            Err(other) => panic!("expected an authentication refusal, got {other:?}"),
+            Ok(_) => panic!("a wrong transport secret must refuse the connection"),
+        }
     }
 }
 
@@ -467,6 +505,7 @@ async fn drive_one_run(backend: &ReferenceBackend, endpoint: Option<&str>) {
                 protocol_version: PROTOCOL_VERSION,
                 run_id: RunId::new(),
                 resume_from: EventCursor::START,
+                transport_secret: secret(),
             },
             host,
         )
@@ -626,6 +665,7 @@ pub async fn control_lane_cancel_preempts_saturated_request_lane() {
 /// Run every conformance scenario in sequence.
 pub async fn run_all() {
     version_mismatch_is_refused().await;
+    unauthenticated_attach_is_refused().await;
     deny_by_default_refuses_ungranted_capability().await;
     over_bound_request_is_refused().await;
     over_bound_event_is_refused().await;
