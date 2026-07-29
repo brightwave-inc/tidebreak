@@ -350,7 +350,9 @@ impl GatewayRuntime {
     /// picker and model policy; entitlement itself stays live at the gateway,
     /// which refuses a revoked model at inference time regardless of what is
     /// cached here.
-    pub(crate) async fn sync_models(&self) -> Result<usize> {
+    pub(crate) async fn sync_models(
+        &self,
+    ) -> std::result::Result<usize, crate::error::ServerError> {
         let policy = crate::managed_policy::resolve(&*self.store, &*self.os_policy).await?;
         let base_url = self
             .effective_base_url(&policy)
@@ -385,7 +387,11 @@ impl GatewayRuntime {
         // gateway's row with this one's model list.
         let policy = crate::managed_policy::resolve(&*self.store, &*self.os_policy).await?;
         if self.effective_base_url(&policy).await?.as_deref() != Some(base_url.as_str()) {
-            return Err(AgentError::config(
+            // A benign, retryable race — the deployment was re-pointed while
+            // the fetch was in flight — not an internal fault. The stable
+            // kind lets clients branch on it, as with `managed_profile`.
+            return Err(crate::error::ServerError::conflict_kind(
+                "gateway_changed",
                 "the model gateway configuration changed during model sync",
             ));
         }
@@ -699,8 +705,11 @@ mod tests {
     /// entitlement fetch is still in flight when a pairing re-points the
     /// profile at a different gateway. The sync must not stamp the old
     /// gateway's model list (or base URL) over the row the pairing just
-    /// wrote; removing the row serialization or its under-lock recheck lets
-    /// the stale write land and fails this.
+    /// wrote. The pairing here runs to completion before the parked fetch
+    /// is released, so the two read-modify-writes never overlap: what this
+    /// pins is the under-lock recheck refusing the stale write. The lock
+    /// itself is pinned by
+    /// `pairing::tests::a_provider_update_parked_mid_write_cannot_overwrite_a_pairing`.
     #[tokio::test]
     async fn a_sync_racing_a_pairing_cannot_resurrect_the_old_gateways_state() {
         // Gateway A: answers token refreshes normally but parks the model
@@ -784,9 +793,10 @@ mod tests {
             .await
             .unwrap()
             .expect_err("a sync whose deployment changed mid-fetch must refuse to write");
-        assert!(
-            error.to_string().contains("changed during model sync"),
-            "{error}"
+        assert_eq!(
+            error.kind(),
+            "gateway_changed",
+            "the refusal is the stable retryable conflict, not a fault: {error:?}"
         );
 
         let config = providers::read_config(&*store, ProviderKind::ModelGateway)

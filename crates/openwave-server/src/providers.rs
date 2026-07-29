@@ -592,7 +592,7 @@ pub async fn update_provider(
     // under the same lock so a pairing that lands first is seen as managed
     // here rather than bypassed with a stale resolution. Other kinds have no
     // concurrent writers and take no lock.
-    let _row = match kind {
+    let row_lock = match kind {
         ProviderKind::ModelGateway => Some(GATEWAY_ROW_WRITES.lock().await),
         _ => None,
     };
@@ -647,7 +647,18 @@ pub async fn update_provider(
             if url.is_empty() {
                 return Err(ServerError::bad_request("base_url must not be empty"));
             }
-            config.base_url = Some(url);
+            config.base_url = Some(if kind == ProviderKind::ModelGateway {
+                // Store the normalized contract form on every profile, not
+                // only managed ones: pairing and policy store the normalized
+                // shape, and both the sync recheck and the connection cache
+                // compare exact strings — a verbatim `https://gw` beside a
+                // normalized `https://gw/` would refuse a same-deployment
+                // sync and split the connection cache for one gateway.
+                crate::managed_policy::validated_gateway_url(&url)
+                    .map_err(|error| ServerError::bad_request(error.to_string()))?
+            } else {
+                url
+            });
         }
     }
     match update.vertex_location {
@@ -709,6 +720,9 @@ pub async fn update_provider(
     }
 
     write_config(store, kind, &config).await?;
+    // The response's has_credential is keychain I/O; the row lock exists to
+    // serialize the row write, so drop it before building the response.
+    drop(row_lock);
 
     Ok(ProviderInfo {
         kind,
