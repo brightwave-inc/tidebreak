@@ -273,11 +273,17 @@ impl SandboxBackend for DockerSandboxBackend {
         if !self.is_available() {
             return Err(BackendError::Unaddressable(RUNTIME_UNAVAILABLE.to_owned()));
         }
+        // Resolve the published host port from `docker inspect` rather than
+        // `docker port`: inspect returns the whole port map as JSON (parseable and
+        // unit-testable without a daemon), and it does not depend on `docker port`'s
+        // line format. The publish is loopback-only, so the binding's host IP is
+        // 127.0.0.1 and `base_url` names it directly.
         let mut command = self.command();
         command.args([
-            "port",
+            "inspect",
+            "--format",
+            "{{json .NetworkSettings.Ports}}",
             &handle.reference,
-            &format!("{}/tcp", self.config.listener_port),
         ]);
         let output = command
             .output()
@@ -290,7 +296,7 @@ impl SandboxBackend for DockerSandboxBackend {
                 Err(BackendError::Unaddressable(PORT_LOOKUP_FAILED.to_owned()))
             };
         }
-        let port = parse_mapped_port(&output.stdout)
+        let port = parse_inspect_ports(&output.stdout, self.config.listener_port)
             .ok_or_else(|| BackendError::Unaddressable(PORT_LOOKUP_FAILED.to_owned()))?;
         let secret = self.read_transport_secret(&handle.reference).await?;
         Ok(SandboxAddress {
@@ -339,15 +345,40 @@ fn parse_container_id(stdout: &[u8]) -> Option<String> {
     (id.len() >= 12 && id.chars().all(|c| c.is_ascii_hexdigit())).then(|| id.to_owned())
 }
 
-/// The host port from `docker port <id> <port>/tcp` output like `127.0.0.1:49155`.
-fn parse_mapped_port(stdout: &[u8]) -> Option<u16> {
-    let text = String::from_utf8_lossy(stdout);
-    let line = text.lines().map(str::trim).find(|line| !line.is_empty())?;
-    line.rsplit(':')
-        .next()?
+/// One host-side binding of a container port, as `docker inspect` renders it.
+#[derive(serde::Deserialize)]
+struct PortBinding {
+    #[serde(rename = "HostIp")]
+    host_ip: Option<String>,
+    #[serde(rename = "HostPort")]
+    host_port: Option<String>,
+}
+
+/// The published host port for `container_port` from the JSON `docker inspect
+/// {{json .NetworkSettings.Ports}}` renders, e.g.
+/// `{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"49155"}]}`. A container that
+/// publishes no such port renders the key as `null` (or omits it), which yields
+/// `None`. A loopback binding is preferred so the resolved port matches the
+/// loopback `base_url`.
+fn parse_inspect_ports(stdout: &[u8], container_port: u16) -> Option<u16> {
+    let ports: std::collections::HashMap<String, Option<Vec<PortBinding>>> =
+        serde_json::from_slice(stdout).ok()?;
+    let bindings = ports.get(&format!("{container_port}/tcp"))?.as_ref()?;
+    let binding = bindings
+        .iter()
+        .find(|binding| is_loopback(binding.host_ip.as_deref()))
+        .or_else(|| bindings.first())?;
+    binding
+        .host_port
+        .as_deref()?
         .parse::<u16>()
         .ok()
         .filter(|port| *port != 0)
+}
+
+/// Whether a binding's host IP is a loopback address.
+fn is_loopback(host_ip: Option<&str>) -> bool {
+    matches!(host_ip, Some("127.0.0.1" | "::1"))
 }
 
 /// Parse the id/tag pairs from the tag-listing template's tab-separated output.
@@ -508,12 +539,33 @@ mod tests {
     }
 
     #[test]
-    fn base_url_and_port_parsing_round_trip() {
+    fn base_url_formats_the_loopback_authority() {
         assert_eq!(base_url(49_155), "http://127.0.0.1:49155");
-        assert_eq!(parse_mapped_port(b"127.0.0.1:49155\n"), Some(49_155));
-        assert_eq!(parse_mapped_port(b"[::]:8081\n"), Some(8081));
-        assert_eq!(parse_mapped_port(b"\n"), None);
-        assert_eq!(parse_mapped_port(b"127.0.0.1:0\n"), None);
+    }
+
+    #[test]
+    fn inspect_ports_resolve_the_published_host_port() {
+        // The published-port shape `docker inspect {{json .NetworkSettings.Ports}}`
+        // renders, with the loopback binding chosen.
+        let published = br#"{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"49155"}]}"#;
+        assert_eq!(parse_inspect_ports(published, 8080), Some(49_155));
+
+        // Two bindings: the loopback one wins over a wildcard one.
+        let dual = br#"{"8080/tcp":[{"HostIp":"0.0.0.0","HostPort":"7000"},{"HostIp":"127.0.0.1","HostPort":"49200"}]}"#;
+        assert_eq!(parse_inspect_ports(dual, 8080), Some(49_200));
+
+        // An unpublished port renders as a null binding.
+        let unbound = br#"{"8080/tcp":null}"#;
+        assert_eq!(parse_inspect_ports(unbound, 8080), None);
+
+        // A different container port than the one asked for.
+        let other = br#"{"9090/tcp":[{"HostIp":"127.0.0.1","HostPort":"49155"}]}"#;
+        assert_eq!(parse_inspect_ports(other, 8080), None);
+
+        // A container with no published ports at all.
+        assert_eq!(parse_inspect_ports(b"{}", 8080), None);
+        // Malformed output resolves to nothing rather than panicking.
+        assert_eq!(parse_inspect_ports(b"not json", 8080), None);
     }
 
     #[test]
@@ -548,20 +600,42 @@ mod tests {
 
     // --- Live-Docker tests, skipped cleanly when no runtime is present. ---
 
-    /// A backend on a trivial public image that holds its listener port.
+    /// A backend on a trivial public image that stays running and holds its
+    /// listener port.
     fn live_backend() -> DockerSandboxBackend {
         DockerSandboxBackend::new(DockerConfig {
             image: "alpine:3.20".to_owned(),
             listener_port: 8080,
-            // busybox httpd holds port 8080 in the foreground so the mapping has a
-            // real listener behind it; the container stays up until we remove it.
+            // A foreground shell loop that keeps the container alive and re-listens
+            // on 8080 with busybox `nc` (present in alpine's base busybox, unlike
+            // `httpd`). The loop never exits, so the container stays running and its
+            // published port keeps a real listener behind it; `|| sleep 1` avoids a
+            // busy spin if a listen attempt ever fails.
             command: vec![
                 "sh".to_owned(),
                 "-c".to_owned(),
-                "echo ok > /index.html && httpd -f -p 8080 -h /".to_owned(),
+                "while true; do nc -l -p 8080 || sleep 1; done".to_owned(),
             ],
             ..DockerConfig::default()
         })
+    }
+
+    /// Poll until the container reports `State.Running`, so addressing and the
+    /// reachability probe do not race container startup.
+    async fn wait_running(backend: &DockerSandboxBackend, reference: &str) -> bool {
+        for _ in 0..50 {
+            let mut command = backend.command();
+            command.args(["inspect", "--format", "{{.State.Running}}", reference]);
+            if let Ok(output) = command.output().await {
+                if output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).trim() == "true"
+                {
+                    return true;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        false
     }
 
     /// Every tag currently stamped on the daemon, so a sweep in the test treats
@@ -635,6 +709,13 @@ mod tests {
             })
             .await
             .expect("provision orphan container");
+
+        // Wait for the container to actually be running before addressing it, so the
+        // published-port lookup and reachability probe do not race startup.
+        assert!(
+            wait_running(&backend, &live.reference).await,
+            "live container never reached the running state"
+        );
 
         // address resolves to a loopback URL with a live listener behind it.
         let address = backend.address(&live).await.expect("resolve live address");
