@@ -71,12 +71,12 @@ describe("inline citations", () => {
     );
 
     const cited = screen.getAllByRole("button");
-    expect(cited.map((button) => button.getAttribute("aria-label"))).toEqual([
-      "Citation 2",
-      "Citation 4",
-    ]);
-    expect(cited[0]).toHaveTextContent("is the largest in the world");
-    expect(cited[1]).toHaveTextContent("its tides are extreme");
+    expect(cited).toHaveLength(2);
+    // The phrase names the control; the ordinal is the snapshot's own.
+    expect(cited[0]).toHaveAccessibleName(
+      "is the largest in the world, citation 2",
+    );
+    expect(cited[1]).toHaveAccessibleName("its tides are extreme, citation 4");
     expect(container.textContent).toContain("The reef is the largest");
     expect(container.textContent).not.toContain(":cit");
     expect(container.textContent).not.toContain("citation_id");

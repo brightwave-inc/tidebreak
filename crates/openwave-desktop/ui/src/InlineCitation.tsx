@@ -69,14 +69,14 @@ export function InlineCitation({
   return (
     <Popover>
       <PopoverTrigger asChild>
-        <button
-          type="button"
-          className="inline-citation"
-          aria-label={`Citation ${source.ordinal}`}
-        >
+        {/* Named by the phrase it wraps, not by a label that would replace it:
+            what the citation backs is the sentence, and the badge only says
+            which citation backs it. */}
+        <button type="button" className="inline-citation">
           {children}
-          <sup className="inline-citation-ordinal" aria-hidden="true">
-            {source.ordinal}
+          <sup className="inline-citation-ordinal">
+            <span className="sr-only">, citation {source.ordinal}</span>
+            <span aria-hidden="true">{source.ordinal}</span>
           </sup>
         </button>
       </PopoverTrigger>

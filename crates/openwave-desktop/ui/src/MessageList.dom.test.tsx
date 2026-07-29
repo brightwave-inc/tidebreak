@@ -813,7 +813,7 @@ describe("citation anchors", () => {
       </SourceNavProvider>,
     );
 
-    await user.click(screen.getByRole("button", { name: "Citation 1" }));
+    await user.click(screen.getByRole("button", { name: /citation 1$/ }));
     await user.click(screen.getByRole("button", { name: "Open source" }));
     await user.click(screen.getByRole("button", { name: "Open source 1" }));
 
