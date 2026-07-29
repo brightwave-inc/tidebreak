@@ -419,7 +419,7 @@ fn canonical_http_url(value: &str) -> Result<String, WebSearchError> {
     Ok(canonical)
 }
 
-fn truncate(value: &str, max_chars: usize) -> String {
+pub(crate) fn truncate(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 

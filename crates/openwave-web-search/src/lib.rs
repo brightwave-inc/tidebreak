@@ -11,19 +11,38 @@
 //! [`HttpClient`] seam; no vendor SDK is required. `ReqwestHttpClient` is opt-in
 //! behind the `http` feature. Requests and normalized output are bounded before
 //! egress and before they can reach a model context.
+//!
+//! The `extract-native` feature adds a self-contained extraction engine:
+//! [`NativeExtractor`] fetches one admitted URL — every redirect hop re-vetted
+//! against the [`fetch_policy`](admit_fetch_url) admission rules with fresh,
+//! pinned DNS resolution — and reduces the page to bounded readable markdown.
+//! The admission policy itself is always compiled because it is pure and
+//! dependency-light; only the parser and transport stack is feature-gated.
 
 mod credentials;
 pub mod exa;
+mod fetch_policy;
 mod http;
+#[cfg(feature = "extract-native")]
+mod native;
 pub mod tavily;
 mod tool;
 mod types;
 
 pub use credentials::{WebSearchCredential, WebSearchCredentials};
 pub use exa::ExaProvider;
+pub use fetch_policy::{
+    admit_fetch_address, admit_fetch_url, FetchPolicyViolation, MAX_FETCH_URL_BYTES,
+};
 #[cfg(feature = "http")]
 pub use http::ReqwestHttpClient;
 pub use http::{HttpClient, HttpRequest, HttpResponse, MAX_HTTP_RESPONSE_BYTES};
+#[cfg(feature = "extract-native")]
+pub use native::{
+    HostAddressResolver, NativeExtractError, NativeExtraction, NativeExtractor, PageFetchResponse,
+    PageFetchTransport, ReqwestPageFetcher, TokioHostResolver, MAX_EXTRACT_CONTENT_CHARS,
+    MAX_FETCH_REDIRECT_HOPS, MAX_FETCH_RESPONSE_BYTES, MIN_EXTRACT_WORDS, NATIVE_FETCH_USER_AGENT,
+};
 pub use tavily::TavilyProvider;
 pub use tool::{
     request_from_tool_arguments, WebSearchResolver, WebSearchResolverError, WebSearchTool,
