@@ -60,7 +60,7 @@ export function NameCellRenderer(props: CellProps) {
       </button>
       {output.producingRunId !== null && (
         <WithTooltip label="Auto-merged from a background agent">
-          <Badge variant="outline" size="sm" className="ml-2 shrink-0 px-1.5 text-[10px] font-medium">
+          <Badge variant="outline" size="sm" className="ml-2 shrink-0 px-1.5 text-2xs font-medium">
             <BotIcon className="size-3" />
             Agent
           </Badge>

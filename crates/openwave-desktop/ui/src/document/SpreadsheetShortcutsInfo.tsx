@@ -17,7 +17,7 @@ export function SpreadsheetShortcutsInfoBar({
       <Button
         variant="ghost"
         size="sm"
-        className="text-muted-foreground hover:text-foreground h-6 px-1.5 text-[11px]"
+        className="text-muted-foreground hover:text-foreground h-6 px-1.5 text-2xs"
         onClick={onAutofit}
       >
         Autofit all columns
