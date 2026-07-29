@@ -357,6 +357,20 @@ jobs:
           cache-bin: false
           cache-targets: false
           save-if: false
+      - name: rich document parser contracts
+        run: |
+          parser_features="parse-liteparse,parse-office,parse-image,parse-spreadsheet"
+          cargo test -p openwave-retrieval --features "$parser_features" --locked \
+            liteparse_parser::tests
+          cargo test -p openwave-retrieval --features "$parser_features" --locked \
+            liteparse_office_parser::tests
+          cargo test -p openwave-retrieval --features "$parser_features" --locked \
+            liteparse_image_parser::tests
+          cargo test -p openwave-retrieval --features "$parser_features" --locked \
+            spreadsheet_parser::tests
+          cargo test -p openwave-server --features document-parsers --locked --lib \
+            tests::documents::raw_ingest_parses_and_indexes_a_pdf_end_to_end \
+            -- --exact
       - name: desktop tests
         run: cargo test -p openwave-desktop --locked
 
@@ -401,7 +415,12 @@ jobs:
         if: ${{ github.ref == 'refs/heads/main' }}
         run: cargo fetch --locked
       - name: headless tests
-        run: cargo test --workspace --exclude openwave-desktop --locked
+        run: >-
+          cargo test --workspace --exclude openwave-desktop
+          --no-default-features
+          --features
+          openwave-core/default,openwave-retrieval/default,openwave-router/default
+          --locked
 
   vectors:
     name: durable vector store
