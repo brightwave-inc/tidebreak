@@ -64,6 +64,7 @@ pub mod protocol;
 pub mod provisioning;
 pub mod reference;
 pub mod reverse;
+pub mod wire;
 
 pub use host::{CapabilityHost, ReverseWaiter};
 pub use ids::{EventCursor, OperationId, RequestId, RunId, SandboxTag, Sequence};
@@ -81,4 +82,9 @@ pub use reverse::{
     Capability, CapabilityResponder, ControlFrame, GrantSet, ModelInferenceParams,
     ModelInferenceResult, RequestFrame, ReverseEnvelope, ReverseRequest, ReverseResponseEnvelope,
     ReverseResult, RunProvenance,
+};
+pub use wire::sandbox::serve_connection;
+pub use wire::{
+    host::ConnectError, read_frame, write_frame, FrameError, HostConnection, ReverseOutcome,
+    SandboxRun, WireClient, WireFrame,
 };
