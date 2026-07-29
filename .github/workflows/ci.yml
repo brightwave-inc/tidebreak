@@ -142,8 +142,9 @@ jobs:
             exit 0
           fi
 
-          # `rust` gates the lanes that cover every crate: rustfmt, clippy, and
-          # the openwave-desktop tests. `workspace` gates the lanes that cover
+          # `rust` gates the lanes that cover every crate: rustfmt, clippy, the
+          # Windows type check, and the openwave-desktop tests. `workspace`
+          # gates the lanes that cover
           # everything *except* openwave-desktop, so it can stay false when a
           # change cannot reach them. `workspace` implies `rust`; the gate below
           # asserts that.
@@ -255,6 +256,48 @@ jobs:
           save-if: false
       - name: clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  windows:
+    name: windows check
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    # Every other lane runs on Linux or macOS, so nothing else ever compiles
+    # cfg(windows) code (RegistryPolicySource, the windows-sys file handling)
+    # and it could merge broken. A Linux cross-check would be cheaper, but
+    # aws-lc-sys - reached by nearly every crate - compiles C against Windows
+    # SDK headers that only a native Windows toolchain carries. Check only, no
+    # tests: this proves the Windows target type-checks, not that it works.
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: ${{ github.event_name == 'pull_request' && 'READ_ONLY' || 'READ_WRITE' }}
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install toolchain (honors rust-toolchain.toml)
+        run: rustup show
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: v0.16.0
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # The Windows dependency set differs from the Linux lanes', so this
+          # download cache lives on its own key with this lane as its single
+          # writer - it must never race the `test` lane's cargo-registry-v3
+          # save.
+          shared-key: cargo-registry-windows-v1-${{ hashFiles('Cargo.lock') }}
+          add-job-id-key: "false"
+          add-rust-environment-hash-key: "false"
+          cache-bin: false
+          cache-targets: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - name: Type-check the Windows target
+        run: cargo check --workspace --locked --target x86_64-pc-windows-msvc
 
   desktop:
     name: desktop test
@@ -492,6 +535,7 @@ jobs:
         changes,
         fmt,
         lint,
+        windows,
         desktop,
         test,
         vectors,
@@ -504,6 +548,7 @@ jobs:
         env:
           FMT_RESULT: ${{ needs.fmt.result }}
           LINT_RESULT: ${{ needs.lint.result }}
+          WINDOWS_RESULT: ${{ needs.windows.result }}
           DESKTOP_RESULT: ${{ needs.desktop.result }}
           TEST_RESULT: ${{ needs.test.result }}
           VECTORS_RESULT: ${{ needs.vectors.result }}
@@ -537,11 +582,13 @@ jobs:
             true)
               test "$FMT_RESULT" = success
               test "$LINT_RESULT" = success
+              test "$WINDOWS_RESULT" = success
               test "$DESKTOP_RESULT" = success
               ;;
             false)
               test "$FMT_RESULT" = skipped
               test "$LINT_RESULT" = skipped
+              test "$WINDOWS_RESULT" = skipped
               test "$DESKTOP_RESULT" = skipped
               ;;
             *)
