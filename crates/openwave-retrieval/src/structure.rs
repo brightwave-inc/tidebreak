@@ -602,8 +602,6 @@ fn find_after(text: &str, from: usize, needle: &str) -> Option<usize> {
 mod tests {
     use super::*;
 
-    use crate::chunk::{Chunker, TextChunker};
-    use crate::document::{Document, DocumentSource};
     use crate::parse::DocumentParser;
 
     const INVOICES_JSON: &str = r#"{
@@ -702,34 +700,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_chunk_of_a_structured_source_is_located_at_the_node_it_covers() {
+    async fn regions_for_one_structured_record_resolve_to_that_record() {
         let parsed = crate::parse::StructuredTextParser::new()
             .parse(INVOICES_JSON.as_bytes(), "application/json")
             .await
             .unwrap();
         assert_eq!(parsed.text, INVOICES_JSON);
-        let document = Document::new(DocumentSource::Inline, "application/json", &parsed.text)
-            .with_source_regions(parsed.source_regions);
-        // A window small enough to fall inside one invoice, so the passage has
-        // an enclosing record rather than the whole file.
-        let chunks = TextChunker::new(60, 0)
-            .chunk(&document, "application/json")
-            .unwrap();
-        let located: Vec<_> = chunks
-            .iter()
-            .map(|chunk| {
-                EvidenceLocation::for_source_regions(
-                    chunk.heading_path.clone(),
-                    chunk.source_regions.clone(),
-                )
-            })
+        let first_invoice_end = parsed.text.find(r#"{"number": "B-2""#).unwrap();
+        let regions = parsed
+            .source_regions
+            .into_iter()
+            .filter(|region| region.span.end <= first_invoice_end)
             .collect();
-        assert!(
-            located.contains(&EvidenceLocation::StructuredPath {
+        assert_eq!(
+            EvidenceLocation::for_source_regions(Vec::new(), regions),
+            EvidenceLocation::StructuredPath {
                 path: "invoices.0".into(),
                 path_type: StructuredPathType::JsonDotNotation,
-            }),
-            "a passage across one invoice's fields is at that invoice: {located:?}"
+            }
         );
     }
 
@@ -742,36 +730,5 @@ mod tests {
             .unwrap();
         assert_eq!(parsed.text, String::from_utf8_lossy(broken));
         assert!(parsed.source_regions.is_empty());
-    }
-
-    #[test]
-    fn a_passage_crossing_more_nodes_than_evidence_carries_stays_valid() {
-        let mut json = String::from("{\"rows\":[");
-        for row in 0..600 {
-            if row > 0 {
-                json.push(',');
-            }
-            json.push_str(&format!("{{\"a\":{row},\"b\":{row}}}"));
-        }
-        json.push_str("]}");
-        let document = Document::new(DocumentSource::Inline, "application/json", &json)
-            .with_source_regions(structured_regions(&json, StructuredFormat::Json));
-        let chunks = TextChunker::default()
-            .chunk(&document, "application/json")
-            .unwrap();
-        for chunk in &chunks {
-            chunk
-                .validate_source_regions()
-                .expect("a dense structured passage must still be valid evidence");
-            let located = EvidenceLocation::for_source_regions(
-                chunk.heading_path.clone(),
-                chunk.source_regions.clone(),
-            );
-            assert!(
-                matches!(located, EvidenceLocation::StructuredPath { .. })
-                    && located.is_well_formed(),
-                "every chunk of a structured source is at a node: {located:?}"
-            );
-        }
     }
 }

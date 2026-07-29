@@ -16,11 +16,6 @@ workspace = true
 # adapters. Parser-specific coverage runs separately with this feature enabled.
 default = ["document-parsers"]
 document-parsers = ["openwave-server/document-parsers"]
-# Forwards the server's durable, on-disk vector store. Off by default so an
-# ordinary build and the workspace tests skip the LanceDB dependency tree; a
-# release build has to enable it (`openwave-server`'s build script says so).
-vec-lance = ["openwave-server/vec-lance"]
-
 # The binary is `openwave` (not `openwave-cli`), so `openwave serve` is the command.
 [[bin]]
 name = "openwave"

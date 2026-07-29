@@ -99,7 +99,6 @@ jobs:
       rust: ${{ steps.scope.outputs.rust }}
       sandbox_container: ${{ steps.scope.outputs.sandbox_container }}
       ui: ${{ steps.scope.outputs.ui }}
-      vectors: ${{ steps.scope.outputs.vectors }}
       workspace: ${{ steps.scope.outputs.workspace }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -120,7 +119,6 @@ jobs:
               echo "parsers=true"
               echo "sandbox_container=true"
               echo "ui=true"
-              echo "vectors=true"
               echo "workspace=true"
             } >> "$GITHUB_OUTPUT"
           }
@@ -162,7 +160,6 @@ jobs:
           parsers=false
           sandbox_container=false
           ui=false
-          vectors=false
           workspace=false
           git diff --no-renames --name-only -z "$diff_range" \
             > "$RUNNER_TEMP/changed-files"
@@ -174,16 +171,14 @@ jobs:
                 parsers=true
                 sandbox_container=true
                 ui=true
-                vectors=true
                 workspace=true
                 ;;
               # These inputs can change dependency resolution or compiler
-              # behavior for either heavyweight capability.
+              # behavior for the heavyweight sandbox-container capability.
               .cargo/*|Cargo.lock|Cargo.toml|rust-toolchain.toml)
                 rust=true
                 parsers=true
                 sandbox_container=true
-                vectors=true
                 workspace=true
                 ;;
               # Generated from Rust definitions, and a Rust test is what checks
@@ -199,35 +194,27 @@ jobs:
               crates/openwave-desktop/Cargo.toml)
                 rust=true
                 parsers=true
-                vectors=true
                 workspace=true
                 ;;
-              # The CLI forwards the release-only durable-store feature.
               crates/openwave-cli/Cargo.toml)
                 rust=true
                 parsers=true
-                vectors=true
                 workspace=true
                 ;;
-              # LanceDB behavior and the server's production wiring are the
-              # only surfaces the durable-store lane adds over headless tests.
               crates/openwave-retrieval/*)
                 rust=true
                 parsers=true
-                vectors=true
                 workspace=true
                 ;;
               crates/openwave-server/Cargo.toml)
                 rust=true
                 parsers=true
                 sandbox_container=true
-                vectors=true
                 workspace=true
                 ;;
-              crates/openwave-server/build.rs|crates/openwave-server/src/lib.rs|crates/openwave-server/src/tests/documents.rs)
+              crates/openwave-server/src/lib.rs|crates/openwave-server/src/tests/documents.rs)
                 rust=true
                 parsers=true
-                vectors=true
                 workspace=true
                 ;;
               # The real-container lane adds a packaging/runtime boundary over
@@ -256,10 +243,6 @@ jobs:
             echo "parser scope without workspace scope; the detector is wrong." >&2
             exit 1
           fi
-          if [[ "$vectors" == true && "$workspace" != true ]]; then
-            echo "vector scope without workspace scope; the detector is wrong." >&2
-            exit 1
-          fi
           if [[ "$sandbox_container" == true && "$workspace" != true ]]; then
             echo "sandbox-container scope without workspace scope; the detector is wrong." >&2
             exit 1
@@ -270,7 +253,6 @@ jobs:
             echo "parsers=$parsers"
             echo "sandbox_container=$sandbox_container"
             echo "ui=$ui"
-            echo "vectors=$vectors"
             echo "workspace=$workspace"
           } >> "$GITHUB_OUTPUT"
 
@@ -492,72 +474,6 @@ jobs:
           openwave-core/default,openwave-retrieval/default,openwave-router/default
           --locked
 
-  vectors:
-    name: durable vector store
-    needs: changes
-    # LanceDB is ~330 crates nobody else compiles, and it is the most expensive
-    # lane we run. While the durable store is parked, pay for it after a relevant
-    # merge and in the weekly/manual backstops instead of once per push to every
-    # open PR: post-merge is late signal, but the feature is off by default in
-    # shipped builds. See #760 to restore the pull-request run when durable
-    # vectors come back into active development.
-    if: ${{ needs.changes.outputs.vectors == 'true' && github.event_name != 'pull_request' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    env:
-      CARGO_INCREMENTAL: 0
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
-      SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_RW_MODE: READ_WRITE
-      RUSTC_WRAPPER: sccache
-      RUSTFLAGS: -C link-arg=-fuse-ld=mold
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Install toolchain (honors rust-toolchain.toml)
-        run: rustup show
-      - name: Set up compiler cache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
-        with:
-          version: v0.16.0
-      # The only lane that compiles LanceDB, so the only one that needs protoc.
-      - name: Install headless system deps (protobuf for the LanceDB vector store)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libprotobuf-dev \
-            mold \
-            protobuf-compiler
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          shared-key: cargo-registry-v3-${{ hashFiles('Cargo.lock') }}
-          add-job-id-key: "false"
-          add-rust-environment-hash-key: "false"
-          cache-bin: false
-          cache-targets: false
-          save-if: false
-      # The build script has no build-dependencies, so it runs and fails long
-      # before the dependency tree is built: seconds of runner time to prove a
-      # shipped binary cannot silently lose the durable store.
-      - name: A release build without the durable store must fail
-        run: |
-          if cargo check -p openwave-server --release --locked \
-            > "$RUNNER_TEMP/durable-guard.log" 2>&1; then
-            echo "A release build without vec-lance succeeded; the guard is gone." >&2
-            exit 1
-          fi
-          grep -q "durable vector store" "$RUNNER_TEMP/durable-guard.log" || {
-            echo "The release build failed for some other reason:" >&2
-            cat "$RUNNER_TEMP/durable-guard.log" >&2
-            exit 1
-          }
-      - name: LanceDB-backed tests
-        run: |
-          cargo test -p openwave-retrieval --features vec-lance --locked
-          cargo test -p openwave-server --features vec-lance --locked --lib \
-            tests::documents::connect_vector_store_opens_a_durable_lance_index_under_data_dir \
-            -- --exact
-
   postgres:
     name: postgres state machine
     needs: changes
@@ -614,9 +530,9 @@ jobs:
     # Builds the sandbox-agent image (compiling the agent crate's slice of the
     # workspace inside Docker) and drives a real container end to end. That is
     # expensive, and the container runtime is a detected capability rather than a
-    # hard dependency, so — like the durable vector lane — pay for it after
-    # relevant merges and in weekly/manual backstops instead of once per push to
-    # every open PR. The rest of the stack is covered on every PR by the loopback
+    # hard dependency, so pay for it after relevant merges and in weekly/manual
+    # backstops instead of once per push to every open PR. The rest of the stack
+    # is covered on every PR by the loopback
     # tests, which drive the same driver against the real agent over a socket.
     if: ${{ needs.changes.outputs.sandbox_container == 'true' && github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest

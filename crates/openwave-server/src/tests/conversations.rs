@@ -333,10 +333,7 @@ async fn chat_creation_reports_not_found_when_project_deletion_wins_after_prefli
     ));
     injected.do_not_pause_terminal();
     injected.delete_project_after_next_get();
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     let (router, token, _store, _dir) =
         test_app_from_parts(Arc::new(FakeProvider), retrieval, injected, dir);
 

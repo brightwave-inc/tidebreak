@@ -12,10 +12,7 @@ async fn test_app_with_executor_id(
         .await
         .unwrap(),
     );
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     let state = AppState::new_with_client_executor_id(
         Config::desktop(dir.path()),
         store.clone(),

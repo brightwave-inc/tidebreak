@@ -1267,10 +1267,7 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
     )
     .await
     .unwrap();
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -1418,10 +1415,7 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         .unwrap(),
     );
     let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),

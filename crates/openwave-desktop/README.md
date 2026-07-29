@@ -45,8 +45,7 @@ scripts/dev.sh
 ```
 
 That installs the UI dependencies and opens the window. Arguments are forwarded
-to `cargo tauri dev`, so `scripts/dev.sh --features vec-lance` works. The long
-way, from this directory, is the same two steps:
+to `cargo tauri dev`. The long way, from this directory, is the same two steps:
 
 ```sh
 pnpm --dir ui install
@@ -64,22 +63,12 @@ lock and app-data directory and can run alongside an installed release build.
 This means dev and release profiles do not share state: the first dev run after
 this change starts from an empty data directory.
 
-A dev build leaves out `vec-lance`, so document search runs on an in-memory
-index that is discarded when the app exits — the LanceDB tree it replaces is
-about 330 crates of build time. Add `--features vec-lance` when you are working
-on retrieval and want the index to survive a restart.
-
 Create an installable bundle. The before-build hook compiles the target-specific
 broker and the default Tauri configuration includes it automatically:
 
 ```sh
-cargo tauri build --features vec-lance
+cargo tauri build
 ```
-
-`vec-lance` carries the durable, on-disk vector store into the bundle. It is not
-optional for a shipped build: `openwave-server`'s build script fails any release
-build that leaves it out, rather than quietly shipping an app whose documents
-disappear on exit.
 
 ## PDFium runtime for packaged apps
 

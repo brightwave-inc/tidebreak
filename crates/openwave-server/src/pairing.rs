@@ -56,16 +56,6 @@ impl PairingHandle {
 pub struct PairingOutcome {
     /// The normalized gateway base URL now on record.
     pub base_url: String,
-    /// True when this call is the one that provisioned the profile; false
-    /// for an idempotent re-pair of the gateway already on record, which
-    /// changed no policy. The desktop shell keys its restart prompt off
-    /// this, and the claim is one-directional: enforcement that only a
-    /// fresh boot can apply (the boot-scoped embedder) is outstanding only
-    /// if this call did the provisioning. A profile already managed by OS
-    /// policy was gated at boot and first-pairs with nothing outstanding,
-    /// and a deferred restart stays outstanding through later re-pairs
-    /// that report false.
-    pub newly_provisioned: bool,
 }
 
 /// Why a pairing did not provision this profile.
@@ -125,9 +115,8 @@ impl From<AgentError> for PairingError {
 
 /// Validate `gateway_url`, probe the gateway, and provision this profile.
 ///
-/// Returns a [`PairingOutcome`] on success — the normalized gateway base URL
-/// plus whether this call is the one that provisioned the profile. Nothing
-/// is written unless the URL passes the gateway contract and the deployment
+/// Returns the normalized gateway base URL on success. Nothing is written
+/// unless the URL passes the gateway contract and the deployment
 /// answers `GET /api/v1/meta`; a conflicting re-provision is refused as the
 /// typed [`PairingError::Conflict`] before the write, leaving the policy
 /// untouched — the desktop shell surfaces that refusal instead of treating
@@ -158,20 +147,17 @@ pub async fn pair_with_gateway(
     // taking a lock that guards nothing would only claim protection this
     // path does not actually depend on. PAIRING alone still makes the
     // conflict check and the policy write atomic against another pairing.
-    let already_provisioned = match managed_policy::provisioned_url(store).await? {
+    match managed_policy::provisioned_url(store).await? {
         Some(existing) if existing != base_url => {
             return Err(PairingError::Conflict {
                 provisioned_url: existing,
             });
         }
-        other => other.is_some(),
-    };
+        _ => {}
+    }
     managed_policy::provision(store, &base_url).await?;
     handle.mcp.enforce_manual_lockdown().await;
-    Ok(PairingOutcome {
-        base_url,
-        newly_provisioned: !already_provisioned,
-    })
+    Ok(PairingOutcome { base_url })
 }
 
 #[cfg(test)]
@@ -324,10 +310,6 @@ mod tests {
         let outcome = pair_with_gateway(&test_handle(&store), &base)
             .await
             .unwrap();
-        assert!(
-            outcome.newly_provisioned,
-            "the first pairing is the one that provisions"
-        );
         let normalized = outcome.base_url;
         assert_eq!(normalized, format!("{base}/"));
 
@@ -342,13 +324,10 @@ mod tests {
             .unwrap()
             .is_empty());
 
-        // Re-pairing the same gateway is idempotent, and reports that no
-        // transition happened — the desktop shell keys its restart prompt
-        // off this distinction.
-        let repaired = pair_with_gateway(&test_handle(&store), &base)
+        // Re-pairing the same gateway is idempotent.
+        pair_with_gateway(&test_handle(&store), &base)
             .await
             .unwrap();
-        assert!(!repaired.newly_provisioned);
     }
 
     /// Pairing applies the policy it writes, not just persists it: a manual

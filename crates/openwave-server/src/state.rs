@@ -48,12 +48,11 @@ pub struct AppState {
     pub(crate) gateway: Arc<crate::gateway_runtime::GatewayRuntime>,
     /// The OS-managed policy reader for managed-mode resolution. Constructed
     /// as the source that asserts nothing, so directly assembled state (tests,
-    /// custom embedders) reads nothing from the host OS; the production
+    /// custom hosts) reads nothing from the host OS; the production
     /// assembly in `bind_inner` replaces this with the platform's reader via
     /// `managed_policy::platform_source`.
     pub(crate) os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
-    /// The retrieval pipeline used by the durable document worker and the
-    /// agent's shared `search` tool.
+    /// The canonical parsing pipeline used by the durable document worker.
     pub retrieval: Arc<Retriever>,
     /// Wakes the durable document worker after an enqueue commits.
     pub(crate) document_job_wake: Arc<Notify>,
@@ -66,7 +65,7 @@ pub struct AppState {
     pub(crate) agent_run_wake: Arc<Notify>,
     /// Wakes the source-blob retirement worker after a reference drop commits.
     pub(crate) blob_retirement_wake: Arc<Notify>,
-    /// Serializes the final publish transition with source replacement/deletion.
+    /// Serializes lifecycle inspection with source replacement or deletion.
     pub(crate) document_writes: Arc<DocumentWriteGuard>,
     /// Coordinates source publication and retirement across server processes.
     pub(crate) blob_writes: Arc<BlobWriteGuard>,
@@ -372,9 +371,8 @@ fn blob_lock_error(error: std::io::Error) -> AgentError {
 
 /// A bounded keyed async lock for document lifecycle transitions.
 ///
-/// Lance admits one writer process for a dataset. Within that process these
-/// stripes close the gap between the worker's final durable lease proof and
-/// vector activation by excluding a concurrent source replacement or deletion.
+/// These stripes keep an auditor's read-and-repair decision from racing a
+/// concurrent source replacement or deletion.
 pub(crate) struct DocumentWriteGuard {
     stripes: Box<[Arc<tokio::sync::Mutex<()>>]>,
 }

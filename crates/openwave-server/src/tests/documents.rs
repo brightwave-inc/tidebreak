@@ -856,10 +856,8 @@ async fn project_document_routes_enforce_corpus_identity_and_ownership() {
 }
 
 #[tokio::test]
-async fn chat_document_routes_isolate_sources_search_and_delete_lifecycle() {
-    let embedder = Arc::new(HashEmbedder::default());
-    let vectors = Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS));
-    let (retrieval, _search) = build_retrieval(embedder.clone(), vectors.clone());
+async fn chat_document_routes_isolate_sources_and_delete_lifecycle() {
+    let retrieval = build_retrieval();
     let (router, token, store, _dir) =
         test_app_with_retrieval(Arc::new(FakeProvider), retrieval).await;
     let bearer = format!("Bearer {token}");
@@ -1177,8 +1175,6 @@ async fn document_catalog_pages_metadata_and_keeps_project_content_private() {
     );
     assert_eq!(catalog_summary["content_revision"], 1);
     assert_eq!(catalog_summary["processing_status"], "queued");
-    assert!(catalog_summary["indexed_revision"].is_null());
-
     let detail = get(format!("/documents/{id}")).await;
     assert_eq!(detail.status(), StatusCode::OK);
     let detail: serde_json::Value = json_body(detail).await;
@@ -1281,10 +1277,7 @@ async fn concurrent_same_document_ingests_publish_in_request_order() {
         .await
         .unwrap(),
     );
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     let blobs = Arc::new(FirstPutGatedBlobStore {
         inner: openwave_core::FsBlobStore::new(dir.path().join("blobs")),
         calls: AtomicUsize::new(0),
@@ -1310,7 +1303,6 @@ async fn concurrent_same_document_ingests_publish_in_request_order() {
         state.blobs.clone(),
         retrieval,
         state.document_job_wake.clone(),
-        state.document_writes.clone(),
         document_worker::DocumentWorkerConfig::default(),
     );
     let router = app(state);
@@ -1465,8 +1457,8 @@ async fn ingest_accepts_any_media_type_via_the_fallback_parser() {
     let (router, token, store, _dir, worker) = test_app_with_worker().await;
     let bearer = format!("Bearer {token}");
 
-    // A text-like body with an unrecognized media type is accepted and stays
-    // searchable: the fallback parser decodes valid UTF-8 into canonical text.
+    // A text-like body with an unrecognized media type is accepted and remains
+    // directly readable because the fallback decodes valid UTF-8.
     let textual = post_raw(
         &router,
         &bearer,
@@ -1484,7 +1476,7 @@ async fn ingest_accepts_any_media_type_via_the_fallback_parser() {
         .unwrap();
 
     // Binary bytes with an unclaimed media type are accepted too, but retained
-    // without decoded canonical text so they never pollute the search index.
+    // without decoded canonical text.
     let binary = post_raw(
         &router,
         &bearer,
@@ -1501,7 +1493,7 @@ async fn ingest_accepts_any_media_type_via_the_fallback_parser() {
         .parse()
         .unwrap();
 
-    // Two documents ⇒ two parse jobs and two index jobs.
+    // Two documents produce two parse jobs.
     run_parse(&worker).await;
     run_parse(&worker).await;
 
@@ -1548,8 +1540,6 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() 
     );
     let extract_store = store.clone();
     let (_retrieval, mut tools, config) = agent_deps(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
         Arc::new(UnavailableCodeExecution),
         Box::new(web_search::foreground_tool(
             store.clone(),
@@ -1723,12 +1713,7 @@ async fn catalog_delete_failure_leaves_source_stale_and_repairable() {
         Arc::new(Notify::new()),
         Arc::new(Notify::new()),
     ));
-    let retrieval = Arc::new(Retriever::new(
-        Box::new(PlainTextParser::new()),
-        Box::new(TextChunker::default()),
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    ));
+    let retrieval = Arc::new(Retriever::new(Box::new(PlainTextParser::new())));
     let (router, token, store_view, _dir) =
         test_app_from_parts(Arc::new(FakeProvider), retrieval, store.clone(), dir);
     let bearer = format!("Bearer {token}");

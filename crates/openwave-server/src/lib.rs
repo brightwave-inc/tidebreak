@@ -83,9 +83,7 @@ use openwave_core::{
     Config, CreateDeliverable, KeychainSecretProvider, ListDir, Profile, ReadFile, Result,
     SecretProvider, Store, Tool, ToolRegistry, WriteFile,
 };
-use openwave_retrieval::{
-    Embedder, HashEmbedder, InMemoryVectorStore, Retriever, TextChunker, VectorStore,
-};
+use openwave_retrieval::Retriever;
 
 use resolver::KeyedResolver;
 
@@ -657,8 +655,8 @@ async fn bind_inner(
     // handlers, so they can never disagree on the resolved policy.
     let os_policy: Arc<dyn managed_policy::OsPolicySource> =
         managed_policy::platform_source(&config);
-    // The BYOK boot paths — the legacy Anthropic auto-enable and the OpenAI
-    // embedder below — are gated on one policy read. A resolution `Err` is
+    // The legacy Anthropic auto-enable is gated on one policy read. A resolution
+    // `Err` is
     // deliberately swallowed as "not allowed": an unreadable policy fails
     // closed to no BYOK arming while boot still proceeds, so the profile can
     // surface the error and be repaired instead of bricking.
@@ -688,10 +686,6 @@ async fn bind_inner(
         gateway.clone(),
         os_policy.clone(),
     ));
-    // The parsing retriever still accepts these until the follow-up removes them.
-    let embedder: Arc<dyn Embedder> = Arc::new(HashEmbedder::default());
-    let vector_store: Arc<dyn VectorStore> =
-        Arc::new(InMemoryVectorStore::new(embedder.dimensions()));
     let code_execution = Arc::new(code_execution::ConfiguredCodeExecutionProvider::new(
         store.clone(),
         secrets.clone(),
@@ -702,8 +696,6 @@ async fn bind_inner(
     let extract_store = store.clone();
     let extract_secrets = secrets.clone();
     let (retrieval, tools, agent_config) = agent_deps(
-        embedder,
-        vector_store,
         code_execution,
         foreground_web_search,
         |_| {
@@ -750,7 +742,6 @@ async fn bind_inner(
         state.blobs.clone(),
         state.retrieval.clone(),
         state.document_job_wake.clone(),
-        state.document_writes.clone(),
         document_worker::DocumentWorkerConfig::default(),
     );
     let document_auditor = document_auditor::DocumentAuditor::new(
@@ -868,18 +859,15 @@ async fn bind_inner(
 /// without a restart. The model *name* comes from `OPENWAVE_MODEL` (or the built-in
 /// default) and can be overridden at runtime via `PUT /settings` or per-chat.
 fn agent_deps(
-    embedder: Arc<dyn Embedder>,
-    store: Arc<dyn VectorStore>,
     code_execution: Arc<dyn openwave_code_execution::CodeExecutionProvider>,
     web_search: Box<dyn Tool>,
     // Built from the retriever rather than handed in ready-made: extraction now
     // files each fetched page as a source, which means queueing it for the same
-    // index every other source goes to, and that identity does not exist until
-    // the retriever does.
+    // canonical parsing pipeline every other source uses.
     web_extract: impl FnOnce(&Retriever) -> Box<dyn Tool>,
     source_store: Arc<dyn Store>,
 ) -> (Arc<Retriever>, ToolRegistry, AgentConfig) {
-    let (retrieval, _) = build_retrieval(embedder, store);
+    let retrieval = build_retrieval();
     let web_extract = web_extract(&retrieval);
     let mut tools = ToolRegistry::new()
         .with(Box::new(ReadFile))
@@ -935,17 +923,10 @@ fn agent_deps(
     (retrieval, tools, agent_config)
 }
 
-fn build_retrieval(
-    embedder: Arc<dyn Embedder>,
-    store: Arc<dyn VectorStore>,
-) -> (Arc<Retriever>, ()) {
-    let retrieval = Arc::new(Retriever::new(
-        Box::new(openwave_retrieval::document_parser_registry()),
-        Box::new(TextChunker::default()),
-        embedder,
-        store,
-    ));
-    (retrieval, ())
+fn build_retrieval() -> Arc<Retriever> {
+    Arc::new(Retriever::new(Box::new(
+        openwave_retrieval::document_parser_registry(),
+    )))
 }
 
 /// Open the durable store the profile selects.

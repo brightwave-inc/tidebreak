@@ -9,11 +9,9 @@ use openwave_core::{
     AgentError, BlobStore, DocumentJob, DocumentJobId, DocumentJobStatus, DocumentParseOutput,
     Result, Store,
 };
-use openwave_retrieval::{DocumentSource, RetrievalError, Retriever};
+use openwave_retrieval::{RetrievalError, Retriever};
 use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
-
-use crate::state::DocumentWriteGuard;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DocumentWorkerConfig {
@@ -72,7 +70,6 @@ impl DocumentWorker {
         blobs: Arc<dyn BlobStore>,
         retrieval: Arc<Retriever>,
         wake: Arc<Notify>,
-        _document_writes: Arc<DocumentWriteGuard>,
         config: DocumentWorkerConfig,
     ) -> Self {
         assert!(!config.lease.is_zero());
@@ -263,16 +260,11 @@ impl DocumentWorker {
                 )
                 .await;
         }
-        let document_source = match source.source_uri.clone() {
-            Some(uri) => DocumentSource::uri(uri),
-            None => DocumentSource::Inline,
-        };
         let parsed = match self
             .supervise(
                 &job,
                 lease_token,
-                self.retrieval
-                    .parse_document(document_source, &source.media_type, &bytes),
+                self.retrieval.parse_document(&source.media_type, &bytes),
             )
             .await
         {

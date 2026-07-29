@@ -248,9 +248,7 @@ impl Tool for ReadSourceTool {
             Err(_) => return Ok(ToolOutput::error("could not read the source")),
         };
 
-        // Parsing and indexing are separate jobs. Direct reads become useful as
-        // soon as canonical parser output exists, even while embedding is still
-        // running, so a small source does not inherit the full RAG wait.
+        // Direct reads become useful as soon as canonical parser output exists.
         if document.source_blob.is_some() && document.canonical_fingerprint.is_none() {
             let status = match document.processing_status {
                 DocumentProcessingStatus::Failed => "could not be prepared",
@@ -279,9 +277,8 @@ impl Tool for ReadSourceTool {
         }
 
         let source_token = Uuid::new_v4();
-        // The same citation grammar the search tool teaches, under the same
-        // per-turn format, so a citation authored from a direct read reads
-        // exactly like one authored from a search hit.
+        // Use the turn's citation format so direct source evidence renders like
+        // every other grounded reference.
         let reference = format_citation_reference(
             ctx.citation_format,
             "your phrasing",

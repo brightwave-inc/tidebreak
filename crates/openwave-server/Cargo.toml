@@ -40,15 +40,6 @@ parse-spreadsheet = ["openwave-retrieval/parse-spreadsheet"]
 # later); routing them to a dedicated parser gives a stable fingerprint and keeps
 # them out of the generic fallback.
 parse-image = ["openwave-retrieval/parse-image"]
-# The durable, on-disk vector store (LanceDB). Off by default because it is the
-# most expensive thing this workspace compiles — roughly 330 crates of arrow,
-# datafusion, parquet, and lance, plus a `protoc` requirement — and the tests
-# that need it are a handful. With the feature off, `connect_vector_store`
-# stands up an in-memory index instead, which is fine for a dev build and would
-# be data loss in a shipped one: `build.rs` fails any release build that leaves
-# this feature out.
-vec-lance = ["openwave-retrieval/vec-lance"]
-
 [dependencies]
 openwave-shell-policy = { path = "../openwave-shell-policy" }
 openwave-code-execution = { path = "../openwave-code-execution" }

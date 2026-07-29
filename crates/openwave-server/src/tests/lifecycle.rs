@@ -83,10 +83,7 @@ async fn cancellation_drains_buffered_preassigned_event_ordinals() {
     injected.pause_next_nonterminal_event();
     let store: Arc<dyn Store> = injected;
     let second_yielded = Arc::new(Notify::new());
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -708,10 +705,7 @@ async fn durable_steer_retries_heartbeat_races_and_ambiguous_application() {
     let store: Arc<dyn Store> = injected.clone();
     let calls = Arc::new(AtomicUsize::new(0));
     let provider_entered = Arc::new(Notify::new());
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -834,10 +828,7 @@ async fn committed_steer_event_recovers_when_cancellation_wins_ambiguous_respons
     let cancellation_committed = injected.cancel_after_next_apply_steer_commit();
     let store: Arc<dyn Store> = injected;
     let entered = Arc::new(Notify::new());
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -939,10 +930,7 @@ async fn queued_steer_is_applied_when_the_worker_claims_the_turn() {
         .await
         .unwrap(),
     );
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -1798,10 +1786,7 @@ async fn client_resolution_publishes_cancellation_and_wakes_resumable_turns() {
         .await
         .unwrap(),
     );
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -1967,10 +1952,7 @@ async fn resumed_worker_preserves_checkpoint_usage_and_step_budget() {
         .unwrap(),
     );
     let calls = Arc::new(AtomicUsize::new(0));
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -2097,10 +2079,7 @@ async fn worker_checkpoints_a_client_tool_and_resumes_after_its_result() {
     injected.fail_after_next_park_commit();
     let store: Arc<dyn Store> = injected;
     let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     let mut tools = ToolRegistry::new();
     tools.register_client(ToolSpec {
         name: "connect_folder".into(),
@@ -2204,10 +2183,7 @@ async fn worker_checkpoints_a_client_tool_and_resumes_after_its_result() {
         .await
         .unwrap(),
     );
-    let (exhausted_retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let exhausted_retrieval = build_retrieval();
     let mut exhausted_tools = ToolRegistry::new();
     exhausted_tools.register_client(ToolSpec {
         name: "connect_folder".into(),
