@@ -189,6 +189,30 @@ pub struct GatewayCredentials {
     access_tokens: BTreeMap<String, CachedAccessToken>,
 }
 
+impl GatewayCredentials {
+    /// Whether these credentials were minted against `base_url`. Trailing
+    /// slashes are normalized the same way [`GatewayAuth::endpoint`] does, so
+    /// a subpath deployment retyped with or without one never reads as a
+    /// different gateway. A base URL that does not parse matches nothing.
+    #[must_use]
+    pub fn matches_base_url(&self, base_url: &str) -> bool {
+        fn normalized(url: &reqwest::Url) -> String {
+            let mut base = url.to_string();
+            if !base.ends_with('/') {
+                base.push('/');
+            }
+            base
+        }
+        match (
+            reqwest::Url::parse(&self.base_url),
+            reqwest::Url::parse(base_url),
+        ) {
+            (Ok(stored), Ok(expected)) => normalized(&stored) == normalized(&expected),
+            _ => false,
+        }
+    }
+}
+
 impl std::fmt::Debug for GatewayCredentials {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -213,6 +237,20 @@ pub async fn has_stored_credentials(secrets: &dyn SecretProvider) -> bool {
     matches!(
         secrets.get_secret(SECRET_KEY).await,
         Ok(Some(raw)) if serde_json::from_str::<GatewayCredentials>(&raw).is_ok()
+    )
+}
+
+/// Whether a gateway session minted against `base_url` is stored.
+///
+/// The deployment-matched form of [`has_stored_credentials`], for readiness
+/// surfaces on a managed profile: a session left by a superseded deployment
+/// must not read as a credential for the policy's current one — every route
+/// and token path already refuses it.
+pub async fn has_stored_credentials_for(secrets: &dyn SecretProvider, base_url: &str) -> bool {
+    matches!(
+        secrets.get_secret(SECRET_KEY).await,
+        Ok(Some(raw)) if serde_json::from_str::<GatewayCredentials>(&raw)
+            .is_ok_and(|credentials| credentials.matches_base_url(base_url))
     )
 }
 
@@ -602,8 +640,18 @@ impl GatewayConnection {
     }
 
     /// Persist a completed sign-in as the connection's stored credentials.
+    ///
+    /// The vault holds one session, so whatever was stored is superseded the
+    /// moment this saves: its refresh token is revoked first (best-effort, at
+    /// its own gateway), or it would stay live server-side with no local
+    /// state left to ever revoke it.
     pub async fn store_session(&self, session: &AuthorizedSession) -> Result<()> {
         let _guard = self.token_motion.lock().await;
+        // An unreadable stored blob is skipped, as in sign-out: it carries no
+        // usable refresh token to revoke.
+        if let Ok(Some(superseded)) = self.vault.load().await {
+            self.revoke_stored(&superseded).await;
+        }
         let mut access_tokens = BTreeMap::new();
         access_tokens.insert(
             session.tokens.resource.clone(),
@@ -634,15 +682,29 @@ impl GatewayConnection {
     /// [`GatewayAuth::endpoint`] does, so a subpath deployment retyped with
     /// or without one never reads as a different gateway.
     fn matches_deployment(&self, credentials: &GatewayCredentials) -> bool {
-        fn normalized(url: &reqwest::Url) -> String {
-            let mut base = url.to_string();
-            if !base.ends_with('/') {
-                base.push('/');
-            }
-            base
-        }
-        reqwest::Url::parse(&credentials.base_url)
-            .is_ok_and(|url| normalized(&url) == normalized(&self.auth.config.base_url))
+        credentials.matches_base_url(self.auth.config.base_url.as_str())
+    }
+
+    /// Best-effort, bounded revocation of a stored session at its own
+    /// gateway.
+    ///
+    /// The stored credentials name the deployment they were minted against,
+    /// which need not be this connection's own (an MDM re-point, a re-pair):
+    /// the revoke goes where the token is valid. A gateway that is
+    /// unreachable, gone, or whose stored URL no longer parses cannot hold
+    /// the caller hostage — the server-side session still dies at
+    /// refresh-token expiry.
+    async fn revoke_stored(&self, credentials: &GatewayCredentials) {
+        const REVOKE_TIMEOUT: Duration = Duration::from_secs(5);
+        let auth = if self.matches_deployment(credentials) {
+            Some(self.auth.clone())
+        } else {
+            GatewayAuthConfig::new(&credentials.base_url)
+                .and_then(GatewayAuth::new)
+                .ok()
+        };
+        let Some(auth) = auth else { return };
+        let _ = tokio::time::timeout(REVOKE_TIMEOUT, auth.revoke(&credentials.refresh_token)).await;
     }
 
     /// The stored (offline) identity, if signed in to this connection's
@@ -731,13 +793,14 @@ impl GatewayConnection {
         self.access_token(&format!("mcp:{slug}")).await
     }
 
-    /// Revoke the session at the gateway (best-effort) and always clear the
-    /// local vault. A gateway that is unreachable cannot hold local sign-out
-    /// hostage; its server-side session still dies at refresh-token expiry.
+    /// Revoke the session at its own gateway (best-effort, bounded) and
+    /// always clear the local vault. A gateway that is unreachable cannot
+    /// hold local sign-out hostage; its server-side session still dies at
+    /// refresh-token expiry.
     pub async fn sign_out(&self) -> Result<()> {
         let _guard = self.token_motion.lock().await;
         if let Some(credentials) = self.vault.load().await? {
-            let _ = self.auth.revoke(&credentials.refresh_token).await;
+            self.revoke_stored(&credentials).await;
         }
         self.vault.clear().await
     }
