@@ -27,21 +27,126 @@ const CREDENTIAL_SUFFIX: &str = ".credential";
 /// Legacy Anthropic API-key secret (pre-providers). Still read as a fallback.
 pub const LEGACY_ANTHROPIC_API_KEY: &str = "provider.anthropic.api_key";
 
-/// Serializes every writer of the ModelGateway provider row.
+/// Serializes every writer of the durable gateway state: the provisioning
+/// write (pairing) and the entitled-model snapshot (model sync, sign-out).
 ///
-/// Pairing, model sync, sign-out, and `PUT /providers/model_gateway` each
-/// read `provider.model_gateway`, mutate part of it, and write the whole row
-/// back, and the [`Store`] API has no cross-call transaction. Unserialized,
-/// two read-modify-writes can interleave and resurrect fields the other just
-/// replaced — a model sync racing a pairing could stamp the old gateway's
-/// base URL or stale model list over the row the pairing wrote while policy
-/// already points at the new gateway. Process-local for the same reason as
-/// pairing's own mutex: the server's instance lock guarantees one process
-/// owns the store, and a static cannot be accidentally wired into two
-/// instances that no longer exclude each other. Lock order: acquired after
-/// the pairing mutex and after the gateway runtime's sign-in state lock,
-/// never before either, and never held across a network call.
-pub(crate) static GATEWAY_ROW_WRITES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// The [`Store`] API has no cross-call transaction, so a sync whose policy
+/// recheck and snapshot write interleaved with a provisioning write could
+/// stamp a snapshot the new policy never entitled. Process-local for the
+/// same reason as pairing's own mutex: the server's instance lock guarantees
+/// one process owns the store, and a static cannot be accidentally wired
+/// into two instances that no longer exclude each other. Lock order:
+/// acquired after the pairing mutex and after the gateway runtime's sign-in
+/// state lock, never before either, and never held across a network call.
+pub(crate) static GATEWAY_STATE_WRITES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Setting key for the entitled-model snapshot synced from the managed
+/// gateway. This replaces the retired `provider.model_gateway` row's model
+/// list: policy names the gateway, this key caches what it entitles, and no
+/// other stored state describes the gateway.
+const GATEWAY_MODELS_KEY: &str = "gateway.models_v1";
+
+/// The persisted snapshot of the managed gateway's entitled models, stamped
+/// with the deployment it was synced from. The stamp is what keeps the cache
+/// honest without coordinated clears: a snapshot synced from one gateway is
+/// simply never honored while policy names another.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct GatewayModelSnapshot {
+    /// The normalized gateway base URL the models were fetched from.
+    pub(crate) gateway_url: String,
+    pub(crate) models: Vec<CustomModelConfig>,
+}
+
+/// Read the stored snapshot regardless of provenance. Callers that offer
+/// models to anything must use [`gateway_models`] instead; this raw read
+/// exists for selection-key resolution, where usability is enforced
+/// separately by [`provider_is_usable`] and route collection.
+pub(crate) async fn read_gateway_snapshot(
+    store: &dyn Store,
+) -> Result<Option<GatewayModelSnapshot>> {
+    Ok(store
+        .get_setting(GATEWAY_MODELS_KEY)
+        .await?
+        .and_then(|value| serde_json::from_value(value).ok()))
+}
+
+/// Persist the entitled-model snapshot. Callers hold
+/// [`GATEWAY_STATE_WRITES`] across their policy recheck and this write.
+pub(crate) async fn write_gateway_snapshot(
+    store: &dyn Store,
+    snapshot: &GatewayModelSnapshot,
+) -> Result<()> {
+    store
+        .set_setting(GATEWAY_MODELS_KEY, &serde_json::to_value(snapshot)?)
+        .await
+}
+
+/// The entitled models of the gateway the resolved policy names: empty for
+/// an unmanaged profile, for a misconfigured policy, and for a snapshot
+/// stamped by a different deployment.
+pub(crate) async fn gateway_models(
+    store: &dyn Store,
+    policy: &crate::managed_policy::ManagedPolicy,
+) -> Result<Vec<CustomModelConfig>> {
+    let Some(gateway_url) = policy.gateway_url.as_deref().filter(|_| policy.managed) else {
+        return Ok(Vec::new());
+    };
+    Ok(read_gateway_snapshot(store)
+        .await?
+        .filter(|snapshot| snapshot.gateway_url == gateway_url)
+        .map(|snapshot| snapshot.models)
+        .unwrap_or_default())
+}
+
+/// One-shot boot cutover for the retired additive gateway configuration.
+///
+/// The `provider.model_gateway` row is no longer read anywhere: policy is
+/// the only gateway source. On a managed profile whose row was stamped by
+/// the policy's own deployment, the row's synced model list is carried into
+/// [`GATEWAY_MODELS_KEY`] once, so the picker does not go blank on upgrade.
+/// On an unmanaged profile a stored row is the retired legacy state: it is
+/// ignored outright — never auto-converted to managed, because lockdown must
+/// not be imposed without the pairing consent flow — and one boot warning
+/// names the remedy.
+pub(crate) async fn retire_legacy_gateway_row(
+    store: &dyn Store,
+    policy: &crate::managed_policy::ManagedPolicy,
+) -> Result<()> {
+    let Some(row) = store
+        .get_setting(&ProviderKind::ModelGateway.setting_key())
+        .await?
+        .and_then(|value| serde_json::from_value::<ProviderConfig>(value).ok())
+    else {
+        return Ok(());
+    };
+    if !policy.managed {
+        if row.base_url.is_some() {
+            tracing::warn!(
+                "this profile carries a legacy additive model-gateway configuration; \
+                 that mode is retired and the stored configuration is ignored — \
+                 pair via your gateway's page to reconnect"
+            );
+        }
+        return Ok(());
+    }
+    let Some(gateway_url) = policy.gateway_url.clone() else {
+        return Ok(());
+    };
+    if row.models.is_empty()
+        || row.base_url.as_deref() != Some(gateway_url.as_str())
+        || read_gateway_snapshot(store).await?.is_some()
+    {
+        return Ok(());
+    }
+    write_gateway_snapshot(
+        store,
+        &GatewayModelSnapshot {
+            gateway_url,
+            models: row.models,
+        },
+    )
+    .await
+}
 
 /// The known provider kinds. `#[non_exhaustive]` so new kinds can land without
 /// breaking wire clients that match on the string form.
@@ -548,12 +653,31 @@ pub async fn has_credential(secrets: &dyn SecretProvider, kind: ProviderKind) ->
 }
 
 /// Build the public [`ProviderInfo`] for every known kind.
+///
+/// The gateway is not an additive provider: an unmanaged profile has no
+/// gateway entry at all, and a managed profile's entry is a projection of
+/// the resolved policy plus the synced snapshot — never a stored row.
 pub async fn list_providers(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
+    policy: &crate::managed_policy::ManagedPolicy,
 ) -> Result<Vec<ProviderInfo>> {
     let mut out = Vec::with_capacity(ProviderKind::ALL.len());
     for &kind in ProviderKind::ALL {
+        if kind == ProviderKind::ModelGateway {
+            if !policy.managed {
+                continue;
+            }
+            out.push(ProviderInfo {
+                kind,
+                enabled: policy.gateway_url.is_some(),
+                base_url: policy.gateway_url.clone(),
+                vertex_location: None,
+                has_credential: has_credential(secrets, kind).await,
+                models: gateway_models(store, policy).await?,
+            });
+            continue;
+        }
         let config = read_config(store, kind).await?;
         out.push(ProviderInfo {
             kind,
@@ -575,64 +699,34 @@ pub(crate) fn managed_profile_refusal(message: impl Into<String>) -> ServerError
 
 /// Apply a [`ProviderUpdate`] and return the resulting [`ProviderInfo`].
 ///
-/// On a managed profile, BYOK providers are locked: credential and base-URL
-/// writes for any non-gateway kind are refused, and the gateway's own base
-/// URL only accepts a value that normalizes to the policy's locked gateway
-/// URL (which keeps the stored row in sync — routing itself reads the policy
-/// URL directly, see [`collect_routes`]).
+/// The ModelGateway kind refuses every write: policy is the only gateway
+/// source, so the profile connects through MDM policy or deep-link pairing
+/// and there is no user-writable gateway configuration in any state. On a
+/// managed profile, BYOK providers are locked: credential and base-URL
+/// writes for any other kind are refused.
 pub async fn update_provider(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
     kind: ProviderKind,
-    mut update: ProviderUpdate,
+    update: ProviderUpdate,
     os_policy: &dyn crate::managed_policy::OsPolicySource,
 ) -> std::result::Result<ProviderInfo, ServerError> {
-    // The gateway row is also written by pairing, model sync, and sign-out;
-    // serialize this read-modify-write with them. The policy is resolved
-    // under the same lock so a pairing that lands first is seen as managed
-    // here rather than bypassed with a stale resolution. Other kinds have no
-    // concurrent writers and take no lock.
-    let row_lock = match kind {
-        ProviderKind::ModelGateway => Some(GATEWAY_ROW_WRITES.lock().await),
-        _ => None,
-    };
+    if kind == ProviderKind::ModelGateway {
+        // Refused wholesale, managed or not — before any read, so no lock is
+        // needed here and nothing this route does can race the snapshot
+        // writers. The stable kind lets clients branch on it, exactly as
+        // `managed_profile` does for the BYOK lockdown.
+        return Err(ServerError::conflict_kind(
+            "gateway_policy",
+            "the model gateway is configured by policy, not provider settings; \
+             pair via your gateway's page to connect",
+        ));
+    }
     let policy = crate::managed_policy::resolve(store, os_policy).await?;
-    if policy.managed {
-        if kind != ProviderKind::ModelGateway
-            && (update.credential.is_some() || update.base_url.is_some())
-        {
-            return Err(managed_profile_refusal(format!(
-                "this profile is managed by a model gateway; {kind} credentials and endpoints are locked"
-            )));
-        }
-        if kind == ProviderKind::ModelGateway {
-            if let Some(base_url) = update.base_url.take() {
-                // Structurally fail closed: a managed policy without a URL
-                // (which resolution today never produces) locks the field
-                // outright rather than comparing against an empty string.
-                let Some(locked) = policy.gateway_url.as_deref() else {
-                    return Err(managed_profile_refusal(
-                        "this profile is managed; the model gateway base URL is locked",
-                    ));
-                };
-                let matches_locked = base_url.as_deref().is_some_and(|url| {
-                    crate::managed_policy::validated_gateway_url(url)
-                        .ok()
-                        .as_deref()
-                        == Some(locked)
-                });
-                if !matches_locked {
-                    return Err(managed_profile_refusal(format!(
-                        "this profile is managed; the model gateway base URL is locked to {locked}"
-                    )));
-                }
-                // Store the normalized contract form, not the raw input: the
-                // guard compared normalized, and downstream scheme checks
-                // must see the same shape (`HTTPS://…` would otherwise pass
-                // here and fail them).
-                update.base_url = Some(Some(locked.to_owned()));
-            }
-        }
+    if policy.managed && (update.credential.is_some() || update.base_url.is_some()) {
+        return Err(managed_profile_refusal(format!(
+            "this profile is managed by a model gateway; {kind} credentials and endpoints are locked"
+        )));
     }
 
     let mut config = read_config(store, kind).await?;
@@ -647,18 +741,7 @@ pub async fn update_provider(
             if url.is_empty() {
                 return Err(ServerError::bad_request("base_url must not be empty"));
             }
-            config.base_url = Some(if kind == ProviderKind::ModelGateway {
-                // Store the normalized contract form on every profile, not
-                // only managed ones: pairing and policy store the normalized
-                // shape, and both the sync recheck and the connection cache
-                // compare exact strings — a verbatim `https://gw` beside a
-                // normalized `https://gw/` would refuse a same-deployment
-                // sync and split the connection cache for one gateway.
-                crate::managed_policy::validated_gateway_url(&url)
-                    .map_err(|error| ServerError::bad_request(error.to_string()))?
-            } else {
-                url
-            });
+            config.base_url = Some(url);
         }
     }
     match update.vertex_location {
@@ -696,16 +779,6 @@ pub async fn update_provider(
     }
 
     if let Some(credential) = update.credential {
-        // The gateway's only credential is its OAuth session, managed by the
-        // sign-in flow; accepting a pasted key here would light up
-        // has_credential with nothing the router can use.
-        if kind == ProviderKind::ModelGateway
-            && matches!(credential, ProviderCredential::ApiKey { .. })
-        {
-            return Err(ServerError::bad_request(
-                "model_gateway signs in with OAuth; api keys are not accepted",
-            ));
-        }
         if let Some(json) = credential.as_service_account() {
             if !kind.accepts_credential(&credential) {
                 return Err(ServerError::bad_request(format!(
@@ -720,9 +793,6 @@ pub async fn update_provider(
     }
 
     write_config(store, kind, &config).await?;
-    // The response's has_credential is keychain I/O; the row lock exists to
-    // serialize the row write, so drop it before building the response.
-    drop(row_lock);
 
     Ok(ProviderInfo {
         kind,
@@ -868,7 +938,9 @@ pub fn route_kind(kind: ProviderKind) -> openwave_router::RouteKind {
 /// On a managed profile only the gateway route is offered: BYOK kinds are
 /// skipped before any credential is read, so stored keys and the env-var
 /// fallbacks are inert without being deleted, and the gateway's bearer target
-/// comes from the policy's locked URL — stored config can never redirect it.
+/// is the policy URL. On an unmanaged profile there is no gateway route at
+/// all: policy is the only gateway source, and a legacy stored row is never
+/// read.
 pub async fn collect_routes(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
@@ -877,43 +949,40 @@ pub async fn collect_routes(
 ) -> Vec<openwave_router::Route> {
     let mut routes = Vec::new();
     for &kind in ProviderKind::ALL {
-        if policy.managed && kind != ProviderKind::ModelGateway {
+        if kind == ProviderKind::ModelGateway {
+            if !policy.managed {
+                continue;
+            }
+            // The gateway route rides its live token source; without a signed-in
+            // session there is nothing to route to.
+            let Some(source) = gateway_tokens.clone() else {
+                continue;
+            };
+            let Some(base) = policy.gateway_url.as_deref() else {
+                continue;
+            };
+            if !(base.starts_with("https://") || base.starts_with("http://")) {
+                continue;
+            }
+            let models = gateway_models(store, policy).await.unwrap_or_default();
+            routes.push(openwave_router::Route {
+                kind: route_kind(kind),
+                api_key: String::new(),
+                base_url: Some(format!("{}/compat/anthropic", base.trim_end_matches('/'))),
+                curated_models: models.into_iter().map(|model| model.id).collect(),
+                token_source: Some(source),
+                vertex: None,
+            });
+            continue;
+        }
+        if policy.managed {
             continue;
         }
         let config = match read_config(store, kind).await {
             Ok(c) => c,
             Err(_) => continue,
         };
-        // A managed profile's gateway presence comes from policy, not the
-        // stored row: a pure-MDM profile may have no row at all (disabled
-        // default), and the row must not be able to turn the gateway off.
-        if !config.enabled && !policy.managed {
-            continue;
-        }
-        if kind == ProviderKind::ModelGateway {
-            // The gateway route rides its live token source; without a signed-in
-            // session there is nothing to route to.
-            let Some(source) = gateway_tokens.clone() else {
-                continue;
-            };
-            let Some(base) = (if policy.managed {
-                policy.gateway_url.as_deref()
-            } else {
-                config.base_url.as_deref()
-            }) else {
-                continue;
-            };
-            if !(base.starts_with("https://") || base.starts_with("http://")) {
-                continue;
-            }
-            routes.push(openwave_router::Route {
-                kind: route_kind(kind),
-                api_key: String::new(),
-                base_url: Some(format!("{}/compat/anthropic", base.trim_end_matches('/'))),
-                curated_models: config.models.into_iter().map(|model| model.id).collect(),
-                token_source: Some(source),
-                vertex: None,
-            });
+        if !config.enabled {
             continue;
         }
 
@@ -1037,15 +1106,18 @@ pub async fn resolve_model_policy(
         if let Some(spec) = model_registry::find_for(provider, id) {
             return Ok(Some(ResolvedModelPolicy::curated(spec)));
         }
-        if !matches!(
-            provider,
-            ProviderKind::OpenaiCompatible | ProviderKind::ModelGateway
-        ) {
-            return Ok(None);
-        }
-        let config = read_config(store, provider).await?;
-        return Ok(config
-            .models
+        let models = match provider {
+            ProviderKind::OpenaiCompatible => read_config(store, provider).await?.models,
+            // Resolution is not an offer: usability and routing gate the
+            // gateway on policy separately, so the raw snapshot read here
+            // only keeps stored selections legible.
+            ProviderKind::ModelGateway => read_gateway_snapshot(store)
+                .await?
+                .map(|snapshot| snapshot.models)
+                .unwrap_or_default(),
+            _ => return Ok(None),
+        };
+        return Ok(models
             .iter()
             .find(|model| model.id == id)
             .map(|model| ResolvedModelPolicy::custom_for(provider, model)));
@@ -1072,9 +1144,10 @@ pub async fn resolve_model_policy(
 
 /// Whether the provider can accept a new turn right now.
 ///
-/// On a managed profile the gateway's presence is derived from policy — the
-/// stored row is display/session-cache only and may not exist at all — so it
-/// is usable exactly when a session is stored; BYOK kinds are never usable.
+/// The gateway is derived from policy in both directions: on a managed
+/// profile it is usable exactly when a session is stored (and BYOK kinds
+/// never are), and on an unmanaged profile it is never usable — whatever
+/// legacy rows persist in the store.
 pub async fn provider_is_usable(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
@@ -1086,6 +1159,9 @@ pub async fn provider_is_usable(
             return Ok(false);
         }
         return Ok(has_credential(secrets, kind).await);
+    }
+    if kind == ProviderKind::ModelGateway {
+        return Ok(false);
     }
     let config = read_config(store, kind).await?;
     if !config.enabled || !has_credential(secrets, kind).await {
@@ -1099,10 +1175,7 @@ pub async fn provider_is_usable(
     {
         return Ok(false);
     }
-    if matches!(
-        kind,
-        ProviderKind::OpenaiCompatible | ProviderKind::ModelGateway
-    ) {
+    if kind == ProviderKind::OpenaiCompatible {
         let Some(base) = config.base_url.as_deref() else {
             return Ok(false);
         };
@@ -1122,21 +1195,23 @@ pub async fn catalog_models(
 ) -> Result<Vec<CatalogModel>> {
     let mut models = Vec::new();
     for &kind in ProviderKind::ALL {
-        let config = read_config(store, kind).await?;
         let available = provider_is_usable(store, secrets, kind, policy).await?;
         models.extend(model_registry::models_for(kind).map(|spec| CatalogModel {
             policy: ResolvedModelPolicy::curated(spec),
             available,
         }));
-        if matches!(
-            kind,
-            ProviderKind::OpenaiCompatible | ProviderKind::ModelGateway
-        ) {
-            models.extend(config.models.iter().map(|model| CatalogModel {
-                policy: ResolvedModelPolicy::custom_for(kind, model),
-                available,
-            }));
-        }
+        // Configured model sets: the compatible endpoint's custom entries,
+        // and the managed gateway's entitled snapshot — which is empty on an
+        // unmanaged profile, so no gateway row ever reaches the catalog there.
+        let configured = match kind {
+            ProviderKind::OpenaiCompatible => read_config(store, kind).await?.models,
+            ProviderKind::ModelGateway => gateway_models(store, policy).await?,
+            _ => Vec::new(),
+        };
+        models.extend(configured.iter().map(|model| CatalogModel {
+            policy: ResolvedModelPolicy::custom_for(kind, model),
+            available,
+        }));
     }
     Ok(models)
 }

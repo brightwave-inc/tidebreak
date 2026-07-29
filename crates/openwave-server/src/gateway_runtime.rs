@@ -1,11 +1,13 @@
 //! The server's handle on a signed-in model-gateway session.
 //!
-//! Owns the [`GatewayConnection`] built from the persisted provider
-//! configuration, hands the router a per-request token source for the
-//! gateway's short-lived `llm` tokens, and syncs the entitled model list into
-//! the provider's stored custom-model set so the picker and model policy work
-//! from durable local state while the gateway stays the live authority at
-//! inference time.
+//! Owns the [`GatewayConnection`] built from the resolved managed policy —
+//! the only gateway source in either direction — hands the router a
+//! per-request token source for the gateway's short-lived `llm` tokens, and
+//! syncs the entitled model list into the stored snapshot so the picker and
+//! model policy work from durable local state while the gateway stays the
+//! live authority at inference time. On an unmanaged profile every surface
+//! here is inert: no connection, no routes, and the sign-in endpoints refuse
+//! with a pointer at the pairing flow.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +21,7 @@ use openwave_router::BearerTokenSource;
 use serde::Serialize;
 use tokio::sync::Mutex;
 
-use crate::providers::{self, CustomModelConfig, ProviderKind};
+use crate::providers::{self, CustomModelConfig};
 
 /// How long a browser sign-in may stay pending before it fails.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
@@ -111,37 +113,26 @@ impl GatewayRuntime {
         })
     }
 
-    /// The renderer-facing connection status.
+    /// The renderer-facing connection status, derived from policy alone: a
+    /// profile is gateway-connected exactly when managed policy asserts it,
+    /// so an unmanaged profile reads unconfigured whatever legacy rows
+    /// persist, and a managed policy whose URL is missing (misconfigured)
+    /// reads unconfigured, honestly.
     ///
-    /// Where the deployment comes from follows [`connection`](Self::connection):
-    /// on a managed profile the resolved policy is the authority, so a
-    /// pure-MDM profile — which may have no stored provider row at all —
-    /// reads configured and enabled against its policy URL instead of
-    /// rendering "not configured" while everything works. A managed policy
-    /// whose URL is missing (misconfigured) reads unconfigured, honestly.
+    /// `configured` and `enabled` are now the same bit — kept apart only for
+    /// wire-shape stability until the renderer slice retires them.
     pub(crate) async fn status(&self) -> Result<GatewayStatus> {
         // One policy read for the whole projection: the renderer polls this
         // every couple of seconds while a sign-in is pending.
         let policy = crate::managed_policy::resolve(&*self.store, &*self.os_policy).await?;
-        let config = providers::read_config(&*self.store, ProviderKind::ModelGateway).await?;
-        let base_url = if policy.managed {
-            policy.gateway_url.clone()
-        } else {
-            config.base_url.clone()
-        };
+        let base_url = policy.gateway_url.clone();
         let credentials = match self.connection_for(&policy).await? {
             Some(connection) => connection.stored_credentials().await?,
             None => None,
         };
         Ok(GatewayStatus {
             configured: base_url.is_some(),
-            // A managed profile's gateway cannot be switched off from the
-            // stored row: policy decides whether it is on.
-            enabled: if policy.managed {
-                base_url.is_some()
-            } else {
-                config.enabled
-            },
+            enabled: base_url.is_some(),
             base_url,
             signed_in: credentials.is_some(),
             account_hint: credentials
@@ -150,19 +141,18 @@ impl GatewayRuntime {
             installation_id: credentials
                 .as_ref()
                 .map(|credentials| credentials.installation_id.clone()),
-            model_count: config.models.len(),
+            model_count: providers::gateway_models(&*self.store, &policy)
+                .await?
+                .len(),
             sign_in: self.sign_in.lock().await.clone(),
         })
     }
 
     /// The entitled connected apps, fetched live from the gateway with the
-    /// stored session. Requires a configured gateway and a signed-in session;
-    /// a gateway without the JSON apps surface reports `supported: false`.
+    /// stored session. Managed-only, like the whole sign-in surface; a
+    /// gateway without the JSON apps surface reports `supported: false`.
     pub(crate) async fn apps(&self) -> Result<GatewayApps> {
-        let connection = self
-            .connection()
-            .await?
-            .ok_or_else(|| AgentError::config("no model gateway is configured"))?;
+        let connection = self.managed_connection().await?;
         Ok(match connection.apps().await? {
             Some(apps) => GatewayApps {
                 supported: true,
@@ -190,10 +180,7 @@ impl GatewayRuntime {
     /// stored and the entitled models synced; on failure the status surface
     /// carries the bounded error until the next attempt.
     pub(crate) async fn begin_sign_in(self: &Arc<Self>) -> Result<String> {
-        let connection = self
-            .connection()
-            .await?
-            .ok_or_else(|| AgentError::config("no model gateway is configured"))?;
+        let connection = self.managed_connection().await?;
         let pending = connection.auth().start_sign_in().await?;
         let authorization_url = pending.authorization_url().to_string();
         let generation = {
@@ -246,8 +233,10 @@ impl GatewayRuntime {
     }
 
     /// Revoke the session (best-effort at the gateway), clear local state, and
-    /// drop the synced model snapshot.
+    /// drop the synced model snapshot. Managed-only, like sign-in.
     pub(crate) async fn sign_out(&self) -> Result<()> {
+        let policy = crate::managed_policy::resolve(&*self.store, &*self.os_policy).await?;
+        let base_url = require_managed(&policy)?;
         // Take the state lock for the whole operation and invalidate any
         // pending browser flow before revoking anything: an exchange that
         // completes during the revoke round-trip serializes behind this lock
@@ -256,35 +245,41 @@ impl GatewayRuntime {
         let mut sign_in = self.sign_in.lock().await;
         self.sign_in_generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        if let Some(connection) = self.connection().await? {
-            connection.sign_out().await?;
-        }
+        self.connection_at(base_url.clone())
+            .await?
+            .sign_out()
+            .await?;
         {
-            // Serialize the snapshot clear with the other row writers so it
-            // cannot land inside one of their read-modify-writes. Lock order
-            // matches the sign-in task's sync path: the sign-in state lock is
-            // already held, the row lock nests inside it.
-            let _row = providers::GATEWAY_ROW_WRITES.lock().await;
-            let mut config =
-                providers::read_config(&*self.store, ProviderKind::ModelGateway).await?;
-            if !config.models.is_empty() {
-                config.models = Vec::new();
-                providers::write_config(&*self.store, ProviderKind::ModelGateway, &config).await?;
+            // Serialize the snapshot clear with the other snapshot writers so
+            // it cannot land inside one of their recheck-and-write windows.
+            // Lock order matches the sign-in task's sync path: the sign-in
+            // state lock is already held, the snapshot lock nests inside it.
+            let _lock = providers::GATEWAY_STATE_WRITES.lock().await;
+            if !providers::gateway_models(&*self.store, &policy)
+                .await?
+                .is_empty()
+            {
+                providers::write_gateway_snapshot(
+                    &*self.store,
+                    &providers::GatewayModelSnapshot {
+                        gateway_url: base_url,
+                        models: Vec::new(),
+                    },
+                )
+                .await?;
             }
         }
         *sign_in = SignInProgress::Idle;
         Ok(())
     }
 
-    /// The connection for the effective gateway, or `None` when none is
-    /// configured.
+    /// The connection for the policy's gateway, or `None` when the profile is
+    /// unmanaged (or the managed policy is misconfigured).
     ///
-    /// A managed profile's deployment comes from the resolved policy, never
-    /// from the stored provider row: the row is renderer-writable while
-    /// unmanaged, so honoring it here would let a pre-provisioning write
-    /// redirect sign-in and every minted bearer — and a merely diverged (or
-    /// absent) row would drop the connection a managed profile is entitled
-    /// to. Under managed policy the row is display/session-cache only.
+    /// The deployment comes from the resolved policy and nowhere else. The
+    /// retired provider row was renderer-writable while unmanaged, so
+    /// honoring it here would let a pre-provisioning write redirect sign-in
+    /// and every minted bearer; it is never read.
     pub(crate) async fn connection(&self) -> Result<Option<Arc<GatewayConnection>>> {
         let policy = crate::managed_policy::resolve(&*self.store, &*self.os_policy).await?;
         self.connection_for(&policy).await
@@ -296,25 +291,19 @@ impl GatewayRuntime {
         &self,
         policy: &crate::managed_policy::ManagedPolicy,
     ) -> Result<Option<Arc<GatewayConnection>>> {
-        let Some(base_url) = self.effective_base_url(policy).await? else {
+        let Some(base_url) = policy.gateway_url.clone().filter(|_| policy.managed) else {
             return Ok(None);
         };
         Ok(Some(self.connection_at(base_url).await?))
     }
 
-    /// The effective deployment URL: the resolved policy's on a managed
-    /// profile, the stored row's otherwise. `None` when neither names one.
-    async fn effective_base_url(
-        &self,
-        policy: &crate::managed_policy::ManagedPolicy,
-    ) -> Result<Option<String>> {
-        Ok(if policy.managed {
-            policy.gateway_url.clone()
-        } else {
-            providers::read_config(&*self.store, ProviderKind::ModelGateway)
-                .await?
-                .base_url
-        })
+    /// The connection for the managed gateway, refusing legibly when the
+    /// profile is unmanaged: the sign-in surface (sign-in, sign-out, apps,
+    /// model sync) exists only under managed policy.
+    async fn managed_connection(&self) -> Result<Arc<GatewayConnection>> {
+        let policy = crate::managed_policy::resolve(&*self.store, &*self.os_policy).await?;
+        let base_url = require_managed(&policy)?;
+        self.connection_at(base_url).await
     }
 
     /// The cached connection for `base_url`, rebuilt when the URL changes.
@@ -334,17 +323,18 @@ impl GatewayRuntime {
         Ok(connection)
     }
 
-    /// A router token source, when the provider is configured and a session
-    /// for that deployment is stored. `None` keeps the gateway route out of
-    /// the router entirely — including when the stored session belongs to a
-    /// different gateway than the configured base URL.
+    /// A router token source, when policy names a gateway and a session for
+    /// that deployment is stored. `None` keeps the gateway route out of the
+    /// router entirely — including on unmanaged profiles and when the stored
+    /// session belongs to a different gateway than the policy URL.
     pub(crate) async fn route_token_source(&self) -> Option<Arc<dyn BearerTokenSource>> {
         let connection = self.connection().await.ok().flatten()?;
         connection.stored_credentials().await.ok().flatten()?;
         Some(Arc::new(GatewayTokenSource(connection)))
     }
 
-    /// Fetch the entitled models and persist them as the provider's model set.
+    /// Fetch the entitled models and persist them as the stored snapshot,
+    /// stamped with the deployment they came from. Managed-only.
     ///
     /// Returns how many models are entitled. The persisted snapshot drives the
     /// picker and model policy; entitlement itself stays live at the gateway,
@@ -354,10 +344,7 @@ impl GatewayRuntime {
         &self,
     ) -> std::result::Result<usize, crate::error::ServerError> {
         let policy = crate::managed_policy::resolve(&*self.store, &*self.os_policy).await?;
-        let base_url = self
-            .effective_base_url(&policy)
-            .await?
-            .ok_or_else(|| AgentError::config("no model gateway is configured"))?;
+        let base_url = require_managed(&policy)?;
         let connection = self.connection_at(base_url.clone()).await?;
         // The gateway routes these models over its Anthropic-compatible
         // surface, so sync exactly the set that protocol can serve. Fetched
@@ -380,13 +367,13 @@ impl GatewayRuntime {
             AgentError::config(format!("gateway model sync rejected: {error:?}"))
         })?;
         let count = models.len();
-        let _row = providers::GATEWAY_ROW_WRITES.lock().await;
-        // The fetch ran outside the lock, so a pairing (or an unmanaged
-        // re-point of the row) may have changed the deployment while it was
-        // in flight. Re-resolve under the lock and refuse to stamp another
-        // gateway's row with this one's model list.
+        let _lock = providers::GATEWAY_STATE_WRITES.lock().await;
+        // The fetch ran outside the lock, so the policy authority (an MDM
+        // push) may have re-pointed the deployment while it was in flight.
+        // Re-resolve under the lock and refuse to stamp a snapshot the new
+        // policy never entitled.
         let policy = crate::managed_policy::resolve(&*self.store, &*self.os_policy).await?;
-        if self.effective_base_url(&policy).await?.as_deref() != Some(base_url.as_str()) {
+        if policy.gateway_url.as_deref() != Some(base_url.as_str()) {
             // A benign, retryable race — the deployment was re-pointed while
             // the fetch was in flight — not an internal fault. The stable
             // kind lets clients branch on it, as with `managed_profile`.
@@ -395,9 +382,14 @@ impl GatewayRuntime {
                 "the model gateway configuration changed during model sync",
             ));
         }
-        let mut config = providers::read_config(&*self.store, ProviderKind::ModelGateway).await?;
-        config.models = models;
-        providers::write_config(&*self.store, ProviderKind::ModelGateway, &config).await?;
+        providers::write_gateway_snapshot(
+            &*self.store,
+            &providers::GatewayModelSnapshot {
+                gateway_url: base_url,
+                models,
+            },
+        )
+        .await?;
         Ok(count)
     }
 }
@@ -417,6 +409,23 @@ impl crate::mcp_config::GatewayEndpoints for GatewayRuntime {
             bearer_token: connection.mcp_access_token(slug).await?,
         })
     }
+}
+
+/// The one refusal for every managed-only gateway surface: unmanaged
+/// profiles have no gateway (policy is the only source), and a managed
+/// policy without a usable URL is misconfigured rather than open.
+fn require_managed(policy: &crate::managed_policy::ManagedPolicy) -> Result<String> {
+    if !policy.managed {
+        return Err(AgentError::config(
+            "this profile is not connected to a model gateway; \
+             pair via your gateway's page to connect",
+        ));
+    }
+    policy.gateway_url.clone().ok_or_else(|| {
+        AgentError::config(
+            "the managed gateway policy has no usable gateway URL; repair the policy authority",
+        )
+    })
 }
 
 fn clamp_u32(value: Option<i64>, default: u32) -> u32 {
@@ -574,8 +583,12 @@ mod tests {
         address
     }
 
-    async fn signed_in_runtime(
-        base_url: &str,
+    /// A runtime with a stored session for `session_base`, on a profile
+    /// provisioned (managed) to `provisioned` — policy being the only way a
+    /// profile is gateway-connected at all.
+    async fn signed_in_runtime_at(
+        session_base: &str,
+        provisioned: &str,
     ) -> (Arc<GatewayRuntime>, Arc<dyn Store>, tempfile::TempDir) {
         let directory = tempfile::tempdir().unwrap();
         let store: Arc<dyn Store> = Arc::new(
@@ -591,7 +604,7 @@ mod tests {
         // seed the vault through its serialized form, exactly as a completed
         // sign-in would have persisted it.
         let credentials: openwave_connectors::GatewayCredentials = serde_json::from_value(json!({
-            "base_url": base_url,
+            "base_url": session_base,
             "installation_id": "install-1",
             "user_id": "user-1",
             "account_hint": "abaas@example.test",
@@ -603,18 +616,9 @@ mod tests {
             .save(&credentials)
             .await
             .unwrap();
-        providers::write_config(
-            &*store,
-            ProviderKind::ModelGateway,
-            &providers::ProviderConfig {
-                enabled: true,
-                base_url: Some(base_url.to_string()),
-                vertex_location: None,
-                models: Vec::new(),
-            },
-        )
-        .await
-        .unwrap();
+        crate::managed_policy::provision(&*store, provisioned)
+            .await
+            .unwrap();
         (
             GatewayRuntime::new(
                 store.clone(),
@@ -626,27 +630,31 @@ mod tests {
         )
     }
 
+    async fn signed_in_runtime(
+        base_url: &str,
+    ) -> (Arc<GatewayRuntime>, Arc<dyn Store>, tempfile::TempDir) {
+        signed_in_runtime_at(base_url, base_url).await
+    }
+
     #[tokio::test]
-    async fn syncs_entitled_models_into_the_provider_config() {
+    async fn syncs_entitled_models_into_the_snapshot() {
         let address = serve(Arc::new(FakeGateway::default())).await;
         let base = format!("http://{address}");
         let (runtime, store, _directory) = signed_in_runtime(&base).await;
 
         assert_eq!(runtime.sync_models().await.unwrap(), 2);
 
-        let config = providers::read_config(&*store, ProviderKind::ModelGateway)
+        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
             .await
             .unwrap();
-        assert_eq!(config.models.len(), 2);
-        assert_eq!(config.models[0].id, "sample-claude");
-        assert_eq!(
-            config.models[0].display_name.as_deref(),
-            Some("Sample Claude")
-        );
-        assert_eq!(config.models[0].context_window, 200_000);
+        let models = providers::gateway_models(&*store, &policy).await.unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "sample-claude");
+        assert_eq!(models[0].display_name.as_deref(), Some("Sample Claude"));
+        assert_eq!(models[0].context_window, 200_000);
         // Absent limits fall back to the conservative custom-model defaults.
-        assert_eq!(config.models[1].context_window, 32_768);
-        assert_eq!(config.models[1].max_output_tokens, 4_096);
+        assert_eq!(models[1].context_window, 32_768);
+        assert_eq!(models[1].max_output_tokens, 4_096);
 
         // The synced snapshot resolves as a model policy under the gateway key.
         let policy =
@@ -654,7 +662,10 @@ mod tests {
                 .await
                 .unwrap()
                 .expect("synced model resolves");
-        assert_eq!(policy.provider, ProviderKind::ModelGateway);
+        assert_eq!(
+            policy.provider,
+            crate::providers::ProviderKind::ModelGateway
+        );
         assert_eq!(policy.display_name, "Sample Claude");
     }
 
@@ -676,7 +687,21 @@ mod tests {
         assert_eq!(gateway.refreshes.load(Ordering::SeqCst), 1);
 
         // The route set includes the gateway with its synced models claimed.
+        // A legacy provider row — even one pointing at a different deployment
+        // — is never read, so it changes nothing about the composite route.
         runtime.sync_models().await.unwrap();
+        providers::write_config(
+            &*store,
+            crate::providers::ProviderKind::ModelGateway,
+            &providers::ProviderConfig {
+                enabled: true,
+                base_url: Some("http://127.0.0.1:9".to_string()),
+                vertex_location: None,
+                models: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
         let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
             .await
             .unwrap();
@@ -699,19 +724,24 @@ mod tests {
         assert!(gateway_route
             .curated_models
             .contains(&"sample-claude".to_string()));
+        assert!(providers::provider_is_usable(
+            &*store,
+            &*runtime.secrets,
+            crate::providers::ProviderKind::ModelGateway,
+            &policy
+        )
+        .await
+        .unwrap());
     }
 
-    /// The race #896 names, forced deterministically: a model sync whose
-    /// entitlement fetch is still in flight when a pairing re-points the
-    /// profile at a different gateway. The sync must not stamp the old
-    /// gateway's model list (or base URL) over the row the pairing just
-    /// wrote. The pairing here runs to completion before the parked fetch
-    /// is released, so the two read-modify-writes never overlap: what this
-    /// pins is the under-lock recheck refusing the stale write. The lock
-    /// itself is pinned by
-    /// `pairing::tests::a_provider_update_parked_mid_write_cannot_overwrite_a_pairing`.
+    /// The race #896 named, in its surviving form: with policy the only
+    /// gateway source, the one authority that can re-point a deployment
+    /// mid-sync is an OS (MDM) push. A sync whose entitlement fetch is still
+    /// in flight when that happens must not stamp the old gateway's model
+    /// list into the snapshot — what this pins is the under-lock policy
+    /// recheck refusing the stale write.
     #[tokio::test]
-    async fn a_sync_racing_a_pairing_cannot_resurrect_the_old_gateways_state() {
+    async fn a_sync_racing_a_policy_repoint_cannot_stamp_the_old_gateways_models() {
         // Gateway A: answers token refreshes normally but parks the model
         // list until released — the window the pairing lands in.
         let (arrived_tx, mut arrived_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
@@ -747,26 +777,41 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
 
-        // Gateway B: answers only the pairing probe.
-        let meta = AxumRouter::new().route(
-            "/api/v1/meta",
-            get(|| async {
-                Json(json!({
-                    "api_version": "v1",
-                    "installation_id": "install-2",
-                    "gateway_version": "1.0.0",
-                    "public_url": "http://gateway-b.test",
-                    "auth_mode": "oidc",
-                }))
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base_b = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move {
-            axum::serve(listener, meta).await.unwrap();
-        });
+        // An OS authority whose asserted deployment can change mid-test, as
+        // an MDM push would.
+        struct SwappableOs(std::sync::Mutex<String>);
 
-        let (runtime, store, _directory) = signed_in_runtime(&base_a).await;
+        impl crate::managed_policy::OsPolicySource for SwappableOs {
+            fn gateway_url(&self) -> Result<Option<String>> {
+                Ok(Some(self.0.lock().unwrap().clone()))
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                directory.path().join("gateway.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let secrets: Arc<dyn SecretProvider> = Arc::new(MockSecrets::default());
+        let credentials: openwave_connectors::GatewayCredentials = serde_json::from_value(json!({
+            "base_url": base_a,
+            "installation_id": "install-1",
+            "user_id": "user-1",
+            "refresh_token": "mg_rt_seed",
+            "access_tokens": {}
+        }))
+        .unwrap();
+        CredentialVault::new(secrets.clone())
+            .save(&credentials)
+            .await
+            .unwrap();
+        let os = Arc::new(SwappableOs(std::sync::Mutex::new(base_a.clone())));
+        let runtime = GatewayRuntime::new(store.clone(), secrets, os.clone());
+
         let sync = tokio::spawn({
             let runtime = runtime.clone();
             async move { runtime.sync_models().await }
@@ -776,17 +821,9 @@ mod tests {
             .await
             .expect("the fetch reaches gateway A");
 
-        // While A's model list is in flight, pair the profile to gateway B.
-        let mcp = Arc::new(crate::mcp_config::McpRuntime::new(
-            Arc::new(openwave_core::ToolRegistry::new()),
-            store.clone(),
-            runtime.clone(),
-            Arc::new(crate::managed_policy::NoOsPolicy),
-        ));
-        let handle = crate::pairing::PairingHandle::new(store.clone(), mcp);
-        let outcome = crate::pairing::pair_with_gateway(&handle, &base_b)
-            .await
-            .unwrap();
+        // While A's model list is in flight, the MDM authority re-points the
+        // profile at gateway B.
+        *os.0.lock().unwrap() = "https://gateway-b.test".to_string();
 
         release.notify_one();
         let error = sync
@@ -799,17 +836,12 @@ mod tests {
             "the refusal is the stable retryable conflict, not a fault: {error:?}"
         );
 
-        let config = providers::read_config(&*store, ProviderKind::ModelGateway)
-            .await
-            .unwrap();
-        assert_eq!(
-            config.base_url.as_deref(),
-            Some(outcome.base_url.as_str()),
-            "the pairing's base URL must survive the racing sync"
-        );
         assert!(
-            config.models.is_empty(),
-            "gateway A's models must not land on gateway B's row"
+            providers::read_gateway_snapshot(&*store)
+                .await
+                .unwrap()
+                .is_none(),
+            "gateway A's models must not be stamped into the snapshot"
         );
     }
 
@@ -831,24 +863,20 @@ mod tests {
         assert!(!json.contains("mg_at_"));
         assert!(!json.contains("mg_rt_"));
 
-        // Managed policy is a separate layer with a separate lifecycle:
-        // disconnecting the session must never deprovision the profile.
-        crate::managed_policy::provision(&*store, &base)
-            .await
-            .unwrap();
-
         runtime.sign_out().await.unwrap();
         let status = runtime.status().await.unwrap();
         assert!(!status.signed_in);
         assert_eq!(status.model_count, 0);
         assert!(status.account_hint.is_none());
-        let config = providers::read_config(&*store, ProviderKind::ModelGateway)
-            .await
-            .unwrap();
-        assert!(config.models.is_empty());
         let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
             .await
             .unwrap();
+        assert!(providers::gateway_models(&*store, &policy)
+            .await
+            .unwrap()
+            .is_empty());
+        // Managed policy is a separate layer with a separate lifecycle:
+        // disconnecting the session must never deprovision the profile.
         assert!(policy.managed, "sign-out must not deprovision the profile");
     }
 
@@ -917,17 +945,9 @@ mod tests {
     async fn a_session_for_a_different_gateway_reads_signed_out() {
         let address = serve(Arc::new(FakeGateway::default())).await;
         let base = format!("http://{address}");
-        let (runtime, store, _directory) = signed_in_runtime(&base).await;
-
-        // Repoint the provider at a different deployment; the stored session
-        // (minted against `base`) stays in the vault untouched.
-        let mut config = providers::read_config(&*store, ProviderKind::ModelGateway)
-            .await
-            .unwrap();
-        config.base_url = Some("http://127.0.0.1:9".to_string());
-        providers::write_config(&*store, ProviderKind::ModelGateway, &config)
-            .await
-            .unwrap();
+        // The profile is managed to one deployment while the stored session
+        // (minted against `base`) belongs to another.
+        let (runtime, _store, _directory) = signed_in_runtime_at(&base, "http://127.0.0.1:9").await;
 
         let status = runtime.status().await.unwrap();
         assert!(status.configured);
@@ -938,70 +958,6 @@ mod tests {
         assert!(status.account_hint.is_none());
         assert!(status.installation_id.is_none());
         assert!(runtime.route_token_source().await.is_none());
-    }
-
-    /// The managed counterpart of the divergence test above, through the
-    /// REAL token path: once provisioned, the policy — not the
-    /// renderer-writable row — names the deployment, so a diverged (or
-    /// stale) row can neither redirect sign-in and bearers nor drop the
-    /// session and route a managed profile is entitled to.
-    #[tokio::test]
-    async fn a_managed_profile_reaches_its_gateway_despite_a_diverged_stored_row() {
-        let address = serve(Arc::new(FakeGateway::default())).await;
-        let base = format!("http://{address}");
-        let (runtime, store, _directory) = signed_in_runtime(&base).await;
-        runtime.sync_models().await.unwrap();
-
-        // Provision to the real deployment, then re-point the stored row —
-        // the write `update_provider` would refuse, applied directly to
-        // model a row that pre-dates provisioning or was tampered with.
-        crate::managed_policy::provision(&*store, &base)
-            .await
-            .unwrap();
-        let mut config = providers::read_config(&*store, ProviderKind::ModelGateway)
-            .await
-            .unwrap();
-        config.base_url = Some("http://127.0.0.1:9".to_string());
-        providers::write_config(&*store, ProviderKind::ModelGateway, &config)
-            .await
-            .unwrap();
-
-        // Tokens still mint against the provisioned deployment.
-        let source = runtime
-            .route_token_source()
-            .await
-            .expect("a managed session follows policy, not the row");
-        let token = source.bearer_token().await.unwrap();
-        assert!(token.starts_with("mg_at_llm_"), "{token}");
-
-        // And the composite route aims at the policy URL, with the synced
-        // models still claimed and the gateway usable for the picker.
-        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
-            .await
-            .unwrap();
-        let routes = providers::collect_routes(
-            &*store,
-            &*runtime.secrets,
-            runtime.route_token_source().await,
-            &policy,
-        )
-        .await;
-        assert_eq!(routes.len(), 1);
-        assert_eq!(
-            routes[0].base_url.as_deref(),
-            Some(format!("{base}/compat/anthropic").as_str())
-        );
-        assert!(routes[0]
-            .curated_models
-            .contains(&"sample-claude".to_string()));
-        assert!(providers::provider_is_usable(
-            &*store,
-            &*runtime.secrets,
-            ProviderKind::ModelGateway,
-            &policy
-        )
-        .await
-        .unwrap());
     }
 
     /// An OS (MDM) authority asserting one gateway, as a device-managed
@@ -1050,12 +1006,11 @@ mod tests {
             GatewayRuntime::new(store.clone(), secrets, Arc::new(OsManaged(base.clone())));
 
         assert!(
-            providers::read_config(&*store, ProviderKind::ModelGateway)
+            providers::read_gateway_snapshot(&*store)
                 .await
                 .unwrap()
-                .base_url
                 .is_none(),
-            "the fixture must have no stored row for the assertion to mean anything"
+            "the fixture must have no stored gateway state for the assertion to mean anything"
         );
         let status = runtime.status().await.unwrap();
         assert!(status.configured && status.enabled && status.signed_in);
@@ -1078,18 +1033,9 @@ mod tests {
             .unwrap(),
         );
         let secrets: Arc<dyn SecretProvider> = Arc::new(MockSecrets::default());
-        providers::write_config(
-            &*store,
-            ProviderKind::ModelGateway,
-            &providers::ProviderConfig {
-                enabled: true,
-                base_url: Some("http://127.0.0.1:1".to_string()),
-                vertex_location: None,
-                models: Vec::new(),
-            },
-        )
-        .await
-        .unwrap();
+        crate::managed_policy::provision(&*store, "http://127.0.0.1:1")
+            .await
+            .unwrap();
         let runtime = GatewayRuntime::new(
             store.clone(),
             secrets,
@@ -1104,5 +1050,193 @@ mod tests {
         assert!(routes
             .iter()
             .all(|route| route.kind != openwave_router::RouteKind::ModelGateway));
+    }
+
+    /// The legacy hard cut: an unmanaged profile with a stored additive
+    /// gateway row — and even a leftover signed-in session — has zero
+    /// gateway surface. The row is ignored, never auto-converted to
+    /// managed: lockdown must not be imposed without the pairing consent
+    /// flow, so the remedy is pairing, and the sign-in surface says so.
+    #[tokio::test]
+    async fn an_unmanaged_profile_with_a_legacy_row_has_no_gateway_surface() {
+        struct StaticTokens;
+
+        #[async_trait]
+        impl BearerTokenSource for StaticTokens {
+            async fn bearer_token(&self) -> Result<String> {
+                Ok("mg_at_test".into())
+            }
+        }
+
+        let address = serve(Arc::new(FakeGateway::default())).await;
+        let base = format!("http://{address}");
+        let directory = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                directory.path().join("gateway.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let secrets: Arc<dyn SecretProvider> = Arc::new(MockSecrets::default());
+        let credentials: openwave_connectors::GatewayCredentials = serde_json::from_value(json!({
+            "base_url": base,
+            "installation_id": "install-1",
+            "user_id": "user-1",
+            "refresh_token": "mg_rt_seed",
+            "access_tokens": {}
+        }))
+        .unwrap();
+        CredentialVault::new(secrets.clone())
+            .save(&credentials)
+            .await
+            .unwrap();
+        providers::write_config(
+            &*store,
+            crate::providers::ProviderKind::ModelGateway,
+            &providers::ProviderConfig {
+                enabled: true,
+                base_url: Some(format!("{base}/")),
+                vertex_location: None,
+                models: vec![CustomModelConfig {
+                    id: "legacy-model".to_string(),
+                    display_name: None,
+                    context_window: 32_768,
+                    max_output_tokens: 4_096,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        let runtime = GatewayRuntime::new(
+            store.clone(),
+            secrets.clone(),
+            Arc::new(crate::managed_policy::NoOsPolicy),
+        );
+
+        // The boot cutover warns and ignores the row: no snapshot appears
+        // and the profile stays unmanaged.
+        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+            .await
+            .unwrap();
+        providers::retire_legacy_gateway_row(&*store, &policy)
+            .await
+            .unwrap();
+        assert!(providers::read_gateway_snapshot(&*store)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(
+            !policy.managed,
+            "a legacy row must never auto-convert the profile to managed"
+        );
+
+        // The status surface reads unconfigured and signed out.
+        let status = runtime.status().await.unwrap();
+        assert!(!status.configured && !status.enabled && !status.signed_in);
+        assert!(status.base_url.is_none());
+        assert_eq!(status.model_count, 0);
+
+        // Routing, the picker, and enumeration offer nothing — even with a
+        // token source in hand, the gateway route is not built.
+        assert!(runtime.route_token_source().await.is_none());
+        let tokens: Arc<dyn BearerTokenSource> = Arc::new(StaticTokens);
+        let routes = providers::collect_routes(&*store, &*secrets, Some(tokens), &policy).await;
+        assert!(routes
+            .iter()
+            .all(|route| route.kind != openwave_router::RouteKind::ModelGateway));
+        assert!(providers::catalog_models(&*store, &*secrets, &policy)
+            .await
+            .unwrap()
+            .iter()
+            .all(|model| model.policy.provider != crate::providers::ProviderKind::ModelGateway));
+        assert!(providers::list_providers(&*store, &*secrets, &policy)
+            .await
+            .unwrap()
+            .iter()
+            .all(|provider| provider.kind != crate::providers::ProviderKind::ModelGateway));
+        assert!(!providers::provider_is_usable(
+            &*store,
+            &*secrets,
+            crate::providers::ProviderKind::ModelGateway,
+            &policy
+        )
+        .await
+        .unwrap());
+
+        // The sign-in surface is managed-only, and the refusal names the
+        // remedy.
+        let error = runtime.begin_sign_in().await.err().unwrap();
+        assert!(
+            error.to_string().contains("pair via your gateway"),
+            "{error}"
+        );
+        assert!(runtime.sync_models().await.is_err());
+        assert!(runtime.apps().await.is_err());
+        assert!(runtime.sign_out().await.is_err());
+    }
+
+    /// The boot cutover's carry-forward: a managed profile whose legacy row
+    /// was stamped by the policy's own deployment keeps its synced models
+    /// across the upgrade — once, and only from that deployment.
+    #[tokio::test]
+    async fn boot_carries_a_managed_rows_snapshot_forward_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                directory.path().join("gateway.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        crate::managed_policy::provision(&*store, "https://corp.gateway")
+            .await
+            .unwrap();
+        let legacy_row = |id: &str| providers::ProviderConfig {
+            enabled: true,
+            base_url: Some("https://corp.gateway/".to_string()),
+            vertex_location: None,
+            models: vec![CustomModelConfig {
+                id: id.to_string(),
+                display_name: None,
+                context_window: 32_768,
+                max_output_tokens: 4_096,
+            }],
+        };
+        providers::write_config(
+            &*store,
+            crate::providers::ProviderKind::ModelGateway,
+            &legacy_row("carried-model"),
+        )
+        .await
+        .unwrap();
+
+        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+            .await
+            .unwrap();
+        providers::retire_legacy_gateway_row(&*store, &policy)
+            .await
+            .unwrap();
+        let models = providers::gateway_models(&*store, &policy).await.unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "carried-model");
+
+        // One-shot: once a snapshot exists, later boots never overwrite it
+        // from the retired row.
+        providers::write_config(
+            &*store,
+            crate::providers::ProviderKind::ModelGateway,
+            &legacy_row("other-model"),
+        )
+        .await
+        .unwrap();
+        providers::retire_legacy_gateway_row(&*store, &policy)
+            .await
+            .unwrap();
+        let models = providers::gateway_models(&*store, &policy).await.unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "carried-model");
     }
 }

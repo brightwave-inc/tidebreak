@@ -3,10 +3,10 @@
 //! The desktop shell's `openwave://provision` handler lands here. The gateway
 //! is probed (`GET /api/v1/meta`) before anything is written, so a mistyped
 //! or unreachable URL never becomes durable policy; only then does the
-//! managed-policy write path run and the ModelGateway provider config get
-//! pointed at the gateway. This function is exported for native embedders
-//! only — pairing changes policy, and policy must never be reachable from a
-//! renderer-writable route.
+//! managed-policy write path run. Policy is the only gateway source — there
+//! is no provider row to point — so provisioning is the whole write. This
+//! function is exported for native embedders only — pairing changes policy,
+//! and policy must never be reachable from a renderer-writable route.
 
 use std::sync::Arc;
 
@@ -16,7 +16,7 @@ use tokio::sync::Mutex;
 
 use crate::managed_policy;
 use crate::mcp_config::McpRuntime;
-use crate::providers::{self, ProviderKind};
+use crate::providers;
 
 /// Serializes pairing end to end. [`managed_policy::provision`] is a
 /// check-then-write over the settings store, and the [`Store`] API offers no
@@ -130,12 +130,12 @@ impl From<AgentError> for PairingError {
 /// plus whether this call is the one that provisioned the profile. Nothing
 /// is written unless the URL passes the gateway contract and the deployment
 /// answers `GET /api/v1/meta`; a conflicting re-provision is refused as the
-/// typed [`PairingError::Conflict`] before either write, leaving both the
-/// policy and the provider configuration untouched — the desktop shell
-/// surfaces that refusal instead of treating it as a generic fault. Success
-/// also points the ModelGateway provider at
-/// the gateway and enables it, dropping any model snapshot synced from a
-/// previously configured base URL — sign-in resyncs the entitled set.
+/// typed [`PairingError::Conflict`] before the write, leaving the policy
+/// untouched — the desktop shell surfaces that refusal instead of treating
+/// it as a generic fault. Provisioning is the only durable write: the model
+/// snapshot is stamped with the deployment it was synced from, so one left
+/// behind by any earlier configuration is simply never honored for this
+/// gateway — sign-in resyncs the entitled set.
 ///
 /// The new policy is applied to this process before returning: manual MCP
 /// servers running under the previously open profile are taken down here
@@ -150,20 +150,15 @@ pub async fn pair_with_gateway(
     let base_url = config.base_url().to_string();
     GatewayAuth::new(config)?.meta().await?;
     let _guard = PAIRING.lock().await;
-    // The provider row is also written by model sync, sign-out, and
-    // `PUT /providers/model_gateway`, none of which run under PAIRING; hold
-    // the shared row lock across the conflict check, the row write, and the
-    // policy write so no interleaved read-modify-write can resurrect
-    // pre-pairing state. Lock order is PAIRING first, row lock second — this
-    // is the only path that takes both.
+    // Model sync rechecks the resolved policy and writes its snapshot under
+    // the shared gateway-state lock, and neither runs under PAIRING; hold
+    // that lock across the conflict check and the policy write so a sync in
+    // flight either sees the pre-pairing policy and refuses, or the
+    // post-pairing one — never a torn middle. Lock order is PAIRING first,
+    // state lock second — this is the only path that takes both.
     let already_provisioned = {
-        let _row = providers::GATEWAY_ROW_WRITES.lock().await;
-        // Refuse a conflicting pairing before either write, then write the
-        // provider configuration before the sticky policy. Neither write is
-        // transactional with the other, so the order decides the failure mode:
-        // provider-first fails into a still-unmanaged profile recoverable from
-        // settings, while policy-first could strand a permanently managed
-        // profile with no configured provider.
+        let _lock = providers::GATEWAY_STATE_WRITES.lock().await;
+        // Refuse a conflicting pairing before the write.
         let already_provisioned = match managed_policy::provisioned_url(store).await? {
             Some(existing) if existing != base_url => {
                 return Err(PairingError::Conflict {
@@ -172,15 +167,6 @@ pub async fn pair_with_gateway(
             }
             other => other.is_some(),
         };
-        let mut provider = providers::read_config(store, ProviderKind::ModelGateway).await?;
-        if provider.base_url.as_deref() != Some(base_url.as_str()) {
-            // A model snapshot synced from a previously configured gateway does
-            // not describe this one.
-            provider.models = Vec::new();
-            provider.base_url = Some(base_url.clone());
-        }
-        provider.enabled = true;
-        providers::write_config(store, ProviderKind::ModelGateway, &provider).await?;
         managed_policy::provision(store, &base_url).await?;
         already_provisioned
     };
@@ -316,19 +302,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pairing_provisions_policy_and_points_the_provider() {
+    async fn pairing_provisions_policy_and_a_stale_snapshot_is_never_honored() {
         let (store, _directory) = test_store().await;
         let base = serve_meta().await;
 
-        // A stale snapshot from a manually configured endpoint must not
+        // A model snapshot synced from some earlier deployment must not
         // survive as this gateway's model set.
-        providers::write_config(
+        providers::write_gateway_snapshot(
             &*store,
-            ProviderKind::ModelGateway,
-            &providers::ProviderConfig {
-                enabled: false,
-                base_url: Some("http://old.gateway.test".into()),
-                vertex_location: None,
+            &providers::GatewayModelSnapshot {
+                gateway_url: "http://old.gateway.test/".to_string(),
                 models: vec![providers::CustomModelConfig {
                     id: "stale-model".into(),
                     display_name: None,
@@ -354,12 +337,12 @@ mod tests {
         assert!(policy.managed);
         assert_eq!(policy.gateway_url.as_deref(), Some(normalized.as_str()));
 
-        let provider = providers::read_config(&*store, ProviderKind::ModelGateway)
+        // The stale snapshot carries the old deployment's stamp, so the new
+        // policy reads no models until sign-in resyncs the entitled set.
+        assert!(providers::gateway_models(&*store, &policy)
             .await
-            .unwrap();
-        assert!(provider.enabled);
-        assert_eq!(provider.base_url.as_deref(), Some(normalized.as_str()));
-        assert!(provider.models.is_empty());
+            .unwrap()
+            .is_empty());
 
         // Re-pairing the same gateway is idempotent, and reports that no
         // transition happened — the desktop shell keys its restart prompt
@@ -416,128 +399,6 @@ mod tests {
         );
     }
 
-    /// The row lock itself, pinned deterministically: an unmanaged provider
-    /// update parked between its row read and row write (inside its keychain
-    /// credential write, a seam on that window) must be holding the shared
-    /// row lock, so a pairing arriving mid-window serializes behind the
-    /// whole update instead of committing inside it and being overwritten by
-    /// the update's stale read. Removing the writers' row-lock acquisitions
-    /// lets the parked update resurrect the old gateway on top of the
-    /// committed pairing, and fails this.
-    #[tokio::test]
-    async fn a_provider_update_parked_mid_write_cannot_overwrite_a_pairing() {
-        /// In-memory secrets that signal and park (once) inside the gateway
-        /// credential write — after `update_provider` has read the row,
-        /// before it writes the row back.
-        struct ParkingSecrets {
-            inner: std::sync::Mutex<std::collections::HashMap<String, String>>,
-            arrived: tokio::sync::mpsc::UnboundedSender<()>,
-            release: Arc<tokio::sync::Notify>,
-            armed: std::sync::atomic::AtomicBool,
-        }
-
-        #[async_trait::async_trait]
-        impl openwave_core::SecretProvider for ParkingSecrets {
-            async fn get_secret(&self, key: &str) -> Result<Option<String>> {
-                Ok(self.inner.lock().unwrap().get(key).cloned())
-            }
-            async fn set_secret(&self, key: &str, value: &str) -> Result<()> {
-                if key == ProviderKind::ModelGateway.credential_key()
-                    && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
-                {
-                    self.arrived.send(()).expect("the test is listening");
-                    self.release.notified().await;
-                }
-                self.inner.lock().unwrap().insert(key.into(), value.into());
-                Ok(())
-            }
-            async fn delete_secret(&self, key: &str) -> Result<()> {
-                self.inner.lock().unwrap().remove(key);
-                Ok(())
-            }
-        }
-
-        let (store, _directory) = test_store().await;
-        providers::write_config(
-            &*store,
-            ProviderKind::ModelGateway,
-            &providers::ProviderConfig {
-                enabled: true,
-                base_url: Some("http://old.gateway.test/".into()),
-                vertex_location: None,
-                models: Vec::new(),
-            },
-        )
-        .await
-        .unwrap();
-
-        let (arrived_tx, mut arrived_rx) = tokio::sync::mpsc::unbounded_channel();
-        let release = Arc::new(tokio::sync::Notify::new());
-        let secrets = Arc::new(ParkingSecrets {
-            inner: std::sync::Mutex::new(std::collections::HashMap::new()),
-            arrived: arrived_tx,
-            release: release.clone(),
-            armed: std::sync::atomic::AtomicBool::new(true),
-        });
-
-        let update = tokio::spawn({
-            let store = store.clone();
-            let secrets = secrets.clone();
-            async move {
-                providers::update_provider(
-                    &*store,
-                    &*secrets,
-                    ProviderKind::ModelGateway,
-                    providers::ProviderUpdate {
-                        enabled: Some(true),
-                        base_url: None,
-                        vertex_location: None,
-                        credential: Some(providers::ProviderCredential::Oauth {}),
-                        models: None,
-                    },
-                    &NoOsPolicy,
-                )
-                .await
-            }
-        });
-        arrived_rx
-            .recv()
-            .await
-            .expect("the update reaches its credential write");
-
-        // A pairing arrives inside the update's read-to-write window.
-        let base = serve_meta().await;
-        let mut pairing = tokio::spawn({
-            let handle = test_handle(&store);
-            async move { pair_with_gateway(&handle, &base).await }
-        });
-        // Serialized, the pairing cannot finish while the update is parked
-        // holding the row lock, so only the timeout branch can release the
-        // window; unserialized, the pairing commits first and the release
-        // then lets the update's stale write race in after it.
-        let outcome =
-            match tokio::time::timeout(std::time::Duration::from_millis(500), &mut pairing).await {
-                Ok(joined) => {
-                    release.notify_one();
-                    joined.unwrap().unwrap()
-                }
-                Err(_) => {
-                    release.notify_one();
-                    pairing.await.unwrap().unwrap()
-                }
-            };
-        update.await.unwrap().unwrap();
-
-        let provider = providers::read_config(&*store, ProviderKind::ModelGateway)
-            .await
-            .unwrap();
-        assert_eq!(
-            provider.base_url.as_deref(),
-            Some(outcome.base_url.as_str()),
-            "the pairing's base URL must survive the parked update's write"
-        );
-    }
-
     #[tokio::test]
     async fn a_failed_pairing_changes_nothing() {
         let (store, _directory) = test_store().await;
@@ -551,14 +412,9 @@ mod tests {
             .unwrap();
         assert!(matches!(error, PairingError::Other(_)));
         assert!(!resolve(&*store, &NoOsPolicy).await.unwrap().managed);
-        let provider = providers::read_config(&*store, ProviderKind::ModelGateway)
-            .await
-            .unwrap();
-        assert!(!provider.enabled);
-        assert!(provider.base_url.is_none());
 
         // A reachable but conflicting gateway: refused after the probe, and
-        // the original pairing survives in both policy and provider config.
+        // the original pairing survives in policy.
         let first = serve_meta().await;
         let second = serve_meta().await;
         let normalized = pair_with_gateway(&test_handle(&store), &first)
@@ -580,9 +436,5 @@ mod tests {
         assert!(error.to_string().contains("already provisioned"));
         let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
         assert_eq!(policy.gateway_url.as_deref(), Some(normalized.as_str()));
-        let provider = providers::read_config(&*store, ProviderKind::ModelGateway)
-            .await
-            .unwrap();
-        assert_eq!(provider.base_url.as_deref(), Some(normalized.as_str()));
     }
 }

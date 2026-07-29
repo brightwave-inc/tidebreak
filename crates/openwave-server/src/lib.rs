@@ -670,16 +670,21 @@ async fn bind_inner(
     // deliberately swallowed as "not allowed": an unreadable policy fails
     // closed to no BYOK arming while boot still proceeds, so the profile can
     // surface the error and be repaired instead of bricking.
-    let byok_boot_allowed = matches!(
-        managed_policy::resolve(&*store, &*os_policy).await,
-        Ok(policy) if !policy.managed
-    );
+    let boot_policy = managed_policy::resolve(&*store, &*os_policy).await;
+    let byok_boot_allowed = matches!(&boot_policy, Ok(policy) if !policy.managed);
     // Pre-providers installs may only have an env/legacy key — enable Anthropic
     // so `KeyedResolver`'s enabled check doesn't fail-closed on upgrade. Never
     // on a managed profile: auto-enabling a BYOK provider would fight the
     // lockdown.
     if byok_boot_allowed {
         providers::migrate_legacy_anthropic(&*store, &*secrets).await?;
+    }
+    // The additive gateway configuration is retired: carry a managed row's
+    // model snapshot forward once, and name the remedy for a legacy
+    // unmanaged one. Skipped when policy is unreadable — fail closed, and
+    // the legacy row stays untouched for when the policy is repaired.
+    if let Ok(policy) = &boot_policy {
+        providers::retire_legacy_gateway_row(&*store, policy).await?;
     }
     let gateway =
         gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone(), os_policy.clone());
