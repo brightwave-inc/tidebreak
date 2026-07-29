@@ -31,6 +31,7 @@ use openwave_web_search::{
     WebSearchResolverError, WebSearchResponse, WebSearchResult, WebSearchTool,
 };
 use resolver::ProviderResolver;
+use sea_orm::ConnectionTrait;
 use serde::de::DeserializeOwned;
 use tokio::sync::Notify;
 use tower::ServiceExt;
@@ -69,6 +70,13 @@ async fn migrated_sqlite_template() -> &'static MigratedSqliteTemplate {
             let url = format!("sqlite://{}?mode=rwc", database.display());
             let store = DbStore::connect(&url).await.unwrap();
             drop(store);
+
+            let checkpoint = sea_orm::Database::connect(&url).await.unwrap();
+            checkpoint
+                .execute_unprepared("PRAGMA wal_checkpoint(TRUNCATE);")
+                .await
+                .unwrap();
+            checkpoint.close().await.unwrap();
 
             MigratedSqliteTemplate {
                 _directory: directory,
