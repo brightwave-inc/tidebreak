@@ -17,6 +17,7 @@ export function useTypewriterOnce(text: string, active: boolean): string {
   const [displayed, setDisplayed] = useState(() =>
     active ? text.slice(0, 1) : text,
   );
+  const displayedRef = useRef(active ? text.slice(0, 1) : text);
   const timerRef = useRef<number | null>(null);
   const mountedRef = useRef(false);
   const hasTypedRef = useRef(false);
@@ -31,6 +32,7 @@ export function useTypewriterOnce(text: string, active: boolean): string {
     };
     const showImmediately = (value: string) => {
       stop();
+      displayedRef.current = value;
       setDisplayed(value);
     };
     const typeOut = (target: string) => {
@@ -38,14 +40,16 @@ export function useTypewriterOnce(text: string, active: boolean): string {
       // A backgrounded tab never sees the motion, so skip straight to the
       // final label rather than animating into a pane no one is watching.
       if (document.visibilityState !== "visible" || target.length === 0) {
-        setDisplayed(target);
+        showImmediately(target);
         return;
       }
       // Never a blank frame. The first character lands synchronously, because
       // an empty row that is also pulsing does not read as text arriving — it
       // reads as something that failed to load.
       let i = 1;
-      setDisplayed(target.slice(0, 1));
+      const firstCharacter = target.slice(0, 1);
+      displayedRef.current = firstCharacter;
+      setDisplayed(firstCharacter);
       if (target.length === 1) return;
       // Paced by the whole label rather than per character, so a phase line
       // that grows — "Checking connected folders and 1 other task" — takes the
@@ -58,7 +62,9 @@ export function useTypewriterOnce(text: string, active: boolean): string {
       );
       timerRef.current = window.setInterval(() => {
         i += step;
-        setDisplayed(target.slice(0, i));
+        const next = target.slice(0, i);
+        displayedRef.current = next;
+        setDisplayed(next);
         if (i >= target.length) stop();
       }, TYPE_INTERVAL_MS);
     };
@@ -72,9 +78,23 @@ export function useTypewriterOnce(text: string, active: boolean): string {
       } else {
         showImmediately(text);
       }
-      return;
+      return stop;
     }
-    if (text === prevRef.current) return;
+    if (text === prevRef.current) {
+      if (!active) {
+        showImmediately(text);
+      } else if (
+        hasTypedRef.current &&
+        displayedRef.current !== text &&
+        timerRef.current === null
+      ) {
+        // React Strict Mode mounts effects, cleans them up, then mounts them
+        // again. The cleanup below correctly cancels the first timer; resume
+        // it here instead of leaving the phase label at its first character.
+        typeOut(text);
+      }
+      return stop;
+    }
     prevRef.current = text;
     if (active && !hasTypedRef.current) {
       hasTypedRef.current = true;
@@ -82,14 +102,8 @@ export function useTypewriterOnce(text: string, active: boolean): string {
     } else {
       showImmediately(text);
     }
+    return stop;
   }, [text, active]);
-
-  useEffect(
-    () => () => {
-      if (timerRef.current !== null) window.clearInterval(timerRef.current);
-    },
-    [],
-  );
 
   return displayed;
 }

@@ -52,9 +52,13 @@ describe("UserQuestionsCard", () => {
         onCancel={vi.fn()}
       />,
     );
+    expect(
+      screen.queryByRole("button", { name: "Continue" }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByLabelText(/Staging/));
+    await user.click(screen.getByRole("button", { name: "Next" }));
     const submit = screen.getByRole("button", { name: "Continue" });
     expect(submit).toBeDisabled();
-    await user.click(screen.getByLabelText(/Staging/));
     await user.type(screen.getByRole("textbox"), "Keep it reversible.");
     expect(submit).toBeEnabled();
     await user.click(submit);

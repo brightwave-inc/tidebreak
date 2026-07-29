@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { renderHook, act } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useTypewriterOnce } from "./useTypewriterOnce";
 
@@ -25,6 +26,17 @@ describe("phase label typing", () => {
 
     act(() => void vi.advanceTimersByTime(400));
     expect(result.current).toBe(long);
+  });
+
+  it("finishes the label when Strict Mode remounts its effects", () => {
+    const label = "Waiting for your answer";
+    const { result } = renderHook(() => useTypewriterOnce(label, true), {
+      wrapper: StrictMode,
+    });
+
+    expect(result.current).toBe("W");
+    act(() => void vi.advanceTimersByTime(400));
+    expect(result.current).toBe(label);
   });
 
   it("shows a settled label at once and never animates it", () => {
