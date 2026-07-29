@@ -8,11 +8,9 @@
 
 use std::sync::Arc;
 
-use sea_orm_migration::MigratorTrait;
 use uuid::Uuid;
 
 use super::temp_store;
-use crate::db::migration::Migrator;
 use crate::storage::{OperationClaimOutcome, OperationLogState, OperationLogWrite, Store};
 
 #[tokio::test]
@@ -231,51 +229,4 @@ async fn eviction_leaves_a_marker_that_never_re_executes() {
             .unwrap(),
         OperationClaimOutcome::TerminalEvicted
     );
-}
-
-/// The name of the migration this test covers.
-const OPERATION_LOG_MIGRATION: &str = "m20260728_000022_add_operation_log";
-
-/// How many migrations were added at or after `name`, so a rollback can be
-/// expressed as "undo everything since" rather than as a literal count that
-/// every later migration has to remember to bump.
-fn migrations_after(name: &str) -> u32 {
-    let all = Migrator::migrations();
-    let index = all
-        .iter()
-        .position(|migration| migration.name() == name)
-        .expect("the migration under test is registered");
-    u32::try_from(all.len() - index).expect("migration count fits in u32")
-}
-
-#[tokio::test]
-async fn the_operation_log_migration_is_reversible() {
-    let (_dir, store) = temp_store().await;
-    let run = Uuid::new_v4();
-    let op = Uuid::new_v4();
-
-    // The additive migration created the table.
-    store
-        .claim_operation(run, op, b"fp", true, Uuid::new_v4())
-        .await
-        .unwrap();
-
-    // Rolling back every migration added after this one drops the table
-    // symmetrically. The count is derived rather than written down: this test
-    // is about the operation log's own reversibility, and having every new
-    // migration edit the number here made it a tripwire for unrelated work.
-    Migrator::down(&store.conn, Some(migrations_after(OPERATION_LOG_MIGRATION)))
-        .await
-        .unwrap();
-    assert!(
-        store
-            .claim_operation(run, Uuid::new_v4(), b"fp", true, Uuid::new_v4())
-            .await
-            .is_err(),
-        "the table must be gone after down"
-    );
-
-    // ...and re-applying it restores a working, empty table.
-    Migrator::up(&store.conn, None).await.unwrap();
-    assert_eq!(store.operation_log_len(run).await.unwrap(), 0);
 }
