@@ -1,4 +1,5 @@
 import { Component, type ReactNode } from "react";
+import { Button } from "@/components/ui/button";
 import { Logomark } from "./Logomark";
 
 type ErrorBoundaryProps = {
@@ -50,9 +51,9 @@ export class ErrorBoundary extends Component<
         </div>
         <p>OpenWave hit an unexpected error.</p>
         <p className="boot-error-detail">{String(this.state.error.message)}</p>
-        <button
-          type="button"
-          className="btn btn-primary"
+        <Button
+          size="sm"
+          className="mt-3"
           onClick={() =>
             this.props.onReload
               ? this.props.onReload()
@@ -60,7 +61,7 @@ export class ErrorBoundary extends Component<
           }
         >
           Reload
-        </button>
+        </Button>
       </div>
     );
   }

@@ -337,42 +337,6 @@ body {
   background: var(--page-background);
 }
 
-/* ---------- Buttons ---------- */
-
-.btn {
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 0.35rem 0.7rem;
-  background: var(--bg-elevated);
-  font-size: 0.84rem;
-  font-weight: 500;
-}
-
-.btn:hover {
-  background: var(--accent);
-}
-
-.btn-primary {
-  border-color: var(--ink);
-  background: var(--ink);
-  color: var(--bg-elevated);
-}
-
-.btn-primary:hover {
-  opacity: 0.9;
-}
-
-.btn-danger {
-  border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
-  color: var(--danger);
-}
-
-.btn-danger:hover:not(:disabled) {
-  border-color: var(--danger);
-  background: var(--critical-background);
-}
-
-.btn:disabled,
 .new-chat:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -617,11 +581,6 @@ body {
   box-shadow: var(--shadow-sm);
 }
 
-.mobile-settings-actions .btn.is-active {
-  border-color: var(--ink);
-  background: var(--accent);
-}
-
 .eyebrow {
   margin-bottom: 0.05rem !important;
   color: var(--muted-foreground);
@@ -718,75 +677,9 @@ body {
   margin-top: 0.25rem;
 }
 
-.welcome-prompt {
-  display: flex;
-  align-items: center;
-  gap: 0.55rem;
-  padding: 0.7rem 0.85rem;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--bg-elevated);
-  color: var(--ink);
-  font-size: 0.85rem;
-  font-weight: 500;
-  text-align: left;
-  transition: background-color 120ms ease, border-color 120ms ease;
-}
-
-.welcome-prompt svg {
-  flex: 0 0 auto;
-  color: var(--muted-foreground);
-}
-
-.welcome-prompt:hover {
-  border-color: color-mix(in srgb, var(--ink) 22%, var(--line));
-  background: var(--accent);
-}
-
-.welcome-prompt:hover svg {
-  color: var(--ink);
-}
-
 @media (max-width: 720px) {
   .welcome-prompts {
     grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-/* An icon-only affordance centered just above the composer. It stays mounted
-   and fades on opacity so scrolling away and back doesn't pop it in and out. */
-.scroll-to-latest {
-  position: absolute;
-  z-index: 1;
-  left: 50%;
-  bottom: 0.75rem;
-  transform: translateX(-50%);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 0.5rem;
-  color: var(--ink);
-  background: var(--bg-elevated);
-  box-shadow: var(--shadow);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 150ms ease, background-color 120ms ease;
-}
-
-.scroll-to-latest.is-visible {
-  opacity: 1;
-  pointer-events: auto;
-}
-
-.scroll-to-latest:hover {
-  background: var(--muted);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .scroll-to-latest {
-    transition: none;
   }
 }
 
@@ -1541,37 +1434,6 @@ body {
   gap: 0.5rem;
 }
 
-.theme-option {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.45rem;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 0.5rem 0.85rem;
-  background: var(--bg-elevated);
-  color: var(--ink);
-  font-size: 0.85rem;
-  font-weight: 500;
-  transition: border-color 120ms ease, background-color 120ms ease;
-}
-
-.theme-option:hover {
-  background: var(--accent);
-}
-
-.theme-option svg {
-  color: var(--muted-foreground);
-}
-
-.theme-option.is-active {
-  border-color: var(--primary);
-  background: var(--accent);
-}
-
-.theme-option.is-active svg {
-  color: var(--ink);
-}
-
 .settings-status {
   display: grid;
   gap: 0.18rem;
@@ -1642,10 +1504,6 @@ body {
   font-family: var(--mono);
   font-size: 0.8rem;
   overflow-wrap: anywhere;
-}
-
-.boot .btn {
-  margin-top: 0.75rem;
 }
 
 /* A transcript phase whose row threw while rendering. Deliberately quiet: the
@@ -1795,26 +1653,6 @@ body {
   display: flex;
   align-items: center;
   gap: 0.1rem;
-}
-
-.titlebar-nav-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 1.5rem;
-  height: 1.5rem;
-  border-radius: 6px;
-  color: var(--muted-foreground);
-}
-
-.titlebar-nav-btn:hover:not(:disabled) {
-  color: var(--ink);
-  background: color-mix(in srgb, var(--ink) 8%, transparent);
-}
-
-.titlebar-nav-btn:disabled {
-  opacity: 0.4;
-  cursor: default;
 }
 
 .titlebar-title {

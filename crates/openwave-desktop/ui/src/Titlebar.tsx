@@ -20,7 +20,7 @@ export function Titlebar() {
         <WithTooltip label="Back" side="bottom">
           <button
             type="button"
-            className="titlebar-nav-btn"
+            className="inline-flex items-center justify-center size-6 rounded-md text-muted-foreground hover:not-disabled:text-foreground hover:not-disabled:bg-[color-mix(in_srgb,var(--ink)_8%,transparent)] disabled:opacity-40 disabled:cursor-default"
             aria-label="Back"
             disabled={!navigation.canGoBack}
             onClick={navigation.goBack}
@@ -31,7 +31,7 @@ export function Titlebar() {
         <WithTooltip label="Forward" side="bottom">
           <button
             type="button"
-            className="titlebar-nav-btn"
+            className="inline-flex items-center justify-center size-6 rounded-md text-muted-foreground hover:not-disabled:text-foreground hover:not-disabled:bg-[color-mix(in_srgb,var(--ink)_8%,transparent)] disabled:opacity-40 disabled:cursor-default"
             aria-label="Forward"
             disabled={!navigation.canGoForward}
             onClick={navigation.goForward}
