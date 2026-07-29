@@ -215,6 +215,11 @@ struct TavilyExtractResponse {
 struct TavilyExtractResult {
     #[serde(default)]
     url: String,
+    /// Undocumented, but populated in practice. Treated as optional so a
+    /// response that stops carrying it degrades to an untitled page rather
+    /// than failing to deserialize.
+    #[serde(default)]
+    title: Option<String>,
     #[serde(default)]
     raw_content: Option<String>,
 }
@@ -256,15 +261,16 @@ fn normalize_extraction(
         return Err(failed());
     }
     let url = admit_fetch_url(&result.url).map_or_else(|_| requested.to_owned(), String::from);
+    // The published contract lists no title, but responses carry one, so it is
+    // read when present and left empty otherwise — which is what the contract
+    // already means by "the page did not provide one". Nothing is derived from
+    // the content to fill the gap: a heading lifted out of the page would be a
+    // guess standing where a fact belongs.
+    let title = result.title.unwrap_or_default();
     WebExtractResponse::new(
         ExtractionMethod::Provider(provider),
         url,
-        // `/extract` returns no title field, so there is none to report. An
-        // empty title is what the contract already means by "the page did not
-        // provide one"; inventing one from the first markdown heading would put
-        // a guess where a fact belongs, and the result card falls back to the
-        // page host on its own.
-        "",
+        title.trim(),
         content,
         word_count,
         // Tavily applies no length cap of its own, so anything shortened here
@@ -399,7 +405,11 @@ mod tests {
         let (result, sent) = extract(
             200,
             serde_json::json!({
-                "results": [{ "url": EXTRACT_URL, "raw_content": raw_content }],
+                "results": [{
+                    "url": EXTRACT_URL,
+                    "title": " Example Domain ",
+                    "raw_content": raw_content,
+                }],
                 "failed_results": [],
                 "response_time": 1.23,
                 "usage": { "credits": 1 },
@@ -413,8 +423,9 @@ mod tests {
             ExtractionMethod::Provider(WebSearchProviderKind::Tavily)
         );
         assert_eq!(response.url, EXTRACT_URL);
-        // `/extract` returns no title, and none is invented for it.
-        assert!(response.title.is_empty());
+        // The title is undocumented but present in real responses, so it is
+        // reported rather than discarded.
+        assert_eq!(response.title, "Example Domain");
         assert_eq!(response.word_count, 8_000);
         // Tavily caps nothing itself, so the output budget is what shortened
         // this page, and it says so.
