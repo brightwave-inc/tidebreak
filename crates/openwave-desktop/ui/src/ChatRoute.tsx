@@ -437,6 +437,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             onDismissAttachedSource={() => setRecentSource(null)}
             onSelectPrompt={setComposerDraft}
             onSend={onSend}
+            onViewOutput={() => openPanel({ type: "outputs" })}
           />
         </TranscriptVisibilityProvider>
       );

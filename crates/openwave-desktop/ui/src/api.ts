@@ -5,6 +5,9 @@ import {
   type ChatMessageSnapshot,
   type PendingApprovalSnapshot,
   type AgentActivitySnapshot,
+  type AgentActivityHistoryItem,
+  type AgentActivityKind,
+  type AgentActivityOutcome,
   type AgentRunCancellationSnapshot,
   type AgentRunSnapshot,
   type Chat as WireChat,
@@ -291,6 +294,15 @@ export type SandboxAgentCancellation = AgentRunCancellationSnapshot;
  * provider identities, or diagnostics.
  */
 export type AgentActivity = AgentActivitySnapshot;
+
+/**
+ * One settled or live step in a background run's ordered activity history.
+ *
+ * Same closed vocabulary and posture as {@link AgentActivity}: the server
+ * sends only a fixed kind, a coarse outcome, and a timestamp — never tool
+ * inputs, queries, results, identities, paths, leases, or diagnostics.
+ */
+export type AgentActivityHistoryEntry = AgentActivityHistoryItem;
 
 
 
@@ -1101,6 +1113,24 @@ export class ApiClient {
     });
   }
 
+  /**
+   * The ordered, renderer-safe activity history for one background run.
+   *
+   * Malformed or unknown entries are dropped rather than trusted, keeping the
+   * closed vocabulary the server promises. A wrong-chat, foreground, or missing
+   * run answers `404`, which surfaces as a thrown error.
+   */
+  async listAgentRunActivity(
+    chatId: string,
+    runId: string,
+  ): Promise<AgentActivityHistoryEntry[]> {
+    const body = await this.json<unknown>(
+      `/chats/${encodeURIComponent(chatId)}/agent-runs/${encodeURIComponent(runId)}/activity`,
+      { headers: this.headers() },
+    );
+    return parseAgentActivityHistory(body);
+  }
+
   async cancelAgentRun(
     chatId: string,
     runId: string,
@@ -1548,6 +1578,55 @@ function nonEmptyBounded(value: unknown, maxChars: number): value is string {
       return code < 32 || (code >= 127 && code <= 159);
     })
   );
+}
+
+const AGENT_ACTIVITY_KINDS = new Set<AgentActivityKind>([
+  "web_search",
+  "read_delegated_file",
+  "list_connected_folders",
+  "list_folder",
+  "read_connected_file",
+  "import_connected_file",
+]);
+
+const AGENT_ACTIVITY_OUTCOMES = new Set<AgentActivityOutcome>([
+  "waiting",
+  "running",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+
+/**
+ * Keep only well-formed history entries in their server order. An entry whose
+ * kind or outcome falls outside the closed vocabulary, or whose timestamp is
+ * missing, is dropped rather than rendered — the same defensive discipline the
+ * transcript applies to every model-influenced projection.
+ */
+export function parseAgentActivityHistory(
+  value: unknown,
+): AgentActivityHistoryEntry[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (
+      !isRecord(entry) ||
+      typeof entry.kind !== "string" ||
+      !AGENT_ACTIVITY_KINDS.has(entry.kind as AgentActivityKind) ||
+      typeof entry.outcome !== "string" ||
+      !AGENT_ACTIVITY_OUTCOMES.has(entry.outcome as AgentActivityOutcome) ||
+      typeof entry.at !== "string" ||
+      entry.at.length === 0
+    ) {
+      return [];
+    }
+    return [
+      {
+        kind: entry.kind as AgentActivityKind,
+        outcome: entry.outcome as AgentActivityOutcome,
+        at: entry.at,
+      },
+    ];
+  });
 }
 
 export function parseSandboxAgentCancellation(

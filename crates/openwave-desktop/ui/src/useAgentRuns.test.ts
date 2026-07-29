@@ -17,6 +17,7 @@ function run(status: AgentRun["status"] = "running"): AgentRun {
     finished_at: null,
     last_error_code: null,
     activity: null,
+    produced_output: status === "completed",
     created_at: "2026-07-27T12:00:00Z",
     updated_at: "2026-07-27T12:00:00Z",
   };

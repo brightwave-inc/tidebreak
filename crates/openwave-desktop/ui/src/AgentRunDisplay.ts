@@ -1,6 +1,8 @@
-import type { AgentRun } from "./api";
+import type { AgentActivityHistoryEntry, AgentRun } from "./api";
 
 type AgentRunStatus = AgentRun["status"];
+type AgentActivityKind = AgentActivityHistoryEntry["kind"];
+type AgentActivityOutcome = AgentActivityHistoryEntry["outcome"];
 
 export type AgentRunStatusGroup = {
   id: string;
@@ -90,5 +92,79 @@ export function agentRunStatusDetail(run: AgentRun): string {
       return "Could not finish";
     case "cancelled":
       return "Stopped";
+  }
+}
+
+/**
+ * One line for a settled or live step in a run's activity history, phrased by
+ * outcome. Every phrase is a closed, renderer-safe label — it names what kind
+ * of step this was, never what it read, searched for, or found.
+ */
+const ACTIVITY_HISTORY_LABELS: Record<
+  AgentActivityKind,
+  Record<AgentActivityOutcome, string>
+> = {
+  web_search: {
+    waiting: "Waiting to search the web",
+    running: "Searching the web",
+    completed: "Searched the web",
+    failed: "Web search failed",
+    cancelled: "Web search stopped",
+  },
+  read_delegated_file: {
+    waiting: "Waiting to read a delegated file",
+    running: "Reading a delegated file",
+    completed: "Read a delegated file",
+    failed: "Could not read a delegated file",
+    cancelled: "File read stopped",
+  },
+  list_connected_folders: {
+    waiting: "Waiting to check connected folders",
+    running: "Checking connected folders",
+    completed: "Checked connected folders",
+    failed: "Could not check connected folders",
+    cancelled: "Folder check stopped",
+  },
+  list_folder: {
+    waiting: "Waiting to list a folder",
+    running: "Listing a folder",
+    completed: "Listed a folder",
+    failed: "Could not list a folder",
+    cancelled: "Folder listing stopped",
+  },
+  read_connected_file: {
+    waiting: "Waiting to read a file",
+    running: "Reading a file",
+    completed: "Read a file",
+    failed: "Could not read a file",
+    cancelled: "File read stopped",
+  },
+  import_connected_file: {
+    waiting: "Waiting to add a source",
+    running: "Adding a source",
+    completed: "Added a source",
+    failed: "Could not add a source",
+    cancelled: "Adding a source stopped",
+  },
+};
+
+export function agentActivityHistoryLabel(
+  entry: AgentActivityHistoryEntry,
+): string {
+  return ACTIVITY_HISTORY_LABELS[entry.kind][entry.outcome];
+}
+
+export function getAgentActivityOutcomeDotClass(
+  outcome: AgentActivityOutcome,
+): string {
+  switch (outcome) {
+    case "waiting":
+    case "running":
+      return "animate-pulse bg-muted-foreground";
+    case "completed":
+      return "bg-success";
+    case "failed":
+    case "cancelled":
+      return "bg-destructive";
   }
 }

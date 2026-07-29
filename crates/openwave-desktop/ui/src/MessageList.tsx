@@ -4,6 +4,7 @@ import type {
   ApprovalGrantRung,
   ApiClient,
   AgentRun,
+  AgentActivityHistoryEntry,
   PendingFolderAccessRequest,
   PendingOutputWritebackRequest,
   PendingUserQuestions,
@@ -115,6 +116,11 @@ type MessageListProps = {
   backgroundAgentRunsLoading?: boolean;
   backgroundAgentRunsError?: string | null;
   onRetryBackgroundAgentRuns?: () => void;
+  onCancelBackgroundAgentRun?: (runId: string) => Promise<void>;
+  onLoadBackgroundAgentActivity?: (
+    runId: string,
+  ) => Promise<AgentActivityHistoryEntry[]>;
+  onViewBackgroundAgentOutput?: () => void;
   busy: boolean;
   reasoningActive?: boolean;
   scrollRef: Ref<HTMLDivElement>;
@@ -172,6 +178,9 @@ export function MessageList({
   backgroundAgentRunsLoading = false,
   backgroundAgentRunsError = null,
   onRetryBackgroundAgentRuns = () => undefined,
+  onCancelBackgroundAgentRun = async () => undefined,
+  onLoadBackgroundAgentActivity = async () => [],
+  onViewBackgroundAgentOutput,
   busy,
   reasoningActive = false,
   scrollRef,
@@ -208,6 +217,9 @@ export function MessageList({
       loading: backgroundAgentRunsLoading,
       error: backgroundAgentRunsError,
       retry: onRetryBackgroundAgentRuns,
+      cancel: onCancelBackgroundAgentRun,
+      loadActivity: onLoadBackgroundAgentActivity,
+      viewOutput: onViewBackgroundAgentOutput,
     },
   );
   // Only greet a genuinely empty, fully-hydrated conversation. While an
@@ -375,7 +387,17 @@ export function groupMessageItems(
     loading: boolean;
     error: string | null;
     retry: () => void;
-  } = { runs: [], loading: false, error: null, retry: () => undefined },
+    cancel: (runId: string) => Promise<void>;
+    loadActivity: (runId: string) => Promise<AgentActivityHistoryEntry[]>;
+    viewOutput?: () => void;
+  } = {
+    runs: [],
+    loading: false,
+    error: null,
+    retry: () => undefined,
+    cancel: async () => undefined,
+    loadActivity: async () => [],
+  },
 ) {
   const items: ReactNode[] = [];
   // The item index at which the trailing turn opens (its user message). Lets the
@@ -461,6 +483,9 @@ export function groupMessageItems(
           loading={backgroundAgents.loading}
           error={backgroundAgents.error}
           onRetry={backgroundAgents.retry}
+          onCancel={backgroundAgents.cancel}
+          onLoadActivity={backgroundAgents.loadActivity}
+          onViewOutput={backgroundAgents.viewOutput}
         />,
       );
     }

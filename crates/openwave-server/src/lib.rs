@@ -377,6 +377,10 @@ pub fn app(state: AppState) -> Router {
         .route("/chats/{id}/messages", get(routes::list_chat_messages))
         .route("/chats/{id}/agent-runs", get(routes::list_agent_runs))
         .route(
+            "/chats/{chat_id}/agent-runs/{run_id}/activity",
+            get(routes::list_agent_run_activity),
+        )
+        .route(
             "/chats/{chat_id}/agent-runs/{run_id}/cancel",
             post(routes::post_agent_run_cancel),
         )
