@@ -394,7 +394,10 @@ mod tests {
         assert_eq!(gateway.pending_pairing_url().await, None);
 
         let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
-        assert_eq!(policy.gateway_url.as_deref(), Some("http://managed.invalid/"));
+        assert_eq!(
+            policy.gateway_url.as_deref(),
+            Some("http://managed.invalid/")
+        );
     }
 
     #[tokio::test]
@@ -454,11 +457,10 @@ mod tests {
             .await
             .unwrap();
 
-        let error =
-            commit_signed_in_pairing(&*store, &NoOsPolicy, &mcp, "http://pending.invalid/")
-                .await
-                .err()
-                .unwrap();
+        let error = commit_signed_in_pairing(&*store, &NoOsPolicy, &mcp, "http://pending.invalid/")
+            .await
+            .err()
+            .unwrap();
         assert!(error.to_string().contains("http://mdm.invalid/"));
         assert!(!error.to_string().contains("pending.invalid"));
 
@@ -512,5 +514,4 @@ mod tests {
             Some(MANAGED_DISABLED_DIAGNOSTIC)
         );
     }
-
 }
