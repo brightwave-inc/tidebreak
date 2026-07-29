@@ -32,23 +32,47 @@ impl WebSearchCredential {
     }
 }
 
+/// Whether one provider's credential requirement is satisfied.
+///
+/// "No key stored" and "no key needed" are separate states on purpose. Folding
+/// them into one `Option` would make a provider that *requires* a key look
+/// usable the moment a credential-free one existed, and failing closed on a
+/// missing key is the whole point of resolving credentials at all.
+#[derive(Debug)]
+pub enum WebSearchCredentialState {
+    /// The provider's fixed key is stored and non-empty.
+    Present(WebSearchCredential),
+    /// The provider requires a key and none is stored. Callers must fail
+    /// closed and make no request.
+    Missing,
+    /// The provider takes no credential — a self-hosted instance the operator
+    /// runs. There is nothing here to fail closed on.
+    NotRequired,
+}
+
 /// Reads provider keys from the application's existing secret boundary.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WebSearchCredentials;
 
 impl WebSearchCredentials {
-    /// Resolve one provider's key. Missing or whitespace-only entries mean the
-    /// provider is disabled; callers must fail closed and make no request.
-    pub async fn load(
+    /// Resolve one provider's credential state. Missing or whitespace-only
+    /// entries are [`WebSearchCredentialState::Missing`], never a usable
+    /// credential.
+    pub async fn resolve(
         secrets: &dyn SecretProvider,
         kind: WebSearchProviderKind,
-    ) -> Result<Option<WebSearchCredential>, WebSearchError> {
+    ) -> Result<WebSearchCredentialState, WebSearchError> {
+        let Some(key) = kind.credential_key() else {
+            return Ok(WebSearchCredentialState::NotRequired);
+        };
         let value = secrets
-            .get_secret(kind.credential_key())
+            .get_secret(key)
             .await
             .map_err(|error| WebSearchError::Transport(error.to_string()))?;
         Ok(value
             .filter(|value| !value.trim().is_empty())
-            .map(|api_key| WebSearchCredential { kind, api_key }))
+            .map_or(WebSearchCredentialState::Missing, |api_key| {
+                WebSearchCredentialState::Present(WebSearchCredential { kind, api_key })
+            }))
     }
 }

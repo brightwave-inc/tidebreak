@@ -427,7 +427,8 @@ async fn web_search_credential_routes_are_authenticated_and_never_return_keys() 
         serde_json::json!({
             "credentials": [
                 {"provider": "exa", "has_credential": false},
-                {"provider": "tavily", "has_credential": false}
+                {"provider": "tavily", "has_credential": false},
+                {"provider": "brave", "has_credential": false}
             ]
         })
     );

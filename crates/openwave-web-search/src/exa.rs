@@ -62,7 +62,11 @@ impl<C: HttpClient> WebSearchProvider for ExaProvider<C> {
         let response = self
             .client
             .post_json(HttpRequest {
-                url: self.kind().search_url().into(),
+                url: self
+                    .kind()
+                    .search_url()
+                    .ok_or(WebSearchError::NotConfigured(self.kind()))?
+                    .into(),
                 headers: vec![
                     ("x-api-key".into(), self.credential.api_key().into()),
                     ("content-type".into(), "application/json".into()),
@@ -106,7 +110,11 @@ impl<C: HttpClient> WebSearchProvider for ExaProvider<C> {
             .post_json(HttpRequest {
                 // The authority is fixed by the provider kind and bound into
                 // the transport before the credential is attached here.
-                url: self.kind().extract_url().into(),
+                url: self
+                    .kind()
+                    .extract_url()
+                    .ok_or(WebSearchError::ExtractNotSupported(self.kind()))?
+                    .into(),
                 headers: vec![
                     // `/contents` documents bearer auth; the legacy `x-api-key`
                     // header the search path still uses is not the shape new
@@ -336,7 +344,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::{HttpResponse, WebSearchCredentials};
+    use crate::{HttpResponse, WebSearchCredentialState, WebSearchCredentials};
     use openwave_core::{AgentError, SecretProvider};
 
     #[derive(Clone)]
@@ -350,7 +358,10 @@ mod tests {
     #[async_trait]
     impl SecretProvider for StaticSecrets {
         async fn get_secret(&self, key: &str) -> openwave_core::Result<Option<String>> {
-            Ok((key == WebSearchProviderKind::Exa.credential_key()).then(|| "exa-key".into()))
+            Ok(
+                (Some(key) == WebSearchProviderKind::Exa.credential_key())
+                    .then(|| "exa-key".into()),
+            )
         }
 
         async fn set_secret(&self, _key: &str, _value: &str) -> openwave_core::Result<()> {
@@ -362,20 +373,33 @@ mod tests {
         }
     }
 
+    /// The stored key as a usable credential, failing the test by name if any
+    /// other credential state comes back.
+    async fn test_credential() -> WebSearchCredential {
+        match WebSearchCredentials::resolve(&StaticSecrets, WebSearchProviderKind::Exa).await {
+            Ok(WebSearchCredentialState::Present(credential)) => credential,
+            other => panic!("expected a stored Exa key, got {other:?}"),
+        }
+    }
+
     #[async_trait]
     impl HttpClient for FakeHttpClient {
         async fn post_json(&self, request: HttpRequest) -> Result<HttpResponse, WebSearchError> {
             self.seen.lock().unwrap().push(request);
             Ok(self.response.clone())
         }
+
+        async fn get(
+            &self,
+            _request: crate::HttpGetRequest,
+        ) -> Result<HttpResponse, WebSearchError> {
+            unreachable!("the Exa adapter posts JSON on both endpoints")
+        }
     }
 
     #[tokio::test]
     async fn maps_exa_response_and_sends_bounded_direct_request() {
-        let credential = WebSearchCredentials::load(&StaticSecrets, WebSearchProviderKind::Exa)
-            .await
-            .unwrap()
-            .unwrap();
+        let credential = test_credential().await;
         let seen = Arc::new(Mutex::new(Vec::new()));
         let client = FakeHttpClient {
             seen: Arc::clone(&seen),
@@ -396,7 +420,10 @@ mod tests {
         assert_eq!(response.results[0].snippet, "short summary");
         let sent = seen.lock().unwrap();
         assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].url, WebSearchProviderKind::Exa.search_url());
+        assert_eq!(
+            Some(sent[0].url.as_str()),
+            WebSearchProviderKind::Exa.search_url()
+        );
         assert_eq!(sent[0].body["numResults"], 2);
         assert_eq!(sent[0].body["includeDomains"][0], "docs.example.com");
         assert_eq!(sent[0].headers[0], ("x-api-key".into(), "exa-key".into()));
@@ -408,10 +435,7 @@ mod tests {
         status: u16,
         body: serde_json::Value,
     ) -> (Result<WebExtractResponse, WebSearchError>, Vec<HttpRequest>) {
-        let credential = WebSearchCredentials::load(&StaticSecrets, WebSearchProviderKind::Exa)
-            .await
-            .unwrap()
-            .unwrap();
+        let credential = test_credential().await;
         let seen = Arc::new(Mutex::new(Vec::new()));
         let provider = ExaProvider::new(
             FakeHttpClient {
@@ -469,7 +493,10 @@ mod tests {
             "extraction exceeded its serialized output budget"
         );
 
-        assert_eq!(sent[0].url, WebSearchProviderKind::Exa.extract_url());
+        assert_eq!(
+            Some(sent[0].url.as_str()),
+            WebSearchProviderKind::Exa.extract_url()
+        );
         assert_eq!(sent[0].body["urls"], serde_json::json!([EXTRACT_URL]));
         // Text is always requested explicitly and always bounded at the source,
         // and freshness is expressed through the supported knob.

@@ -11,9 +11,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use openwave_core::{Result, SecretProvider, Store};
 use openwave_web_search::{
-    ExaProvider, NativeExtractor, PageExtractor, ReqwestHttpClient, ReqwestPageFetcher,
-    TavilyProvider, TokioHostResolver, WebExtractFailure, WebExtractRequest, WebExtractResponse,
-    WebExtractTool, WebSearchCredentials, WebSearchProvider, WebSearchProviderKind,
+    BraveProvider, ExaProvider, NativeExtractor, OutboundOrigin, PageExtractor, ReqwestHttpClient,
+    ReqwestPageFetcher, SearxngBaseUrl, SearxngProvider, TavilyProvider, TokioHostResolver,
+    WebExtractFailure, WebExtractRequest, WebExtractResponse, WebExtractTool, WebSearchCredential,
+    WebSearchCredentialState, WebSearchCredentials, WebSearchProvider, WebSearchProviderKind,
     WebSearchResolver, WebSearchResolverError, WebSearchTool,
 };
 use serde::{Deserialize, Serialize};
@@ -31,11 +32,15 @@ pub const MIN_TIMEOUT_MS: u64 = 1_000;
 /// durable worker state rather than an unbounded HTTP call.
 pub const MAX_TIMEOUT_MS: u64 = 60_000;
 
-/// The fixed providers this host can hold a credential for. Keeping this
-/// allow-list here means a local API route can never turn an arbitrary path
-/// segment into a keychain key.
-const CREDENTIAL_PROVIDERS: [WebSearchProviderKind; 2] =
-    [WebSearchProviderKind::Exa, WebSearchProviderKind::Tavily];
+/// The fixed providers this host can hold a credential for. SearXNG is
+/// self-hosted and holds none, so it is absent here. Keeping this allow-list
+/// here means a local API route can never turn an arbitrary path segment into
+/// a keychain key.
+const CREDENTIAL_PROVIDERS: [WebSearchProviderKind; 3] = [
+    WebSearchProviderKind::Exa,
+    WebSearchProviderKind::Tavily,
+    WebSearchProviderKind::Brave,
+];
 
 /// Non-secret host configuration. `provider: None` is the safe default: no
 /// credential lookup and no possible outbound request.
@@ -45,6 +50,16 @@ pub struct WebSearchConfig {
     pub provider: Option<WebSearchProviderKind>,
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
+    /// Base URL of the operator's self-hosted SearXNG instance.
+    ///
+    /// This is the one address in the whole surface that is configuration
+    /// rather than a constant, because a self-hosted instance has none to pin.
+    /// It is host configuration only: it is never a model argument and nothing
+    /// in a tool call can reach it. It is validated here at `PUT` time, exactly
+    /// as the egress allowlist is, so a malformed value is rejected rather than
+    /// silently widening where the transport may dial.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub searxng_base_url: Option<String>,
 }
 
 impl Default for WebSearchConfig {
@@ -52,6 +67,7 @@ impl Default for WebSearchConfig {
         Self {
             provider: None,
             timeout_ms: DEFAULT_TIMEOUT_MS,
+            searxng_base_url: None,
         }
     }
 }
@@ -63,7 +79,27 @@ impl WebSearchConfig {
                 "web search timeout_ms must be between {MIN_TIMEOUT_MS} and {MAX_TIMEOUT_MS}"
             )));
         }
+        if self
+            .searxng_base_url
+            .as_deref()
+            .map(SearxngBaseUrl::parse)
+            .is_some_and(|parsed| parsed.is_err())
+        {
+            return Err(ServerError::bad_request(
+                "web search searxng_base_url must be an http or https instance URL with no credentials, query, or fragment",
+            ));
+        }
         Ok(())
+    }
+
+    /// The configured instance URL in canonical form, if it is usable.
+    ///
+    /// `validate` has already rejected a malformed value, so this reads as a
+    /// straightforward "is one configured" without a second error path.
+    fn searxng_base_url(&self) -> Option<SearxngBaseUrl> {
+        self.searxng_base_url
+            .as_deref()
+            .and_then(|value| SearxngBaseUrl::parse(value).ok())
     }
 }
 
@@ -72,15 +108,27 @@ const fn default_timeout_ms() -> u64 {
 }
 
 /// Public state returned by the local API. It intentionally reports only
-/// selection and credential presence — key material never crosses the secret
-/// boundary.
+/// selection, credential presence, and the configured instance URL — key
+/// material never crosses the secret boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 pub struct WebSearchConfigInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub provider: Option<WebSearchProviderKind>,
     pub timeout_ms: u64,
+    /// Whether a key is stored for the selected provider. Always false for a
+    /// credential-free provider, which has no key slot at all — read
+    /// [`Self::available`] to know whether search will actually run.
     pub has_credential: bool,
+    /// Whether the selected provider has everything it needs to be invoked.
+    ///
+    /// A key for the credentialed providers, an instance URL for SearXNG.
+    pub available: bool,
+    /// The configured SearXNG instance URL, in the canonical form the host
+    /// stored. It is safe to return: validation forbids embedded credentials.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub searxng_base_url: Option<String>,
 }
 
 /// Credential readiness for one fixed web-search provider. This public shape
@@ -105,6 +153,11 @@ pub struct WebSearchConfigUpdate {
     pub provider: Option<Option<WebSearchProviderKind>>,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    /// An omitted value leaves the instance URL unchanged; an explicit `null`
+    /// clears it, which takes SearXNG out of service without discarding the
+    /// other providers' keys.
+    #[serde(default, deserialize_with = "double_option")]
+    pub searxng_base_url: Option<Option<String>>,
 }
 
 fn double_option<'de, D, T>(deserializer: D) -> std::result::Result<Option<Option<T>>, D::Error>
@@ -143,17 +196,26 @@ pub async fn config_info(
 ) -> Result<WebSearchConfigInfo> {
     let config = read_config(store).await?;
     let has_credential = match config.provider {
-        Some(provider) => WebSearchCredentials::load(secrets, provider)
-            .await
-            .ok()
-            .flatten()
-            .is_some(),
+        Some(provider) => matches!(
+            WebSearchCredentials::resolve(secrets, provider).await,
+            Ok(WebSearchCredentialState::Present(_))
+        ),
+        None => false,
+    };
+    let available = match config.provider {
+        // Nothing to authenticate with; the instance URL is what it needs.
+        Some(WebSearchProviderKind::Searxng) => config.searxng_base_url().is_some(),
+        Some(_) => has_credential,
         None => false,
     };
     Ok(WebSearchConfigInfo {
         provider: config.provider,
         timeout_ms: config.timeout_ms,
         has_credential,
+        available,
+        searxng_base_url: config
+            .searxng_base_url()
+            .map(|base| base.as_str().to_owned()),
     })
 }
 
@@ -165,10 +227,14 @@ pub async fn credentials_info(
 ) -> std::result::Result<WebSearchCredentialsInfo, ServerError> {
     let mut credentials = Vec::with_capacity(CREDENTIAL_PROVIDERS.len());
     for provider in CREDENTIAL_PROVIDERS {
-        let has_credential = WebSearchCredentials::load(secrets, provider)
-            .await
-            .map_err(|_| ServerError::internal("web search credential storage is unavailable"))?
-            .is_some();
+        let has_credential = matches!(
+            WebSearchCredentials::resolve(secrets, provider)
+                .await
+                .map_err(|_| ServerError::internal(
+                    "web search credential storage is unavailable"
+                ))?,
+            WebSearchCredentialState::Present(_)
+        );
         credentials.push(WebSearchCredentialReadiness {
             provider,
             has_credential,
@@ -187,6 +253,21 @@ pub fn credential_provider(value: &str) -> std::result::Result<WebSearchProvider
         .ok_or_else(|| ServerError::not_found(format!("unknown web search provider kind: {value}")))
 }
 
+/// The fixed keychain name for a provider that takes a key.
+///
+/// A credential-free provider has no slot to address, and asking for one is a
+/// routing mistake rather than a storage failure — [`credential_provider`]
+/// already refuses to resolve one from a path segment.
+fn credential_key(
+    provider: WebSearchProviderKind,
+) -> std::result::Result<&'static str, ServerError> {
+    provider.credential_key().ok_or_else(|| {
+        ServerError::not_found(format!(
+            "web search provider {provider} stores no credential"
+        ))
+    })
+}
+
 /// Store a non-empty, already validated credential under the provider's fixed
 /// key. The provider kind is an enum rather than caller-controlled storage
 /// input, so this cannot address other application secrets.
@@ -196,7 +277,7 @@ pub async fn write_credential(
     api_key: &str,
 ) -> std::result::Result<WebSearchCredentialReadiness, ServerError> {
     secrets
-        .set_secret(provider.credential_key(), api_key)
+        .set_secret(credential_key(provider)?, api_key)
         .await
         .map_err(|_| ServerError::internal("web search credential storage is unavailable"))?;
     Ok(WebSearchCredentialReadiness {
@@ -211,7 +292,7 @@ pub async fn delete_credential(
     provider: WebSearchProviderKind,
 ) -> std::result::Result<WebSearchCredentialReadiness, ServerError> {
     secrets
-        .delete_secret(provider.credential_key())
+        .delete_secret(credential_key(provider)?)
         .await
         .map_err(|_| ServerError::internal("web search credential storage is unavailable"))?;
     Ok(WebSearchCredentialReadiness {
@@ -233,17 +314,67 @@ pub async fn update_config(
     if let Some(timeout_ms) = update.timeout_ms {
         config.timeout_ms = timeout_ms;
     }
+    if let Some(searxng_base_url) = update.searxng_base_url {
+        // Store the canonical form the crate produced, not the raw text, so
+        // there is one spelling of an instance URL in the store and in every
+        // later comparison.
+        config.searxng_base_url = match searxng_base_url {
+            Some(value) => Some(
+                SearxngBaseUrl::parse(value)
+                    .map_err(|_| {
+                        ServerError::bad_request(
+                            "web search searxng_base_url must be an http or https instance URL with no credentials, query, or fragment",
+                        )
+                    })?
+                    .as_str()
+                    .to_owned(),
+            ),
+            None => None,
+        };
+    }
     config.validate()?;
     write_config(store, &config).await?;
     config_info(store, secrets).await.map_err(Into::into)
 }
 
-/// Resolve the explicitly selected, credentialed provider for host execution.
-/// The returned provider is inert until its `search` method is called.
+/// One opaque failure for everything about resolving host configuration, so
+/// keychain and transport details cannot escape through logs or local API
+/// responses.
+fn unavailable() -> ServerError {
+    ServerError::internal("web search configuration is unavailable")
+}
+
+/// A transport bound to exactly one origin under the current timeout policy.
+fn bound_client(
+    origin: OutboundOrigin,
+    timeout_ms: u64,
+) -> std::result::Result<ReqwestHttpClient, ServerError> {
+    ReqwestHttpClient::with_timeout(origin, Duration::from_millis(timeout_ms))
+        .map_err(|_| unavailable())
+}
+
+/// The stored key for a provider that requires one, or `None` to fail closed.
 ///
-/// Secret resolution failures are intentionally projected to one generic
-/// message so keychain implementation details cannot escape through logs or
-/// local API responses. A missing key fails closed as `Ok(None)`.
+/// Only providers that take a key reach this. A credential-free provider is
+/// routed before it, so `NotRequired` here would mean a routing mistake, and
+/// answering `None` keeps that mistake a refusal rather than an unauthenticated
+/// request.
+async fn required_credential(
+    secrets: &dyn SecretProvider,
+    kind: WebSearchProviderKind,
+) -> std::result::Result<Option<WebSearchCredential>, ServerError> {
+    match WebSearchCredentials::resolve(secrets, kind).await {
+        Ok(WebSearchCredentialState::Present(credential)) => Ok(Some(credential)),
+        Ok(WebSearchCredentialState::Missing | WebSearchCredentialState::NotRequired) => Ok(None),
+        Err(_) => Err(unavailable()),
+    }
+}
+
+/// Resolve the explicitly selected provider for host execution. The returned
+/// provider is inert until its `search` method is called.
+///
+/// Every path fails closed as `Ok(None)`: a missing key for the providers that
+/// need one, and a missing instance URL for the one that does not.
 pub async fn resolve_provider(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
@@ -253,23 +384,38 @@ pub async fn resolve_provider(
     let Some(kind) = config.provider else {
         return Ok(None);
     };
-    let credential = WebSearchCredentials::load(secrets, kind)
-        .await
-        .map_err(|_| ServerError::internal("web search configuration is unavailable"))?;
-    let Some(credential) = credential else {
-        return Ok(None);
-    };
-    let client = ReqwestHttpClient::with_timeout(kind, Duration::from_millis(config.timeout_ms))
-        .map_err(|_| ServerError::internal("web search configuration is unavailable"))?;
     let provider: Arc<dyn WebSearchProvider> = match kind {
-        WebSearchProviderKind::Exa => Arc::new(
-            ExaProvider::new(client, credential)
-                .map_err(|_| ServerError::internal("web search configuration is unavailable"))?,
-        ),
-        WebSearchProviderKind::Tavily => Arc::new(
-            TavilyProvider::new(client, credential)
-                .map_err(|_| ServerError::internal("web search configuration is unavailable"))?,
-        ),
+        WebSearchProviderKind::Searxng => {
+            // The self-hosted case: no credential to resolve, and the address
+            // comes from validated host configuration rather than a constant.
+            // Without one there is nowhere to dial, which fails closed exactly
+            // as a missing key does for the others.
+            let Some(base_url) = config.searxng_base_url() else {
+                return Ok(None);
+            };
+            let client = bound_client(base_url.origin(), config.timeout_ms)?;
+            Arc::new(SearxngProvider::new(client, base_url))
+        }
+        kind => {
+            let Some(credential) = required_credential(secrets, kind).await? else {
+                return Ok(None);
+            };
+            let origin = OutboundOrigin::fixed(kind).ok_or_else(unavailable)?;
+            let client = bound_client(origin, config.timeout_ms)?;
+            match kind {
+                WebSearchProviderKind::Exa => {
+                    Arc::new(ExaProvider::new(client, credential).map_err(|_| unavailable())?)
+                }
+                WebSearchProviderKind::Tavily => {
+                    Arc::new(TavilyProvider::new(client, credential).map_err(|_| unavailable())?)
+                }
+                WebSearchProviderKind::Brave => {
+                    Arc::new(BraveProvider::new(client, credential).map_err(|_| unavailable())?)
+                }
+                // Handled above; `OutboundOrigin::fixed` has already refused it.
+                WebSearchProviderKind::Searxng => return Ok(None),
+            }
+        }
     };
     Ok(Some(provider))
 }
@@ -403,14 +549,16 @@ mod tests {
         assert_eq!(config.timeout_ms, DEFAULT_TIMEOUT_MS);
         assert!(config.validate().is_ok());
         assert!(WebSearchConfig {
-            provider: Some(WebSearchProviderKind::Exa),
             timeout_ms: MIN_TIMEOUT_MS - 1,
+            provider: Some(WebSearchProviderKind::Exa),
+            ..WebSearchConfig::default()
         }
         .validate()
         .is_err());
         assert!(WebSearchConfig {
-            provider: Some(WebSearchProviderKind::Tavily),
             timeout_ms: MAX_TIMEOUT_MS + 1,
+            provider: Some(WebSearchProviderKind::Tavily),
+            ..WebSearchConfig::default()
         }
         .validate()
         .is_err());
@@ -420,7 +568,7 @@ mod tests {
     fn selection_has_no_endpoint_or_secret_reference_field() {
         let json = serde_json::to_value(WebSearchConfig {
             provider: Some(WebSearchProviderKind::Exa),
-            timeout_ms: DEFAULT_TIMEOUT_MS,
+            ..WebSearchConfig::default()
         })
         .unwrap();
         assert_eq!(json["provider"], "exa");
@@ -447,6 +595,7 @@ mod tests {
             WebSearchConfigUpdate {
                 provider: Some(Some(WebSearchProviderKind::Exa)),
                 timeout_ms: Some(MIN_TIMEOUT_MS),
+                searxng_base_url: None,
             },
         )
         .await;
@@ -457,8 +606,64 @@ mod tests {
 
         assert_eq!(info.provider, Some(WebSearchProviderKind::Exa));
         assert!(!info.has_credential);
+        assert!(!info.available);
         assert!(matches!(resolve_provider(&store, &secrets).await, Ok(None)));
         assert!(secrets.0.lock().unwrap().is_empty());
+    }
+
+    /// The credential-free provider: selection alone is not enough, an
+    /// instance URL is, and no key is ever read or written for it.
+    #[tokio::test]
+    async fn a_credential_free_provider_turns_on_with_an_instance_url_and_no_key() {
+        let (store, _dir) = test_store().await;
+        let secrets = TestSecrets::default();
+        let select = |base: Option<Option<String>>| WebSearchConfigUpdate {
+            provider: Some(Some(WebSearchProviderKind::Searxng)),
+            timeout_ms: None,
+            searxng_base_url: base,
+        };
+
+        // Selected but with nowhere to dial: fails closed exactly as a
+        // credentialed provider without its key does.
+        let info = update_config(&store, &secrets, select(None)).await.unwrap();
+        assert_eq!(info.provider, Some(WebSearchProviderKind::Searxng));
+        assert!(!info.available);
+        assert!(matches!(resolve_provider(&store, &secrets).await, Ok(None)));
+
+        // A malformed instance URL is rejected at PUT time rather than
+        // silently widening where the transport may dial.
+        for invalid in ["not a url", "ftp://localhost:8888", "http://user:pw@host"] {
+            assert!(
+                update_config(&store, &secrets, select(Some(Some(invalid.into()))))
+                    .await
+                    .is_err(),
+                "{invalid} was accepted as an instance URL"
+            );
+        }
+
+        // A valid one stores canonically and makes the provider usable, with
+        // `has_credential` still false because there is no key slot at all.
+        let info = update_config(
+            &store,
+            &secrets,
+            select(Some(Some("http://localhost:8888/".into()))),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            info.searxng_base_url.as_deref(),
+            Some("http://localhost:8888")
+        );
+        assert!(!info.has_credential);
+        assert!(info.available);
+        assert!(matches!(
+            resolve_provider(&store, &secrets).await,
+            Ok(Some(_))
+        ));
+        // Nothing about a credential-free provider touches the keychain, and
+        // it is not addressable as a credential slot either.
+        assert!(secrets.0.lock().unwrap().is_empty());
+        assert!(credential_provider("searxng").is_err());
     }
 
     #[tokio::test]
@@ -485,26 +690,34 @@ mod tests {
         let info = config_info(&store, &secrets).await.unwrap();
         assert_eq!(info.provider, None);
         assert!(!info.has_credential);
+        assert!(!info.available);
         assert!(matches!(resolve_provider(&store, &secrets).await, Ok(None)));
     }
 
+    /// Persisted policy may be hand-edited or left by an interrupted build.
+    /// Neither an out-of-range timeout nor an instance URL that would widen
+    /// egress may leave a selected provider usable.
     #[tokio::test]
-    async fn invalid_persisted_timeout_reverts_to_disabled_policy() {
-        let (store, _dir) = test_store().await;
-        store
-            .set_setting(
-                WEB_SEARCH_SETTING,
-                &serde_json::json!({
-                    "provider": "tavily",
-                    "timeout_ms": MAX_TIMEOUT_MS + 1,
-                }),
-            )
-            .await
-            .unwrap();
+    async fn invalid_persisted_policy_reverts_to_disabled() {
+        for invalid in [
+            serde_json::json!({ "provider": "tavily", "timeout_ms": MAX_TIMEOUT_MS + 1 }),
+            serde_json::json!({
+                "provider": "searxng",
+                "timeout_ms": DEFAULT_TIMEOUT_MS,
+                "searxng_base_url": "http://operator:secret@localhost:8888",
+            }),
+        ] {
+            let (store, _dir) = test_store().await;
+            store
+                .set_setting(WEB_SEARCH_SETTING, &invalid)
+                .await
+                .unwrap();
 
-        assert_eq!(
-            read_config(&store).await.unwrap(),
-            WebSearchConfig::default()
-        );
+            assert_eq!(
+                read_config(&store).await.unwrap(),
+                WebSearchConfig::default(),
+                "{invalid} did not fail closed"
+            );
+        }
     }
 }
