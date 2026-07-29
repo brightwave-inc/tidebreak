@@ -2779,3 +2779,99 @@ async fn connect_vector_store_falls_back_to_an_in_memory_index_without_vec_lance
     let reopened = connect_vector_store(&config, 2).await.unwrap();
     assert_eq!(reopened.len().await.unwrap(), 0);
 }
+
+/// Records where the document surface sits in a native embedding, which is the
+/// configuration the desktop actually runs and the one no other test here
+/// builds. Every other test uses the headless router, where these same routes
+/// are on the primary bearer — so none of them can see what the renderer meets.
+///
+/// The renderer holds the primary bearer and nothing else, so today it cannot
+/// read a document it has just listed. That is what this asserts, and it is a
+/// boundary rather than an accident: the second credential gates host authority
+/// (see `docs/host-access.md`). It is also why the desktop's document viewers
+/// are unreachable, so the assertion is expected to invert when that is
+/// resolved — deliberately, by a change that has to come here and say so.
+#[tokio::test]
+async fn a_native_embedding_refuses_the_renderer_its_own_documents() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let (retrieval, _search) = build_retrieval(
+        Arc::new(HashEmbedder::default()),
+        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+    );
+    let state = AppState::new_with_client_executor_id(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        retrieval,
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+        Uuid::new_v4(),
+    )
+    .unwrap();
+    let bearer = format!("Bearer {}", state.token);
+    let executor = state.client_executor_token.to_string();
+    let router = app(state);
+
+    let chat = make_chat(&router, &bearer).await;
+    // Ingest needs the native credential too: in this configuration the whole
+    // document surface is behind it, writes and listings included.
+    let ingest: serde_json::Value = json_body(
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/chats/{}/documents", chat.id))
+                    .header(header::AUTHORIZATION, &bearer)
+                    .header(crate::auth::CLIENT_EXECUTOR_HEADER, &executor)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"uri": "file:///note.txt", "content": "a source"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    let document_id = ingest["document_id"].as_str().unwrap().to_owned();
+
+    let fetch = |extra: Option<&'static str>| {
+        let executor_owned = extra.map(|_| executor.clone());
+        let router = router.clone();
+        let bearer = bearer.clone();
+        let uri = format!("/chats/{}/documents/{document_id}", chat.id);
+        async move {
+            let mut builder = Request::builder()
+                .uri(uri)
+                .header(header::AUTHORIZATION, bearer);
+            if let Some(token) = executor_owned {
+                builder = builder.header(crate::auth::CLIENT_EXECUTOR_HEADER, token);
+            }
+            router
+                .oneshot(builder.body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+        }
+    };
+
+    // What the renderer sends. It holds the primary bearer and nothing else,
+    // so the document it just listed is unreachable to it.
+    assert_eq!(fetch(None).await.status(), StatusCode::UNAUTHORIZED);
+    // What the native host sends, and why the source list works while the
+    // reader that opens one does not.
+    assert_eq!(fetch(Some("native")).await.status(), StatusCode::OK);
+}
