@@ -71,6 +71,10 @@ pub enum ToolActionPreview {
         /// Latest publication date the search will accept.
         end_published_at: Option<String>,
     },
+    /// A single public web page fetch. The URL is the entire action — it is
+    /// both what leaves the device and where the request goes — so the card
+    /// shows it whole.
+    WebExtract { url: String },
 }
 
 impl ToolActionPreview {
@@ -102,6 +106,15 @@ impl ToolActionPreview {
                 domains: clamped_list(arguments.get("domains")),
                 start_published_at: clamped_field(arguments.get("start_published_at")),
                 end_published_at: clamped_field(arguments.get("end_published_at")),
+            }),
+            // Approving a page fetch without seeing the URL is not consent to
+            // fetching anything in particular. Trimmed like the queries above,
+            // because the tool trims before admitting the URL.
+            "web_extract" => Some(Self::WebExtract {
+                url: clamp(
+                    arguments.get("url")?.as_str()?.trim(),
+                    MAX_ACTION_FIELD_CHARS,
+                )?,
             }),
             _ => None,
         }
@@ -148,6 +161,13 @@ impl ToolActionPreview {
                     && field_survives_clamp(arguments.get("start_published_at"))
                     && field_survives_clamp(arguments.get("end_published_at"))
             }
+            // A page fetch's action is its URL, all of it: a grant keyed on a
+            // clamped URL would cover other URLs sharing its first 512
+            // characters.
+            "web_extract" => arguments
+                .get("url")
+                .and_then(Value::as_str)
+                .is_some_and(|url| survives_clamp(url.trim())),
             // A tool with no variant projects nothing, so there is nothing a
             // narrower scope could name — and claiming otherwise would invite a
             // narrow grant with nothing to narrow to.
@@ -379,6 +399,7 @@ pub enum ToolResultPreview {
 const ENTRY_TOOLS: &[&str] = &[
     "search",
     crate::WEB_SEARCH_TOOL,
+    crate::WEB_EXTRACT_TOOL,
     "list_sources",
     "read_source",
     "read_file",
@@ -407,7 +428,7 @@ impl ToolResultPreview {
     pub fn build(tool_name: &str, output: &ToolOutput) -> Option<Self> {
         if output.is_error
             && output.error_category == Some(crate::ToolErrorCategory::ConfigurationRequired)
-            && tool_name == crate::WEB_SEARCH_TOOL
+            && web_capability_tool(tool_name)
         {
             return Some(Self::WebSearchProviderRequired);
         }
@@ -497,7 +518,7 @@ impl ToolResultPreview {
     #[must_use]
     pub fn from_stored_error(tool_name: &str, error_code: Option<&str>) -> Option<Self> {
         if error_code == Some(crate::ToolErrorCategory::ConfigurationRequired.as_str())
-            && tool_name == crate::WEB_SEARCH_TOOL
+            && web_capability_tool(tool_name)
         {
             Some(Self::WebSearchProviderRequired)
         } else {
@@ -516,6 +537,14 @@ impl ToolResultPreview {
             Self::Entries { .. } => true,
         }
     }
+}
+
+/// The tools whose configuration-required failure means "web capability needs
+/// a provider set up in Settings". Extraction shares web search's card: both
+/// are repaired from the same web-search settings section, and the card
+/// carries no tool-specific text.
+fn web_capability_tool(tool_name: &str) -> bool {
+    tool_name == crate::WEB_SEARCH_TOOL || tool_name == crate::WEB_EXTRACT_TOOL
 }
 
 /// Bound one listed row, or drop it.

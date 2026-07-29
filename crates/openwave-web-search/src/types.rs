@@ -22,6 +22,19 @@ pub const MAX_RESULT_CONTENT_CHARS: usize = 4_000;
 pub const MAX_RESULT_URL_BYTES: usize = 2_048;
 /// Maximum UTF-8 bytes in a serialized normalized response.
 pub const MAX_OUTPUT_BYTES: usize = 16_000;
+/// Maximum UTF-8 bytes in a serialized normalized extraction.
+///
+/// Wider than the search budget because one extraction carries a whole page's
+/// readable content. It comfortably fits the native engine's 24,000-character
+/// content budget as single-byte text; a page dense in multi-byte script is
+/// trimmed to fit and says so through `truncated`.
+pub const MAX_EXTRACT_OUTPUT_BYTES: usize = 64_000;
+/// Below this many extracted words a page has no readable content.
+///
+/// The floor is engine-neutral on purpose: a vendor that answers with a cookie
+/// banner is exactly as unhelpful as a native fetch that lands on a script
+/// shell, and both should resolve "nothing there" rather than a thin success.
+pub const MIN_EXTRACT_WORDS: usize = 20;
 /// Legacy name for the serialized response output budget.
 pub const MAX_OUTPUT_CHARS: usize = MAX_OUTPUT_BYTES;
 const MAX_DOMAIN_CHARS: usize = 253;
@@ -60,6 +73,15 @@ impl WebSearchProviderKind {
         match self {
             Self::Exa => "https://api.exa.ai/search",
             Self::Tavily => "https://api.tavily.com/search",
+        }
+    }
+
+    /// Fixed page-extraction endpoint, on the same authority as
+    /// [`Self::search_url`] so one transport binding covers both calls.
+    pub(crate) const fn extract_url(self) -> &'static str {
+        match self {
+            Self::Exa => "https://api.exa.ai/contents",
+            Self::Tavily => "https://api.tavily.com/extract",
         }
     }
 
@@ -376,13 +398,229 @@ impl WebSearchResponse {
     }
 }
 
+/// Credential-free request to extract one public page. One URL per call is
+/// the whole v1 shape; every fetch policy knob is host-owned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebExtractRequest {
+    url: String,
+}
+
+// The schema bound core advertises to models must equal the byte bound the
+// fetch admission policy enforces, or the two drift silently.
+const _: () =
+    assert!(openwave_core::MAX_WEB_EXTRACT_URL_BYTES == crate::fetch_policy::MAX_FETCH_URL_BYTES);
+
+impl WebExtractRequest {
+    /// Admit a URL for extraction, or say precisely why not.
+    ///
+    /// This runs the full fetch admission policy — https-only, no userinfo,
+    /// default port, denied-network IP literals — before any provider or
+    /// transport can see the value, and keeps the canonical fragment-stripped
+    /// form. The reason text is closed policy prose, safe for a model.
+    pub fn new(url: impl AsRef<str>) -> Result<Self, WebSearchError> {
+        let admitted = crate::fetch_policy::admit_fetch_url(url.as_ref().trim())
+            .map_err(|violation| WebSearchError::InvalidRequest(violation.to_string()))?;
+        Ok(Self {
+            url: admitted.into(),
+        })
+    }
+
+    /// Revalidate a deserialized request at the egress boundary.
+    pub fn validate(&self) -> Result<(), WebSearchError> {
+        let admitted = Self::new(&self.url)?;
+        if admitted.url != self.url {
+            return Err(WebSearchError::InvalidRequest(
+                "page URL is not in canonical admitted form".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The admitted, canonical page URL.
+    #[must_use]
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+}
+
+/// How an extraction was produced.
+///
+/// Every successful extraction is stamped with its method so degraded
+/// extraction (a vendor falling back to the native engine) stays visible
+/// downstream and can flow into citations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtractionMethod {
+    /// The host's own admission-checked fetch and readability engine.
+    Native,
+    /// A configured provider's extraction endpoint.
+    Provider(WebSearchProviderKind),
+}
+
+impl ExtractionMethod {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Provider(kind) => kind.as_str(),
+        }
+    }
+}
+
+impl std::fmt::Display for ExtractionMethod {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for ExtractionMethod {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ExtractionMethod {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        if value == "native" {
+            return Ok(Self::Native);
+        }
+        [WebSearchProviderKind::Exa, WebSearchProviderKind::Tavily]
+            .into_iter()
+            .find(|kind| kind.as_str() == value)
+            .map(Self::Provider)
+            .ok_or_else(|| serde::de::Error::custom("unknown extraction method"))
+    }
+}
+
+/// One fully normalized, bounded extraction. Provider-native payloads are
+/// deliberately unrepresentable, exactly as for [`WebSearchResponse`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebExtractResponse {
+    /// Which engine produced this extraction.
+    pub extraction_method: ExtractionMethod,
+    /// Final canonical page URL after any redirects.
+    pub url: String,
+    /// Page title; empty when the page did not provide one.
+    pub title: String,
+    /// Readable page content as markdown or plain text.
+    pub content: String,
+    /// Words in the full extraction, counted before any truncation.
+    pub word_count: usize,
+    /// Whether `content` was shortened to fit an output budget.
+    pub truncated: bool,
+}
+
+impl WebExtractResponse {
+    /// Normalize and bound one extraction before it can reach a model context.
+    pub fn new(
+        extraction_method: ExtractionMethod,
+        url: impl AsRef<str>,
+        title: impl AsRef<str>,
+        content: impl Into<String>,
+        word_count: usize,
+        truncated: bool,
+    ) -> Result<Self, WebSearchError> {
+        let url = canonical_http_url(url.as_ref())?;
+        let mut response = Self {
+            extraction_method,
+            url,
+            title: truncate(title.as_ref().trim(), MAX_RESULT_TITLE_CHARS),
+            content: content.into(),
+            word_count,
+            truncated,
+        };
+        response.enforce_output_budget();
+        Ok(response)
+    }
+
+    /// The same trim ladder idea as the search response: shed the largest
+    /// field first and never return an over-budget serialization. The URL is
+    /// already bounded, so content then title always suffices.
+    fn enforce_output_budget(&mut self) {
+        while self.serialized_len() > MAX_EXTRACT_OUTPUT_BYTES {
+            let excess = self
+                .serialized_len()
+                .saturating_sub(MAX_EXTRACT_OUTPUT_BYTES)
+                .max(1);
+            if !self.content.is_empty() {
+                self.truncated = true;
+                trim_required_field(&mut self.content, excess);
+                continue;
+            }
+            if trim_required_field(&mut self.title, excess) {
+                continue;
+            }
+            break;
+        }
+    }
+
+    fn serialized_len(&self) -> usize {
+        serde_json::to_vec(self).map_or(usize::MAX, |value| value.len())
+    }
+}
+
+/// Why one page could not be extracted, in a closed vocabulary a model can
+/// act on.
+///
+/// Every variant renders fixed prose (plus at most an HTTP status number), so
+/// no transport diagnostic, vendor payload, or host configuration detail can
+/// ride along.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum WebExtractFailure {
+    #[error("the URL is not allowed by the page fetch policy")]
+    UrlNotAllowed,
+    #[error("the page could not be reached")]
+    PageUnreachable,
+    #[error("the page returned HTTP {0}")]
+    HttpStatus(u16),
+    #[error("the page redirected too many times or to an invalid location")]
+    RedirectNotFollowed,
+    #[error("the page response exceeded the size limit")]
+    PageTooLarge,
+    #[error("the page markup was too large or too deeply nested to extract")]
+    PageTooComplex,
+    #[error("the page took longer than the extraction budget allows")]
+    ExtractionTimedOut,
+    #[error("the page is not a readable text or HTML document")]
+    UnsupportedContentType,
+    #[error("no readable content could be extracted from the page")]
+    NoReadableContent,
+}
+
 /// A configured provider. Implementations must reject invalid requests before
 /// egress and return [`WebSearchResponse`] rather than provider-native JSON.
 #[async_trait]
 pub trait WebSearchProvider: Send + Sync {
     fn kind(&self) -> WebSearchProviderKind;
 
+    /// Whether this provider implements the search contract.
+    fn supports_search(&self) -> bool {
+        true
+    }
+
+    /// Whether this provider implements the extraction contract.
+    ///
+    /// Extraction routing is derived from this capability alone — no
+    /// heuristics and no escalation. An extract-capable provider receives
+    /// extraction requests; a search-only provider never does.
+    fn supports_extract(&self) -> bool {
+        false
+    }
+
     async fn search(&self, request: WebSearchRequest) -> Result<WebSearchResponse, WebSearchError>;
+
+    /// Extract one admitted page through the provider.
+    ///
+    /// The default refuses: a provider that does not opt in through
+    /// [`Self::supports_extract`] has no extraction endpoint to call, and a
+    /// silent fallback here would hide a routing bug.
+    async fn extract(
+        &self,
+        request: WebExtractRequest,
+    ) -> Result<WebExtractResponse, WebSearchError> {
+        let _ = request;
+        Err(WebSearchError::ExtractNotSupported(self.kind()))
+    }
 }
 
 #[derive(Debug, Error)]
@@ -391,6 +629,8 @@ pub enum WebSearchError {
     InvalidRequest(String),
     #[error("web search is not configured for {0}")]
     NotConfigured(WebSearchProviderKind),
+    #[error("web extraction is not supported by {0}")]
+    ExtractNotSupported(WebSearchProviderKind),
     #[error("web search transport failed: {0}")]
     Transport(String),
     #[error("web search outbound request is not allowed")]
@@ -400,6 +640,22 @@ pub enum WebSearchError {
         provider: WebSearchProviderKind,
         status: u16,
     },
+    /// The provider refused the configured key. This is host configuration
+    /// rather than a property of the request, so it is worth distinguishing
+    /// from every other provider failure: it will recur on the next call.
+    #[error("web search provider {0} rejected the configured API key")]
+    CredentialRejected(WebSearchProviderKind),
+    /// The account's plan or prepaid balance is spent. Distinct from
+    /// [`Self::RateLimited`] because waiting does not clear it.
+    #[error("web search provider {0} has no remaining quota")]
+    QuotaExhausted(WebSearchProviderKind),
+    #[error("web search provider {0} rate limited the request")]
+    RateLimited(WebSearchProviderKind),
+    /// The provider accepted the request and reported that this one page could
+    /// not be extracted. Both vendors answer HTTP 200 in that case, so this is
+    /// what stops a per-URL failure becoming an empty-content success.
+    #[error("web search provider {provider} could not extract the page")]
+    PageNotExtracted { provider: WebSearchProviderKind },
     #[error("web search provider {provider} returned an invalid response")]
     InvalidResponse { provider: WebSearchProviderKind },
     #[error("web search provider returned an invalid result URL")]
@@ -421,6 +677,38 @@ fn canonical_http_url(value: &str) -> Result<String, WebSearchError> {
 
 pub(crate) fn truncate(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
+}
+
+/// Words carrying at least one alphanumeric character.
+///
+/// Punctuation-only tokens are not words, so a page of navigation glyphs
+/// cannot clear [`MIN_EXTRACT_WORDS`] on separators alone.
+pub(crate) fn count_words(value: &str) -> usize {
+    value
+        .split_whitespace()
+        .filter(|token| token.chars().any(char::is_alphanumeric))
+        .count()
+}
+
+/// Whether a URL a provider echoed back names the page that was requested.
+///
+/// Both extract endpoints answer HTTP 200 on a partial failure and report the
+/// per-URL outcome in a side array, so a response must be matched by URL key
+/// and never by array position. Providers may normalize what they echo — host
+/// case, an added root path — so parsed forms are compared, with exact bytes as
+/// the fallback for an identifier that is not a URL at all.
+pub(crate) fn same_page_url(candidate: &str, requested: &str) -> bool {
+    if candidate == requested {
+        return true;
+    }
+    match (Url::parse(candidate), Url::parse(requested)) {
+        (Ok(mut candidate), Ok(mut requested)) => {
+            candidate.set_fragment(None);
+            requested.set_fragment(None);
+            candidate == requested
+        }
+        _ => false,
+    }
 }
 
 fn contains_control(value: &str) -> bool {

@@ -43,7 +43,7 @@ export type AgentRunCancellationStatus = "cancelling" | "cancelled";
  * executing inside an execution provider's boundary adds a variant here
  * rather than a second meaning to [`AgentRunTier`].
  */
-export type AgentRunExecutionLocation = "in_process";
+export type AgentRunExecutionLocation = "in_process" | "container";
 
 /**
  * Identifies one durable foreground or sandboxed background agent run.
@@ -118,13 +118,12 @@ document_id: DocumentId,
  * Half-open byte range of the cited passage in that document's canonical
  * text, which is the text the extracted-text view renders.
  */
-span: CitationSpan, excerpt: string, heading: string | null, pages: Array<number>, 
+span: CitationSpan, excerpt: string, heading: string | null, 
 /**
- * Where on those pages the passage sits, for sources whose parser resolved
- * it that finely. Empty for page-granular sources; `pages` is the complete
- * answer either way.
+ * Where the passage sits in its source, in the terms that source is
+ * addressed by.
  */
-bounds: Array<CitationPageBounds>, };
+location: CitationLocation, };
 
 /**
  * Where the Auto-mode judge stands on one parked call.
@@ -293,6 +292,21 @@ tool_activity: Array<ChatToolActivitySnapshot>, last_event_seq: number, };
  * meaning "follow the global default".
  */
 export type CitationFormat = "inline" | "sources_attached";
+
+/**
+ * Where a citation points, projected per evidence kind.
+ *
+ * The discriminant is the renderer's instruction for how to open the passage:
+ * pages and rectangles address a paginated document, a cell range addresses a
+ * sheet, and a path addresses a node. Only document content is produced today.
+ */
+export type CitationLocation = { "kind": "document_content", pages: Array<number>, 
+/**
+ * Where on those pages the passage sits, for sources whose parser
+ * resolved it that finely. Empty for page-granular sources; `pages`
+ * is the complete answer either way.
+ */
+bounds: Array<CitationPageBounds>, } | { "kind": "spreadsheet_cell_range", start_cell: string, end_cell: string | null, sheet_index: number, sheet_name: string, } | { "kind": "structured_path", path: string, path_type: StructuredPathType, };
 
 /**
  * One highlight rectangle of a citation, on a named page.
@@ -904,7 +918,7 @@ export type RendererSequencedEvent = { seq: number, event: RendererAgentEvent, }
  * are all generated from this enum, so a variant added here cannot leave one of
  * them behind — see `docs/wire-types.md`.
  */
-export type RendererToolName = "search" | "list_sources" | "read_source" | "read_tool_result" | "web_search" | "read_delegated_file" | "read_file" | "list_dir" | "write_file" | "create_deliverable" | "request_folder_access" | "connect_folder" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file" | "write_output_to_connected_folder" | "spawn_sandbox_agent" | "wait_for_agents" | "ask_user_questions" | "exec" | "other";
+export type RendererToolName = "search" | "list_sources" | "read_source" | "read_tool_result" | "web_search" | "web_extract" | "read_delegated_file" | "read_file" | "list_dir" | "write_file" | "create_deliverable" | "request_folder_access" | "connect_folder" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file" | "write_output_to_connected_folder" | "spawn_sandbox_agent" | "wait_for_agents" | "ask_user_questions" | "exec" | "other";
 
 export type RendererToolStatus = "completed" | "failed";
 
@@ -1039,6 +1053,11 @@ source_call_id: CallId, chat_id: ChatId,
 chat_title: string | null, action: RendererToolName, approval: ToolApprovalKind, scope: GrantScope, granted_at: string, };
 
 /**
+ * How the `path` of a structured-path evidence location is written.
+ */
+export type StructuredPathType = "json_dot_notation" | "xml_xpath";
+
+/**
  * The action a call will take, in a form a human can inspect.
  *
  * Approval cards need this because consent to an action you cannot see is not
@@ -1072,7 +1091,7 @@ start_published_at: string | null,
 /**
  * Latest publication date the search will accept.
  */
-end_published_at: string | null, };
+end_published_at: string | null, } | { "tool": "web_extract", url: string, };
 
 /**
  * Closed immutable consent semantics stored with each approval request.
@@ -1082,7 +1101,7 @@ end_published_at: string | null, };
  * summary or arguments. `Unsupported` is the fail-closed default: a Sensitive
  * action the server can only reject, never approve.
  */
-export type ToolApprovalKind = "search_may_share_query_and_excerpts" | "web_search_may_share_query" | "exec_may_run_networked_command" | "external_mcp_may_call_server" | "workspace_may_modify_files" | "unsupported";
+export type ToolApprovalKind = "search_may_share_query_and_excerpts" | "web_search_may_share_query" | "web_extract_may_fetch_url" | "exec_may_run_networked_command" | "external_mcp_may_call_server" | "workspace_may_modify_files" | "unsupported";
 
 /**
  * What a call produced, in a form a human can read.
@@ -1208,6 +1227,7 @@ export const RENDERER_TOOL_NAMES = [
   "read_source",
   "read_tool_result",
   "web_search",
+  "web_extract",
   "read_delegated_file",
   "read_file",
   "list_dir",

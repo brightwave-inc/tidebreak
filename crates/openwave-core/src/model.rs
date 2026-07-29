@@ -773,6 +773,141 @@ pub enum RetrievalEvidenceSource {
     Inline,
 }
 
+/// How a passage addresses the place it was taken from.
+///
+/// A position in a source is not one shape: prose is a span of canonical text,
+/// a spreadsheet passage is a cell range on a named sheet, and a passage from a
+/// structured document is a path to a node. The discriminant is what lets a
+/// reader open the right one, so it travels with the evidence rather than being
+/// inferred later from the document's media type.
+///
+/// Document content is the only kind produced today; the others are declared
+/// and validated so that the pipelines which produce them are additive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EvidenceLocation {
+    /// A passage of canonical text, addressed by the evidence's own byte span.
+    DocumentContent {
+        /// Section headings above the passage, outermost first.
+        heading_path: Vec<String>,
+        /// Parser mappings from the passage back into the original source.
+        source_regions: Vec<SourceRegion>,
+    },
+    /// A cell or rectangular range on one sheet of a workbook.
+    SpreadsheetCellRange {
+        /// First cell of the range, in A1 notation.
+        start_cell: String,
+        /// Last cell of the range, in A1 notation, for a range wider than one
+        /// cell.
+        end_cell: Option<String>,
+        /// Zero-based position of the sheet in the workbook.
+        sheet_index: i32,
+        /// The sheet's own name, which is what a reader is shown.
+        sheet_name: String,
+    },
+    /// A node of a structured document, addressed by path.
+    StructuredPath {
+        /// The path itself, interpreted according to `path_type`.
+        path: String,
+        /// How to read the path.
+        path_type: StructuredPathType,
+    },
+}
+
+impl EvidenceLocation {
+    /// Longest accepted A1 reference: three column letters and seven row
+    /// digits are the widest and tallest a worksheet addresses.
+    const MAX_CELL_COLUMN_LETTERS: usize = 3;
+    const MAX_CELL_ROW_DIGITS: usize = 7;
+    pub const MAX_SHEET_NAME_BYTES: usize = 1024;
+    pub const MAX_STRUCTURED_PATH_BYTES: usize = 4 * 1024;
+
+    /// Section headings above a document-content passage, outermost first.
+    /// Empty for every other kind, which carries no heading trail.
+    #[must_use]
+    pub fn heading_path(&self) -> &[String] {
+        match self {
+            Self::DocumentContent { heading_path, .. } => heading_path,
+            Self::SpreadsheetCellRange { .. } | Self::StructuredPath { .. } => &[],
+        }
+    }
+
+    /// Parser mappings from a document-content passage back into its source.
+    /// Empty for every other kind, which addresses the source directly.
+    #[must_use]
+    pub fn source_regions(&self) -> &[SourceRegion] {
+        match self {
+            Self::DocumentContent { source_regions, .. } => source_regions,
+            Self::SpreadsheetCellRange { .. } | Self::StructuredPath { .. } => &[],
+        }
+    }
+
+    /// Whether this location is well formed on its own terms.
+    ///
+    /// Only the invariants a location can be judged by alone. A document
+    /// passage's regions are additionally checked against the span and snippet
+    /// they map, which is not knowable from here.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        match self {
+            Self::DocumentContent {
+                heading_path,
+                source_regions,
+            } => {
+                let heading_bytes = heading_path
+                    .iter()
+                    .try_fold(0_usize, |total, heading| total.checked_add(heading.len()));
+                heading_path.len() <= RetrievalEvidenceInput::MAX_HEADING_SEGMENTS
+                    && heading_bytes
+                        .is_some_and(|bytes| bytes <= RetrievalEvidenceInput::MAX_HEADING_BYTES)
+                    && !heading_path.iter().any(|heading| heading.contains('\0'))
+                    && source_regions.len() <= RetrievalEvidenceInput::MAX_SOURCE_REGIONS
+            }
+            Self::SpreadsheetCellRange {
+                start_cell,
+                end_cell,
+                sheet_index,
+                sheet_name,
+            } => {
+                is_a1_reference(start_cell)
+                    && end_cell.as_deref().is_none_or(is_a1_reference)
+                    && *sheet_index >= 0
+                    && !sheet_name.is_empty()
+                    && sheet_name.len() <= Self::MAX_SHEET_NAME_BYTES
+                    && !sheet_name.contains('\0')
+            }
+            Self::StructuredPath { path, .. } => {
+                !path.is_empty()
+                    && path.len() <= Self::MAX_STRUCTURED_PATH_BYTES
+                    && !path.contains('\0')
+            }
+        }
+    }
+}
+
+/// How the `path` of a structured-path evidence location is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StructuredPathType {
+    /// Dot-separated keys and indices into a JSON document, as in
+    /// `items.0.invoice_number`.
+    JsonDotNotation,
+    /// An XPath expression into an XML or HTML document.
+    XmlXpath,
+}
+
+/// Whether `cell` is an A1-notation reference: a column of letters followed by
+/// a one-based row number, and nothing else.
+fn is_a1_reference(cell: &str) -> bool {
+    let column_letters = cell.bytes().take_while(u8::is_ascii_alphabetic).count();
+    let (column, row) = cell.split_at(column_letters);
+    (1..=EvidenceLocation::MAX_CELL_COLUMN_LETTERS).contains(&column.len())
+        && (1..=EvidenceLocation::MAX_CELL_ROW_DIGITS).contains(&row.len())
+        && row.bytes().all(|byte| byte.is_ascii_digit())
+        && !row.starts_with('0')
+}
+
 /// One bounded, generation-fenced passage produced by a search tool.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetrievalEvidenceInput {
@@ -784,8 +919,8 @@ pub struct RetrievalEvidenceInput {
     pub chunk_id: ChunkId,
     pub span: ByteSpan,
     pub snippet: String,
-    pub heading_path: Vec<String>,
-    pub source_regions: Vec<SourceRegion>,
+    /// Where the passage sits in its source, and in what terms.
+    pub location: EvidenceLocation,
     pub source: RetrievalEvidenceSource,
 }
 
@@ -1779,6 +1914,12 @@ impl AgentRunTier {
 pub enum AgentRunExecutionLocation {
     /// The loop runs inside the OpenWave server process.
     InProcess,
+    /// The loop runs inside a sandbox-resident container, host-driven over the
+    /// versioned sandbox-agent wire protocol. The in-process scheduler does not
+    /// advance these runs; the sandbox-resident driver provisions the container,
+    /// attaches, proxies model inference back over the reverse channel, and
+    /// commits the result through the same fenced result path.
+    Container,
 }
 
 impl AgentRunExecutionLocation {
@@ -1787,6 +1928,7 @@ impl AgentRunExecutionLocation {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::InProcess => "in_process",
+            Self::Container => "container",
         }
     }
 }
@@ -2970,5 +3112,104 @@ mod tests {
             })
         )
         .is_err());
+    }
+
+    fn cell_range(start_cell: &str, sheet_index: i32, sheet_name: &str) -> EvidenceLocation {
+        EvidenceLocation::SpreadsheetCellRange {
+            start_cell: start_cell.into(),
+            end_cell: None,
+            sheet_index,
+            sheet_name: sheet_name.into(),
+        }
+    }
+
+    #[test]
+    fn a_location_that_addresses_nothing_is_rejected() {
+        assert!(cell_range("A1", 0, "Summary").is_well_formed());
+        assert!(EvidenceLocation::SpreadsheetCellRange {
+            start_cell: "A1".into(),
+            end_cell: Some("XFD1048576".into()),
+            sheet_index: 3,
+            sheet_name: "Q4 Results".into(),
+        }
+        .is_well_formed());
+        // A1 notation is a column of letters then a one-based row, and nothing
+        // else: a half-written reference points at no cell at all.
+        for start_cell in ["", "A", "1", "1A", "A0", "AAAA1", "A12345678", "A 1", "A1:"] {
+            assert!(
+                !cell_range(start_cell, 0, "Summary").is_well_formed(),
+                "{start_cell} is not an A1 reference"
+            );
+        }
+        assert!(!EvidenceLocation::SpreadsheetCellRange {
+            start_cell: "A1".into(),
+            end_cell: Some("D".into()),
+            sheet_index: 0,
+            sheet_name: "Summary".into(),
+        }
+        .is_well_formed());
+        // A sheet is identified by both its position and its name: the index
+        // is what resolves it and the name is what a reader is shown.
+        assert!(!cell_range("A1", -1, "Summary").is_well_formed());
+        assert!(!cell_range("A1", 0, "").is_well_formed());
+
+        assert!(EvidenceLocation::StructuredPath {
+            path: "items.0.invoice_number".into(),
+            path_type: StructuredPathType::JsonDotNotation,
+        }
+        .is_well_formed());
+        // An empty path resolves to the whole document, which is not evidence.
+        assert!(!EvidenceLocation::StructuredPath {
+            path: String::new(),
+            path_type: StructuredPathType::XmlXpath,
+        }
+        .is_well_formed());
+    }
+
+    #[test]
+    fn a_location_carries_its_kind_on_the_wire() {
+        let location = EvidenceLocation::SpreadsheetCellRange {
+            start_cell: "B2".into(),
+            end_cell: Some("D10".into()),
+            sheet_index: 2,
+            sheet_name: "Q4 Results".into(),
+        };
+        let encoded = serde_json::to_value(&location).unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "kind": "spreadsheet_cell_range",
+                "start_cell": "B2",
+                "end_cell": "D10",
+                "sheet_index": 2,
+                "sheet_name": "Q4 Results",
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<EvidenceLocation>(encoded).unwrap(),
+            location
+        );
+
+        let structured = EvidenceLocation::StructuredPath {
+            path: "/invoice/total".into(),
+            path_type: StructuredPathType::XmlXpath,
+        };
+        assert_eq!(
+            serde_json::to_value(&structured).unwrap(),
+            serde_json::json!({
+                "kind": "structured_path",
+                "path": "/invoice/total",
+                "path_type": "xml_xpath",
+            })
+        );
+        // The discriminant is what tells the kinds apart, so a payload without
+        // one addresses nothing and must not be guessed at.
+        assert!(
+            serde_json::from_value::<EvidenceLocation>(serde_json::json!({
+                "path": "/invoice/total",
+                "path_type": "xml_xpath",
+            }))
+            .is_err()
+        );
     }
 }

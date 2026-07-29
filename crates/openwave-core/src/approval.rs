@@ -78,6 +78,9 @@ pub enum ToolApprovalKind {
     /// A public-web search may share the query and explicit filters with the
     /// host's configured provider.
     WebSearchMayShareQuery,
+    /// A public-web page fetch may share the exact URL with the page's site or
+    /// the host's configured provider.
+    WebExtractMayFetchUrl,
     /// A command execution escapes the chat workspace and may reach the network.
     ExecMayRunNetworkedCommand,
     /// An external MCP process may receive the call and act with its own local
@@ -101,6 +104,7 @@ impl ToolApprovalKind {
         match name {
             "search" => Self::SearchMayShareQueryAndExcerpts,
             "web_search" => Self::WebSearchMayShareQuery,
+            "web_extract" => Self::WebExtractMayFetchUrl,
             "exec" => Self::ExecMayRunNetworkedCommand,
             "write_file" | "create_deliverable" => Self::WorkspaceMayModifyFiles,
             name if name.starts_with("mcp__") => Self::ExternalMcpMayCallServer,
@@ -137,6 +141,9 @@ impl ToolApprovalKind {
             // disambiguates document search from web search on recovery, while
             // serde still exposes the narrower renderer kind.
             Self::WebSearchMayShareQuery => "search_may_share_query_and_excerpts",
+            // Same closed-constraint fold as web search: the exact tool name
+            // stored beside it recovers the page-fetch kind on read.
+            Self::WebExtractMayFetchUrl => "search_may_share_query_and_excerpts",
             Self::ExecMayRunNetworkedCommand => "exec_may_run_networked_command",
             // Existing databases have a closed approval-kind constraint. The
             // exact namespaced tool name disambiguates this renderer kind when
@@ -163,6 +170,7 @@ impl ToolApprovalKind {
         match self {
             Self::SearchMayShareQueryAndExcerpts => "search_may_share_query_and_excerpts",
             Self::WebSearchMayShareQuery => "web_search_may_share_query",
+            Self::WebExtractMayFetchUrl => "web_extract_may_fetch_url",
             Self::ExecMayRunNetworkedCommand => "exec_may_run_networked_command",
             Self::ExternalMcpMayCallServer => "external_mcp_may_call_server",
             // Never stored: the kind is not standing-grantable (the chat's
@@ -179,6 +187,7 @@ impl ToolApprovalKind {
         match value {
             "search_may_share_query_and_excerpts" => Some(Self::SearchMayShareQueryAndExcerpts),
             "web_search_may_share_query" => Some(Self::WebSearchMayShareQuery),
+            "web_extract_may_fetch_url" => Some(Self::WebExtractMayFetchUrl),
             "exec_may_run_networked_command" => Some(Self::ExecMayRunNetworkedCommand),
             "external_mcp_may_call_server" => Some(Self::ExternalMcpMayCallServer),
             "workspace_may_modify_files" => Some(Self::WorkspaceMayModifyFiles),
@@ -193,6 +202,7 @@ impl ToolApprovalKind {
             self,
             Self::SearchMayShareQueryAndExcerpts
                 | Self::WebSearchMayShareQuery
+                | Self::WebExtractMayFetchUrl
                 | Self::ExecMayRunNetworkedCommand
                 | Self::ExternalMcpMayCallServer
                 | Self::WorkspaceMayModifyFiles

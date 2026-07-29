@@ -345,7 +345,9 @@ function spokenAction(preview: ToolActionPreview): string {
   const spoken =
     preview.tool === "exec"
       ? [preview.command, ...preview.args].join(" ")
-      : preview.query;
+      : preview.tool === "web_extract"
+        ? preview.url
+        : preview.query;
   return spoken.length > SPOKEN_ACTION_CHARS
     ? `${spoken.slice(0, SPOKEN_ACTION_CHARS).trimEnd()}\u2026`
     : spoken;

@@ -1749,6 +1749,49 @@ pub trait Store: Send + Sync {
         agent_run_storage_unavailable()
     }
 
+    /// Admit one depth-one sandbox child that executes inside a sandbox-resident
+    /// container rather than in process.
+    ///
+    /// Identical to [`Store::admit_sandbox_agent_run`] except the child's
+    /// [`AgentRunExecutionLocation`](crate::model::AgentRunExecutionLocation) is
+    /// `Container`, so the in-process scheduler leaves it and the
+    /// sandbox-resident driver claims it with
+    /// [`Store::claim_container_agent_run`], provisions a container, attaches,
+    /// proxies model inference back over the reverse channel, and commits the
+    /// result through the same fenced result path.
+    #[allow(clippy::too_many_arguments)]
+    async fn admit_sandbox_container_agent_run(
+        &self,
+        _origin_turn_id: TurnId,
+        _spawn_call_id: CallId,
+        _input: &str,
+        _lease_token: uuid::Uuid,
+        _expected_steer_revision: i64,
+        _max_outstanding_children: u32,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<AdmitSandboxAgentRunOutcome>> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Claim one specific queued sandbox-resident container run by id under an
+    /// exact bounded lease.
+    ///
+    /// The sandbox-resident driver calls this for the exact run it is
+    /// provisioning a container for; unlike [`Store::claim_agent_run`], which the
+    /// in-process scheduler uses to select the oldest due in-process run, this
+    /// only transitions a fresh `queued` `container` run to `running`. Reusing
+    /// `lease_token` recovers its original still-live claim and never claims
+    /// different work. The returned lease fences the run's result commit exactly
+    /// as an in-process claim does.
+    async fn claim_container_agent_run(
+        &self,
+        _id: AgentRunId,
+        _lease_token: uuid::Uuid,
+        _lease_duration: chrono::Duration,
+    ) -> Result<Option<AgentRun>> {
+        agent_run_storage_unavailable()
+    }
+
     /// Atomically admit one depth-one sandbox child and yield the foreground
     /// turn at a non-blocking spawn boundary.
     ///

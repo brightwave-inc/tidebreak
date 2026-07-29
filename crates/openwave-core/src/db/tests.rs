@@ -1,10 +1,10 @@
 use super::*;
 use crate::model::{
     ByteSpan, ChatRootAttachment, DocumentParseOutput, DocumentSourceBlob, DocumentSourceUpsert,
-    PageBounds, RetrievalEvidenceInput, RetrievalEvidenceSource, RootAttachmentChangeAction,
-    RootAttachmentChangeFailure, RootAttachmentChangeTerminal, RootAttachmentOrigin,
-    SourceLocation, SourceRegion, ToolCallExecution, ToolCallResolution, ToolCallStatus,
-    MAX_ATTACHMENT_REVISION, MAX_ROOT_ATTACHMENTS,
+    EvidenceLocation, PageBounds, RetrievalEvidenceInput, RetrievalEvidenceSource,
+    RootAttachmentChangeAction, RootAttachmentChangeFailure, RootAttachmentChangeTerminal,
+    RootAttachmentOrigin, SourceLocation, SourceRegion, ToolCallExecution, ToolCallResolution,
+    ToolCallStatus, MAX_ATTACHMENT_REVISION, MAX_ROOT_ATTACHMENTS,
 };
 use crate::storage::ApplyTurnSteerOutcome;
 use crate::{ApprovalClass, ChunkId, CitationFormat, ToolApprovalStatus};
@@ -21,6 +21,17 @@ mod parent_terminal_guard;
 mod root_attachment;
 mod sandbox_spawn_checkpoint;
 mod turn_steer;
+
+/// The pages and highlight rectangles of a projected citation, which today is
+/// always a document-content one.
+fn document_content_placement(
+    location: &crate::citation::CitationLocation,
+) -> (&[u32], &[crate::citation::CitationPageBounds]) {
+    match location {
+        crate::citation::CitationLocation::DocumentContent { pages, bounds } => (pages, bounds),
+        other => panic!("expected a document-content citation, got {other:?}"),
+    }
+}
 
 async fn temp_store() -> (tempfile::TempDir, DbStore) {
     let dir = tempfile::tempdir().unwrap();
@@ -5331,6 +5342,84 @@ async fn m0006_upgrades_an_existing_store_without_losing_records() {
     assert_ne!(stored.revision_token, supplied_token);
     document.revision_token = stored.revision_token;
     assert_eq!(stored, document);
+}
+
+#[tokio::test]
+async fn m0024_widens_and_narrows_the_execution_location_domain() {
+    // Guards the container-location migration's bespoke SQLite table rebuild in
+    // both directions: after `up` a `container` execution location is accepted,
+    // after `down` it is rejected again, and re-applying `up` restores it — so a
+    // regression in the hand-written rebuild SQL fails here rather than silently.
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        dir.path().join("relocate.db").display()
+    );
+    let conn = Database::connect(&url).await.unwrap();
+    migration::Migrator::up(&conn, None).await.unwrap();
+
+    // A foreground-shaped row is the cheapest row that satisfies the unrelated
+    // shape/lease/finished checks; only its execution location is under test.
+    // Foreign keys are off so no chat row is needed.
+    conn.execute_unprepared("PRAGMA foreign_keys=OFF")
+        .await
+        .unwrap();
+    let insert_container = |conn: DatabaseConnection| async move {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let chat = uuid::Uuid::new_v4().simple().to_string();
+        conn.execute_unprepared(&format!(
+            "INSERT INTO agent_run \
+             (id, chat_id, tier, execution_location, depth, status, attempt_count, \
+              max_attempts, claim_count, available_at, created_at, updated_at) \
+             VALUES (X'{id}', X'{chat}', 'foreground', 'container', 0, 'active', 0, 0, 0, \
+              '2026-07-29 00:00:00+00:00', '2026-07-29 00:00:00+00:00', \
+              '2026-07-29 00:00:00+00:00')"
+        ))
+        .await
+    };
+
+    assert!(
+        insert_container(conn.clone()).await.is_ok(),
+        "container must be accepted after the widening migration"
+    );
+
+    // A rollback with a container row still present is refused up front, and
+    // leaves the schema untouched — rather than failing partway through the
+    // rebuild and stranding the scratch table, which would break the next `up`.
+    let refused = migration::Migrator::down(&conn, Some(1)).await;
+    assert!(
+        refused.is_err(),
+        "narrowing must be refused while a container row remains"
+    );
+    conn.execute_unprepared("PRAGMA foreign_keys=OFF")
+        .await
+        .unwrap();
+    assert!(
+        insert_container(conn.clone()).await.is_ok(),
+        "a refused rollback must leave the widened schema intact"
+    );
+
+    // With the container rows cleared, the rollback proceeds.
+    conn.execute_unprepared("DELETE FROM agent_run")
+        .await
+        .unwrap();
+    migration::Migrator::down(&conn, Some(1)).await.unwrap();
+    conn.execute_unprepared("PRAGMA foreign_keys=OFF")
+        .await
+        .unwrap();
+    assert!(
+        insert_container(conn.clone()).await.is_err(),
+        "container must be rejected once the domain is narrowed back"
+    );
+
+    migration::Migrator::up(&conn, None).await.unwrap();
+    conn.execute_unprepared("PRAGMA foreign_keys=OFF")
+        .await
+        .unwrap();
+    assert!(
+        insert_container(conn.clone()).await.is_ok(),
+        "re-applying the migration restores the widened domain"
+    );
 }
 
 #[tokio::test]
@@ -11350,13 +11439,15 @@ async fn retrieval_evidence_is_atomic_generation_fenced_and_survives_source_chan
         chunk_id: ChunkId::derive(source.id, span.start, span.end),
         span,
         snippet: source.canonical_text.clone(),
-        heading_path: vec!["Archive".into()],
-        source_regions: vec![
-            placed(0, 2, 2, 1_000, 5_000),
-            placed(2, 4, 1, 3_000, 1_000),
-            placed(4, 6, 1, 1_000, 1_000),
-            placed(6, 8, 1, 1_000, 1_000),
-        ],
+        location: EvidenceLocation::DocumentContent {
+            heading_path: vec!["Archive".into()],
+            source_regions: vec![
+                placed(0, 2, 2, 1_000, 5_000),
+                placed(2, 4, 1, 3_000, 1_000),
+                placed(4, 6, 1, 1_000, 1_000),
+                placed(6, 8, 1, 1_000, 1_000),
+            ],
+        },
         source: RetrievalEvidenceSource::Uri {
             uri: source.source_uri.clone().unwrap(),
         },
@@ -11445,19 +11536,21 @@ async fn retrieval_evidence_is_atomic_generation_fenced_and_survives_source_chan
         chunk_id: ChunkId::derive(source.id, long_span.start, long_span.end),
         span: long_span,
         snippet: long_snippet,
-        heading_path: vec!["H".repeat(200)],
-        source_regions: (0..9)
-            .map(|index| SourceRegion {
-                span: ByteSpan::new(index, index + 1),
-                location: SourceLocation::Page {
-                    number: std::num::NonZeroU32::new(
-                        u32::try_from(index + 1).expect("test page fits u32"),
-                    )
-                    .unwrap(),
-                    bounds: None,
-                },
-            })
-            .collect(),
+        location: EvidenceLocation::DocumentContent {
+            heading_path: vec!["H".repeat(200)],
+            source_regions: (0..9)
+                .map(|index| SourceRegion {
+                    span: ByteSpan::new(index, index + 1),
+                    location: SourceLocation::Page {
+                        number: std::num::NonZeroU32::new(
+                            u32::try_from(index + 1).expect("test page fits u32"),
+                        )
+                        .unwrap(),
+                        bounds: None,
+                    },
+                })
+                .collect(),
+        },
         ..evidence.clone()
     };
     store
@@ -11571,15 +11664,16 @@ async fn retrieval_evidence_is_atomic_generation_fenced_and_survives_source_chan
             .count(),
         160
     );
-    assert_eq!(snapshot.citations[0].pages, [1, 2, 3, 4, 5, 6, 7, 8]);
+    let (pages, bounds) = document_content_placement(&snapshot.citations[0].location);
+    assert_eq!(pages, [1, 2, 3, 4, 5, 6, 7, 8]);
     // A page-granular source has nothing to draw; `pages` is the whole answer.
-    assert!(snapshot.citations[0].bounds.is_empty());
+    assert!(bounds.is_empty());
     // Positioned regions keep their first-seen page order but are projected as
     // rectangles ordered down and across each page, deduplicated.
-    assert_eq!(snapshot.citations[1].pages, [2, 1]);
+    let (pages, bounds) = document_content_placement(&snapshot.citations[1].location);
+    assert_eq!(pages, [2, 1]);
     assert_eq!(
-        snapshot.citations[1]
-            .bounds
+        bounds
             .iter()
             .map(|placed| (placed.page, placed.bounds.top, placed.bounds.left))
             .collect::<Vec<_>>(),
@@ -11677,6 +11771,145 @@ async fn retrieval_evidence_is_atomic_generation_fenced_and_survives_source_chan
         .is_empty());
 }
 
+/// Evidence written before it had kinds carries no location payload, and no
+/// migration gives it one. Such a row is document content and has to read back
+/// as exactly the passage it was stored as.
+#[test]
+fn evidence_stored_before_the_taxonomy_reads_as_document_content() {
+    let document_id = DocumentId::new();
+    let span = ByteSpan::new(0, 8);
+    let regions = vec![SourceRegion {
+        span,
+        location: SourceLocation::Page {
+            number: std::num::NonZeroU32::new(3).unwrap(),
+            bounds: None,
+        },
+    }];
+    // Exactly the columns the pre-taxonomy writer produced, with no location.
+    let stored = entities::retrieval_evidence::Model {
+        call_id: uuid::Uuid::new_v4(),
+        rank: 1,
+        source_token: uuid::Uuid::new_v4(),
+        chat_id: uuid::Uuid::new_v4(),
+        turn_id: uuid::Uuid::new_v4(),
+        document_id: document_id.0,
+        content_revision: 1,
+        revision_token: uuid::Uuid::new_v4(),
+        chunk_id: ChunkId::derive(document_id, span.start, span.end).0,
+        span_start: 0,
+        span_end: 8,
+        snippet: "evidence".into(),
+        heading_path: serde_json::json!(["Archive", "1994"]),
+        source_regions: serde_json::to_value(&regions).unwrap(),
+        source_kind: "inline".into(),
+        source_uri: None,
+        location: None,
+    };
+    let read = super::ops::client_execution::evidence_from_model(stored).unwrap();
+    assert_eq!(
+        read.evidence.location,
+        EvidenceLocation::DocumentContent {
+            heading_path: vec!["Archive".into(), "1994".into()],
+            source_regions: regions,
+        }
+    );
+}
+
+/// A kind the evidence columns cannot express keeps its own location through
+/// the store and reaches the renderer as the place it addresses, not as pages.
+#[tokio::test]
+async fn evidence_of_another_kind_round_trips_and_projects_its_own_location() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let created_at = DateTime::<Utc>::from_timestamp(1_700_002_000, 0).unwrap();
+    let call = ToolCallRecord {
+        id: CallId::new(),
+        chat_id: chat.id,
+        turn_id: TurnId::new(),
+        provider_id: "search_sheet".into(),
+        name: "search".into(),
+        arguments: serde_json::json!({"query": "revenue"}),
+        execution: ToolCallExecution::Server,
+        status: ToolCallStatus::Pending,
+        result: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at,
+        resolved_at: None,
+    };
+    store.accept_tool_call(&call).await.unwrap();
+    let document_id = DocumentId::new();
+    let span = ByteSpan::new(0, 8);
+    let evidence = RetrievalEvidenceInput {
+        rank: 1,
+        source_token: uuid::Uuid::new_v4(),
+        document_id,
+        generation: DocumentGeneration {
+            content_revision: 1,
+            revision_token: uuid::Uuid::new_v4(),
+        },
+        chunk_id: ChunkId::derive(document_id, span.start, span.end),
+        span,
+        snippet: "1,204.00".into(),
+        location: EvidenceLocation::SpreadsheetCellRange {
+            start_cell: "B2".into(),
+            end_cell: Some("D10".into()),
+            sheet_index: 2,
+            sheet_name: "Q4 Results".into(),
+        },
+        source: RetrievalEvidenceSource::Inline,
+    };
+    store
+        .resolve_server_tool_call_with_evidence(
+            call.id,
+            &ToolCallResolution::Completed {
+                result: "Found 1 range".into(),
+            },
+            created_at + chrono::Duration::seconds(1),
+            std::slice::from_ref(&evidence),
+        )
+        .await
+        .unwrap();
+    let stored = store.list_retrieval_evidence(call.id).await.unwrap();
+    assert_eq!(stored[0].evidence, evidence);
+
+    let reference = crate::AssistantCitationReference {
+        source_token: evidence.source_token,
+    };
+    let assistant_id = MessageId::new();
+    let cited = crate::parse_assistant_citations(
+        &crate::format_citation_directive("revenue", reference),
+        assistant_id,
+    );
+    store
+        .append_assistant_message_with_citations(
+            &Message {
+                id: assistant_id,
+                chat_id: chat.id,
+                turn_id: call.turn_id,
+                role: Role::Assistant,
+                content: cited.content,
+                created_at: created_at + chrono::Duration::seconds(2),
+            },
+            &cited.references,
+        )
+        .await
+        .unwrap();
+    let snapshot = store.get_chat_transcript(chat.id).await.unwrap().unwrap();
+    assert_eq!(
+        snapshot.citations[0].location,
+        crate::citation::CitationLocation::SpreadsheetCellRange {
+            start_cell: "B2".into(),
+            end_cell: Some("D10".into()),
+            sheet_index: 2,
+            sheet_name: "Q4 Results".into(),
+        }
+    );
+}
+
 #[tokio::test]
 async fn invalid_retrieval_identity_rolls_back_tool_completion() {
     let (_dir, store) = temp_store().await;
@@ -11713,8 +11946,10 @@ async fn invalid_retrieval_identity_rolls_back_tool_completion() {
         chunk_id: ChunkId::derive(DocumentId::new(), 0, 4),
         span: ByteSpan::new(0, 4),
         snippet: "fact".into(),
-        heading_path: Vec::new(),
-        source_regions: Vec::new(),
+        location: EvidenceLocation::DocumentContent {
+            heading_path: Vec::new(),
+            source_regions: Vec::new(),
+        },
         source: RetrievalEvidenceSource::Inline,
     };
     let resolution = ToolCallResolution::Completed {
@@ -11750,8 +11985,10 @@ async fn invalid_retrieval_identity_rolls_back_tool_completion() {
         chunk_id: ChunkId::derive(document_id, oversized_span.start, oversized_span.end),
         span: oversized_span,
         snippet: oversized_snippet,
-        heading_path: Vec::new(),
-        source_regions: Vec::new(),
+        location: EvidenceLocation::DocumentContent {
+            heading_path: Vec::new(),
+            source_regions: Vec::new(),
+        },
         source: RetrievalEvidenceSource::Inline,
     };
     assert!(store
@@ -11775,8 +12012,10 @@ async fn invalid_retrieval_identity_rolls_back_tool_completion() {
         chunk_id: ChunkId::derive(document_id, nul_span.start, nul_span.end),
         span: nul_span,
         snippet: "a\0bc".into(),
-        heading_path: Vec::new(),
-        source_regions: Vec::new(),
+        location: EvidenceLocation::DocumentContent {
+            heading_path: Vec::new(),
+            source_regions: Vec::new(),
+        },
         source: RetrievalEvidenceSource::Inline,
     };
     assert!(store
@@ -11802,8 +12041,10 @@ async fn invalid_retrieval_identity_rolls_back_tool_completion() {
             chunk_id: ChunkId::derive(document_id, span.start, span.end),
             span,
             snippet: "fact".into(),
-            heading_path: Vec::new(),
-            source_regions: Vec::new(),
+            location: EvidenceLocation::DocumentContent {
+                heading_path: Vec::new(),
+                source_regions: Vec::new(),
+            },
             source: RetrievalEvidenceSource::Inline,
         };
         assert!(store

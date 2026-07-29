@@ -3,14 +3,15 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use openwave_core::{
     ApprovalClass, ResultEntry, ResultEntryKind, Tool, ToolCtx, ToolErrorCategory, ToolOutput,
-    ToolSpec, WebSearchArgs,
+    ToolSpec, WebExtractArgs, WebSearchArgs,
 };
 use serde_json::Value;
 use thiserror::Error;
 use url::Url;
 
 use crate::{
-    SearchDomain, WebSearchError, WebSearchProvider, WebSearchRequest, WebSearchResult,
+    SearchDomain, WebExtractFailure, WebExtractRequest, WebExtractResponse, WebSearchError,
+    WebSearchProvider, WebSearchRequest, WebSearchResult, MAX_EXTRACT_OUTPUT_BYTES,
     MAX_OUTPUT_BYTES,
 };
 
@@ -104,6 +105,150 @@ impl Tool for WebSearchTool {
         let entries = response.results.iter().map(page_entry).collect();
         Ok(ToolOutput::text(result).with_entries(entries))
     }
+}
+
+/// One bounded page extraction, independent of which engine performs it.
+///
+/// This is the native engine's seam into the tool: object-safe, so the tool
+/// carries neither the engine's transport generics nor its cargo feature. The
+/// vendor path does not pass through here — providers extract through
+/// [`WebSearchProvider::extract`].
+#[async_trait]
+pub trait PageExtractor: Send + Sync {
+    async fn extract_page(
+        &self,
+        request: &WebExtractRequest,
+    ) -> Result<WebExtractResponse, WebExtractFailure>;
+}
+
+/// Decode and validate the one canonical model-facing extract argument shape,
+/// running the full fetch admission policy before anything can egress.
+pub fn extract_request_from_tool_arguments(
+    arguments: Value,
+) -> Result<WebExtractRequest, WebSearchError> {
+    let arguments: WebExtractArgs = serde_json::from_value(arguments)
+        .map_err(|_| WebSearchError::InvalidRequest("invalid tool arguments".into()))?;
+    WebExtractRequest::new(arguments.url)
+}
+
+/// Foreground single-page extraction tool.
+///
+/// Routing is deterministic and derived from the configured provider: an
+/// extract-capable provider receives the request, and a search-only or absent
+/// provider routes to the native engine. A vendor failure falls back to the
+/// native engine for that request, except a rejected credential, which is host
+/// configuration and surfaces; a native failure returns a closed, actionable
+/// reason. Nothing degrades silently — every success is stamped with its
+/// extraction method.
+pub struct WebExtractTool {
+    resolver: Arc<dyn WebSearchResolver>,
+    native: Option<Arc<dyn PageExtractor>>,
+}
+
+impl WebExtractTool {
+    #[must_use]
+    pub fn new(
+        resolver: Arc<dyn WebSearchResolver>,
+        native: Option<Arc<dyn PageExtractor>>,
+    ) -> Self {
+        Self { resolver, native }
+    }
+}
+
+#[async_trait]
+impl Tool for WebExtractTool {
+    fn spec(&self) -> ToolSpec {
+        openwave_core::web_extract_tool_spec()
+    }
+
+    fn approval_class(&self) -> ApprovalClass {
+        ApprovalClass::Sensitive
+    }
+
+    async fn execute(&self, _ctx: &ToolCtx, args: Value) -> openwave_core::Result<ToolOutput> {
+        let request = match extract_request_from_tool_arguments(args) {
+            Ok(request) => request,
+            // The admission reason is closed policy prose ("page URL scheme
+            // must be https"), safe and useful for the model to act on.
+            Err(WebSearchError::InvalidRequest(reason)) => {
+                return Ok(ToolOutput::error(format!(
+                    "Web page extraction arguments are invalid: {reason}."
+                )))
+            }
+            Err(_) => {
+                return Ok(ToolOutput::error(
+                    "Web page extraction arguments are invalid.",
+                ))
+            }
+        };
+        let provider = match self.resolver.resolve().await {
+            Ok(provider) => provider,
+            Err(_) => return Ok(ToolOutput::error("Web page extraction could not complete.")),
+        };
+        // Deterministic routing: the configured provider takes the request
+        // exactly when it implements the extract contract. A vendor failure
+        // (quota, rate limit, timeout, an unreadable page) falls back to the
+        // native engine for this request; no vendor diagnostic crosses either
+        // way.
+        if let Some(provider) = provider.filter(|provider| provider.supports_extract()) {
+            match provider.extract(request.clone()).await {
+                Ok(response) => return Ok(extraction_output(&response)),
+                // A rejected key is the one vendor failure that is about the
+                // host and not about this page. It will reject the next call
+                // and every call after it, and the same key is what web search
+                // uses, so falling back would hide a broken configuration
+                // behind quietly degraded extraction forever. Surface it as the
+                // typed configuration failure the settings card repairs.
+                Err(WebSearchError::CredentialRejected(_)) => {
+                    return Ok(ToolOutput::failed(
+                        ToolErrorCategory::ConfigurationRequired,
+                        "The configured web-search provider rejected its API key.",
+                    ))
+                }
+                Err(_) => {}
+            }
+        }
+        let Some(native) = &self.native else {
+            return Ok(ToolOutput::failed(
+                ToolErrorCategory::ConfigurationRequired,
+                "Web page extraction is not available on this host.",
+            ));
+        };
+        match native.extract_page(&request).await {
+            Ok(response) => Ok(extraction_output(&response)),
+            Err(failure) => Ok(ToolOutput::error(format!(
+                "Web page extraction failed: {failure}."
+            ))),
+        }
+    }
+}
+
+/// Serialize one bounded extraction and its result-card row.
+fn extraction_output(response: &WebExtractResponse) -> ToolOutput {
+    let result = match serde_json::to_string(response) {
+        Ok(result) if result.len() <= MAX_EXTRACT_OUTPUT_BYTES => result,
+        Ok(_) | Err(_) => {
+            return ToolOutput::error("Web page extraction returned an invalid response.")
+        }
+    };
+    let label = if response.title.is_empty() {
+        response.url.as_str()
+    } else {
+        response.title.as_str()
+    };
+    let mut entry = ResultEntry::new(ResultEntryKind::Link, label);
+    if let Some(host) = Url::parse(&response.url).ok().and_then(|url| {
+        url.host_str()
+            .map(|host| host.trim_start_matches("www.").to_owned())
+    }) {
+        entry = entry.with_detail(host);
+    }
+    let meta = if response.truncated {
+        format!("{} words · truncated", response.word_count)
+    } else {
+        format!("{} words", response.word_count)
+    };
+    ToolOutput::text(result).with_entries(vec![entry.with_meta(meta)])
 }
 
 /// One web result as a card row.
@@ -284,5 +429,231 @@ mod tests {
         assert_eq!(output.content, "Web search could not complete.");
         assert!(!output.content.contains("secret"));
         assert!(!output.content.contains("private provider"));
+    }
+
+    struct StubNative {
+        calls: Mutex<usize>,
+    }
+
+    impl StubNative {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                calls: Mutex::new(0),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl PageExtractor for StubNative {
+        async fn extract_page(
+            &self,
+            request: &WebExtractRequest,
+        ) -> Result<WebExtractResponse, WebExtractFailure> {
+            *self.calls.lock().unwrap() += 1;
+            WebExtractResponse::new(
+                crate::ExtractionMethod::Native,
+                request.url(),
+                "Native title",
+                "native content ".repeat(4),
+                8,
+                false,
+            )
+            .map_err(|_| WebExtractFailure::UrlNotAllowed)
+        }
+    }
+
+    /// A provider that opts into the extract contract, unlike the search-only
+    /// `FakeProvider` above.
+    struct ExtractCapableProvider {
+        fail_extract: bool,
+    }
+
+    /// A provider whose key the vendor rejects.
+    struct KeyRejectingProvider;
+
+    #[async_trait]
+    impl WebSearchProvider for KeyRejectingProvider {
+        fn kind(&self) -> WebSearchProviderKind {
+            WebSearchProviderKind::Tavily
+        }
+
+        fn supports_extract(&self) -> bool {
+            true
+        }
+
+        async fn search(
+            &self,
+            _request: WebSearchRequest,
+        ) -> Result<WebSearchResponse, WebSearchError> {
+            unreachable!("extraction must never call search")
+        }
+
+        async fn extract(
+            &self,
+            _request: WebExtractRequest,
+        ) -> Result<WebExtractResponse, WebSearchError> {
+            Err(WebSearchError::CredentialRejected(
+                WebSearchProviderKind::Tavily,
+            ))
+        }
+    }
+
+    #[async_trait]
+    impl WebSearchProvider for ExtractCapableProvider {
+        fn kind(&self) -> WebSearchProviderKind {
+            WebSearchProviderKind::Exa
+        }
+
+        fn supports_extract(&self) -> bool {
+            true
+        }
+
+        async fn search(
+            &self,
+            _request: WebSearchRequest,
+        ) -> Result<WebSearchResponse, WebSearchError> {
+            unreachable!("extraction must never call search")
+        }
+
+        async fn extract(
+            &self,
+            request: WebExtractRequest,
+        ) -> Result<WebExtractResponse, WebSearchError> {
+            if self.fail_extract {
+                return Err(WebSearchError::Transport(
+                    "private vendor diagnostic".into(),
+                ));
+            }
+            WebExtractResponse::new(
+                crate::ExtractionMethod::Provider(WebSearchProviderKind::Exa),
+                request.url(),
+                "Vendor title",
+                "vendor content",
+                2,
+                false,
+            )
+        }
+    }
+
+    fn extract_tool(
+        provider: Option<Arc<dyn WebSearchProvider>>,
+        native: Option<Arc<dyn PageExtractor>>,
+    ) -> WebExtractTool {
+        WebExtractTool::new(
+            Arc::new(FakeResolver {
+                provider,
+                fail: false,
+            }),
+            native,
+        )
+    }
+
+    const EXTRACT_ARGS: fn() -> Value =
+        || serde_json::json!({"url": "https://example.com/article"});
+
+    #[tokio::test]
+    async fn extraction_routes_by_declared_capability_and_stamps_its_method() {
+        // A search-only provider never receives the request: it routes native.
+        let native = StubNative::new();
+        let search_only = Arc::new(FakeProvider {
+            requests: Mutex::new(Vec::new()),
+            response: Ok(WebSearchResponse::new(
+                WebSearchProviderKind::Exa,
+                Vec::new(),
+            )),
+        });
+        let tool = extract_tool(Some(search_only.clone()), Some(native.clone()));
+        let output = tool.execute(&context(), EXTRACT_ARGS()).await.unwrap();
+        assert!(!output.is_error);
+        let body: Value = serde_json::from_str(&output.content).unwrap();
+        assert_eq!(body["extraction_method"], "native");
+        assert_eq!(*native.calls.lock().unwrap(), 1);
+        assert!(search_only.requests.lock().unwrap().is_empty());
+
+        // An extract-capable provider takes the request and the native engine
+        // stays idle; the stamp names the vendor.
+        let native = StubNative::new();
+        let tool = extract_tool(
+            Some(Arc::new(ExtractCapableProvider {
+                fail_extract: false,
+            })),
+            Some(native.clone()),
+        );
+        let output = tool.execute(&context(), EXTRACT_ARGS()).await.unwrap();
+        let body: Value = serde_json::from_str(&output.content).unwrap();
+        assert_eq!(body["extraction_method"], "exa");
+        assert_eq!(*native.calls.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn vendor_extract_failure_falls_back_to_native_without_leaking() {
+        let native = StubNative::new();
+        let tool = extract_tool(
+            Some(Arc::new(ExtractCapableProvider { fail_extract: true })),
+            Some(native.clone()),
+        );
+        let output = tool.execute(&context(), EXTRACT_ARGS()).await.unwrap();
+        assert!(!output.is_error);
+        let body: Value = serde_json::from_str(&output.content).unwrap();
+        assert_eq!(body["extraction_method"], "native");
+        assert_eq!(*native.calls.lock().unwrap(), 1);
+        assert!(!output.content.contains("private vendor"));
+
+        // A rejected key is the exception: it is host configuration, so it
+        // surfaces for repair instead of degrading quietly on every future
+        // call. The native engine is not consulted.
+        let native = StubNative::new();
+        let tool = extract_tool(Some(Arc::new(KeyRejectingProvider)), Some(native.clone()));
+        let output = tool.execute(&context(), EXTRACT_ARGS()).await.unwrap();
+        assert!(output.is_error);
+        assert_eq!(
+            output.error_category,
+            Some(ToolErrorCategory::ConfigurationRequired)
+        );
+        assert_eq!(*native.calls.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn extraction_failures_are_typed_actionable_and_never_silent() {
+        // No native engine and no extract-capable provider: a typed
+        // configuration-required failure the UI can turn into a settings hint.
+        let tool = extract_tool(None, None);
+        let output = tool.execute(&context(), EXTRACT_ARGS()).await.unwrap();
+        assert!(output.is_error);
+        assert_eq!(
+            output.error_category,
+            Some(ToolErrorCategory::ConfigurationRequired)
+        );
+
+        // A native failure surfaces its closed reason, not a diagnostic.
+        struct FailingNative;
+        #[async_trait]
+        impl PageExtractor for FailingNative {
+            async fn extract_page(
+                &self,
+                _request: &WebExtractRequest,
+            ) -> Result<WebExtractResponse, WebExtractFailure> {
+                Err(WebExtractFailure::NoReadableContent)
+            }
+        }
+        let tool = extract_tool(None, Some(Arc::new(FailingNative)));
+        let output = tool.execute(&context(), EXTRACT_ARGS()).await.unwrap();
+        assert!(output.is_error);
+        assert_eq!(
+            output.content,
+            "Web page extraction failed: no readable content could be extracted from the page."
+        );
+
+        // Admission rejects before anything can resolve or egress, with the
+        // policy's own closed reason.
+        let output = tool
+            .execute(
+                &context(),
+                serde_json::json!({"url": "http://example.com/article"}),
+            )
+            .await
+            .unwrap();
+        assert!(output.is_error);
+        assert!(output.content.contains("scheme must be https"));
     }
 }

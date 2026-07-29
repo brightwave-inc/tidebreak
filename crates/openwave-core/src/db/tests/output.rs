@@ -6,9 +6,9 @@ use crate::deliverable::{
 };
 use crate::id::{CallId, DocumentId, OutputId, OutputRevisionId};
 use crate::model::{
-    ByteSpan, DocumentGeneration, PageBounds, RetrievalEvidenceInput, RetrievalEvidenceSource,
-    SourceLocation, SourceRegion, ToolCallExecution, ToolCallRecord, ToolCallResolution,
-    ToolCallStatus,
+    ByteSpan, DocumentGeneration, EvidenceLocation, PageBounds, RetrievalEvidenceInput,
+    RetrievalEvidenceSource, SourceLocation, SourceRegion, ToolCallExecution, ToolCallRecord,
+    ToolCallResolution, ToolCallStatus,
 };
 
 fn at(second: i64) -> DateTime<Utc> {
@@ -87,19 +87,22 @@ async fn persist_evidence(
         chunk_id: crate::ChunkId::derive(document_id, span.start, span.end),
         span,
         snippet: snippet.into(),
-        heading_path: vec![format!("Section {rank}")],
-        source_regions: vec![SourceRegion {
-            span,
-            location: SourceLocation::Page {
-                number: std::num::NonZeroU32::new(u32::from(rank)).expect("ranks are one-based"),
-                bounds: Some(PageBounds {
-                    left: 500,
-                    top: 1_000 * rank,
-                    width: 4_000,
-                    height: 200,
-                }),
-            },
-        }],
+        location: EvidenceLocation::DocumentContent {
+            heading_path: vec![format!("Section {rank}")],
+            source_regions: vec![SourceRegion {
+                span,
+                location: SourceLocation::Page {
+                    number: std::num::NonZeroU32::new(u32::from(rank))
+                        .expect("ranks are one-based"),
+                    bounds: Some(PageBounds {
+                        left: 500,
+                        top: 1_000 * rank,
+                        width: 4_000,
+                        height: 200,
+                    }),
+                },
+            }],
+        },
         source: RetrievalEvidenceSource::Inline,
     };
     assert_eq!(
@@ -420,10 +423,10 @@ async fn output_revisions_retain_ordered_scoped_citations_and_retry_them_exactly
     assert_eq!(citations[0].heading.as_deref(), Some("Section 1"));
     // An output citation is navigable on the same terms as an assistant one:
     // the page it sits on, and where on the page.
-    assert_eq!(citations[0].pages, [1]);
+    let (pages, bounds) = document_content_placement(&citations[0].location);
+    assert_eq!(pages, [1]);
     assert_eq!(
-        citations[0]
-            .bounds
+        bounds
             .iter()
             .map(|placed| (placed.page, placed.bounds.top))
             .collect::<Vec<_>>(),

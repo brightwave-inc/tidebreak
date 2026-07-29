@@ -42,6 +42,7 @@ mod providers;
 mod resolver;
 mod routes;
 mod sandbox_agent_run_worker;
+pub mod sandbox_container_run;
 /// A [`SandboxBackend`](openwave_sandbox_protocol::SandboxBackend) over the Docker
 /// CLI: container provision, loopback addressing, idempotent teardown, and a
 /// correlation-tag orphan sweep.
@@ -697,11 +698,16 @@ async fn bind_inner(
     ));
     let foreground_web_search =
         Box::new(web_search::foreground_tool(store.clone(), secrets.clone()));
+    let foreground_web_extract = Box::new(web_search::foreground_extract_tool(
+        store.clone(),
+        secrets.clone(),
+    ));
     let (retrieval, tools, agent_config) = agent_deps(
         embedder,
         vector_store,
         code_execution,
         foreground_web_search,
+        foreground_web_extract,
         store.clone(),
     );
     let tools = Arc::new(tools);
@@ -862,6 +868,7 @@ fn agent_deps(
     store: Arc<dyn VectorStore>,
     code_execution: Arc<dyn openwave_code_execution::CodeExecutionProvider>,
     web_search: Box<dyn Tool>,
+    web_extract: Box<dyn Tool>,
     source_store: Arc<dyn Store>,
 ) -> (Arc<Retriever>, ToolRegistry, AgentConfig) {
     let (retrieval, search) = build_retrieval(embedder, store);
@@ -884,7 +891,8 @@ fn agent_deps(
         .with(Box::new(source_tools::ReadToolResultTool::new(
             source_store,
         )))
-        .with(web_search);
+        .with(web_search)
+        .with(web_extract);
     tools.register_validated_client(
         request_folder_access_tool_spec(),
         validate_request_folder_access_arguments,

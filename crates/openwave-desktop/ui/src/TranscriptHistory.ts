@@ -69,8 +69,7 @@ export function hydrateTranscriptHistory(
                 span,
                 excerpt,
                 heading,
-                pages,
-                bounds,
+                location,
               }) => ({
                 id,
                 ordinal,
@@ -78,8 +77,14 @@ export function hydrateTranscriptHistory(
                 span: { start: span.start, end: span.end },
                 excerpt,
                 heading,
-                pages,
-                bounds,
+                // A row is placed by pages and rectangles, which is what a
+                // document-content citation carries. The other evidence kinds
+                // address their source in their own terms and have no page to
+                // open at, so they render as an unpaginated source does.
+                pages:
+                  location.kind === "document_content" ? location.pages : [],
+                bounds:
+                  location.kind === "document_content" ? location.bounds : [],
               }),
             )
           : [],

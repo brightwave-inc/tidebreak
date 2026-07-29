@@ -260,6 +260,62 @@ pub(in crate::db) async fn admit_sandbox_agent_run(
     max_outstanding_children: u32,
     now: chrono::DateTime<Utc>,
 ) -> Result<Option<AdmitSandboxAgentRunOutcome>> {
+    admit_sandbox_agent_run_at(
+        store,
+        origin_turn_id,
+        spawn_call_id,
+        input,
+        AgentRunExecutionLocation::InProcess,
+        lease_token,
+        expected_steer_revision,
+        max_outstanding_children,
+        now,
+    )
+    .await
+}
+
+/// Admit a depth-one sandbox child that runs inside a sandbox-resident
+/// container, host-driven over the wire protocol. Identical to
+/// [`admit_sandbox_agent_run`] except the child's execution location is
+/// [`AgentRunExecutionLocation::Container`], so the in-process scheduler leaves
+/// it for the sandbox-resident driver to claim, provision, attach, and drive.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::db) async fn admit_sandbox_container_agent_run(
+    store: &DbStore,
+    origin_turn_id: TurnId,
+    spawn_call_id: CallId,
+    input: &str,
+    lease_token: uuid::Uuid,
+    expected_steer_revision: i64,
+    max_outstanding_children: u32,
+    now: chrono::DateTime<Utc>,
+) -> Result<Option<AdmitSandboxAgentRunOutcome>> {
+    admit_sandbox_agent_run_at(
+        store,
+        origin_turn_id,
+        spawn_call_id,
+        input,
+        AgentRunExecutionLocation::Container,
+        lease_token,
+        expected_steer_revision,
+        max_outstanding_children,
+        now,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn admit_sandbox_agent_run_at(
+    store: &DbStore,
+    origin_turn_id: TurnId,
+    spawn_call_id: CallId,
+    input: &str,
+    execution_location: AgentRunExecutionLocation,
+    lease_token: uuid::Uuid,
+    expected_steer_revision: i64,
+    max_outstanding_children: u32,
+    now: chrono::DateTime<Utc>,
+) -> Result<Option<AdmitSandboxAgentRunOutcome>> {
     validate_admission_request(
         origin_turn_id,
         spawn_call_id,
@@ -300,6 +356,7 @@ pub(in crate::db) async fn admit_sandbox_agent_run(
         spawn_call_id,
         input,
         None,
+        execution_location,
         lease_token,
         expected_steer_revision,
         max_outstanding_children,
@@ -354,6 +411,7 @@ pub(in crate::db) async fn admit_sandbox_agent_run_on<C>(
     spawn_call_id: CallId,
     input: &str,
     resource: Option<&SandboxAgentFileResource>,
+    execution_location: AgentRunExecutionLocation,
     lease_token: uuid::Uuid,
     expected_steer_revision: i64,
     max_outstanding_children: u32,
@@ -455,7 +513,7 @@ where
         parent_depth: Set(Some(0)),
         spawn_call_id: Set(Some(spawn_call_id.0)),
         tier: Set(AgentRunTier::Background.as_str().into()),
-        execution_location: Set(AgentRunExecutionLocation::InProcess.as_str().into()),
+        execution_location: Set(execution_location.as_str().into()),
         depth: Set(i16::from(AgentRun::MAX_DEPTH)),
         status: Set(AgentRunStatus::Queued.as_str().into()),
         input: Set(Some(input.into())),
@@ -465,7 +523,15 @@ where
         // the row records what it ran against.
         model: Set(Some(turn.model.clone())),
         attempt_count: Set(0),
-        max_attempts: Set(AgentRun::DEFAULT_MAX_ATTEMPTS),
+        // A sandbox-resident (container) run has exactly one execution attempt:
+        // an external effect (model spend) cannot be proven unexecuted after a
+        // loss, so a lost run fails terminally and is never re-claimed into a
+        // second attempt. Only in-process runs use the multi-attempt retry
+        // machinery.
+        max_attempts: Set(match execution_location {
+            AgentRunExecutionLocation::Container => 1,
+            _ => AgentRun::DEFAULT_MAX_ATTEMPTS,
+        }),
         claim_count: Set(0),
         available_at: Set(created_at),
         deadline_at: Set(Some(created_at + AgentRun::DEFAULT_MAX_DURATION)),
@@ -614,6 +680,7 @@ pub(in crate::db) async fn accept_sandbox_agent_run_and_park_turn(
         spawn_call_id,
         input,
         None,
+        AgentRunExecutionLocation::InProcess,
         lease_token,
         expected_steer_revision,
         AgentRun::DEFAULT_MAX_OUTSTANDING_CHILDREN,
@@ -988,6 +1055,170 @@ pub(in crate::db) async fn claim_agent_run(
         transaction.commit().await.map_err(store_err)?;
         return Ok(Some(claimed));
     }
+}
+
+/// Claim one specific queued sandbox-resident container run by id under an exact
+/// bounded lease, so the sandbox-resident driver can drive it and commit its
+/// result through the same fenced result path as an in-process run.
+///
+/// Unlike [`claim_agent_run`] — which the in-process scheduler uses to select
+/// the oldest due `in_process` run under global and per-chat concurrency limits
+/// — this claims exactly the named `container` run, because the driver has
+/// already decided which run it is provisioning a container for. Reusing
+/// `lease_token` recovers only its original still-live claim (the same
+/// ambiguous-commit recovery `claim_agent_run` gives) and never claims different
+/// work. A container run has exactly one execution attempt, so this only
+/// transitions a fresh `queued` run to `running`; it never reclaims an expired
+/// lease into a second attempt.
+pub(in crate::db) async fn claim_container_agent_run(
+    store: &DbStore,
+    id: AgentRunId,
+    lease_token: uuid::Uuid,
+    lease_duration: chrono::Duration,
+) -> Result<Option<AgentRun>> {
+    if lease_token.is_nil() || lease_duration <= chrono::Duration::zero() {
+        return Err(AgentError::Store(
+            "container agent-run claim requires a non-nil token and positive duration".into(),
+        ));
+    }
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    acquire_agent_run_claim_lock(&transaction).await?;
+    let now = database_now(&transaction).await?;
+    let lease_expires_at = now.checked_add_signed(lease_duration).ok_or_else(|| {
+        AgentError::Store("agent-run lease duration overflows the database timestamp range".into())
+    })?;
+
+    // Idempotent re-claim: a prior commit may have been lost after it wrote the
+    // claim receipt. Recover only the exact still-live claim this token owns.
+    if let Some(receipt) = entities::agent_run_claim::Entity::find_by_id(lease_token)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    {
+        let Some(agent_run_id) = receipt.agent_run_id else {
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(None);
+        };
+        let existing = find_by_id_on(&transaction, AgentRunId(agent_run_id))
+            .await?
+            .filter(|run| {
+                run.tier == AgentRunTier::Background.as_str()
+                    && run.execution_location == AgentRunExecutionLocation::Container.as_str()
+                    && matches!(run.status.as_str(), "running" | "cancelling")
+                    && Some(run.attempt_count) == receipt.attempt_count
+                    && Some(run.claim_count) == receipt.claim_count
+                    && run.lease_token == Some(lease_token)
+                    && run.lease_expires_at.is_some_and(|expiry| expiry > now)
+                    && run.deadline_at.is_some_and(|deadline| deadline > now)
+            })
+            .map(agent_run_from_model)
+            .transpose()?;
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(existing);
+    }
+
+    let Some(candidate) = find_by_id_on(&transaction, id).await? else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    let admitted = entities::sandbox_agent_admission::Entity::find_by_id(candidate.id)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    let claimable = admitted
+        && candidate.tier == AgentRunTier::Background.as_str()
+        && candidate.execution_location == AgentRunExecutionLocation::Container.as_str()
+        && candidate.status == AgentRunStatus::Queued.as_str()
+        && candidate.available_at <= now
+        && candidate.deadline_at.is_some_and(|deadline| deadline > now)
+        && candidate.updated_at <= now;
+    if !claimable {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+
+    let attempt_count = candidate.attempt_count.checked_add(1).ok_or_else(|| {
+        AgentError::Store(format!("agent run {} attempt count overflow", candidate.id))
+    })?;
+    let claim_count = candidate.claim_count.checked_add(1).ok_or_else(|| {
+        AgentError::Store(format!("agent run {} claim count overflow", candidate.id))
+    })?;
+    let deadline_at = candidate
+        .deadline_at
+        .ok_or_else(|| AgentError::Store("container agent run is missing its deadline".into()))?;
+    let effective_lease_expires_at = Ord::min(deadline_at, lease_expires_at);
+    entities::agent_run_claim::ActiveModel {
+        token: Set(lease_token),
+        agent_run_id: Set(Some(candidate.id)),
+        attempt_count: Set(Some(attempt_count)),
+        claim_count: Set(Some(claim_count)),
+        claimed_at: Set(now),
+        lease_expires_at: Set(Some(effective_lease_expires_at)),
+    }
+    .insert(&transaction)
+    .await
+    .map_err(store_err)?;
+
+    let claimed = entities::agent_run::Entity::update_many()
+        .col_expr(
+            entities::agent_run::Column::Status,
+            sea_orm::sea_query::Expr::value(AgentRunStatus::Running.as_str()),
+        )
+        .col_expr(
+            entities::agent_run::Column::AttemptCount,
+            sea_orm::sea_query::Expr::value(attempt_count),
+        )
+        .col_expr(
+            entities::agent_run::Column::ClaimCount,
+            sea_orm::sea_query::Expr::value(claim_count),
+        )
+        .col_expr(
+            entities::agent_run::Column::LeaseToken,
+            sea_orm::sea_query::Expr::value(Some(lease_token)),
+        )
+        .col_expr(
+            entities::agent_run::Column::LeaseExpiresAt,
+            sea_orm::sea_query::Expr::value(Some(effective_lease_expires_at)),
+        )
+        .col_expr(
+            entities::agent_run::Column::StartedAt,
+            sea_orm::sea_query::Expr::value(Some(candidate.started_at.unwrap_or(now))),
+        )
+        .col_expr(
+            entities::agent_run::Column::LastErrorCode,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            entities::agent_run::Column::LastErrorDetail,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            entities::agent_run::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(entities::agent_run::Column::Id.eq(candidate.id))
+        .filter(entities::agent_run::Column::Status.eq(AgentRunStatus::Queued.as_str()))
+        .filter(entities::agent_run::Column::AttemptCount.eq(candidate.attempt_count))
+        .filter(entities::agent_run::Column::ClaimCount.eq(candidate.claim_count))
+        .filter(entities::agent_run::Column::UpdatedAt.eq(candidate.updated_at))
+        .filter(entities::agent_run::Column::LeaseToken.is_null())
+        .filter(entities::agent_run::Column::LeaseExpiresAt.is_null())
+        .filter(entities::agent_run::Column::AvailableAt.lte(now))
+        .filter(entities::agent_run::Column::DeadlineAt.gt(now))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    if claimed.rows_affected != 1 {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let claimed = find_by_id_on(&transaction, id)
+        .await?
+        .ok_or_else(|| AgentError::Store("claimed container agent run disappeared".into()))?;
+    let claimed = agent_run_from_model(claimed)?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(Some(claimed))
 }
 
 async fn record_empty_claim_scan_on<C>(
@@ -2098,6 +2329,17 @@ where
 {
     entities::agent_run::Entity::find()
         .filter(entities::agent_run::Column::Tier.eq(AgentRunTier::Background.as_str()))
+        // Lease expiry means "the in-process worker that held this run died".
+        // A sandbox-resident run holds no in-process worker: its driver keeps
+        // the lease live by heartbeat while the container works, and a driver
+        // that dies is recovered by reconciling the existing container, not by
+        // reaping the run out from under a container that is still spending.
+        // Its absolute deadline (checked by the deadline scan above, which has
+        // no such exemption) remains the backstop.
+        .filter(
+            entities::agent_run::Column::ExecutionLocation
+                .eq(AgentRunExecutionLocation::InProcess.as_str()),
+        )
         .filter(entities::agent_run::Column::Id.in_subquery(admitted_child_id_subquery()))
         .filter(
             sea_orm::Condition::any()
@@ -2424,6 +2666,7 @@ pub(in crate::db) fn agent_run_from_model(model: entities::agent_run::Model) -> 
     };
     let execution_location = match model.execution_location.as_str() {
         "in_process" => AgentRunExecutionLocation::InProcess,
+        "container" => AgentRunExecutionLocation::Container,
         value => {
             return Err(AgentError::Store(format!(
                 "invalid agent-run execution location {value}"

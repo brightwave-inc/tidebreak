@@ -24,6 +24,8 @@ pub const SPAWN_SANDBOX_AGENT_TOOL: &str = "spawn_sandbox_agent";
 pub const WAIT_FOR_AGENTS_TOOL: &str = "wait_for_agents";
 /// Stable name for the provider-backed public-web search tool.
 pub const WEB_SEARCH_TOOL: &str = "web_search";
+/// Stable name for the single-page public-web extraction tool.
+pub const WEB_EXTRACT_TOOL: &str = "web_extract";
 /// Compatibility name for the same contract when checkpointed by a sandbox.
 pub const SANDBOX_WEB_SEARCH_TOOL: &str = WEB_SEARCH_TOOL;
 /// Stable name for the native-executed exact delegated file read.
@@ -44,6 +46,11 @@ pub const MAX_WEB_SEARCH_RESULTS: usize = 10;
 pub const MAX_WEB_SEARCH_DOMAINS: usize = 20;
 /// Default result count when a model omits `max_results`.
 pub const DEFAULT_WEB_SEARCH_RESULTS: usize = 5;
+/// Maximum web-extract URL length in bytes advertised to a model.
+///
+/// `openwave-web-search` holds its fetch-admission URL bound to this value, so
+/// the schema a model sees and the policy the fetcher enforces cannot drift.
+pub const MAX_WEB_EXTRACT_URL_BYTES: usize = 2_048;
 
 /// Maximum serialized JSON bytes allocated to one model-facing child result.
 ///
@@ -175,6 +182,22 @@ pub struct WebSearchArgs {
 
 const fn default_web_search_results() -> usize {
     DEFAULT_WEB_SEARCH_RESULTS
+}
+
+/// Canonical arguments for the single-page web-extraction contract.
+///
+/// One exact URL per call is the whole argument surface: no fetch options, no
+/// depth, no output shaping. Everything else about a fetch — admission policy,
+/// timeout, redirect handling, output budget — is host-owned.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WebExtractArgs {
+    /// Exact public https page URL to fetch and extract.
+    #[schemars(
+        length(min = 1, max = MAX_WEB_EXTRACT_URL_BYTES),
+        description = ""
+    )]
+    pub url: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -368,6 +391,19 @@ pub fn web_search_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<WebSearchArgs>(
         WEB_SEARCH_TOOL,
         "Search the public web for current information. Use focused queries and cite sources with the exact result URLs. Results may be unavailable when the host has not configured web search.",
+    )
+}
+
+/// Host-executed contract for reading one exact public web page.
+///
+/// The extraction implementation belongs to `openwave-web-search`; core owns
+/// this schema beside the shared web-search contract so every trusted runtime
+/// advertises the same closed arguments.
+#[must_use]
+pub fn web_extract_tool_spec() -> ToolSpec {
+    ToolSpec::for_args::<WebExtractArgs>(
+        WEB_EXTRACT_TOOL,
+        "Fetch one exact public web page URL and return its readable content. Use it to open a page found through search and verify claims against the page itself instead of relying on snippets; cite the exact page URL.",
     )
 }
 

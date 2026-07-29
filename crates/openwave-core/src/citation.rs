@@ -10,7 +10,10 @@
 use std::collections::BTreeSet;
 
 use crate::RetrievalEvidenceInput;
-use crate::{AssistantCitationId, DocumentId, MessageId, PageBounds, SourceLocation, SourceRegion};
+use crate::{
+    AssistantCitationId, DocumentId, EvidenceLocation, MessageId, PageBounds, SourceLocation,
+    SourceRegion, StructuredPathType,
+};
 
 const SOURCE_REFERENCE_PREFIX: &str = "[[ow-source:";
 const SOURCE_REFERENCE_SUFFIX: &str = "]]";
@@ -78,11 +81,40 @@ pub struct AssistantCitationSnapshot {
     pub span: CitationSpan,
     pub excerpt: String,
     pub heading: Option<String>,
-    pub pages: Vec<u32>,
-    /// Where on those pages the passage sits, for sources whose parser resolved
-    /// it that finely. Empty for page-granular sources; `pages` is the complete
-    /// answer either way.
-    pub bounds: Vec<CitationPageBounds>,
+    /// Where the passage sits in its source, in the terms that source is
+    /// addressed by.
+    pub location: CitationLocation,
+}
+
+/// Where a citation points, projected per evidence kind.
+///
+/// The discriminant is the renderer's instruction for how to open the passage:
+/// pages and rectangles address a paginated document, a cell range addresses a
+/// sheet, and a path addresses a node. Only document content is produced today.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CitationLocation {
+    /// A passage of canonical text, at `pages` of the source it was parsed
+    /// from.
+    DocumentContent {
+        pages: Vec<u32>,
+        /// Where on those pages the passage sits, for sources whose parser
+        /// resolved it that finely. Empty for page-granular sources; `pages`
+        /// is the complete answer either way.
+        bounds: Vec<CitationPageBounds>,
+    },
+    /// A cell or rectangular range on one sheet of a workbook.
+    SpreadsheetCellRange {
+        start_cell: String,
+        end_cell: Option<String>,
+        sheet_index: i32,
+        sheet_name: String,
+    },
+    /// A node of a structured document, addressed by path.
+    StructuredPath {
+        path: String,
+        path_type: StructuredPathType,
+    },
 }
 
 /// One highlight rectangle of a citation, on a named page.
@@ -104,6 +136,36 @@ pub struct CitationSpan {
     pub start: u32,
     /// Exclusive end byte offset.
     pub end: u32,
+}
+
+/// Project the renderer's view of where a citation points, from the immutable
+/// location of the evidence it was made from.
+///
+/// Only document content is reshaped: its regions become the pages and
+/// rectangles a viewer paints. The other kinds already address their source in
+/// the terms a reader opens it by, so they travel across unchanged.
+pub(crate) fn project_citation_location(location: &EvidenceLocation) -> CitationLocation {
+    match location {
+        EvidenceLocation::DocumentContent { source_regions, .. } => {
+            let (pages, bounds) = project_citation_pages(source_regions);
+            CitationLocation::DocumentContent { pages, bounds }
+        }
+        EvidenceLocation::SpreadsheetCellRange {
+            start_cell,
+            end_cell,
+            sheet_index,
+            sheet_name,
+        } => CitationLocation::SpreadsheetCellRange {
+            start_cell: start_cell.clone(),
+            end_cell: end_cell.clone(),
+            sheet_index: *sheet_index,
+            sheet_name: sheet_name.clone(),
+        },
+        EvidenceLocation::StructuredPath { path, path_type } => CitationLocation::StructuredPath {
+            path: path.clone(),
+            path_type: *path_type,
+        },
+    }
 }
 
 /// Project the pages and highlight rectangles a citation shows, from the
