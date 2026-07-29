@@ -1161,7 +1161,10 @@ mod tests {
 
         runtime.dismiss_pending_pairing().await;
         assert_eq!(runtime.pending_pairing_url().await, None);
-        assert_eq!(runtime.status().await.unwrap().sign_in, SignInProgress::Idle);
+        assert_eq!(
+            runtime.status().await.unwrap().sign_in,
+            SignInProgress::Idle
+        );
         assert!(runtime.begin_sign_in().await.is_err());
     }
 
