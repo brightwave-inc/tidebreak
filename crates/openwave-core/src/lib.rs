@@ -46,6 +46,7 @@ pub mod model;
 pub mod preview;
 pub mod provider;
 mod renderer_tool;
+pub mod secret_cache;
 pub mod semantic_checkpoint;
 pub mod steer;
 pub mod storage;
@@ -149,6 +150,7 @@ pub use provider::{
     RefusalDetails, RefusalOutcome, ResponseFormat, StopReason, ToolChoice, Usage,
 };
 pub use renderer_tool::RendererToolName;
+pub use secret_cache::CachingSecretProvider;
 pub use semantic_checkpoint::{
     ContextCheckpoint, ContextCheckpointPayloadV1, SaveContextCheckpointOutcome,
     CONTEXT_CHECKPOINT_FORMAT_V1, MAX_CONTEXT_CHECKPOINT_BYTES, MAX_CONTEXT_CHECKPOINT_ITEMS,
