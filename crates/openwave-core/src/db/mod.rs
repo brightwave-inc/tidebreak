@@ -2876,6 +2876,31 @@ impl Store for DbStore {
             now,
             resolution,
             resolved_at,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn resolve_client_tool_call_and_append_event_with_rows(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<Utc>,
+        rows: Option<&serde_json::Value>,
+    ) -> Result<JournaledClientToolCallOutcome> {
+        ops::client_execution::resolve_client_tool_call_and_append_event(
+            self,
+            id,
+            chat_id,
+            lease_token,
+            now,
+            resolution,
+            resolved_at,
+            rows,
         )
         .await
     }
@@ -2897,6 +2922,31 @@ impl Store for DbStore {
             now,
             resolution,
             resolved_at,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn resolve_expired_client_tool_call_and_append_event_with_rows(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<Utc>,
+        rows: Option<&serde_json::Value>,
+    ) -> Result<JournaledClientToolCallOutcome> {
+        ops::client_execution::resolve_expired_client_tool_call_and_append_event(
+            self,
+            id,
+            chat_id,
+            lease_token,
+            now,
+            resolution,
+            resolved_at,
+            rows,
         )
         .await
     }

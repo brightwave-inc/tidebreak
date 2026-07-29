@@ -406,6 +406,14 @@ async fn execute_receipt(
                     "Published output {} revision {} to the connected folder.",
                     receipt.output_id, receipt.revision_id
                 ),
+                rows: Some(serde_json::json!({
+                    "entries": [openwave_core::ResultEntry::new(
+                        openwave_core::ResultEntryKind::Output,
+                        file_name(&receipt.relative_path),
+                    )
+                    .with_detail(receipt.relative_path.clone())
+                    .with_meta(openwave_core::format_bytes(receipt.byte_len))],
+                })),
             }
         }
         Ok(_) => unavailable("output_writeback_broker_protocol"),
@@ -488,4 +496,13 @@ fn broker_resolution(error: &BrokerClientError) -> StoredResolution {
         _ => "output_writeback_unavailable",
     };
     unavailable(code)
+}
+
+/// The last segment of a connected-folder path, so a row leads with the file
+/// rather than the path it sits under.
+fn file_name(path: &str) -> String {
+    path.rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(path)
+        .to_owned()
 }

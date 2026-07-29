@@ -303,6 +303,15 @@ pub(super) enum AttachmentPhase {
 pub(super) enum StoredResolution {
     Completed {
         result: String,
+        /// What the operation surfaced, as `{entries, failures}`, for the
+        /// renderer's card.
+        ///
+        /// Defaulted so a receipt written before this field still loads: a
+        /// crash-recovery format that refused older receipts would strand the
+        /// very work it exists to finish. An older receipt simply reports no
+        /// rows, which is what it knew.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rows: Option<serde_json::Value>,
     },
     Failed {
         result: String,
@@ -1437,6 +1446,7 @@ mod tests {
 
         receipt.phase = FolderOperationPhase::DispatchStarted;
         receipt.resolution = Some(StoredResolution::Completed {
+            rows: None,
             result: r#"{"status":"written"}"#.to_owned(),
         });
         store.save_output_writeback(&receipt).unwrap();
@@ -1470,6 +1480,7 @@ mod tests {
         assert!(!debug.contains(&temp.path().display().to_string()));
 
         receipt.resolution = Some(StoredResolution::Completed {
+            rows: None,
             result: r#"{"status":"connected"}"#.into(),
         });
         store.save(&receipt).unwrap();

@@ -516,6 +516,7 @@ fn connected_resolution(
     Ok(StoredResolution::Completed {
         result: serde_json::to_string(&result)
             .map_err(|_| "could not encode folder-access result".to_owned())?,
+        rows: None,
     })
 }
 
@@ -523,6 +524,7 @@ fn declined_resolution() -> Result<StoredResolution, String> {
     Ok(StoredResolution::Completed {
         result: serde_json::to_string(&RequestFolderAccessResult::Declined)
             .map_err(|_| "could not encode folder-access result".to_owned())?,
+        rows: None,
     })
 }
 
@@ -626,14 +628,14 @@ mod tests {
             display_name: "Documents".into(),
         })
         .unwrap();
-        let StoredResolution::Completed { result } = connected else {
+        let StoredResolution::Completed { result, .. } = connected else {
             panic!("expected completed result")
         };
         assert!(result.contains("connected"));
         assert!(!result.contains("/Users/"));
         assert!(matches!(
             declined_resolution().unwrap(),
-            StoredResolution::Completed { result } if result.contains("declined")
+            StoredResolution::Completed { result, .. } if result.contains("declined")
         ));
     }
 
