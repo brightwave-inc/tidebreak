@@ -69,14 +69,71 @@ pub struct PairingOutcome {
     pub newly_provisioned: bool,
 }
 
+/// Why a pairing did not provision this profile.
+///
+/// The conflict is its own variant because it is a product refusal, not a
+/// fault: the recorded decision is refuse-forever (gateway migration is the
+/// MDM tier's job — OS-asserted policy already outranks provisioned state —
+/// or a profile reset), and the shell owes the user an explanation naming
+/// the gateway that actually manages this device rather than a log line.
+/// Every other failure — invalid URL, unreachable gateway, bad manifest,
+/// store errors — stays the [`AgentError`] it was.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum PairingError {
+    /// The link named a different gateway than the one this profile is
+    /// provisioned to. Carries the provisioned base URL — normalized and
+    /// secret-free by the gateway-URL contract — so callers can name it;
+    /// user-facing surfaces should reduce it to the origin.
+    Conflict {
+        /// The normalized base URL this profile is provisioned to.
+        provisioned_url: String,
+    },
+    /// Any other failure. No policy was written — though the provider
+    /// configuration may already be repointed: it is deliberately written
+    /// first, so a failure between the writes fails into a still-unmanaged
+    /// profile recoverable from settings (see the ordering comment in
+    /// [`pair_with_gateway`]).
+    Other(AgentError),
+}
+
+impl std::fmt::Display for PairingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Conflict { .. } => write!(
+                f,
+                "this profile is already provisioned to a different gateway"
+            ),
+            Self::Other(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for PairingError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Conflict { .. } => None,
+            Self::Other(error) => Some(error),
+        }
+    }
+}
+
+impl From<AgentError> for PairingError {
+    fn from(error: AgentError) -> Self {
+        Self::Other(error)
+    }
+}
+
 /// Validate `gateway_url`, probe the gateway, and provision this profile.
 ///
 /// Returns a [`PairingOutcome`] on success — the normalized gateway base URL
 /// plus whether this call is the one that provisioned the profile. Nothing
 /// is written unless the URL passes the gateway contract and the deployment
-/// answers `GET /api/v1/meta`; a conflicting re-provision is refused inside
-/// [`managed_policy::provision`] and leaves both the policy and the provider
-/// configuration untouched. Success also points the ModelGateway provider at
+/// answers `GET /api/v1/meta`; a conflicting re-provision is refused as the
+/// typed [`PairingError::Conflict`] before either write, leaving both the
+/// policy and the provider configuration untouched — the desktop shell
+/// surfaces that refusal instead of treating it as a generic fault. Success
+/// also points the ModelGateway provider at
 /// the gateway and enables it, dropping any model snapshot synced from a
 /// previously configured base URL — sign-in resyncs the entitled set.
 ///
@@ -87,7 +144,7 @@ pub struct PairingOutcome {
 pub async fn pair_with_gateway(
     handle: &PairingHandle,
     gateway_url: &str,
-) -> Result<PairingOutcome> {
+) -> Result<PairingOutcome, PairingError> {
     let store = &*handle.store;
     let config = GatewayAuthConfig::new(gateway_url)?;
     let base_url = config.base_url().to_string();
@@ -101,9 +158,9 @@ pub async fn pair_with_gateway(
     // profile with no configured provider.
     let already_provisioned = match managed_policy::provisioned_url(store).await? {
         Some(existing) if existing != base_url => {
-            return Err(AgentError::config(
-                "this profile is already provisioned to a different gateway",
-            ));
+            return Err(PairingError::Conflict {
+                provisioned_url: existing,
+            });
         }
         other => other.is_some(),
     };
@@ -353,11 +410,14 @@ mod tests {
     async fn a_failed_pairing_changes_nothing() {
         let (store, _directory) = test_store().await;
 
-        // Unreachable gateway: the probe fails before any write.
+        // Unreachable gateway: the probe fails before any write, and the
+        // failure is a fault, not the typed conflict refusal.
         let dead = unreachable_base().await;
-        assert!(pair_with_gateway(&test_handle(&store), &dead)
+        let error = pair_with_gateway(&test_handle(&store), &dead)
             .await
-            .is_err());
+            .err()
+            .unwrap();
+        assert!(matches!(error, PairingError::Other(_)));
         assert!(!resolve(&*store, &NoOsPolicy).await.unwrap().managed);
         let provider = providers::read_config(&*store, ProviderKind::ModelGateway)
             .await
@@ -373,10 +433,18 @@ mod tests {
             .await
             .unwrap()
             .base_url;
+        // The refusal is typed — the desktop dialog keys off the variant,
+        // not the message — and names the gateway actually on record.
         let error = pair_with_gateway(&test_handle(&store), &second)
             .await
             .err()
             .unwrap();
+        match &error {
+            PairingError::Conflict { provisioned_url } => {
+                assert_eq!(provisioned_url, &normalized)
+            }
+            other => panic!("expected the typed conflict, got {other:?}"),
+        }
         assert!(error.to_string().contains("already provisioned"));
         let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
         assert_eq!(policy.gateway_url.as_deref(), Some(normalized.as_str()));

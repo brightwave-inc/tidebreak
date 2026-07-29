@@ -27,7 +27,7 @@ use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tokio::sync::watch;
 
-use openwave_server::PairingHandle;
+use openwave_server::{PairingError, PairingHandle};
 
 /// Where the pairing handler waits for the embedded server's pairing handle:
 /// filled once boot has bound the server. A provision link commonly
@@ -198,7 +198,10 @@ fn spawn_pairing(app: tauri::AppHandle, link: ProvisionLink) {
                 }
             }
             Ok(None) => log_pairing(&app, &format!("pairing with {origin} declined")),
-            Err(reason) => log_pairing(&app, &format!("pairing failed: {reason}")),
+            Err(failure) => {
+                log_pairing(&app, &format!("pairing failed for {origin}: {failure}"));
+                show_pairing_failure(&app, &origin, &failure);
+            }
         }
         app.state::<PairingStore>()
             .in_flight
@@ -210,16 +213,17 @@ fn spawn_pairing(app: tauri::AppHandle, link: ProvisionLink) {
 /// decision path is testable without a GUI: `confirm` sees only the gateway
 /// origin, and nothing runs `pair` but a confirming answer. What a confirmed
 /// pairing yields flows back to the caller — today, whether this pairing
-/// newly provisioned the profile, which decides the restart prompt.
-async fn pair_after_confirmation<C, P, F, T>(
+/// newly provisioned the profile, which decides the restart prompt — and so
+/// does what a failed one raised, which decides the refusal dialog.
+async fn pair_after_confirmation<C, P, F, T, E>(
     link: ProvisionLink,
     confirm: C,
     pair: P,
-) -> Result<Option<T>, String>
+) -> Result<Option<T>, E>
 where
     C: FnOnce(&str) -> bool,
     P: FnOnce(String) -> F,
-    F: std::future::Future<Output = Result<T, String>>,
+    F: std::future::Future<Output = Result<T, E>>,
 {
     if !confirm(&link.origin) {
         return Ok(None);
@@ -247,16 +251,89 @@ fn confirm_pairing(app: &tauri::AppHandle, origin: &str) -> bool {
         .blocking_show()
 }
 
+/// A pairing failure, split the way the user-facing surface needs it: the
+/// conflict refusal is a product state with its own explanation, everything
+/// else a generic fault whose details belong in the log, not the dialog.
+enum PairFailure {
+    /// This device is provisioned to a different gateway. Refuse-forever is
+    /// the recorded decision, so the dialog names that gateway's origin and
+    /// points at the administrator instead of offering a retry.
+    Conflict { provisioned_origin: String },
+    /// Anything else: unreachable gateway, invalid manifest, the embedded
+    /// server not starting.
+    Other(String),
+}
+
+impl std::fmt::Display for PairFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Conflict { provisioned_origin } => write!(
+                f,
+                "refused: this device is already provisioned to {provisioned_origin}"
+            ),
+            Self::Other(reason) => f.write_str(reason),
+        }
+    }
+}
+
 /// Validate, probe, and provision — all server-side. The sign-in gate is a
 /// separate surface: once policy flips to managed it presents itself on its
 /// next poll, so pairing does not drive the renderer. Reports whether this
-/// pairing newly provisioned the profile — the restart-prompt signal.
-async fn pair(app: tauri::AppHandle, gateway_url: String) -> Result<bool, String> {
-    let handle = wait_pairing_handle(&app).await?;
-    openwave_server::pair_with_gateway(&handle, &gateway_url)
+/// pairing newly provisioned the profile — the restart-prompt signal — and
+/// keeps the server's typed conflict refusal distinct from other failures,
+/// reduced to the provisioned gateway's origin.
+async fn pair(app: tauri::AppHandle, gateway_url: String) -> Result<bool, PairFailure> {
+    let handle = wait_pairing_handle(&app)
         .await
-        .map(|outcome| outcome.newly_provisioned)
-        .map_err(|error| error.to_string())
+        .map_err(PairFailure::Other)?;
+    match openwave_server::pair_with_gateway(&handle, &gateway_url).await {
+        Ok(outcome) => Ok(outcome.newly_provisioned),
+        Err(PairingError::Conflict { provisioned_url }) => Err(PairFailure::Conflict {
+            provisioned_origin: origin_of(&provisioned_url),
+        }),
+        Err(error) => Err(PairFailure::Other(error.to_string())),
+    }
+}
+
+/// Reduce a stored gateway base URL to its origin — the only form
+/// user-facing text and logs carry. The stored URL passed the gateway
+/// contract at provisioning, so this parse does not fail in practice; the
+/// fallback keeps the dialog honest rather than empty if it ever does.
+fn origin_of(url: &str) -> String {
+    tauri::Url::parse(url)
+        .map(|url| url.origin().ascii_serialization())
+        .unwrap_or_else(|_| "another gateway".to_string())
+}
+
+/// The one user-facing line per failure class, pure so the choice of what a
+/// refusal says is testable without a GUI. The conflict names the gateway
+/// that actually manages this device and points at the administrator; any
+/// other failure names only the origin the user just confirmed — the raw
+/// reason stays in `pairing.log`.
+fn refusal_message(origin: &str, failure: &PairFailure) -> String {
+    match failure {
+        PairFailure::Conflict { provisioned_origin } => format!(
+            "This device is already managed by {provisioned_origin}. Contact \
+             your administrator to change gateways."
+        ),
+        PairFailure::Other(_) => format!(
+            "OpenWave could not pair with {origin}. This device was not \
+             paired; details are in pairing.log."
+        ),
+    }
+}
+
+/// One bounded error dialog per failed attempt, for both failure classes:
+/// the user just confirmed a pairing in a dialog, so a refusal that reaches
+/// only the log reads as success — the exact silent confusion the
+/// confirmation flow exists to avoid. No retry affordance, no loop: the
+/// dialog closes and the attempt is over.
+fn show_pairing_failure(app: &tauri::AppHandle, origin: &str, failure: &PairFailure) {
+    app.dialog()
+        .message(refusal_message(origin, failure))
+        .title("Pairing failed")
+        .kind(MessageDialogKind::Error)
+        .blocking_show();
 }
 
 /// Offer the restart that completes enforcement, after the pairing that
@@ -326,7 +403,10 @@ fn log_pairing(app: &tauri::AppHandle, message: &str) {
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use super::{pair_after_confirmation, provision_link, ProvisionLink};
+    use super::{
+        origin_of, pair_after_confirmation, provision_link, refusal_message, PairFailure,
+        ProvisionLink,
+    };
 
     #[test]
     fn provision_links_are_held_to_the_contract() {
@@ -412,7 +492,7 @@ mod tests {
             |_| false,
             |_| {
                 paired.store(true, Ordering::SeqCst);
-                async { Ok(true) }
+                async { Ok::<_, String>(true) }
             },
         )
         .await;
@@ -431,10 +511,44 @@ mod tests {
             },
             |gateway_url| async move {
                 assert_eq!(gateway_url, "https://gw.example");
-                Ok(false)
+                Ok::<_, String>(false)
             },
         )
         .await;
         assert_eq!(outcome, Ok(Some(false)));
+    }
+
+    /// The refusal dialog's one line per failure class: the conflict names
+    /// the gateway that actually manages this device (never the link's) and
+    /// points at the administrator; a generic failure names only the origin
+    /// the user confirmed, keeping the raw reason out of the dialog.
+    #[test]
+    fn the_refusal_dialog_names_the_right_gateway() {
+        let conflict = refusal_message(
+            "https://new.example",
+            &PairFailure::Conflict {
+                provisioned_origin: "https://old.example".to_string(),
+            },
+        );
+        assert!(conflict.contains("already managed by https://old.example"));
+        assert!(conflict.contains("administrator"));
+        assert!(!conflict.contains("new.example"));
+
+        let other = refusal_message(
+            "https://new.example",
+            &PairFailure::Other("probe failed: token=shh".to_string()),
+        );
+        assert!(other.contains("https://new.example"));
+        assert!(!other.contains("token=shh"));
+    }
+
+    /// Pins the load-bearing reduction the conflict dialog's claim rests
+    /// on: scheme, host, and port — nothing else of the stored base URL.
+    #[test]
+    fn a_stored_base_url_reduces_to_its_origin() {
+        assert_eq!(
+            origin_of("https://gw.example:8443/base/path/"),
+            "https://gw.example:8443"
+        );
     }
 }
