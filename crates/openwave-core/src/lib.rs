@@ -68,12 +68,13 @@ pub use agent_tools::{
     sandbox_read_delegated_file_tool_spec, sandbox_web_search_tool_spec,
     spawn_sandbox_agent_tool_spec, validate_sandbox_read_delegated_file_arguments,
     validate_spawn_sandbox_agent_arguments, validate_wait_for_agents_arguments,
-    wait_for_agents_tool_spec, web_search_tool_spec, SandboxAgentFileResource,
-    SpawnSandboxAgentArgs, SpawnSandboxAgentResult, WaitForAgentResult, WaitForAgentsArgs,
-    WaitForAgentsResult, WebSearchArgs, DEFAULT_WEB_SEARCH_RESULTS, MAX_SANDBOX_AGENT_TASK_CHARS,
-    MAX_WAIT_FOR_AGENTS_CHILDREN, MAX_WEB_SEARCH_DOMAINS, MAX_WEB_SEARCH_QUERY_CHARS,
+    wait_for_agents_tool_spec, web_extract_tool_spec, web_search_tool_spec,
+    SandboxAgentFileResource, SpawnSandboxAgentArgs, SpawnSandboxAgentResult, WaitForAgentResult,
+    WaitForAgentsArgs, WaitForAgentsResult, WebExtractArgs, WebSearchArgs,
+    DEFAULT_WEB_SEARCH_RESULTS, MAX_SANDBOX_AGENT_TASK_CHARS, MAX_WAIT_FOR_AGENTS_CHILDREN,
+    MAX_WEB_EXTRACT_URL_BYTES, MAX_WEB_SEARCH_DOMAINS, MAX_WEB_SEARCH_QUERY_CHARS,
     MAX_WEB_SEARCH_RESULTS, SANDBOX_READ_DELEGATED_FILE_TOOL, SANDBOX_WEB_SEARCH_TOOL,
-    SPAWN_SANDBOX_AGENT_TOOL, WAIT_FOR_AGENTS_TOOL, WEB_SEARCH_TOOL,
+    SPAWN_SANDBOX_AGENT_TOOL, WAIT_FOR_AGENTS_TOOL, WEB_EXTRACT_TOOL, WEB_SEARCH_TOOL,
 };
 pub use approval::{
     ApprovalDecision, ApprovalFuture, ApprovalGate, ApprovalJournalIdentity, ApprovalRegistration,

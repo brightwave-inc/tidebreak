@@ -40,6 +40,15 @@ export function toolPreviewPresentation(
       .join("\n");
     return { headline, detail };
   }
+  if (preview.tool === "web_extract") {
+    // The URL is the whole action: what leaves the device and where the
+    // request goes are the same string, so the card shows it unabridged.
+    const headline = preview.url;
+    return {
+      headline,
+      detail: `${headline}\n# fetched from the public web`,
+    };
+  }
   const headline = [preview.command, ...preview.args]
     .map(quoteArgument)
     .join(" ");

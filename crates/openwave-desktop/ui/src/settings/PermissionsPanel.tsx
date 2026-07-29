@@ -19,6 +19,7 @@ const TOOL_LABELS: Partial<Record<RendererToolName, string>> = {
   exec: "Commands",
   search: "Document search",
   web_search: "Web search",
+  web_extract: "Web pages",
 };
 
 export function toolGrantLabel(action: RendererToolName): string {
@@ -39,6 +40,11 @@ export function grantScopeLabel(
       if (scope.tool === "exec") {
         return [scope.command, ...scope.args].join(" ");
       }
+      // A page grant is for one address, and an address read back in quotes
+      // reads as a phrase rather than as the place it will fetch.
+      if (scope.tool === "web_extract") {
+        return scope.url;
+      }
       return `“${scope.query}”`;
     }
     case "any_args_for":
@@ -51,6 +57,8 @@ export function grantScopeLabel(
           return "Every document search";
         case "web_search":
           return "Every web search";
+        case "web_extract":
+          return "Every web page";
         default:
           return `Every ${toolGrantLabel(action)} call`;
       }

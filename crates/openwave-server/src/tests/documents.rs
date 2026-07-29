@@ -2425,6 +2425,10 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() 
             store.clone(),
             Arc::new(MemSecrets::default()),
         )),
+        Box::new(web_search::foreground_extract_tool(
+            store.clone(),
+            Arc::new(MemSecrets::default()),
+        )),
         store,
     );
     assert!(
@@ -2488,6 +2492,14 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() 
     );
     assert_eq!(
         surface.tools.get("web_search").unwrap().approval_class(),
+        ApprovalClass::Sensitive
+    );
+    assert!(
+        names.iter().any(|n| n == "web_extract"),
+        "foreground web extraction registered beside web search"
+    );
+    assert_eq!(
+        surface.tools.get("web_extract").unwrap().approval_class(),
         ApprovalClass::Sensitive
     );
     assert!([

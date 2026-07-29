@@ -33,6 +33,7 @@ const USER_QUESTIONS_HEADING: &str = "## User clarification";
 const PRIVATE_SCRATCH_HEADING: &str = "## Private scratch";
 const SOURCES_HEADING: &str = "## Conversation sources and citations";
 const WEB_SEARCH_HEADING: &str = "## Public web research";
+const WEB_EXTRACT_HEADING: &str = "## Public web pages";
 const CONNECTED_FOLDERS_HEADING: &str = "## Connected folders";
 const OUTPUTS_HEADING: &str = "## User-visible outputs";
 const EXECUTION_HEADING: &str = "## Code execution";
@@ -134,6 +135,23 @@ pub(crate) fn compose(specs: &[ToolSpec]) -> String {
                 "- A web-search request may require approval before information leaves OpenWave; do not describe approval as already granted.",
             ],
         );
+    }
+
+    if has("web_extract") {
+        let mut lines =
+            vec!["- Use `web_extract` to open one exact public page URL and read its content."];
+        if has("web_search") {
+            lines.push(
+                "- Open the pages behind load-bearing search results and verify claims against the page itself rather than relying on snippets.",
+            );
+        }
+        lines.push(
+            "- Cite the exact URL of the page a claim came from, and distinguish page-backed facts from inference.",
+        );
+        lines.push(
+            "- A page fetch may require approval before the URL leaves OpenWave; do not describe approval as already granted.",
+        );
+        push_section(&mut prompt, WEB_EXTRACT_HEADING, &lines);
     }
 
     if [
@@ -292,6 +310,7 @@ mod tests {
             PRIVATE_SCRATCH_HEADING,
             SOURCES_HEADING,
             WEB_SEARCH_HEADING,
+            WEB_EXTRACT_HEADING,
             CONNECTED_FOLDERS_HEADING,
             OUTPUTS_HEADING,
             EXECUTION_HEADING,
@@ -302,6 +321,7 @@ mod tests {
             "`request_folder_access`",
             "`create_deliverable`",
             "`spawn_sandbox_agent`",
+            "`web_extract`",
         ] {
             assert!(
                 !prompt.contains(unavailable),
@@ -319,6 +339,7 @@ mod tests {
             spec("list_sources"),
             spec("read_source"),
             spec("web_search"),
+            spec("web_extract"),
             spec("list_connected_folders"),
             spec("read_connected_file"),
             spec("create_deliverable"),
@@ -333,6 +354,7 @@ mod tests {
             USER_QUESTIONS_HEADING,
             SOURCES_HEADING,
             WEB_SEARCH_HEADING,
+            WEB_EXTRACT_HEADING,
             CONNECTED_FOLDERS_HEADING,
             OUTPUTS_HEADING,
             EXECUTION_HEADING,
@@ -344,6 +366,7 @@ mod tests {
             "`list_sources`",
             "`read_source`",
             "`web_search`",
+            "`web_extract`",
             "`list_connected_folders`",
             "`read_connected_file`",
             "`create_deliverable`",
@@ -397,6 +420,13 @@ mod tests {
         assert!(wait_only.contains("`wait_for_agents`"));
         assert!(!wait_only.contains("`spawn_sandbox_agent`"));
         assert!(!wait_only.contains("returned agent ID"));
+
+        // Same rule for the web pair: extraction alone must not tell the
+        // model to open "search results" it has no way to produce.
+        let extract_only = compose(&[spec("web_extract")]);
+        assert!(extract_only.contains("`web_extract`"));
+        assert!(!extract_only.contains(WEB_SEARCH_HEADING));
+        assert!(!extract_only.contains("search results"));
     }
 
     #[test]
@@ -436,6 +466,7 @@ mod tests {
             spec("list_sources"),
             spec("read_source"),
             spec("web_search"),
+            spec("web_extract"),
             spec("request_folder_access"),
             spec("list_connected_folders"),
             spec("list_folder"),
@@ -449,7 +480,7 @@ mod tests {
 
         assert_eq!(
             identity(&prompt),
-            "foreground-v1:sha256:e459918082cacf1fd2b7859b939d9a969d06858d59f540babc361ea2a107cbfa"
+            "foreground-v1:sha256:8225fab877c9bd538dab24bc828b830b8b4a6ea07c40a6f87a8863f4d49546be"
         );
     }
 }
