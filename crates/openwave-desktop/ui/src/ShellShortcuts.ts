@@ -14,7 +14,18 @@ export type ShellShortcutAction =
   | "focus-composer"
   | "zoom-in"
   | "zoom-out"
-  | "zoom-reset";
+  | "zoom-reset"
+  | "show-shortcuts";
+
+/** The heading a shortcut sits under in the help dialog. */
+export type ShellShortcutGroup = "Chat" | "View" | "Help";
+
+/** Group headings in the order the help dialog lists them. */
+export const SHELL_SHORTCUT_GROUPS: readonly ShellShortcutGroup[] = [
+  "Chat",
+  "View",
+  "Help",
+];
 
 export type ShellShortcutDef = {
   id: ShellShortcutAction;
@@ -33,6 +44,8 @@ export type ShellShortcutDef = {
   shift?: boolean | "any";
   /** What the shortcut does, phrased for a help dialog. */
   description: string;
+  /** Which heading the help dialog files it under. */
+  group: ShellShortcutGroup;
   /**
    * Whether the shortcut may fire while focus is in a text field. Chorded
    * combos (mod+key) are safe there — they are not something a reader types —
@@ -43,17 +56,11 @@ export type ShellShortcutDef = {
 
 export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
   {
-    id: "toggle-sidebar",
-    keys: ["b"],
-    mod: true,
-    description: "Show or hide the sidebar",
-    allowInEditable: true,
-  },
-  {
     id: "new-chat",
     keys: ["n"],
     mod: true,
     description: "Start a new chat",
+    group: "Chat",
     allowInEditable: true,
   },
   {
@@ -61,6 +68,15 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     keys: ["k"],
     mod: true,
     description: "Focus the message composer",
+    group: "Chat",
+    allowInEditable: true,
+  },
+  {
+    id: "toggle-sidebar",
+    keys: ["b"],
+    mod: true,
+    description: "Show or hide the sidebar",
+    group: "View",
     allowInEditable: true,
   },
   {
@@ -69,6 +85,7 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     mod: true,
     shift: "any",
     description: "Make the interface larger",
+    group: "View",
     allowInEditable: true,
   },
   {
@@ -77,6 +94,7 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     mod: true,
     shift: "any",
     description: "Make the interface smaller",
+    group: "View",
     allowInEditable: true,
   },
   {
@@ -84,9 +102,75 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     keys: ["0"],
     mod: true,
     description: "Reset the interface size",
+    group: "View",
+    allowInEditable: true,
+  },
+  {
+    id: "show-shortcuts",
+    // `?` is the shifted glyph the same physical key produces, so the reader
+    // reaches this whether or not they think of it as Cmd+Shift+/.
+    keys: ["/", "?"],
+    mod: true,
+    shift: "any",
+    description: "Show keyboard shortcuts",
+    group: "Help",
     allowInEditable: true,
   },
 ];
+
+/**
+ * Whether the platform command modifier is Cmd rather than Ctrl.
+ *
+ * The table records `mod: true` rather than a glyph because the listener
+ * accepts either modifier; only the help dialog has to commit to one, and it
+ * commits to whichever one the reader's keyboard actually has. Takes the
+ * user-agent string rather than reading `navigator` so it is testable.
+ */
+export function usesCommandModifier(userAgent: string): boolean {
+  return /Mac|iPhone|iPad|iPod/.test(userAgent);
+}
+
+/**
+ * The keycaps a shortcut should be drawn as, in the order they are pressed.
+ *
+ * Derived from the same definition the listener matches on, so the help dialog
+ * cannot come to disagree with the binding. Only the first of a definition's
+ * keys is shown — the alternates exist so a shifted glyph still matches, not
+ * because they are a second shortcut worth documenting.
+ */
+export function shortcutKeycaps(
+  def: ShellShortcutDef,
+  command: boolean,
+): string[] {
+  const caps: string[] = [];
+  if (def.mod) caps.push(command ? "⌘" : "Ctrl");
+  if (def.shift === true) caps.push(command ? "⇧" : "Shift");
+  const key = def.keys[0] ?? "";
+  caps.push(key.length === 1 ? key.toUpperCase() : key);
+  return caps;
+}
+
+/**
+ * The shortcuts under their headings, in the order the help dialog lists them.
+ *
+ * Grouping lives here rather than in the dialog so a shortcut cannot go missing
+ * from the help by being filed under a heading nobody renders.
+ */
+export function groupedShellShortcuts(): Array<{
+  group: ShellShortcutGroup;
+  items: ShellShortcutDef[];
+}> {
+  const byGroup = new Map<ShellShortcutGroup, ShellShortcutDef[]>();
+  for (const def of SHELL_SHORTCUTS) {
+    const items = byGroup.get(def.group) ?? [];
+    items.push(def);
+    byGroup.set(def.group, items);
+  }
+  return SHELL_SHORTCUT_GROUPS.flatMap((group) => {
+    const items = byGroup.get(group);
+    return items ? [{ group, items }] : [];
+  });
+}
 
 type ShortcutKeyEvent = Pick<
   KeyboardEvent,
