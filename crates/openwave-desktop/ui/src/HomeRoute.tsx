@@ -6,12 +6,13 @@ import { ChatExplorer } from "./ChatExplorer";
 import { useChatListStore } from "./ChatListStore";
 import { Composer } from "./Composer";
 import { useFirstMessage } from "./FirstMessage";
-import { CitationFormatMenu, ModelMenu, ReasoningEffortMenu } from "./ModelMenu";
+import { ModelMenu, ReasoningEffortMenu } from "./ModelMenu";
 import { modelForSelection } from "./ModelSelection";
 import { useNewChatSettings } from "./NewChatSettings";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import { RouteFrame } from "./RouteFrame";
 import { HomeSidebar } from "./sidebar/HomeSidebar";
+import { ToolsMenu } from "./ToolsMenu";
 
 const chatListActions = useChatListStore.getState();
 const firstMessageActions = useFirstMessage.getState();
@@ -100,6 +101,12 @@ export function HomeRoute() {
             steerStatus={null}
             modelMenu={
               <>
+                <ToolsMenu
+                  disabled={creatingChat}
+                  citationFormat={newChat.citationFormat}
+                  defaultCitationFormat={defaultCitationFormat}
+                  onCitationFormatChange={newChat.setCitationFormat}
+                />
                 <ModelMenu
                   models={models}
                   value={newChat.model}
@@ -119,12 +126,6 @@ export function HomeRoute() {
                   value={newChat.permissionMode}
                   disabled={creatingChat}
                   onChange={newChat.setPermissionMode}
-                />
-                <CitationFormatMenu
-                  value={newChat.citationFormat}
-                  defaultFormat={defaultCitationFormat}
-                  disabled={creatingChat}
-                  onChange={newChat.setCitationFormat}
                 />
               </>
             }
