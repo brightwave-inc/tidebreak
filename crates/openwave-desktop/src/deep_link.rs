@@ -10,14 +10,22 @@
 //! Windows/Linux is picked up from the plugin's recorded launch URL right
 //! after the listener is registered.
 //!
-//! Provisioning itself lives server-side ([`openwave_server::pair_with_gateway`]):
-//! the shell calls it directly on the embedded server's store, so no HTTP
-//! route — authenticated or otherwise — can reach the policy write path.
+//! A deep link is an unauthenticated remote trigger — any page the user
+//! visits can raise one — so a valid provision link never writes anything by
+//! itself: a native dialog names the gateway origin and the consequence, and
+//! only an explicit confirmation runs the pairing. Provisioning itself lives
+//! server-side ([`openwave_server::pair_with_gateway`]): the shell calls it
+//! directly on the embedded server's store, so no HTTP route — authenticated
+//! or otherwise — can reach the policy write path. The webview cannot reach
+//! it either: the main window's capability denies `core:event:emit`, so a
+//! compromised renderer cannot forge the plugin's open-URL event.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tauri::Manager;
 use tauri_plugin_deep_link::DeepLinkExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tokio::sync::watch;
 
 use openwave_core::Store;
@@ -27,21 +35,38 @@ use openwave_core::Store;
 /// app, so the handler awaits this instead of racing the boot task.
 pub(crate) struct PairingStore {
     rx: watch::Receiver<Option<Arc<dyn Store>>>,
+    /// One pairing at a time. While a confirmation dialog is up or a probe
+    /// is in flight, further provision links are dropped with a log line
+    /// instead of stacking dialogs and long-timeout probes.
+    in_flight: AtomicBool,
 }
 
 impl PairingStore {
     pub(crate) fn new(rx: watch::Receiver<Option<Arc<dyn Store>>>) -> Self {
-        Self { rx }
+        Self {
+            rx,
+            in_flight: AtomicBool::new(false),
+        }
     }
+}
+
+/// A validated provision link: the gateway URL to pair with, and its origin
+/// — the only form of it that user-facing text and logs ever carry.
+#[derive(Debug, PartialEq, Eq)]
+struct ProvisionLink {
+    gateway_url: String,
+    origin: String,
 }
 
 /// Register the open-URL listener and pick up a launch link.
 pub(crate) fn install(app: &tauri::AppHandle) {
-    // Dev builds and portable installs have no installer run to write the
-    // scheme registration; best-effort runtime registration keeps the link
-    // working there. Not available on macOS, where the bundle's Info.plist
-    // (generated from the deep-link config) is the only registration path.
-    #[cfg(any(windows, target_os = "linux"))]
+    // Dev builds have no installer run to write the scheme registration, so
+    // register at runtime. Debug-only: in a release build this would write
+    // a per-user registration for whatever path the binary runs from,
+    // shadowing the installer's registration. Not available on macOS, where
+    // the bundle's Info.plist (generated from the deep-link config) is the
+    // only registration path.
+    #[cfg(all(debug_assertions, any(windows, target_os = "linux")))]
     if let Err(error) = app.deep_link().register_all() {
         eprintln!("openwave-desktop: deep-link scheme registration failed: {error}");
     }
@@ -57,17 +82,17 @@ pub(crate) fn install(app: &tauri::AppHandle) {
     }
 }
 
-/// Handle every `openwave://` URL in one delivery: surface the window, then
-/// pair for each well-formed provision link. A malformed link is logged
-/// (bounded, without echoing the link) and changes nothing.
+/// Handle every URL in one delivery. Only a link that parses as a provision
+/// link surfaces the window and starts the (confirmation-gated) pairing; a
+/// malformed link is logged bounded — never echoing the link — and changes
+/// nothing.
 fn handle_deep_link_urls(app: &tauri::AppHandle, urls: &[tauri::Url]) {
     for url in urls {
-        if url.scheme() != "openwave" {
-            continue;
-        }
-        focus_main_window(app);
-        match provision_gateway_url(url) {
-            Ok(gateway_url) => spawn_pairing(app.clone(), gateway_url),
+        match provision_link(url) {
+            Ok(link) => {
+                focus_main_window(app);
+                spawn_pairing(app.clone(), link);
+            }
             Err(reason) => log_pairing(app, &format!("ignored a deep link: {reason}")),
         }
     }
@@ -83,19 +108,30 @@ pub(crate) fn focus_main_window(app: &tauri::AppHandle) {
     }
 }
 
-/// Extract the gateway URL from a provision link.
+/// Parse and validate a provision link.
 ///
-/// The contract is strict — scheme `openwave`, action `provision`, exactly
-/// one query parameter named `gateway` — so a malformed link is refused
-/// whole rather than partially honored. The gateway URL value itself is held
-/// to the gateway contract server-side, before anything is written.
-fn provision_gateway_url(url: &tauri::Url) -> Result<String, String> {
+/// The contract is strict — scheme `openwave`, action `provision` with no
+/// userinfo, port, or extra path, exactly one query parameter named
+/// `gateway`, and a gateway value that is an http(s) URL with no query or
+/// fragment — so a malformed or hostile link is refused whole rather than
+/// partially honored. Near-miss gateway values matter: the conflict check on
+/// the write path compares normalized URL strings, so accepting a decorated
+/// variant would mint a distinct, permanently conflicting policy value. The
+/// gateway URL is additionally held to the connectors contract server-side.
+fn provision_link(url: &tauri::Url) -> Result<ProvisionLink, String> {
     if url.scheme() != "openwave" {
         return Err("not an openwave:// link".into());
     }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("the link must not carry credentials".into());
+    }
+    if url.port().is_some() {
+        return Err("the link must not carry a port".into());
+    }
     // `openwave://provision` parses the action as a host; a bare
     // `openwave:provision` parses it as the path. Anything left over in the
-    // other position means a different link shape.
+    // other position means a different link shape. The host is opaque for a
+    // custom scheme, so a percent-encoded spelling does not match.
     let action = match (url.host_str(), url.path().trim_matches('/')) {
         (Some(host), "") => host.to_string(),
         (None, path) => path.to_string(),
@@ -117,25 +153,100 @@ fn provision_gateway_url(url: &tauri::Url) -> Result<String, String> {
     if value.is_empty() {
         return Err("the provision link carries an empty gateway URL".into());
     }
-    Ok(value.into_owned())
+    let gateway =
+        tauri::Url::parse(&value).map_err(|_| "the gateway URL is invalid".to_string())?;
+    if !matches!(gateway.scheme(), "http" | "https") {
+        return Err("the gateway URL must use http or https".into());
+    }
+    if gateway.query().is_some() || gateway.fragment().is_some() {
+        return Err("the gateway URL must not carry a query or fragment".into());
+    }
+    Ok(ProvisionLink {
+        origin: gateway.origin().ascii_serialization(),
+        gateway_url: value.into_owned(),
+    })
 }
 
-fn spawn_pairing(app: tauri::AppHandle, gateway_url: String) {
+fn spawn_pairing(app: tauri::AppHandle, link: ProvisionLink) {
+    if app
+        .state::<PairingStore>()
+        .in_flight
+        .swap(true, Ordering::SeqCst)
+    {
+        log_pairing(
+            &app,
+            "a pairing is already awaiting confirmation; ignored another provision link",
+        );
+        return;
+    }
     tauri::async_runtime::spawn(async move {
-        match pair(&app, &gateway_url).await {
-            Ok(base_url) => log_pairing(&app, &format!("provisioned to {base_url}")),
+        let origin = link.origin.clone();
+        let confirm_app = app.clone();
+        let pair_app = app.clone();
+        let outcome = pair_after_confirmation(
+            link,
+            move |origin| confirm_pairing(&confirm_app, origin),
+            move |gateway_url| pair(pair_app, gateway_url),
+        )
+        .await;
+        match outcome {
+            Ok(Some(())) => log_pairing(&app, &format!("provisioned to {origin}")),
+            Ok(None) => log_pairing(&app, &format!("pairing with {origin} declined")),
             Err(reason) => log_pairing(&app, &format!("pairing failed: {reason}")),
         }
+        app.state::<PairingStore>()
+            .in_flight
+            .store(false, Ordering::SeqCst);
     });
+}
+
+/// The confirmation gate, separated from the dialog and the store so the
+/// decision path is testable without a GUI: `confirm` sees only the gateway
+/// origin, and nothing runs `pair` but a confirming answer.
+async fn pair_after_confirmation<C, P, F>(
+    link: ProvisionLink,
+    confirm: C,
+    pair: P,
+) -> Result<Option<()>, String>
+where
+    C: FnOnce(&str) -> bool,
+    P: FnOnce(String) -> F,
+    F: std::future::Future<Output = Result<(), String>>,
+{
+    if !confirm(&link.origin) {
+        return Ok(None);
+    }
+    pair(link.gateway_url).await.map(Some)
+}
+
+/// Ask the user — in a native dialog, before anything is probed or written —
+/// whether this device should become managed by `origin`. Blocking is fine
+/// here: the pairing task runs on the async runtime's worker pool, never the
+/// main thread.
+fn confirm_pairing(app: &tauri::AppHandle, origin: &str) -> bool {
+    app.dialog()
+        .message(format!(
+            "Pair OpenWave with {origin}?\n\nThis device will become managed by that gateway: \
+             it will control which models are available, and the pairing cannot be undone from \
+             within OpenWave."
+        ))
+        .title("Pair with a model gateway")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Pair".to_string(),
+            "Cancel".to_string(),
+        ))
+        .blocking_show()
 }
 
 /// Validate, probe, and provision — all server-side. The sign-in gate is a
 /// separate surface: once policy flips to managed it presents itself on its
 /// next poll, so pairing does not drive the renderer.
-async fn pair(app: &tauri::AppHandle, gateway_url: &str) -> Result<String, String> {
-    let store = wait_store(app).await?;
-    openwave_server::pair_with_gateway(&*store, gateway_url)
+async fn pair(app: tauri::AppHandle, gateway_url: String) -> Result<(), String> {
+    let store = wait_store(&app).await?;
+    openwave_server::pair_with_gateway(&*store, &gateway_url)
         .await
+        .map(|_| ())
         .map_err(|error| error.to_string())
 }
 
@@ -152,8 +263,9 @@ async fn wait_store(app: &tauri::AppHandle) -> Result<Arc<dyn Store>, String> {
 }
 
 /// One bounded, secret-free line per pairing attempt: stderr for terminal
-/// launches, `pairing.log` under app-data for GUI launches. Gateway errors
-/// already strip URLs and token material; the raw link is never echoed.
+/// launches, `pairing.log` under app-data for GUI launches. Only the gateway
+/// origin is ever named — never the full link or URL — and gateway errors
+/// already strip URLs and token material.
 fn log_pairing(app: &tauri::AppHandle, message: &str) {
     use std::io::Write;
     eprintln!("openwave-desktop: gateway pairing: {message}");
@@ -170,7 +282,9 @@ fn log_pairing(app: &tauri::AppHandle, message: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::provision_gateway_url;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::{pair_after_confirmation, provision_link, ProvisionLink};
 
     #[test]
     fn provision_links_are_held_to_the_contract() {
@@ -190,7 +304,7 @@ mod tests {
                 Some("https://gw.example"),
             ),
             // Wrong action, missing/empty/duplicated/unknown parameters,
-            // trailing path, foreign scheme: all refused whole.
+            // trailing path, foreign scheme: refused whole.
             ("openwave://settings?gateway=https://gw.example", None),
             ("openwave://provision", None),
             ("openwave://provision?gateway=", None),
@@ -207,14 +321,75 @@ mod tests {
                 None,
             ),
             ("https://provision?gateway=https://gw.example", None),
+            // Hostile decoration of the link itself: userinfo, an explicit
+            // port, a percent-encoded action host.
+            (
+                "openwave://user:pw@provision?gateway=https://gw.example",
+                None,
+            ),
+            ("openwave://provision:9999?gateway=https://gw.example", None),
+            ("openwave://pro%76ision?gateway=https://gw.example", None),
+            // Near-miss gateway values: not a URL, wrong scheme, or carrying
+            // a query or fragment (which would also leak into any log that
+            // echoed them, and would mint a permanently conflicting policy
+            // value under the string-equality conflict check).
+            ("openwave://provision?gateway=notaurl", None),
+            ("openwave://provision?gateway=ftp://gw.example", None),
+            (
+                "openwave://provision?gateway=https://gw.example/?token=x",
+                None,
+            ),
+            (
+                "openwave://provision?gateway=https%3A%2F%2Fgw.example%2F%23frag",
+                None,
+            ),
         ];
         for (link, expected) in cases {
-            let url = tauri::Url::parse(link).expect(link);
+            let parsed = tauri::Url::parse(link)
+                .ok()
+                .and_then(|url| provision_link(&url).ok());
             assert_eq!(
-                provision_gateway_url(&url).ok().as_deref(),
+                parsed.as_ref().map(|link| link.gateway_url.as_str()),
                 *expected,
                 "{link}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn only_a_confirmed_pairing_reaches_the_write_path() {
+        let link = || ProvisionLink {
+            gateway_url: "https://gw.example".to_string(),
+            origin: "https://gw.example".to_string(),
+        };
+
+        // Declined: the pairing action is never invoked.
+        let paired = AtomicBool::new(false);
+        let outcome = pair_after_confirmation(
+            link(),
+            |_| false,
+            |_| {
+                paired.store(true, Ordering::SeqCst);
+                async { Ok(()) }
+            },
+        )
+        .await;
+        assert_eq!(outcome, Ok(None));
+        assert!(!paired.load(Ordering::SeqCst));
+
+        // Confirmed: the dialog sees the origin, the pairing action the URL.
+        let outcome = pair_after_confirmation(
+            link(),
+            |origin| {
+                assert_eq!(origin, "https://gw.example");
+                true
+            },
+            |gateway_url| async move {
+                assert_eq!(gateway_url, "https://gw.example");
+                Ok(())
+            },
+        )
+        .await;
+        assert_eq!(outcome, Ok(Some(())));
     }
 }

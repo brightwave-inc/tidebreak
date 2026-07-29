@@ -9,7 +9,7 @@
 //! renderer-writable route.
 
 use openwave_connectors::{GatewayAuth, GatewayAuthConfig};
-use openwave_core::{Result, Store};
+use openwave_core::{AgentError, Result, Store};
 use tokio::sync::Mutex;
 
 use crate::managed_policy;
@@ -38,7 +38,19 @@ pub async fn pair_with_gateway(store: &dyn Store, gateway_url: &str) -> Result<S
     let base_url = config.base_url().to_string();
     GatewayAuth::new(config)?.meta().await?;
     let _guard = PAIRING.lock().await;
-    managed_policy::provision(store, &base_url).await?;
+    // Refuse a conflicting pairing before either write, then write the
+    // provider configuration before the sticky policy. Neither write is
+    // transactional with the other, so the order decides the failure mode:
+    // provider-first fails into a still-unmanaged profile recoverable from
+    // settings, while policy-first could strand a permanently managed
+    // profile with no configured provider.
+    if let Some(existing) = managed_policy::provisioned_url(store).await? {
+        if existing != base_url {
+            return Err(AgentError::config(
+                "this profile is already provisioned to a different gateway",
+            ));
+        }
+    }
     let mut provider = providers::read_config(store, ProviderKind::ModelGateway).await?;
     if provider.base_url.as_deref() != Some(base_url.as_str()) {
         // A model snapshot synced from a previously configured gateway does
@@ -48,6 +60,7 @@ pub async fn pair_with_gateway(store: &dyn Store, gateway_url: &str) -> Result<S
     }
     provider.enabled = true;
     providers::write_config(store, ProviderKind::ModelGateway, &provider).await?;
+    managed_policy::provision(store, &base_url).await?;
     Ok(base_url)
 }
 
@@ -74,6 +87,15 @@ mod tests {
             .unwrap(),
         );
         (store, directory)
+    }
+
+    /// An address nothing listens on: bound to reserve an ephemeral port,
+    /// then dropped, so the probe fails fast and deterministically.
+    async fn unreachable_base() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        format!("http://{address}")
     }
 
     /// A gateway that answers only the unauthenticated identity probe.
@@ -146,9 +168,8 @@ mod tests {
         let (store, _directory) = test_store().await;
 
         // Unreachable gateway: the probe fails before any write.
-        assert!(pair_with_gateway(&*store, "http://127.0.0.1:9")
-            .await
-            .is_err());
+        let dead = unreachable_base().await;
+        assert!(pair_with_gateway(&*store, &dead).await.is_err());
         assert!(!resolve(&*store, &NoOsPolicy).await.unwrap().managed);
         let provider = providers::read_config(&*store, ProviderKind::ModelGateway)
             .await
