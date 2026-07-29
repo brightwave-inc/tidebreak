@@ -59,6 +59,49 @@ async fn maps_each_passage_to_the_page_it_appears_on() {
     assert_eq!(page_of("Bravo"), 2);
 }
 
+/// The geometry half: a real parse should place text on the page, not just name
+/// the page. Asserts the rectangle is plausible rather than exact — the precise
+/// numbers are PDFium's text metrics, which are not ours to pin.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn positions_text_within_the_page_it_appears_on() {
+    let parser = LiteParsePdfParser::new();
+    let parsed = parser
+        .parse(TWO_PAGE_PDF, "application/pdf")
+        .await
+        .expect("liteparse should parse a valid two-page PDF");
+
+    let positioned: Vec<_> = parsed
+        .source_regions
+        .iter()
+        .filter_map(|region| match region.location {
+            SourceLocation::Page { number, bounds } => bounds.map(|bounds| (number.get(), bounds)),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        !positioned.is_empty(),
+        "expected at least one positioned region, got: {:?}",
+        parsed.source_regions
+    );
+    for (page, bounds) in &positioned {
+        assert!(*page >= 1 && *page <= 2, "unexpected page {page}");
+        assert!(
+            bounds.is_valid(),
+            "bounds must lie within the page: {bounds:?}"
+        );
+    }
+    // The fixture draws its text near the top of the page (y = 700 of 792), so
+    // a region placed in the bottom half would mean the vertical axis is
+    // flipped — the classic PDF-coordinates bug, and one a viewer would show.
+    let (_, first) = positioned.first().expect("checked non-empty");
+    assert!(
+        first.top < openwave_retrieval::PAGE_BOUNDS_SCALE / 2,
+        "text drawn near the page top should not land in the bottom half: {first:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn surfaces_an_error_for_bytes_that_are_not_a_pdf() {
     let parser = LiteParsePdfParser::new();

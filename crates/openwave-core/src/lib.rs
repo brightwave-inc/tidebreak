@@ -139,7 +139,7 @@ pub use model::{
     ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnAgentRunWait, TurnAgentRunWaitSet,
     TurnAgentRunWaitStatus, TurnCheckpointProgress, TurnClientWait, TurnClientWaitStatus,
     TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer, TurnSteerStatus,
-    MAX_ATTACHMENT_REVISION, MAX_MESSAGE_ATTACHMENTS, MAX_ROOT_ATTACHMENTS,
+    MAX_ATTACHMENT_REVISION, MAX_MESSAGE_ATTACHMENTS, MAX_ROOT_ATTACHMENTS, PAGE_BOUNDS_SCALE,
 };
 pub use preview::{
     format_bytes, ResultEntry, ResultEntryKind, ResultFailure, ToolActionPreview,
