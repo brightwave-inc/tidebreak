@@ -125,7 +125,7 @@ export function ManagedGate({
           // product is correct, not a dead end.
           setPolicyState({
             kind: "resolved",
-            policy: { managed: false, source: "unmanaged" },
+            policy: { managed: false, source: "unmanaged", misconfigured: false },
           });
           return;
         }

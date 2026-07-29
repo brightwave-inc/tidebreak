@@ -68,6 +68,15 @@ image = { version = "=0.25.10", default-features = false, features = ["png", "jp
 # regular dependency, not a macOS-only one, so the extraction stays
 # unit-testable on every OS.
 plist = "=1.10.0"
+# Managed-policy resolution deliberately projects authority failures into a
+# minimal misconfigured state; these warnings are the admin's field
+# diagnostic for what exactly is broken.
+tracing = "=0.1.44"
+
+[target.'cfg(unix)'.dependencies]
+# Effective-uid account lookup (getpwuid_r) for the macOS managed-preferences
+# user channel; $USER is launcher-controlled and must not pick the path.
+libc = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }

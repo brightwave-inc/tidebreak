@@ -16,7 +16,7 @@
 //! route, which is what makes the state sticky rather than a setting.
 
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use openwave_core::{AgentError, Config, Result, Store};
@@ -140,35 +140,141 @@ impl ManagedPreferencesSource {
     pub(crate) fn for_bundle_id(bundle_id: &str) -> Self {
         let root = PathBuf::from("/Library/Managed Preferences");
         let mut paths = Vec::new();
-        if let Some(user) = std::env::var_os("USER").filter(|user| !user.is_empty()) {
-            paths.push(root.join(user).join(format!("{bundle_id}.plist")));
+        // The user channel is scoped by the *effective* uid's account name,
+        // resolved from the user database — never `$USER`, which any launcher
+        // controls and could point at another account's channel or, via path
+        // separators, outside the managed-preferences tree entirely.
+        if let Some(user) = effective_user_name().filter(|name| is_safe_path_component(name)) {
+            paths.push(root.join(&user).join(format!("{bundle_id}.plist")));
         }
         paths.push(root.join(format!("{bundle_id}.plist")));
         Self { paths }
     }
 }
 
+/// The account name of the effective uid, from the user database rather than
+/// the environment. `None` when the uid has no passwd entry.
+#[cfg(unix)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn effective_user_name() -> Option<String> {
+    let mut passwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    let mut buffer = vec![0u8; 1024];
+    loop {
+        let status = unsafe {
+            libc::getpwuid_r(
+                libc::geteuid(),
+                &mut passwd,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        if status == libc::ERANGE && buffer.len() < (1 << 16) {
+            buffer.resize(buffer.len() * 2, 0);
+            continue;
+        }
+        if status != 0 || result.is_null() {
+            return None;
+        }
+        let name = unsafe { std::ffi::CStr::from_ptr(passwd.pw_name) };
+        return name
+            .to_str()
+            .ok()
+            .map(str::to_owned)
+            .filter(|name| !name.is_empty());
+    }
+}
+
+#[cfg(not(unix))]
+#[allow(dead_code)]
+fn effective_user_name() -> Option<String> {
+    None
+}
+
+/// A resolved account name gets joined into a filesystem path; refuse any
+/// shape that could traverse rather than trust the user database blindly.
+fn is_safe_path_component(name: &str) -> bool {
+    !name.is_empty() && name != "." && !name.contains("..") && !name.contains(['/', '\\', '\0'])
+}
+
 impl OsPolicySource for ManagedPreferencesSource {
+    // Reading the forced-domain files directly assumes the app stays
+    // unsandboxed: the App Sandbox reports paths it can't reach as EPERM
+    // rather than ENOENT, which this reader would take for a broken channel.
+    // If OpenWave ever adopts the App Sandbox, this must move to the
+    // sandbox-safe CFPreferences API.
     fn gateway_url(&self) -> Result<Option<String>> {
+        let mut broken = None;
         for path in &self.paths {
-            let bytes = match std::fs::read(path) {
-                Ok(bytes) => bytes,
-                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            // A broken channel falls through instead of aborting the search:
+            // an unreadable user-channel artifact must not hide the
+            // device-channel policy the organization actually deployed.
+            // Misconfigured is reported only when no channel yields a usable
+            // value and at least one had a present-but-broken artifact.
+            match managed_plist_channel(path) {
+                Ok(Some(url)) => return Ok(Some(url)),
+                Ok(None) => {}
                 Err(error) => {
-                    return Err(AgentError::config(format!(
-                        "managed preferences {} are unreadable: {error}",
-                        path.display()
-                    )))
+                    tracing::warn!("managed-preferences channel skipped: {error}");
+                    broken.get_or_insert(error);
                 }
-            };
-            // A domain that forces other keys without GatewayURL asserts no
-            // gateway here; keep looking in the next channel.
-            if let Some(url) = gateway_url_from_managed_plist(&bytes)? {
-                return Ok(Some(url));
             }
         }
-        Ok(None)
+        match broken {
+            Some(error) => Err(error),
+            None => Ok(None),
+        }
     }
+}
+
+/// Read one managed-preferences channel: an absent file (or absent key) is
+/// `None`. Only a root-owned file is honored — MDM materializes these as
+/// root, and a plist planted by an unprivileged user must never assert
+/// device policy. Ownership is taken from the opened handle, so the check
+/// and the read cannot be raced apart.
+fn managed_plist_channel(path: &Path) -> Result<Option<String>> {
+    use std::io::Read;
+
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(AgentError::config(format!(
+                "managed preferences {} are unreadable: {error}",
+                path.display()
+            )))
+        }
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let owner = file
+            .metadata()
+            .map_err(|error| {
+                AgentError::config(format!(
+                    "managed preferences {} are unreadable: {error}",
+                    path.display()
+                ))
+            })?
+            .uid();
+        if owner != 0 {
+            return Err(AgentError::config(format!(
+                "managed preferences {} are owned by uid {owner}, not root; refusing to honor them",
+                path.display()
+            )));
+        }
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|error| {
+        AgentError::config(format!(
+            "managed preferences {} are unreadable: {error}",
+            path.display()
+        ))
+    })?;
+    // A domain that forces other keys without GatewayURL asserts no gateway
+    // in this channel.
+    gateway_url_from_managed_plist(&bytes)
 }
 
 /// Extract `GatewayURL` from a managed-preferences plist (binary or XML).
@@ -205,9 +311,14 @@ pub(crate) struct RegistryPolicySource;
 #[cfg(windows)]
 impl OsPolicySource for RegistryPolicySource {
     fn gateway_url(&self) -> Result<Option<String>> {
+        // KEY_WOW64_64KEY pins the native 64-bit view: policy lives in the
+        // real Policies hive, and a future 32-bit build must not be silently
+        // redirected to Wow6432Node.
         let key = match winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
-            .open_subkey(r"Software\Policies\Brightwave\OpenWave")
-        {
+            .open_subkey_with_flags(
+                r"Software\Policies\Brightwave\OpenWave",
+                winreg::enums::KEY_READ | winreg::enums::KEY_WOW64_64KEY,
+            ) {
             Ok(key) => key,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
             Err(error) => {
@@ -301,17 +412,27 @@ struct ProvisionedPolicy {
 /// through [`validated_gateway_url`], so consumers always see one URL shape
 /// regardless of which authority asserted it — no platform reader has to
 /// remember to validate.
+///
+/// The OS artifact is read on every call, deliberately: an MDM push or
+/// removal becomes visible on the next `/policy` read without an app
+/// restart, and the artifacts are tiny.
 pub(crate) async fn resolve(
     store: &dyn Store,
     os_policy: &dyn OsPolicySource,
 ) -> Result<ManagedPolicy> {
     match os_policy.gateway_url() {
         Ok(Some(gateway_url)) => return Ok(asserted(ManagedPolicySource::Os, &gateway_url)),
-        Err(_) => return Ok(ManagedPolicy::misconfigured(ManagedPolicySource::Os)),
+        Err(error) => {
+            // The projection stays minimal; this warning is the admin's
+            // field diagnostic for what exactly is broken.
+            tracing::warn!("OS-managed policy is present but unusable: {error}");
+            return Ok(ManagedPolicy::misconfigured(ManagedPolicySource::Os));
+        }
         Ok(None) => {}
     }
     if let Some(value) = store.get_setting(SETTING_KEY).await? {
         let Ok(saved) = serde_json::from_value::<ProvisionedPolicy>(value) else {
+            tracing::warn!("stored provisioned policy does not decode; resolving misconfigured");
             return Ok(ManagedPolicy::misconfigured(
                 ManagedPolicySource::Provisioned,
             ));
@@ -339,7 +460,10 @@ fn asserted(source: ManagedPolicySource, gateway_url: &str) -> ManagedPolicy {
             source,
             misconfigured: false,
         },
-        Err(_) => ManagedPolicy::misconfigured(source),
+        Err(error) => {
+            tracing::warn!("{source:?}-asserted gateway URL fails the contract: {error}");
+            ManagedPolicy::misconfigured(source)
+        }
     }
 }
 
@@ -581,6 +705,26 @@ mod tests {
             blank.as_bytes(),
         ] {
             assert!(gateway_url_from_managed_plist(broken).is_err());
+        }
+    }
+
+    /// The guard between the user database and the filesystem join: no
+    /// resolved account name may escape the managed-preferences tree.
+    #[test]
+    fn a_resolved_account_name_never_traverses_the_preferences_tree() {
+        assert!(is_safe_path_component("abaas"));
+        assert!(is_safe_path_component("svc-mdm.local"));
+        for hostile in [
+            "",
+            ".",
+            "..",
+            "../../tmp/evil",
+            "a/b",
+            "a\\b",
+            "x..y",
+            "nul\0byte",
+        ] {
+            assert!(!is_safe_path_component(hostile), "accepted {hostile:?}");
         }
     }
 

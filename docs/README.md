@@ -24,6 +24,8 @@ Project documentation, versioned alongside the code.
 - [Code execution](code-execution.md) — the provider-neutral `exec` contract,
   native local sandbox, configuration boundary, and managed-provider extension
   path.
+- [OS-managed policy (MDM)](managed-policy.md) — the per-platform artifacts an
+  administrator deploys to point OpenWave at a managed model gateway.
 - [Releases and versioning](releases.md) — semantic PR titles, native release
   drafts, tag-derived macOS builds, and the deliberate path to `1.0.0`.
 
