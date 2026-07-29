@@ -21,6 +21,7 @@ import {
   SidebarHeader,
   useSidebarWidth,
 } from "./primitives";
+import { useTheme } from "@/theme";
 import { useUiStore } from "@/UiStore";
 
 /**
@@ -34,7 +35,8 @@ import { useUiStore } from "@/UiStore";
  */
 export function SidebarFrame({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
-  const { themeMode, cycleTheme, updateState, restartForUpdate } = useApp();
+  const { updateState, restartForUpdate } = useApp();
+  const { mode: themeMode, cycle: cycleTheme } = useTheme();
   const toggleSidebar = useUiStore((state) => state.toggleSidebar);
   const isCompact = useSidebarWidth() === "compact";
   const pathname = useRouterState({ select: (state) => state.location.pathname });

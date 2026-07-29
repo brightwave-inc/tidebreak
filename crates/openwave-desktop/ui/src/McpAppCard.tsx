@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AppWindow, ShieldCheck } from "lucide-react";
 import { useApp } from "./AppContext";
 import { createMcpAppBridge, type McpAppBridge } from "./McpAppBridge";
+import { useTheme } from "./theme";
 
 /**
  * The sandboxed surface for an MCP Apps view.
@@ -37,23 +38,15 @@ export function McpAppCard({
   chatId?: string;
   callId?: string;
 }) {
-  const { client, themeMode } = useApp();
+  const { client } = useApp();
+  const { resolved: resolvedTheme } = useTheme();
   const [state, setState] = useState<ViewState>({ kind: "loading" });
   const [frameHeight, setFrameHeight] = useState(DEFAULT_FRAME_HEIGHT);
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const bridgeRef = useRef<McpAppBridge | null>(null);
 
-  const resolveTheme = useCallback(
-    (): "light" | "dark" =>
-      themeMode === "system"
-        ? window.matchMedia?.("(prefers-color-scheme: dark)").matches
-          ? "dark"
-          : "light"
-        : themeMode,
-    [themeMode],
-  );
-  const themeRef = useRef(resolveTheme);
-  themeRef.current = resolveTheme;
+  const themeRef = useRef(resolvedTheme);
+  themeRef.current = resolvedTheme;
 
   // The bridge listener must exist before the frame's document runs, or the
   // view's ui/initialize request is lost and it hangs until its timeout.
@@ -63,7 +56,7 @@ export function McpAppCard({
   useEffect(() => {
     const bridge = createMcpAppBridge({
       frame: () => frameRef.current?.contentWindow ?? null,
-      theme: () => themeRef.current(),
+      theme: () => themeRef.current,
       onHeight: setFrameHeight,
     });
     bridgeRef.current = bridge;

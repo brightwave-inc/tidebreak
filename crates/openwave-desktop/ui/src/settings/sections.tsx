@@ -15,6 +15,7 @@ import {
 
 import { useApp } from "@/AppContext";
 import { useManagedPolicy } from "@/managedPolicy";
+import { useTheme } from "@/theme";
 import { AppearancePanel } from "./AppearancePanel";
 import { CitationsPanel } from "./CitationsPanel";
 import { CodeExecutionPanel } from "./CodeExecutionPanel";
@@ -102,8 +103,8 @@ function CitationsSection() {
 }
 
 function AppearanceSection() {
-  const { themeMode, setThemeMode } = useApp();
-  return <AppearancePanel mode={themeMode} onChange={setThemeMode} />;
+  const { mode, setMode } = useTheme();
+  return <AppearancePanel mode={mode} onChange={setMode} />;
 }
 
 function UpdatesSection() {
