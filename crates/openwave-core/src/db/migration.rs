@@ -35,7 +35,105 @@ impl MigratorTrait for Migrator {
             Box::new(AddAgentRunModel),
             Box::new(AddToolResultPreviews),
             Box::new(SplitAgentRunExecution),
+            Box::new(AddOperationLog),
         ]
+    }
+}
+
+/// Adds the durable reverse-RPC operation log (issue #858): a crash-safe,
+/// idempotency-keyed record of host-mediated operations a sandbox-resident run
+/// requested back over the reverse channel.
+///
+/// The table is keyed by `(run_id, operation_id)` and holds the operation's
+/// state machine (`claimed -> recorded | failed`), the request `fingerprint`
+/// that fences a re-issue, an `external_effect` flag, the claiming process
+/// lifetime's `owner_epoch` (which separates a concurrent duplicate from an
+/// after-crash re-issue), and the recorded terminal `body`.
+///
+/// The schema is deliberately shaped for the retention follow-up (#859): `body`
+/// is nullable and paired with a `retained` flag, so #859 can evict a full
+/// response body down to a commit marker — clearing `body` and `retained` while
+/// keeping the row's state, `external_effect`, and timestamps — without a
+/// migration rewrite. This is a purely additive migration (a new table, no
+/// change to existing shapes), with a symmetric `down` and identical shape on
+/// SQLite and PostgreSQL.
+struct AddOperationLog;
+
+impl MigrationName for AddOperationLog {
+    fn name(&self) -> &str {
+        "m20260728_000022_add_operation_log"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddOperationLog {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(OperationLog::Table)
+                    .col(ColumnDef::new(OperationLog::RunId).uuid().not_null())
+                    .col(ColumnDef::new(OperationLog::OperationId).uuid().not_null())
+                    .col(
+                        ColumnDef::new(OperationLog::State)
+                            .string_len(16)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(OperationLog::Fingerprint)
+                            .binary()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(OperationLog::ExternalEffect)
+                            .boolean()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(OperationLog::OwnerEpoch).uuid().not_null())
+                    .col(ColumnDef::new(OperationLog::Body).binary().null())
+                    .col(
+                        ColumnDef::new(OperationLog::Retained)
+                            .boolean()
+                            .not_null()
+                            .default(true),
+                    )
+                    .col(
+                        ColumnDef::new(OperationLog::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(OperationLog::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .primary_key(
+                        Index::create()
+                            .name("pk_operation_log")
+                            .col(OperationLog::RunId)
+                            .col(OperationLog::OperationId),
+                    )
+                    .check(Expr::col(OperationLog::State).is_in(["claimed", "recorded", "failed"]))
+                    // A claimed entry has not recorded a body yet.
+                    .check(
+                        Expr::col(OperationLog::State)
+                            .ne("claimed")
+                            .or(Expr::col(OperationLog::Body).is_null()),
+                    )
+                    // An unretained entry keeps only a commit marker, never a body.
+                    .check(
+                        Expr::col(OperationLog::Retained)
+                            .or(Expr::col(OperationLog::Body).is_null()),
+                    )
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(OperationLog::Table).to_owned())
+            .await
     }
 }
 
@@ -6643,6 +6741,21 @@ enum OutputRevisionCitation {
     TurnId,
     EvidenceCallId,
     EvidenceRank,
+}
+
+#[derive(DeriveIden)]
+enum OperationLog {
+    Table,
+    RunId,
+    OperationId,
+    State,
+    Fingerprint,
+    ExternalEffect,
+    OwnerEpoch,
+    Body,
+    Retained,
+    CreatedAt,
+    UpdatedAt,
 }
 
 #[derive(DeriveIden)]

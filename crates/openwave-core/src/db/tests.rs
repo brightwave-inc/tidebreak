@@ -15,6 +15,7 @@ mod context_checkpoint;
 mod delegated_file_read;
 mod message_attachment;
 mod multi_agent_wait;
+mod operation_log;
 mod output;
 mod parent_terminal_guard;
 mod root_attachment;

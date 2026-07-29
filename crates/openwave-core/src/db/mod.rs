@@ -57,7 +57,8 @@ use crate::storage::{
     FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
     FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
     JournaledToolApprovalOutcome, JournaledTurnOutcome, JournaledTurnSteerOutcome,
-    ParkSandboxToolCallOutcome, ParkTurnForAgentRunInboxOutcome, ParkTurnForAgentRunWaitSetOutcome,
+    OperationClaimOutcome, OperationLogEntry, OperationLogWrite, ParkSandboxToolCallOutcome,
+    ParkTurnForAgentRunInboxOutcome, ParkTurnForAgentRunWaitSetOutcome,
     ParkTurnForClientCallOutcome, RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome,
     RequestToolApprovalOutcome, RequestTurnCancellationOutcome, ResolveSandboxToolCallOutcome,
     ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome, Store,
@@ -3058,6 +3059,59 @@ impl Store for DbStore {
 
     async fn list_events(&self, chat_id: ChatId, after: i64) -> Result<Vec<SequencedEvent>> {
         ops::conversation::list_events(self, chat_id, after).await
+    }
+
+    async fn claim_operation(
+        &self,
+        run_id: uuid::Uuid,
+        operation_id: uuid::Uuid,
+        fingerprint: &[u8],
+        external_effect: bool,
+        owner_epoch: uuid::Uuid,
+    ) -> Result<OperationClaimOutcome> {
+        ops::operation_log::claim(
+            self,
+            run_id,
+            operation_id,
+            fingerprint,
+            external_effect,
+            owner_epoch,
+        )
+        .await
+    }
+
+    async fn record_operation(
+        &self,
+        run_id: uuid::Uuid,
+        operation_id: uuid::Uuid,
+        body: &[u8],
+    ) -> Result<OperationLogWrite> {
+        ops::operation_log::record(self, run_id, operation_id, body).await
+    }
+
+    async fn fail_operation(
+        &self,
+        run_id: uuid::Uuid,
+        operation_id: uuid::Uuid,
+        body: &[u8],
+    ) -> Result<OperationLogWrite> {
+        ops::operation_log::fail(self, run_id, operation_id, body).await
+    }
+
+    async fn operation_state(
+        &self,
+        run_id: uuid::Uuid,
+        operation_id: uuid::Uuid,
+    ) -> Result<Option<OperationLogEntry>> {
+        ops::operation_log::state(self, run_id, operation_id).await
+    }
+
+    async fn evict_operation(&self, run_id: uuid::Uuid, operation_id: uuid::Uuid) -> Result<()> {
+        ops::operation_log::evict(self, run_id, operation_id).await
+    }
+
+    async fn operation_log_len(&self, run_id: uuid::Uuid) -> Result<usize> {
+        ops::operation_log::len(self, run_id).await
     }
 }
 

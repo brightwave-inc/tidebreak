@@ -86,10 +86,17 @@ pub enum ClaimOutcome {
 /// A crash-safe error the durable store may surface. In-memory writes never
 /// fail, so [`InMemoryOperationStore`] never returns one.
 #[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
 pub enum StoreError {
     /// The operation identity was not `Claimed` when a terminal write arrived.
     #[error("operation was not in a claimable state for a terminal write")]
     NotClaimed,
+    /// The durable backend failed (I/O, transaction, or (de)serialization).
+    ///
+    /// A durable store surfaces this so a caller never mistakes an unreachable
+    /// database for a clean "not claimed"; the in-memory store never returns it.
+    #[error("operation store backend failure: {0}")]
+    Backend(String),
 }
 
 /// The durable-storage seam for the reverse-RPC operation log.

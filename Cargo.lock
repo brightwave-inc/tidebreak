@@ -6646,6 +6646,7 @@ dependencies = [
  "openwave-mcp",
  "openwave-retrieval",
  "openwave-router",
+ "openwave-sandbox-protocol",
  "openwave-web-search",
  "reqwest 0.12.28",
  "schemars 1.2.2",

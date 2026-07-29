@@ -354,6 +354,45 @@ pub mod context_checkpoint {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod operation_log {
+    use sea_orm::entity::prelude::*;
+
+    /// One durable reverse-RPC operation-log entry, keyed by `(run_id,
+    /// operation_id)`. Bodies are opaque blobs; the protocol tier owns their
+    /// typed meaning. See `openwave-sandbox-protocol::oplog` and issue #858.
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "operation_log")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub run_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub operation_id: Uuid,
+        /// `claimed` | `recorded` | `failed`.
+        pub state: String,
+        /// The serialized request the identity was first claimed with; a later
+        /// re-issue with a different fingerprint is a conflict.
+        pub fingerprint: Vec<u8>,
+        /// Whether the claimed operation carries an external effect.
+        pub external_effect: bool,
+        /// The process lifetime that holds the claim, distinguishing a
+        /// concurrent duplicate from an after-crash re-issue.
+        pub owner_epoch: Uuid,
+        /// The recorded terminal body, `NULL` while `claimed` or once #859
+        /// evicts the body down to a commit marker.
+        pub body: Option<Vec<u8>>,
+        /// Whether the terminal body is still retained (#859 clears this when it
+        /// keeps only a commit marker).
+        pub retained: bool,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod message_attachment {
     use sea_orm::entity::prelude::*;
 
