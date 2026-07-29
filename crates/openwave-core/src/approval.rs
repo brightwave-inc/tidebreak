@@ -85,6 +85,11 @@ pub enum ToolApprovalKind {
     /// grantable because a Settings edit can replace the process behind a
     /// stable tool namespace.
     ExternalMcpMayCallServer,
+    /// A `Workspace`-class action may create or modify files inside the chat
+    /// workspace. Gated only in [`crate::PermissionMode::Ask`]; approvable
+    /// once but not standing-grantable, because "stop asking about workspace
+    /// edits here" is exactly what switching the chat to `Auto` says.
+    WorkspaceMayModifyFiles,
     /// A Sensitive action with no presentable consent semantics: rejectable but
     /// not approvable from the renderer.
     Unsupported,
@@ -97,8 +102,29 @@ impl ToolApprovalKind {
             "search" => Self::SearchMayShareQueryAndExcerpts,
             "web_search" => Self::WebSearchMayShareQuery,
             "exec" => Self::ExecMayRunNetworkedCommand,
+            "write_file" | "create_deliverable" => Self::WorkspaceMayModifyFiles,
             name if name.starts_with("mcp__") => Self::ExternalMcpMayCallServer,
             _ => Self::Unsupported,
+        }
+    }
+
+    /// The consent semantics for a call, given the class its tool declares.
+    ///
+    /// Extends [`Self::for_tool_name`] with the one classification a name
+    /// alone cannot make: any `Workspace`-class tool without its own named
+    /// kind consents as a workspace edit, so a tool added later gates
+    /// correctly in `Ask` mode without registering its name here. Recovery of
+    /// a parked call re-derives the kind from the stored name only, so a
+    /// workspace tool unknown to [`Self::for_tool_name`] recovers as
+    /// `Unsupported` (rejectable-only) after a restart — fail-closed, and the
+    /// same degradation the folded database spellings already accept.
+    #[must_use]
+    pub fn for_call(name: &str, class: crate::tool::ApprovalClass) -> Self {
+        match Self::for_tool_name(name) {
+            Self::Unsupported if matches!(class, crate::tool::ApprovalClass::Workspace) => {
+                Self::WorkspaceMayModifyFiles
+            }
+            kind => kind,
         }
     }
 
@@ -116,6 +142,11 @@ impl ToolApprovalKind {
             // exact namespaced tool name disambiguates this renderer kind when
             // durable state is read, as it already does for web search.
             Self::ExternalMcpMayCallServer => "search_may_share_query_and_excerpts",
+            // Same closed-constraint fold: stored as the legacy spelling, and
+            // the tool name stored beside it recovers the workspace kind. A
+            // workspace tool the name table does not know recovers as a true
+            // `Unsupported` — rejectable-only, never silently approvable.
+            Self::WorkspaceMayModifyFiles => "unsupported",
             Self::Unsupported => "unsupported",
         }
     }
@@ -134,6 +165,10 @@ impl ToolApprovalKind {
             Self::WebSearchMayShareQuery => "web_search_may_share_query",
             Self::ExecMayRunNetworkedCommand => "exec_may_run_networked_command",
             Self::ExternalMcpMayCallServer => "external_mcp_may_call_server",
+            // Never stored: the kind is not standing-grantable (the chat's
+            // permission mode is the wider consent). Named anyway so the key
+            // vocabulary stays total.
+            Self::WorkspaceMayModifyFiles => "workspace_may_modify_files",
             Self::Unsupported => "unsupported",
         }
     }
@@ -146,6 +181,7 @@ impl ToolApprovalKind {
             "web_search_may_share_query" => Some(Self::WebSearchMayShareQuery),
             "exec_may_run_networked_command" => Some(Self::ExecMayRunNetworkedCommand),
             "external_mcp_may_call_server" => Some(Self::ExternalMcpMayCallServer),
+            "workspace_may_modify_files" => Some(Self::WorkspaceMayModifyFiles),
             "unsupported" => Some(Self::Unsupported),
             _ => None,
         }
@@ -159,6 +195,7 @@ impl ToolApprovalKind {
                 | Self::WebSearchMayShareQuery
                 | Self::ExecMayRunNetworkedCommand
                 | Self::ExternalMcpMayCallServer
+                | Self::WorkspaceMayModifyFiles
         )
     }
 
@@ -166,10 +203,17 @@ impl ToolApprovalKind {
     ///
     /// MCP is intentionally one-shot: its configured executable can change
     /// while retaining a model-visible namespace, so reusing consent by name
-    /// would silently widen authority.
+    /// would silently widen authority. Workspace edits are one-shot for the
+    /// opposite reason: their standing "yes" already exists as the chat's
+    /// `Auto` permission mode, and a second spelling of the same consent
+    /// would drift from the first.
     #[must_use]
     pub const fn is_standing_grantable(self) -> bool {
-        self.is_approvable() && !matches!(self, Self::ExternalMcpMayCallServer)
+        self.is_approvable()
+            && !matches!(
+                self,
+                Self::ExternalMcpMayCallServer | Self::WorkspaceMayModifyFiles
+            )
     }
 }
 

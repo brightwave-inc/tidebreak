@@ -157,6 +157,7 @@ pub mod chat {
         pub title: Option<String>,
         pub model: Option<String>,
         pub reasoning_effort: Option<String>,
+        pub permission_mode: Option<String>,
         pub attachment_revision: i64,
         pub created_at: DateTimeUtc,
     }

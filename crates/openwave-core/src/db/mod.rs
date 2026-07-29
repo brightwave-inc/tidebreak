@@ -37,7 +37,7 @@ use crate::model::{
     Chat, DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
     DocumentParseOutput, DocumentProcessingStatus, DocumentRecord, DocumentScope,
     DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message,
-    MessageAttachment, Project, ReasoningEffort, RootAttachmentChange,
+    MessageAttachment, PermissionMode, Project, ReasoningEffort, RootAttachmentChange,
     RootAttachmentChangeTerminal, SandboxToolCall, SandboxToolCallReceipt, SandboxToolCallRequest,
     SourceRegion, ToolCallRecord, ToolCallResolution, TurnAgentRunWaitStatus,
     TurnCheckpointProgress, TurnClientWaitStatus, TurnFailureRetry, TurnRun, TurnRunStatus,
@@ -1801,8 +1801,17 @@ impl Store for DbStore {
         title: Option<Option<String>>,
         model: Option<Option<String>>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
+        permission_mode: Option<Option<PermissionMode>>,
     ) -> Result<bool> {
-        ops::conversation::update_chat_metadata(self, id, title, model, reasoning_effort).await
+        ops::conversation::update_chat_metadata(
+            self,
+            id,
+            title,
+            model,
+            reasoning_effort,
+            permission_mode,
+        )
+        .await
     }
 
     async fn get_chat(&self, id: ChatId) -> Result<Option<Chat>> {

@@ -19,6 +19,7 @@ function chat(id: string, projectId: string | null): Chat {
     title: null,
     model: null,
     reasoning_effort: null,
+    permission_mode: null,
     attachment_revision: 0,
     root_attachments: [],
     created_at: "2026-07-21T12:00:00Z",

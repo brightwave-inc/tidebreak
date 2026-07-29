@@ -47,8 +47,8 @@ use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{AgentRunId, CallId, ChatId, MessageId, TurnId};
 use crate::image::{ImageAttachments, ImageData, ImageRef};
 use crate::model::{
-    Chat, Message, MessageAttachment, Role, ToolCallExecution, ToolCallRecord, ToolCallResolution,
-    ToolCallStatus, TurnRunStatus,
+    Chat, Message, MessageAttachment, PermissionMode, Role, ToolCallExecution, ToolCallRecord,
+    ToolCallResolution, ToolCallStatus, TurnRunStatus,
 };
 use crate::preview::{ToolActionPreview, ToolResultPreview};
 use crate::provider::{
@@ -2446,34 +2446,47 @@ impl Agent {
                 format!("unknown tool: {}", call.name),
             );
         };
-        // Policy: ReadOnly/Workspace auto; uncovered Sensitive calls park on the
-        // approval gate.
+        // Policy, decided in order: a standing grant the reader already made
+        // covers its calls in every mode; otherwise the chat's permission mode
+        // says which classes park on the gate. ReadOnly never parks; Workspace
+        // parks only in Ask; Sensitive parks in everything but Allow.
         // Commit the approval request *before* emitting ApprovalRequired so a
         // client that sees the event can never race a 404 against a request
         // that exists only in this process.
         let approval_class = durable_approval
             .map(|approval| approval.class)
             .unwrap_or_else(|| tool.approval_class());
+        let kind_for_call = ToolApprovalKind::for_call(&call.name, approval_class);
         // The action a standing grant is matched against, and the one the card
         // shows if this call ends up parking. Built once so a grant can never
         // be tested against a different reading of the arguments than the
         // human was shown.
         let action = call_action_preview(call);
-        let bypass_by_explicit_grant = matches!(approval_class, ApprovalClass::Sensitive)
-            && durable_approval.is_none()
+        let bypass_by_explicit_grant = durable_approval.is_none()
             && serde_json::from_str::<Value>(&call.args).is_ok_and(|arguments| {
-                self.standing_grants.covers(
-                    chat.id,
-                    &call.name,
-                    ToolApprovalKind::for_tool_name(&call.name),
-                    &arguments,
-                )
+                self.standing_grants
+                    .covers(chat.id, &call.name, kind_for_call, &arguments)
             });
-        if matches!(approval_class, ApprovalClass::Sensitive) && !bypass_by_explicit_grant {
+        // A recovered call re-enters the gate whatever the mode now says: its
+        // durable approval may already hold a rejection the mode must not
+        // outrun, and a still-pending card must resolve, not dangle.
+        let gate_required = durable_approval.is_some()
+            || match approval_class {
+                ApprovalClass::ReadOnly => false,
+                ApprovalClass::Workspace => matches!(
+                    chat.permission_mode.unwrap_or(PermissionMode::Ask),
+                    PermissionMode::Ask
+                ),
+                ApprovalClass::Sensitive => !matches!(
+                    chat.permission_mode.unwrap_or(PermissionMode::Ask),
+                    PermissionMode::Allow
+                ),
+            };
+        if gate_required && !bypass_by_explicit_grant {
             let summary = format!("{} requires approval", call.name);
             let kind = durable_approval
                 .map(|approval| approval.kind)
-                .unwrap_or_else(|| ToolApprovalKind::for_tool_name(&call.name));
+                .unwrap_or(kind_for_call);
             // A recovered call re-presents the preview durable state already
             // holds, so a reconnecting client sees the same command it was
             // asked about before the restart.
@@ -2499,7 +2512,7 @@ impl Agent {
                     chat_id: chat.id,
                     turn_id,
                     tool_name: call.name.clone(),
-                    class: ApprovalClass::Sensitive,
+                    class: approval_class,
                     kind,
                     preview: preview.clone(),
                     summary: summary.clone(),
@@ -2518,7 +2531,7 @@ impl Agent {
             let required = AgentEvent::ApprovalRequired {
                 call_id: call.call_id,
                 tool_name: call.name.clone(),
-                class: ApprovalClass::Sensitive,
+                class: approval_class,
                 kind,
                 preview,
                 summary,
@@ -3916,6 +3929,7 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -4136,6 +4150,7 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -4309,6 +4324,7 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -4359,6 +4375,7 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -4515,6 +4532,7 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -4605,6 +4623,7 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -4712,6 +4731,7 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -4876,6 +4896,7 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -4967,6 +4988,7 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -5052,6 +5074,7 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -5453,6 +5476,7 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -5504,6 +5528,7 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -5569,6 +5594,7 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -5644,6 +5670,7 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -5761,6 +5788,7 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -5866,6 +5894,7 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -5983,6 +6012,7 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -6147,6 +6177,7 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -6268,6 +6299,7 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -6379,6 +6411,182 @@ mod tests {
             "an uncovered call must still park on the gate"
         );
         assert_eq!(ran.load(Ordering::SeqCst), 0, "RefuseGate blocks the tool");
+    }
+
+    async fn permission_mode_chat(
+        store: &Arc<dyn Store>,
+        mode: Option<crate::model::PermissionMode>,
+    ) -> Chat {
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            reasoning_effort: None,
+            permission_mode: mode,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        chat
+    }
+
+    /// A Workspace-class tool that records whether it ran.
+    struct WorkspaceWriteTool {
+        ran: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for WorkspaceWriteTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "write_file".into(),
+                description: "a workspace write tool".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }
+        }
+        fn approval_class(&self) -> ApprovalClass {
+            ApprovalClass::Workspace
+        }
+        async fn execute(&self, _ctx: &ToolCtx, _args: Value) -> Result<ToolOutput> {
+            self.ran.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolOutput::text("written"))
+        }
+    }
+
+    /// Provider that asks for `write_file` once, then finishes.
+    struct WorkspaceWriteProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ModelProvider for WorkspaceWriteProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("workspace-write")
+        }
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            let events = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                vec![
+                    ProviderEvent::ToolCallStarted {
+                        index: 0,
+                        id: "call_write".into(),
+                        name: "write_file".into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 0,
+                        fragment: "{}".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::ToolUse,
+                    },
+                ]
+            } else {
+                vec![
+                    ProviderEvent::TextDelta { text: "ok".into() },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ]
+            };
+            Ok(stream::iter(events).boxed())
+        }
+    }
+
+    fn workspace_write_agent(store: Arc<dyn Store>, ran: Arc<AtomicUsize>) -> Agent {
+        let tools = Arc::new(ToolRegistry::new().with(Box::new(WorkspaceWriteTool { ran })));
+        // Default gate is `RefuseGate`, so whether the tool runs is exactly
+        // whether the mode kept the call off the gate.
+        Agent::new(
+            Arc::new(WorkspaceWriteProvider {
+                calls: AtomicUsize::new(0),
+            }),
+            tools,
+            store,
+            AgentConfig {
+                model: "fake".into(),
+                ..Default::default()
+            },
+        )
+    }
+
+    /// The default mode is Ask, and Ask parks Workspace-class calls: reversing
+    /// either half of that silently stops asking before file edits.
+    #[tokio::test]
+    async fn ask_mode_parks_workspace_writes_by_default() {
+        let store = search_grant_store().await;
+        let chat = permission_mode_chat(&store, None).await;
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let agent = workspace_write_agent(store, ran.clone());
+
+        let (tx, rx) = unbounded();
+        agent.run_turn(&chat, "go", &tx).await.unwrap();
+        drop(tx);
+        let events: Vec<AgentEvent> = rx.collect().await;
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::ApprovalRequired { class, kind, .. }
+                    if *class == ApprovalClass::Workspace
+                        && *kind == ToolApprovalKind::WorkspaceMayModifyFiles
+            )),
+            "an uncovered workspace call must park in Ask"
+        );
+        assert_eq!(ran.load(Ordering::SeqCst), 0, "RefuseGate blocks the tool");
+    }
+
+    /// Auto keeps today's behavior: workspace writes proceed without a card.
+    #[tokio::test]
+    async fn auto_mode_runs_workspace_writes_without_asking() {
+        let store = search_grant_store().await;
+        let chat = permission_mode_chat(&store, Some(crate::model::PermissionMode::Auto)).await;
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let agent = workspace_write_agent(store, ran.clone());
+
+        let (tx, rx) = unbounded();
+        agent.run_turn(&chat, "go", &tx).await.unwrap();
+        drop(tx);
+        let events: Vec<AgentEvent> = rx.collect().await;
+
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ApprovalRequired { .. })),
+            "Auto must not ask before a workspace write"
+        );
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+    }
+
+    /// Allow bypasses the gate for Sensitive calls entirely — no card, no
+    /// approval row, the tool just runs. The inverse regression (Allow still
+    /// parking) would make the mode a lie in the other direction.
+    #[tokio::test]
+    async fn allow_mode_runs_sensitive_without_the_gate() {
+        let store = search_grant_store().await;
+        let chat = permission_mode_chat(&store, Some(crate::model::PermissionMode::Allow)).await;
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let agent = search_agent(
+            store,
+            ran.clone(),
+            Arc::new(crate::approval::StandingGrants::new()),
+        );
+
+        let (tx, rx) = unbounded();
+        agent.run_turn(&chat, "go", &tx).await.unwrap();
+        drop(tx);
+        let events: Vec<AgentEvent> = rx.collect().await;
+
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ApprovalRequired { .. })),
+            "Allow must not park a sensitive call"
+        );
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
     }
 
     /// A Sensitive tool that escapes the chat workspace (`exec`) and records
@@ -6649,6 +6857,7 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -6770,6 +6979,7 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -6847,6 +7057,7 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -7031,6 +7242,7 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -8478,6 +8690,7 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -8662,6 +8875,7 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -9111,6 +9325,7 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -9530,6 +9745,7 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -9707,6 +9923,7 @@ mod image_hydration_tests {
             title: None,
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),

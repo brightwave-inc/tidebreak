@@ -4,6 +4,7 @@ import { useNavigate } from "@tanstack/react-router";
 import type {
   ModelInfo,
   ModelSelectionKey,
+  PermissionMode,
   ReasoningEffort,
   SequencedEvent,
 } from "./api";
@@ -46,6 +47,7 @@ import {
 import { useImageAttachments } from "./useImageAttachments";
 import { modelForSelection } from "./ModelSelection";
 import { ModelMenu, ReasoningEffortMenu } from "./ModelMenu";
+import { PermissionModeMenu } from "./PermissionModeMenu";
 import {
   PICKER_BUSY_MESSAGE,
   PICKER_HOLDERS,
@@ -348,6 +350,11 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     chatListActions.replaceChat(await client.patchChatReasoningEffort(chatId, effort));
   }
 
+  async function onPermissionModeChange(mode: PermissionMode) {
+    if (deletingChatId !== null) return;
+    chatListActions.replaceChat(await client.patchChatPermissionMode(chatId, mode));
+  }
+
   if (!chat) return <div className="routed-surface-loading" />;
 
   function renderPanel(panel: PanelContent, position: "left" | "right" | "chat", visible: boolean) {
@@ -394,6 +401,11 @@ export function ChatRoute({ chatId }: { chatId: string }) {
                     onChange={onReasoningEffortChange}
                   />
                 )}
+                <PermissionModeMenu
+                  value={chat!.permission_mode}
+                  disabled={deletingChatId !== null}
+                  onChange={onPermissionModeChange}
+                />
               </>
             }
             onDraftChange={setComposerDraft}

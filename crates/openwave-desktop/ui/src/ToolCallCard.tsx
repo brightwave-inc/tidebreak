@@ -433,6 +433,16 @@ export function toolApprovalPresentation(
       canRemember: false,
     };
   }
+  if (kind === "workspace_may_modify_files") {
+    return {
+      summary:
+        "Allow OpenWave to create or modify files in this chat's workspace?",
+      canApprove: true,
+      // The standing "yes" for workspace edits is the chat's Auto permission
+      // mode, not a per-tool grant.
+      canRemember: false,
+    };
+  }
   return {
     summary: "The exact action cannot be safely described.",
     canApprove: false,

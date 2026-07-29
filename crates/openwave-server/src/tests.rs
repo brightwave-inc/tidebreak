@@ -265,6 +265,7 @@ async fn assistant_retry_and_stream_redaction_survive_durable_replay() {
         title: None,
         model: None,
         reasoning_effort: None,
+        permission_mode: None,
         attachment_revision: 0,
         root_attachments: Vec::new(),
         created_at: chrono::Utc::now(),
@@ -1362,9 +1363,10 @@ impl Store for PauseTerminalStore {
         title: Option<Option<String>>,
         model: Option<Option<String>>,
         reasoning_effort: Option<Option<openwave_core::ReasoningEffort>>,
+        permission_mode: Option<Option<openwave_core::PermissionMode>>,
     ) -> Result<bool> {
         self.inner
-            .update_chat_metadata(id, title, model, reasoning_effort)
+            .update_chat_metadata(id, title, model, reasoning_effort, permission_mode)
             .await
     }
     async fn get_turn_run(&self, id: TurnId) -> Result<Option<openwave_core::TurnRun>> {

@@ -12,8 +12,8 @@ use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{ChatId, DocumentId, HostRootId, MessageId, ProjectId, TurnId};
 use crate::model::{
     validate_chat_root_projection, validate_chat_root_projection_against_project, Chat,
-    ChatRootAttachment, DocumentGeneration, Message, ReasoningEffort, Role, RootAttachmentOrigin,
-    ToolCallRecord, TurnRunStatus, MAX_ROOT_ATTACHMENTS,
+    ChatRootAttachment, DocumentGeneration, Message, PermissionMode, ReasoningEffort, Role,
+    RootAttachmentOrigin, ToolCallRecord, TurnRunStatus, MAX_ROOT_ATTACHMENTS,
 };
 use crate::storage::{
     ChatRefusalSnapshot, ChatToolActivitySnapshot, ChatToolActivityStatus, ChatTranscriptSnapshot,
@@ -186,6 +186,10 @@ where
             Some(effort) => Set(Some(effort.as_str().to_owned())),
             None => sea_orm::ActiveValue::NotSet,
         },
+        permission_mode: match &chat.permission_mode {
+            Some(mode) => Set(Some(mode.as_str().to_owned())),
+            None => sea_orm::ActiveValue::NotSet,
+        },
         attachment_revision: Set(chat.attachment_revision),
         created_at: Set(chat.created_at),
     }
@@ -270,8 +274,10 @@ pub(in crate::db) async fn update_chat_metadata(
     title: Option<Option<String>>,
     model: Option<Option<String>>,
     reasoning_effort: Option<Option<ReasoningEffort>>,
+    permission_mode: Option<Option<PermissionMode>>,
 ) -> Result<bool> {
-    if title.is_none() && model.is_none() && reasoning_effort.is_none() {
+    if title.is_none() && model.is_none() && reasoning_effort.is_none() && permission_mode.is_none()
+    {
         return Ok(entities::chat::Entity::find_by_id(id.0)
             .one(&store.conn)
             .await
@@ -298,6 +304,12 @@ pub(in crate::db) async fn update_chat_metadata(
             sea_orm::sea_query::Expr::value(
                 reasoning_effort.map(|effort| effort.as_str().to_owned()),
             ),
+        );
+    }
+    if let Some(permission_mode) = permission_mode {
+        update = update.col_expr(
+            entities::chat::Column::PermissionMode,
+            sea_orm::sea_query::Expr::value(permission_mode.map(|mode| mode.as_str().to_owned())),
         );
     }
     let result = update
@@ -1192,6 +1204,10 @@ fn chat_from_models(
             .reasoning_effort
             .as_deref()
             .and_then(ReasoningEffort::from_str),
+        permission_mode: model
+            .permission_mode
+            .as_deref()
+            .and_then(PermissionMode::from_str),
         attachment_revision: model.attachment_revision,
         root_attachments,
         created_at: model.created_at,

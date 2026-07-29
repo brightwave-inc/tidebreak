@@ -37,6 +37,7 @@ impl MigratorTrait for Migrator {
             Box::new(SplitAgentRunExecution),
             Box::new(AddOperationLog),
             Box::new(ExtendOutputRevisionsForBinary),
+            Box::new(AddChatPermissionMode),
         ]
     }
 }
@@ -6729,6 +6730,43 @@ impl MigrationTrait for AddClaimedTurnEffectLeases {
     }
 }
 
+/// Adds the optional per-chat `permission_mode` (issue #756): how much the
+/// chat lets the agent do between approvals. `NULL` reads as `ask`.
+struct AddChatPermissionMode;
+
+impl MigrationName for AddChatPermissionMode {
+    fn name(&self) -> &str {
+        "m20260729_000023_add_chat_permission_mode"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddChatPermissionMode {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Chat::Table)
+                    .add_column(ColumnDef::new(Chat::PermissionMode).text())
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Chat::Table)
+                    .drop_column(Chat::PermissionMode)
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+}
+
 /// Adds the optional per-chat `reasoning_effort` override.
 struct AddChatReasoningEffort;
 
@@ -7034,6 +7072,7 @@ enum Chat {
     Title,
     Model,
     ReasoningEffort,
+    PermissionMode,
     AttachmentRevision,
     CreatedAt,
 }

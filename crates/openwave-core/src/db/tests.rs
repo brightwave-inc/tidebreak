@@ -42,6 +42,7 @@ async fn create_chat_before_agent_run_split(store: &DbStore, chat: &Chat) {
         title: Set(chat.title.clone()),
         model: Set(chat.model.clone()),
         reasoning_effort: sea_orm::ActiveValue::NotSet,
+        permission_mode: sea_orm::ActiveValue::NotSet,
         attachment_revision: Set(chat.attachment_revision),
         created_at: Set(chat.created_at),
     }
@@ -111,6 +112,7 @@ fn sample_chat() -> Chat {
         title: Some("hello".into()),
         model: None,
         reasoning_effort: None,
+        permission_mode: None,
         attachment_revision: 0,
         root_attachments: Vec::new(),
         created_at: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
@@ -417,6 +419,7 @@ async fn project_membership_fk_and_attachment_insertions_are_atomic() {
         title: Set(None),
         model: Set(None),
         reasoning_effort: Set(None),
+        permission_mode: Set(None),
         attachment_revision: Set(0),
         created_at: Set(Utc::now()),
     };
@@ -536,6 +539,7 @@ async fn chats_stored_before_the_effort_scale_widened_still_load() {
             title: Set(chat.title.clone()),
             model: Set(None),
             reasoning_effort: Set(Some(stored.to_owned())),
+            permission_mode: Set(None),
             attachment_revision: Set(0),
             created_at: Set(chat.created_at),
         }
@@ -11870,6 +11874,50 @@ async fn claimed_sensitive_call_with(
         summary: "search requires approval".into(),
     };
     (turn_id, lease_token, call, request)
+}
+
+#[tokio::test]
+async fn workspace_approval_folds_storage_but_recovers_class_and_kind() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (_turn_id, _lease_token, call, mut request) = claimed_sensitive_call_with(
+        &store,
+        &chat,
+        "write_file",
+        serde_json::json!({"path": "notes.md", "content": "x"}),
+    )
+    .await;
+    request.class = ApprovalClass::Workspace;
+    request.kind = crate::ToolApprovalKind::WorkspaceMayModifyFiles;
+    store
+        .request_tool_call_approval(&request, Utc::now())
+        .await
+        .unwrap();
+
+    // The stored row keeps the legacy spellings the column constraints allow…
+    let row = entities::tool_call::Entity::find_by_id(call.id.0)
+        .one(&store.conn)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.approval_class.as_deref(), Some("sensitive"));
+    assert_eq!(row.approval_kind.as_deref(), Some("unsupported"));
+
+    // …and the read model recovers the real class and kind from the tool
+    // name, so a workspace card parked across a restart stays approvable.
+    let approval = store
+        .get_tool_call_approval(call.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(approval.class, ApprovalClass::Workspace);
+    assert_eq!(
+        approval.kind,
+        crate::ToolApprovalKind::WorkspaceMayModifyFiles
+    );
+    assert!(approval.kind.is_approvable());
+    assert!(!approval.kind.is_standing_grantable());
 }
 
 #[tokio::test]

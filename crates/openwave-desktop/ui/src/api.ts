@@ -31,6 +31,7 @@ import {
   type Project as WireProject,
   type ProviderInfo as WireProviderInfo,
   type ProviderKind as WireProviderKind,
+  type PermissionMode as WirePermissionMode,
   type ReasoningEffort as WireReasoningEffort,
   type Settings,
   type WebSearchConfigInfo as WireWebSearchConfigInfo,
@@ -119,6 +120,9 @@ export type ModelSelectionKey = `${ProviderKind}::${string}`;
 
 /** How hard a reasoning-capable model should think before answering. */
 export type ReasoningEffort = WireReasoningEffort;
+
+/** How much a chat lets the agent do between approvals. */
+export type PermissionMode = WirePermissionMode;
 
 export type ProviderInfo = WireProviderInfo;
 
@@ -366,7 +370,8 @@ export function isApprovableKind(kind: RendererApprovalKind): boolean {
     kind === "search_may_share_query_and_excerpts" ||
     kind === "web_search_may_share_query" ||
     kind === "exec_may_run_networked_command" ||
-    kind === "external_mcp_may_call_server"
+    kind === "external_mcp_may_call_server" ||
+    kind === "workspace_may_modify_files"
   );
 }
 
@@ -1012,6 +1017,17 @@ export class ApiClient {
       method: "PATCH",
       headers: this.headers(true),
       body: JSON.stringify({ reasoning_effort: reasoningEffort }),
+    });
+  }
+
+  patchChatPermissionMode(
+    chatId: string,
+    permissionMode: PermissionMode | null,
+  ): Promise<Chat> {
+    return this.json(`/chats/${chatId}`, {
+      method: "PATCH",
+      headers: this.headers(true),
+      body: JSON.stringify({ permission_mode: permissionMode }),
     });
   }
 
@@ -1749,6 +1765,7 @@ function isRendererApprovalKind(value: unknown): value is RendererApprovalKind {
     value === "web_search_may_share_query" ||
     value === "exec_may_run_networked_command" ||
     value === "external_mcp_may_call_server" ||
+    value === "workspace_may_modify_files" ||
     value === "unsupported"
   );
 }
