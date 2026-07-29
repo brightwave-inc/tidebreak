@@ -1,6 +1,13 @@
 import type { ComponentPropsWithoutRef } from "react";
 
-/** OpenWave mark geometry, shared with the packaged desktop app icon. */
+/**
+ * OpenWave mark geometry, shared with the packaged desktop app icon.
+ *
+ * The box is tight to the drawing, unlike the packaged icon's square canvas:
+ * call sites that size the mark with `height: auto` derive their height from
+ * this ratio, so squaring it here would pad every one of them. A caller that
+ * wants a square footprint asks for one by passing equal width and height.
+ */
 const LOGOMARK_VIEWBOX = "127 217 757 407";
 const LOGOMARK_PATH = `
   M1736 3851l-179-178 4-9c2-5 306-309 675-676l671-668h723v18l-1 17-832 838-832 838-25-1-25-1-179-178z
