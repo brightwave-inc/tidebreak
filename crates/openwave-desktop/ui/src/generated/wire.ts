@@ -9,12 +9,33 @@
 // which a type can express. See docs/wire-types.md.
 
 /**
+ * One renderer-safe entry in a background run's ordered activity history.
+ *
+ * Built from durable sandbox tool calls, but it carries only the fixed
+ * [`AgentActivityKind`] vocabulary, a coarse lifecycle, and a timestamp. Tool
+ * arguments, queries, results, folder and file identities, host paths,
+ * provider identities, executor leases, and raw diagnostics all remain
+ * server-side, exactly as they do for the live `activity` projection.
+ */
+export type AgentActivityHistoryItem = { kind: AgentActivityKind, outcome: AgentActivityOutcome, at: string, };
+
+/**
  * Fixed, renderer-safe names for supported live work.
  *
  * Adding a durable tool does not automatically expose it to a renderer: it
  * must be deliberately admitted here with a safe label.
  */
 export type AgentActivityKind = "web_search" | "read_delegated_file" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file";
+
+/**
+ * Coarse, renderer-safe lifecycle for one historical activity entry.
+ *
+ * Unlike [`AgentActivityStatus`], which only names live work, this also
+ * admits the three terminal outcomes so a settled step can be shown in an
+ * ordered timeline. It carries no failure detail: a failed step is only
+ * "failed", never why.
+ */
+export type AgentActivityOutcome = "waiting" | "running" | "completed" | "failed" | "cancelled";
 
 /**
  * Renderer-safe projection of one live supported checkpoint.
@@ -68,7 +89,16 @@ last_error_code: string | null,
  * arguments, results, provider call identities, executor leases, or raw
  * executor diagnostics.
  */
-activity: AgentActivitySnapshot | null, created_at: string, updated_at: string, spawn_call_id: CallId | null, };
+activity: AgentActivitySnapshot | null, 
+/**
+ * Whether a completed background run committed an immutable terminal
+ * receipt, which happens atomically with its terminal state.
+ *
+ * This is presence only: the payload, its display text, and any merged
+ * deliverable never cross this boundary. A renderer uses it to offer a
+ * "view output" affordance and link to the outputs surface.
+ */
+produced_output: boolean, created_at: string, updated_at: string, spawn_call_id: CallId | null, };
 
 /**
  * Durable lifecycle of an [`AgentRun`].

@@ -20,10 +20,14 @@ function run(
     finished_at: null,
     last_error_code: null,
     activity: null,
+    produced_output: status === "completed",
     created_at: "2026-07-27T12:00:00Z",
     updated_at: "2026-07-27T12:00:00Z",
   };
 }
+
+const noop = async () => undefined;
+const noActivity = async () => [];
 
 describe("BackgroundAgentList", () => {
   it("groups only the durable children of its own spawn step", () => {
@@ -41,6 +45,8 @@ describe("BackgroundAgentList", () => {
         loading={false}
         error={null}
         onRetry={() => undefined}
+        onCancel={noop}
+        onLoadActivity={noActivity}
       />,
     );
 
@@ -59,6 +65,8 @@ describe("BackgroundAgentList", () => {
         loading
         error={null}
         onRetry={() => undefined}
+        onCancel={noop}
+        onLoadActivity={noActivity}
       />,
     );
 
@@ -73,9 +81,51 @@ describe("BackgroundAgentList", () => {
         loading={false}
         error={null}
         onRetry={() => undefined}
+        onCancel={noop}
+        onLoadActivity={noActivity}
       />,
     );
 
     expect(markup).toEqual("");
+  });
+
+  it("offers Stop on a cancellable run and View output only once it produced a result", () => {
+    const markup = renderToStaticMarkup(
+      <BackgroundAgentList
+        spawns={[
+          { callId: "call-running", status: "running" },
+          { callId: "call-done", status: "completed" },
+        ]}
+        runs={[
+          run("run-running", "call-running", "running"),
+          run("run-done", "call-done", "completed"),
+        ]}
+        loading={false}
+        error={null}
+        onRetry={() => undefined}
+        onCancel={noop}
+        onLoadActivity={noActivity}
+        onViewOutput={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain("Stop");
+    expect(markup).toContain("View output");
+  });
+
+  it("does not offer Stop on a settled run", () => {
+    const markup = renderToStaticMarkup(
+      <BackgroundAgentList
+        spawns={[{ callId: "call-done", status: "completed" }]}
+        runs={[run("run-done", "call-done", "completed")]}
+        loading={false}
+        error={null}
+        onRetry={() => undefined}
+        onCancel={noop}
+        onLoadActivity={noActivity}
+      />,
+    );
+
+    expect(markup).not.toContain(">Stop<");
   });
 });

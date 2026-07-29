@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-import type { AgentRun, ApiClient } from "./api";
+import type { AgentActivityHistoryEntry, AgentRun, ApiClient } from "./api";
 import { RUNNING_AGENT_STATUSES } from "./AgentRunDisplay";
 
 const LIVE_POLL_INTERVAL_MS = 5_000;
@@ -10,6 +10,14 @@ export type AgentRuns = {
   loading: boolean;
   error: string | null;
   refresh: () => void;
+  /**
+   * Durably request cancellation of one background run, then refresh so the
+   * poll picks up the `cancelling`/`cancelled` transition. The caller holds its
+   * own optimistic "Stopping" state until that durable status arrives.
+   */
+  cancel: (runId: string) => Promise<void>;
+  /** Fetch the ordered, renderer-safe activity history for one background run. */
+  loadActivity: (runId: string) => Promise<AgentActivityHistoryEntry[]>;
 };
 
 /**
@@ -92,10 +100,30 @@ export function useAgentRuns(
     return () => window.clearInterval(interval);
   }, [hasLiveSandbox, hasUnresolvedSpawn]);
 
+  // Stable identities so a row can list them as effect dependencies without
+  // re-fetching its timeline on every parent render.
+  const cancel = useCallback(
+    async (runId: string) => {
+      if (!client || !chatId) return;
+      await client.cancelAgentRun(chatId, runId);
+      refreshRef.current?.();
+    },
+    [client, chatId],
+  );
+  const loadActivity = useCallback(
+    async (runId: string) => {
+      if (!client || !chatId) return [];
+      return client.listAgentRunActivity(chatId, runId);
+    },
+    [client, chatId],
+  );
+
   return {
     runs,
     loading,
     error,
     refresh: () => refreshRef.current?.(),
+    cancel,
+    loadActivity,
   };
 }

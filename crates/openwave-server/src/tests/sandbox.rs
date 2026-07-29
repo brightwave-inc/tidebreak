@@ -215,6 +215,162 @@ async fn agent_run_snapshots_expose_only_safe_live_sandbox_activity() {
 }
 
 #[tokio::test]
+async fn agent_run_activity_history_is_ordered_renderer_safe_and_flags_a_produced_result() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let other_chat = make_chat(&router, &bearer).await;
+
+    let run = admit_sandbox_for_test(&store, chat.id, "research").await;
+    let worker_lease = uuid::Uuid::new_v4();
+    assert_eq!(
+        store
+            .claim_agent_run(worker_lease, chrono::Duration::minutes(5), 4, 4)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        run.id
+    );
+
+    let checkpoint = SandboxToolCallRequest {
+        id: CallId::new(),
+        agent_run_id: run.id,
+        chat_id: chat.id,
+        provider_id: "provider-call-identity".into(),
+        name: "web_search".into(),
+        arguments: serde_json::json!({
+            "query": "private query that must not reach the renderer",
+            "api_key": "secret-value"
+        }),
+    };
+    assert!(matches!(
+        store
+            .park_agent_run_for_sandbox_tool_call(run.id, worker_lease, &checkpoint)
+            .await
+            .unwrap(),
+        ParkSandboxToolCallOutcome::Parked { .. }
+    ));
+    let executor_lease = uuid::Uuid::new_v4();
+    assert!(matches!(
+        store
+            .claim_sandbox_tool_call(checkpoint.id, executor_lease, chrono::Duration::minutes(5))
+            .await
+            .unwrap(),
+        openwave_core::ClaimSandboxToolCallOutcome::Claimed(_)
+    ));
+    assert!(matches!(
+        store
+            .resolve_sandbox_tool_call(
+                checkpoint.id,
+                executor_lease,
+                &ToolCallResolution::Completed {
+                    result: "private result that must not reach the renderer".into(),
+                },
+            )
+            .await
+            .unwrap(),
+        openwave_core::ResolveSandboxToolCallOutcome::Resolved
+    ));
+
+    // Resolving the checkpoint hands the run back for continuation; take it and
+    // commit its terminal result so the snapshot reports a produced result.
+    let continuation_lease = uuid::Uuid::new_v4();
+    assert_eq!(
+        store
+            .claim_agent_run(continuation_lease, chrono::Duration::minutes(5), 4, 4)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        run.id
+    );
+    store
+        .submit_agent_run_result(run.id, continuation_lease, "final answer")
+        .await
+        .unwrap()
+        .expect("completion commits");
+
+    // The run snapshot flags result presence without carrying any payload.
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/chats/{}/agent-runs", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let snapshots: Vec<serde_json::Value> = json_body(response).await;
+    let snapshot = snapshots
+        .iter()
+        .find(|snapshot| snapshot.get("id") == Some(&serde_json::json!(run.id)))
+        .expect("sandbox snapshot is returned");
+    assert_eq!(
+        snapshot.get("produced_output"),
+        Some(&serde_json::json!(true))
+    );
+    assert_eq!(snapshot.get("activity"), Some(&serde_json::json!(null)));
+
+    // The activity history is the ordered, terminal-outcome projection.
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/chats/{}/agent-runs/{}/activity", chat.id, run.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let history: Vec<serde_json::Value> = json_body(response).await;
+    assert_eq!(history.len(), 1);
+    assert_eq!(
+        history[0].get("kind"),
+        Some(&serde_json::json!("web_search"))
+    );
+    assert_eq!(
+        history[0].get("outcome"),
+        Some(&serde_json::json!("completed"))
+    );
+    assert!(history[0].get("at").is_some_and(|at| at.is_string()));
+
+    let encoded = serde_json::to_string(&history).unwrap();
+    for forbidden in [
+        "private query that must not reach the renderer",
+        "private result that must not reach the renderer",
+        "secret-value",
+        "provider-call-identity",
+        "arguments",
+        "lease_token",
+        "result",
+    ] {
+        assert!(!encoded.contains(forbidden), "history leaked {forbidden}");
+    }
+
+    // Binding to the wrong chat must not reveal that the run exists.
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/chats/{}/agent-runs/{}/activity",
+                    other_chat.id, run.id
+                ))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn delegated_file_routes_are_native_only_and_expose_only_exact_broker_authority() {
     let (router, token, _state, store, _dir) = test_app_with_state().await;
     let bearer = format!("Bearer {token}");

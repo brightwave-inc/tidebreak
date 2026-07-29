@@ -38,6 +38,8 @@ export type ChatViewProps = {
   onDismissAttachedSource: () => void;
   onSelectPrompt: (prompt: string) => void;
   onSend: () => Promise<void>;
+  /** Open the outputs surface, offered on a completed background run's row. */
+  onViewOutput?: () => void;
 };
 
 /**
@@ -63,6 +65,7 @@ export function ChatView({
   onDismissAttachedSource,
   onSelectPrompt,
   onSend,
+  onViewOutput,
 }: ChatViewProps) {
   const transcriptVisible = useTranscriptVisible();
   const folderAccess = useFolderAccessRequests(client, chat.id);
@@ -266,6 +269,9 @@ export function ChatView({
           backgroundAgentRunsLoading={agentRuns.loading}
           backgroundAgentRunsError={agentRuns.error}
           onRetryBackgroundAgentRuns={agentRuns.refresh}
+          onCancelBackgroundAgentRun={agentRuns.cancel}
+          onLoadBackgroundAgentActivity={agentRuns.loadActivity}
+          onViewBackgroundAgentOutput={onViewOutput}
           busy={busy}
           reasoningActive={reasoningActive}
           scrollRef={attachScrollRef}

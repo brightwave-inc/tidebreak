@@ -354,6 +354,9 @@ mod tests {
         generate::collect_from::<openwave_core::Chat>(&cfg, &mut out);
         generate::collect_from::<crate::routes::AgentRunSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::AgentRunCancellationSnapshot>(&cfg, &mut out);
+        // A separate endpoint root: the ordered activity history is returned by
+        // its own route, so the snapshot walk never reaches it.
+        generate::collect_from::<crate::routes::AgentActivityHistoryItem>(&cfg, &mut out);
         out
     }
 
