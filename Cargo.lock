@@ -6650,6 +6650,7 @@ dependencies = [
  "chrono",
  "futures",
  "image",
+ "libc",
  "openwave-code-execution",
  "openwave-connectors",
  "openwave-core",
@@ -6659,6 +6660,7 @@ dependencies = [
  "openwave-router",
  "openwave-sandbox-protocol",
  "openwave-web-search",
+ "plist",
  "reqwest 0.12.28",
  "schemars 1.2.2",
  "serde",
@@ -6669,10 +6671,12 @@ dependencies = [
  "tokio-tungstenite 0.30.0",
  "tower",
  "tower-http 0.7.0",
+ "tracing",
  "ts-rs",
  "unicode-general-category",
  "uuid",
  "windows-sys 0.61.2",
+ "winreg",
 ]
 
 [[package]]

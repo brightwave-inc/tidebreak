@@ -15,10 +15,18 @@
 //! tests — it is deliberately not reachable from any renderer-writable
 //! route, which is what makes the state sticky rather than a setting.
 
-use openwave_core::{AgentError, Result, Store};
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use openwave_core::{AgentError, Config, Result, Store};
 use serde::{Deserialize, Serialize};
 
 const SETTING_KEY: &str = "managed_policy_v1";
+
+/// The key every OS artifact stores the asserted URL under: the Windows
+/// registry value and the macOS managed-preferences key share this name.
+const MANAGED_GATEWAY_URL_KEY: &str = "GatewayURL";
 
 /// Which authority asserted the active policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
@@ -41,24 +49,381 @@ pub(crate) struct ManagedPolicy {
     #[ts(optional)]
     pub(crate) gateway_url: Option<String>,
     pub(crate) source: ManagedPolicySource,
+    /// True when `source` asserted management but its gateway URL is missing,
+    /// unreadable, or invalid. The profile stays managed with no usable URL —
+    /// fail closed — and surfaces can name the authority that needs repair
+    /// instead of showing an opaque error.
+    pub(crate) misconfigured: bool,
 }
 
-/// An OS-managed policy reader. Platform implementations (macOS managed
-/// preferences, Windows registry policy, Linux `/etc/openwave/`) arrive in a
-/// follow-up slice; the seam exists now so the precedence order is fixed and
-/// testable before any reader ships.
+impl ManagedPolicy {
+    /// The fail-closed projection of an authority whose assertion cannot be
+    /// honored: managed, no gateway, explicitly misconfigured.
+    fn misconfigured(source: ManagedPolicySource) -> Self {
+        Self {
+            managed: true,
+            gateway_url: None,
+            source,
+            misconfigured: true,
+        }
+    }
+}
+
+/// An OS-managed policy reader. One per platform — macOS managed preferences,
+/// Windows registry policy, Linux policy file — selected at boot by
+/// [`platform_source`].
 pub(crate) trait OsPolicySource: Send + Sync {
     /// The OS-asserted gateway base URL, when the platform declares one.
-    fn gateway_url(&self) -> Option<String>;
+    ///
+    /// `Ok(None)` means the platform asserts no policy. `Err` means a policy
+    /// artifact exists but cannot be read or decoded — [`resolve`] projects
+    /// that as a misconfigured managed profile, never as unmanaged.
+    fn gateway_url(&self) -> Result<Option<String>>;
 }
 
-/// The default source on every platform until a reader ships.
+/// The source that asserts nothing: non-desktop platforms, embeddings without
+/// a policy domain, and directly assembled test state.
 pub(crate) struct NoOsPolicy;
 
 impl OsPolicySource for NoOsPolicy {
-    fn gateway_url(&self) -> Option<String> {
-        None
+    fn gateway_url(&self) -> Result<Option<String>> {
+        Ok(None)
     }
+}
+
+/// Select this platform's OS policy reader.
+///
+/// Called from the production boot path (`bind_inner`), not from `AppState`
+/// construction, so directly assembled state (tests, custom embedders) stays
+/// hermetic and reads nothing from the host OS.
+#[cfg(target_os = "macos")]
+pub(crate) fn platform_source(config: &Config) -> Arc<dyn OsPolicySource> {
+    // Managed preferences are keyed by the embedding's bundle id; an
+    // embedding without one (the CLI, tests) has no policy domain to read.
+    match &config.bundle_id {
+        Some(bundle_id) => Arc::new(ManagedPreferencesSource::for_bundle_id(bundle_id)),
+        None => Arc::new(NoOsPolicy),
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn platform_source(_config: &Config) -> Arc<dyn OsPolicySource> {
+    Arc::new(RegistryPolicySource)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn platform_source(_config: &Config) -> Arc<dyn OsPolicySource> {
+    Arc::new(PolicyFileSource::at("/etc/openwave/managed-policy.json"))
+}
+
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+pub(crate) fn platform_source(_config: &Config) -> Arc<dyn OsPolicySource> {
+    Arc::new(NoOsPolicy)
+}
+
+/// Managed (MDM-forced) preferences for the embedding's bundle id.
+///
+/// `cfprefsd` materializes forced domains as plists under
+/// `/Library/Managed Preferences`: the user channel in a per-user directory,
+/// the device channel at the root. The reader parses those artifacts directly
+/// rather than through `CFPreferences`, which keeps the extraction portable
+/// and testable; the user channel is consulted first, matching the
+/// framework's search order.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) struct ManagedPreferencesSource {
+    /// Candidate plist paths in precedence order.
+    paths: Vec<PathBuf>,
+    /// The uid a channel plist must be owned by to be honored — root in
+    /// production, where MDM materializes the artifacts. Tests point it at
+    /// themselves so channel behavior can be exercised with files a test
+    /// can actually create.
+    trusted_owner: u32,
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+impl ManagedPreferencesSource {
+    pub(crate) fn for_bundle_id(bundle_id: &str) -> Self {
+        let root = PathBuf::from("/Library/Managed Preferences");
+        let mut paths = Vec::new();
+        // The user channel is scoped by the *effective* uid's account name,
+        // resolved from the user database — never `$USER`, which any launcher
+        // controls and could point at another account's channel or, via path
+        // separators, outside the managed-preferences tree entirely.
+        if let Some(user) = effective_user_name() {
+            if is_safe_path_component(&user) {
+                paths.push(root.join(&user).join(format!("{bundle_id}.plist")));
+            } else {
+                tracing::warn!(
+                    "resolved account name {user:?} is not a safe path component; \
+                     skipping the user-scoped managed-preferences channel"
+                );
+            }
+        }
+        paths.push(root.join(format!("{bundle_id}.plist")));
+        Self {
+            paths,
+            trusted_owner: 0,
+        }
+    }
+
+    /// Test seam: the production paths are fixed OS locations, so tests
+    /// inject their own channel files here. Ownership is still held to the
+    /// production requirement (root) unless the test relaxes it.
+    #[cfg(test)]
+    fn with_paths(paths: Vec<PathBuf>) -> Self {
+        Self {
+            paths,
+            trusted_owner: 0,
+        }
+    }
+}
+
+/// The account name of the effective uid, from the user database rather than
+/// the environment. `None` when the uid has no passwd entry.
+#[cfg(unix)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn effective_user_name() -> Option<String> {
+    let mut passwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    let mut buffer = vec![0u8; 1024];
+    loop {
+        let status = unsafe {
+            libc::getpwuid_r(
+                libc::geteuid(),
+                &mut passwd,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        if status == libc::ERANGE && buffer.len() < (1 << 16) {
+            buffer.resize(buffer.len() * 2, 0);
+            continue;
+        }
+        if status != 0 || result.is_null() {
+            return None;
+        }
+        let name = unsafe { std::ffi::CStr::from_ptr(passwd.pw_name) };
+        return name
+            .to_str()
+            .ok()
+            .map(str::to_owned)
+            .filter(|name| !name.is_empty());
+    }
+}
+
+#[cfg(not(unix))]
+#[allow(dead_code)]
+fn effective_user_name() -> Option<String> {
+    None
+}
+
+/// A resolved account name gets joined into a filesystem path; refuse any
+/// shape that could traverse rather than trust the user database blindly.
+fn is_safe_path_component(name: &str) -> bool {
+    !name.is_empty() && name != "." && !name.contains("..") && !name.contains(['/', '\\', '\0'])
+}
+
+impl OsPolicySource for ManagedPreferencesSource {
+    // Reading the forced-domain files directly assumes the app stays
+    // unsandboxed: the App Sandbox reports paths it can't reach as EPERM
+    // rather than ENOENT, which this reader would take for a broken channel.
+    // If OpenWave ever adopts the App Sandbox, this must move to the
+    // sandbox-safe CFPreferences API.
+    fn gateway_url(&self) -> Result<Option<String>> {
+        let mut broken = None;
+        for path in &self.paths {
+            // A broken channel falls through instead of aborting the search:
+            // an unreadable user-channel artifact must not hide the
+            // device-channel policy the organization actually deployed.
+            // Misconfigured is reported only when no channel yields a usable
+            // value and at least one had a present-but-broken artifact.
+            match managed_plist_channel(path, self.trusted_owner) {
+                Ok(Some(url)) => return Ok(Some(url)),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!("managed-preferences channel skipped: {error}");
+                    broken.get_or_insert(error);
+                }
+            }
+        }
+        match broken {
+            Some(error) => Err(error),
+            None => Ok(None),
+        }
+    }
+}
+
+/// Read one managed-preferences channel: an absent file (or absent key) is
+/// `None`. Only a file owned by `trusted_owner` (root in production) is
+/// honored — MDM materializes these as root, and a plist planted by an
+/// unprivileged user must never assert device policy. Ownership is taken
+/// from the opened handle, so the check and the read cannot be raced apart.
+// Portable so unit tests exercise it on every platform; the production
+// caller is the macOS reader.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(unix), allow(unused_variables))]
+fn managed_plist_channel(path: &Path, trusted_owner: u32) -> Result<Option<String>> {
+    use std::io::Read;
+
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(AgentError::config(format!(
+                "managed preferences {} are unreadable: {error}",
+                path.display()
+            )))
+        }
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let owner = file
+            .metadata()
+            .map_err(|error| {
+                AgentError::config(format!(
+                    "managed preferences {} are unreadable: {error}",
+                    path.display()
+                ))
+            })?
+            .uid();
+        if owner != trusted_owner {
+            return Err(AgentError::config(format!(
+                "managed preferences {} are owned by uid {owner}, not uid {trusted_owner}; refusing to honor them",
+                path.display()
+            )));
+        }
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|error| {
+        AgentError::config(format!(
+            "managed preferences {} are unreadable: {error}",
+            path.display()
+        ))
+    })?;
+    // A domain that forces other keys without GatewayURL asserts no gateway
+    // in this channel.
+    gateway_url_from_managed_plist(&bytes)
+}
+
+/// Extract `GatewayURL` from a managed-preferences plist (binary or XML).
+/// Split from the reader so the format is unit-testable without a profile.
+// Live via the reader only where the platform wires it; tested everywhere.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn gateway_url_from_managed_plist(bytes: &[u8]) -> Result<Option<String>> {
+    let value = plist::Value::from_reader(std::io::Cursor::new(bytes))
+        .map_err(|_| AgentError::config("managed preferences plist is unreadable"))?;
+    let Some(dictionary) = value.as_dictionary() else {
+        return Err(AgentError::config(
+            "managed preferences plist is not a dictionary",
+        ));
+    };
+    match dictionary.get(MANAGED_GATEWAY_URL_KEY) {
+        None => Ok(None),
+        Some(value) => match value.as_string() {
+            Some(url) => asserted_gateway_url(url).map(Some),
+            None => Err(AgentError::config(
+                "managed preferences GatewayURL is not a string",
+            )),
+        },
+    }
+}
+
+/// Machine policy from the Windows registry:
+/// `HKLM\Software\Policies\Brightwave\OpenWave`, value `GatewayURL` — the key
+/// GPO/Intune administrative templates deploy to. Registry access has no
+/// portable seam, so only the value check ([`asserted_gateway_url`]) is
+/// unit-tested and this reader stays a thin shell over `winreg`.
+#[cfg(windows)]
+pub(crate) struct RegistryPolicySource;
+
+#[cfg(windows)]
+impl OsPolicySource for RegistryPolicySource {
+    fn gateway_url(&self) -> Result<Option<String>> {
+        // KEY_WOW64_64KEY pins the native 64-bit view: policy lives in the
+        // real Policies hive, and a future 32-bit build must not be silently
+        // redirected to Wow6432Node.
+        let key = match winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
+            .open_subkey_with_flags(
+                r"Software\Policies\Brightwave\OpenWave",
+                winreg::enums::KEY_READ | winreg::enums::KEY_WOW64_64KEY,
+            ) {
+            Ok(key) => key,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(AgentError::config(format!(
+                    "managed policy registry key is unreadable: {error}"
+                )))
+            }
+        };
+        match key.get_value::<String, _>(MANAGED_GATEWAY_URL_KEY) {
+            Ok(value) => asserted_gateway_url(&value).map(Some),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(AgentError::config(format!(
+                "managed policy registry value is unreadable: {error}"
+            ))),
+        }
+    }
+}
+
+/// A JSON policy file: `{"gateway_url": "https://…"}`. Linux wires this at
+/// `/etc/openwave/managed-policy.json`; the reader itself is portable so its
+/// whole contract is testable on any OS.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) struct PolicyFileSource {
+    path: PathBuf,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl PolicyFileSource {
+    pub(crate) fn at(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+}
+
+impl OsPolicySource for PolicyFileSource {
+    fn gateway_url(&self) -> Result<Option<String>> {
+        let bytes = match std::fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(AgentError::config(format!(
+                    "managed policy file {} is unreadable: {error}",
+                    self.path.display()
+                )))
+            }
+        };
+        gateway_url_from_policy_json(&bytes).map(Some)
+    }
+}
+
+/// Decode the policy-file payload. Split from the reader so the format is
+/// testable without a filesystem.
+// Live via the reader only where the platform wires it; tested everywhere.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn gateway_url_from_policy_json(bytes: &[u8]) -> Result<String> {
+    #[derive(Deserialize)]
+    struct PolicyFile {
+        gateway_url: String,
+    }
+    let file: PolicyFile = serde_json::from_slice(bytes)
+        .map_err(|_| AgentError::config("managed policy file is not the expected JSON shape"))?;
+    asserted_gateway_url(&file.gateway_url)
+}
+
+/// The shared shape check for a value read from any OS artifact: registry
+/// values and plist strings arrive padded or blank more readily than typed
+/// config does, so every reader trims before validation and refuses a blank
+/// assertion (present-but-empty is a misconfiguration, not "no policy").
+fn asserted_gateway_url(raw: &str) -> Result<String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Err(AgentError::config(
+            "managed policy asserts an empty gateway URL",
+        ));
+    }
+    Ok(value.to_string())
 }
 
 /// The durable provisioned state, stored as one setting.
@@ -69,37 +434,67 @@ struct ProvisionedPolicy {
 
 /// Resolve the active policy: OS-managed over provisioned over unmanaged.
 ///
-/// A present-but-invalid policy is an error, not silently unmanaged: a
-/// profile that claims to be managed must never quietly revert to the open
-/// experience on a decode or validation failure. Both authorities pass
+/// A present-but-invalid policy resolves managed-but-misconfigured
+/// ([`ManagedPolicy::misconfigured`]), never silently unmanaged: a profile
+/// that claims to be managed must not quietly revert to the open experience
+/// on a decode or validation failure, and surfaces need a legible state to
+/// render rather than an opaque error on every read. Both authorities pass
 /// through [`validated_gateway_url`], so consumers always see one URL shape
 /// regardless of which authority asserted it — no platform reader has to
 /// remember to validate.
+///
+/// The OS artifact is read on every call, deliberately: an MDM push or
+/// removal becomes visible on the next `/policy` read without an app
+/// restart, and the artifacts are tiny.
 pub(crate) async fn resolve(
     store: &dyn Store,
     os_policy: &dyn OsPolicySource,
 ) -> Result<ManagedPolicy> {
-    if let Some(gateway_url) = os_policy.gateway_url() {
-        return Ok(ManagedPolicy {
-            managed: true,
-            gateway_url: Some(validated_gateway_url(&gateway_url)?),
-            source: ManagedPolicySource::Os,
-        });
+    match os_policy.gateway_url() {
+        Ok(Some(gateway_url)) => return Ok(asserted(ManagedPolicySource::Os, &gateway_url)),
+        Err(error) => {
+            // The projection stays minimal; this warning is the admin's
+            // field diagnostic for what exactly is broken.
+            tracing::warn!("OS-managed policy is present but unusable: {error}");
+            return Ok(ManagedPolicy::misconfigured(ManagedPolicySource::Os));
+        }
+        Ok(None) => {}
     }
     if let Some(value) = store.get_setting(SETTING_KEY).await? {
-        let saved: ProvisionedPolicy = serde_json::from_value(value)
-            .map_err(|_| AgentError::config("saved managed policy is unreadable"))?;
-        return Ok(ManagedPolicy {
-            managed: true,
-            gateway_url: Some(validated_gateway_url(&saved.gateway_url)?),
-            source: ManagedPolicySource::Provisioned,
-        });
+        let Ok(saved) = serde_json::from_value::<ProvisionedPolicy>(value) else {
+            tracing::warn!("stored provisioned policy does not decode; resolving misconfigured");
+            return Ok(ManagedPolicy::misconfigured(
+                ManagedPolicySource::Provisioned,
+            ));
+        };
+        return Ok(asserted(
+            ManagedPolicySource::Provisioned,
+            &saved.gateway_url,
+        ));
     }
     Ok(ManagedPolicy {
         managed: false,
         gateway_url: None,
         source: ManagedPolicySource::Unmanaged,
+        misconfigured: false,
     })
+}
+
+/// Project one authority's asserted URL: valid means managed with the
+/// normalized URL, invalid means managed and misconfigured — fail closed.
+fn asserted(source: ManagedPolicySource, gateway_url: &str) -> ManagedPolicy {
+    match validated_gateway_url(gateway_url) {
+        Ok(gateway_url) => ManagedPolicy {
+            managed: true,
+            gateway_url: Some(gateway_url),
+            source,
+            misconfigured: false,
+        },
+        Err(error) => {
+            tracing::warn!("{source:?}-asserted gateway URL fails the contract: {error}");
+            ManagedPolicy::misconfigured(source)
+        }
+    }
 }
 
 /// The one gateway-URL contract for every policy authority: http/https, no
@@ -161,8 +556,17 @@ mod tests {
     struct OsAsserted(&'static str);
 
     impl OsPolicySource for OsAsserted {
-        fn gateway_url(&self) -> Option<String> {
-            Some(self.0.to_string())
+        fn gateway_url(&self) -> Result<Option<String>> {
+            Ok(Some(self.0.to_string()))
+        }
+    }
+
+    /// A reader whose policy artifact exists but cannot be decoded.
+    struct OsUnreadable;
+
+    impl OsPolicySource for OsUnreadable {
+        fn gateway_url(&self) -> Result<Option<String>> {
+            Err(AgentError::config("artifact present but unreadable"))
         }
     }
 
@@ -187,6 +591,7 @@ mod tests {
         assert!(!policy.managed);
         assert_eq!(policy.source, ManagedPolicySource::Unmanaged);
         assert!(policy.gateway_url.is_none());
+        assert!(!policy.misconfigured);
 
         provision(&*store, "https://gw.example").await.unwrap();
         let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
@@ -202,9 +607,38 @@ mod tests {
             .unwrap();
         assert_eq!(policy.source, ManagedPolicySource::Os);
         assert_eq!(policy.gateway_url.as_deref(), Some("https://mdm.example/"));
-        assert!(resolve(&*store, &OsAsserted("http://user:pw@mdm.example"))
+    }
+
+    /// Carried from the #753 review: a broken authority must fail closed as
+    /// a legible misconfigured state — still managed, no usable URL, naming
+    /// the authority — instead of erroring every `/policy` read. The OS
+    /// authority holds precedence even when broken: a valid provisioned URL
+    /// underneath must not resurface.
+    #[tokio::test]
+    async fn a_broken_authority_resolves_misconfigured_never_open() {
+        let (store, _directory) = test_store().await;
+        provision(&*store, "https://gw.example").await.unwrap();
+
+        for os_policy in [
+            &OsAsserted("http://user:pw@mdm.example") as &dyn OsPolicySource,
+            &OsUnreadable,
+        ] {
+            let policy = resolve(&*store, os_policy).await.unwrap();
+            assert!(policy.managed && policy.misconfigured);
+            assert_eq!(policy.source, ManagedPolicySource::Os);
+            assert!(policy.gateway_url.is_none());
+        }
+
+        // A degenerate stored provisioned value gets the same projection on
+        // its own authority.
+        store
+            .set_setting(SETTING_KEY, &serde_json::json!({ "gateway_url": "" }))
             .await
-            .is_err());
+            .unwrap();
+        let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
+        assert!(policy.managed && policy.misconfigured);
+        assert_eq!(policy.source, ManagedPolicySource::Provisioned);
+        assert!(policy.gateway_url.is_none());
     }
 
     #[tokio::test]
@@ -234,13 +668,186 @@ mod tests {
         assert_eq!(policy.gateway_url.as_deref(), Some("https://corp.gateway/"));
     }
 
+    /// The Linux reader end to end through resolution: absent file is the
+    /// open experience, a valid file is OS-managed, a corrupt file fails
+    /// closed as misconfigured. Portable — the path is injected.
     #[tokio::test]
-    async fn a_degenerate_stored_value_never_resolves_managed() {
+    async fn policy_file_reader_resolves_absent_valid_and_corrupt_files() {
         let (store, _directory) = test_store().await;
-        store
-            .set_setting(SETTING_KEY, &serde_json::json!({ "gateway_url": "" }))
-            .await
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("managed-policy.json");
+        let reader = PolicyFileSource::at(&path);
+
+        assert!(!resolve(&*store, &reader).await.unwrap().managed);
+
+        std::fs::write(&path, br#"{ "gateway_url": "https://corp.gateway" }"#).unwrap();
+        let policy = resolve(&*store, &reader).await.unwrap();
+        assert!(policy.managed && !policy.misconfigured);
+        assert_eq!(policy.source, ManagedPolicySource::Os);
+        assert_eq!(policy.gateway_url.as_deref(), Some("https://corp.gateway/"));
+
+        for corrupt in [&b"not json"[..], br#"{ "gateway": "wrong shape" }"#] {
+            std::fs::write(&path, corrupt).unwrap();
+            let policy = resolve(&*store, &reader).await.unwrap();
+            assert!(policy.managed && policy.misconfigured);
+            assert_eq!(policy.source, ManagedPolicySource::Os);
+        }
+    }
+
+    /// The macOS extraction over both plist encodings MDM profiles produce,
+    /// plus every refusal shape. The key-absent case must be `None` (not an
+    /// error) so a domain forcing unrelated keys never reads as broken.
+    #[test]
+    fn managed_plist_extraction_covers_both_encodings_and_refusals() {
+        let xml = |body: &str| {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>{body}</dict></plist>"#
+            )
+        };
+
+        let asserted = xml("<key>GatewayURL</key><string> https://corp.gateway </string>");
+        assert_eq!(
+            gateway_url_from_managed_plist(asserted.as_bytes()).unwrap(),
+            // Padding from hand-edited profiles is trimmed before validation.
+            Some("https://corp.gateway".to_string())
+        );
+
+        let mut binary = Vec::new();
+        let mut dictionary = plist::Dictionary::new();
+        dictionary.insert(
+            "GatewayURL".into(),
+            plist::Value::String("https://corp.gateway".into()),
+        );
+        plist::Value::Dictionary(dictionary)
+            .to_writer_binary(std::io::Cursor::new(&mut binary))
             .unwrap();
-        assert!(resolve(&*store, &NoOsPolicy).await.is_err());
+        assert_eq!(
+            gateway_url_from_managed_plist(&binary).unwrap(),
+            Some("https://corp.gateway".to_string())
+        );
+
+        let unrelated = xml("<key>OtherSetting</key><true/>");
+        assert_eq!(
+            gateway_url_from_managed_plist(unrelated.as_bytes()).unwrap(),
+            None
+        );
+
+        let non_string = xml("<key>GatewayURL</key><integer>7</integer>");
+        let blank = xml("<key>GatewayURL</key><string>   </string>");
+        for broken in [
+            b"not a plist".as_slice(),
+            non_string.as_bytes(),
+            blank.as_bytes(),
+        ] {
+            assert!(gateway_url_from_managed_plist(broken).is_err());
+        }
+    }
+
+    /// The channel-fallthrough decision, end to end through resolution: a
+    /// broken user-channel artifact must not hide the device-channel policy
+    /// the organization actually deployed, and misconfigured is reported
+    /// only when no channel yields a usable value. A refactor restoring
+    /// abort-on-first-error fails here.
+    #[tokio::test]
+    async fn a_broken_user_channel_falls_through_to_the_device_channel() {
+        let (store, _directory) = test_store().await;
+        let directory = tempfile::tempdir().unwrap();
+        let user_path = directory.path().join("user").join("app.plist");
+        let device_path = directory.path().join("app.plist");
+        std::fs::create_dir_all(user_path.parent().unwrap()).unwrap();
+        std::fs::write(&user_path, b"not a plist").unwrap();
+        std::fs::write(
+            &device_path,
+            br#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>GatewayURL</key><string>https://corp.gateway</string></dict></plist>"#,
+        )
+        .unwrap();
+
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut reader = ManagedPreferencesSource::with_paths(vec![user_path, device_path.clone()]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            // Trust files owned like the ones this test just wrote.
+            reader.trusted_owner = std::fs::metadata(&device_path).unwrap().uid();
+        }
+
+        let policy = resolve(&*store, &reader).await.unwrap();
+        assert!(policy.managed && !policy.misconfigured);
+        assert_eq!(policy.source, ManagedPolicySource::Os);
+        assert_eq!(policy.gateway_url.as_deref(), Some("https://corp.gateway/"));
+
+        // With no device channel behind it, the broken user channel is what
+        // the reader has to say: misconfigured, never silently unmanaged.
+        std::fs::remove_file(&device_path).unwrap();
+        let policy = resolve(&*store, &reader).await.unwrap();
+        assert!(policy.managed && policy.misconfigured);
+        assert!(policy.gateway_url.is_none());
+    }
+
+    /// The ownership refusal, in the direction testable without root: a
+    /// channel plist owned by the (non-root) test user must be refused
+    /// rather than honored as device policy.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_channel_plist_not_owned_by_root_is_refused() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (store, _directory) = test_store().await;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("app.plist");
+        std::fs::write(
+            &path,
+            br#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>GatewayURL</key><string>https://planted.example</string></dict></plist>"#,
+        )
+        .unwrap();
+        if std::fs::metadata(&path).unwrap().uid() == 0 {
+            // Running as root: the file is genuinely root-owned and the
+            // refusal cannot be observed.
+            return;
+        }
+
+        let reader = ManagedPreferencesSource::with_paths(vec![path]);
+        let policy = resolve(&*store, &reader).await.unwrap();
+        assert!(policy.managed && policy.misconfigured);
+        assert_eq!(policy.source, ManagedPolicySource::Os);
+        assert!(policy.gateway_url.is_none());
+    }
+
+    /// The guard between the user database and the filesystem join: no
+    /// resolved account name may escape the managed-preferences tree.
+    #[test]
+    fn a_resolved_account_name_never_traverses_the_preferences_tree() {
+        assert!(is_safe_path_component("abaas"));
+        assert!(is_safe_path_component("svc-mdm.local"));
+        for hostile in [
+            "",
+            ".",
+            "..",
+            "../../tmp/evil",
+            "a/b",
+            "a\\b",
+            "x..y",
+            "nul\0byte",
+        ] {
+            assert!(!is_safe_path_component(hostile), "accepted {hostile:?}");
+        }
+    }
+
+    /// The value check shared by the Windows registry reader (whose registry
+    /// access itself has no portable seam): padded values are trimmed, blank
+    /// ones are a misconfiguration rather than "no policy".
+    #[test]
+    fn an_asserted_value_is_trimmed_and_a_blank_one_refused() {
+        assert_eq!(
+            asserted_gateway_url(" https://corp.gateway \r\n").unwrap(),
+            "https://corp.gateway"
+        );
+        assert!(asserted_gateway_url("   ").is_err());
     }
 }

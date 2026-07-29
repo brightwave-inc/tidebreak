@@ -634,10 +634,13 @@ async fn bind_inner(
     let instance_lock = InstanceLock::acquire(&config)?;
     let store = connect_store(&config).await?;
     let secrets = secret_provider(&config);
-    // Until the platform readers land, no OS source asserts a policy. This is
-    // the one instance shared by the boot migration, the resolver, and the
-    // request handlers, so they can never disagree on the resolved policy.
-    let os_policy: Arc<dyn managed_policy::OsPolicySource> = Arc::new(managed_policy::NoOsPolicy);
+    // The product boot path is where this platform's OS-managed (MDM) policy
+    // reader gets selected; directly assembled AppState stays hermetic. This
+    // is the one instance shared by the boot policy read, the legacy-key
+    // migration guard, the resolver, the gateway runtime, and the request
+    // handlers, so they can never disagree on the resolved policy.
+    let os_policy: Arc<dyn managed_policy::OsPolicySource> =
+        managed_policy::platform_source(&config);
     // The BYOK boot paths — the legacy Anthropic auto-enable and the OpenAI
     // embedder below — are gated on one policy read. A resolution `Err` is
     // deliberately swallowed as "not allowed": an unreadable policy fails

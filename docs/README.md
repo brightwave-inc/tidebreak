@@ -27,6 +27,8 @@ Project documentation, versioned alongside the code.
 - [Execution providers and sandbox-resident agent runs](sandbox-providers.md) —
   the run-tier/execution-provider split, reachability and credential
   invariants, and the phased route to detached background agent runs.
+- [OS-managed policy (MDM)](managed-policy.md) — the per-platform artifacts an
+  administrator deploys to point OpenWave at a managed model gateway.
 - [Releases and versioning](releases.md) — semantic PR titles, native release
   drafts, tag-derived macOS builds, and the deliberate path to `1.0.0`.
 

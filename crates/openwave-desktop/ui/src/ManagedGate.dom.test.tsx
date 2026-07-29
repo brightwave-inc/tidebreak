@@ -12,6 +12,7 @@ const managed: ManagedPolicy = {
   managed: true,
   gateway_url: "https://gateway.example/",
   source: "os",
+  misconfigured: false,
 };
 
 const signedOut: GatewayStatus = {

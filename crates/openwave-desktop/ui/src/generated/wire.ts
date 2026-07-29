@@ -452,7 +452,14 @@ export type InputModality = "text" | "image";
  * Renderer-safe resolved policy. Carries only what surfaces need to render
  * managed state: the verdict, the locked gateway URL, and its authority.
  */
-export type ManagedPolicy = { managed: boolean, gateway_url?: string, source: ManagedPolicySource, };
+export type ManagedPolicy = { managed: boolean, gateway_url?: string, source: ManagedPolicySource, 
+/**
+ * True when `source` asserted management but its gateway URL is missing,
+ * unreadable, or invalid. The profile stays managed with no usable URL —
+ * fail closed — and surfaces can name the authority that needs repair
+ * instead of showing an opaque error.
+ */
+misconfigured: boolean, };
 
 /**
  * Which authority asserted the active policy.
