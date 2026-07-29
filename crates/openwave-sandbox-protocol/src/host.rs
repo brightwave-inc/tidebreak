@@ -106,6 +106,15 @@ impl CapabilityHost {
         if !self.shared.grants.allows(envelope.request.capability()) {
             return ReverseWaiter::settled(Response::Error(ErrorResponse::denied()));
         }
+        // An inbound request is untrusted input. Refuse an over-bound one before
+        // claiming or executing it — never forward it to the responder.
+        if !envelope.request.within_bounds() {
+            return ReverseWaiter::settled(Response::Error(ErrorResponse::new(
+                ErrorCode::TooLarge,
+                "reverse request exceeds its per-capability bound",
+                false,
+            )));
+        }
 
         let id = envelope.operation_id;
         let fingerprint = envelope.request.clone();
@@ -239,6 +248,17 @@ async fn execute(
         )),
     };
 
+    // Enforce the result bound before recording: a responder that returns an
+    // over-bound completion has its result rejected, not persisted.
+    let settled = match settled {
+        Response::Ok(result) if !result.within_bounds() => Response::Error(ErrorResponse::new(
+            ErrorCode::TooLarge,
+            "reverse result exceeds its per-capability bound",
+            false,
+        )),
+        settled => settled,
+    };
+
     // Record durably first, so a re-issue racing this completion observes the
     // terminal state in the store rather than a `Claimed` with a vanishing
     // in-flight entry.
@@ -254,4 +274,97 @@ async fn execute(
     // A dropped receiver only means no connection is currently waiting; the
     // recorded outcome still stands for a later re-issue.
     let _ = outcome.send(Outcome::Settled(settled));
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::{
+        ids::{OperationId, RequestId, RunId},
+        oplog::{ClaimOutcome, OperationFingerprint, OperationState, OperationStore, StoreError},
+        protocol::PROTOCOL_VERSION,
+        reverse::{
+            Capability, CapabilityResponder, GrantSet, ModelInferenceParams, ModelInferenceResult,
+            ReverseEnvelope, ReverseRequest, ReverseResult, RunProvenance,
+        },
+    };
+
+    use super::*;
+
+    /// A store that reports every claim as `ClaimedElsewhere` — the after-crash
+    /// state a durable store surfaces for a `Claimed` entry it did not itself
+    /// dispatch. In-memory stores can never reach it, so it is faked here.
+    struct CrashedStore;
+
+    impl OperationStore for CrashedStore {
+        fn claim(&self, _id: OperationId, _fingerprint: &OperationFingerprint) -> ClaimOutcome {
+            ClaimOutcome::ClaimedElsewhere
+        }
+        fn record(&self, _id: OperationId, _result: ReverseResult) -> Result<(), StoreError> {
+            Ok(())
+        }
+        fn fail(&self, _id: OperationId, _error: ErrorResponse) -> Result<(), StoreError> {
+            Ok(())
+        }
+        fn state(&self, _id: OperationId) -> Option<OperationState> {
+            None
+        }
+        fn evict(&self, _id: OperationId) {}
+        fn len(&self) -> usize {
+            0
+        }
+    }
+
+    struct CountingResponder {
+        executions: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CapabilityResponder for CountingResponder {
+        async fn respond(&self, _request: ReverseRequest) -> Response<ReverseResult> {
+            self.executions.fetch_add(1, Ordering::SeqCst);
+            Response::Ok(ReverseResult::ModelInference(ModelInferenceResult {
+                completion: "should never run".to_owned(),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn claimed_after_crash_refuses_conservatively_and_never_executes() {
+        let executions = Arc::new(AtomicUsize::new(0));
+        let provenance = RunProvenance {
+            run_id: RunId::new(),
+            provider: "test".to_owned(),
+        };
+        let host = CapabilityHost::new(
+            GrantSet::new(provenance, [Capability::ModelInference]),
+            Arc::new(CountingResponder {
+                executions: Arc::clone(&executions),
+            }),
+            Arc::new(CrashedStore),
+        );
+
+        let response = host
+            .dispatch(ReverseEnvelope {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: RequestId::new(),
+                operation_id: OperationId::new(),
+                request: ReverseRequest::ModelInference(ModelInferenceParams {
+                    prompt: "resume after crash".to_owned(),
+                }),
+            })
+            .wait()
+            .await;
+
+        match response {
+            Response::Error(error) => assert_eq!(error.code, ErrorCode::OperationAmbiguous),
+            Response::Ok(_) => panic!("a claimed-after-crash call must not be replayed"),
+        }
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            0,
+            "a conservatively-refused call must never execute"
+        );
+    }
 }

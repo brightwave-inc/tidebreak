@@ -72,6 +72,17 @@ impl ReverseRequest {
             ReverseRequest::ModelInference(_) => Capability::ModelInference,
         }
     }
+
+    /// Whether this inbound request is within its declared per-capability bound.
+    ///
+    /// The host checks this before executing: a request is untrusted input, and
+    /// an over-bound one is refused, not forwarded.
+    #[must_use]
+    pub fn within_bounds(&self) -> bool {
+        match self {
+            ReverseRequest::ModelInference(params) => params.within_bounds(),
+        }
+    }
 }
 
 /// A bounded typed success for one reverse request.
@@ -219,6 +230,19 @@ impl GrantSet {
 pub trait CapabilityResponder: Send + Sync {
     /// Execute one reverse request and return its bounded outcome.
     async fn respond(&self, request: ReverseRequest) -> Response<ReverseResult>;
+}
+
+impl ReverseResult {
+    /// Whether this result is within its declared per-capability bound.
+    ///
+    /// The host checks this before recording: a responder that returns an
+    /// over-bound completion has its result rejected rather than persisted.
+    #[must_use]
+    pub fn within_bounds(&self) -> bool {
+        match self {
+            ReverseResult::ModelInference(result) => result.within_bounds(),
+        }
+    }
 }
 
 impl ModelInferenceResult {

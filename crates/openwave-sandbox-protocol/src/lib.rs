@@ -35,6 +35,23 @@
 //! correctness-critical designs that get their own focused review and are
 //! tracked as follow-ups (see [`oplog`]). The
 //! [`OperationStore`](oplog::OperationStore) trait is the seam they plug into.
+//!
+//! # Scope of this crate: the types, not the byte transport
+//!
+//! What this crate defines and pins is the **wire types and their semantics**:
+//! the serde representations (round-tripped and golden-encoding-asserted in the
+//! tests, so a cross-language self-hoster has a representation spec), the
+//! version handshake, the deny-by-default and idempotency rules, the event-
+//! cursor contract, and the per-capability bounds. What it deliberately does
+//! **not** define is the concrete byte transport: **wire framing** (how a frame
+//! is delimited on a socket) and **lane multiplexing** (how the request lane and
+//! the reserved control lane share one connection) are transport-specific and
+//! belong to a concrete backend — the local container backend in delivery-
+//! sequence step 7, exercised there as the managed `exec` adapters are. The
+//! [reference backend](reference) passes typed frames in-process to pin
+//! semantics; it is not the byte transport, and "a public versioned interface
+//! third parties implement" means these types and rules, plus a concrete
+//! transport a backend supplies.
 
 pub mod artifacts;
 pub mod conformance;
@@ -52,9 +69,10 @@ pub use host::{CapabilityHost, ReverseWaiter};
 pub use ids::{EventCursor, OperationId, RequestId, RunId, SandboxTag, Sequence};
 pub use oplog::{ClaimOutcome, InMemoryOperationStore, OperationState, OperationStore, StoreError};
 pub use protocol::{
-    require_version, AttachAccepted, AttachRequest, ErrorCode, ErrorResponse, Response,
-    MAX_ARTIFACTS, MAX_ARTIFACT_BYTES, MAX_BUFFERED_EVENTS, MAX_EVENT_PAYLOAD_BYTES,
-    MAX_FRAME_BYTES, MAX_MODEL_COMPLETION_BYTES, MAX_MODEL_PROMPT_BYTES, PROTOCOL_VERSION,
+    handshake, require_version, AttachAccepted, AttachRefused, AttachRequest, ErrorCode,
+    ErrorResponse, HandshakeResponse, Response, MAX_ARTIFACTS, MAX_ARTIFACT_BYTES,
+    MAX_BUFFERED_EVENTS, MAX_EVENT_PAYLOAD_BYTES, MAX_FRAME_BYTES, MAX_INFLIGHT_REQUESTS,
+    MAX_MODEL_COMPLETION_BYTES, MAX_MODEL_PROMPT_BYTES, PROTOCOL_VERSION,
 };
 pub use provisioning::{
     BackendError, ProvisionRequest, SandboxAddress, SandboxBackend, SandboxHandle, TransportSecret,

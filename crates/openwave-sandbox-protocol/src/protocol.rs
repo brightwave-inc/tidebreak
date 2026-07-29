@@ -42,6 +42,12 @@ pub const MAX_ARTIFACTS: usize = 256;
 /// Largest single artifact the protocol returns as opaque bytes.
 pub const MAX_ARTIFACT_BYTES: usize = 8 * 1024 * 1024;
 
+/// Largest number of reverse requests one connection keeps in flight before the
+/// request lane applies backpressure. The reserved control lane
+/// ([`ControlFrame`](crate::reverse::ControlFrame)) is not subject to this bound,
+/// so a cancel or a heartbeat preempts a saturated request backlog.
+pub const MAX_INFLIGHT_REQUESTS: usize = 16;
+
 /// The host's request to attach to a provisioned sandbox.
 ///
 /// `resume_from` is the host's last committed [`EventCursor`]; a fresh run
@@ -59,16 +65,29 @@ pub struct AttachRequest {
     pub resume_from: EventCursor,
 }
 
-/// The sandbox supervisor's answer to an [`AttachRequest`].
+/// The sandbox supervisor's answer to an [`AttachRequest`], as an on-wire frame.
 ///
-/// It is returned even on a version mismatch so the host learns the sandbox's
-/// version rather than a blank refusal — the same courtesy the broker's `Hello`
-/// extends. A mismatch still denies the connection; the fields describe why.
+/// The sandbox always answers a handshake: it [`Accepted`](HandshakeResponse::Accepted)
+/// the connection, or it [`Refused`](HandshakeResponse::Refused) it and returns
+/// the sandbox's own version so the host learns the mismatch rather than getting
+/// a blank refusal — the same courtesy the broker's `Hello` extends. A refusal
+/// still leaves the connection unusable. Backends compute this with
+/// [`handshake`]; the reference backend surfaces a refusal as
+/// [`ConnectError::VersionRefused`](crate::reference::ConnectError::VersionRefused).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HandshakeResponse {
+    /// The versions matched exactly; the connection is established.
+    Accepted(AttachAccepted),
+    /// The versions did not match; the connection is refused.
+    Refused(AttachRefused),
+}
+
+/// The accepted-attach frame the sandbox returns when versions match exactly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttachAccepted {
-    /// The version the sandbox speaks. Equal to the host's on an accepted
-    /// attach; different on a refusal.
+    /// The version the sandbox speaks; equal to the host's on an accepted attach.
     pub protocol_version: u32,
     /// The reverse-RPC capabilities the sandbox may request over this
     /// connection, resolved deny-by-default from the run's grants.
@@ -76,6 +95,46 @@ pub struct AttachAccepted {
     /// The highest sequence the sandbox currently holds, so the host can bound
     /// how far a resume will carry it.
     pub latest_sequence: Option<crate::ids::Sequence>,
+}
+
+/// The refused-attach frame the sandbox returns on a version mismatch.
+///
+/// It carries the sandbox's own version so the host — or a third-party backend's
+/// host — learns what the peer speaks. The connection is not established.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttachRefused {
+    /// The version the sandbox speaks, different from the host's.
+    pub protocol_version: u32,
+    /// Always [`ErrorCode::ProtocolVersion`] today; carried for symmetry with
+    /// other refusals.
+    pub code: ErrorCode,
+}
+
+/// Compute the sandbox's handshake answer for one attach — the canonical answer
+/// a backend returns, so a third-party implementation has an exact example.
+///
+/// Exact-equality on the version, mirroring the host broker: equal versions
+/// accept; anything else refuses and returns the sandbox's version.
+#[must_use]
+pub fn handshake(
+    request: &AttachRequest,
+    sandbox_version: u32,
+    granted_capabilities: Vec<crate::reverse::Capability>,
+    latest_sequence: Option<crate::ids::Sequence>,
+) -> HandshakeResponse {
+    if request.protocol_version == sandbox_version {
+        HandshakeResponse::Accepted(AttachAccepted {
+            protocol_version: sandbox_version,
+            granted_capabilities,
+            latest_sequence,
+        })
+    } else {
+        HandshakeResponse::Refused(AttachRefused {
+            protocol_version: sandbox_version,
+            code: ErrorCode::ProtocolVersion,
+        })
+    }
 }
 
 /// Stable failure classes carried across the sandbox-agent boundary.
@@ -210,6 +269,49 @@ mod tests {
         let error = require_version(PROTOCOL_VERSION + 1).unwrap_err();
         assert_eq!(error.code, ErrorCode::ProtocolVersion);
         assert!(!error.retryable);
+    }
+
+    #[test]
+    fn handshake_accepts_on_match_and_refuses_on_skew() {
+        let request = AttachRequest {
+            protocol_version: PROTOCOL_VERSION,
+            run_id: RunId::new(),
+            resume_from: EventCursor::START,
+        };
+        match handshake(
+            &request,
+            PROTOCOL_VERSION,
+            vec![Capability::ModelInference],
+            None,
+        ) {
+            HandshakeResponse::Accepted(accepted) => {
+                assert_eq!(accepted.protocol_version, PROTOCOL_VERSION);
+                assert_eq!(
+                    accepted.granted_capabilities,
+                    vec![Capability::ModelInference]
+                );
+            }
+            HandshakeResponse::Refused(_) => panic!("matching versions must accept"),
+        }
+
+        // A skewed attach is answered with an on-wire refusal carrying the
+        // sandbox's own version, not a blank error.
+        let skewed = handshake(&request, PROTOCOL_VERSION + 1, Vec::new(), None);
+        match skewed {
+            HandshakeResponse::Refused(refused) => {
+                assert_eq!(refused.protocol_version, PROTOCOL_VERSION + 1);
+                assert_eq!(refused.code, ErrorCode::ProtocolVersion);
+            }
+            HandshakeResponse::Accepted(_) => panic!("skewed versions must refuse"),
+        }
+
+        // The refusal frame round-trips and is externally tagged.
+        let encoded = serde_json::to_value(&skewed).unwrap();
+        assert!(encoded.get("refused").is_some());
+        assert_eq!(
+            serde_json::from_value::<HandshakeResponse>(encoded).unwrap(),
+            skewed
+        );
     }
 
     #[test]

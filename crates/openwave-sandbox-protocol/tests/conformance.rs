@@ -18,6 +18,21 @@ async fn deny_by_default_refuses_ungranted_capability() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn over_bound_request_is_refused() {
+    conformance::over_bound_request_is_refused().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn over_bound_event_is_refused() {
+    conformance::over_bound_event_is_refused().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn control_lane_cancel_preempts_saturated_request_lane() {
+    conformance::control_lane_cancel_preempts_saturated_request_lane().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn event_stream_resumes_from_committed_cursor() {
     conformance::event_stream_resumes_from_committed_cursor().await;
 }

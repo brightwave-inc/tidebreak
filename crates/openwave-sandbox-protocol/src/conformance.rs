@@ -35,7 +35,10 @@ use tokio::sync::Semaphore;
 use crate::{
     ids::{EventCursor, OperationId, RunId, Sequence},
     oplog::{InMemoryOperationStore, OperationStore},
-    protocol::{AttachRequest, ErrorCode, Response, PROTOCOL_VERSION},
+    protocol::{
+        AttachRequest, ErrorCode, Response, MAX_BUFFERED_EVENTS, MAX_EVENT_PAYLOAD_BYTES,
+        MAX_MODEL_PROMPT_BYTES, PROTOCOL_VERSION,
+    },
     provisioning::{ProvisionRequest, SandboxBackend, TransportSecret},
     reference::{ReferenceBackend, ReferenceSandbox, ReverseCallOutcome, Session},
     reverse::{
@@ -159,7 +162,7 @@ async fn attach(
 
 /// A version-skewed peer is refused, never attached.
 pub async fn version_mismatch_is_refused() {
-    let sandbox = ReferenceSandbox::with_config(PROTOCOL_VERSION + 1, 8);
+    let sandbox = ReferenceSandbox::with_config(PROTOCOL_VERSION + 1, 8, 4);
     let backend = ReferenceBackend::self_hosted("inproc://skewed", secret(), sandbox);
     let handle = backend
         .provision(provision_request())
@@ -169,9 +172,11 @@ pub async fn version_mismatch_is_refused() {
 
     let (host, _store) = host_with(vec![Capability::ModelInference], echo().0);
     match backend.connect(&address, attach_request(), host) {
-        Err(crate::reference::ConnectError::ProtocolVersion { host, sandbox }) => {
-            assert_eq!(host, PROTOCOL_VERSION);
-            assert_eq!(sandbox, PROTOCOL_VERSION + 1);
+        Err(crate::reference::ConnectError::VersionRefused(refused)) => {
+            // The skew answer is an on-wire refusal carrying the sandbox's own
+            // version, and no session was established.
+            assert_eq!(refused.protocol_version, PROTOCOL_VERSION + 1);
+            assert_eq!(refused.code, ErrorCode::ProtocolVersion);
         }
         Err(other) => panic!("expected a version-mismatch refusal, got {other:?}"),
         Ok(_) => panic!("a version mismatch must refuse the connection"),
@@ -257,7 +262,7 @@ pub async fn event_stream_resumes_from_committed_cursor() {
 /// drain that advances the cursor lets production resume.
 pub async fn event_buffer_overflow_checkpoints_and_resumes() {
     let (host, _store) = host_with(Vec::new(), echo().0);
-    let sandbox = ReferenceSandbox::with_config(PROTOCOL_VERSION, 2);
+    let sandbox = ReferenceSandbox::with_config(PROTOCOL_VERSION, 2, 4);
     let control = sandbox.control();
     control.emit_progress("one").expect("first fits");
     control.emit_progress("two").expect("second fits");
@@ -431,13 +436,26 @@ pub async fn self_hosted_and_managed_share_one_attach_path() {
     drive_one_run(&self_hosted, Some("inproc://self-hosted")).await;
 }
 
-async fn drive_one_run(backend: &ReferenceBackend, _endpoint: Option<&str>) {
+async fn drive_one_run(backend: &ReferenceBackend, endpoint: Option<&str>) {
     let (host, store) = host_with(vec![Capability::ModelInference], echo().0);
     let handle = backend
         .provision(provision_request())
         .await
         .expect("provision");
     let address = backend.address(&handle).await.expect("address");
+    match endpoint {
+        // A self-hosted backend's provision is a no-op: address must resolve to
+        // the exact user-supplied endpoint, not a freshly minted one.
+        Some(endpoint) => assert_eq!(
+            address.base_url, endpoint,
+            "self-hosted address routes to the user-supplied endpoint"
+        ),
+        // A managed backend mints its own reachable endpoint.
+        None => assert!(
+            address.base_url.starts_with("inproc://"),
+            "managed backend provisions its own endpoint"
+        ),
+    }
     let control = backend
         .control(&handle)
         .expect("control resolves for both modes");
@@ -479,7 +497,7 @@ pub async fn artifact_collection_roundtrips_and_is_bounded() {
     let backend = ReferenceBackend::self_hosted("inproc://artifacts", secret(), sandbox);
     let session = attach(&backend, host, EventCursor::START).await;
 
-    let manifest = session.collect_artifacts();
+    let manifest = session.collect_artifacts().expect("manifest within bounds");
     assert!(manifest.within_bounds());
     let names: Vec<&str> = manifest
         .entries
@@ -500,14 +518,121 @@ pub async fn artifact_collection_roundtrips_and_is_bounded() {
     assert_eq!(missing.code, ErrorCode::NotFound);
 }
 
+/// An over-bound inbound reverse request is refused before it executes.
+pub async fn over_bound_request_is_refused() {
+    let (responder, executions) = echo();
+    let (host, store) = host_with(vec![Capability::ModelInference], responder);
+    let sandbox = ReferenceSandbox::new();
+    let control = sandbox.control();
+    let backend = ReferenceBackend::self_hosted("inproc://bound-req", secret(), sandbox);
+    let _session = attach(&backend, host, EventCursor::START).await;
+
+    let oversize = "x".repeat(MAX_MODEL_PROMPT_BYTES + 1);
+    let outcome = control
+        .issue_reverse(OperationId::new(), infer(&oversize))
+        .await;
+    match outcome {
+        ReverseCallOutcome::Settled(Response::Error(error)) => {
+            assert_eq!(error.code, ErrorCode::TooLarge);
+        }
+        other => panic!("expected an over-bound refusal, got {other:?}"),
+    }
+    assert_eq!(
+        executions.load(Ordering::SeqCst),
+        0,
+        "an over-bound request must never execute"
+    );
+    assert!(
+        store.is_empty(),
+        "an over-bound request records no operation"
+    );
+}
+
+/// An over-bound event is refused rather than emitted.
+pub async fn over_bound_event_is_refused() {
+    let sandbox = ReferenceSandbox::new();
+    let control = sandbox.control();
+    let oversize = "y".repeat(MAX_EVENT_PAYLOAD_BYTES + 1);
+    assert_eq!(
+        control.emit_progress(oversize),
+        Err(crate::reference::EmitError::TooLarge),
+        "an over-bound event must be refused, not emitted"
+    );
+    // A within-bound event still emits, so the refusal is specific to the bound.
+    control.emit_progress("ok").expect("a bounded event emits");
+}
+
+/// A control-lane cancel lands even while the request lane is saturated: the
+/// reserved lane is not subject to request backpressure.
+pub async fn control_lane_cancel_preempts_saturated_request_lane() {
+    // The gate is never released: these calls stay in flight to keep the
+    // request lane saturated, and are abandoned when the test ends.
+    let (responder, started, finished, _gate) = gated();
+    let (host, _store) = host_with(vec![Capability::ModelInference], responder);
+    // A request lane with exactly two in-flight permits.
+    let sandbox = ReferenceSandbox::with_config(PROTOCOL_VERSION, MAX_BUFFERED_EVENTS, 2);
+    let control = sandbox.control();
+    let backend = ReferenceBackend::self_hosted("inproc://saturated", secret(), sandbox);
+    let _session = attach(&backend, host, EventCursor::START).await;
+
+    // Saturate the request lane: two gated calls hold both permits.
+    let target = OperationId::new();
+    let call_a = {
+        let control = control.clone();
+        tokio::spawn(async move { control.issue_reverse(target, infer("a")).await })
+    };
+    let call_b = {
+        let control = control.clone();
+        tokio::spawn(async move { control.issue_reverse(OperationId::new(), infer("b")).await })
+    };
+    while started.load(Ordering::SeqCst) < 2 {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    // A third call cannot even register: no permit is free while the lane is
+    // saturated. It never reaches the responder.
+    let call_c = {
+        let control = control.clone();
+        tokio::spawn(async move { control.issue_reverse(OperationId::new(), infer("c")).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(
+        started.load(Ordering::SeqCst),
+        2,
+        "a third request is blocked behind request backpressure"
+    );
+
+    // The cancel travels the reserved control lane, acquires no request permit,
+    // and lands despite the saturated request lane.
+    control.cancel_reverse(target);
+    match call_a.await.expect("join") {
+        ReverseCallOutcome::Settled(Response::Error(error)) => {
+            assert_eq!(error.code, ErrorCode::Cancelled);
+        }
+        other => panic!("expected the cancel to land, got {other:?}"),
+    }
+    assert_eq!(
+        finished.load(Ordering::SeqCst),
+        0,
+        "the cancelled effect never finished"
+    );
+
+    // Cleanup: the still-blocked calls are abandoned with the test.
+    call_b.abort();
+    call_c.abort();
+}
+
 /// Run every conformance scenario in sequence.
 pub async fn run_all() {
     version_mismatch_is_refused().await;
     deny_by_default_refuses_ungranted_capability().await;
+    over_bound_request_is_refused().await;
+    over_bound_event_is_refused().await;
     event_stream_resumes_from_committed_cursor().await;
     event_buffer_overflow_checkpoints_and_resumes().await;
     reverse_rpc_correlates_concurrent_calls().await;
     reverse_rpc_cancel_aborts_in_flight().await;
+    control_lane_cancel_preempts_saturated_request_lane().await;
     reverse_rpc_disconnect_fails_inflight_then_reissue_replays().await;
     reverse_rpc_reissue_with_a_different_request_conflicts().await;
     self_hosted_and_managed_share_one_attach_path().await;

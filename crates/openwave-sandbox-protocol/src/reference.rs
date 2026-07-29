@@ -24,7 +24,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use tokio::sync::watch;
+use tokio::sync::{watch, Semaphore};
 use uuid::Uuid;
 
 use crate::{
@@ -33,7 +33,8 @@ use crate::{
     host::CapabilityHost,
     ids::{EventCursor, OperationId, RunId, Sequence},
     protocol::{
-        AttachAccepted, AttachRequest, ErrorCode, ErrorResponse, Response, MAX_BUFFERED_EVENTS,
+        handshake, AttachAccepted, AttachRefused, AttachRequest, ErrorCode, ErrorResponse,
+        HandshakeResponse, Response, MAX_ARTIFACTS, MAX_BUFFERED_EVENTS, MAX_INFLIGHT_REQUESTS,
         PROTOCOL_VERSION,
     },
     provisioning::{
@@ -47,9 +48,11 @@ use crate::{
 /// Why attaching a host to a sandbox failed.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ConnectError {
-    /// The versions did not match exactly; the connection is refused.
-    #[error("protocol version mismatch: host speaks {host}, sandbox speaks {sandbox}")]
-    ProtocolVersion { host: u32, sandbox: u32 },
+    /// The versions did not match exactly; the sandbox answered with an on-wire
+    /// [`AttachRefused`] carrying its own version, and the connection is not
+    /// established.
+    #[error("attach refused: sandbox speaks protocol version {}", .0.protocol_version)]
+    VersionRefused(AttachRefused),
     /// The address resolves to no reachable sandbox.
     #[error("sandbox address is not reachable: {0}")]
     Unreachable(String),
@@ -63,6 +66,9 @@ pub enum EmitError {
     /// the host's cursor clears this.
     #[error("event buffer overflowed; sandbox checkpointed")]
     Overflow,
+    /// The event payload exceeds its declared per-event bound and is refused.
+    #[error("event payload exceeds its per-event bound")]
+    TooLarge,
 }
 
 /// The outcome of one sandbox-originated reverse call over the current session.
@@ -79,11 +85,16 @@ pub enum ReverseCallOutcome {
 struct AttachedHost {
     host: CapabilityHost,
     disconnect: watch::Receiver<bool>,
+    /// The request lane's in-flight bound for this connection. Reverse requests
+    /// acquire a permit and back up when the host is slow; the reserved control
+    /// lane (cancel) does not touch it.
+    request_permits: Arc<Semaphore>,
 }
 
 struct Inner {
     protocol_version: u32,
     buffer_cap: usize,
+    request_lane_capacity: usize,
     events: Vec<SandboxEvent>,
     next_seq: u64,
     acked_through: u64,
@@ -100,20 +111,26 @@ pub struct ReferenceSandbox {
 
 impl ReferenceSandbox {
     /// A sandbox speaking the current [`PROTOCOL_VERSION`] with the default
-    /// event-buffer bound.
+    /// event-buffer and request-lane bounds.
     #[must_use]
     pub fn new() -> Self {
-        Self::with_config(PROTOCOL_VERSION, MAX_BUFFERED_EVENTS)
+        Self::with_config(PROTOCOL_VERSION, MAX_BUFFERED_EVENTS, MAX_INFLIGHT_REQUESTS)
     }
 
-    /// A sandbox with an explicit protocol version and event-buffer bound, for
-    /// exercising version refusal and overflow at a small, cheap scale.
+    /// A sandbox with explicit protocol version, event-buffer bound, and
+    /// request-lane capacity, for exercising version refusal, overflow, and
+    /// backpressure at a small, cheap scale.
     #[must_use]
-    pub fn with_config(protocol_version: u32, buffer_cap: usize) -> Self {
+    pub fn with_config(
+        protocol_version: u32,
+        buffer_cap: usize,
+        request_lane_capacity: usize,
+    ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 protocol_version,
                 buffer_cap: buffer_cap.max(1),
+                request_lane_capacity: request_lane_capacity.max(1),
                 events: Vec::new(),
                 next_seq: Sequence::FIRST.get(),
                 acked_through: EventCursor::START.get(),
@@ -139,6 +156,13 @@ impl ReferenceSandbox {
     fn latest_sequence(&self) -> Option<Sequence> {
         let inner = self.inner.lock().expect("sandbox lock");
         (inner.next_seq > Sequence::FIRST.get()).then(|| Sequence::new(inner.next_seq - 1))
+    }
+
+    fn request_lane_capacity(&self) -> usize {
+        self.inner
+            .lock()
+            .expect("sandbox lock")
+            .request_lane_capacity
     }
 
     fn attach(&self, host: AttachedHost) {
@@ -180,6 +204,9 @@ impl SandboxControl {
     }
 
     fn emit(&self, payload: EventPayload) -> Result<Sequence, EmitError> {
+        if !payload.within_bounds() {
+            return Err(EmitError::TooLarge);
+        }
         let mut inner = self.sandbox.inner.lock().expect("sandbox lock");
         let unacked = (inner.next_seq - 1).saturating_sub(inner.acked_through);
         if unacked >= inner.buffer_cap as u64 {
@@ -205,17 +232,28 @@ impl SandboxControl {
     /// Originate one reverse request over the currently attached session.
     ///
     /// Reverse-RPC availability is keyed to attachment: with no attached host
-    /// this returns [`ReverseCallOutcome::Disconnected`]. The request lane
-    /// carries the call; a disconnect mid-flight fails it while the host's
-    /// execution keeps running.
+    /// this returns [`ReverseCallOutcome::Disconnected`]. The call first acquires
+    /// a request-lane permit — the backpressure point — so a saturated request
+    /// lane blocks new requests here rather than buffering without bound; the
+    /// permit is held until the call settles. A disconnect mid-flight fails it
+    /// while the host's execution keeps running.
     pub async fn issue_reverse(
         &self,
         operation_id: OperationId,
         request: ReverseRequest,
     ) -> ReverseCallOutcome {
-        let Some((host, mut disconnect)) = self.attached() else {
+        let Some((host, mut disconnect, permits)) = self.attached() else {
             return ReverseCallOutcome::Disconnected;
         };
+        // Backpressure: block on a request-lane permit before registering the
+        // request. Held by `_permit` for the lifetime of the call.
+        let _permit = match permits.acquire_owned().await {
+            Ok(permit) => permit,
+            Err(_) => return ReverseCallOutcome::Disconnected,
+        };
+        if *disconnect.borrow() {
+            return ReverseCallOutcome::Disconnected;
+        }
         let envelope = ReverseEnvelope {
             protocol_version: self.sandbox.protocol_version(),
             request_id: RequestId::new(),
@@ -231,20 +269,25 @@ impl SandboxControl {
 
     /// Cancel an in-flight reverse operation over the reserved control lane.
     ///
-    /// This reaches the host directly rather than through the request lane, so
-    /// it is never queued behind request backpressure.
+    /// This reaches the host directly rather than through the request lane, and
+    /// acquires no request-lane permit, so it is never queued behind request
+    /// backpressure — a cancel lands even while the request lane is saturated.
     pub fn cancel_reverse(&self, operation_id: OperationId) {
-        if let Some((host, _)) = self.attached() {
+        if let Some((host, _, _)) = self.attached() {
             host.cancel(operation_id);
         }
     }
 
-    fn attached(&self) -> Option<(CapabilityHost, watch::Receiver<bool>)> {
+    #[allow(clippy::type_complexity)]
+    fn attached(&self) -> Option<(CapabilityHost, watch::Receiver<bool>, Arc<Semaphore>)> {
         let inner = self.sandbox.inner.lock().expect("sandbox lock");
-        inner
-            .attached
-            .as_ref()
-            .map(|attached| (attached.host.clone(), attached.disconnect.clone()))
+        inner.attached.as_ref().map(|attached| {
+            (
+                attached.host.clone(),
+                attached.disconnect.clone(),
+                Arc::clone(&attached.request_permits),
+            )
+        })
     }
 }
 
@@ -306,10 +349,21 @@ impl Session {
     }
 
     /// The bounded manifest of artifacts the run exposes.
-    #[must_use]
-    pub fn collect_artifacts(&self) -> ArtifactManifest {
+    ///
+    /// # Errors
+    /// [`ErrorCode::TooLarge`] if the run exposes more than [`MAX_ARTIFACTS`] —
+    /// the manifest is untrusted input and its cardinality is bounded before it
+    /// crosses to the host.
+    pub fn collect_artifacts(&self) -> Result<ArtifactManifest, ErrorResponse> {
         use sha2::{Digest, Sha256};
         let inner = self.sandbox.inner.lock().expect("sandbox lock");
+        if inner.artifacts.len() > MAX_ARTIFACTS {
+            return Err(ErrorResponse::new(
+                ErrorCode::TooLarge,
+                "artifact manifest exceeds its bound",
+                false,
+            ));
+        }
         let mut entries: Vec<ArtifactEntry> = inner
             .artifacts
             .iter()
@@ -320,7 +374,7 @@ impl Session {
             })
             .collect();
         entries.sort_by(|a, b| a.name.cmp(&b.name));
-        ArtifactManifest { entries }
+        Ok(ArtifactManifest { entries })
     }
 
     /// Fetch one artifact's bounded bytes.
@@ -414,10 +468,14 @@ impl ReferenceBackend {
     /// Attach a run-scoped host to the addressed sandbox, performing the version
     /// handshake and wiring reverse RPC to `host`.
     ///
+    /// The handshake is computed by the shared [`handshake`] function — the
+    /// canonical answer a backend returns — so a skew yields an on-wire
+    /// [`AttachRefused`] rather than an out-of-band decision.
+    ///
     /// # Errors
-    /// [`ConnectError::ProtocolVersion`] on a version mismatch (the connection
-    /// is refused), or [`ConnectError::Unreachable`] if the address resolves to
-    /// no sandbox.
+    /// [`ConnectError::VersionRefused`] on a version mismatch (carrying the
+    /// sandbox's on-wire refusal; the connection is not established), or
+    /// [`ConnectError::Unreachable`] if the address resolves to no sandbox.
     pub fn connect(
         &self,
         address: &SandboxAddress,
@@ -432,23 +490,23 @@ impl ReferenceBackend {
             .cloned()
             .ok_or_else(|| ConnectError::Unreachable(address.base_url.clone()))?;
 
-        let sandbox_version = sandbox.protocol_version();
-        if attach.protocol_version != sandbox_version {
-            return Err(ConnectError::ProtocolVersion {
-                host: attach.protocol_version,
-                sandbox: sandbox_version,
-            });
-        }
+        let accepted = match handshake(
+            &attach,
+            sandbox.protocol_version(),
+            host.granted_capabilities(),
+            sandbox.latest_sequence(),
+        ) {
+            HandshakeResponse::Accepted(accepted) => accepted,
+            HandshakeResponse::Refused(refused) => {
+                return Err(ConnectError::VersionRefused(refused))
+            }
+        };
 
         let (disconnect_tx, disconnect_rx) = watch::channel(false);
-        let accepted = AttachAccepted {
-            protocol_version: sandbox_version,
-            granted_capabilities: host.granted_capabilities(),
-            latest_sequence: sandbox.latest_sequence(),
-        };
         sandbox.attach(AttachedHost {
             host,
             disconnect: disconnect_rx,
+            request_permits: Arc::new(Semaphore::new(sandbox.request_lane_capacity())),
         });
         Ok(Session {
             sandbox,
