@@ -1183,6 +1183,7 @@ mod tests {
             span: ByteSpan::new(0, text.len()),
             location: SourceLocation::Page {
                 number: std::num::NonZeroU32::new(3).unwrap(),
+                bounds: None,
             },
         }];
         let (_, job) = store

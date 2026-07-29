@@ -37,9 +37,13 @@ export type AgentRunCancellationSnapshot = { id: AgentRunId, status: AgentRunCan
 export type AgentRunCancellationStatus = "cancelling" | "cancelled";
 
 /**
- * Execution boundary for an [`AgentRun`].
+ * Where an [`AgentRun`]'s loop executes.
+ *
+ * Every run executes inside the OpenWave server process today. A run
+ * executing inside an execution provider's boundary adds a variant here
+ * rather than a second meaning to [`AgentRunTier`].
  */
-export type AgentRunExecution = "foreground" | "sandbox";
+export type AgentRunExecutionLocation = "in_process";
 
 /**
  * Identifies one durable foreground or sandboxed background agent run.
@@ -52,7 +56,7 @@ export type AgentRunId = string;
  * Worker lease tokens, delegated inputs, scheduling budgets, and other
  * executor-facing fields intentionally remain inside the server/store boundary.
  */
-export type AgentRunSnapshot = { id: AgentRunId, parent_id: AgentRunId | null, execution: AgentRunExecution, status: AgentRunStatus, started_at: string | null, finished_at: string | null, 
+export type AgentRunSnapshot = { id: AgentRunId, parent_id: AgentRunId | null, tier: AgentRunTier, execution_location: AgentRunExecutionLocation, status: AgentRunStatus, started_at: string | null, finished_at: string | null, 
 /**
  * Stable, bounded classification suitable for renderer display.
  */
@@ -70,6 +74,16 @@ activity: AgentActivitySnapshot | null, created_at: string, updated_at: string, 
  * Durable lifecycle of an [`AgentRun`].
  */
 export type AgentRunStatus = "active" | "queued" | "running" | "cancelling" | "waiting" | "retry_wait" | "completed" | "failed" | "cancelled";
+
+/**
+ * Run tier of an [`AgentRun`]: who advances the run.
+ *
+ * Formerly one half of `AgentRunExecution` (`foreground | sandbox`), which
+ * fused this axis with [`AgentRunExecutionLocation`]. The two agreed only
+ * while every run executed in-process, so the field split before a second
+ * location could exist.
+ */
+export type AgentRunTier = "foreground" | "background";
 
 /**
  * The approval policy class a tool declares for itself.
@@ -104,7 +118,13 @@ document_id: DocumentId,
  * Half-open byte range of the cited passage in that document's canonical
  * text, which is the text the extracted-text view renders.
  */
-span: CitationSpan, excerpt: string, heading: string | null, pages: Array<number>, };
+span: CitationSpan, excerpt: string, heading: string | null, pages: Array<number>, 
+/**
+ * Where on those pages the passage sits, for sources whose parser resolved
+ * it that finely. Empty for page-granular sources; `pages` is the complete
+ * answer either way.
+ */
+bounds: Array<CitationPageBounds>, };
 
 /**
  * Identifies one tool call, stable across its request/approval/result.
@@ -210,7 +230,20 @@ action?: ToolActionPreview,
  * Closed projection of an actionable result. Arbitrary result text is
  * never included.
  */
-result?: ToolResultPreview, background_agent_run_id?: AgentRunId, status: ChatToolActivityStatus, started_at: string, finished_at: string | null, };
+result?: ToolResultPreview, 
+/**
+ * Set when this call retained a projection that no longer deserializes.
+ *
+ * The projection is a closed union that is allowed to move, and rows
+ * written before a change may no longer parse against it. Distinguishing
+ * that from "this call projected nothing" is the difference between a card
+ * that says its result can no longer be shown and one that silently
+ * vanishes — which would read as the call never having produced anything.
+ *
+ * A property of reading storage, not of the result: the live stream builds
+ * its projection in memory and can never set this.
+ */
+result_unreadable: boolean, background_agent_run_id?: AgentRunId, status: ChatToolActivityStatus, started_at: string, finished_at: string | null, };
 
 /**
  * Fixed lifecycle vocabulary exposed for a historical tool card.
@@ -228,6 +261,19 @@ export type ChatTranscript = { messages: Array<ChatMessageSnapshot>,
  * renderer-safe allowlist. Canonical tool records never cross this API.
  */
 tool_activity: Array<ChatToolActivitySnapshot>, last_event_seq: number, };
+
+/**
+ * One highlight rectangle of a citation, on a named page.
+ */
+export type CitationPageBounds = { 
+/**
+ * One-based page the rectangle falls on.
+ */
+page: number, 
+/**
+ * The rectangle, in that page's normalized coordinate space.
+ */
+bounds: PageBounds, };
 
 /**
  * A citation's byte range, projected for the renderer.
@@ -248,12 +294,47 @@ end: number, };
 /**
  * Renderer-safe configuration and readiness.
  */
-export type CodeExecutionConfigInfo = { provider?: CodeExecutionProviderKind, timeout_ms: number, available: boolean, has_credential: boolean, };
+export type CodeExecutionConfigInfo = { provider?: CodeExecutionProviderKind, timeout_ms: number, available: boolean, has_credential: boolean, 
+/**
+ * The configured egress policy and each managed provider's enforcement
+ * status, so the renderer can present the policy and disclose which
+ * providers actually restrict egress today.
+ */
+egress: CodeExecutionEgressInfo, };
 
 /**
  * Renderer-safe readiness for one managed provider's fixed credential slot.
  */
 export type CodeExecutionCredentialReadiness = { provider: CodeExecutionProviderKind, has_credential: boolean, };
+
+/**
+ * A managed provider's egress-enforcement status, as host knowledge rather
+ * than a claim the backend makes about itself.
+ */
+export type CodeExecutionEgressEnforcement = { provider: CodeExecutionProviderKind, status: EgressEnforcementStatus, 
+/**
+ * Destinations the vendor's mechanism keeps reachable regardless of the
+ * configured policy — each a short purpose string straight from the
+ * enforcement model, so the settings surface can show the caveat inline
+ * instead of burying it in prose the user skims past.
+ */
+gaps: Array<string>, };
+
+/**
+ * Renderer-safe egress policy plus per-provider enforcement disclosure.
+ */
+export type CodeExecutionEgressInfo = { 
+/**
+ * The configured host policy. `Open` is the default: managed sandboxes are
+ * created with open internet access. An allowlist restricts every managed
+ * sandbox created afterwards.
+ */
+policy: EgressConfig, 
+/**
+ * One row per managed provider, stating whether its egress restriction is
+ * confirmed against the live vendor API or still pending confirmation.
+ */
+enforcement: Array<CodeExecutionEgressEnforcement>, };
 
 /**
  * A configured code-execution backend.
@@ -289,6 +370,34 @@ max_output_tokens: number, };
  * preserves the existing stable URI identity used by retrieval ingestion.
  */
 export type DocumentId = string;
+
+/**
+ * Host-owned, non-secret egress policy for the managed exec sandboxes.
+ *
+ * The model never sets this (invariant 1): it is host configuration, carries
+ * no secret, and accepts no endpoint. `Open` is the default and preserves
+ * exec's out-of-the-box behavior — E2B and Daytona are created with open
+ * internet access, as they always have been. Egress restriction is opt-in:
+ * an `Allowlist` switches every managed sandbox created afterwards to
+ * deny-by-default and compiles the listed domain patterns and CIDR blocks
+ * into the vendor's per-sandbox network controls. An empty allowlist denies
+ * everything on both axes.
+ *
+ * The strings are validated to the same [`DomainPattern`] and [`CidrBlock`]
+ * grammar the decision layer uses, so a malformed grant is rejected at
+ * `PUT` time rather than silently widening egress at sandbox creation.
+ */
+export type EgressConfig = { "mode": "open" } | { "mode": "allowlist", domains: Array<string>, cidrs: Array<string>, };
+
+/**
+ * The honest state of a managed provider's egress enforcement.
+ *
+ * Derived from the shipped enforcement model, never asserted per provider, so
+ * the settings surface and the decision layer cannot disagree: if the model
+ * says a vendor's mechanism leaves a general-purpose destination reachable,
+ * the surface must not present it as a full boundary.
+ */
+export type EgressEnforcementStatus = "boundary" | "applied_with_gaps" | "unconfirmed";
 
 /**
  * One entitled connected app, with the slugs of the MCP endpoints that
@@ -510,6 +619,39 @@ selection: string | null,
 resolved_key: string | null, };
 
 /**
+ * A rectangle on a page, in the page's own normalized coordinate space.
+ *
+ * Coordinates are fractions of the page's width and height with the origin at
+ * the top-left corner, expressed in ten-thousandths ([`PAGE_BOUNDS_SCALE`]).
+ * Normalizing to the page box is what lets a viewer draw the rectangle at any
+ * zoom or render size — multiply by the rendered page and place it — without
+ * knowing the page dimensions the parser saw.
+ *
+ * Fixed-point rather than floating-point on purpose: these travel through JSON
+ * and comparisons, and integers round-trip exactly, keep the enclosing types
+ * `Eq`/`Hash`, and make containment in the page an invariant that can actually
+ * be checked. A ten-thousandth of a US Letter page is ~0.06pt — far finer than
+ * any highlight needs.
+ */
+export type PageBounds = { 
+/**
+ * Distance from the page's left edge.
+ */
+left: number, 
+/**
+ * Distance from the page's top edge.
+ */
+top: number, 
+/**
+ * Width of the rectangle.
+ */
+width: number, 
+/**
+ * Height of the rectangle.
+ */
+height: number, };
+
+/**
  * Closed renderer-safe pending approval projection. Canonical arguments,
  * model-authored summaries, and unknown tool names never cross this boundary;
  * only a tool's own closed preview of the action under review does.
@@ -693,6 +835,73 @@ export type RendererToolStatus = "completed" | "failed";
 export type RequestedFolderHint = "documents" | "downloads";
 
 /**
+ * One thing a call surfaced.
+ *
+ * Three fields because a row reads as three: what it is, where it came from,
+ * and how big or how many. A tool that wants to say more than that is
+ * describing something this projection does not cover.
+ */
+export type ResultEntry = { kind: ResultEntryKind, 
+/**
+ * The row's name — a file name, a source title, a page title.
+ */
+label: string, 
+/**
+ * A secondary hint beside the name — a path, a domain, a section.
+ */
+detail: string | null, 
+/**
+ * Trailing meta — a size, a count, a status word.
+ */
+meta: string | null, };
+
+/**
+ * What one row of a listed result is, which is what picks its icon.
+ *
+ * A closed vocabulary rather than an icon name: the renderer chooses how to
+ * draw a folder, and a tool must not be able to name a glyph.
+ */
+export type ResultEntryKind = "file" | "folder" | "source" | "passage" | "link" | "output";
+
+/**
+ * One thing a call could not do.
+ *
+ * A batch tool succeeds and fails in the same breath — five files import, two
+ * do not — and a card that lists only what worked is not reporting, it is
+ * flattering. Every one of Brightwave's local-file results carries a parallel
+ * failures list for exactly this reason.
+ *
+ * Two fields because that is what a failure row reads as, and it is what
+ * Brightwave's own card normalizes its three failure shapes down to before
+ * rendering them: the thing that failed, and why.
+ */
+export type ResultFailure = { 
+/**
+ * What failed, when the tool can name it. `None` when the tool cannot —
+ * a folder it could not even read the name of — and the row then leads
+ * with a generic noun rather than being dropped. A failure the reader
+ * never sees is worse than one it cannot fully name.
+ */
+label: string | null, 
+/**
+ * Why it failed, in the tool's own words.
+ *
+ * This is tool-authored text, and it crosses on the same terms as a
+ * command's stderr already does: what the boundary keeps out is model- and
+ * provider-authored text and private diagnostics, and this is a message
+ * our own tool wrote for a person to act on. Clamped like every other
+ * field; a failure nobody can read is not a report.
+ *
+ * "Our own tool wrote" is the load-bearing part, and it is a habit rather
+ * than something the type can enforce. Write the sentence — "file is not
+ * valid UTF-8" — instead of forwarding a `std::io::Error`, a broker
+ * failure, or any other error whose `Display` you do not control. Those
+ * interpolate whatever they were handed, which is how a host path ends up
+ * on a card nobody meant to put it on.
+ */
+error: string, };
+
+/**
  * Why a root appears in one conversation's exact ordered projection.
  */
 export type RootAttachmentOrigin = "project_default" | "conversation";
@@ -788,7 +997,20 @@ server: string,
 /**
  * The validated `ui://` document reference.
  */
-resource_uri: string, };
+resource_uri: string, } | { "tool": "entries", entries: Array<ResultEntry>, 
+/**
+ * What the same call could not do. Bounded and counted on the same
+ * terms as `entries`, and elided into the same tally: the card's job
+ * is to be honest about how much it is not showing, and a hidden
+ * failure is the worst thing to hide.
+ */
+failures: Array<ResultFailure>, 
+/**
+ * Rows past [`MAX_RESULT_ENTRIES`], counted rather than shown. A card
+ * that silently lists the first fifty of two hundred results is
+ * telling the reader something false.
+ */
+elided: number, };
 
 /**
  * One renderer-safe image identity attached to a historical user message.

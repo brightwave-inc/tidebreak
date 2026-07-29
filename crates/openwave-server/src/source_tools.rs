@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use openwave_core::{
-    format_source_reference, ApprovalClass, AssistantCitationReference, ByteSpan, CallId, ChunkId,
-    DocumentId, DocumentProcessingStatus, DocumentScope, Result, RetrievalEvidenceInput,
+    format_citation_directive, ApprovalClass, AssistantCitationReference, ByteSpan, CallId,
+    ChunkId, DocumentId, DocumentProcessingStatus, DocumentScope, Result, RetrievalEvidenceInput,
     RetrievalEvidenceSource, Store, Tool, ToolCtx, ToolOutput, ToolSpec,
 };
 use serde::Deserialize;
@@ -135,12 +135,30 @@ impl Tool for ListSourcesTool {
             }
         };
         if records.is_empty() {
-            return Ok(ToolOutput::text(
-                "No sources have been added to this conversation.",
-            ));
+            return Ok(
+                ToolOutput::text("No sources have been added to this conversation.")
+                    // Projected empty rather than not projected: "no sources" and "the
+                    // renderer was told nothing" are different facts, and only the card
+                    // can tell them apart.
+                    .with_entries(Vec::new()),
+            );
         }
 
         let truncated = records.len() > MAX_LISTED_SOURCES as usize;
+        // The readiness word is the one thing a reader has to see here: a
+        // source that is still processing, or that holds no searchable text,
+        // is a source the next answer will quietly fail to use.
+        let entries = records
+            .iter()
+            .take(MAX_LISTED_SOURCES as usize)
+            .map(|record| {
+                openwave_core::ResultEntry::new(
+                    openwave_core::ResultEntryKind::Source,
+                    record.title.as_deref().unwrap_or("Untitled source"),
+                )
+                .with_meta(readiness_label(record.readiness().as_str()))
+            })
+            .collect();
         let visible = records
             .into_iter()
             .take(MAX_LISTED_SOURCES as usize)
@@ -165,7 +183,8 @@ impl Tool for ListSourcesTool {
         Ok(ToolOutput::text(format!(
             "Sources in this conversation:\n{}",
             serde_json::to_string_pretty(&body).expect("bounded source metadata always serializes")
-        )))
+        ))
+        .with_entries(entries))
     }
 }
 
@@ -175,8 +194,8 @@ impl Tool for ReadSourceTool {
         ToolSpec {
             name: READ_SOURCE_TOOL.into(),
             description: "Read a bounded text range from one source in this exact conversation. \
-                          The result includes an opaque reference that can be copied into the \
-                          answer to create a grounded citation."
+                          The result carries a citation directive to wrap the wording it \
+                          supports in."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -262,7 +281,11 @@ impl Tool for ReadSourceTool {
         }
 
         let source_token = Uuid::new_v4();
-        let source_reference = format_source_reference(AssistantCitationReference { source_token });
+        // The same citation grammar the search tool teaches: a directive that
+        // carries the phrasing it supports, so a citation authored from a direct
+        // read anchors to text rather than landing without a position.
+        let directive =
+            format_citation_directive("your phrasing", AssistantCitationReference { source_token });
         let title = document
             .title
             .as_deref()
@@ -270,8 +293,9 @@ impl Tool for ReadSourceTool {
             .unwrap_or("Untitled source");
         let content = format!(
             "Source: {title}\nDocument ID: {document_id}\nCharacters: {}..{} of {}\n\
-             To cite this range, copy this source reference exactly into the answer: \
-             {source_reference}\n\n{}",
+             To cite this range, wrap the wording it supports in this citation directive: \
+             your phrasing goes in the brackets and may paraphrase the range, and the \
+             reference is copied exactly.\nCite as: {directive}\n\n{}",
             window.start_character, window.end_character, window.total_characters, window.text
         );
         let span = ByteSpan::new(window.start_byte, window.end_byte);
@@ -312,7 +336,34 @@ impl Tool for ReadSourceTool {
             source_regions,
             source,
         };
-        Ok(ToolOutput::text(content).with_private_evidence(vec![evidence]))
+        Ok(ToolOutput::text(content)
+            .with_entries(vec![openwave_core::ResultEntry::new(
+                openwave_core::ResultEntryKind::Source,
+                title,
+            )
+            // Which slice of the source was read, because a source read in
+            // twelve-thousand-character windows produces twelve identical rail
+            // lines and the range is the only thing telling them apart.
+            .with_meta(format!(
+                "characters {}–{} of {}",
+                window.start_character, window.end_character, window.total_characters
+            ))])
+            .with_private_evidence(vec![evidence]))
+    }
+}
+
+/// The readiness word a source row shows.
+///
+/// Mapped rather than passed through: the tool's vocabulary is written for the
+/// model and says so — `stored_not_searchable` is a contract term, not
+/// something to put in front of a reader.
+fn readiness_label(readiness: &str) -> &'static str {
+    match readiness {
+        "searchable" => "Searchable",
+        "processing" => "Processing",
+        "stored_not_searchable" => "No text",
+        "failed" => "Failed",
+        _ => "Unknown",
     }
 }
 
@@ -473,8 +524,8 @@ fn historical_safe_name(name: &str) -> &'static str {
 mod tests {
     use chrono::Utc;
     use openwave_core::{
-        Chat, ChatId, DbStore, DocumentUpsert, ReasoningEffort, SourceLocation, SourceRegion,
-        Store, ToolCallRecord, TurnId,
+        format_source_reference, Chat, ChatId, DbStore, DocumentUpsert, ReasoningEffort,
+        SourceLocation, SourceRegion, Store, ToolCallRecord, TurnId,
     };
     use serde_json::json;
     use std::num::NonZeroU32;
@@ -515,6 +566,7 @@ mod tests {
                 span: ByteSpan::new(0, canonical_text.len()),
                 location: SourceLocation::Page {
                     number: NonZeroU32::new(2).unwrap(),
+                    bounds: None,
                 },
             }],
             updated_at: Utc::now(),
@@ -744,14 +796,20 @@ mod tests {
                 span: ByteSpan::new(1, 8),
                 location: SourceLocation::Page {
                     number: NonZeroU32::new(2).unwrap(),
+                    bounds: None,
                 },
             }]
         );
+        // The read teaches the directive form and hands out nothing copyable in
+        // the legacy marker form: a bare marker cites without a phrase to anchor
+        // to, which is exactly the position-less citation this avoids.
+        let reference = AssistantCitationReference {
+            source_token: evidence.source_token,
+        };
         assert!(read
             .content
-            .contains(&format_source_reference(AssistantCitationReference {
-                source_token: evidence.source_token,
-            })));
+            .contains(&format_citation_directive("your phrasing", reference)));
+        assert!(!read.content.contains(&format_source_reference(reference)));
 
         let denied = ReadSourceTool::new(store)
             .execute(&other_context, json!({ "document_id": document_id }))

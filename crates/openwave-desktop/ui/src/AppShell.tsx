@@ -20,12 +20,14 @@ import { useConfirm } from "./components/ConfirmDialog";
 import { hasMacOverlayTitlebar } from "./host";
 import { useInterfaceZoom } from "./InterfaceZoom";
 import { Logomark } from "./Logomark";
+import { ManagedGate } from "./ManagedGate";
 import { resolvedRoleKey } from "./ModelSelection";
 import { useTheme } from "./theme";
 import { Titlebar } from "./Titlebar";
 import { useActiveChatId } from "./useActiveChatId";
 import { useChatPromptWatcher } from "./useChatPromptWatcher";
 import { useShellShortcuts } from "./ShellShortcuts";
+import { ShortcutsDialog } from "./ShortcutsDialog";
 import { useUiStore } from "./UiStore";
 import { useDesktopUpdates } from "./updates";
 
@@ -61,6 +63,7 @@ export function AppShell() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [defaultModelKey, setDefaultModelKey] = useState<string | null>(null);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [status, setStatus] = useState("starting…");
   const openChatId = useActiveChatId();
   const savingTitle = useChatListStore((state) => state.savingTitle);
@@ -87,6 +90,7 @@ export function AppShell() {
     "zoom-in": zoom.zoomIn,
     "zoom-out": zoom.zoomOut,
     "zoom-reset": zoom.resetZoom,
+    "show-shortcuts": () => setShortcutsOpen(true),
   });
 
   useEffect(() => {
@@ -280,36 +284,39 @@ export function AppShell() {
   }
 
   return (
-    <AppContextProvider
-      value={{
-        client,
-        models,
-        defaultModelKey,
-        providers,
-        refreshCatalog,
-        status,
-        setStatus,
-        newChat: () => void onNewChat(),
-        deleteChat: (target) => void onDeleteChat(target),
-        startRename: startChatRename,
-        commitRename: (target) => void commitChatRename(target),
-        cancelRename: cancelChatRename,
-        themeMode,
-        setThemeMode,
-        cycleTheme,
-        updateState: desktopUpdates.state,
-        checkForUpdate: desktopUpdates.check,
-        restartForUpdate: onRestartForUpdate,
-      }}
-    >
-      <div className={`app-shell${hasMacOverlayTitlebar() ? " with-titlebar" : ""}`}>
-        {confirmDialog}
-        {hasMacOverlayTitlebar() && <Titlebar />}
-        {/* Each route renders its own rail beside its content — see RouteFrame. */}
-        <div className="app-body">
-          <Outlet />
+    <ManagedGate client={client}>
+      <AppContextProvider
+        value={{
+          client,
+          models,
+          defaultModelKey,
+          providers,
+          refreshCatalog,
+          status,
+          setStatus,
+          newChat: () => void onNewChat(),
+          deleteChat: (target) => void onDeleteChat(target),
+          startRename: startChatRename,
+          commitRename: (target) => void commitChatRename(target),
+          cancelRename: cancelChatRename,
+          themeMode,
+          setThemeMode,
+          cycleTheme,
+          updateState: desktopUpdates.state,
+          checkForUpdate: desktopUpdates.check,
+          restartForUpdate: onRestartForUpdate,
+        }}
+      >
+        <div className={`app-shell${hasMacOverlayTitlebar() ? " with-titlebar" : ""}`}>
+          {confirmDialog}
+          <ShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
+          {hasMacOverlayTitlebar() && <Titlebar />}
+          {/* Each route renders its own rail beside its content — see RouteFrame. */}
+          <div className="app-body">
+            <Outlet />
+          </div>
         </div>
-      </div>
-    </AppContextProvider>
+      </AppContextProvider>
+    </ManagedGate>
   );
 }

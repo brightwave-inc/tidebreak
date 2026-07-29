@@ -20,6 +20,7 @@ import { resolveTheme } from "@/theme";
 import UniverFormulaWorker from "@/workers/univer-formula.worker?worker&inline";
 import { SpreadsheetShortcutsInfoBar } from "./SpreadsheetShortcutsInfo";
 import { parseCellAddress } from "./spreadsheet";
+import { FileDownloadProgressIndicator } from "@/components/document/FileDownloadProgress";
 import { useFileDownload } from "./useFileDownload";
 import { useUniverWorker } from "./useUniverWorker";
 
@@ -32,7 +33,8 @@ export interface SheetHighlightRange {
 }
 
 interface Props extends HTMLAttributes<HTMLDivElement> {
-  client: Pick<ApiClient, "getDocumentFileContent">;
+  client: Pick<ApiClient, "getChatDocumentFile">;
+  chatId: string;
   documentId: string;
   highlightRange?: SheetHighlightRange;
   /** When true, skip the XLSX-only style pass — a CSV has none. */
@@ -57,6 +59,7 @@ interface UniverInstance {
  */
 export default function UniverSpreadsheetViewer({
   client,
+  chatId,
   documentId,
   highlightRange,
   isCsv,
@@ -92,7 +95,9 @@ export default function UniverSpreadsheetViewer({
     };
   }, []);
 
-  const fileDownload = useFileDownload(client, documentId);
+  const fileDownload = useFileDownload(client, chatId, documentId, {
+    parseAs: "arrayBuffer",
+  });
 
   // Shortcuts the canvas does not handle itself.
   useEffect(() => {
@@ -360,7 +365,11 @@ export default function UniverSpreadsheetViewer({
   if (fileDownload.isLoading) {
     return (
       <div className={cn("relative overflow-auto", className)} {...restProps}>
-        <ViewerMessage spinner>Loading spreadsheet…</ViewerMessage>
+        {fileDownload.progress ? (
+          <FileDownloadProgressIndicator progress={fileDownload.progress} />
+        ) : (
+          <ViewerMessage spinner>Loading spreadsheet…</ViewerMessage>
+        )}
       </div>
     );
   }

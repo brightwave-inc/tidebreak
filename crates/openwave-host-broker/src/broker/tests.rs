@@ -86,6 +86,16 @@ fn register(
     result
 }
 
+/// The listing shape a folder gets from a plain registration, which grants both
+/// reading and writing.
+fn read_write(root: RootSummary) -> RootAccess {
+    RootAccess {
+        root_id: root.root_id,
+        display_name: root.display_name,
+        capabilities: vec![Capability::ReadFiles, Capability::WriteFiles],
+    }
+}
+
 fn mutate_attachment(
     controller: &Controller,
     operation_id: OperationId,
@@ -422,7 +432,7 @@ fn approved_roots_can_be_explicitly_attached_to_another_standalone_conversation(
         )
         .unwrap(),
         OperationResult::ListRoots {
-            roots: vec![registered.root]
+            roots: vec![read_write(registered.root)]
         }
     );
     assert!(matches!(
@@ -491,7 +501,7 @@ fn reused_standalone_approval_and_chat_attachment_survive_restart() {
         )
         .unwrap(),
         OperationResult::ListRoots {
-            roots: vec![registered.root]
+            roots: vec![read_write(registered.root)]
         }
     );
 }
@@ -529,7 +539,7 @@ fn choosing_the_same_approved_folder_again_reuses_its_host_identity() {
         )
         .unwrap(),
         OperationResult::ListRoots {
-            roots: vec![first.root]
+            roots: vec![read_write(first.root)]
         }
     );
 }
@@ -705,7 +715,7 @@ fn basename_collisions_are_not_offered_as_approved_roots() {
         )
         .unwrap(),
         OperationResult::ListRoots {
-            roots: vec![first.root],
+            roots: vec![read_write(first.root)],
         }
     );
 }
@@ -728,7 +738,7 @@ fn register_list_read_and_revoke_are_one_live_authority_boundary() {
     assert_eq!(
         roots,
         OperationResult::ListRoots {
-            roots: vec![registered.root.clone()]
+            roots: vec![read_write(registered.root.clone())]
         }
     );
     let listing = operate(
@@ -992,7 +1002,7 @@ fn repeated_registration_reuses_the_same_root_and_attaches_new_project_chat() {
         assert_eq!(
             roots,
             OperationResult::ListRoots {
-                roots: vec![first.root.clone()]
+                roots: vec![read_write(first.root.clone())]
             }
         );
     }
@@ -1345,7 +1355,7 @@ fn attach_and_detach_are_exact_conversation_mutations() {
     let second_context = ExecutionContext::project_chat(second_conversation, project_id).unwrap();
     assert!(matches!(
         operate(&broker.operator(), second_context, OperationRequest::ListRoots).unwrap(),
-        OperationResult::ListRoots { roots } if roots == vec![registered.root.clone()]
+        OperationResult::ListRoots { roots } if roots == vec![read_write(registered.root.clone())]
     ));
 
     let detach_id = OperationId::new();
@@ -1366,7 +1376,7 @@ fn attach_and_detach_are_exact_conversation_mutations() {
     ));
     assert!(matches!(
         operate(&broker.operator(), second_context, OperationRequest::ListRoots).unwrap(),
-        OperationResult::ListRoots { roots } if roots == vec![registered.root]
+        OperationResult::ListRoots { roots } if roots == vec![read_write(registered.root)]
     ));
     assert!(
         !mutate_attachment(
@@ -1492,7 +1502,62 @@ fn failed_attachment_mutation_is_durable_and_cannot_widen_authority() {
             },
         )
         .unwrap(),
-        RootAttachmentMutationReceipt::Failed { error } if error == first
+        RootAttachmentMutationReceipt::Failed { error, currently_attached: false }
+            if error == first
+    ));
+}
+
+/// A rejected mutation changed nothing, but the broker still knows what it
+/// holds. Saying so is what lets a caller tell "nothing is attached" apart from
+/// "cannot say" — the product records that observation durably, and an
+/// unknowable one can never be settled afterwards.
+#[test]
+fn a_failed_mutation_reports_the_attachment_it_could_not_change() {
+    let (_temp, broker, path) = setup();
+    let conversation = Uuid::new_v4();
+    let owner = GrantSubject::project(Uuid::new_v4()).unwrap();
+    let registered = register(
+        &broker.controller(),
+        owner,
+        conversation,
+        path,
+        OperationId::new(),
+    );
+    let root_id = registered.root.root_id;
+
+    // The conversation itself holds no grant on this root, so detaching under
+    // that subject is denied while the attachment plainly still exists.
+    let ungranted = GrantSubject::conversation(conversation).unwrap();
+    let operation_id = OperationId::new();
+    assert_eq!(
+        mutate_attachment(
+            &broker.controller(),
+            operation_id,
+            ungranted,
+            conversation,
+            root_id,
+            RootAttachmentMutationKind::Detach,
+        )
+        .unwrap_err()
+        .code,
+        ErrorCode::Denied
+    );
+    assert!(matches!(
+        lookup_attachment_receipt(
+            &broker.controller(),
+            LookupRootAttachmentReceiptRequest {
+                operation_id,
+                subject: ungranted,
+                conversation_id: conversation,
+                root_id,
+                mutation: RootAttachmentMutationKind::Detach,
+            },
+        )
+        .unwrap(),
+        RootAttachmentMutationReceipt::Failed {
+            currently_attached: true,
+            ..
+        }
     ));
 }
 
@@ -2548,6 +2613,77 @@ fn writes_create_without_clobber_and_retry_from_the_terminal_receipt() {
         b"authoritative revision",
         "create mode never clobbers the destination"
     );
+}
+
+/// The capability set a listing reports is what the broker will actually allow.
+///
+/// The desktop renders this set as a folder's access state, so the two must not
+/// be able to drift: reporting a capability the next operation refuses, or
+/// hiding one it would permit, both mislead the person deciding what the agent
+/// can reach. Dropping the write grant is the only way to reach a read-only
+/// folder today — registration always mints both — so it stands in for a
+/// narrower grant the ladder may later offer.
+#[test]
+fn a_listing_reports_the_capabilities_the_broker_would_authorize() {
+    let (_temp, broker, path) = setup();
+    let conversation = Uuid::new_v4();
+    let subject = GrantSubject::conversation(conversation).unwrap();
+    let registered = register(
+        &broker.controller(),
+        subject,
+        conversation,
+        path.clone(),
+        OperationId::new(),
+    );
+    let context = ExecutionContext::standalone(conversation).unwrap();
+    let root_id = registered.root.root_id;
+    std::fs::create_dir(path.join("published")).unwrap();
+
+    assert_eq!(
+        operate(&broker.operator(), context, OperationRequest::ListRoots).unwrap(),
+        OperationResult::ListRoots {
+            roots: vec![read_write(registered.root)]
+        },
+        "a folder connected through the picker allows reading and writing"
+    );
+
+    broker
+        .shared
+        .state
+        .lock()
+        .unwrap()
+        .grants
+        .retain(|grant| grant.capability() != Capability::WriteFiles);
+
+    let OperationResult::ListRoots { roots } =
+        operate(&broker.operator(), context, OperationRequest::ListRoots).unwrap()
+    else {
+        panic!("unexpected listing result")
+    };
+    assert_eq!(
+        roots.first().map(|root| root.capabilities.as_slice()),
+        Some([Capability::ReadFiles].as_slice()),
+        "write is not reported once the grant behind it is gone"
+    );
+    assert!(matches!(
+        operate(
+            &broker.operator(),
+            context,
+            write_request(
+                OperationId::new(),
+                root_id,
+                "published/report.txt",
+                WriteFileMode::Create,
+                None,
+                b"unauthorized revision",
+            ),
+        ),
+        Err(ErrorResponse {
+            code: ErrorCode::Denied,
+            ..
+        })
+    ));
+    assert!(!path.join("published/report.txt").exists());
 }
 
 #[test]

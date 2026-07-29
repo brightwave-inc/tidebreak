@@ -67,19 +67,19 @@ reqwest = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 # The LanceDB vector backend (vec-lance feature only). arrow-array/-schema are
 # pinned to the exact major LanceDB uses (58) so RecordBatch types are compatible.
-lancedb = { version = "=0.31.0", optional = true }
-arrow-array = { version = "=58.3.0", optional = true }
+lancedb = { version = "=0.33.0", optional = true }
+arrow-array = { version = "=58.4.0", optional = true }
 arrow-schema = { version = "=58.4.0", optional = true }
-arrow-select = { version = "=58.3.0", optional = true }
+arrow-select = { version = "=58.4.0", optional = true }
 futures = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["sync"], optional = true }
 # Rich PDF parser (parse-liteparse feature only). Local + PDFium-backed; OCR off.
-liteparse = { version = "=2.8.0", default-features = false, optional = true }
+liteparse = { version = "=2.8.1", default-features = false, optional = true }
 # The PDFium loader liteparse builds on. Depended on directly (pinned to the same
 # version liteparse resolves, so cargo unifies the one runtime binding) only to
 # probe `load_default()` and fail closed with a clear error instead of the panic
 # liteparse raises when the PDFium library is absent.
-liteparse-pdfium-sys = { version = "=1.3.0", optional = true }
+liteparse-pdfium-sys = { version = "=1.4.0", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread"] }

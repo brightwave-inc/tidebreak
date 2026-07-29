@@ -456,7 +456,13 @@ pub(in crate::db) async fn apply_turn_steer(
             preceding_citations,
         )
         .await?;
-        super::super::citation::insert_for_message_on(&transaction, preceding, &evidence).await?;
+        super::super::citation::insert_for_message_on(
+            &transaction,
+            preceding,
+            preceding_citations,
+            &evidence,
+        )
+        .await?;
     }
 
     if !transfer_steer_message_identity_on(

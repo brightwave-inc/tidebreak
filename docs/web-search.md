@@ -48,10 +48,13 @@ disabled selection fails closed: there is no provider to invoke.
 
 The desktop sidebar has a **Web search** panel for this same local API. It
 shows whether the saved configuration is disabled, ready, or missing the
-selected provider's key; lets the user choose Exa or Tavily (or disable search),
-set the bounded timeout, and save, replace, or remove a key. Existing keys are
-never displayed or read into the renderer. Saving a key and saving provider
-selection are deliberately separate actions, matching the API boundary above.
+selected provider's key; offers a key field per fixed slot, so Exa and Tavily
+can both hold a key and switching between them needs no retyping; and lets the
+user pick which provider is active (or disable search) and set the bounded
+timeout. Existing keys are never displayed or read into the renderer. Saving
+writes every key the user typed before it writes selection, so a provider cannot
+become active in a pass that failed to store its key. Removing a key stays a
+separate action against a single slot.
 
 ## Current boundary
 

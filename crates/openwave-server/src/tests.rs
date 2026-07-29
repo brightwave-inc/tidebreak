@@ -66,6 +66,15 @@ fn transcript_citation_json_is_closed_and_renderer_bounded() {
             excerpt: "x".repeat(openwave_core::MAX_CITATION_EXCERPT_CHARS),
             heading: Some("h".repeat(openwave_core::MAX_CITATION_HEADING_CHARS)),
             pages: (1..=u32::try_from(openwave_core::MAX_CITATION_PAGES).unwrap()).collect(),
+            bounds: vec![openwave_core::CitationPageBounds {
+                page: 1,
+                bounds: openwave_core::PageBounds {
+                    left: 100,
+                    top: 200,
+                    width: 5_000,
+                    height: 300,
+                },
+            }],
         }],
         image_attachments: None,
         refusal: None,
@@ -80,6 +89,7 @@ fn transcript_citation_json_is_closed_and_renderer_bounded() {
             .cloned()
             .collect::<std::collections::BTreeSet<_>>(),
         [
+            "bounds",
             "document_id",
             "excerpt",
             "heading",

@@ -1,7 +1,7 @@
 use super::*;
 use crate::model::{
     ByteSpan, ChatRootAttachment, DocumentParseOutput, DocumentSourceBlob, DocumentSourceUpsert,
-    RetrievalEvidenceInput, RetrievalEvidenceSource, RootAttachmentChangeAction,
+    PageBounds, RetrievalEvidenceInput, RetrievalEvidenceSource, RootAttachmentChangeAction,
     RootAttachmentChangeFailure, RootAttachmentChangeTerminal, RootAttachmentOrigin,
     SourceLocation, SourceRegion, ToolCallExecution, ToolCallResolution, ToolCallStatus,
     MAX_ATTACHMENT_REVISION, MAX_ROOT_ATTACHMENTS,
@@ -15,6 +15,7 @@ mod context_checkpoint;
 mod delegated_file_read;
 mod message_attachment;
 mod multi_agent_wait;
+mod operation_log;
 mod output;
 mod parent_terminal_guard;
 mod root_attachment;
@@ -26,6 +27,41 @@ async fn temp_store() -> (tempfile::TempDir, DbStore) {
     let url = format!("sqlite://{}?mode=rwc", dir.path().join("test.db").display());
     let store = DbStore::connect(&url).await.unwrap();
     (dir, store)
+}
+
+/// Seed a chat the way `create_chat` did before the agent-run tier/location
+/// split, for upgrade tests that write against a partially migrated schema.
+///
+/// The chat row still matches the current entity, but the foreground run must
+/// go through the retired single `execution` column that the split migration
+/// later maps onto `(tier, execution_location)`.
+async fn create_chat_before_agent_run_split(store: &DbStore, chat: &Chat) {
+    entities::chat::ActiveModel {
+        id: Set(chat.id.0),
+        project_id: Set(chat.project_id.map(|p| p.0)),
+        title: Set(chat.title.clone()),
+        model: Set(chat.model.clone()),
+        reasoning_effort: sea_orm::ActiveValue::NotSet,
+        attachment_revision: Set(chat.attachment_revision),
+        created_at: Set(chat.created_at),
+    }
+    .insert(&store.conn)
+    .await
+    .unwrap();
+    store
+        .conn
+        .execute_unprepared(&format!(
+            "INSERT INTO agent_run \
+             (id, chat_id, execution, depth, status, attempt_count, max_attempts, claim_count, \
+              available_at, created_at, updated_at) \
+             VALUES (X'{id}', X'{chat_id}', 'foreground', 0, 'active', 0, 0, 0, \
+              '2023-11-14 22:13:20+00:00', '2023-11-14 22:13:20+00:00', \
+              '2023-11-14 22:13:20+00:00')",
+            id = AgentRunId::foreground_for_chat(chat.id).0.simple(),
+            chat_id = chat.id.0.simple(),
+        ))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -1078,6 +1114,7 @@ async fn document_constraints_reject_invalid_catalog_state() {
         span: ByteSpan::new(4, 5),
         location: SourceLocation::Page {
             number: std::num::NonZeroU32::new(1).unwrap(),
+            bounds: None,
         },
     }];
     assert!(store.create_document(&invalid_regions).await.is_err());
@@ -1136,6 +1173,7 @@ async fn source_regions_roundtrip_and_provenance_changes_advance_revision() {
         span: ByteSpan::new(0, 9),
         location: SourceLocation::Page {
             number: std::num::NonZeroU32::new(number).unwrap(),
+            bounds: None,
         },
     };
     let source = DocumentUpsert {
@@ -1281,6 +1319,7 @@ async fn raw_source_parse_completion_atomically_enqueues_index() {
             span: ByteSpan::new(0, 8),
             location: SourceLocation::Page {
                 number: std::num::NonZeroU32::new(1).unwrap(),
+                bounds: None,
             },
         }],
     };
@@ -5238,7 +5277,7 @@ async fn m0006_upgrades_an_existing_store_without_losing_records() {
     migration::Migrator::up(&conn, Some(5)).await.unwrap();
     let store = DbStore { conn: conn.clone() };
     let chat = sample_chat();
-    store.create_chat(&chat).await.unwrap();
+    create_chat_before_agent_run_split(&store, &chat).await;
 
     migration::Migrator::up(&conn, None).await.unwrap();
 
@@ -5322,7 +5361,7 @@ async fn m0013_adds_outputs_to_an_existing_conversation_store() {
     migration::Migrator::up(&conn, Some(12)).await.unwrap();
     let store = DbStore { conn: conn.clone() };
     let chat = sample_chat();
-    store.create_chat(&chat).await.unwrap();
+    create_chat_before_agent_run_split(&store, &chat).await;
 
     migration::Migrator::up(&conn, None).await.unwrap();
 
@@ -5360,7 +5399,7 @@ async fn m0015_adds_output_citations_without_changing_existing_outputs() {
     migration::Migrator::up(&conn, Some(14)).await.unwrap();
     let store = DbStore { conn: conn.clone() };
     let chat = sample_chat();
-    store.create_chat(&chat).await.unwrap();
+    create_chat_before_agent_run_split(&store, &chat).await;
     let request = crate::deliverable::CreateOutput {
         id: crate::id::OutputId::new(),
         chat_id: chat.id,
@@ -6838,6 +6877,57 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
         journaled.turn.as_ref().map(|turn| turn.status),
         Some(TurnRunStatus::Resuming)
     );
+    // A client call is executed and resolved outside the agent loop, and the
+    // resumed loop reads its result straight into the model transcript without
+    // ever revisiting the call. Nothing else announces that it finished, so the
+    // renderer showed the row running from `ToolCallStarted` until the chat was
+    // reopened. It announces itself here instead.
+    let completions = |events: Vec<crate::SequencedEvent>| {
+        events
+            .into_iter()
+            .filter(|event| matches!(event.event, AgentEvent::ToolCallCompleted { .. }))
+            .collect::<Vec<_>>()
+    };
+    let announced = completions(store.list_events(chat.id, 0).await.unwrap());
+    assert_eq!(announced.len(), 1);
+    let AgentEvent::ToolCallCompleted {
+        call_id,
+        ref output,
+        ref action,
+        ..
+    } = announced[0].event
+    else {
+        unreachable!("filtered to completions")
+    };
+    assert_eq!(call_id, request.id);
+    assert!(!output.is_error);
+    // Projected from the call's own stored arguments, so a client card names
+    // its action identically live and after a reload.
+    assert_eq!(
+        action.as_ref(),
+        crate::ToolActionPreview::build(&request.name, &request.arguments).as_ref()
+    );
+
+    // An exact retry recovers the same outcome without announcing it twice.
+    assert_eq!(
+        store
+            .resolve_client_tool_call_and_append_event(
+                request.id,
+                chat.id,
+                client_lease,
+                resolved_at,
+                &resolution,
+                resolved_at,
+            )
+            .await
+            .unwrap()
+            .outcome,
+        ResolveToolCallOutcome::Existing
+    );
+    assert_eq!(
+        completions(store.list_events(chat.id, 0).await.unwrap()).len(),
+        1
+    );
     let resumable = store.get_turn_run(turn_id).await.unwrap().unwrap();
     assert_eq!(resumable.status, TurnRunStatus::Resuming);
     assert_eq!((resumable.attempt_count, resumable.claim_count), (1, 1));
@@ -7892,9 +7982,16 @@ async fn client_wait_cancellation_fences_unclaimed_and_claimed_native_work() {
         claimed_wait.status,
         crate::model::TurnClientWaitStatus::Cancelled.as_str()
     );
+    // The call resolved before the turn was cancelled, and both are announced
+    // in that order. Without the completion the renderer would keep showing the
+    // native call running underneath a cancelled turn.
     let events = store.list_events(claimed_chat.id, 0).await.unwrap();
-    assert_eq!(events.len(), 1);
-    assert!(matches!(events[0].event, AgentEvent::TurnCancelled { .. }));
+    assert_eq!(events.len(), 2);
+    assert!(matches!(
+        events[0].event,
+        AgentEvent::ToolCallCompleted { call_id, .. } if call_id == claimed_call.id
+    ));
+    assert!(matches!(events[1].event, AgentEvent::TurnCancelled { .. }));
     let recovered = store
         .resolve_expired_client_tool_call_and_append_event(
             claimed_call.id,
@@ -10267,6 +10364,10 @@ async fn delete_chat_erases_quiesced_history_and_fails_closed_for_live_work_or_r
     );
     assert!(store.get_chat(rooted.id).await.unwrap().is_some());
 
+    // The store still refuses an unknown broker observation, even though the
+    // desktop no longer records one: a rejected mutation now settles on the
+    // state the broker reports. This keeps the gate honest for a row written by
+    // an older build, which nothing will ever re-drive.
     let ambiguous = sample_chat();
     store.create_chat(&ambiguous).await.unwrap();
     let change = BeginRootAttachmentChange {
@@ -11162,6 +11263,20 @@ async fn retrieval_evidence_is_atomic_generation_fenced_and_survives_source_chan
     };
     store.accept_tool_call(&call).await.unwrap();
     let span = ByteSpan::new(0, source.canonical_text.len());
+    // Positioned regions, deliberately not in reading order and with the last
+    // two on the same rectangle: the snapshot has to sort and collapse them.
+    let placed = |start: usize, end: usize, page: u32, left: u16, top: u16| SourceRegion {
+        span: ByteSpan::new(start, end),
+        location: SourceLocation::Page {
+            number: std::num::NonZeroU32::new(page).unwrap(),
+            bounds: Some(PageBounds {
+                left,
+                top,
+                width: 1_000,
+                height: 200,
+            }),
+        },
+    };
     let evidence = RetrievalEvidenceInput {
         rank: 1,
         source_token: uuid::Uuid::new_v4(),
@@ -11171,7 +11286,12 @@ async fn retrieval_evidence_is_atomic_generation_fenced_and_survives_source_chan
         span,
         snippet: source.canonical_text.clone(),
         heading_path: vec!["Archive".into()],
-        source_regions: Vec::new(),
+        source_regions: vec![
+            placed(0, 2, 2, 1_000, 5_000),
+            placed(2, 4, 1, 3_000, 1_000),
+            placed(4, 6, 1, 1_000, 1_000),
+            placed(6, 8, 1, 1_000, 1_000),
+        ],
         source: RetrievalEvidenceSource::Uri {
             uri: source.source_uri.clone().unwrap(),
         },
@@ -11269,6 +11389,7 @@ async fn retrieval_evidence_is_atomic_generation_fenced_and_survives_source_chan
                         u32::try_from(index + 1).expect("test page fits u32"),
                     )
                     .unwrap(),
+                    bounds: None,
                 },
             })
             .collect(),
@@ -11284,14 +11405,6 @@ async fn retrieval_evidence_is_atomic_generation_fenced_and_survives_source_chan
         .await
         .unwrap();
 
-    let assistant = Message {
-        id: MessageId::new(),
-        chat_id: chat.id,
-        turn_id: call.turn_id,
-        role: Role::Assistant,
-        content: "Grounded answer".into(),
-        created_at: resolved_at + chrono::Duration::seconds(1),
-    };
     let reference = crate::AssistantCitationReference {
         source_token: evidence.source_token,
     };
@@ -11300,6 +11413,30 @@ async fn retrieval_evidence_is_atomic_generation_fenced_and_survives_source_chan
     };
     let unknown_reference = crate::AssistantCitationReference {
         source_token: uuid::Uuid::new_v4(),
+    };
+    // The model cites a phantom between two real passages, so the citation the
+    // store cannot resolve sits ahead of ones it can.
+    let assistant_id = MessageId::new();
+    let cited = crate::parse_assistant_citations(
+        &format!(
+            "{} then {} then {}",
+            crate::format_citation_directive("phantom claim", unknown_reference),
+            crate::format_citation_directive("second claim", second_reference),
+            crate::format_citation_directive("first claim", reference),
+        ),
+        assistant_id,
+    );
+    assert_eq!(
+        cited.references,
+        [unknown_reference, second_reference, reference]
+    );
+    let assistant = Message {
+        id: assistant_id,
+        chat_id: chat.id,
+        turn_id: call.turn_id,
+        role: Role::Assistant,
+        content: cited.content.clone(),
+        created_at: resolved_at + chrono::Duration::seconds(1),
     };
     store
         .append_assistant_message_with_citations(
@@ -11332,8 +11469,32 @@ async fn retrieval_evidence_is_atomic_generation_fenced_and_survives_source_chan
     let snapshot = store.get_chat_transcript(chat.id).await.unwrap().unwrap();
     assert_eq!(snapshot.citations.len(), 2);
     assert_eq!(snapshot.citations[0].message_id, assistant.id);
-    assert_eq!(snapshot.citations[0].ordinal, 1);
-    assert_eq!(snapshot.citations[1].ordinal, 2);
+    // The unresolved citation holds ordinal 1 rather than letting the two that
+    // resolved slide onto identities the message text already spent: each
+    // embedded id resolves to the evidence its own phrase cited, and the
+    // phantom's resolves to nothing at all.
+    assert_eq!(snapshot.citations[0].ordinal, 2);
+    assert_eq!(snapshot.citations[1].ordinal, 3);
+    let cited_id = |phrase: &str| {
+        let opened = assistant
+            .content
+            .split_once(&format!(":cit[{phrase}]{{citation_id="))
+            .expect("the phrase is cited")
+            .1;
+        opened
+            .split_once('}')
+            .expect("the citation closes")
+            .0
+            .parse::<crate::AssistantCitationId>()
+            .expect("the citation carries an id")
+    };
+    assert_eq!(cited_id("second claim"), snapshot.citations[0].id);
+    assert_eq!(cited_id("first claim"), snapshot.citations[1].id);
+    let phantom = cited_id("phantom claim");
+    assert!(snapshot
+        .citations
+        .iter()
+        .all(|citation| citation.id != phantom));
     assert_eq!(snapshot.citations[0].excerpt.chars().count(), 600);
     assert!(!snapshot.citations[0].excerpt.contains(private_tail));
     assert_eq!(
@@ -11346,6 +11507,19 @@ async fn retrieval_evidence_is_atomic_generation_fenced_and_survives_source_chan
         160
     );
     assert_eq!(snapshot.citations[0].pages, [1, 2, 3, 4, 5, 6, 7, 8]);
+    // A page-granular source has nothing to draw; `pages` is the whole answer.
+    assert!(snapshot.citations[0].bounds.is_empty());
+    // Positioned regions keep their first-seen page order but are projected as
+    // rectangles ordered down and across each page, deduplicated.
+    assert_eq!(snapshot.citations[1].pages, [2, 1]);
+    assert_eq!(
+        snapshot.citations[1]
+            .bounds
+            .iter()
+            .map(|placed| (placed.page, placed.bounds.top, placed.bounds.left))
+            .collect::<Vec<_>>(),
+        [(1, 1_000, 1_000), (1, 1_000, 3_000), (2, 5_000, 1_000)]
+    );
 
     let other_chat = sample_chat();
     store.create_chat(&other_chat).await.unwrap();

@@ -25,7 +25,7 @@ const PDF_MEDIA_TYPE: &str = "application/pdf";
 /// Stable identity of this parser's canonical-text behavior. Bump the trailing
 /// version tag whenever an implementation or configuration change can alter the
 /// extracted text, so the durable pipeline reparses affected documents.
-const LITEPARSE_FINGERPRINT: &str = "liteparse:v2.8:pdf:markdown:no-ocr:v1";
+const LITEPARSE_FINGERPRINT: &str = "liteparse:v2.8:pdf:markdown:no-ocr:positioned:v3";
 
 /// Extracts Markdown canonical text from `application/pdf` bytes via `liteparse`.
 #[derive(Debug, Clone, Copy, Default)]
@@ -74,6 +74,12 @@ impl DocumentParser for LiteParsePdfParser {
         Self::base_media_type(media_type) == PDF_MEDIA_TYPE
     }
 
+    /// `liteparse` is configured for Markdown output, so a parsed
+    /// PDF carries Markdown regardless of the source's own type.
+    fn canonical_media_type(&self, _media_type: &str) -> String {
+        "text/markdown".to_string()
+    }
+
     async fn parse(&self, raw: &[u8], media_type: &str) -> Result<ParsedDocument> {
         if !self.supports(media_type) {
             return Err(RetrievalError::parse(format!(
@@ -97,7 +103,7 @@ impl DocumentParser for LiteParsePdfParser {
             .map_err(|error| {
                 RetrievalError::parse(format!("liteparse could not parse the PDF: {error}"))
             })?;
-        Ok(ParsedDocument::from_text(result.text))
+        Ok(crate::liteparse_regions::parsed_document_from(result))
     }
 }
 
@@ -126,6 +132,17 @@ mod tests {
             Some(LITEPARSE_FINGERPRINT)
         );
         assert_eq!(parser.fingerprint_for("text/plain"), None);
+    }
+
+    #[test]
+    fn canonical_text_is_declared_markdown_not_the_source_type() {
+        // The chunker partitions Markdown at headings, and can only know to do
+        // that for a PDF if the parser says what it emitted.
+        let parser = LiteParsePdfParser::new();
+        assert_eq!(
+            parser.canonical_media_type("application/pdf"),
+            "text/markdown"
+        );
     }
 
     #[tokio::test]

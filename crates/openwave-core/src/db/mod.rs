@@ -32,12 +32,12 @@ use crate::image::ImageRef;
 #[cfg(test)]
 use crate::model::Role;
 use crate::model::{
-    validate_project_root_projection, AgentRun, AgentRunExecution, AgentRunInboxEntry,
-    AgentRunStatus, AgentRunWaitSetCandidate, BeginRootAttachmentChange, BlobRetirement,
-    BlobRetirementStatus, Chat, DocumentGeneration, DocumentJob, DocumentJobKind,
-    DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentProcessingStatus,
-    DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord,
-    DocumentUpsert, Message, MessageAttachment, Project, ReasoningEffort, RootAttachmentChange,
+    validate_project_root_projection, AgentRun, AgentRunInboxEntry, AgentRunStatus, AgentRunTier,
+    AgentRunWaitSetCandidate, BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus,
+    Chat, DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
+    DocumentParseOutput, DocumentProcessingStatus, DocumentRecord, DocumentScope,
+    DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message,
+    MessageAttachment, Project, ReasoningEffort, RootAttachmentChange,
     RootAttachmentChangeTerminal, SandboxToolCall, SandboxToolCallReceipt, SandboxToolCallRequest,
     SourceRegion, ToolCallRecord, ToolCallResolution, TurnAgentRunWaitStatus,
     TurnCheckpointProgress, TurnClientWaitStatus, TurnFailureRetry, TurnRun, TurnRunStatus,
@@ -57,7 +57,8 @@ use crate::storage::{
     FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
     FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
     JournaledToolApprovalOutcome, JournaledTurnOutcome, JournaledTurnSteerOutcome,
-    ParkSandboxToolCallOutcome, ParkTurnForAgentRunInboxOutcome, ParkTurnForAgentRunWaitSetOutcome,
+    OperationClaimOutcome, OperationLogEntry, OperationLogWrite, ParkSandboxToolCallOutcome,
+    ParkTurnForAgentRunInboxOutcome, ParkTurnForAgentRunWaitSetOutcome,
     ParkTurnForClientCallOutcome, RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome,
     RequestToolApprovalOutcome, RequestTurnCancellationOutcome, ResolveSandboxToolCallOutcome,
     ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome, Store,
@@ -1918,19 +1919,11 @@ impl Store for DbStore {
         chat_id: ChatId,
         parent_id: Option<AgentRunId>,
         spawn_call_id: Option<CallId>,
-        execution: AgentRunExecution,
+        tier: AgentRunTier,
         input: Option<&str>,
     ) -> Result<AcceptAgentRunOutcome> {
-        ops::agent_run::accept_agent_run(
-            self,
-            id,
-            chat_id,
-            parent_id,
-            spawn_call_id,
-            execution,
-            input,
-        )
-        .await
+        ops::agent_run::accept_agent_run(self, id, chat_id, parent_id, spawn_call_id, tier, input)
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2760,6 +2753,54 @@ impl Store for DbStore {
             resolution,
             resolved_at,
             evidence,
+            None,
+        )
+        .await
+    }
+
+    async fn resolve_server_tool_call_with_artifacts(
+        &self,
+        id: CallId,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<Utc>,
+        evidence: &[crate::RetrievalEvidenceInput],
+        preview: Option<&crate::ToolResultPreview>,
+    ) -> Result<ResolveToolCallOutcome> {
+        ops::client_execution::resolve_server_tool_call_with_evidence(
+            self,
+            id,
+            resolution,
+            resolved_at,
+            evidence,
+            preview,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn resolve_claimed_server_tool_call_with_artifacts(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        turn_id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<Utc>,
+        evidence: &[crate::RetrievalEvidenceInput],
+        preview: Option<&crate::ToolResultPreview>,
+    ) -> Result<ResolveToolCallOutcome> {
+        ops::client_execution::resolve_claimed_server_tool_call_with_evidence(
+            self,
+            id,
+            chat_id,
+            turn_id,
+            lease_token,
+            now,
+            resolution,
+            resolved_at,
+            evidence,
+            preview,
         )
         .await
     }
@@ -2786,6 +2827,7 @@ impl Store for DbStore {
             resolution,
             resolved_at,
             evidence,
+            None,
         )
         .await
     }
@@ -2835,6 +2877,31 @@ impl Store for DbStore {
             now,
             resolution,
             resolved_at,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn resolve_client_tool_call_and_append_event_with_rows(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<Utc>,
+        rows: Option<&serde_json::Value>,
+    ) -> Result<JournaledClientToolCallOutcome> {
+        ops::client_execution::resolve_client_tool_call_and_append_event(
+            self,
+            id,
+            chat_id,
+            lease_token,
+            now,
+            resolution,
+            resolved_at,
+            rows,
         )
         .await
     }
@@ -2856,6 +2923,31 @@ impl Store for DbStore {
             now,
             resolution,
             resolved_at,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn resolve_expired_client_tool_call_and_append_event_with_rows(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<Utc>,
+        rows: Option<&serde_json::Value>,
+    ) -> Result<JournaledClientToolCallOutcome> {
+        ops::client_execution::resolve_expired_client_tool_call_and_append_event(
+            self,
+            id,
+            chat_id,
+            lease_token,
+            now,
+            resolution,
+            resolved_at,
+            rows,
         )
         .await
     }
@@ -2967,6 +3059,59 @@ impl Store for DbStore {
 
     async fn list_events(&self, chat_id: ChatId, after: i64) -> Result<Vec<SequencedEvent>> {
         ops::conversation::list_events(self, chat_id, after).await
+    }
+
+    async fn claim_operation(
+        &self,
+        run_id: uuid::Uuid,
+        operation_id: uuid::Uuid,
+        fingerprint: &[u8],
+        external_effect: bool,
+        owner_epoch: uuid::Uuid,
+    ) -> Result<OperationClaimOutcome> {
+        ops::operation_log::claim(
+            self,
+            run_id,
+            operation_id,
+            fingerprint,
+            external_effect,
+            owner_epoch,
+        )
+        .await
+    }
+
+    async fn record_operation(
+        &self,
+        run_id: uuid::Uuid,
+        operation_id: uuid::Uuid,
+        body: &[u8],
+    ) -> Result<OperationLogWrite> {
+        ops::operation_log::record(self, run_id, operation_id, body).await
+    }
+
+    async fn fail_operation(
+        &self,
+        run_id: uuid::Uuid,
+        operation_id: uuid::Uuid,
+        body: &[u8],
+    ) -> Result<OperationLogWrite> {
+        ops::operation_log::fail(self, run_id, operation_id, body).await
+    }
+
+    async fn operation_state(
+        &self,
+        run_id: uuid::Uuid,
+        operation_id: uuid::Uuid,
+    ) -> Result<Option<OperationLogEntry>> {
+        ops::operation_log::state(self, run_id, operation_id).await
+    }
+
+    async fn evict_operation(&self, run_id: uuid::Uuid, operation_id: uuid::Uuid) -> Result<()> {
+        ops::operation_log::evict(self, run_id, operation_id).await
+    }
+
+    async fn operation_log_len(&self, run_id: uuid::Uuid) -> Result<usize> {
+        ops::operation_log::len(self, run_id).await
     }
 }
 

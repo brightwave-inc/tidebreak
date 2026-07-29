@@ -20,8 +20,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use openwave_core::{
-    format_source_reference, ApprovalClass, AssistantCitationReference, Result,
-    RetrievalEvidenceInput, RetrievalEvidenceSource, Tool, ToolCtx, ToolOutput, ToolSpec,
+    format_citation_directive, ApprovalClass, AssistantCitationReference, Result, ResultEntry,
+    ResultEntryKind, RetrievalEvidenceInput, RetrievalEvidenceSource, Tool, ToolCtx, ToolOutput,
+    ToolSpec,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -81,15 +82,20 @@ fn render(citations: &[Citation], source_tokens: &[uuid::Uuid]) -> String {
     debug_assert_eq!(citations.len(), source_tokens.len());
     let plural = if citations.len() == 1 { "" } else { "s" };
     let mut out = format!(
-        "Found {} passage{plural}. To cite a passage, copy its opaque source reference exactly into the answer:",
+        "Found {} passage{plural}. To cite a passage, wrap the wording it supports in \
+         that passage's citation directive: your phrasing goes in the brackets and may \
+         paraphrase the passage, and the reference is copied exactly.",
         citations.len()
     );
     for (i, c) in citations.iter().enumerate() {
-        let reference = format_source_reference(AssistantCitationReference {
-            source_token: source_tokens[i],
-        });
+        let reference = format_citation_directive(
+            "your phrasing",
+            AssistantCitationReference {
+                source_token: source_tokens[i],
+            },
+        );
         out.push_str(&format!(
-            "\n\n{}. Source reference: {reference}\n[score {:.3}] document {} (bytes {}..{}){}{}\n{}",
+            "\n\n{}. Cite as: {reference}\n[score {:.3}] document {} (bytes {}..{}){}{}\n{}",
             i + 1,
             c.score,
             c.document_id,
@@ -110,7 +116,7 @@ fn render(citations: &[Citation], source_tokens: &[uuid::Uuid]) -> String {
 fn render_pages(citation: &Citation) -> String {
     let mut pages = Vec::new();
     for region in &citation.source_regions {
-        if let SourceLocation::Page { number } = &region.location {
+        if let SourceLocation::Page { number, .. } = &region.location {
             let page = number.get();
             if pages.last() != Some(&page) {
                 pages.push(page);
@@ -138,7 +144,8 @@ impl Tool for SearchTool {
             name: "search".into(),
             description: "Search the indexed documents for passages relevant to a query. \
                           Returns ranked, grounded citations (document id, byte span, source \
-                          pages when available, and text)."
+                          pages when available, and text). Each result carries a citation \
+                          directive to wrap the wording it supports in."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -207,7 +214,10 @@ impl Tool for SearchTool {
 
         let mut citations: Vec<Citation> = hits.into_iter().map(Citation::from).collect();
         if citations.is_empty() {
-            return Ok(ToolOutput::text("No matching passages found."));
+            // An empty list, not an absent one: "searched and found nothing" is
+            // the useful thing to show, and it is what the rail alone cannot
+            // distinguish from "searched".
+            return Ok(ToolOutput::text("No matching passages found.").with_entries(Vec::new()));
         }
         let mut source_tokens = citations
             .iter()
@@ -255,9 +265,43 @@ impl Tool for SearchTool {
             })
             .collect::<std::result::Result<Vec<_>, _>>();
         match evidence {
-            Ok(evidence) => Ok(ToolOutput::text(content).with_private_evidence(evidence)),
+            Ok(evidence) => Ok(ToolOutput::text(content)
+                .with_entries(citations.iter().map(passage_entry).collect())
+                .with_private_evidence(evidence)),
             Err(output) => Ok(output),
         }
+    }
+}
+
+/// One matched passage as a card row.
+///
+/// The section heading leads when the document has one, because it says where
+/// in the document the match is — which is what someone scanning the card wants
+/// and what a relevance score is not. Without headings the passage has to speak
+/// for itself, so the row falls back to its opening line.
+///
+/// That fallback is the one place this projection carries document text, and it
+/// is deliberate: what the renderer boundary keeps out is model- and
+/// provider-authored text and private diagnostics, and a passage is neither —
+/// it is a span of the reader's own source, which is the entire thing they
+/// asked to be shown. It crosses clamped to one bounded line like every other
+/// row, and the snippet the model works from stays behind the boundary.
+fn passage_entry(citation: &Citation) -> ResultEntry {
+    let label = if citation.heading_path.is_empty() {
+        citation
+            .snippet
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("Matched passage")
+            .to_owned()
+    } else {
+        citation.heading_path.join(" › ")
+    };
+    let entry = ResultEntry::new(ResultEntryKind::Passage, label);
+    match render_pages(citation).trim_start().to_owned() {
+        pages if pages.is_empty() => entry,
+        pages => entry.with_detail(pages),
     }
 }
 
@@ -289,7 +333,9 @@ mod tests {
             "text/plain",
             text,
         );
-        let chunks = TextChunker::new(90, 0).chunk(&doc).unwrap();
+        let chunks = TextChunker::new(90, 0)
+            .chunk(&doc, &doc.media_type)
+            .unwrap();
         let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
         let embeddings = embedder.embed_documents(&texts).await.unwrap();
         let generation = DocumentGeneration {
@@ -516,6 +562,7 @@ mod tests {
             span: ByteSpan::new(start, end),
             location: SourceLocation::Page {
                 number: std::num::NonZeroU32::new(number).unwrap(),
+                bounds: None,
             },
         };
         let mut single = Chunk::new(document_id, 0, ByteSpan::new(0, 4), "body");
@@ -577,15 +624,29 @@ mod tests {
             out.content
         );
 
-        assert!(out.data.is_none());
+        // The passage is offered to the renderer as one row, and the row is the
+        // whole of what crosses: the snippet the model reads stays behind the
+        // boundary unless the passage has no heading to name it by.
+        assert_eq!(
+            openwave_core::ToolResultPreview::build("search", &out),
+            Some(openwave_core::ToolResultPreview::Entries {
+                entries: vec![openwave_core::ResultEntry::new(
+                    openwave_core::ResultEntryKind::Passage,
+                    "Jupiter is the largest planet in the Solar System, a gas giant.",
+                )],
+                failures: Vec::new(),
+                elided: 0,
+            })
+        );
         assert_eq!(out.private_evidence.len(), 1);
         assert!(out.private_evidence[0].snippet.contains("Jupiter"));
         assert_eq!(out.private_evidence[0].rank, 1);
-        assert!(out
-            .content
-            .contains(&format_source_reference(AssistantCitationReference {
+        assert!(out.content.contains(&format_citation_directive(
+            "your phrasing",
+            AssistantCitationReference {
                 source_token: out.private_evidence[0].source_token,
-            })));
+            }
+        )));
         assert_eq!(out.private_evidence[0].generation.content_revision, 1);
     }
 
@@ -621,7 +682,9 @@ mod tests {
                 content_revision: 1,
                 revision_token: uuid::Uuid::new_v4(),
             };
-            let chunks = TextChunker::new(90, 0).chunk(&document).unwrap();
+            let chunks = TextChunker::new(90, 0)
+                .chunk(&document, &document.media_type)
+                .unwrap();
             let texts: Vec<_> = chunks.iter().map(|chunk| chunk.text.clone()).collect();
             let embeddings = embedder.embed_documents(&texts).await.unwrap();
             store

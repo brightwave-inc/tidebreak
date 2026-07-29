@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 
 import type { ApiClient } from "./api";
+import { publishChatImage } from "./attachments";
+import { hasNativeHost } from "./host";
 import {
   imageAttachmentName,
   imageAttachmentRejection,
@@ -93,6 +95,32 @@ export function useImageAttachments(
     filesRef.current.delete(id);
   }
 
+  /**
+   * Move one file's bytes, by whichever route this build has.
+   *
+   * Under a native host the server mounts the image publish endpoint behind the
+   * client-executor token, so the renderer cannot post to it and the bytes go
+   * over IPC for the host to publish. In a browser — `pnpm dev`, and the UI
+   * tests — the same endpoint sits on the renderer's own bearer, and posting it
+   * directly is what gives the chip real byte progress.
+   */
+  async function publish(id: string, file: File, signal: AbortSignal) {
+    if (!hasNativeHost()) {
+      return uploadImageAttachment(client, chatId, file, {
+        onProgress: (uploadedBytes) =>
+          update((current) => withUploadProgress(current, id, uploadedBytes)),
+        signal,
+      });
+    }
+    // One IPC call with no cancellation seam, so a removal mid-flight is
+    // honoured on the way out instead of interrupting it. The bytes are
+    // published by then, but nothing references them, so the server's orphan
+    // sweep reclaims them.
+    const published = await publishChatImage(chatId, file);
+    if (signal.aborted) throw new DOMException("Upload cancelled", "AbortError");
+    return published;
+  }
+
   async function upload(id: string) {
     const file = filesRef.current.get(id);
     if (!file) return;
@@ -100,11 +128,7 @@ export function useImageAttachments(
     abortsRef.current.set(id, controller);
     update((current) => withUploadStarted(current, id));
     try {
-      const published = await uploadImageAttachment(client, chatId, file, {
-        onProgress: (uploadedBytes) =>
-          update((current) => withUploadProgress(current, id, uploadedBytes)),
-        signal: controller.signal,
-      });
+      const published = await publish(id, file, controller.signal);
       update((current) => withUploadPublished(current, id, published));
     } catch (err) {
       // A cancelled upload belongs to an attachment the reader already removed,

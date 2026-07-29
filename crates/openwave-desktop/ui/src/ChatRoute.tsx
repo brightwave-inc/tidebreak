@@ -26,9 +26,10 @@ import {
 } from "./ChatTranscriptPresentation";
 import { useFirstMessage } from "./FirstMessage";
 import { ChatView } from "./ChatView";
-import { DeliverablesView } from "./DeliverablesView";
+import { OutputDetailRoot } from "./outputs/OutputDetailRoot";
+import { OutputsView } from "./outputs/OutputsView";
 import { DocumentDetailRoot } from "./document-detail/DocumentDetailRoot";
-import { DocumentsView } from "./DocumentsView";
+import { SourcesView } from "./sources/SourcesView";
 import { FoldersView } from "./FoldersView";
 import { hasNativeHost } from "./host";
 import { attachChatFiles } from "./attachments";
@@ -55,7 +56,6 @@ import { PanelLayout } from "./panel/PanelLayout";
 import type { PanelContent } from "./panel/panelTypes";
 import { usePanelNav } from "./panel/usePanelNav";
 import { SourceNavProvider, useStableSourceNav } from "./panel/SourceNav";
-import { PanelBreadcrumb } from "./components/PanelHeader";
 import { RouteFrame } from "./RouteFrame";
 import { ChatSidebar } from "./sidebar/ChatSidebar";
 import { useRefreshSignals } from "./RefreshSignals";
@@ -415,28 +415,37 @@ export function ChatRoute({ chatId }: { chatId: string }) {
           <DocumentDetailRoot
             chatId={chatId}
             documentID={panel.documentId}
+            citationId={panel.citationId}
             position={side}
           />
         ) : (
           <PanelFrame position={side} spaceBetween>
-            <DocumentsView
+            <SourcesView
               chatId={chatId}
               onOpen={(documentId) => openPanel({ type: "sources", documentId })}
             />
           </PanelFrame>
         );
       case "outputs":
-        return (
+        // An output id turns the list into the reader for that one output, the
+        // same way a document id does for sources.
+        return panel.outputId ? (
+          <OutputDetailRoot
+            chatId={chatId}
+            outputId={panel.outputId}
+            position={side}
+          />
+        ) : (
           <PanelFrame position={side} spaceBetween>
-            <DeliverablesView chatId={chatId} initialOutputId={panel.outputId} />
+            <OutputsView
+              chatId={chatId}
+              onOpen={(outputId) => openPanel({ type: "outputs", outputId })}
+            />
           </PanelFrame>
         );
       case "folders":
         return (
-          <PanelFrame
-            position={side}
-            breadcrumb={<PanelBreadcrumb firstPart="Folders" />}
-          >
+          <PanelFrame position={side} spaceBetween>
             <FoldersView chat={chat!} />
           </PanelFrame>
         );

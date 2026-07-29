@@ -16,8 +16,8 @@ use std::path::Path as FsPath;
 use tokio::sync::broadcast::error::RecvError;
 
 use openwave_core::{
-    AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentError, AgentRun, AgentRunExecution,
-    AgentRunStatus, ApprovalDecision, CallId, Chat, ChatId, DeleteChatOutcome,
+    AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentError, AgentRun, AgentRunExecutionLocation,
+    AgentRunStatus, AgentRunTier, ApprovalDecision, CallId, Chat, ChatId, DeleteChatOutcome,
     DeleteProjectOutcome, Message as StoredMessage, MessageId, Project, ProjectId, ReasoningEffort,
     RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, Role, SandboxToolCall,
     SandboxToolCallStatus, SecretProvider, SequencedEvent, Store, ToolCallExecution,
@@ -27,6 +27,7 @@ use openwave_core::{
 use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
 use crate::code_execution::{
     self, CodeExecutionConfigInfo, CodeExecutionConfigUpdate, CodeExecutionCredentialReadiness,
+    CodeExecutionCredentialsInfo,
 };
 use crate::error::ServerError;
 use crate::event_projection::{RendererChatFrame, RendererChatMetadata, RendererSequencedEvent};
@@ -416,6 +417,14 @@ pub async fn put_code_execution_config(
     ))
 }
 
+/// `GET /code-execution/credentials` — readiness for the fixed E2B and Daytona
+/// credential slots. Local execution needs no credential and is absent here.
+pub async fn get_code_execution_credentials(
+    State(state): State<AppState>,
+) -> Json<CodeExecutionCredentialsInfo> {
+    Json(code_execution::credentials_info(&*state.secrets).await)
+}
+
 const MAX_CODE_EXECUTION_CREDENTIAL_BYTES: usize = 8 * 1024;
 
 /// Body of `PUT /code-execution/credentials/{provider}`. Debug output always
@@ -505,7 +514,7 @@ pub async fn put_web_search_credential(
     Path(provider): Path<String>,
     Json(body): Json<WebSearchCredentialUpdate>,
 ) -> Result<Json<WebSearchCredentialReadiness>, ServerError> {
-    let provider = parse_web_search_provider(&provider)?;
+    let provider = web_search::credential_provider(&provider)?;
     if body.api_key.len() > MAX_WEB_SEARCH_CREDENTIAL_BYTES {
         return Err(ServerError::bad_request(format!(
             "web search api_key must be at most {MAX_WEB_SEARCH_CREDENTIAL_BYTES} bytes"
@@ -528,22 +537,10 @@ pub async fn delete_web_search_credential(
     State(state): State<AppState>,
     Path(provider): Path<String>,
 ) -> Result<Json<WebSearchCredentialReadiness>, ServerError> {
-    let provider = parse_web_search_provider(&provider)?;
+    let provider = web_search::credential_provider(&provider)?;
     Ok(Json(
         web_search::delete_credential(&*state.secrets, provider).await?,
     ))
-}
-
-fn parse_web_search_provider(
-    value: &str,
-) -> std::result::Result<openwave_web_search::WebSearchProviderKind, ServerError> {
-    match value {
-        "exa" => Ok(openwave_web_search::WebSearchProviderKind::Exa),
-        "tavily" => Ok(openwave_web_search::WebSearchProviderKind::Tavily),
-        _ => Err(ServerError::not_found(format!(
-            "unknown web search provider kind: {value}"
-        ))),
-    }
 }
 
 /// The configured chat model, if any — the `chat` role's explicit selection.
@@ -1359,7 +1356,7 @@ pub async fn delete_chat(
         )),
         DeleteChatOutcome::RootAttachmentStateUnresolved => Err(ServerError::conflict_kind(
             "chat_root_attachment_unresolved",
-            "reconcile connected-folder changes before deleting this conversation",
+            "a connected-folder change is still finishing; try deleting again in a moment",
         )),
     }
 }
@@ -1416,7 +1413,8 @@ fn remove_private_chat_scratch(root: &FsPath, id: ChatId) -> std::io::Result<()>
 pub struct AgentRunSnapshot {
     pub id: openwave_core::AgentRunId,
     pub parent_id: Option<openwave_core::AgentRunId>,
-    pub execution: AgentRunExecution,
+    pub tier: AgentRunTier,
+    pub execution_location: AgentRunExecutionLocation,
     pub status: AgentRunStatus,
     pub started_at: Option<chrono::DateTime<Utc>>,
     pub finished_at: Option<chrono::DateTime<Utc>>,
@@ -1442,7 +1440,8 @@ impl AgentRunSnapshot {
             id: run.id,
             parent_id: run.parent_id,
             spawn_call_id: run.spawn_call_id,
-            execution: run.execution,
+            tier: run.tier,
+            execution_location: run.execution_location,
             status: run.status,
             started_at: run.started_at,
             finished_at: run.finished_at,
@@ -1556,13 +1555,13 @@ pub async fn list_agent_runs(
     let now = Utc::now();
     let mut snapshots = Vec::with_capacity(runs.len());
     for run in runs {
-        let activity = if run.execution == AgentRunExecution::Sandbox {
+        let activity = if run.tier == AgentRunTier::Background {
             let calls = state
                 .store
                 .list_sandbox_tool_calls_for_agent_run(run.id)
                 .await?;
             sandbox_activity(&calls)
-        } else if run.execution == AgentRunExecution::Foreground {
+        } else if run.tier == AgentRunTier::Foreground {
             foreground_activity(&client_calls, now)
         } else {
             None
@@ -1603,7 +1602,7 @@ pub async fn post_agent_run_cancel(
     let Some(run) = state.store.get_agent_run(run_id).await? else {
         return Err(ServerError::conflict("sandbox run is not cancellable"));
     };
-    if run.chat_id != chat_id || run.execution != AgentRunExecution::Sandbox {
+    if run.chat_id != chat_id || run.tier != AgentRunTier::Background {
         return Err(ServerError::conflict("sandbox run is not cancellable"));
     }
 
@@ -1616,7 +1615,7 @@ pub async fn post_agent_run_cancel(
         let Some(current) = state.store.get_agent_run(run_id).await? else {
             return Err(ServerError::conflict("sandbox run is not cancellable"));
         };
-        if current.chat_id != chat_id || current.execution != AgentRunExecution::Sandbox {
+        if current.chat_id != chat_id || current.tier != AgentRunTier::Background {
             return Err(ServerError::conflict("sandbox run is not cancellable"));
         }
         tokio::task::yield_now().await;
@@ -1707,7 +1706,7 @@ async fn signal_origin_sandbox_runs_after_commit(
         return;
     };
     for run in runs {
-        if run.execution != AgentRunExecution::Sandbox
+        if run.tier != AgentRunTier::Background
             || !matches!(
                 run.status,
                 AgentRunStatus::Cancelling | AgentRunStatus::Cancelled

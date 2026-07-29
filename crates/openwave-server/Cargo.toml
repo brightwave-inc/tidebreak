@@ -41,12 +41,16 @@ vec-lance = ["openwave-retrieval/vec-lance"]
 openwave-code-execution = { path = "../openwave-code-execution" }
 openwave-core = { path = "../openwave-core", default-features = false, features = ["sqlite", "tools", "keychain", "blob-fs"] }
 openwave-connectors = { path = "../openwave-connectors" }
+openwave-egress = { path = "../openwave-egress" }
 openwave-mcp = { path = "../openwave-mcp" }
 openwave-router = { path = "../openwave-router" }
 openwave-retrieval = { path = "../openwave-retrieval" }
 openwave-web-search = { path = "../openwave-web-search", features = ["http"] }
+openwave-sandbox-protocol = { path = "../openwave-sandbox-protocol" }
 axum = { workspace = true }
-tokio = { workspace = true, features = ["net", "process", "rt", "sync", "macros", "time"] }
+# `rt-multi-thread` backs the durable operation log's synchronous `OperationStore`
+# bridge (`tokio::task::block_in_place`); the host runs on a multi-thread runtime.
+tokio = { workspace = true, features = ["net", "process", "rt", "rt-multi-thread", "sync", "macros", "time"] }
 tower-http = { version = "=0.7.0", features = ["cors"] }
 futures = { workspace = true }
 async-trait = { workspace = true }

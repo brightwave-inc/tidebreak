@@ -1179,6 +1179,13 @@ async fn chat_document_routes_isolate_sources_search_and_delete_lifecycle() {
         second_list["documents"][0]["document_id"],
         second_id.to_string()
     );
+    // The happy path, which this test asserted around rather than through: the
+    // conversation that owns a source can fetch it by id. Without this, a
+    // detail route that never resolves anything still passes the isolation
+    // assertions below.
+    let owned: serde_json::Value =
+        json_body(get(format!("/chats/{}/documents/{first_id}", first.id)).await).await;
+    assert_eq!(owned["document_id"], first_id.to_string());
     assert_eq!(
         get(format!("/chats/{}/documents/{second_id}", first.id))
             .await
@@ -2776,4 +2783,147 @@ async fn connect_vector_store_falls_back_to_an_in_memory_index_without_vec_lance
     // A second connect starts empty: nothing carried over from the first.
     let reopened = connect_vector_store(&config, 2).await.unwrap();
     assert_eq!(reopened.len().await.unwrap(), 0);
+}
+
+/// What the renderer may read in a native embedding, which is the configuration
+/// the desktop runs and the one no other test in this module builds.
+///
+/// The reader's two routes — the narrowed detail projection and the bytes — are
+/// on the primary bearer, because a renderer holds only that and is the thing
+/// drawing the document. Before this, the whole document surface sat behind the
+/// native-only credential, so every viewer in the desktop got a 401 and none of
+/// them had ever loaded a file.
+///
+/// The full-fidelity surface stays where it was, and that is asserted here too:
+/// its catalog carries `uri`, which for an unscoped source is a real filesystem
+/// path. `root_attachment::embedded_renderer_bearer_cannot_reach_canonical_document_routes`
+/// is the test that guards that, and it must keep passing unchanged.
+#[tokio::test]
+async fn a_native_embedding_serves_the_renderer_the_document_it_draws() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let (retrieval, _search) = build_retrieval(
+        Arc::new(HashEmbedder::default()),
+        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+    );
+    let state = AppState::new_with_client_executor_id(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        retrieval,
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+        Uuid::new_v4(),
+    )
+    .unwrap();
+    assert!(state.root_attachment_routes_enabled);
+    let bearer = format!("Bearer {}", state.token);
+    let executor = state.client_executor_token.to_string();
+    let router = app(state);
+
+    let chat = make_chat(&router, &bearer).await;
+    // Ingest is full-fidelity and stays native-only, so the host's credential
+    // sets the fixture up. The uri stands in for one a connected-folder import
+    // records; it is the field the renderer must not be handed.
+    let ingest: serde_json::Value = json_body(
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/chats/{}/documents", chat.id))
+                    .header(header::AUTHORIZATION, &bearer)
+                    .header(crate::auth::CLIENT_EXECUTOR_HEADER, &executor)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "uri": "file:///Users/private/quarterly-sentinel.md",
+                            "content": "Revenue rose.",
+                            "media_type": "text/markdown",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    let document_id = ingest["document_id"].as_str().unwrap().to_owned();
+
+    let get = |uri: String| {
+        let router = router.clone();
+        let bearer = bearer.clone();
+        async move {
+            router
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header(header::AUTHORIZATION, bearer)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        }
+    };
+
+    // The document the reader opens, and the bytes its viewer draws.
+    let detail = get(format!("/chats/{}/documents/{document_id}", chat.id)).await;
+    assert_eq!(detail.status(), StatusCode::OK);
+    let body = String::from_utf8_lossy(&to_bytes(detail.into_body(), usize::MAX).await.unwrap())
+        .into_owned();
+    let detail: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(detail["document_id"], document_id);
+    // Present and a string; no worker runs here, so it is empty until one parses
+    // the source. What matters is that the field the viewers read is served.
+    assert!(detail["content"].is_string());
+    assert_eq!(detail["media_type"], "text/markdown");
+    assert_eq!(
+        get(format!(
+            "/chats/{}/documents/{document_id}/file-content",
+            chat.id
+        ))
+        .await
+        .status(),
+        StatusCode::OK
+    );
+
+    // Nothing about where the file came from, and no index bookkeeping, travels
+    // with it. This is the projection's whole purpose.
+    for sentinel in [
+        "/Users/private",
+        "quarterly-sentinel",
+        "uri",
+        "content_revision",
+        "index_fingerprint",
+    ] {
+        assert!(
+            !body.contains(sentinel),
+            "renderer detail leaked {sentinel}"
+        );
+    }
+
+    // The full-fidelity surface and host authority are both still withheld.
+    assert_eq!(
+        get(format!("/chats/{}/documents", chat.id)).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        get("/root-attachment-changes/pending".into())
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
 }

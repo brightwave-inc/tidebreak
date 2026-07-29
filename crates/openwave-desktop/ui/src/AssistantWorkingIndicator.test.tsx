@@ -67,6 +67,7 @@ describe("AssistantWorkingIndicator", () => {
                 excerpt: "Visible evidence",
                 heading: null,
                 pages: [],
+                bounds: [],
               },
             ],
           },

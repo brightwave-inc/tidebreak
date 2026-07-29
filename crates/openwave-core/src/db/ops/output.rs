@@ -13,8 +13,8 @@ use sea_orm::{
 };
 
 use crate::citation::{
-    AssistantCitationReference, MAX_CITATION_EXCERPT_CHARS, MAX_CITATION_HEADING_CHARS,
-    MAX_CITATION_PAGES,
+    project_citation_pages, AssistantCitationReference, MAX_CITATION_EXCERPT_CHARS,
+    MAX_CITATION_HEADING_CHARS,
 };
 use crate::deliverable::{
     deliverable_media_type, validate_deliverable_name, CreateOutput, NewOutputRevision,
@@ -23,7 +23,6 @@ use crate::deliverable::{
 };
 use crate::error::{AgentError, Result};
 use crate::id::{ChatId, OutputCitationId, OutputId, OutputRevisionId};
-use crate::model::SourceLocation;
 
 use super::super::{entities, store_err, DbStore};
 use super::acquire_chat_write_lock;
@@ -236,17 +235,7 @@ pub(in crate::db) async fn list_output_revision_citations(
                 "output citation projection owner is corrupt".into(),
             ));
         }
-        let mut pages = Vec::new();
-        for region in evidence.evidence.source_regions {
-            let SourceLocation::Page { number } = region.location;
-            let page = number.get();
-            if !pages.contains(&page) {
-                pages.push(page);
-                if pages.len() == MAX_CITATION_PAGES {
-                    break;
-                }
-            }
-        }
+        let (pages, bounds) = project_citation_pages(&evidence.evidence.source_regions);
         let headings = evidence.evidence.heading_path;
         let heading = (!headings.is_empty()).then(|| {
             headings
@@ -267,6 +256,7 @@ pub(in crate::db) async fn list_output_revision_citations(
                 .collect(),
             heading,
             pages,
+            bounds,
         });
     }
     Ok(snapshots)

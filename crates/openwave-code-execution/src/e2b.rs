@@ -5,24 +5,32 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use futures::StreamExt as _;
 use openwave_core::SecretProvider;
+use openwave_egress::{
+    CidrBlock, EgressEnforcement, EgressPolicy, EnforcementException, ExceptionReach,
+    ExceptionScope,
+};
 use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 
 use crate::credential::SecretCredential;
-use crate::http::decode_bounded_json;
+use crate::http::{decode_bounded_json, download_bounded_file, multipart_file};
 use crate::output::{Capture, StreamKind};
 use crate::remote::{
-    execute_remote, RemoteSandboxAdapter, RemoteSession, RemoteSessionError, RemoteSessionPool,
+    connect_remote_workspace, create_remote_workspace, destroy_remote_workspace, execute_remote,
+    with_remote_session, RemoteSandboxAdapter, RemoteSession, RemoteSessionError,
+    RemoteSessionPool, RemoteWorkspaceAdapter,
 };
 use crate::{
     CodeExecutionError, CodeExecutionProvider, CodeExecutionProviderKind, CodeExecutionRequest,
-    CodeExecutionResponse,
+    CodeExecutionResponse, ExecutionWorkspaceId, WorkspaceFileEntry, WorkspaceFilePath,
+    WorkspaceLifecycle, WorkspaceListing, MAX_WORKSPACE_FILE_BYTES, MAX_WORKSPACE_LIST_ENTRIES,
 };
 
 const E2B_API_BASE: &str = "https://api.e2b.app";
 const E2B_SANDBOX_BASE: &str = "https://sandbox.e2b.app";
 const E2B_TEMPLATE: &str = "code-interpreter-v1";
 const E2B_WORKSPACE_ROOT: &str = "/home/user";
+const E2B_USER: &str = "user";
 const E2B_ENVD_PORT: &str = "49983";
 const E2B_SANDBOX_TTL_SECONDS: u64 = 300;
 const E2B_TRANSPORT_GRACE: Duration = Duration::from_secs(10);
@@ -75,6 +83,7 @@ pub struct E2BExecutionProvider {
     pool: RemoteSessionPool,
     client: Client,
     endpoints: E2BEndpoints,
+    egress: Option<EgressPolicy>,
 }
 
 #[derive(Clone)]
@@ -132,7 +141,54 @@ impl E2BExecutionProvider {
             pool,
             client,
             endpoints,
+            egress: None,
         })
+    }
+
+    /// Compile an egress policy into every sandbox this provider creates.
+    ///
+    /// Without a policy the provider keeps today's disclosed open-egress
+    /// creation. With one, sandboxes are created deny-by-default and the
+    /// allowlist becomes E2B's per-sandbox `allowOut` rules — subject to the
+    /// enforcement holes declared by [`Self::egress_enforcement`].
+    #[must_use]
+    pub fn with_egress_policy(mut self, policy: EgressPolicy) -> Self {
+        self.egress = Some(policy);
+        self
+    }
+
+    /// The egress policy compiled into this provider's sandboxes, or `None` for
+    /// today's open-internet creation. Exposed so the host wiring that selects
+    /// and applies a policy can be verified without a live API — a dropped
+    /// policy in that path reverts a configured allowlist to open egress, and
+    /// this is what a test asserts against.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn egress_policy(&self) -> Option<&EgressPolicy> {
+        self.egress.as_ref()
+    }
+
+    /// Host knowledge about E2B's per-sandbox network enforcement, declared
+    /// as what it actually blocks. Vendor exceptions: DNS to `8.8.8.8` stays
+    /// open regardless of policy, and domain-pattern rules are enforced only
+    /// on ports 80 and 443, so a name denied only by a domain rule may stay
+    /// reachable on other ports.
+    #[must_use]
+    pub fn egress_enforcement() -> EgressEnforcement {
+        EgressEnforcement::external(vec![
+            EnforcementException {
+                scope: ExceptionScope::Address(
+                    CidrBlock::parse("8.8.8.8/32").expect("static exception block parses"),
+                ),
+                reach: ExceptionReach::Narrow,
+                purpose: "DNS resolution",
+            },
+            EnforcementException {
+                scope: ExceptionScope::DomainRulePortLimit(vec![80, 443]),
+                reach: ExceptionReach::GeneralPurpose,
+                purpose: "domain filtering covers HTTP and HTTPS ports only",
+            },
+        ])
     }
 
     async fn create_sandbox(
@@ -143,6 +199,7 @@ impl E2BExecutionProvider {
             "{}/sandboxes",
             self.endpoints.api_base.trim_end_matches('/')
         );
+        let network = e2b_network_settings(self.egress.as_ref());
         let response = self
             .client
             .post(url)
@@ -151,7 +208,8 @@ impl E2BExecutionProvider {
                 template_id: E2B_TEMPLATE,
                 timeout: E2B_SANDBOX_TTL_SECONDS,
                 secure: true,
-                allow_internet_access: true,
+                allow_internet_access: network.allow_internet_access,
+                network: network.network,
                 metadata: HashMap::from([("openwave_workspace_id", workspace_id)]),
             })
             .send()
@@ -239,6 +297,27 @@ impl E2BExecutionProvider {
             .await
             .map_err(RemoteSessionError::Provider)
     }
+
+    fn envd_request(
+        &self,
+        builder: reqwest::RequestBuilder,
+        session: &RemoteSession,
+    ) -> Result<reqwest::RequestBuilder, CodeExecutionError> {
+        let access_token = session.access_token.as_deref().ok_or_else(|| {
+            CodeExecutionError::Unavailable("E2B sandbox token is unavailable".into())
+        })?;
+        Ok(builder
+            .header("E2b-Sandbox-Id", &session.sandbox_id)
+            .header("E2b-Sandbox-Port", E2B_ENVD_PORT)
+            .header("X-Access-Token", access_token))
+    }
+
+    fn sandbox_url(&self, path: &str) -> String {
+        format!(
+            "{}{path}",
+            self.endpoints.sandbox_base.trim_end_matches('/')
+        )
+    }
 }
 
 #[async_trait]
@@ -275,12 +354,239 @@ impl RemoteSandboxAdapter for E2BExecutionProvider {
 }
 
 #[async_trait]
+impl RemoteWorkspaceAdapter for E2BExecutionProvider {
+    async fn upload_file(
+        &self,
+        session: &RemoteSession,
+        path: &WorkspaceFilePath,
+        content: &[u8],
+    ) -> Result<(), RemoteSessionError> {
+        validate_sandbox_id(&session.sandbox_id)?;
+        let multipart = multipart_file(path.file_name(), content);
+        let response = self
+            .envd_request(self.client.post(self.sandbox_url("/files")), session)?
+            .query(&[
+                ("path", remote_file_path(Some(path)).as_str()),
+                ("username", E2B_USER),
+            ])
+            .header("Content-Type", multipart.content_type)
+            .body(multipart.body)
+            .send()
+            .await
+            .map_err(|_| {
+                CodeExecutionError::Unavailable("could not reach the E2B sandbox".into())
+            })?;
+        if response.status() == StatusCode::NOT_FOUND
+            || response.status() == StatusCode::BAD_GATEWAY
+        {
+            return Err(RemoteSessionError::Missing);
+        }
+        if !response.status().is_success() {
+            return Err(provider_status_error(response.status()).into());
+        }
+        Ok(())
+    }
+
+    async fn download_file(
+        &self,
+        session: &RemoteSession,
+        path: &WorkspaceFilePath,
+    ) -> Result<Vec<u8>, RemoteSessionError> {
+        validate_sandbox_id(&session.sandbox_id)?;
+        let response = self
+            .envd_request(self.client.get(self.sandbox_url("/files")), session)?
+            .query(&[
+                ("path", remote_file_path(Some(path)).as_str()),
+                ("username", E2B_USER),
+            ])
+            .send()
+            .await
+            .map_err(|_| {
+                CodeExecutionError::Unavailable("could not reach the E2B sandbox".into())
+            })?;
+        // The session was reconciled immediately before this call, so a 404
+        // here is the file, while a routing failure surfaces as 502.
+        if response.status() == StatusCode::NOT_FOUND {
+            return Err(CodeExecutionError::WorkspaceFileNotFound.into());
+        }
+        if response.status() == StatusCode::BAD_GATEWAY {
+            return Err(RemoteSessionError::Missing);
+        }
+        if !response.status().is_success() {
+            return Err(provider_status_error(response.status()).into());
+        }
+        download_bounded_file(response, "E2B", MAX_WORKSPACE_FILE_BYTES)
+            .await
+            .map_err(RemoteSessionError::Provider)
+    }
+
+    async fn list_directory(
+        &self,
+        session: &RemoteSession,
+        path: Option<&WorkspaceFilePath>,
+    ) -> Result<WorkspaceListing, RemoteSessionError> {
+        validate_sandbox_id(&session.sandbox_id)?;
+        let response = self
+            .envd_request(
+                self.client
+                    .post(self.sandbox_url("/filesystem.Filesystem/ListDir")),
+                session,
+            )?
+            .header("Connect-Protocol-Version", "1")
+            .json(&ListDirRequest {
+                path: remote_file_path(path),
+                depth: 1,
+            })
+            .send()
+            .await
+            .map_err(|_| {
+                CodeExecutionError::Unavailable("could not reach the E2B sandbox".into())
+            })?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Err(CodeExecutionError::WorkspaceFileNotFound.into());
+        }
+        if response.status() == StatusCode::BAD_GATEWAY {
+            return Err(RemoteSessionError::Missing);
+        }
+        if !response.status().is_success() {
+            return Err(provider_status_error(response.status()).into());
+        }
+        let body =
+            decode_bounded_json::<ListDirResponse>(response, "E2B", MAX_MANAGEMENT_RESPONSE_BYTES)
+                .await
+                .map_err(RemoteSessionError::Provider)?;
+        let mut entries = Vec::new();
+        for entry in body.entries {
+            if entry.name.is_empty() {
+                continue;
+            }
+            let relative = entry
+                .path
+                .as_deref()
+                .and_then(|absolute| {
+                    absolute
+                        .strip_prefix(E2B_WORKSPACE_ROOT)
+                        .map(|rest| rest.trim_start_matches('/').to_owned())
+                })
+                .filter(|relative| !relative.is_empty())
+                .unwrap_or_else(|| match path {
+                    None => entry.name.clone(),
+                    Some(path) => format!("{}/{}", path.as_str(), entry.name),
+                });
+            entries.push(WorkspaceFileEntry {
+                path: relative,
+                directory: entry.kind.as_deref() == Some("FILE_TYPE_DIRECTORY"),
+                size_bytes: entry.size.as_ref().and_then(json_u64),
+            });
+        }
+        entries.sort_by(|left, right| left.path.cmp(&right.path));
+        let truncated = entries.len() > MAX_WORKSPACE_LIST_ENTRIES;
+        entries.truncate(MAX_WORKSPACE_LIST_ENTRIES);
+        Ok(WorkspaceListing { entries, truncated })
+    }
+
+    async fn destroy_sandbox(&self, session: &RemoteSession) -> Result<(), CodeExecutionError> {
+        validate_sandbox_id(&session.sandbox_id)?;
+        let url = format!(
+            "{}/sandboxes/{}",
+            self.endpoints.api_base.trim_end_matches('/'),
+            session.sandbox_id
+        );
+        let response = self
+            .client
+            .delete(url)
+            .header("X-API-Key", self.credential.as_str())
+            .send()
+            .await
+            .map_err(|_| CodeExecutionError::Unavailable("could not reach the E2B API".into()))?;
+        if response.status() == StatusCode::NOT_FOUND || response.status().is_success() {
+            return Ok(());
+        }
+        Err(provider_status_error(response.status()))
+    }
+}
+
+#[async_trait]
+impl WorkspaceLifecycle for E2BExecutionProvider {
+    async fn create_workspace(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+    ) -> Result<(), CodeExecutionError> {
+        create_remote_workspace(self, &self.pool, workspace.as_str()).await
+    }
+
+    async fn connect_workspace(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+    ) -> Result<bool, CodeExecutionError> {
+        connect_remote_workspace(self, &self.pool, workspace.as_str()).await
+    }
+
+    async fn destroy_workspace(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+    ) -> Result<(), CodeExecutionError> {
+        destroy_remote_workspace(self, &self.pool, workspace.as_str()).await
+    }
+
+    async fn put_workspace_file(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+        path: &WorkspaceFilePath,
+        content: &[u8],
+    ) -> Result<(), CodeExecutionError> {
+        if content.len() > MAX_WORKSPACE_FILE_BYTES {
+            return Err(CodeExecutionError::WorkspaceFileTooLarge);
+        }
+        with_remote_session(
+            self,
+            &self.pool,
+            workspace.as_str(),
+            |adapter, session| async move { adapter.upload_file(&session, path, content).await },
+        )
+        .await
+    }
+
+    async fn get_workspace_file(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+        path: &WorkspaceFilePath,
+    ) -> Result<Vec<u8>, CodeExecutionError> {
+        with_remote_session(
+            self,
+            &self.pool,
+            workspace.as_str(),
+            |adapter, session| async move { adapter.download_file(&session, path).await },
+        )
+        .await
+    }
+
+    async fn list_workspace_files(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+        path: Option<&WorkspaceFilePath>,
+    ) -> Result<WorkspaceListing, CodeExecutionError> {
+        with_remote_session(
+            self,
+            &self.pool,
+            workspace.as_str(),
+            |adapter, session| async move { adapter.list_directory(&session, path).await },
+        )
+        .await
+    }
+}
+
+#[async_trait]
 impl CodeExecutionProvider for E2BExecutionProvider {
     async fn execute(
         &self,
         request: CodeExecutionRequest,
     ) -> Result<CodeExecutionResponse, CodeExecutionError> {
         execute_remote(self, &self.pool, request).await
+    }
+
+    fn workspace_lifecycle(&self) -> Option<&dyn WorkspaceLifecycle> {
+        Some(self)
     }
 }
 
@@ -291,7 +597,49 @@ struct CreateSandboxRequest<'a> {
     timeout: u64,
     secure: bool,
     allow_internet_access: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    network: Option<E2BNetworkConfig>,
     metadata: HashMap<&'static str, &'a str>,
+}
+
+#[derive(Serialize)]
+struct E2BNetworkConfig {
+    #[serde(rename = "allowOut")]
+    allow_out: Vec<String>,
+}
+
+struct E2BNetworkSettings {
+    allow_internet_access: bool,
+    network: Option<E2BNetworkConfig>,
+}
+
+/// Compile the host policy into E2B's creation-time network controls. No
+/// policy keeps today's disclosed open-egress sandbox; any policy creates the
+/// sandbox deny-by-default, with allowlist entries (wildcard domains and CIDR
+/// blocks) as `allowOut` holes through the blocked default.
+fn e2b_network_settings(policy: Option<&EgressPolicy>) -> E2BNetworkSettings {
+    let Some(policy) = policy else {
+        return E2BNetworkSettings {
+            allow_internet_access: true,
+            network: None,
+        };
+    };
+    let network = match policy {
+        EgressPolicy::BlockAll => None,
+        EgressPolicy::Allowlist(allowlist) => {
+            let allow_out: Vec<String> = allowlist
+                .domains()
+                .iter()
+                .map(ToString::to_string)
+                .chain(allowlist.cidrs().iter().map(ToString::to_string))
+                .collect();
+            (!allow_out.is_empty()).then_some(E2BNetworkConfig { allow_out })
+        }
+    };
+    E2BNetworkSettings {
+        allow_internet_access: false,
+        network,
+    }
 }
 
 #[derive(Serialize)]
@@ -355,6 +703,47 @@ fn validate_sandbox_id(value: &str) -> Result<(), CodeExecutionError> {
         ));
     }
     Ok(())
+}
+
+/// Map a validated workspace-relative path onto the sandbox user's home, the
+/// same root the command contract uses for its working directory.
+fn remote_file_path(path: Option<&WorkspaceFilePath>) -> String {
+    match path {
+        None => E2B_WORKSPACE_ROOT.to_owned(),
+        Some(path) => format!("{E2B_WORKSPACE_ROOT}/{}", path.as_str()),
+    }
+}
+
+/// Connect's JSON mapping encodes 64-bit sizes as strings; older envd builds
+/// omit the field entirely.
+fn json_u64(value: &serde_json::Value) -> Option<u64> {
+    match value {
+        serde_json::Value::Number(number) => number.as_u64(),
+        serde_json::Value::String(text) => text.parse().ok(),
+        _ => None,
+    }
+}
+
+#[derive(Serialize)]
+struct ListDirRequest {
+    path: String,
+    depth: u32,
+}
+
+#[derive(Deserialize)]
+struct ListDirResponse {
+    #[serde(default)]
+    entries: Vec<ListDirEntry>,
+}
+
+#[derive(Deserialize)]
+struct ListDirEntry {
+    #[serde(default)]
+    name: String,
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    path: Option<String>,
+    size: Option<serde_json::Value>,
 }
 
 fn remote_cwd(cwd: &str) -> Result<String, CodeExecutionError> {
@@ -610,9 +999,9 @@ mod tests {
     use std::sync::{Arc, Mutex as StdMutex};
 
     use axum::body::Bytes;
-    use axum::extract::{Path as AxumPath, State};
+    use axum::extract::{Path as AxumPath, Query, State};
     use axum::http::{header, HeaderMap};
-    use axum::routing::post;
+    use axum::routing::{delete, post};
     use axum::{Json, Router};
     use base64::Engine as _;
     use serde_json::{json, Value};
@@ -631,10 +1020,12 @@ mod tests {
         creates: AtomicUsize,
         connects: AtomicUsize,
         starts: AtomicUsize,
+        deletes: AtomicUsize,
         create_body: StdMutex<Option<Value>>,
         start_bodies: StdMutex<Vec<Vec<u8>>>,
         api_keys: StdMutex<Vec<String>>,
         access_tokens: StdMutex<Vec<String>>,
+        files: StdMutex<std::collections::HashMap<String, Vec<u8>>>,
     }
 
     impl MockState {
@@ -644,16 +1035,19 @@ mod tests {
                 creates: AtomicUsize::new(0),
                 connects: AtomicUsize::new(0),
                 starts: AtomicUsize::new(0),
+                deletes: AtomicUsize::new(0),
                 create_body: StdMutex::new(None),
                 start_bodies: StdMutex::new(Vec::new()),
                 api_keys: StdMutex::new(Vec::new()),
                 access_tokens: StdMutex::new(Vec::new()),
+                files: StdMutex::new(std::collections::HashMap::new()),
             }
         }
     }
 
     async fn mock_provider(
         mode: ProcessMode,
+        egress: Option<EgressPolicy>,
     ) -> (
         E2BExecutionProvider,
         Arc<MockState>,
@@ -662,8 +1056,11 @@ mod tests {
         let state = Arc::new(MockState::new(mode));
         let app = Router::new()
             .route("/sandboxes", post(mock_create))
+            .route("/sandboxes/{sandbox_id}", delete(mock_delete))
             .route("/sandboxes/{sandbox_id}/connect", post(mock_connect))
             .route("/process.Process/Start", post(mock_start))
+            .route("/files", post(mock_upload).get(mock_download))
+            .route("/filesystem.Filesystem/ListDir", post(mock_list))
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -682,6 +1079,10 @@ mod tests {
             },
         )
         .unwrap();
+        let provider = match egress {
+            Some(policy) => provider.with_egress_policy(policy),
+            None => provider,
+        };
         (provider, state, server)
     }
 
@@ -785,6 +1186,82 @@ mod tests {
         )
     }
 
+    async fn mock_delete(
+        State(state): State<Arc<MockState>>,
+        AxumPath(sandbox_id): AxumPath<String>,
+        headers: HeaderMap,
+    ) -> axum::http::StatusCode {
+        assert_eq!(sandbox_id, "sandbox-123");
+        assert_eq!(header_value(&headers, "x-api-key"), "test-e2b-key");
+        state.deletes.fetch_add(1, Ordering::SeqCst);
+        axum::http::StatusCode::NO_CONTENT
+    }
+
+    async fn mock_upload(
+        State(state): State<Arc<MockState>>,
+        Query(query): Query<std::collections::HashMap<String, String>>,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> axum::http::StatusCode {
+        assert_eq!(query["username"], "user");
+        assert_eq!(header_value(&headers, "x-access-token"), "access-123");
+        let content = multipart_content(&headers, &body);
+        state
+            .files
+            .lock()
+            .unwrap()
+            .insert(query["path"].clone(), content);
+        axum::http::StatusCode::OK
+    }
+
+    async fn mock_download(
+        State(state): State<Arc<MockState>>,
+        Query(query): Query<std::collections::HashMap<String, String>>,
+        headers: HeaderMap,
+    ) -> Result<Vec<u8>, axum::http::StatusCode> {
+        assert_eq!(query["username"], "user");
+        assert_eq!(header_value(&headers, "x-access-token"), "access-123");
+        state
+            .files
+            .lock()
+            .unwrap()
+            .get(&query["path"])
+            .cloned()
+            .ok_or(axum::http::StatusCode::NOT_FOUND)
+    }
+
+    async fn mock_list(
+        State(state): State<Arc<MockState>>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        assert_eq!(header_value(&headers, "connect-protocol-version"), "1");
+        assert_eq!(body["path"], E2B_WORKSPACE_ROOT);
+        let files = state.files.lock().unwrap();
+        let entries: Vec<Value> = files
+            .iter()
+            .map(|(path, content)| {
+                json!({
+                    "name": path.rsplit('/').next().unwrap(),
+                    "type": "FILE_TYPE_FILE",
+                    "path": path,
+                    // Connect's JSON mapping renders uint64 as a string.
+                    "size": content.len().to_string(),
+                })
+            })
+            .collect();
+        Json(json!({ "entries": entries }))
+    }
+
+    fn multipart_content(headers: &HeaderMap, body: &[u8]) -> Vec<u8> {
+        let content_type = header_value(headers, "content-type");
+        let boundary = content_type.split("boundary=").nth(1).unwrap().to_owned();
+        let start = body.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        let tail = format!("\r\n--{boundary}--\r\n");
+        assert!(body.ends_with(tail.as_bytes()));
+        body[start..body.len() - tail.len()].to_vec()
+    }
+
     fn header_value(headers: &HeaderMap, name: &str) -> String {
         headers
             .get(name)
@@ -817,7 +1294,7 @@ mod tests {
 
     #[tokio::test]
     async fn e2b_reuses_the_chat_sandbox_and_replays_an_exact_execution() {
-        let (provider, state, server) = mock_provider(ProcessMode::Complete).await;
+        let (provider, state, server) = mock_provider(ProcessMode::Complete, None).await;
         let first_request = request("execution-1", "workspace-1", "first");
         let first = provider.execute(first_request.clone()).await.unwrap();
         assert_eq!(first.provider, CodeExecutionProviderKind::E2b);
@@ -862,6 +1339,7 @@ mod tests {
         assert_eq!(create["metadata"]["openwave_workspace_id"], "workspace-1");
         assert_eq!(create["secure"], true);
         assert_eq!(create["allow_internet_access"], true);
+        assert!(create.get("network").is_none());
 
         let bodies = state.start_bodies.lock().unwrap();
         let first_start = decode_start_request(&bodies[0]);
@@ -873,8 +1351,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn e2b_workspace_lifecycle_round_trips_files_over_the_session_api() {
+        let (provider, state, server) = mock_provider(ProcessMode::Complete, None).await;
+        let workspace = ExecutionWorkspaceId::parse("workspace-files").unwrap();
+
+        // No pooled handle yet: connect reports unreachable without failing.
+        assert!(!provider.connect_workspace(&workspace).await.unwrap());
+        provider.create_workspace(&workspace).await.unwrap();
+        assert_eq!(state.creates.load(Ordering::SeqCst), 1);
+        assert!(provider.connect_workspace(&workspace).await.unwrap());
+
+        let path = WorkspaceFilePath::parse("data/report.bin").unwrap();
+        let content = b"\x00openwave\xff".to_vec();
+        provider
+            .put_workspace_file(&workspace, &path, &content)
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .files
+                .lock()
+                .unwrap()
+                .get("/home/user/data/report.bin"),
+            Some(&content)
+        );
+        assert_eq!(
+            provider
+                .get_workspace_file(&workspace, &path)
+                .await
+                .unwrap(),
+            content
+        );
+        assert!(matches!(
+            provider
+                .get_workspace_file(&workspace, &WorkspaceFilePath::parse("missing").unwrap())
+                .await,
+            Err(CodeExecutionError::WorkspaceFileNotFound)
+        ));
+
+        let listing = provider
+            .list_workspace_files(&workspace, None)
+            .await
+            .unwrap();
+        assert!(!listing.truncated);
+        assert_eq!(listing.entries.len(), 1);
+        assert_eq!(listing.entries[0].path, "data/report.bin");
+        assert!(!listing.entries[0].directory);
+        assert_eq!(listing.entries[0].size_bytes, Some(content.len() as u64));
+
+        provider.destroy_workspace(&workspace).await.unwrap();
+        assert_eq!(state.deletes.load(Ordering::SeqCst), 1);
+        // The handle is released, so the workspace reports unreachable and a
+        // second destroy is a no-op rather than another provider call.
+        assert!(!provider.connect_workspace(&workspace).await.unwrap());
+        provider.destroy_workspace(&workspace).await.unwrap();
+        assert_eq!(state.deletes.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn e2b_compiles_the_egress_policy_into_the_creation_request() {
+        use openwave_egress::{CidrBlock, DomainPattern, EgressAllowlist};
+
+        let policy = EgressPolicy::Allowlist(EgressAllowlist::new(
+            vec![DomainPattern::parse("*.pypi.org").unwrap()],
+            vec![CidrBlock::parse("140.82.112.0/20").unwrap()],
+        ));
+        let (provider, state, server) = mock_provider(ProcessMode::Complete, Some(policy)).await;
+        provider
+            .execute(request("execution-net", "workspace-net", "hello"))
+            .await
+            .unwrap();
+        let create = state.create_body.lock().unwrap().clone().unwrap();
+        assert_eq!(create["allow_internet_access"], false);
+        assert_eq!(
+            create["network"]["allowOut"],
+            json!(["*.pypi.org", "140.82.112.0/20"])
+        );
+
+        // Block-all needs no allow rules: the blocked default is the policy.
+        let block_all = e2b_network_settings(Some(&EgressPolicy::BlockAll));
+        assert!(!block_all.allow_internet_access);
+        assert!(block_all.network.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn e2b_projects_connect_deadlines_to_the_bounded_timeout_result() {
-        let (provider, state, server) = mock_provider(ProcessMode::Timeout).await;
+        let (provider, state, server) = mock_provider(ProcessMode::Timeout, None).await;
         let response = provider
             .execute(request("execution-timeout", "workspace-timeout", "slow"))
             .await

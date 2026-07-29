@@ -37,10 +37,10 @@ use crate::{
         LookupRootAttachmentReceiptResult, OperationEnvelope, OperationRequest,
         OperationResponseEnvelope, OperationResult, PathRequest, ReadFileBinaryResult,
         ReadFileResult, RegisterRootReceipt, RegisterRootRequest, RegisterRootResult, Response,
-        ResponseEnvelope, RevokeRootRequest, RevokeRootResult, RootAttachmentMutationKind,
-        RootAttachmentMutationReceipt, RootAttachmentMutationRequest, RootAttachmentMutationResult,
-        RootSummary, WriteFileMode, WriteFileRequest, WriteFileResult, MAX_READ_FILE_BINARY_BYTES,
-        PROTOCOL_VERSION,
+        ResponseEnvelope, RevokeRootRequest, RevokeRootResult, RootAccess,
+        RootAttachmentMutationKind, RootAttachmentMutationReceipt, RootAttachmentMutationRequest,
+        RootAttachmentMutationResult, RootSummary, WriteFileMode, WriteFileRequest,
+        WriteFileResult, MAX_READ_FILE_BINARY_BYTES, PROTOCOL_VERSION,
     },
     Capability, ConsentMethod, ConsentRecord, ExecutionContext, Grant, GrantError, GrantId,
     GrantSubject, OperationId, RelativePath, RootAttachment, RootId, RootPolicy, RootPolicyError,
@@ -775,6 +775,11 @@ impl Controller {
             }) if attachment_lookup_matches(existing, &expected) => {
                 RootAttachmentMutationReceipt::Failed {
                     error: error.clone(),
+                    currently_attached: has_root_attachment(
+                        &state,
+                        request.conversation_id,
+                        request.root_id,
+                    ),
                 }
             }
             Some(_) => return Err(error_response(BrokerError::OperationIdConflict)),
@@ -1954,9 +1959,10 @@ fn list_roots(
             )
             .is_ok()
         })
-        .map(|(root_id, root)| RootSummary {
+        .map(|(root_id, root)| RootAccess {
             root_id: *root_id,
             display_name: root.display_name.clone(),
+            capabilities: root_capabilities(state, context, root_id),
         })
         .take(MAX_LIST_ROOTS + 1)
         .collect::<Vec<_>>();
@@ -1969,6 +1975,25 @@ fn list_roots(
             .then_with(|| left.root_id.to_string().cmp(&right.root_id.to_string()))
     });
     Ok((OperationResult::ListRoots { roots }, Some(grant_id)))
+}
+
+/// Per-folder capabilities this conversation actually holds on one root.
+///
+/// Each candidate is put through the same [`authorize`] call that gates the
+/// corresponding operation rather than read off the grant list, so a reported
+/// capability and an allowed operation cannot disagree. Subject-wide
+/// capabilities are excluded: they are not properties of a folder.
+fn root_capabilities(
+    state: &State,
+    context: ExecutionContext,
+    root_id: &RootId,
+) -> Vec<Capability> {
+    [Capability::ReadFiles, Capability::WriteFiles]
+        .into_iter()
+        .filter(|capability| {
+            authorize(state, context, *capability, Resource::Root(root_id)).is_ok()
+        })
+        .collect()
 }
 
 fn root_display_name(path: &Path) -> String {

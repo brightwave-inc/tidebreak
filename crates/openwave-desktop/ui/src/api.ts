@@ -12,6 +12,7 @@ import {
   type CodeExecutionConfigInfo as WireCodeExecutionConfigInfo,
   type CodeExecutionCredentialReadiness as WireCodeExecutionCredentialReadiness,
   type CodeExecutionProviderKind as WireCodeExecutionProviderKind,
+  type EgressConfig as WireEgressConfig,
   type CustomModelConfig as WireCustomModelConfig,
   type McpHealth as WireMcpHealth,
   type McpServerDefinition as WireMcpServerDefinition,
@@ -42,12 +43,14 @@ import {
   type UserQuestionOption as WireUserQuestionOption,
   type ChatToolActivitySnapshot,
   type ChatToolActivityStatus,
+  type CitationPageBounds as WireCitationPageBounds,
   type RendererAgentEvent,
   type RendererChatFrame,
   type RendererChatMetadata,
   type RendererRefusal,
   type RendererSequencedEvent,
   type RendererToolName,
+  type ResultEntryKind,
   type ToolActionPreview,
   type TranscriptImageAttachment as WireTranscriptImageAttachment,
   type TranscriptRole,
@@ -61,6 +64,7 @@ export type {
   ChatToolActivityStatus,
   TranscriptRole,
   RendererToolName,
+  ResultEntryKind,
   ToolActionPreview,
   RendererRefusal,
 };
@@ -87,6 +91,12 @@ export type ChatMetadataFrame = RendererChatMetadata;
 /** Generated from `ToolApprovalKind`. */
 export type RendererApprovalKind = ToolApprovalKind;
 
+/**
+ * One source as the renderer may see it, paired with `ChatDocumentDetail` on the
+ * server. Deliberately narrower than the catalog summary, which also carries the
+ * source's `uri` and index bookkeeping — neither of which the renderer is given,
+ * because a `uri` can name a place on the reader's disk.
+ */
 export type DocumentDetail = {
   document_id: string;
   media_type: string;
@@ -162,6 +172,12 @@ export type CodeExecutionConfigInfo = WireCodeExecutionConfigInfo;
 export type CodeExecutionCredentialReadiness =
   WireCodeExecutionCredentialReadiness;
 
+/**
+ * Host-owned egress policy for the managed sandboxes. Never a secret: only
+ * domain patterns and CIDR blocks, or `open` for today's unrestricted egress.
+ */
+export type EgressConfig = WireEgressConfig;
+
 export type McpHealth = WireMcpHealth;
 
 /** Typed stdio process data. Values are argv entries, never shell source. */
@@ -204,6 +220,14 @@ export type ChatMessage = Omit<
  * deliberately skips `message_id` on the wire. Do not reintroduce it.
  */
 export type ChatMessageCitation = AssistantCitationSnapshot;
+
+/**
+ * One rectangle of a cited passage, on the page it falls on.
+ *
+ * The rectangle is normalized to the page box in ten-thousandths, so a viewer
+ * places it as a fraction of whatever size the page was rendered at.
+ */
+export type CitationPageBounds = WireCitationPageBounds;
 
 /** One durable image identity in a historical user message. */
 export type ChatMessageImageAttachment = WireTranscriptImageAttachment;
@@ -274,7 +298,35 @@ export type ToolResultPreview =
       tool: "mcp_app";
       server: string;
       resourceUri: string;
+    }
+  | {
+      /** What a call found, read, or wrote, as the list of things it was. */
+      tool: "entries";
+      entries: ResultEntry[];
+      /** What the same call could not do. */
+      failures: ResultFailure[];
+      /** Rows the server bounded away, counted rather than shown. */
+      elided: number;
     };
+
+/** One row of a listed result. */
+export type ResultEntry = {
+  kind: ResultEntryKind;
+  label: string;
+  detail: string | null;
+  meta: string | null;
+};
+
+/** One thing a listed call could not do. */
+export type ResultFailure = {
+  /** What failed, when the tool could name it. */
+  label: string | null;
+  /** Why, in the tool's own words. */
+  error: string;
+};
+
+/** The entries-shaped result the list card renders. */
+export type EntriesResultPreview = Extract<ToolResultPreview, { tool: "entries" }>;
 
 /** The exec-shaped result the command card renders. */
 export type ExecResultPreview = Extract<ToolResultPreview, { tool: "exec" }>;
@@ -416,6 +468,76 @@ export const RENDERER_FOLDER_ACCESS_REASON =
 const WS_HANDSHAKE = "openwave-v1";
 const WS_TOKEN_PREFIX = "openwave-token.";
 
+/** How far a source download has got, when its length is known. */
+export type FileDownloadProgress = {
+  loaded: number;
+  total: number;
+  /** `loaded` over `total`, as 0–100. */
+  percentage: number;
+};
+
+/**
+ * The size below which a transfer is not worth reporting on.
+ *
+ * A bar that appears and vanishes is worse than no bar, and a source under this
+ * arrives in a couple of chunks — most of them from a sidecar on this machine.
+ * Well under the 16 MB a source may be, so the files big enough to wait on do
+ * still report.
+ */
+const PROGRESS_MIN_BYTES = 2 * 1024 * 1024;
+
+/** Progress updates are worth at most one re-render per frame budget. */
+const PROGRESS_THROTTLE_MS = 100;
+
+/**
+ * Rate-limit progress callbacks, always letting the last one through.
+ *
+ * Without the trailing call the bar can stop short of the end: the final chunk
+ * usually lands inside the throttle window of the one before it.
+ */
+function throttle(
+  report: (progress: FileDownloadProgress) => void,
+): (progress: FileDownloadProgress) => void {
+  let last = 0;
+  return (progress) => {
+    const now = Date.now();
+    if (progress.loaded >= progress.total || now - last >= PROGRESS_THROTTLE_MS) {
+      last = now;
+      report(progress);
+    }
+  };
+}
+
+/**
+ * A rejected response, carrying the status so a caller can tell why.
+ *
+ * The status is what separates "this is gone" from "we could not reach the
+ * server": a panel that cannot tell those apart has to guess, and guessing
+ * wrong tells a reader their file was deleted when it was not.
+ */
+export class HttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "HttpError";
+  }
+}
+
+/** The server's own message for a failed response, or its status text. */
+async function throwIfNotOk(response: Response): Promise<void> {
+  if (response.ok) return;
+  let detail = response.statusText;
+  try {
+    const body = (await response.json()) as { message?: string };
+    if (body.message) detail = body.message;
+  } catch {
+    /* ignore */
+  }
+  throw new HttpError(response.status, `${response.status}: ${detail}`);
+}
+
 export class ApiClient {
   constructor(
     readonly baseUrl: string,
@@ -436,16 +558,7 @@ export class ApiClient {
     expectedStatus?: number,
   ): Promise<T> {
     const response = await fetch(`${this.baseUrl}${path}`, init);
-    if (!response.ok) {
-      let detail = response.statusText;
-      try {
-        const body = (await response.json()) as { message?: string };
-        if (body.message) detail = body.message;
-      } catch {
-        /* ignore */
-      }
-      throw new Error(`${response.status}: ${detail}`);
-    }
+    await throwIfNotOk(response);
     if (expectedStatus !== undefined && response.status !== expectedStatus) {
       throw new Error(
         `unexpected response status: expected ${expectedStatus}, received ${response.status}`,
@@ -576,11 +689,20 @@ export class ApiClient {
   putCodeExecutionConfig(body: {
     provider?: CodeExecutionProviderKind | null;
     timeout_ms?: number;
+    egress?: EgressConfig;
   }): Promise<CodeExecutionConfigInfo> {
     return this.json("/code-execution", {
       method: "PUT",
       headers: this.headers(true),
       body: JSON.stringify(body),
+    });
+  }
+
+  listCodeExecutionCredentials(): Promise<{
+    credentials: CodeExecutionCredentialReadiness[];
+  }> {
+    return this.json("/code-execution/credentials", {
+      headers: this.headers(),
     });
   }
 
@@ -754,17 +876,65 @@ export class ApiClient {
       headers: this.headers(),
       signal,
     });
-    if (!response.ok) {
-      let detail = response.statusText;
-      try {
-        const body = (await response.json()) as { message?: string };
-        if (body.message) detail = body.message;
-      } catch {
-        /* ignore */
-      }
-      throw new Error(`${response.status}: ${detail}`);
-    }
+    await throwIfNotOk(response);
     return response.blob();
+  }
+
+  /**
+   * Bytes read as they arrive, reporting how much has landed.
+   *
+   * Reading the body as a stream rather than awaiting it whole is the only way
+   * to say anything about a transfer while it is still running. It costs an
+   * extra copy — the chunks are joined once at the end — which is why the
+   * callers that have nothing to report progress to still use {@link blob}.
+   *
+   * `onProgress` is only ever called when the response declares its length:
+   * without a total there is no fraction to report, and a byte count climbing
+   * toward an unknown end is not worth a progress bar.
+   */
+  private async streamBytes(
+    path: string,
+    signal?: AbortSignal,
+    onProgress?: (progress: FileDownloadProgress) => void,
+  ): Promise<{ bytes: Uint8Array; contentType: string | null }> {
+    const response = await fetch(`${this.baseUrl}${path}`, {
+      headers: this.headers(),
+      signal,
+    });
+    await throwIfNotOk(response);
+
+    const contentType = response.headers.get("Content-Type");
+    const declared = Number(response.headers.get("Content-Length"));
+    const total = Number.isSafeInteger(declared) && declared > 0 ? declared : 0;
+
+    // No reader to stream from (an old runtime, or a mocked response in a
+    // test): take the whole body and skip straight to the finished state.
+    if (!response.body) {
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      return { bytes, contentType };
+    }
+
+    const report =
+      onProgress && total > PROGRESS_MIN_BYTES ? throttle(onProgress) : null;
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let loaded = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      loaded += value.length;
+      report?.({ loaded, total, percentage: (loaded / total) * 100 });
+    }
+
+    const bytes = new Uint8Array(loaded);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return { bytes, contentType };
   }
 
   getChatImageAttachment(
@@ -778,34 +948,6 @@ export class ApiClient {
     );
   }
 
-  /**
-   * The original bytes of a source document, as stored.
-   *
-   * Returned as bytes rather than a URL because the renderer authenticates
-   * with a bearer header the webview cannot attach to an `<embed>` or `<img>`
-   * source, and because pdf.js wants a buffer anyway.
-   */
-  async getDocumentFileContent(
-    documentId: string,
-    signal?: AbortSignal,
-  ): Promise<Uint8Array> {
-    const response = await fetch(
-      `${this.baseUrl}/documents/${encodeURIComponent(documentId)}/file-content`,
-      { headers: this.headers(), signal },
-    );
-    if (!response.ok) {
-      let detail = response.statusText;
-      try {
-        const body = (await response.json()) as { message?: string };
-        if (body.message) detail = body.message;
-      } catch {
-        /* ignore */
-      }
-      throw new Error(`${response.status}: ${detail}`);
-    }
-    return new Uint8Array(await response.arrayBuffer());
-  }
-
   /** One source's extracted text and catalog metadata. */
   getChatDocument(chatId: string, documentId: string): Promise<DocumentDetail> {
     return this.json(
@@ -817,18 +959,29 @@ export class ApiClient {
   /**
    * The original bytes of one source, exactly as they were imported.
    *
-   * Bytes are addressed by document id and never by a host path, so a viewer
-   * can show the file the reader gave us without the renderer learning where
-   * on disk it came from.
+   * Bytes are addressed by document id inside its conversation and never by a
+   * host path, so a viewer can show the file the reader gave us without the
+   * renderer learning where on disk it came from. The conversation is part of
+   * the address rather than decoration: the server serves a document's bytes
+   * only under the chat that owns it.
+   *
+   * Returned as bytes rather than a URL because the renderer authenticates with
+   * a bearer header the webview cannot attach to an `<embed>` or `<img>` source,
+   * and because pdf.js and the workbook parsers want a buffer anyway. The
+   * stored media type comes back alongside them because it is what the text
+   * viewers dispatch on, and it would otherwise be lost when the streamed
+   * chunks are reassembled.
    */
   getChatDocumentFile(
     chatId: string,
     documentId: string,
     signal?: AbortSignal,
-  ): Promise<Blob> {
-    return this.blob(
+    onProgress?: (progress: FileDownloadProgress) => void,
+  ): Promise<{ bytes: Uint8Array; contentType: string | null }> {
+    return this.streamBytes(
       `/chats/${encodeURIComponent(chatId)}/documents/${encodeURIComponent(documentId)}/file-content`,
       signal,
+      onProgress,
     );
   }
 
@@ -1444,6 +1597,63 @@ type UncheckedMcpAppResult = Partial<
   Record<keyof Extract<WireToolResultPreview, { tool: "mcp_app" }>, unknown>
 >;
 
+type UncheckedEntriesResult = Partial<
+  Record<keyof Extract<WireToolResultPreview, { tool: "entries" }>, unknown>
+>;
+
+const RESULT_ENTRY_KINDS: readonly ResultEntryKind[] = [
+  "file",
+  "folder",
+  "source",
+  "passage",
+  "link",
+  "output",
+];
+
+/**
+ * Validate one listed row.
+ *
+ * A row is dropped rather than partially rendered, on the same terms as a whole
+ * preview: a row with no label is a blank line the reader cannot interpret, and
+ * an unrecognized kind would reach the icon map with nothing to draw.
+ */
+function parseResultEntry(value: unknown): ResultEntry | null {
+  if (!isRecord(value)) return null;
+  const { kind, label } = value;
+  // A missing hint is faithfully the absence the row shows, so `detail` and
+  // `meta` are normalized rather than validated — only a present value of the
+  // wrong type would be a reason to distrust the row, and it drops that field.
+  const detail = value.detail ?? null;
+  const meta = value.meta ?? null;
+  if (
+    typeof label !== "string" ||
+    label.length === 0 ||
+    !(RESULT_ENTRY_KINDS as readonly unknown[]).includes(kind) ||
+    !isOptionalString(detail) ||
+    !isOptionalString(meta)
+  ) {
+    return null;
+  }
+  return { kind: kind as ResultEntryKind, label, detail, meta };
+}
+
+/**
+ * Validate one failure row.
+ *
+ * The reason is what the row exists to say, so a row without a readable one is
+ * dropped — and, like a dropped entry, counted as not shown rather than
+ * vanishing. A failure the card quietly omits is the worst kind of omission.
+ */
+function parseResultFailure(value: unknown): ResultFailure | null {
+  if (!isRecord(value)) return null;
+  const { error } = value;
+  const label = value.label ?? null;
+  if (typeof error !== "string" || error.length === 0 || !isOptionalString(label)) {
+    return null;
+  }
+  return { label, error };
+}
+
 /**
  * Validate a result field by field, on the same terms as an action: anything
  * that cannot be fully verified is dropped rather than half-rendered.
@@ -1467,6 +1677,35 @@ export function parseToolResultPreview(
       return null;
     }
     return { tool: "mcp_app", server, resourceUri: resource_uri };
+  }
+  if (value.tool === "entries") {
+    const { entries, failures, elided }: UncheckedEntriesResult = value;
+    if (
+      !Array.isArray(entries) ||
+      !Array.isArray(failures) ||
+      !Number.isInteger(elided) ||
+      Number(elided) < 0
+    ) {
+      return null;
+    }
+    const parsedEntries = entries
+      .map(parseResultEntry)
+      .filter((entry): entry is ResultEntry => entry !== null);
+    const parsedFailures = failures
+      .map(parseResultFailure)
+      .filter((failure): failure is ResultFailure => failure !== null);
+    // Rows this parser rejected are counted with the ones the server bounded
+    // away, because in both cases the card is showing fewer results than the
+    // call returned and has to say so.
+    return {
+      tool: "entries",
+      entries: parsedEntries,
+      failures: parsedFailures,
+      elided:
+        Number(elided) +
+        (entries.length - parsedEntries.length) +
+        (failures.length - parsedFailures.length),
+    };
   }
   if (value.tool !== "exec") return null;
   const { exit_code, timed_out, output_truncated, stdout, stderr }: UncheckedExecResult = value;

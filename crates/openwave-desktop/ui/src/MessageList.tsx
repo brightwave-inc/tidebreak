@@ -22,8 +22,11 @@ import { OutputWritebackCard } from "./OutputWritebackCard";
 import { MessageMarkdown } from "./MessageMarkdown";
 import { MessageFooter } from "./MessageFooter";
 import { AssistantSources, type AssistantSource } from "./AssistantSources";
+import { stripCitationDirectives } from "./citationDirectives";
+import { MessageCitationsProvider } from "./InlineCitation";
 import { McpAppCard } from "./McpAppCard";
 import { ToolCommandCard, type ToolCallStatus } from "./ToolCallCard";
+import { ToolEntriesCard } from "./ToolEntriesCard";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { ToolActivityGroup } from "./ToolActivityGroup";
 import { WelcomeState } from "./WelcomeState";
@@ -73,6 +76,8 @@ export type ChatMessage =
       preview?: ToolActionPreview | null;
       /** What the call produced, once it has produced anything. */
       result?: ToolResultPreview | null;
+      /** Set when a retained projection no longer parses against this build. */
+      resultUnreadable?: boolean;
     }
   | {
       id: string;
@@ -523,6 +528,21 @@ function surfacedCards(
       continue;
     }
     if (entry.role !== "tool") continue;
+    // A call whose retained projection this build can no longer read. Saying so
+    // beats rendering nothing: the alternative reads as a call that produced
+    // no result, which is a different and untrue claim.
+    if (entry.resultUnreadable && !parked.has(entry.callId)) {
+      cards.push(
+        <p
+          key={entry.id}
+          className="text-muted-foreground bg-muted max-w-prose rounded-md px-3 py-2 text-xs"
+          role="status"
+        >
+          This tool completed, but its result can no longer be displayed.
+        </p>,
+      );
+      continue;
+    }
     if (
       entry.result?.tool === "web_search_provider_required" &&
       !parked.has(entry.callId)
@@ -541,6 +561,20 @@ function surfacedCards(
           resourceUri={entry.result.resourceUri}
           chatId={chatId}
           callId={entry.callId}
+        />,
+      );
+      continue;
+    }
+    // Also keyed on the result, and for the same reason as an MCP view: what
+    // the call found is the card, and most of these tools project no action
+    // preview because their arguments say nothing a reader needs.
+    if (entry.result?.tool === "entries" && !parked.has(entry.callId)) {
+      cards.push(
+        <ToolEntriesCard
+          key={entry.id}
+          name={entry.name}
+          status={entry.status}
+          result={entry.result}
         />,
       );
       continue;
@@ -589,6 +623,9 @@ function AssistantMessageBody({
  */
 export const MessageBubble = memo(MessageBubbleImpl);
 
+/** A stable stand-in for the roles that carry no citations. */
+const EMPTY_SOURCES: readonly AssistantSource[] = [];
+
 /**
  * One conversational turn. Tool calls and approvals are not turns — they belong
  * to an activity phase, which owns both the rail and the cards below it.
@@ -605,6 +642,24 @@ function MessageBubbleImpl({
   chatId?: string;
 }) {
   const sourceNav = useSourceNav();
+  // One way into the source panel for both anchors a citation has: the phrase
+  // in the prose and the row at the foot of the message open the same place.
+  const openSource = useMemo(
+    () =>
+      sourceNav
+        ? (source: AssistantSource) =>
+            sourceNav.openCitation({
+              documentId: source.documentId,
+              citationId: source.id,
+            })
+        : undefined,
+    [sourceNav],
+  );
+  const sources = message.role === "assistant" ? message.sources : EMPTY_SOURCES;
+  const citations = useMemo(
+    () => ({ sources, onOpenSource: openSource }),
+    [sources, openSource],
+  );
 
   if (message.role === "assistant") {
     if (!message.text && message.sources.length === 0) return null;
@@ -621,29 +676,25 @@ function MessageBubbleImpl({
     }
 
     return (
-      <article className="message message-assistant" aria-label="Assistant">
-        {message.text && (
-          <AssistantMessageBody text={message.text} streaming={busy} />
-        )}
-        <AssistantSources
-          sources={message.sources}
-          onOpenSource={
-            sourceNav
-              ? (source) =>
-                  sourceNav.openCitation({
-                    documentId: source.documentId,
-                    citationId: source.id,
-                  })
-              : undefined
-          }
-        />
-        <MessageFooter
-          role="assistant"
-          text={message.text}
-          createdAt={message.createdAt}
-          settled={!busy}
-        />
-      </article>
+      <MessageCitationsProvider value={citations}>
+        <article className="message message-assistant" aria-label="Assistant">
+          {message.text && (
+            <AssistantMessageBody text={message.text} streaming={busy} />
+          )}
+          <AssistantSources
+            sources={message.sources}
+            onOpenSource={openSource}
+          />
+          <MessageFooter
+            role="assistant"
+            // The clipboard yields what the message reads as, not how a
+            // citation is stored.
+            text={stripCitationDirectives(message.text)}
+            createdAt={message.createdAt}
+            settled={!busy}
+          />
+        </article>
+      </MessageCitationsProvider>
     );
   }
 

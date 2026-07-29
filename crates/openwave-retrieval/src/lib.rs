@@ -81,6 +81,8 @@ mod liteparse_image_parser;
 mod liteparse_office_parser;
 #[cfg(feature = "parse-liteparse")]
 mod liteparse_parser;
+#[cfg(feature = "parse-liteparse")]
+mod liteparse_regions;
 #[cfg(feature = "embed-openai")]
 mod openai_embed;
 mod parse;
@@ -93,7 +95,8 @@ mod vector;
 
 pub use chunk::{Chunker, TextChunker};
 pub use document::{
-    ByteSpan, Chunk, Citation, Document, DocumentSource, ScoredChunk, SourceLocation, SourceRegion,
+    ByteSpan, Chunk, Citation, Document, DocumentSource, PageBounds, ScoredChunk, SourceLocation,
+    SourceRegion, PAGE_BOUNDS_SCALE,
 };
 pub use embed::{Embedder, Embedding, HashEmbedder};
 pub use error::{Result, RetrievalError};

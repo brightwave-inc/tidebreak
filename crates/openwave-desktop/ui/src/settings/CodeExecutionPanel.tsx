@@ -3,149 +3,170 @@ import { toast } from "sonner";
 import type {
   ApiClient,
   CodeExecutionConfigInfo,
+  CodeExecutionCredentialReadiness,
   CodeExecutionProviderKind,
+  EgressConfig,
 } from "../api";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+  ActiveProviderField,
+  ProviderCredentialField,
+  TimeoutSecondsField,
+  timeoutMsFromSeconds,
+} from "./ProviderFields";
 import {
   SettingsError,
   SettingsField,
   SettingsPanel,
   SettingsSection,
+  SettingsStatus,
 } from "./primitives";
 
-const MIN_CODE_EXECUTION_TIMEOUT_MS = 1_000;
-const MAX_CODE_EXECUTION_TIMEOUT_MS = 120_000;
+const MIN_CODE_EXECUTION_TIMEOUT_SECONDS = 1;
+const MAX_CODE_EXECUTION_TIMEOUT_SECONDS = 120;
 
-// Radix Select reserves the empty string, so "Disabled" (no provider) rides on
-// a sentinel value the wire never carries.
-const NO_PROVIDER = "__disabled__";
+/** The local sandbox needs no credential, so it never appears in the key list. */
+const LOCAL_PROVIDER: CodeExecutionProviderKind = "local";
 
 export function CodeExecutionPanel({ client }: { client: ApiClient }) {
   const [config, setConfig] = useState<CodeExecutionConfigInfo | null>(null);
+  const [credentials, setCredentials] = useState<
+    CodeExecutionCredentialReadiness[]
+  >([]);
   const [provider, setProvider] = useState<CodeExecutionProviderKind | "">("");
-  const [timeoutMs, setTimeoutMs] = useState("");
-  const [apiKey, setApiKey] = useState("");
+  const [timeoutSeconds, setTimeoutSeconds] = useState("");
+  // One draft key per managed provider, so E2B and Daytona can be configured
+  // together and switching the active provider discards neither.
+  const [apiKeys, setApiKeys] = useState<
+    Partial<Record<CodeExecutionProviderKind, string>>
+  >({});
+  // Egress restriction is opt-in: off means today's open-internet sandboxes.
+  const [restrictEgress, setRestrictEgress] = useState(false);
+  const [egressDomains, setEgressDomains] = useState("");
+  const [egressCidrs, setEgressCidrs] = useState("");
   const [loading, setLoading] = useState(true);
-  const [savingConfig, setSavingConfig] = useState(false);
-  const [savingCredential, setSavingCredential] = useState(false);
-  const [removingCredential, setRemovingCredential] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [removing, setRemoving] = useState<CodeExecutionProviderKind | null>(
+    null,
+  );
   const [error, setError] = useState<string | null>(null);
-
-  async function refresh() {
-    const nextConfig = await client.getCodeExecutionConfig();
-    setConfig(nextConfig);
-    setProvider(nextConfig.provider ?? "");
-    setTimeoutMs(String(nextConfig.timeout_ms));
-  }
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    void client
-      .getCodeExecutionConfig()
-      .then((nextConfig) => {
+    void (async () => {
+      try {
+        const [nextConfig, nextCredentials] = await Promise.all([
+          client.getCodeExecutionConfig(),
+          client.listCodeExecutionCredentials(),
+        ]);
         if (cancelled) return;
         setConfig(nextConfig);
+        setCredentials(nextCredentials.credentials);
         setProvider(nextConfig.provider ?? "");
-        setTimeoutMs(String(nextConfig.timeout_ms));
-      })
-      .catch((err) => {
+        setTimeoutSeconds(String(nextConfig.timeout_ms / 1000));
+        hydrateEgress(nextConfig.egress.policy);
+      } catch (err) {
         if (!cancelled) setError(String(err));
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) setLoading(false);
-      });
+      }
+    })();
     return () => {
       cancelled = true;
     };
   }, [client]);
 
+  const working = saving || removing !== null;
   const state = codeExecutionState(config);
-  const activeProvider = config?.provider;
-  const managedProvider =
-    activeProvider === "e2b" || activeProvider === "daytona"
-      ? activeProvider
-      : null;
-  const managedProviderLabel = managedProvider
-    ? codeExecutionProviderLabel(managedProvider)
-    : null;
-  const working = savingConfig || savingCredential || removingCredential;
 
-  async function saveConfig() {
-    const parsedTimeout = Number(timeoutMs);
-    if (
-      !Number.isInteger(parsedTimeout) ||
-      parsedTimeout < MIN_CODE_EXECUTION_TIMEOUT_MS ||
-      parsedTimeout > MAX_CODE_EXECUTION_TIMEOUT_MS
-    ) {
-      setError(
-        `Timeout must be a whole number between ${MIN_CODE_EXECUTION_TIMEOUT_MS.toLocaleString()} and ${MAX_CODE_EXECUTION_TIMEOUT_MS.toLocaleString()} ms.`,
-      );
+  function hydrateEgress(policy: EgressConfig) {
+    if (policy.mode === "allowlist") {
+      setRestrictEgress(true);
+      setEgressDomains(policy.domains.join("\n"));
+      setEgressCidrs(policy.cidrs.join("\n"));
+    } else {
+      setRestrictEgress(false);
+      setEgressDomains("");
+      setEgressCidrs("");
+    }
+  }
+
+  async function save() {
+    const timeout = timeoutMsFromSeconds(
+      timeoutSeconds,
+      MIN_CODE_EXECUTION_TIMEOUT_SECONDS,
+      MAX_CODE_EXECUTION_TIMEOUT_SECONDS,
+    );
+    if ("error" in timeout) {
+      setError(timeout.error);
       return;
     }
 
-    setSavingConfig(true);
+    setSaving(true);
     setError(null);
     try {
+      // Keys go first so the newly active provider never lands
+      // selected-but-unusable when the caller supplied both in one pass.
+      for (const credential of credentials) {
+        const key = apiKeys[credential.provider]?.trim();
+        if (!key) continue;
+        await client.putCodeExecutionCredential(credential.provider, key);
+        setApiKeys((current) => ({ ...current, [credential.provider]: "" }));
+      }
       const nextConfig = await client.putCodeExecutionConfig({
         provider: provider || null,
-        timeout_ms: parsedTimeout,
+        timeout_ms: timeout.timeoutMs,
+        egress: restrictEgress
+          ? {
+              mode: "allowlist",
+              domains: splitEntries(egressDomains),
+              cidrs: splitEntries(egressCidrs),
+            }
+          : { mode: "open" },
       });
+      const nextCredentials = await client.listCodeExecutionCredentials();
       setConfig(nextConfig);
+      setCredentials(nextCredentials.credentials);
       setProvider(nextConfig.provider ?? "");
-      setTimeoutMs(String(nextConfig.timeout_ms));
-      toast.success("Saved code-execution configuration");
+      setTimeoutSeconds(String(nextConfig.timeout_ms / 1000));
+      hydrateEgress(nextConfig.egress.policy);
+      toast.success("Saved code-execution settings");
     } catch (err) {
       setError(String(err));
     } finally {
-      setSavingConfig(false);
+      setSaving(false);
     }
   }
 
-  async function saveCredential() {
-    if (!managedProvider || !managedProviderLabel || !apiKey.trim()) return;
-    setSavingCredential(true);
+  async function removeCredential(target: CodeExecutionProviderKind) {
+    setRemoving(target);
     setError(null);
     try {
-      await client.putCodeExecutionCredential(managedProvider, apiKey.trim());
-      setApiKey("");
-      await refresh();
-      toast.success(`Saved the ${managedProviderLabel} API key`);
+      await client.deleteCodeExecutionCredential(target);
+      const [nextConfig, nextCredentials] = await Promise.all([
+        client.getCodeExecutionConfig(),
+        client.listCodeExecutionCredentials(),
+      ]);
+      setConfig(nextConfig);
+      setCredentials(nextCredentials.credentials);
+      toast.success(
+        `Removed the saved ${codeExecutionProviderLabel(target)} API key`,
+      );
     } catch (err) {
       setError(String(err));
     } finally {
-      setSavingCredential(false);
-    }
-  }
-
-  async function removeCredential() {
-    if (!managedProvider || !managedProviderLabel) return;
-    setRemovingCredential(true);
-    setError(null);
-    try {
-      await client.deleteCodeExecutionCredential(managedProvider);
-      await refresh();
-      toast.success(`Removed the saved ${managedProviderLabel} API key`);
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setRemovingCredential(false);
+      setRemoving(null);
     }
   }
 
   return (
     <SettingsPanel
       title="Code execution"
-      description="Choose an isolated execution provider and a host-enforced timeout."
+      description="Configure as many cloud sandboxes as you like, choose where agents execute, and bound every run. Saved keys are never shown here."
       busy={loading}
     >
       {loading ? (
@@ -158,116 +179,136 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
         </p>
       ) : (
         <>
-          <div className={`web-search-state is-${state.kind}`} role="status">
-            <strong>{state.label}</strong>
-            <span>{state.description}</span>
-          </div>
+          <SettingsStatus
+            tone={state.kind}
+            label={state.label}
+            description={state.description}
+          />
 
-          <SettingsSection>
-            <SettingsField label="Provider">
-              <Select
-                value={provider === "" ? NO_PROVIDER : provider}
+          <SettingsSection
+            title="Cloud sandbox keys"
+            description="Give a key to every managed provider you want available. The local sandbox needs none."
+          >
+            {credentials.map((credential) => (
+              <ProviderCredentialField
+                key={credential.provider}
+                provider={codeExecutionProviderLabel(credential.provider)}
+                hasCredential={credential.has_credential}
+                value={apiKeys[credential.provider] ?? ""}
                 disabled={working}
-                onValueChange={(value) =>
-                  setProvider(
-                    value === NO_PROVIDER
-                      ? ""
-                      : (value as CodeExecutionProviderKind),
-                  )
+                removing={removing === credential.provider}
+                onChange={(value) =>
+                  setApiKeys((current) => ({
+                    ...current,
+                    [credential.provider]: value,
+                  }))
                 }
-              >
-                <SelectTrigger aria-label="Provider">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={NO_PROVIDER}>Disabled</SelectItem>
-                  <SelectItem value="local">Local native sandbox</SelectItem>
-                  <SelectItem value="e2b">E2B cloud sandbox</SelectItem>
-                  <SelectItem value="daytona">
-                    Daytona cloud sandbox
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </SettingsField>
-
-            <SettingsField
-              label="Execution timeout (ms)"
-              hint={`Between ${MIN_CODE_EXECUTION_TIMEOUT_MS.toLocaleString()} and ${MAX_CODE_EXECUTION_TIMEOUT_MS.toLocaleString()} ms.`}
-            >
-              <Input
-                type="number"
-                inputMode="numeric"
-                min={MIN_CODE_EXECUTION_TIMEOUT_MS}
-                max={MAX_CODE_EXECUTION_TIMEOUT_MS}
-                step="1000"
-                value={timeoutMs}
-                disabled={working}
-                onChange={(event) => setTimeoutMs(event.target.value)}
+                onRemove={() => void removeCredential(credential.provider)}
               />
-            </SettingsField>
-
-            <Button
-              type="button"
-              className="self-start"
-              disabled={working}
-              onClick={() => void saveConfig()}
-            >
-              {savingConfig ? "Saving…" : "Save configuration"}
-            </Button>
+            ))}
           </SettingsSection>
 
-          {managedProvider && managedProviderLabel && (
-            <SettingsSection title={`${managedProviderLabel} credential`}>
-              <span className="text-xs text-muted-foreground">
-                {config.has_credential
-                  ? "credential saved"
-                  : "no credential saved"}
-              </span>
-              <SettingsField
-                label={config.has_credential ? "Replace API key" : "API key"}
-              >
-                <Input
-                  type="password"
-                  placeholder={`Paste a new ${managedProviderLabel} API key`}
-                  value={apiKey}
-                  maxLength={8_192}
-                  autoComplete="new-password"
-                  disabled={working}
-                  onChange={(event) => setApiKey(event.target.value)}
-                />
-              </SettingsField>
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  type="button"
-                  disabled={working || !apiKey.trim()}
-                  onClick={() => void saveCredential()}
-                >
-                  {savingCredential
-                    ? "Saving…"
-                    : config.has_credential
-                      ? "Update key"
-                      : "Save key"}
-                </Button>
-                {config.has_credential && (
-                  <Button
-                    type="button"
-                    variant="destructive"
-                    disabled={working}
-                    onClick={() => void removeCredential()}
-                  >
-                    {removingCredential ? "Removing…" : "Remove saved key"}
-                  </Button>
-                )}
-              </div>
-            </SettingsSection>
-          )}
+          <SettingsSection
+            title="Active provider"
+            description="Agents execute in this one provider. The others stay configured and idle."
+          >
+            <ActiveProviderField
+              value={provider}
+              disabled={working}
+              onChange={setProvider}
+              options={[
+                { kind: LOCAL_PROVIDER, label: "Local native sandbox" },
+                ...credentials.map((credential) => ({
+                  kind: credential.provider,
+                  label: `${codeExecutionProviderLabel(credential.provider)} cloud sandbox`,
+                })),
+              ]}
+            />
 
-          {provider !== (activeProvider ?? "") && (
-            <p className="text-xs text-muted-foreground">
-              Save the provider configuration before managing that provider’s
-              key.
-            </p>
-          )}
+            <TimeoutSecondsField
+              label="Execution timeout"
+              minSeconds={MIN_CODE_EXECUTION_TIMEOUT_SECONDS}
+              maxSeconds={MAX_CODE_EXECUTION_TIMEOUT_SECONDS}
+              value={timeoutSeconds}
+              disabled={working}
+              onChange={setTimeoutSeconds}
+            />
+          </SettingsSection>
+
+          <SettingsSection
+            title="Network egress"
+            description="Cloud sandboxes reach the internet freely by default. Turn on restriction to allow only the destinations you list; everything else is denied. The local sandbox already blocks all network."
+          >
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex flex-col gap-0.5">
+                <span className="font-bold">Restrict network egress</span>
+                <span className="text-sm text-muted-foreground">
+                  {restrictEgress
+                    ? "Only the domains and address blocks below are reachable from the cloud sandbox."
+                    : "Open egress — the cloud sandbox can reach any destination, as it does today."}
+                </span>
+              </div>
+              <Switch
+                checked={restrictEgress}
+                disabled={working}
+                onCheckedChange={setRestrictEgress}
+                aria-label="Restrict network egress"
+              />
+            </div>
+
+            {restrictEgress && (
+              <>
+                <SettingsField
+                  label="Allowed domains"
+                  hint="One per line. An exact host (api.example.com) or a leading wildcard (*.pypi.org)."
+                >
+                  <textarea
+                    className={ENTRY_TEXTAREA_CLASS}
+                    rows={4}
+                    spellCheck={false}
+                    value={egressDomains}
+                    disabled={working}
+                    placeholder={"*.pypi.org\nfiles.pythonhosted.org"}
+                    onChange={(event) => setEgressDomains(event.target.value)}
+                  />
+                </SettingsField>
+
+                <SettingsField
+                  label="Allowed address blocks"
+                  hint="One per line, in CIDR notation (140.82.112.0/20) or a bare address."
+                >
+                  <textarea
+                    className={ENTRY_TEXTAREA_CLASS}
+                    rows={3}
+                    spellCheck={false}
+                    value={egressCidrs}
+                    disabled={working}
+                    placeholder={"140.82.112.0/20"}
+                    onChange={(event) => setEgressCidrs(event.target.value)}
+                  />
+                </SettingsField>
+
+                <p className="text-sm leading-relaxed text-muted-foreground">
+                  An empty allowlist blocks all egress. Domain and address rules
+                  are independent: a domain grant never opens a raw IP, and an
+                  address block never opens a hostname.
+                </p>
+              </>
+            )}
+
+            <EgressEnforcementDisclosure
+              enforcement={config.egress.enforcement}
+            />
+          </SettingsSection>
+
+          {/* One save for the whole surface: it stores every key typed above
+              and the selection together, so a provider cannot go active in a
+              pass that failed to save its key. */}
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" disabled={working} onClick={() => void save()}>
+              {saving ? "Saving…" : "Save settings"}
+            </Button>
+          </div>
 
           <p className="text-sm leading-relaxed text-muted-foreground">
             Local execution blocks network and confines writes to private chat
@@ -280,6 +321,85 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
       )}
       {error && <SettingsError>{error}</SettingsError>}
     </SettingsPanel>
+  );
+}
+
+/** Textarea styled to match the shared `Input`, sized for a list of entries. */
+const ENTRY_TEXTAREA_CLASS =
+  "flex w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50";
+
+/**
+ * Split a textarea of grants into trimmed, non-empty entries. Newlines and
+ * commas both separate, so a pasted comma-joined list works as well as one per
+ * line; the server re-validates each entry's grammar.
+ */
+function splitEntries(value: string): string[] {
+  return value
+    .split(/[\n,]/)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
+type EgressEnforcementRow =
+  CodeExecutionConfigInfo["egress"]["enforcement"][number];
+
+/**
+ * How each enforcement status reads: the badge never claims a boundary a
+ * provider does not have, and the caveat sits inline beside it rather than in
+ * prose below. Driven by the server's status, which is itself derived from the
+ * enforcement model, so the UI cannot oversell what the model won't back.
+ */
+const EGRESS_STATUS_PRESENTATION: Record<
+  EgressEnforcementRow["status"],
+  { badge: "success" | "warning" | "critical"; label: string; lead: string }
+> = {
+  boundary: {
+    badge: "success",
+    label: "Boundary",
+    lead: "Enforced as a full network boundary.",
+  },
+  applied_with_gaps: {
+    badge: "warning",
+    label: "Applied — not a full boundary",
+    lead: "The allowlist is applied, but these stay reachable regardless of policy:",
+  },
+  unconfirmed: {
+    badge: "warning",
+    label: "Unconfirmed",
+    lead: "A policy is sent at creation, but enforcement is not yet confirmed against the live API. These stay reachable regardless of policy:",
+  },
+};
+
+/**
+ * Per-provider egress enforcement, disclosed honestly: the badge reflects the
+ * model's own status and the gaps the vendor leaves open are listed inline, so
+ * a provider that is not a full boundary can never read as one.
+ */
+function EgressEnforcementDisclosure({
+  enforcement,
+}: {
+  enforcement: CodeExecutionConfigInfo["egress"]["enforcement"];
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      {enforcement.map((row) => {
+        const presentation = EGRESS_STATUS_PRESENTATION[row.status];
+        return (
+          <div key={row.provider} className="flex items-start gap-2 text-sm">
+            <Badge variant={presentation.badge} size="sm">
+              {presentation.label}
+            </Badge>
+            <span className="text-muted-foreground">
+              <span className="font-medium text-foreground">
+                {codeExecutionProviderLabel(row.provider)}
+              </span>{" "}
+              — {presentation.lead}
+              {row.gaps.length > 0 && ` ${row.gaps.join("; ")}.`}
+            </span>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -300,12 +420,12 @@ function codeExecutionState(config: CodeExecutionConfigInfo | null): {
       kind: "ready",
       label: "Ready",
       description:
-        config.provider !== "local"
+        config.provider !== LOCAL_PROVIDER
           ? `${codeExecutionProviderLabel(config.provider)} is selected and has a saved credential.`
           : "The local native sandbox is available.",
     };
   }
-  if (config.provider !== "local" && !config.has_credential) {
+  if (config.provider !== LOCAL_PROVIDER && !config.has_credential) {
     return {
       kind: "not-configured",
       label: "Not configured",
