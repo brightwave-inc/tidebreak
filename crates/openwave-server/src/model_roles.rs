@@ -174,8 +174,14 @@ async fn usable_policy(
     let Some(policy) = providers::resolve_model_policy(store, selection, false).await? else {
         return Ok(None);
     };
+    // Roles read only the sticky store authority for now: threading the OS
+    // policy source through every role caller (the turn worker included)
+    // belongs to the slice that makes background roles policy-aware. A
+    // provisioned profile already locks BYOK roles out here; a pure
+    // OS-asserted one still hits the egress lockdown in `collect_routes`.
+    let managed = crate::managed_policy::resolve(store, &crate::managed_policy::NoOsPolicy).await?;
     Ok(
-        providers::provider_is_usable(store, secrets, policy.provider)
+        providers::provider_is_usable(store, secrets, policy.provider, &managed)
             .await?
             .then_some(policy),
     )

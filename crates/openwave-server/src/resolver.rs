@@ -50,21 +50,25 @@ pub struct ConfiguredResolver {
     store: Arc<dyn Store>,
     secrets: Arc<dyn SecretProvider>,
     gateway: Arc<crate::gateway_runtime::GatewayRuntime>,
+    os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     cached: Mutex<CachedProvider>,
 }
 
 impl ConfiguredResolver {
     /// A resolver that reads provider config from `store` and credentials from
-    /// `secrets`, with `gateway` supplying the model-gateway token source.
+    /// `secrets`, with `gateway` supplying the model-gateway token source and
+    /// `os_policy` the OS authority for managed-mode resolution.
     pub fn new(
         store: Arc<dyn Store>,
         secrets: Arc<dyn SecretProvider>,
         gateway: Arc<crate::gateway_runtime::GatewayRuntime>,
+        os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     ) -> Self {
         Self {
             store,
             secrets,
             gateway,
+            os_policy,
             cached: Mutex::new(None),
         }
     }
@@ -76,8 +80,15 @@ pub type KeyedResolver = ConfiguredResolver;
 #[async_trait]
 impl ProviderResolver for ConfiguredResolver {
     async fn resolve(&self) -> Arc<dyn ModelProvider> {
+        // A profile that claims to be managed but whose policy cannot be read
+        // fails closed: no egress, rather than quietly reverting to BYOK routes.
+        let Ok(policy) = crate::managed_policy::resolve(&*self.store, &*self.os_policy).await
+        else {
+            return Arc::new(UnconfiguredProvider);
+        };
         let gateway_tokens = self.gateway.route_token_source().await;
-        let routes = providers::collect_routes(&*self.store, &*self.secrets, gateway_tokens).await;
+        let routes =
+            providers::collect_routes(&*self.store, &*self.secrets, gateway_tokens, &policy).await;
         let router = Router::build(routes);
         let fingerprint = router.fingerprint().to_string();
 

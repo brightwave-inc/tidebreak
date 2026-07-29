@@ -634,16 +634,38 @@ async fn bind_inner(
     let instance_lock = InstanceLock::acquire(&config)?;
     let store = connect_store(&config).await?;
     let secrets = secret_provider(&config);
+    // The product boot path is where this platform's OS-managed (MDM) policy
+    // reader gets selected; directly assembled AppState stays hermetic. This
+    // is the one instance shared by the boot policy read, the legacy-key
+    // migration guard, the resolver, the gateway runtime, and the request
+    // handlers, so they can never disagree on the resolved policy.
+    let os_policy: Arc<dyn managed_policy::OsPolicySource> =
+        managed_policy::platform_source(&config);
+    // The BYOK boot paths — the legacy Anthropic auto-enable and the OpenAI
+    // embedder below — are gated on one policy read. A resolution `Err` is
+    // deliberately swallowed as "not allowed": an unreadable policy fails
+    // closed to no BYOK arming while boot still proceeds, so the profile can
+    // surface the error and be repaired instead of bricking.
+    let byok_boot_allowed = matches!(
+        managed_policy::resolve(&*store, &*os_policy).await,
+        Ok(policy) if !policy.managed
+    );
     // Pre-providers installs may only have an env/legacy key — enable Anthropic
-    // so `KeyedResolver`'s enabled check doesn't fail-closed on upgrade.
-    providers::migrate_legacy_anthropic(&*store, &*secrets).await?;
-    let gateway = gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone());
+    // so `KeyedResolver`'s enabled check doesn't fail-closed on upgrade. Never
+    // on a managed profile: auto-enabling a BYOK provider would fight the
+    // lockdown.
+    if byok_boot_allowed {
+        providers::migrate_legacy_anthropic(&*store, &*secrets).await?;
+    }
+    let gateway =
+        gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone(), os_policy.clone());
     let resolver = Arc::new(KeyedResolver::new(
         store.clone(),
         secrets.clone(),
         gateway.clone(),
+        os_policy.clone(),
     ));
-    let embedder = resolve_embedder(&*store, &*secrets).await;
+    let embedder = resolve_embedder(&*store, &*secrets, byok_boot_allowed).await;
     let vector_store = connect_vector_store(&config, embedder.dimensions()).await?;
     let code_execution = Arc::new(code_execution::ConfiguredCodeExecutionProvider::new(
         store.clone(),
@@ -686,9 +708,7 @@ async fn bind_inner(
     // instances over the same keychain entry can race a stale refresh token
     // into the gateway's reuse detection (a spurious full sign-out).
     state.gateway = gateway;
-    // Directly assembled AppState stays hermetic; the product boot path is
-    // where this platform's OS-managed (MDM) policy reader gets selected.
-    state.os_policy = managed_policy::platform_source(&state.config);
+    state.os_policy = os_policy;
     state.mcp.initialize(mcp_servers).await?;
     let token = state.token.clone();
     let client_executor_token = state.client_executor_token.clone();
@@ -885,11 +905,26 @@ const EMBED_DIMS: usize = 1536;
 /// Chosen once at startup: the vector index is dimension-bound to the embedder, so
 /// enabling OpenAI (or adding a key) takes effect on restart — where a change in
 /// embedding width rebuilds the persistent index (see `connect_vector_store`).
-async fn resolve_embedder(store: &dyn Store, secrets: &dyn SecretProvider) -> Arc<dyn Embedder> {
-    let enabled = providers::read_config(store, providers::ProviderKind::Openai)
-        .await
-        .map(|config| config.enabled)
-        .unwrap_or(false);
+///
+/// `byok_allowed` is false on a managed profile (or when its policy could not
+/// be read — fail closed): document text then never egresses through a BYOK
+/// key, regardless of the stored OpenAI row or an ambient `OPENAI_API_KEY`.
+///
+/// Because the embedder is boot-scoped (the vector index is dimension-bound
+/// to it), a profile provisioned managed at runtime keeps a live BYOK
+/// embedder until the next app start: the pairing flow must prompt or
+/// trigger a restart (or index rebuild) to complete enforcement — tracked
+/// in #763.
+async fn resolve_embedder(
+    store: &dyn Store,
+    secrets: &dyn SecretProvider,
+    byok_allowed: bool,
+) -> Arc<dyn Embedder> {
+    let enabled = byok_allowed
+        && providers::read_config(store, providers::ProviderKind::Openai)
+            .await
+            .map(|config| config.enabled)
+            .unwrap_or(false);
     let key = if enabled {
         providers::resolve_api_key(secrets, providers::ProviderKind::Openai).await
     } else {
