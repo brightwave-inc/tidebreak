@@ -719,6 +719,108 @@ async fn chat_transcript_replays_only_visible_durable_messages() {
 }
 
 #[tokio::test]
+async fn a_retained_result_projection_survives_reopening_the_chat() {
+    // Terminal activity used to be rebuilt from the stored failure code alone,
+    // which recovers one enumerated setup signal and nothing else — so every
+    // result card vanished on reload, including a command's own output. The
+    // projection is now retained with the resolution and comes back with it.
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+
+    assert_eq!(
+        send_message(&router, &bearer, chat.id, "finish a turn first").await,
+        StatusCode::ACCEPTED
+    );
+    wait_for_turn(&store, chat.id).await;
+    let turn = store
+        .list_turn_runs(chat.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("accepted turn exists");
+
+    let call_id = CallId::new();
+    let started_at = chrono::Utc::now();
+    store
+        .accept_tool_call(&ToolCallRecord {
+            id: call_id,
+            chat_id: chat.id,
+            turn_id: turn.id,
+            provider_id: "provider-list".into(),
+            name: "list_dir".into(),
+            arguments: serde_json::json!({ "path": "reports" }),
+            execution: ToolCallExecution::Server,
+            status: ToolCallStatus::Pending,
+            result: None,
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
+            created_at: started_at,
+            resolved_at: None,
+        })
+        .await
+        .unwrap();
+    let preview = openwave_core::ToolResultPreview::Entries {
+        entries: vec![openwave_core::ResultEntry::new(
+            openwave_core::ResultEntryKind::File,
+            "q3.md",
+        )],
+        failures: vec![openwave_core::ResultFailure::new("q4.md", "unreadable")],
+        elided: 0,
+    };
+    assert_eq!(
+        store
+            .resolve_server_tool_call_with_artifacts(
+                call_id,
+                &ToolCallResolution::Completed {
+                    result: "private model-facing listing".into(),
+                },
+                started_at + chrono::Duration::seconds(1),
+                &[],
+                Some(&preview),
+            )
+            .await
+            .unwrap(),
+        openwave_core::ResolveToolCallOutcome::Resolved
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri(format!("/chats/{}/messages", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = String::from_utf8(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    // The model-facing result text is not what came back — only the projection.
+    assert!(!body.contains("private model-facing listing"));
+    let transcript: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let card = transcript["tool_activity"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|card| card["tool"] == "list_dir")
+        .expect("the listing is in terminal activity");
+    assert_eq!(card["result"]["tool"], "entries");
+    assert_eq!(card["result"]["entries"][0]["label"], "q3.md");
+    assert_eq!(card["result"]["failures"][0]["error"], "unreadable");
+    assert_eq!(card["result_unreadable"], serde_json::json!(false));
+}
+
+#[tokio::test]
 async fn transcript_tool_activity_is_allowlisted_and_redacts_canonical_tool_data() {
     let (router, token, store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");

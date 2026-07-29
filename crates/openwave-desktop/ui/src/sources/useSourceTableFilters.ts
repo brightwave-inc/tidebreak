@@ -1,18 +1,8 @@
 import { useMemo, useState } from "react";
 
 import type { LibraryDocument } from "@/documents";
+import { useFacet } from "@/lib/facets";
 import { documentTitle, mediaTypeLabel, statusLabel } from "./sourceFormat";
-
-/** One faceted filter: what is selected, what it is searched by, and the counts. */
-export type Facet = {
-  selected: Set<string>;
-  setSelected: React.Dispatch<React.SetStateAction<Set<string>>>;
-  search: string;
-  setSearch: (search: string) => void;
-  /** Every value in the unfiltered catalog, with how many sources carry it. */
-  counts: Record<string, number>;
-  toggle: (value: string) => void;
-};
 
 /**
  * Search and faceting over a conversation's sources.
@@ -68,34 +58,6 @@ export function useSourceTableFilters(documents: readonly LibraryDocument[]) {
     hasActiveFilters,
     clearAllFilters,
   };
-}
-
-function useFacet(
-  documents: readonly LibraryDocument[],
-  valueOf: (document: LibraryDocument) => string,
-): Facet {
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [search, setSearch] = useState("");
-
-  const counts = useMemo(() => {
-    const totals: Record<string, number> = {};
-    for (const document of documents) {
-      const value = valueOf(document);
-      totals[value] = (totals[value] ?? 0) + 1;
-    }
-    return totals;
-  }, [documents, valueOf]);
-
-  function toggle(value: string) {
-    setSelected((current) => {
-      const next = new Set(current);
-      if (next.has(value)) next.delete(value);
-      else next.add(value);
-      return next;
-    });
-  }
-
-  return { selected, setSelected, search, setSearch, counts, toggle };
 }
 
 function mediaTypeLabelOf(document: LibraryDocument): string {

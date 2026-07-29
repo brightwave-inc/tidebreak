@@ -1,0 +1,20 @@
+[package]
+name = "openwave-reverse-rpc-spike"
+description = "SPIKE: feasibility prototype for the host-held reverse-RPC callback channel. Not wired into the server."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "io-util", "time"] }
+
+[lints]
+workspace = true

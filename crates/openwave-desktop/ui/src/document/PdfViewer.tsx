@@ -14,9 +14,12 @@ import { Document, Page, pdfjs } from "react-pdf";
 // security policy. Vite emits the file and rewrites this to its final URL.
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
-import type { ApiClient } from "@/api";
+import type { ApiClient, CitationPageBounds } from "@/api";
+import { FileDownloadProgressIndicator } from "@/components/document/FileDownloadProgress";
 import { Button } from "@/components/ui/button";
 import { useRegisterPdfControls } from "@/document/PdfControlsContext";
+import { PdfPageHighlights } from "@/document/PdfPageHighlights";
+import { useFileDownload } from "@/document/useFileDownload";
 import { usePdfPageState } from "@/document/usePdfPageState";
 import { useWheelPageNavigation } from "@/document/useWheelPageNavigation";
 import { useZoom } from "@/document/useZoom";
@@ -25,11 +28,20 @@ import { cn } from "@/lib/utils";
 
 pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
+/** Shared so a viewer opened without a citation does not remount the overlay. */
+const EMPTY_HIGHLIGHTS: readonly CitationPageBounds[] = [];
+
 interface Props extends HTMLAttributes<HTMLDivElement> {
-  client: Pick<ApiClient, "getDocumentFileContent">;
+  client: Pick<ApiClient, "getChatDocumentFile">;
+  chatId: string;
   documentId: string;
   /** Open on this page the first time it is requested for this document. */
   targetPage?: number;
+  /**
+   * Rectangles of a cited passage to mark on the pages they were recorded on.
+   * Empty, or absent, for a citation that only knows which pages it came from.
+   */
+  highlights?: readonly CitationPageBounds[];
   /** Render the toolbar at a smaller scale. */
   compact?: boolean;
 }
@@ -37,17 +49,32 @@ interface Props extends HTMLAttributes<HTMLDivElement> {
 interface PdfPageProps {
   pageNumber: number;
   width: number;
+  highlights: readonly CitationPageBounds[];
+  onNavigate: (page: number) => void;
 }
 
-function PdfPage({ pageNumber, width }: PdfPageProps) {
+function PdfPage({ pageNumber, width, highlights, onNavigate }: PdfPageProps) {
+  // The overlay is placed as a fraction of this container, so it can only be
+  // drawn once the page has laid the container out at its real aspect — until
+  // then the container is the loading placeholder, which is a different shape.
+  const [pageRendered, setPageRendered] = useState(false);
+
   return (
     <div style={{ position: "relative", width, display: "inline-block" }}>
       <Page
         pageNumber={pageNumber}
         width={width}
         className="shadow"
+        onRenderSuccess={() => setPageRendered(true)}
         loading={<div className="aspect-4/3 bg-background" style={{ width }} />}
       />
+      {pageRendered && (
+        <PdfPageHighlights
+          page={pageNumber}
+          highlights={highlights}
+          onNavigate={onNavigate}
+        />
+      )}
     </div>
   );
 }
@@ -59,8 +86,10 @@ function PdfPage({ pageNumber, width }: PdfPageProps) {
  */
 export function PdfViewer({
   client,
+  chatId,
   documentId,
   targetPage,
+  highlights,
   compact,
   className,
   ...restProps
@@ -74,36 +103,27 @@ export function PdfViewer({
   const zoomIn = useZoom((s) => s.zoomIn);
   const zoomOut = useZoom((s) => s.zoomOut);
 
-  const [bytes, setBytes] = useState<Uint8Array | null>(null);
-  const [loadFailed, setLoadFailed] = useState(false);
+  const [renderFailed, setRenderFailed] = useState(false);
   const [numPages, setNumPages] = useState(0);
+
+  const { data, error, progress } = useFileDownload(client, chatId, documentId, {
+    parseAs: "arrayBuffer",
+  });
+  const loadFailed = renderFailed || error !== null;
 
   // Reset scale, error state and page count on document change.
   useEffect(() => {
     setScale(100);
-    setLoadFailed(false);
+    setRenderFailed(false);
     setNumPages(0);
   }, [documentId, setScale]);
 
-  useEffect(() => {
-    const abort = new AbortController();
-    setBytes(null);
-    void client
-      .getDocumentFileContent(documentId, abort.signal)
-      .then((data) => {
-        if (!abort.signal.aborted) setBytes(data);
-      })
-      .catch(() => {
-        if (!abort.signal.aborted) setLoadFailed(true);
-      });
-    return () => abort.abort();
-  }, [client, documentId]);
-
   const pdfFile = useMemo(() => {
-    if (!bytes) return null;
-    // Copy so pdf.js can transfer the buffer without detaching the cached one.
-    return { data: new Uint8Array(bytes) };
-  }, [bytes]);
+    if (!data) return null;
+    // The hook hands out its own copy of the bytes, so pdf.js is free to
+    // transfer this buffer without detaching the cached original.
+    return { data: new Uint8Array(data) };
+  }, [data]);
 
   const { currentPage, setCurrentPage } = usePdfPageState(documentId, {
     numPages,
@@ -296,7 +316,7 @@ export function PdfViewer({
           key={documentId}
           file={pdfFile ?? undefined}
           onLoadSuccess={({ numPages }) => setNumPages(numPages)}
-          onLoadError={() => setLoadFailed(true)}
+          onLoadError={() => setRenderFailed(true)}
           onItemClick={({ pageNumber }) => {
             if (pageNumber) {
               setCurrentPage(pageNumber);
@@ -304,10 +324,14 @@ export function PdfViewer({
             }
           }}
           noData={
-            <div className="flex items-center justify-center gap-2">
-              Fetching document…
-              <Loader2Icon className="size-4 animate-spin" />
-            </div>
+            progress ? (
+              <FileDownloadProgressIndicator progress={progress} />
+            ) : (
+              <div className="flex items-center justify-center gap-2">
+                Fetching document…
+                <Loader2Icon className="size-4 animate-spin" />
+              </div>
+            )
           }
           loading={
             <div className="flex justify-center">
@@ -326,6 +350,8 @@ export function PdfViewer({
               key={`page_${currentPage}`}
               pageNumber={currentPage}
               width={pageWidth}
+              highlights={highlights ?? EMPTY_HIGHLIGHTS}
+              onNavigate={setCurrentPage}
             />
           )}
         </Document>

@@ -213,8 +213,19 @@ fn title_from_path(path: &str) -> Option<String> {
 }
 
 fn imported(result: ImportConnectedFileResult) -> StoredResolution {
+    // An import that reports the source it added is the whole point of the
+    // card; anything that did not add one has no row to show.
+    let rows = match &result {
+        ImportConnectedFileResult::Imported { title, .. } => Some(serde_json::json!({
+            "entries": [openwave_core::ResultEntry::new(
+                openwave_core::ResultEntryKind::Source,
+                title.clone(),
+            )],
+        })),
+        _ => None,
+    };
     match serde_json::to_string(&result) {
-        Ok(result) => StoredResolution::Completed { result },
+        Ok(result) => StoredResolution::Completed { result, rows },
         Err(_) => unavailable("That file could not be added to this conversation."),
     }
 }
@@ -323,7 +334,7 @@ mod tests {
             bytes: 1_024,
             readiness: SourceReadiness::Processing,
         });
-        let StoredResolution::Completed { result } = imported else {
+        let StoredResolution::Completed { result, .. } = imported else {
             panic!("a successful import completes");
         };
         // The model learns the source exists and that it is not ready yet; it

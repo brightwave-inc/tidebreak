@@ -4,11 +4,12 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::error::Result;
+use crate::preview::{ResultEntry, ResultEntryKind};
 use crate::tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolSpec};
 
 use super::arguments;
 use super::definitions;
-use super::private_scratch::{read_utf8_file, relative_path};
+use super::private_scratch::{file_name, line_count, read_utf8_file, relative_path};
 
 /// `read_file` — read a UTF-8 text file from private scratch.
 pub struct ReadFile;
@@ -44,7 +45,19 @@ impl Tool for ReadFile {
         };
         let result = tokio::task::spawn_blocking(move || read_utf8_file(&workspace, &path)).await;
         match result {
-            Ok(Ok(content)) => Ok(ToolOutput::text(content)),
+            // The file's own text is what the model needs and is far too much
+            // for a card, so the row reports the read rather than replaying it:
+            // the path, and how much of it came back.
+            Ok(Ok(content)) => {
+                let entry = ResultEntry::new(ResultEntryKind::File, file_name(&arguments.path))
+                    .with_detail(&arguments.path)
+                    .with_meta(format!(
+                        "{} · {}",
+                        crate::preview::format_bytes(content.len() as u64),
+                        line_count(&content)
+                    ));
+                Ok(ToolOutput::text(content).with_entries(vec![entry]))
+            }
             Ok(Err(error)) => Ok(ToolOutput::error(format!(
                 "could not read {}: {error}",
                 arguments.path

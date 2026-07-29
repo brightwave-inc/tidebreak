@@ -15,6 +15,27 @@ import type {
 } from "../api";
 import { CodeExecutionPanel } from "./CodeExecutionPanel";
 
+/**
+ * The default egress projection: open policy, E2B applied-with-gaps, Daytona a
+ * strict per-sandbox boundary conditional on org tier 3+ (no phantom gaps).
+ */
+const OPEN_EGRESS: CodeExecutionConfigInfo["egress"] = {
+  policy: { mode: "open" },
+  enforcement: [
+    {
+      provider: "e2b",
+      status: "applied_with_gaps",
+      gaps: ["DNS resolution", "domain filtering covers HTTP and HTTPS ports only"],
+    },
+    {
+      provider: "daytona",
+      status: "conditional_boundary",
+      gaps: [],
+      requirement: "Daytona org tier 3+",
+    },
+  ],
+};
+
 function clientFor(
   config: CodeExecutionConfigInfo,
   credentials: CodeExecutionCredentialReadiness[] = [
@@ -57,6 +78,7 @@ describe("CodeExecutionPanel", () => {
         timeout_ms: 20_000,
         available: false,
         has_credential: false,
+        egress: OPEN_EGRESS,
       });
 
     render(<CodeExecutionPanel client={client} />);
@@ -82,9 +104,11 @@ describe("CodeExecutionPanel", () => {
       "daytona",
       "daytona-secret",
     );
+    // Egress restriction is opt-in: an untouched panel saves the open policy.
     expect(putCodeExecutionConfig).toHaveBeenCalledWith({
       provider: "e2b",
       timeout_ms: 30_000,
+      egress: { mode: "open" },
     });
     // A provider must not go active in a pass that failed to store its key.
     expect(
@@ -99,6 +123,7 @@ describe("CodeExecutionPanel", () => {
         timeout_ms: 20_000,
         available: true,
         has_credential: true,
+        egress: OPEN_EGRESS,
       },
       [
         { provider: "e2b", has_credential: true },
@@ -118,12 +143,88 @@ describe("CodeExecutionPanel", () => {
     expect(deleteCodeExecutionCredential).toHaveBeenCalledTimes(1);
   });
 
+  it("sends a domain-and-CIDR allowlist once egress restriction is turned on", async () => {
+    const { client, putCodeExecutionConfig } = clientFor({
+      provider: "e2b",
+      timeout_ms: 20_000,
+      available: true,
+      has_credential: true,
+      egress: OPEN_EGRESS,
+    });
+
+    render(<CodeExecutionPanel client={client} />);
+
+    fireEvent.click(
+      await screen.findByRole("switch", { name: "Restrict network egress" }),
+    );
+    fireEvent.change(screen.getByLabelText(/Allowed domains/), {
+      target: { value: "*.pypi.org\nfiles.pythonhosted.org" },
+    });
+    fireEvent.change(screen.getByLabelText(/Allowed address blocks/), {
+      target: { value: "140.82.112.0/20" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+
+    await waitFor(() =>
+      expect(putCodeExecutionConfig).toHaveBeenCalledWith({
+        provider: "e2b",
+        timeout_ms: 20_000,
+        egress: {
+          mode: "allowlist",
+          domains: ["*.pypi.org", "files.pythonhosted.org"],
+          cidrs: ["140.82.112.0/20"],
+        },
+      }),
+    );
+  });
+
+  it("does not present E2B as a full boundary and surfaces its gaps inline", async () => {
+    const { client } = clientFor({
+      provider: "e2b",
+      timeout_ms: 20_000,
+      available: true,
+      has_credential: true,
+      egress: OPEN_EGRESS,
+    });
+
+    render(<CodeExecutionPanel client={client} />);
+
+    // The E2B badge must read "not a full boundary", never a plain green
+    // "Enforced"/boundary, and the reachable holes are shown next to it.
+    await screen.findByText(/not a full boundary/i);
+    expect(screen.queryByText(/^Boundary$/)).toBeNull();
+    expect(
+      screen.getByText(/domain filtering covers HTTP and HTTPS ports only/i),
+    ).toBeInTheDocument();
+  });
+
+  it("presents Daytona as a conditional boundary requiring org tier 3+, never an unconditional boundary", async () => {
+    const { client } = clientFor({
+      provider: "daytona",
+      timeout_ms: 20_000,
+      available: true,
+      has_credential: true,
+      egress: OPEN_EGRESS,
+    });
+
+    render(<CodeExecutionPanel client={client} />);
+
+    // The tier-3+ requirement is surfaced inline, and the badge reads
+    // conditional — never a plain green "Boundary".
+    await screen.findByText(/Requires Daytona org tier 3\+/i);
+    expect(screen.getByText(/Boundary — conditional/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^Boundary$/)).toBeNull();
+    // The phantom curated-service exceptions are gone from the disclosure.
+    expect(screen.queryByText(/git hosting/i)).toBeNull();
+  });
+
   it("rejects a timeout outside the bounds before touching the server", async () => {
     const { client, putCodeExecutionConfig } = clientFor({
       provider: "local",
       timeout_ms: 20_000,
       available: true,
       has_credential: false,
+      egress: OPEN_EGRESS,
     });
 
     render(<CodeExecutionPanel client={client} />);

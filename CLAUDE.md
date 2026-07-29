@@ -115,9 +115,15 @@ is the whole rule, and it is coarse on purpose:
 - Any changed file outside `*.md`, `docs/`, `assets/`, `LICENSE`, `NOTICE`, and
   `crates/openwave-desktop/ui/` marks the change **Rust** — including
   `Cargo.toml` and `Cargo.lock`. That runs rustfmt, clippy (`--all-targets
-  -D warnings`), the desktop tests, the headless workspace tests, and the
-  PostgreSQL turn-state lane. Every cargo invocation passes `--locked`, so a
-  lockfile drift fails there too.
+  -D warnings`), and the desktop tests. Every cargo invocation passes
+  `--locked`, so a lockfile drift fails there too.
+- A Rust change also marks the **workspace** scope, which adds the headless
+  workspace tests and the PostgreSQL turn-state lane, unless every changed file
+  is one of `openwave-desktop`'s own sources. Nothing in the workspace depends on
+  that crate and the headless lane already excludes it, so those lanes cannot see
+  such a change. Its `Cargo.toml` is not covered by the carve-out — it forwards
+  features into `openwave-server` — and neither is
+  `ui/src/generated/`, whose staleness check lives in `openwave-server`.
 - Any file under `crates/openwave-desktop/ui/` marks it **UI**, which runs
   `pnpm test` and `pnpm build`.
 - The aggregate `fmt · clippy · build · test` check asserts each lane either

@@ -24,6 +24,9 @@ Project documentation, versioned alongside the code.
 - [Code execution](code-execution.md) — the provider-neutral `exec` contract,
   native local sandbox, configuration boundary, and managed-provider extension
   path.
+- [Execution providers and sandbox-resident agent runs](sandbox-providers.md) —
+  the run-tier/execution-provider split, reachability and credential
+  invariants, and the phased route to detached background agent runs.
 - [OS-managed policy (MDM)](managed-policy.md) — the per-platform artifacts an
   administrator deploys to point OpenWave at a managed model gateway.
 - [Releases and versioning](releases.md) — semantic PR titles, native release

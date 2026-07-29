@@ -5,8 +5,8 @@ use sea_orm::{
 
 use crate::error::{AgentError, Result};
 use crate::model::{
-    AgentRunExecution, AgentRunInboxStatus, AgentRunStatus, TurnAgentRunWait,
-    TurnAgentRunWaitStatus, TurnCheckpointProgress, TurnRunStatus, TurnSteerStatus,
+    AgentRunInboxStatus, AgentRunStatus, AgentRunTier, TurnAgentRunWait, TurnAgentRunWaitStatus,
+    TurnCheckpointProgress, TurnRunStatus, TurnSteerStatus,
 };
 use crate::storage::ParkTurnForAgentRunInboxOutcome;
 use crate::{AgentRunId, TurnId, TurnRun};
@@ -173,7 +173,7 @@ where
             && child.chat_id == turn.chat_id
             && child.parent_id == Some(turn.agent_run_id)
             && child.depth == 1
-            && child.execution == AgentRunExecution::Sandbox.as_str()
+            && child.tier == AgentRunTier::Background.as_str()
             && !matches!(
                 child.status.as_str(),
                 status if status == AgentRunStatus::Failed.as_str()

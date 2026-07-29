@@ -1,5 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { stripCitationDirectives } from "./citationDirectives";
 import {
   MessageMarkdown,
   preserveLineBreaks,
@@ -13,6 +14,45 @@ describe("preserveLineBreaks", () => {
     expect(preserveLineBreaks("para one\n\npara two")).toBe(
       "para one\n\npara two",
     );
+  });
+});
+
+describe("citation directives", () => {
+  const id = "0b2b1f2c-9d3e-4a5b-8c7d-6e5f4a3b2c1d";
+
+  it("renders the cited phrasing, with its Markdown, and never the syntax", () => {
+    const markup = renderToStaticMarkup(
+      <MessageMarkdown>
+        {`The reef :cit[is the *largest* in the world]{citation_id=${id}}, and it grows.`}
+      </MessageMarkdown>,
+    );
+
+    expect(markup).toContain("The reef ");
+    expect(markup).toContain("is the <em>largest</em> in the world");
+    expect(markup).toContain(", and it grows.");
+    expect(markup).not.toContain(":cit");
+    expect(markup).not.toContain("citation_id");
+  });
+
+  it("keeps directive-shaped prose that never closes into a citation", () => {
+    const prose = [
+      ":cit[unterminated",
+      ":cit[phrase]{ref=0123456789abcdef0123456789abcdef}",
+    ].join("\n");
+    const markup = renderToStaticMarkup(
+      <MessageMarkdown>{prose}</MessageMarkdown>,
+    );
+
+    expect(markup).toContain(":cit[unterminated");
+    expect(markup).toContain(":cit[phrase]{ref=0123456789abcdef0123456789abcdef}");
+  });
+
+  it("strips citations from the text the clipboard is handed", () => {
+    expect(
+      stripCitationDirectives(
+        `The reef :cit[is the largest in the world]{citation_id=${id}}, and it grows.`,
+      ),
+    ).toBe("The reef is the largest in the world, and it grows.");
   });
 });
 

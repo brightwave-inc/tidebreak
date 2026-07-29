@@ -2,7 +2,7 @@ use sea_orm::DatabaseBackend;
 use sea_orm_migration::prelude::*;
 
 use super::{
-    AgentRunExecution, AgentRunStatus, BlobRetirementStatus, DocumentJobKind, DocumentJobStatus,
+    AgentRunStatus, BlobRetirementStatus, DocumentJobKind, DocumentJobStatus,
     DocumentProcessingStatus, TurnAgentRunWaitStatus, TurnClientWaitStatus, TurnRunStatus,
     TurnSteerStatus,
 };
@@ -33,7 +33,657 @@ impl MigratorTrait for Migrator {
             Box::new(AddStandingToolGrants),
             Box::new(AddContextCheckpointUsage),
             Box::new(AddAgentRunModel),
+            Box::new(AddToolResultPreviews),
+            Box::new(SplitAgentRunExecution),
+            Box::new(AddOperationLog),
+            Box::new(ExtendOutputRevisionsForBinary),
         ]
+    }
+}
+
+/// Adds the durable reverse-RPC operation log (issue #858): a crash-safe,
+/// idempotency-keyed record of host-mediated operations a sandbox-resident run
+/// requested back over the reverse channel.
+///
+/// The table is keyed by `(run_id, operation_id)` and holds the operation's
+/// state machine (`claimed -> recorded | failed`), the request `fingerprint`
+/// that fences a re-issue, an `external_effect` flag, the claiming process
+/// lifetime's `owner_epoch` (which separates a concurrent duplicate from an
+/// after-crash re-issue), and the recorded terminal `body`.
+///
+/// The schema is deliberately shaped for the retention follow-up (#859): `body`
+/// is nullable and paired with a `retained` flag, so #859 can evict a full
+/// response body down to a commit marker — clearing `body` and `retained` while
+/// keeping the row's state, `external_effect`, and timestamps — without a
+/// migration rewrite. This is a purely additive migration (a new table, no
+/// change to existing shapes), with a symmetric `down` and identical shape on
+/// SQLite and PostgreSQL.
+struct AddOperationLog;
+
+impl MigrationName for AddOperationLog {
+    fn name(&self) -> &str {
+        "m20260728_000022_add_operation_log"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddOperationLog {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(OperationLog::Table)
+                    .col(ColumnDef::new(OperationLog::RunId).uuid().not_null())
+                    .col(ColumnDef::new(OperationLog::OperationId).uuid().not_null())
+                    .col(
+                        ColumnDef::new(OperationLog::State)
+                            .string_len(16)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(OperationLog::Fingerprint)
+                            .binary()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(OperationLog::ExternalEffect)
+                            .boolean()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(OperationLog::OwnerEpoch).uuid().not_null())
+                    .col(ColumnDef::new(OperationLog::Body).binary().null())
+                    .col(
+                        ColumnDef::new(OperationLog::Retained)
+                            .boolean()
+                            .not_null()
+                            .default(true),
+                    )
+                    .col(
+                        ColumnDef::new(OperationLog::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(OperationLog::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .primary_key(
+                        Index::create()
+                            .name("pk_operation_log")
+                            .col(OperationLog::RunId)
+                            .col(OperationLog::OperationId),
+                    )
+                    .check(Expr::col(OperationLog::State).is_in(["claimed", "recorded", "failed"]))
+                    // A claimed entry has not recorded a body yet.
+                    .check(
+                        Expr::col(OperationLog::State)
+                            .ne("claimed")
+                            .or(Expr::col(OperationLog::Body).is_null()),
+                    )
+                    // An unretained entry keeps only a commit marker, never a body.
+                    .check(
+                        Expr::col(OperationLog::Retained)
+                            .or(Expr::col(OperationLog::Body).is_null()),
+                    )
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(OperationLog::Table).to_owned())
+            .await
+    }
+}
+
+/// Splits `agent_run.execution` into a run tier and an execution location.
+///
+/// The retired column named its variants (`foreground | sandbox`) by who
+/// advances the run, while reading as where the run executes. The two axes
+/// agree only while every run executes inside the server process, so the
+/// field splits before a second location exists. Existing `sandbox` rows map
+/// to `(background, in_process)` and `foreground` rows to
+/// `(foreground, in_process)`.
+///
+/// SQLite cannot alter CHECK constraints, so it rebuilds the table with the
+/// shape constraints re-expressed over the two new columns. The rebuild is
+/// one raw multi-statement batch because it depends on connection state:
+/// `PRAGMA foreign_keys` is per-connection (and a no-op inside a
+/// transaction), SQLite migrations run outside an automatic transaction, and
+/// with enforcement off the drop-and-rename leaves every child table's
+/// `REFERENCES agent_run` clause untouched. PostgreSQL alters the table in
+/// place inside the migration's transaction.
+struct SplitAgentRunExecution;
+
+impl MigrationName for SplitAgentRunExecution {
+    fn name(&self) -> &str {
+        "m20260728_000021_split_agent_run_execution"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for SplitAgentRunExecution {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if manager.get_database_backend() == DatabaseBackend::Sqlite {
+            return rebuild_agent_run_sqlite(manager, true).await;
+        }
+        let split_shape = render_postgres_check(agent_run_shape_check(true));
+        let location = render_postgres_check(agent_run_location_check());
+        let statements = [
+            "ALTER TABLE agent_run ADD COLUMN tier varchar(16)".to_owned(),
+            "ALTER TABLE agent_run ADD COLUMN execution_location varchar(16)".to_owned(),
+            "UPDATE agent_run SET tier = CASE execution WHEN 'sandbox' THEN 'background' \
+             ELSE 'foreground' END, execution_location = 'in_process'"
+                .to_owned(),
+            "ALTER TABLE agent_run ALTER COLUMN tier SET NOT NULL".to_owned(),
+            "ALTER TABLE agent_run ALTER COLUMN execution_location SET NOT NULL".to_owned(),
+            // The baseline's shape constraint is unnamed, so find it by the
+            // column it constrains. No other check mentions `execution`, and
+            // the replacement constraints are added only after this drop.
+            "DO $$
+             DECLARE name text;
+             BEGIN
+                 FOR name IN
+                     SELECT conname FROM pg_constraint
+                     WHERE conrelid = 'agent_run'::regclass
+                       AND contype = 'c'
+                       AND pg_get_constraintdef(oid) LIKE '%execution%'
+                 LOOP
+                     EXECUTE format('ALTER TABLE agent_run DROP CONSTRAINT %I', name);
+                 END LOOP;
+             END $$"
+                .to_owned(),
+            format!(
+                "ALTER TABLE agent_run ADD CONSTRAINT chk_agent_run_shape CHECK ({split_shape})"
+            ),
+            format!(
+                "ALTER TABLE agent_run ADD CONSTRAINT chk_agent_run_execution_location \
+                 CHECK ({location})"
+            ),
+            "DROP INDEX idx_agent_run_one_foreground".to_owned(),
+            "CREATE UNIQUE INDEX idx_agent_run_one_foreground ON agent_run (chat_id) \
+             WHERE tier = 'foreground'"
+                .to_owned(),
+            "ALTER TABLE agent_run DROP COLUMN execution".to_owned(),
+        ];
+        for statement in statements {
+            manager
+                .get_connection()
+                .execute_unprepared(&statement)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if manager.get_database_backend() == DatabaseBackend::Sqlite {
+            return rebuild_agent_run_sqlite(manager, false).await;
+        }
+        let legacy_shape = render_postgres_check(agent_run_shape_check(false));
+        let statements = [
+            "ALTER TABLE agent_run ADD COLUMN execution varchar(16)".to_owned(),
+            "UPDATE agent_run SET execution = CASE tier WHEN 'background' THEN 'sandbox' \
+             ELSE 'foreground' END"
+                .to_owned(),
+            "ALTER TABLE agent_run ALTER COLUMN execution SET NOT NULL".to_owned(),
+            "ALTER TABLE agent_run DROP CONSTRAINT chk_agent_run_shape".to_owned(),
+            "ALTER TABLE agent_run DROP CONSTRAINT chk_agent_run_execution_location".to_owned(),
+            format!("ALTER TABLE agent_run ADD CONSTRAINT agent_run_check CHECK ({legacy_shape})"),
+            "DROP INDEX idx_agent_run_one_foreground".to_owned(),
+            "CREATE UNIQUE INDEX idx_agent_run_one_foreground ON agent_run (chat_id) \
+             WHERE execution = 'foreground'"
+                .to_owned(),
+            "ALTER TABLE agent_run DROP COLUMN tier".to_owned(),
+            "ALTER TABLE agent_run DROP COLUMN execution_location".to_owned(),
+        ];
+        for statement in statements {
+            manager
+                .get_connection()
+                .execute_unprepared(&statement)
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+/// The table name used while rebuilding `agent_run` on SQLite.
+const AGENT_RUN_REBUILD: &str = "agent_run_split";
+
+async fn rebuild_agent_run_sqlite(manager: &SchemaManager<'_>, split: bool) -> Result<(), DbErr> {
+    let mut statements = vec![
+        "PRAGMA foreign_keys=OFF".to_owned(),
+        "BEGIN IMMEDIATE".to_owned(),
+        agent_run_rebuild_table(split).to_string(SqliteQueryBuilder),
+        agent_run_rebuild_copy_sql(split),
+        "DROP TABLE agent_run".to_owned(),
+        format!("ALTER TABLE {AGENT_RUN_REBUILD} RENAME TO agent_run"),
+    ];
+    statements.extend(
+        agent_run_rebuild_indexes(split)
+            .iter()
+            .map(|index| index.to_string(SqliteQueryBuilder)),
+    );
+    statements.push("COMMIT".to_owned());
+    statements.push("PRAGMA foreign_keys=ON".to_owned());
+    manager
+        .get_connection()
+        .execute_unprepared(&format!("{};", statements.join(";\n")))
+        .await?;
+    Ok(())
+}
+
+fn agent_run_rebuild_copy_sql(split: bool) -> String {
+    let (new_columns, mapped) = if split {
+        (
+            "tier, execution_location",
+            "CASE execution WHEN 'sandbox' THEN 'background' ELSE 'foreground' END, 'in_process'",
+        )
+    } else {
+        (
+            "execution",
+            "CASE tier WHEN 'background' THEN 'sandbox' ELSE 'foreground' END",
+        )
+    };
+    format!(
+        "INSERT INTO {AGENT_RUN_REBUILD} \
+         (id, chat_id, parent_id, parent_depth, spawn_call_id, {new_columns}, depth, status, \
+          input, model, attempt_count, max_attempts, claim_count, available_at, deadline_at, \
+          lease_token, lease_expires_at, started_at, finished_at, last_error_code, \
+          last_error_detail, created_at, updated_at) \
+         SELECT id, chat_id, parent_id, parent_depth, spawn_call_id, {mapped}, depth, status, \
+          input, model, attempt_count, max_attempts, claim_count, available_at, deadline_at, \
+          lease_token, lease_expires_at, started_at, finished_at, last_error_code, \
+          last_error_detail, created_at, updated_at \
+         FROM agent_run"
+    )
+}
+
+fn agent_run_rebuild_table(split: bool) -> TableCreateStatement {
+    let rebuild = Alias::new(AGENT_RUN_REBUILD);
+    let mut statement = Table::create();
+    statement
+        .table(rebuild.clone())
+        .col(ColumnDef::new(AgentRun::Id).uuid().not_null())
+        .col(ColumnDef::new(AgentRun::ChatId).uuid().not_null())
+        .col(ColumnDef::new(AgentRun::ParentId).uuid())
+        .col(ColumnDef::new(AgentRun::ParentDepth).small_integer())
+        .col(ColumnDef::new(AgentRun::SpawnCallId).uuid());
+    if split {
+        statement
+            .col(ColumnDef::new(AgentRun::Tier).string_len(16).not_null())
+            .col(
+                ColumnDef::new(AgentRun::ExecutionLocation)
+                    .string_len(16)
+                    .not_null(),
+            );
+    } else {
+        statement.col(
+            ColumnDef::new(AgentRun::Execution)
+                .string_len(16)
+                .not_null(),
+        );
+    }
+    statement
+        .col(ColumnDef::new(AgentRun::Depth).small_integer().not_null())
+        .col(ColumnDef::new(AgentRun::Status).string_len(32).not_null())
+        .col(ColumnDef::new(AgentRun::Input).text())
+        .col(
+            ColumnDef::new(AgentRun::Model)
+                .string_len(crate::model::AgentRun::MAX_MODEL_LEN as u32),
+        )
+        .col(ColumnDef::new(AgentRun::AttemptCount).integer().not_null())
+        .col(ColumnDef::new(AgentRun::MaxAttempts).integer().not_null())
+        .col(ColumnDef::new(AgentRun::ClaimCount).integer().not_null())
+        .col(
+            ColumnDef::new(AgentRun::AvailableAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .col(ColumnDef::new(AgentRun::DeadlineAt).timestamp_with_time_zone())
+        .col(ColumnDef::new(AgentRun::LeaseToken).uuid())
+        .col(ColumnDef::new(AgentRun::LeaseExpiresAt).timestamp_with_time_zone())
+        .col(ColumnDef::new(AgentRun::StartedAt).timestamp_with_time_zone())
+        .col(ColumnDef::new(AgentRun::FinishedAt).timestamp_with_time_zone())
+        .col(
+            ColumnDef::new(AgentRun::LastErrorCode)
+                .string_len(crate::model::AgentRun::MAX_ERROR_CODE_LEN as u32),
+        )
+        .col(
+            ColumnDef::new(AgentRun::LastErrorDetail)
+                .string_len(crate::model::AgentRun::MAX_ERROR_DETAIL_LEN as u32),
+        )
+        .col(
+            ColumnDef::new(AgentRun::CreatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(AgentRun::UpdatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .primary_key(
+            Index::create()
+                .name("pk_agent_run")
+                .col(AgentRun::Id)
+                .col(AgentRun::ChatId)
+                .col(AgentRun::Depth),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_agent_run_chat")
+                .from(rebuild.clone(), AgentRun::ChatId)
+                .to(Chat::Table, Chat::Id)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        // The self-reference names the final table: with foreign-key
+        // enforcement off, neither the drop nor the rename rewrites
+        // REFERENCES clauses, so it resolves to this table once renamed.
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_agent_run_parent")
+                .from_tbl(rebuild.clone())
+                .from_col(AgentRun::ParentId)
+                .from_col(AgentRun::ChatId)
+                .from_col(AgentRun::ParentDepth)
+                .to_tbl(AgentRun::Table)
+                .to_col(AgentRun::Id)
+                .to_col(AgentRun::ChatId)
+                .to_col(AgentRun::Depth)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_agent_run_live_claim")
+                .from_tbl(rebuild)
+                .from_col(AgentRun::LeaseToken)
+                .from_col(AgentRun::Id)
+                .from_col(AgentRun::AttemptCount)
+                .from_col(AgentRun::ClaimCount)
+                .to_tbl(AgentRunClaim::Table)
+                .to_col(AgentRunClaim::Token)
+                .to_col(AgentRunClaim::AgentRunId)
+                .to_col(AgentRunClaim::AttemptCount)
+                .to_col(AgentRunClaim::ClaimCount)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .check(agent_run_shape_check(split))
+        .check(agent_run_lease_check())
+        .check(agent_run_finished_check())
+        .check(agent_run_error_check())
+        .check(
+            Expr::col(AgentRun::LastErrorDetail)
+                .is_null()
+                .or(Expr::col(AgentRun::LastErrorCode).is_not_null()),
+        )
+        .check(Expr::col(AgentRun::UpdatedAt).gte(Expr::col(AgentRun::CreatedAt)));
+    if split {
+        statement.check(agent_run_location_check());
+    }
+    statement.to_owned()
+}
+
+fn agent_run_rebuild_indexes(split: bool) -> Vec<IndexCreateStatement> {
+    let one_foreground = if split {
+        Expr::col(AgentRun::Tier).eq("foreground")
+    } else {
+        Expr::col(AgentRun::Execution).eq("foreground")
+    };
+    vec![
+        Index::create()
+            .name("idx_agent_run_id")
+            .table(AgentRun::Table)
+            .col(AgentRun::Id)
+            .unique()
+            .to_owned(),
+        Index::create()
+            .name("idx_agent_run_id_parent_chat")
+            .table(AgentRun::Table)
+            .col(AgentRun::Id)
+            .col(AgentRun::ParentId)
+            .col(AgentRun::ChatId)
+            .unique()
+            .to_owned(),
+        Index::create()
+            .name("idx_agent_run_admission_identity")
+            .table(AgentRun::Table)
+            .col(AgentRun::Id)
+            .col(AgentRun::ParentId)
+            .col(AgentRun::ChatId)
+            .col(AgentRun::SpawnCallId)
+            .unique()
+            .to_owned(),
+        Index::create()
+            .name("idx_agent_run_spawn_call")
+            .table(AgentRun::Table)
+            .col(AgentRun::SpawnCallId)
+            .unique()
+            .to_owned(),
+        Index::create()
+            .name("idx_agent_run_one_foreground")
+            .table(AgentRun::Table)
+            .col(AgentRun::ChatId)
+            .unique()
+            .and_where(one_foreground)
+            .to_owned(),
+        Index::create()
+            .name("idx_agent_run_parent")
+            .table(AgentRun::Table)
+            .col(AgentRun::ParentId)
+            .col(AgentRun::CreatedAt)
+            .to_owned(),
+        Index::create()
+            .name("idx_agent_run_chat_history")
+            .table(AgentRun::Table)
+            .col(AgentRun::ChatId)
+            .col(AgentRun::CreatedAt)
+            .col(AgentRun::Id)
+            .to_owned(),
+        Index::create()
+            .name("idx_agent_run_claimable")
+            .table(AgentRun::Table)
+            .col(AgentRun::Status)
+            .col(AgentRun::AvailableAt)
+            .col(AgentRun::CreatedAt)
+            .col(AgentRun::Id)
+            .to_owned(),
+        Index::create()
+            .name("idx_agent_run_live_by_chat")
+            .table(AgentRun::Table)
+            .col(AgentRun::Status)
+            .col(AgentRun::ChatId)
+            .col(AgentRun::LeaseExpiresAt)
+            .to_owned(),
+    ]
+}
+
+/// The foreground/background row-shape constraint, expressed over the split
+/// tier column (`split`) or the retired execution column (for rollback).
+fn agent_run_shape_check(split: bool) -> SimpleExpr {
+    let (foreground_marker, background_marker) = if split {
+        (
+            Expr::col(AgentRun::Tier).eq("foreground"),
+            Expr::col(AgentRun::Tier).eq("background"),
+        )
+    } else {
+        (
+            Expr::col(AgentRun::Execution).eq("foreground"),
+            Expr::col(AgentRun::Execution).eq("sandbox"),
+        )
+    };
+    let foreground_status = Expr::col(AgentRun::Status).is_in([
+        AgentRunStatus::Active.as_str(),
+        AgentRunStatus::Completed.as_str(),
+        AgentRunStatus::Failed.as_str(),
+        AgentRunStatus::Cancelled.as_str(),
+    ]);
+    let background_status = Expr::col(AgentRun::Status).is_in([
+        AgentRunStatus::Queued.as_str(),
+        AgentRunStatus::Running.as_str(),
+        AgentRunStatus::Cancelling.as_str(),
+        AgentRunStatus::Waiting.as_str(),
+        AgentRunStatus::RetryWait.as_str(),
+        AgentRunStatus::Completed.as_str(),
+        AgentRunStatus::Failed.as_str(),
+        AgentRunStatus::Cancelled.as_str(),
+    ]);
+    let foreground_shape = foreground_marker
+        .and(Expr::col(AgentRun::Depth).eq(0))
+        .and(Expr::col(AgentRun::ParentId).is_null())
+        .and(Expr::col(AgentRun::ParentDepth).is_null())
+        .and(Expr::col(AgentRun::SpawnCallId).is_null())
+        .and(Expr::col(AgentRun::Input).is_null())
+        .and(Expr::col(AgentRun::AttemptCount).eq(0))
+        .and(Expr::col(AgentRun::MaxAttempts).eq(0))
+        .and(Expr::col(AgentRun::ClaimCount).eq(0))
+        .and(Expr::col(AgentRun::AvailableAt).eq(Expr::col(AgentRun::CreatedAt)))
+        .and(Expr::col(AgentRun::DeadlineAt).is_null())
+        .and(Expr::col(AgentRun::StartedAt).is_null())
+        .and(foreground_status);
+    let background_shape = background_marker
+        .and(Expr::col(AgentRun::Depth).eq(i32::from(crate::model::AgentRun::MAX_DEPTH)))
+        .and(Expr::col(AgentRun::ParentId).is_not_null())
+        .and(Expr::col(AgentRun::ParentDepth).eq(0))
+        .and(Expr::col(AgentRun::SpawnCallId).is_not_null())
+        .and(Expr::col(AgentRun::Input).is_not_null())
+        .and(Expr::col(AgentRun::MaxAttempts).gte(1))
+        .and(Expr::col(AgentRun::AttemptCount).gte(0))
+        .and(Expr::col(AgentRun::AttemptCount).lte(Expr::col(AgentRun::MaxAttempts)))
+        .and(Expr::col(AgentRun::ClaimCount).gte(Expr::col(AgentRun::AttemptCount)))
+        .and(Expr::col(AgentRun::ClaimCount).lt(i32::MAX))
+        .and(Expr::col(AgentRun::AvailableAt).gte(Expr::col(AgentRun::CreatedAt)))
+        .and(Expr::col(AgentRun::DeadlineAt).gt(Expr::col(AgentRun::CreatedAt)))
+        .and(
+            Func::char_length(Expr::col(AgentRun::Input))
+                .between(1, crate::model::AgentRun::MAX_INPUT_LEN as i32),
+        )
+        .and(background_status);
+    foreground_shape.or(background_shape)
+}
+
+fn agent_run_location_check() -> SimpleExpr {
+    Expr::col(AgentRun::ExecutionLocation).eq("in_process")
+}
+
+fn agent_run_lease_check() -> SimpleExpr {
+    let active_lease = Expr::col(AgentRun::Status)
+        .is_in([
+            AgentRunStatus::Running.as_str(),
+            AgentRunStatus::Cancelling.as_str(),
+        ])
+        .and(Expr::col(AgentRun::LeaseToken).is_not_null())
+        .and(Expr::col(AgentRun::LeaseExpiresAt).is_not_null())
+        .and(Expr::col(AgentRun::AttemptCount).gte(1))
+        .and(Expr::col(AgentRun::StartedAt).is_not_null());
+    let no_lease = Expr::col(AgentRun::Status)
+        .is_not_in([
+            AgentRunStatus::Running.as_str(),
+            AgentRunStatus::Cancelling.as_str(),
+        ])
+        .and(Expr::col(AgentRun::LeaseToken).is_null())
+        .and(Expr::col(AgentRun::LeaseExpiresAt).is_null());
+    active_lease.or(no_lease)
+}
+
+fn agent_run_finished_check() -> SimpleExpr {
+    let terminal_finished = Expr::col(AgentRun::Status)
+        .is_in([
+            AgentRunStatus::Completed.as_str(),
+            AgentRunStatus::Failed.as_str(),
+            AgentRunStatus::Cancelled.as_str(),
+        ])
+        .and(Expr::col(AgentRun::FinishedAt).is_not_null());
+    let nonterminal_unfinished = Expr::col(AgentRun::Status)
+        .is_in([
+            AgentRunStatus::Active.as_str(),
+            AgentRunStatus::Queued.as_str(),
+            AgentRunStatus::Running.as_str(),
+            AgentRunStatus::Cancelling.as_str(),
+            AgentRunStatus::Waiting.as_str(),
+            AgentRunStatus::RetryWait.as_str(),
+        ])
+        .and(Expr::col(AgentRun::FinishedAt).is_null());
+    terminal_finished.or(nonterminal_unfinished)
+}
+
+fn agent_run_error_check() -> SimpleExpr {
+    let failure_has_error = Expr::col(AgentRun::Status)
+        .is_in([
+            AgentRunStatus::RetryWait.as_str(),
+            AgentRunStatus::Failed.as_str(),
+        ])
+        .and(Expr::col(AgentRun::LastErrorCode).is_not_null());
+    let success_has_no_error = Expr::col(AgentRun::Status)
+        .is_not_in([
+            AgentRunStatus::RetryWait.as_str(),
+            AgentRunStatus::Failed.as_str(),
+        ])
+        .and(Expr::col(AgentRun::LastErrorCode).is_null())
+        .and(Expr::col(AgentRun::LastErrorDetail).is_null());
+    failure_has_error.or(success_has_no_error)
+}
+
+/// Renders a check expression as PostgreSQL SQL for `ADD CONSTRAINT`.
+///
+/// sea-query offers no standalone expression renderer, so this prints the
+/// expression through a bare `SELECT` and strips the keyword.
+fn render_postgres_check(check: SimpleExpr) -> String {
+    let rendered = Query::select().expr(check).to_string(PostgresQueryBuilder);
+    rendered
+        .strip_prefix("SELECT ")
+        .expect("a bare select renders its expression after the keyword")
+        .to_owned()
+}
+
+/// Retains the renderer projection of what a tool call produced.
+///
+/// Terminal activity was rebuilt from the stored failure code alone, which
+/// recovers one enumerated setup signal and nothing else — so reopening a chat
+/// lost every result card, including a command's own output. The projection is
+/// already closed and clamped when it is built, so what lands here is exactly
+/// what crossed the boundary live and nothing more.
+///
+/// Deliberately the *projected* form rather than the tool output it was built
+/// from. Brightwave persists the internal result and projects on read, which
+/// lets the projection change without a migration; that trade needs a boundary
+/// that keeps arbitrary tool data out on the way *out*, and ours keeps it out
+/// on the way *in*. Storing only what already crossed means a later bug in the
+/// read path has nothing to leak.
+///
+/// Nullable because every call resolved before this migration has no projection
+/// to recover, and because most calls never project one at all.
+struct AddToolResultPreviews;
+
+impl MigrationName for AddToolResultPreviews {
+    fn name(&self) -> &str {
+        "m20260728_000020_add_tool_result_previews"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddToolResultPreviews {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(ToolCall::Table)
+                    .add_column(ColumnDef::new(ToolCall::ResultPreview).json_binary())
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(ToolCall::Table)
+                    .drop_column(ToolCall::ResultPreview)
+                    .to_owned(),
+            )
+            .await
     }
 }
 
@@ -747,6 +1397,231 @@ impl MigrationTrait for AddOutputRevisionCitations {
     }
 }
 
+/// Extends the output-revision shape so the record can hold host-accepted binary
+/// workspace artifacts and can attribute a revision to a producing background
+/// run.
+///
+/// Two additive changes to `output_revision`:
+///
+/// - `producing_run_id` (nullable) records the background run that produced a
+///   revision, alongside the existing `turn_id`. A revision names at most one
+///   producer, enforced by a check; existing rows keep only their `turn_id`.
+/// - the coarse `byte_len` upper bound is raised from the 512 KiB text cap to
+///   the 16 MiB binary cap. The tight per-kind ceiling (text stays 512 KiB) is
+///   enforced in application validation; the database bound is the outer limit
+///   that admits a binary artifact at all.
+///
+/// SQLite cannot alter a check constraint in place, so it rebuilds the table
+/// under foreign-key suppression the same way the agent-run split does; the
+/// `output_revision_citation` foreign key resolves to the rebuilt table once it
+/// is renamed. PostgreSQL alters the column and constraints directly. The `down`
+/// is symmetric and restores the original shape.
+struct ExtendOutputRevisionsForBinary;
+
+impl MigrationName for ExtendOutputRevisionsForBinary {
+    fn name(&self) -> &str {
+        "m20260729_000023_extend_output_revisions_for_binary"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for ExtendOutputRevisionsForBinary {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if manager.get_database_backend() == DatabaseBackend::Sqlite {
+            return rebuild_output_revision_sqlite(manager, true).await;
+        }
+        let statements = [
+            "ALTER TABLE output_revision ADD COLUMN producing_run_id uuid".to_owned(),
+            // The baseline's byte_len checks are unnamed; drop both by the column
+            // they constrain, then re-add named ones so a re-up after down is
+            // idempotent.
+            "DO $$
+             DECLARE name text;
+             BEGIN
+                 FOR name IN
+                     SELECT conname FROM pg_constraint
+                     WHERE conrelid = 'output_revision'::regclass
+                       AND contype = 'c'
+                       AND pg_get_constraintdef(oid) LIKE '%byte_len%'
+                 LOOP
+                     EXECUTE format('ALTER TABLE output_revision DROP CONSTRAINT %I', name);
+                 END LOOP;
+             END $$"
+                .to_owned(),
+            "ALTER TABLE output_revision ADD CONSTRAINT chk_output_revision_byte_len_nonneg \
+             CHECK (byte_len >= 0)"
+                .to_owned(),
+            format!(
+                "ALTER TABLE output_revision ADD CONSTRAINT chk_output_revision_byte_len_max \
+                 CHECK (byte_len <= {})",
+                crate::deliverable::MAX_BINARY_DELIVERABLE_BYTES as i64
+            ),
+            "ALTER TABLE output_revision ADD CONSTRAINT chk_output_revision_producer \
+             CHECK (turn_id IS NULL OR producing_run_id IS NULL)"
+                .to_owned(),
+        ];
+        for statement in statements {
+            manager
+                .get_connection()
+                .execute_unprepared(&statement)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if manager.get_database_backend() == DatabaseBackend::Sqlite {
+            return rebuild_output_revision_sqlite(manager, false).await;
+        }
+        let statements = [
+            "ALTER TABLE output_revision DROP CONSTRAINT chk_output_revision_producer".to_owned(),
+            "DO $$
+             DECLARE name text;
+             BEGIN
+                 FOR name IN
+                     SELECT conname FROM pg_constraint
+                     WHERE conrelid = 'output_revision'::regclass
+                       AND contype = 'c'
+                       AND pg_get_constraintdef(oid) LIKE '%byte_len%'
+                 LOOP
+                     EXECUTE format('ALTER TABLE output_revision DROP CONSTRAINT %I', name);
+                 END LOOP;
+             END $$"
+                .to_owned(),
+            "ALTER TABLE output_revision ADD CONSTRAINT chk_output_revision_byte_len_nonneg \
+             CHECK (byte_len >= 0)"
+                .to_owned(),
+            format!(
+                "ALTER TABLE output_revision ADD CONSTRAINT chk_output_revision_byte_len_max \
+                 CHECK (byte_len <= {})",
+                crate::deliverable::MAX_DELIVERABLE_BYTES as i64
+            ),
+            "ALTER TABLE output_revision DROP COLUMN producing_run_id".to_owned(),
+        ];
+        for statement in statements {
+            manager
+                .get_connection()
+                .execute_unprepared(&statement)
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+/// The table name used while rebuilding `output_revision` on SQLite.
+const OUTPUT_REVISION_REBUILD: &str = "output_revision_rebuild";
+
+async fn rebuild_output_revision_sqlite(
+    manager: &SchemaManager<'_>,
+    binary: bool,
+) -> Result<(), DbErr> {
+    let statements = vec![
+        "PRAGMA foreign_keys=OFF".to_owned(),
+        "BEGIN IMMEDIATE".to_owned(),
+        output_revision_rebuild_table(binary).to_string(SqliteQueryBuilder),
+        output_revision_rebuild_copy_sql(binary),
+        "DROP TABLE output_revision".to_owned(),
+        format!("ALTER TABLE {OUTPUT_REVISION_REBUILD} RENAME TO output_revision"),
+        output_revision_ordinal_index().to_string(SqliteQueryBuilder),
+        "COMMIT".to_owned(),
+        "PRAGMA foreign_keys=ON".to_owned(),
+    ];
+    manager
+        .get_connection()
+        .execute_unprepared(&format!("{};", statements.join(";\n")))
+        .await?;
+    Ok(())
+}
+
+fn output_revision_rebuild_table(binary: bool) -> TableCreateStatement {
+    let rebuild = Alias::new(OUTPUT_REVISION_REBUILD);
+    let byte_ceiling = if binary {
+        crate::deliverable::MAX_BINARY_DELIVERABLE_BYTES as i64
+    } else {
+        crate::deliverable::MAX_DELIVERABLE_BYTES as i64
+    };
+    let mut statement = Table::create();
+    statement
+        .table(rebuild.clone())
+        .col(
+            ColumnDef::new(OutputRevision::Id)
+                .uuid()
+                .not_null()
+                .primary_key(),
+        )
+        .col(ColumnDef::new(OutputRevision::OutputId).uuid().not_null())
+        .col(ColumnDef::new(OutputRevision::Ordinal).integer().not_null())
+        .col(
+            ColumnDef::new(OutputRevision::ByteLen)
+                .big_integer()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(OutputRevision::Sha256)
+                .binary_len(32)
+                .not_null(),
+        )
+        .col(ColumnDef::new(OutputRevision::TurnId).uuid());
+    if binary {
+        statement.col(ColumnDef::new(OutputRevision::ProducingRunId).uuid());
+    }
+    statement
+        .col(
+            ColumnDef::new(OutputRevision::CreatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_output_revision_output")
+                .from(rebuild, OutputRevision::OutputId)
+                .to(Output::Table, Output::Id)
+                .on_delete(ForeignKeyAction::Cascade),
+        )
+        .check(
+            Expr::col(OutputRevision::Ordinal)
+                .between(1, crate::deliverable::MAX_OUTPUT_REVISIONS as i32),
+        )
+        .check(Expr::col(OutputRevision::ByteLen).gte(0))
+        .check(Expr::col(OutputRevision::ByteLen).lte(byte_ceiling));
+    if binary {
+        statement.check(
+            Expr::col(OutputRevision::TurnId)
+                .is_null()
+                .or(Expr::col(OutputRevision::ProducingRunId).is_null()),
+        );
+    }
+    statement.to_owned()
+}
+
+fn output_revision_rebuild_copy_sql(binary: bool) -> String {
+    if binary {
+        format!(
+            "INSERT INTO {OUTPUT_REVISION_REBUILD} \
+             (id, output_id, ordinal, byte_len, sha256, turn_id, producing_run_id, created_at) \
+             SELECT id, output_id, ordinal, byte_len, sha256, turn_id, NULL, created_at \
+             FROM output_revision"
+        )
+    } else {
+        format!(
+            "INSERT INTO {OUTPUT_REVISION_REBUILD} \
+             (id, output_id, ordinal, byte_len, sha256, turn_id, created_at) \
+             SELECT id, output_id, ordinal, byte_len, sha256, turn_id, created_at \
+             FROM output_revision"
+        )
+    }
+}
+
+fn output_revision_ordinal_index() -> IndexCreateStatement {
+    Index::create()
+        .name("idx_output_revision_ordinal")
+        .table(OutputRevision::Table)
+        .col(OutputRevision::OutputId)
+        .col(OutputRevision::Ordinal)
+        .unique()
+        .to_owned()
+}
+
 /// Records the images a message was submitted with, so a reloaded conversation
 /// replays the same turn rather than a text-only approximation of it.
 ///
@@ -1142,7 +2017,9 @@ async fn create_agent_run_table(manager: &SchemaManager<'_>) -> Result<(), DbErr
         AgentRunStatus::Cancelled.as_str(),
     ]);
     let foreground_shape = Expr::col(AgentRun::Execution)
-        .eq(AgentRunExecution::Foreground.as_str())
+        // The baseline predates the tier/location split; its shape is frozen
+        // over the original single execution column.
+        .eq("foreground")
         .and(Expr::col(AgentRun::Depth).eq(0))
         .and(Expr::col(AgentRun::ParentId).is_null())
         .and(Expr::col(AgentRun::ParentDepth).is_null())
@@ -1156,7 +2033,7 @@ async fn create_agent_run_table(manager: &SchemaManager<'_>) -> Result<(), DbErr
         .and(Expr::col(AgentRun::StartedAt).is_null())
         .and(foreground_status);
     let sandbox_shape = Expr::col(AgentRun::Execution)
-        .eq(AgentRunExecution::Sandbox.as_str())
+        .eq("sandbox")
         .and(Expr::col(AgentRun::Depth).eq(i32::from(crate::model::AgentRun::MAX_DEPTH)))
         .and(Expr::col(AgentRun::ParentId).is_not_null())
         .and(Expr::col(AgentRun::ParentDepth).eq(0))
@@ -1377,9 +2254,7 @@ async fn create_agent_run_table(manager: &SchemaManager<'_>) -> Result<(), DbErr
                 .table(AgentRun::Table)
                 .col(AgentRun::ChatId)
                 .unique()
-                .and_where(
-                    Expr::col(AgentRun::Execution).eq(AgentRunExecution::Foreground.as_str()),
-                )
+                .and_where(Expr::col(AgentRun::Execution).eq("foreground"))
                 .to_owned(),
         )
         .await?;
@@ -6079,6 +6954,7 @@ enum OutputRevision {
     ByteLen,
     Sha256,
     TurnId,
+    ProducingRunId,
     CreatedAt,
 }
 
@@ -6092,6 +6968,21 @@ enum OutputRevisionCitation {
     TurnId,
     EvidenceCallId,
     EvidenceRank,
+}
+
+#[derive(DeriveIden)]
+enum OperationLog {
+    Table,
+    RunId,
+    OperationId,
+    State,
+    Fingerprint,
+    ExternalEffect,
+    OwnerEpoch,
+    Body,
+    Retained,
+    CreatedAt,
+    UpdatedAt,
 }
 
 #[derive(DeriveIden)]
@@ -6155,7 +7046,11 @@ enum AgentRun {
     ParentId,
     ParentDepth,
     SpawnCallId,
+    /// The pre-split execution column; only migrations up to the tier/location
+    /// split reference it.
     Execution,
+    Tier,
+    ExecutionLocation,
     Depth,
     Status,
     Input,
@@ -6565,6 +7460,7 @@ enum ToolCall {
     Execution,
     Status,
     Result,
+    ResultPreview,
     ErrorCode,
     ErrorDetail,
     ApprovalStatus,

@@ -52,8 +52,12 @@ The product store therefore owns an output record whose identity is an opaque
 - An output has an opaque id, an owning conversation, a display filename, a
   fixed media type, a current revision, and a revision count.
 - A revision has its own opaque id, a one-based ordinal, an exact byte length,
-  a SHA-256 digest, and the turn that produced it. Revision rows are
-  insert-only.
+  a SHA-256 digest, and the producer that created it. A producer is either a
+  foreground turn or a background run, never both — recorded in two mutually
+  exclusive nullable references so existing turn-produced revisions are
+  unchanged and a background run can now be attributed just as precisely. Only a
+  turn producer may carry retrieval citations, which resolve against the turn's
+  evidence. Revision rows are insert-only.
 - Updating an output appends a revision and republishes the current one. The
   replaced revision keeps its own id and stays readable, so an update can no
   longer destroy the bytes it supersedes.
@@ -80,12 +84,42 @@ is not yet wired to `create_deliverable`, which still writes a filename into
 adopted into it: they stay on disk and remain listed by the current catalog
 until that surface moves to the record.
 
+## Accepting binary workspace artifacts
+
+An execution provider with a durable workspace (see
+[sandbox providers](sandbox-providers.md)) can produce a file the conversation
+should keep — a rendered chart, a generated PDF, a spreadsheet. Such a file is a
+*proposal*, not an output: it enters the record only when the host **accepts**
+it, and acceptance is a host-side operation the model cannot perform for itself.
+
+- The host pulls the bytes back with the workspace capability's bounded file
+  read, then accepts them into an output. Acceptance publishes the bytes at the
+  same write-once revision path a text deliverable uses, so an accepted binary
+  artifact is cataloged, addressed, and exported exactly like any other output.
+- A binary artifact carries an **explicit media type** rather than one derived
+  from its filename, and its filename obeys the same portable-ASCII rules with
+  no text-extension requirement. The declared media type is a bounded,
+  well-formed `type/subtype` token and may not masquerade as one of the curated
+  text types.
+- Binary artifacts are bounded at 16 MiB — the same ceiling the workspace file
+  read enforces, so every file the workspace is willing to hand back is
+  acceptable and acceptance never has to reject a well-formed artifact. The text
+  path keeps its 512 KiB cap; each output's media type fixes which ceiling its
+  revisions use.
+- The producing background run is recorded on the accepted revision, so a
+  workspace artifact's provenance is a run rather than a foreground turn.
+
+Acceptance changes nothing about export: a person still chooses the destination
+through **Save As…**, and the bytes never leave private app data until then.
+
 ## Deliberate limits
 
 An export is a synchronous user action, so it is not automatically retried and
-does not yet have a durable export receipt. Binary formats, Office document
-generation, transcript-inline artifact cards, per-revision source references,
-and writing directly into connected folders remain later slices. Those
-additions should preserve the same rule: the model names a logical output,
-while a person or narrowly scoped capability chooses where host data is
-written.
+does not yet have a durable export receipt. Binary artifacts enter the record
+only through host acceptance of a workspace file, described above;
+`create_deliverable` itself still authors text only, so model-authored binary
+generation is not part of this contract. Office document generation,
+transcript-inline artifact cards, per-revision source references, and writing
+directly into connected folders remain later slices. Those additions should
+preserve the same rule: the model names a logical output, while a person or
+narrowly scoped capability chooses where host data is written.

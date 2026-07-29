@@ -1,13 +1,22 @@
 import { FileIcon, Loader2Icon } from "lucide-react";
 import type { HTMLAttributes } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import type { ApiClient } from "@/api";
+import { useFileDownload } from "@/document/useFileDownload";
 import { cn } from "@/lib/utils";
+import { extractHeadings } from "@/markdownHeadings";
 import { MessageMarkdown } from "@/MessageMarkdown";
-import { useFileDownload } from "./useFileDownload";
-
-/** A character range in the raw file, as a citation reports it. */
-export type HighlightRange = { start: number; end: number };
+import {
+  CITATION_MARK_CLASS,
+  CITATION_MARK_LABEL,
+  CITATION_MARK_STYLE,
+  pieceStartOffsets,
+  rangeWithinPiece,
+} from "./citationMark";
+import { charRangeForByteSpan, type CitationSpan } from "./citationSpan";
+import { FileDownloadProgressIndicator } from "./FileDownloadProgress";
+import { MarkdownOutline } from "./MarkdownOutline";
 
 // Each chunk is rendered as a separate markdown block. 50K chars is
 // comfortably fast for the parser to handle in one pass.
@@ -49,51 +58,39 @@ export function splitIntoChunks(text: string, chunkSize: number): string[] {
   return chunks;
 }
 
-/**
- * Find which chunk a character offset falls in, and the offset of that chunk's
- * start within the full text.
- */
-export function findChunkForOffset(
-  chunks: string[],
-  offset: number,
-): { index: number; chunkStart: number } | null {
-  let chunkStart = 0;
-  for (let i = 0; i < chunks.length; i++) {
-    if (offset < chunkStart + chunks[i]!.length) {
-      return { index: i, chunkStart };
-    }
-    chunkStart += chunks[i]!.length;
-  }
-  return null;
-}
-
 interface Props extends HTMLAttributes<HTMLDivElement> {
+  client: Pick<ApiClient, "getChatDocumentFile">;
   chatId: string;
   documentID: string;
   /**
-   * Character range in the raw file to reveal, as a citation reports it. The
-   * range decides which chunk is rendered first and what is scrolled to;
-   * drawing the highlight itself is not implemented yet.
+   * Byte range of the cited passage, when a citation led here.
+   *
+   * A citation reports its span in the text of record, which for a text-shaped
+   * source is the file itself: nothing is extracted out of it, so the offsets
+   * address the very characters this viewer draws. That is what lets the mark
+   * follow the reader from the extracted text onto the original.
    */
-  highlightRange?: HighlightRange;
+  citationSpan?: CitationSpan;
   /** Render the file as markdown rather than as the text it literally is. */
   markdown?: boolean;
 }
 
 /** Text-shaped originals: markdown rendered, everything else as written. */
 export function MarkdownViewer({
+  client,
   chatId,
   documentID,
-  highlightRange,
+  citationSpan,
   markdown = false,
   className,
   ...props
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const anchorRef = useRef<HTMLDivElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
 
-  const fileDownload = useFileDownload(chatId, documentID, { parseAs: "text" });
+  const fileDownload = useFileDownload(client, chatId, documentID, {
+    parseAs: "text",
+  });
   const fullContent = fileDownload.data ?? "";
 
   // Split into render-friendly chunks at paragraph boundaries
@@ -102,17 +99,44 @@ export function MarkdownViewer({
     [fullContent],
   );
 
-  // For citation mode: locate the chunk containing the highlight
-  const citationInfo = useMemo(() => {
-    if (!highlightRange || !fullContent) return null;
-    const hit = findChunkForOffset(chunks, highlightRange.start);
-    return hit ? { chunkIndex: hit.index } : null;
-  }, [highlightRange, fullContent, chunks]);
+  const headings = useMemo(
+    () => (markdown ? extractHeadings(fullContent) : []),
+    [markdown, fullContent],
+  );
+
+  const scrollToHeading = useCallback((id: string) => {
+    containerRef.current
+      ?.querySelector(`#${CSS.escape(id)}`)
+      ?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
+
+  // The span is re-derived from the transcript on every update it makes, so what
+  // this depends on is the offsets rather than the object carrying them.
+  const spanStart = citationSpan?.start;
+  const spanEnd = citationSpan?.end;
+  const cited = useMemo(
+    () =>
+      spanStart != null && spanEnd != null && fullContent
+        ? charRangeForByteSpan(fullContent, { start: spanStart, end: spanEnd })
+        : null,
+    [fullContent, spanStart, spanEnd],
+  );
+
+  const chunkStarts = useMemo(() => pieceStartOffsets(chunks), [chunks]);
+
+  // For citation mode: the chunk the passage begins in — the last one starting
+  // at or before it.
+  const citationChunk = useMemo(() => {
+    if (!cited) return null;
+    for (let i = chunkStarts.length - 1; i >= 0; i--) {
+      if (chunkStarts[i]! <= cited.start) return i;
+    }
+    return null;
+  }, [cited, chunkStarts]);
 
   // In citation mode, skip the chunks before it rather than parsing megabytes
   // of text the reader has not asked to see yet.
-  const startChunkIndex =
-    citationInfo != null ? Math.max(0, citationInfo.chunkIndex - 1) : 0;
+  const startChunkIndex = citationChunk != null ? Math.max(0, citationChunk - 1) : 0;
   const maxRenderableChunks = chunks.length - startChunkIndex;
   const initialCount = Math.min(INITIAL_CHUNK_COUNT, maxRenderableChunks);
 
@@ -141,21 +165,26 @@ export function MarkdownViewer({
     return () => observer.disconnect();
   }, [renderedCount, maxRenderableChunks]);
 
-  // Scroll to the citation anchor after it renders
+  // Scroll to the passage itself, whichever way the original is drawn: the mark
+  // is what the reader came for, and a range marked in several nodes — a
+  // sentence with a bold word in it — begins at the first of them.
+  //
+  // Once per passage, not once per render. The mark can arrive a commit after
+  // the citation resolves, since the chunk holding it may not be among those
+  // already drawn, and appending chunks as the reader scrolls must not drag them
+  // back to where they started reading.
+  const scrolledTo = useRef<string | null>(null);
   useEffect(() => {
-    if (!citationInfo) return;
-    requestAnimationFrame(() => {
-      const container = containerRef.current;
-      const anchor = anchorRef.current;
-      if (!container || !anchor) return;
-      const containerRect = container.getBoundingClientRect();
-      const anchorRect = anchor.getBoundingClientRect();
-      const scrollTarget = anchorRect.top - containerRect.top + container.scrollTop;
-      container.scrollTo({ top: Math.max(0, scrollTarget - 40), behavior: "instant" });
-    });
-  }, [citationInfo]);
+    if (!cited) return;
+    const passage = `${cited.start}:${cited.end}`;
+    if (scrolledTo.current === passage) return;
+    const mark = containerRef.current?.querySelector(`.${CITATION_MARK_CLASS}`);
+    if (!mark) return;
+    scrolledTo.current = passage;
+    mark.scrollIntoView({ block: "center" });
+  }, [cited, renderedCount]);
 
-  if (fileDownload.isError) {
+  if (fileDownload.error) {
     return (
       <div className={cn("relative overflow-auto", className)} {...props}>
         <div className="flex h-64 items-center justify-center text-muted-foreground">
@@ -168,7 +197,11 @@ export function MarkdownViewer({
   if (fileDownload.isLoading) {
     return (
       <div className={cn("flex items-center justify-center", className)} {...props}>
-        <Loader2Icon className="size-6 animate-spin" />
+        {fileDownload.progress ? (
+          <FileDownloadProgressIndicator progress={fileDownload.progress} />
+        ) : (
+          <Loader2Icon className="size-6 animate-spin" />
+        )}
       </div>
     );
   }
@@ -190,21 +223,51 @@ export function MarkdownViewer({
 
   return (
     <div className={cn("relative flex min-h-0 flex-1 flex-col", className)} {...props}>
+      {headings.length > 0 && (
+        <div className="absolute top-2 right-2 z-10">
+          <MarkdownOutline
+            headings={headings}
+            onNavigate={scrollToHeading}
+            triggerClassName="bg-background/80 backdrop-blur-sm"
+          />
+        </div>
+      )}
       <div ref={containerRef} className="min-h-0 flex-1 overflow-auto p-6">
         <div className="mx-auto max-w-4xl">
-          <div ref={anchorRef} />
-          {visibleChunks.map((chunk, i) =>
-            markdown ? (
-              <MessageMarkdown key={startChunkIndex + i}>{chunk}</MessageMarkdown>
+          {visibleChunks.map((chunk, i) => {
+            const inChunk = cited
+              ? rangeWithinPiece(cited, chunkStarts[startChunkIndex + i]!, chunk.length)
+              : null;
+            return markdown ? (
+              <MessageMarkdown
+                key={startChunkIndex + i}
+                headingIds
+                highlightRange={inChunk ?? undefined}
+              >
+                {chunk}
+              </MessageMarkdown>
             ) : (
               <pre
                 key={startChunkIndex + i}
                 className="font-mono text-xs break-words whitespace-pre-wrap"
               >
-                {chunk}
+                {inChunk ? (
+                  <>
+                    {chunk.slice(0, inChunk.start)}
+                    <mark
+                      aria-label={CITATION_MARK_LABEL}
+                      className={cn(CITATION_MARK_CLASS, CITATION_MARK_STYLE)}
+                    >
+                      {chunk.slice(inChunk.start, inChunk.end)}
+                    </mark>
+                    {chunk.slice(inChunk.end)}
+                  </>
+                ) : (
+                  chunk
+                )}
               </pre>
-            ),
-          )}
+            );
+          })}
           {hasMoreChunks && (
             <div ref={sentinelRef} className="flex items-center justify-center py-8">
               <Loader2Icon className="size-5 animate-spin text-muted-foreground" />

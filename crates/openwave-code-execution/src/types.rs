@@ -14,6 +14,12 @@ pub const MAX_ARGUMENT_BYTES: usize = 32 * 1_024;
 pub const MAX_CWD_BYTES: usize = 1_024;
 /// Maximum bytes captured from stdout and stderr together.
 pub const MAX_CAPTURE_BYTES: usize = 40_000;
+/// Maximum bytes transferred for one workspace file in either direction.
+pub const MAX_WORKSPACE_FILE_BYTES: usize = 16 * 1_024 * 1_024;
+/// Maximum UTF-8 bytes in a workspace-relative file path.
+pub const MAX_WORKSPACE_PATH_BYTES: usize = 1_024;
+/// Maximum entries returned by one workspace listing.
+pub const MAX_WORKSPACE_LIST_ENTRIES: usize = 256;
 const MAX_ID_BYTES: usize = 128;
 
 /// A configured code-execution backend.
@@ -80,6 +86,123 @@ impl ExecutionWorkspaceId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// A validated workspace-relative file path.
+///
+/// Paths are relative, contain only normal components (no `.`, `..`, root, or
+/// prefix components), and are stored in a normalized `a/b/c` form. Absolute
+/// host paths and traversal never cross the workspace contract.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WorkspaceFilePath(String);
+
+impl WorkspaceFilePath {
+    pub fn parse(value: impl Into<String>) -> Result<Self, CodeExecutionError> {
+        let value = value.into();
+        let invalid = || CodeExecutionError::InvalidRequest("invalid workspace path".into());
+        if value.is_empty()
+            || value.len() > MAX_WORKSPACE_PATH_BYTES
+            || value.chars().any(char::is_control)
+            || value.contains('\\')
+        {
+            return Err(invalid());
+        }
+        let path = Path::new(&value);
+        if path.is_absolute() {
+            return Err(invalid());
+        }
+        let mut parts = Vec::new();
+        for component in path.components() {
+            let Component::Normal(part) = component else {
+                return Err(invalid());
+            };
+            parts.push(part.to_str().ok_or_else(invalid)?);
+        }
+        if parts.is_empty() {
+            return Err(invalid());
+        }
+        Ok(Self(parts.join("/")))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The final path component.
+    #[must_use]
+    pub fn file_name(&self) -> &str {
+        self.0.rsplit('/').next().unwrap_or(&self.0)
+    }
+}
+
+/// One entry in a bounded workspace listing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceFileEntry {
+    /// Workspace-relative path in normalized `a/b/c` form.
+    pub path: String,
+    pub directory: bool,
+    /// Byte length where the backend reports one; directories report none.
+    pub size_bytes: Option<u64>,
+}
+
+/// A bounded listing of one workspace directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceListing {
+    pub entries: Vec<WorkspaceFileEntry>,
+    /// True when the directory held more than [`MAX_WORKSPACE_LIST_ENTRIES`].
+    pub truncated: bool,
+}
+
+/// Optional durable-workspace capability beside [`CodeExecutionProvider::execute`].
+///
+/// This is a host-internal surface: nothing here is model-facing, and no
+/// credential or absolute host path crosses it. File transfers are bounded by
+/// [`MAX_WORKSPACE_FILE_BYTES`] and every path is workspace-relative.
+#[async_trait]
+pub trait WorkspaceLifecycle: Send + Sync {
+    /// Ensure the durable workspace exists, connecting when it already does.
+    async fn create_workspace(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+    ) -> Result<(), CodeExecutionError>;
+
+    /// Connect to an existing workspace without creating one. `Ok(false)`
+    /// means no durable workspace is currently reachable.
+    async fn connect_workspace(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+    ) -> Result<bool, CodeExecutionError>;
+
+    /// Destroy the workspace. Destroying one that no longer exists succeeds.
+    async fn destroy_workspace(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+    ) -> Result<(), CodeExecutionError>;
+
+    /// Write one bounded file, creating parent directories inside the
+    /// workspace and the workspace itself when needed.
+    async fn put_workspace_file(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+        path: &WorkspaceFilePath,
+        content: &[u8],
+    ) -> Result<(), CodeExecutionError>;
+
+    /// Read one bounded file.
+    async fn get_workspace_file(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+        path: &WorkspaceFilePath,
+    ) -> Result<Vec<u8>, CodeExecutionError>;
+
+    /// List one directory (the workspace root when `path` is `None`).
+    async fn list_workspace_files(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+        path: Option<&WorkspaceFilePath>,
+    ) -> Result<WorkspaceListing, CodeExecutionError>;
 }
 
 fn validate_id(value: &str, label: &str) -> Result<(), CodeExecutionError> {
@@ -203,6 +326,13 @@ pub trait CodeExecutionProvider: Send + Sync {
         &self,
         request: CodeExecutionRequest,
     ) -> Result<CodeExecutionResponse, CodeExecutionError>;
+
+    /// The provider's optional durable-workspace capability. `None` means the
+    /// backend has no durable session surface; callers must degrade instead of
+    /// treating the absence as an error.
+    fn workspace_lifecycle(&self) -> Option<&dyn WorkspaceLifecycle> {
+        None
+    }
 }
 
 #[derive(Debug, Error)]
@@ -219,6 +349,10 @@ pub enum CodeExecutionError {
     Spawn,
     #[error("execution identity was reused with different arguments")]
     IdentityConflict,
+    #[error("the requested workspace file does not exist")]
+    WorkspaceFileNotFound,
+    #[error("workspace file exceeds the transfer bound")]
+    WorkspaceFileTooLarge,
     #[error("the outcome of this execution is ambiguous; it was not replayed")]
     AmbiguousExecution,
 }
@@ -261,6 +395,35 @@ mod tests {
             ".",
         )
         .is_err());
+    }
+
+    #[test]
+    fn workspace_paths_are_normalized_and_reject_traversal() {
+        assert_eq!(
+            WorkspaceFilePath::parse("reports//2026/summary.csv")
+                .unwrap()
+                .as_str(),
+            "reports/2026/summary.csv"
+        );
+        assert_eq!(
+            WorkspaceFilePath::parse("a/b/c.txt").unwrap().file_name(),
+            "c.txt"
+        );
+        for rejected in [
+            "",
+            "/etc/passwd",
+            "../outside",
+            "a/../b",
+            "./a",
+            "a\\b",
+            "a\u{0}b",
+        ] {
+            assert!(
+                WorkspaceFilePath::parse(rejected).is_err(),
+                "{rejected:?} must be rejected"
+            );
+        }
+        assert!(WorkspaceFilePath::parse("x".repeat(MAX_WORKSPACE_PATH_BYTES + 1)).is_err());
     }
 
     #[test]

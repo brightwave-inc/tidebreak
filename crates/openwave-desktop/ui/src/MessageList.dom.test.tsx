@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApprovalCard } from "./ApprovalCard";
 import { AppContextProvider, type AppContextValue } from "./AppContext";
 import type { ApiClient } from "./api";
 import { MessageBubble, MessageList, type ChatMessage } from "./MessageList";
+import { SourceNavProvider } from "./panel/SourceNav";
 import { renderWithRouter } from "./test/router";
 
 const noop = () => undefined;
@@ -629,6 +630,114 @@ describe("mcp app views", () => {
       await screen.findByTitle("MCP App view from gateway"),
     ).toBeInTheDocument();
   });
+
+  it("surfaces what a call found, behind one line until it is opened", async () => {
+    const user = userEvent.setup();
+    render(
+      <MessageList
+        messages={[
+          {
+            id: "t1",
+            role: "tool",
+            callId: "c1",
+            name: "list_dir",
+            status: "completed",
+            result: {
+              tool: "entries",
+              elided: 3,
+              entries: [
+                { kind: "file", label: "notes.md", detail: null, meta: "1.2 KB" },
+                { kind: "folder", label: "reports", detail: null, meta: null },
+              ],
+              failures: [],
+            },
+          },
+        ]}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
+        busy={false}
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+
+    // The count is on the collapsed header, and it counts the rows the card is
+    // not showing — a reader must not have to open the card to learn there
+    // were five results.
+    const card = screen.getByRole("status", {
+      name: "Browse files: File browse complete",
+    });
+    expect(within(card).getByText("5 results")).toBeInTheDocument();
+    expect(screen.queryByText("notes.md")).not.toBeInTheDocument();
+
+    await user.click(within(card).getByRole("button"));
+    expect(screen.getByText("notes.md")).toBeInTheDocument();
+    expect(screen.getByText("reports")).toBeInTheDocument();
+    expect(screen.getByText("3 more not shown")).toBeInTheDocument();
+  });
+
+  it("says on the collapsed header that some of the call failed", async () => {
+    const user = userEvent.setup();
+    render(
+      <MessageList
+        messages={[
+          {
+            id: "t1",
+            role: "tool",
+            callId: "c1",
+            name: "read_file",
+            status: "completed",
+            result: {
+              tool: "entries",
+              elided: 0,
+              entries: [
+                { kind: "file", label: "q3.md", detail: null, meta: null },
+              ],
+              failures: [
+                { label: "q4.md", error: "file is not valid UTF-8" },
+                { label: null, error: "the folder is no longer available" },
+              ],
+            },
+          },
+        ]}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
+        busy={false}
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+
+    // A partial success read as a clean one is the failure this whole channel
+    // exists to prevent: the reader must not have to open the card to find out
+    // that two of the three files never made it.
+    const card = screen.getByRole("status", {
+      name: "Read a file: File read complete",
+    });
+    expect(within(card).getByText(/1 result · 2 failed/)).toBeInTheDocument();
+
+    await user.click(within(card).getByRole("button"));
+    expect(screen.getByText("file is not valid UTF-8")).toBeInTheDocument();
+    // A failure the tool could not name still gets a row rather than vanishing.
+    expect(screen.getByText("the folder is no longer available")).toBeInTheDocument();
+    expect(screen.getByText("Item")).toBeInTheDocument();
+  });
 });
 
 describe("actionable tool results", () => {
@@ -671,5 +780,58 @@ describe("actionable tool results", () => {
     await waitFor(() => {
       expect(router.state.location.pathname).toBe("/settings/web-search");
     });
+  });
+});
+
+describe("citation anchors", () => {
+  const CITATION = "0b2b1f2c-9d3e-4a5b-8c7d-6e5f4a3b2c1d";
+
+  const message: ChatMessage = {
+    id: "assistant-1",
+    role: "assistant",
+    text: `The reef :cit[is the largest in the world]{citation_id=${CITATION}}.`,
+    sources: [
+      {
+        id: CITATION,
+        ordinal: 1,
+        documentId: "document-1",
+        span: { start: 0, end: 26 },
+        excerpt: "A short supporting excerpt.",
+        heading: "Project notes",
+        pages: [2],
+        bounds: [],
+      },
+    ],
+  };
+
+  it("opens the same place from the phrase and from the sources row", async () => {
+    const user = userEvent.setup();
+    const openCitation = vi.fn();
+    render(
+      <SourceNavProvider value={{ openCitation }}>
+        <MessageBubble message={message} busy={false} />
+      </SourceNavProvider>,
+    );
+
+    await user.click(screen.getByRole("button", { name: /citation 1$/ }));
+    await user.click(screen.getByRole("button", { name: "Open source" }));
+    await user.click(screen.getByRole("button", { name: "Open source 1" }));
+
+    expect(openCitation).toHaveBeenCalledTimes(2);
+    expect(openCitation.mock.calls[0]).toEqual(openCitation.mock.calls[1]);
+    expect(openCitation).toHaveBeenLastCalledWith({
+      documentId: "document-1",
+      citationId: CITATION,
+    });
+  });
+
+  it("copies what the message reads as, not how a citation is stored", async () => {
+    const user = userEvent.setup();
+    render(<MessageBubble message={message} busy={false} />);
+
+    await user.click(screen.getByRole("button", { name: "Copy" }));
+    expect(await window.navigator.clipboard.readText()).toBe(
+      "The reef is the largest in the world.",
+    );
   });
 });

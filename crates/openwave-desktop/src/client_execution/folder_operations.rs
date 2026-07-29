@@ -10,8 +10,8 @@ use std::collections::HashSet;
 use openwave_core::{
     validate_import_connected_file_arguments, validate_list_connected_folders_arguments,
     validate_list_folder_arguments, validate_read_connected_file_arguments, CallId, ListFolderArgs,
-    ReadConnectedFileArgs, ToolCallExecution, ToolCallRecord, ToolCallStatus,
-    IMPORT_CONNECTED_FILE_TOOL, LIST_CONNECTED_FOLDERS_TOOL, LIST_FOLDER_TOOL,
+    ReadConnectedFileArgs, ResultEntry, ResultEntryKind, ToolCallExecution, ToolCallRecord,
+    ToolCallStatus, IMPORT_CONNECTED_FILE_TOOL, LIST_CONNECTED_FOLDERS_TOOL, LIST_FOLDER_TOOL,
     READ_CONNECTED_FILE_TOOL,
 };
 use openwave_host_broker::{
@@ -280,7 +280,7 @@ async fn execute_operation(
         })
         .await;
     match result {
-        Ok(result) => serialize_result(result),
+        Ok(result) => serialize_result(call, result),
         // Broker transport errors are intentionally not surfaced to the model.
         // Authorization is rechecked by the broker before bytes are released.
         Err(_) => unavailable(
@@ -317,29 +317,75 @@ fn broker_request(call: &ToolCallRecord) -> Result<OperationRequest, ()> {
     }
 }
 
-fn serialize_result(result: OperationResult) -> StoredResolution {
-    let result = match result {
-        OperationResult::ListRoots { roots } => serde_json::json!({
-            "status": "ok",
-            "folders": roots.into_iter().take(MAX_DIRECTORY_ENTRIES).map(|root| serde_json::json!({
-                "root_id": root.root_id,
-                "display_name": root.display_name,
-            })).collect::<Vec<_>>(),
-        }),
-        OperationResult::ListDirectory { entries } => serde_json::json!({
-            "status": "ok",
-            "entries": entries.into_iter().take(MAX_DIRECTORY_ENTRIES).map(|entry| serde_json::json!({
-                "name": entry.name,
-                "kind": entry.kind,
-            })).collect::<Vec<_>>(),
-        }),
+fn serialize_result(call: &ToolCallRecord, result: OperationResult) -> StoredResolution {
+    // The rows are built from the same values the model-facing payload is, so
+    // the card and the model can never disagree about what the folder held.
+    let (result, rows) = match result {
+        OperationResult::ListRoots { roots } => {
+            let roots: Vec<_> = roots.into_iter().take(MAX_DIRECTORY_ENTRIES).collect();
+            let rows = roots
+                .iter()
+                .map(|root| ResultEntry::new(ResultEntryKind::Folder, root.display_name.clone()))
+                .collect();
+            (
+                serde_json::json!({
+                    "status": "ok",
+                    "folders": roots.iter().map(|root| serde_json::json!({
+                        "root_id": root.root_id,
+                        "display_name": root.display_name,
+                    })).collect::<Vec<_>>(),
+                }),
+                rows,
+            )
+        }
+        OperationResult::ListDirectory { entries } => {
+            let entries: Vec<_> = entries.into_iter().take(MAX_DIRECTORY_ENTRIES).collect();
+            let rows = entries
+                .iter()
+                .map(|entry| {
+                    // The broker's own word for what an entry is; anything that
+                    // is not a directory reads as a file.
+                    let kind = if format!("{:?}", entry.kind).to_lowercase().contains("dir") {
+                        ResultEntryKind::Folder
+                    } else {
+                        ResultEntryKind::File
+                    };
+                    ResultEntry::new(kind, entry.name.clone())
+                })
+                .collect();
+            (
+                serde_json::json!({
+                    "status": "ok",
+                    "entries": entries.iter().map(|entry| serde_json::json!({
+                        "name": entry.name,
+                        "kind": entry.kind,
+                    })).collect::<Vec<_>>(),
+                }),
+                rows,
+            )
+        }
         OperationResult::ReadFile(file) => {
             let (content, truncated) = truncate_utf8(&file.content, MAX_FILE_CONTENT_BYTES);
-            serde_json::json!({
-                "status": "ok",
-                "content": content,
-                "truncated": truncated,
-            })
+            // The file's text is what the model reads and far too much for a
+            // card, so the row reports the read rather than replaying it.
+            // The name comes from the request: a read result is bytes, and
+            // only the arguments say which file they came from.
+            let path = serde_json::from_value::<ReadConnectedFileArgs>(call.arguments.clone())
+                .map(|args| args.path)
+                .unwrap_or_default();
+            let mut row = ResultEntry::new(ResultEntryKind::File, read_file_name(&path))
+                .with_meta(openwave_core::format_bytes(content.len() as u64));
+            if truncated {
+                row = row.with_detail("truncated at the read limit");
+            }
+            (
+                serde_json::json!({
+                    "status": "ok",
+                    "content": content,
+                    "truncated": truncated,
+                }),
+                vec![row],
+            )
         }
         _ => {
             return unavailable(
@@ -349,9 +395,10 @@ fn serialize_result(result: OperationResult) -> StoredResolution {
         }
     };
     match serde_json::to_string(&result) {
-        Ok(result) if result.len() <= MAX_RESULT_CONTENT_BYTES => {
-            StoredResolution::Completed { result }
-        }
+        Ok(result) if result.len() <= MAX_RESULT_CONTENT_BYTES => StoredResolution::Completed {
+            result,
+            rows: Some(serde_json::json!({ "entries": rows })),
+        },
         _ => unavailable(
             "result_too_large",
             "The connected-folder result was too large to return.",
@@ -437,6 +484,19 @@ fn is_connected_folder_call(call: &ToolCallRecord) -> bool {
     }
 }
 
+/// The last segment of a connected-folder path, so a row leads with the file.
+fn read_file_name(path: &str) -> String {
+    let name = path
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(path);
+    if name.is_empty() {
+        "file".to_owned()
+    } else {
+        name.to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,17 +504,45 @@ mod tests {
 
     #[test]
     fn results_are_bounded_and_do_not_include_host_error_detail() {
-        let result = serialize_result(OperationResult::ReadFile(
-            openwave_host_broker::ReadFileResult {
+        let call = ToolCallRecord {
+            id: CallId::new(),
+            chat_id: ChatId::new(),
+            turn_id: openwave_core::TurnId::new(),
+            provider_id: "tool-1".into(),
+            name: READ_CONNECTED_FILE_TOOL.into(),
+            arguments: serde_json::json!({
+                "root_id": uuid::Uuid::new_v4(),
+                "path": "reports/q3.md",
+            }),
+            execution: ToolCallExecution::Client,
+            status: ToolCallStatus::Pending,
+            result: None,
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
+            created_at: chrono::Utc::now(),
+            resolved_at: None,
+        };
+        let result = serialize_result(
+            &call,
+            OperationResult::ReadFile(openwave_host_broker::ReadFileResult {
                 content: "x".repeat(MAX_FILE_CONTENT_BYTES + 1),
                 bytes: MAX_FILE_CONTENT_BYTES + 1,
-            },
-        ));
-        let StoredResolution::Completed { result } = result else {
+            }),
+        );
+        let StoredResolution::Completed { result, rows } = result else {
             panic!("expected bounded result");
         };
         assert!(result.len() <= MAX_RESULT_CONTENT_BYTES);
         assert!(result.contains("\"truncated\":true"));
+        // The card reports the read rather than replaying the file, and names
+        // the file from the request — a read result is only bytes.
+        let rows = rows.expect("a completed read reports its row");
+        assert_eq!(rows["entries"][0]["label"], "q3.md");
+        assert_eq!(rows["entries"][0]["kind"], "file");
+        assert_eq!(rows["entries"][0]["detail"], "truncated at the read limit");
+        assert!(!rows.to_string().contains('x'));
     }
 
     #[test]

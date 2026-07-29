@@ -845,6 +845,24 @@ rejects the self-host profile at startup, and document/blob PostgreSQL parity is
 not comprehensively tested. Production Postgres wiring, remote secret custody,
 object storage, and multi-process ownership remain future integration work.
 
+**Authorization is the gate on this profile, and it is not built.** The API has
+no per-user authorization at all: `auth.rs` is a per-launch bearer on a loopback
+port, which answers "is this the client this process handed a token to" — a
+capability check on a local process, not a principal. No route is owner-scoped;
+`require_chat` checks that a chat *exists* and nothing else, and the document,
+project, and settings surfaces are the same. Identity work (#578) is deliberately
+attributive only and states that no read path consults it, so it does not close
+this.
+
+That is the right trade for a local-first desktop, where the bearer is
+per-launch, loopback-only, and belongs to the one person at the machine. It stops
+being right the moment more than one person's data shares a store: an existence
+check that passes for any authenticated caller is an authorization bug as soon as
+callers differ. Finishing this profile without resolving a principal in the
+request path and scoping queries by owner would ship a multi-user server whose
+every mode degrades to "any authenticated caller can see everything". Tracked as
+a gate in #853, which any shared-deployment work should be blocked on.
+
 ## Where the code lives
 
 | Area | Start here | What it owns |
@@ -915,6 +933,9 @@ The main next steps are:
   sandbox-safe capabilities without widening exact delegated-file or spawn
   authority;
 - add richer parsers and wire indexed search into MCP;
+- resolve a principal in the request path and scope queries by owner (#853)
+  before finishing the self-host profile, which is otherwise a multi-user server
+  with no per-user authorization;
 - finish the self-host profile rather than only testing Postgres state logic;
 - add health-aware provider failover;
 - add output deletion, version history, richer formats, and durable export

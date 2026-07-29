@@ -30,6 +30,27 @@ pub(super) fn relative_path(rel: &str) -> std::result::Result<PathBuf, String> {
     Ok(path.to_path_buf())
 }
 
+/// The last segment of a scratch-relative path, for a card row's name.
+///
+/// A row leads with the file rather than the path so a column of results stays
+/// scannable; the full path is the row's secondary hint. A path that ends in a
+/// separator has no last segment, and there is nothing better to show than what
+/// the model asked for.
+pub(super) fn file_name(path: &str) -> &str {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path)
+}
+
+/// How many lines a read returned, phrased for a card.
+pub(super) fn line_count(content: &str) -> String {
+    // A file with no trailing newline still has a last line, and an empty file
+    // has none — which `lines()` gets right and a newline count does not.
+    let lines = content.lines().count();
+    format!("{lines} {}", if lines == 1 { "line" } else { "lines" })
+}
+
 pub(super) fn read_utf8_file(workspace: &Dir, path: &Path) -> std::result::Result<String, String> {
     let bytes = read_regular_file_bytes(workspace, path, MAX_READ_FILE_BYTES)?;
     String::from_utf8(bytes).map_err(|_| "file is not valid UTF-8".into())
@@ -155,7 +176,7 @@ pub(super) fn write_utf8_file(workspace: &Dir, path: &Path, content: &[u8]) -> s
 /// A hard link gives the temporary file an atomic, no-replace final name. If a
 /// previous attempt already published that name, accepting it only when its
 /// exact bytes match makes an interrupted store response safe to retry.
-pub(super) fn publish_immutable_file(
+pub(crate) fn publish_immutable_file(
     workspace: &Dir,
     path: &Path,
     content: &[u8],

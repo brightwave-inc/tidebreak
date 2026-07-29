@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 use crate::receipt::{request_fingerprint, BeginExecution, ExecutionReceipt};
 use crate::{
     CodeExecutionError, CodeExecutionProviderKind, CodeExecutionRequest, CodeExecutionResponse,
+    WorkspaceFilePath, WorkspaceListing,
 };
 
 /// Shared process-local sessions and idempotency receipts for managed sandboxes.
@@ -70,6 +71,32 @@ pub(crate) trait RemoteSandboxAdapter: Send + Sync {
         session: &RemoteSession,
         request: &CodeExecutionRequest,
     ) -> Result<CodeExecutionResponse, RemoteSessionError>;
+}
+
+/// Vendor file and teardown transports behind the shared workspace lifecycle.
+#[async_trait]
+pub(crate) trait RemoteWorkspaceAdapter: RemoteSandboxAdapter {
+    async fn upload_file(
+        &self,
+        session: &RemoteSession,
+        path: &WorkspaceFilePath,
+        content: &[u8],
+    ) -> Result<(), RemoteSessionError>;
+
+    async fn download_file(
+        &self,
+        session: &RemoteSession,
+        path: &WorkspaceFilePath,
+    ) -> Result<Vec<u8>, RemoteSessionError>;
+
+    async fn list_directory(
+        &self,
+        session: &RemoteSession,
+        path: Option<&WorkspaceFilePath>,
+    ) -> Result<WorkspaceListing, RemoteSessionError>;
+
+    /// Destroy the remote sandbox. A sandbox that is already gone is success.
+    async fn destroy_sandbox(&self, session: &RemoteSession) -> Result<(), CodeExecutionError>;
 }
 
 impl RemoteSessionPool {
@@ -151,43 +178,154 @@ async fn execute_uncached(
     pool: &RemoteSessionPool,
     request: &CodeExecutionRequest,
 ) -> Result<CodeExecutionResponse, CodeExecutionError> {
-    let provider = adapter.kind();
-    let session = pool
+    with_remote_session(
+        adapter,
+        pool,
+        request.workspace_id.as_str(),
+        |adapter, session| async move { adapter.run_command(&session, request).await },
+    )
+    .await
+}
+
+/// Run one operation against the chat's connected remote session, creating or
+/// reconnecting the sandbox first. Operations for one chat are serialized so
+/// workspace mutations have a deterministic order and session replacement
+/// cannot race execution.
+pub(crate) async fn with_remote_session<'a, A, T, F, Fut>(
+    adapter: &'a A,
+    pool: &RemoteSessionPool,
+    workspace_id: &str,
+    operation: F,
+) -> Result<T, CodeExecutionError>
+where
+    A: RemoteSandboxAdapter + ?Sized,
+    F: FnOnce(&'a A, RemoteSession) -> Fut,
+    Fut: std::future::Future<Output = Result<T, RemoteSessionError>>,
+{
+    let slot = pool
         .session(
-            provider,
+            adapter.kind(),
             adapter.credential_fingerprint(),
-            request.workspace_id.as_str(),
+            workspace_id,
         )
         .await;
-    // Commands for one chat are serialized so workspace mutations have a
-    // deterministic order and session replacement cannot race execution.
-    let mut session = session.lock().await;
-    let active = match session.as_ref() {
-        Some(existing) => match adapter.reconnect_session(existing).await? {
-            Some(connected) => connected,
-            None => {
-                adapter
-                    .create_session(request.workspace_id.as_str())
-                    .await?
-            }
-        },
-        None => {
-            adapter
-                .create_session(request.workspace_id.as_str())
-                .await?
-        }
-    };
-    *session = Some(active.clone());
-
-    match adapter.run_command(&active, request).await {
-        Ok(response) => Ok(response),
+    let mut slot = slot.lock().await;
+    let active = connected_session(adapter, &mut slot, workspace_id).await?;
+    match operation(adapter, active).await {
+        Ok(value) => Ok(value),
         Err(RemoteSessionError::Missing) => {
-            *session = None;
+            *slot = None;
             Err(CodeExecutionError::Unavailable(format!(
                 "{} sandbox is no longer available",
-                provider
+                adapter.kind()
             )))
         }
         Err(RemoteSessionError::Provider(error)) => Err(error),
+    }
+}
+
+async fn connected_session<A>(
+    adapter: &A,
+    slot: &mut Option<RemoteSession>,
+    workspace_id: &str,
+) -> Result<RemoteSession, CodeExecutionError>
+where
+    A: RemoteSandboxAdapter + ?Sized,
+{
+    let active = match slot.as_ref() {
+        Some(existing) => match adapter.reconnect_session(existing).await? {
+            Some(connected) => connected,
+            None => adapter.create_session(workspace_id).await?,
+        },
+        None => adapter.create_session(workspace_id).await?,
+    };
+    *slot = Some(active.clone());
+    Ok(active)
+}
+
+/// Ensure the chat's durable remote workspace exists.
+pub(crate) async fn create_remote_workspace<A>(
+    adapter: &A,
+    pool: &RemoteSessionPool,
+    workspace_id: &str,
+) -> Result<(), CodeExecutionError>
+where
+    A: RemoteSandboxAdapter + ?Sized,
+{
+    let slot = pool
+        .session(
+            adapter.kind(),
+            adapter.credential_fingerprint(),
+            workspace_id,
+        )
+        .await;
+    let mut slot = slot.lock().await;
+    connected_session(adapter, &mut slot, workspace_id)
+        .await
+        .map(|_| ())
+}
+
+/// Connect to an existing remote workspace without creating one. The host can
+/// only reach sandboxes it has a pooled handle for; a workspace with no handle
+/// reports unreachable rather than provisioning a new sandbox.
+pub(crate) async fn connect_remote_workspace<A>(
+    adapter: &A,
+    pool: &RemoteSessionPool,
+    workspace_id: &str,
+) -> Result<bool, CodeExecutionError>
+where
+    A: RemoteSandboxAdapter + ?Sized,
+{
+    let slot = pool
+        .session(
+            adapter.kind(),
+            adapter.credential_fingerprint(),
+            workspace_id,
+        )
+        .await;
+    let mut slot = slot.lock().await;
+    let Some(existing) = slot.as_ref() else {
+        return Ok(false);
+    };
+    match adapter.reconnect_session(existing).await? {
+        Some(connected) => {
+            *slot = Some(connected);
+            Ok(true)
+        }
+        None => {
+            *slot = None;
+            Ok(false)
+        }
+    }
+}
+
+/// Destroy the chat's remote sandbox if the host holds a handle to one. The
+/// handle is released only after the provider acknowledges the destroy, so a
+/// failed teardown stays retryable.
+pub(crate) async fn destroy_remote_workspace<A>(
+    adapter: &A,
+    pool: &RemoteSessionPool,
+    workspace_id: &str,
+) -> Result<(), CodeExecutionError>
+where
+    A: RemoteWorkspaceAdapter + ?Sized,
+{
+    let slot = pool
+        .session(
+            adapter.kind(),
+            adapter.credential_fingerprint(),
+            workspace_id,
+        )
+        .await;
+    let mut slot = slot.lock().await;
+    let Some(session) = slot.take() else {
+        return Ok(());
+    };
+    match adapter.destroy_sandbox(&session).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            *slot = Some(session);
+            Err(error)
+        }
     }
 }

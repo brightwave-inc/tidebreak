@@ -3,18 +3,22 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use openwave_core::SecretProvider;
+use openwave_egress::{EgressEnforcement, EgressPolicy};
 use reqwest::{Client, Response, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 
 use crate::credential::SecretCredential;
-use crate::http::decode_bounded_json;
+use crate::http::{decode_bounded_json, download_bounded_file, multipart_file};
 use crate::output::{Capture, StreamKind};
 use crate::remote::{
-    execute_remote, RemoteSandboxAdapter, RemoteSession, RemoteSessionError, RemoteSessionPool,
+    connect_remote_workspace, create_remote_workspace, destroy_remote_workspace, execute_remote,
+    with_remote_session, RemoteSandboxAdapter, RemoteSession, RemoteSessionError,
+    RemoteSessionPool, RemoteWorkspaceAdapter,
 };
 use crate::{
     CodeExecutionError, CodeExecutionProvider, CodeExecutionProviderKind, CodeExecutionRequest,
-    CodeExecutionResponse,
+    CodeExecutionResponse, ExecutionWorkspaceId, WorkspaceFileEntry, WorkspaceFilePath,
+    WorkspaceLifecycle, WorkspaceListing, MAX_WORKSPACE_FILE_BYTES, MAX_WORKSPACE_LIST_ENTRIES,
 };
 
 const DAYTONA_API_BASE: &str = "https://app.daytona.io/api";
@@ -23,6 +27,10 @@ const DAYTONA_START_TIMEOUT: Duration = Duration::from_secs(60);
 const DAYTONA_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const DAYTONA_TRANSPORT_GRACE: Duration = Duration::from_secs(10);
 const MAX_DAYTONA_RESPONSE_BYTES: usize = 1024 * 1024;
+/// Daytona accepts at most this many CIDR entries per sandbox allowlist.
+const DAYTONA_MAX_NETWORK_ALLOW_ENTRIES: usize = 10;
+/// Daytona accepts at most this many domain entries per sandbox allowlist.
+const DAYTONA_MAX_DOMAIN_ALLOW_ENTRIES: usize = 20;
 
 /// Fixed key for Daytona credentials in OpenWave's host secret store.
 pub const DAYTONA_CREDENTIAL_KEY: &str = "code_execution.daytona.api_key";
@@ -68,6 +76,7 @@ pub struct DaytonaExecutionProvider {
     pool: RemoteSessionPool,
     client: Client,
     endpoints: DaytonaEndpoints,
+    egress: Option<EgressPolicy>,
 }
 
 #[derive(Clone)]
@@ -125,7 +134,70 @@ impl DaytonaExecutionProvider {
             pool,
             client,
             endpoints,
+            egress: None,
         })
+    }
+
+    /// Compile an egress policy into every sandbox this provider creates.
+    ///
+    /// Without a policy the provider keeps today's disclosed open-egress
+    /// creation. With one, sandboxes are created with Daytona's block-all
+    /// switch or its per-sandbox allowlists — subject to the vendor exception
+    /// list declared by [`Self::egress_enforcement`], and to Daytona's plan
+    /// gating on per-sandbox network overrides. Fails when the allowlist
+    /// exceeds Daytona's entry limits, before any sandbox is created.
+    pub fn with_egress_policy(mut self, policy: EgressPolicy) -> Result<Self, CodeExecutionError> {
+        if let EgressPolicy::Allowlist(allowlist) = &policy {
+            if allowlist.cidrs().len() > DAYTONA_MAX_NETWORK_ALLOW_ENTRIES {
+                return Err(CodeExecutionError::InvalidRequest(format!(
+                    "Daytona accepts at most {DAYTONA_MAX_NETWORK_ALLOW_ENTRIES} egress address blocks"
+                )));
+            }
+            if allowlist.domains().len() > DAYTONA_MAX_DOMAIN_ALLOW_ENTRIES {
+                return Err(CodeExecutionError::InvalidRequest(format!(
+                    "Daytona accepts at most {DAYTONA_MAX_DOMAIN_ALLOW_ENTRIES} egress domain patterns"
+                )));
+            }
+        }
+        self.egress = Some(policy);
+        Ok(self)
+    }
+
+    /// The egress policy compiled into this provider's sandboxes, or `None` for
+    /// today's open-internet creation. Exposed so the host wiring that selects
+    /// and applies a policy can be verified without a live API.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn egress_policy(&self) -> Option<&EgressPolicy> {
+        self.egress.as_ref()
+    }
+
+    /// Host knowledge about Daytona's per-sandbox network enforcement,
+    /// declared as what it actually blocks.
+    ///
+    /// A live test against a real Daytona account (issue #888) established that
+    /// a per-sandbox policy is a *strict*, externally-enforced allowlist: only
+    /// listed domains are reachable, raw-IP egress and unlisted-domain DNS are
+    /// blocked, and there is no "essential services" carve-out — package
+    /// registries, public git hosting, container registries, and AI APIs are
+    /// all blocked under a per-sandbox policy, contrary to the earlier
+    /// assumption this code encoded. So the surface has the external tier with
+    /// no general-purpose holes and qualifies as a credential boundary; in fact
+    /// it is stronger than E2B, which limits domain rules to HTTP/HTTPS ports
+    /// and leaves DNS open.
+    ///
+    /// The one caveat left is a precondition the adapter cannot verify
+    /// statically, so it is *not* encoded here (this declares what the
+    /// mechanism blocks, not account state): the per-sandbox egress override
+    /// requires Daytona org tier 3+. On tier 1–2 the override is refused and the
+    /// org default applies, so the boundary is not guaranteed. The host
+    /// projection surfaces that requirement inline as a conditional boundary
+    /// rather than an unconditional one.
+    #[must_use]
+    pub fn egress_enforcement() -> EgressEnforcement {
+        // No general-purpose exceptions: a per-sandbox policy blocks every
+        // unlisted destination, confirmed live in #888.
+        EgressEnforcement::external(Vec::new())
     }
 
     async fn create_sandbox(
@@ -141,7 +213,7 @@ impl DaytonaExecutionProvider {
                     ("openwave_workspace_id", workspace_id),
                     ("code-toolbox-language", "python"),
                 ]),
-                network_block_all: false,
+                network: daytona_network_settings(self.egress.as_ref()),
                 auto_stop_interval: DAYTONA_IDLE_MINUTES,
                 // Delete once the idle stop happens. A later command creates a
                 // fresh chat workspace instead of leaving stopped resources.
@@ -260,10 +332,11 @@ impl DaytonaExecutionProvider {
         let endpoint = session.endpoint.as_deref().ok_or_else(|| {
             CodeExecutionError::Unavailable("Daytona toolbox endpoint is unavailable".into())
         })?;
-        let url = toolbox_execute_url(
+        let url = toolbox_url(
             endpoint,
             &session.sandbox_id,
             self.endpoints.allow_insecure_toolbox,
+            "process/execute",
         )?;
         let started = Instant::now();
         let response = self
@@ -327,6 +400,22 @@ impl DaytonaExecutionProvider {
         ))
     }
 
+    fn toolbox_file_url(
+        &self,
+        session: &RemoteSession,
+        suffix: &str,
+    ) -> Result<Url, CodeExecutionError> {
+        let endpoint = session.endpoint.as_deref().ok_or_else(|| {
+            CodeExecutionError::Unavailable("Daytona toolbox endpoint is unavailable".into())
+        })?;
+        toolbox_url(
+            endpoint,
+            &session.sandbox_id,
+            self.endpoints.allow_insecure_toolbox,
+            suffix,
+        )
+    }
+
     async fn decode_sandbox(
         &self,
         response: Response,
@@ -379,6 +468,212 @@ impl RemoteSandboxAdapter for DaytonaExecutionProvider {
 }
 
 #[async_trait]
+impl RemoteWorkspaceAdapter for DaytonaExecutionProvider {
+    async fn upload_file(
+        &self,
+        session: &RemoteSession,
+        path: &WorkspaceFilePath,
+        content: &[u8],
+    ) -> Result<(), RemoteSessionError> {
+        let url = self.toolbox_file_url(session, "files/upload")?;
+        let multipart = multipart_file(path.file_name(), content);
+        let response = self
+            .client
+            .post(url)
+            .bearer_auth(self.credential.as_str())
+            .query(&[("path", path.as_str())])
+            .header("Content-Type", multipart.content_type)
+            .body(multipart.body)
+            .send()
+            .await
+            .map_err(|_| CodeExecutionError::Unavailable("could not reach Daytona".into()))?;
+        if matches!(
+            response.status(),
+            StatusCode::NOT_FOUND | StatusCode::GONE | StatusCode::BAD_GATEWAY
+        ) {
+            return Err(RemoteSessionError::Missing);
+        }
+        if !response.status().is_success() {
+            return Err(provider_status_error(response.status()).into());
+        }
+        Ok(())
+    }
+
+    async fn download_file(
+        &self,
+        session: &RemoteSession,
+        path: &WorkspaceFilePath,
+    ) -> Result<Vec<u8>, RemoteSessionError> {
+        let url = self.toolbox_file_url(session, "files/download")?;
+        let response = self
+            .client
+            .get(url)
+            .bearer_auth(self.credential.as_str())
+            .query(&[("path", path.as_str())])
+            .send()
+            .await
+            .map_err(|_| CodeExecutionError::Unavailable("could not reach Daytona".into()))?;
+        // The session was reconciled immediately before this call, so a 404
+        // here is the file rather than the sandbox.
+        if response.status() == StatusCode::NOT_FOUND {
+            return Err(CodeExecutionError::WorkspaceFileNotFound.into());
+        }
+        if matches!(
+            response.status(),
+            StatusCode::GONE | StatusCode::BAD_GATEWAY
+        ) {
+            return Err(RemoteSessionError::Missing);
+        }
+        if !response.status().is_success() {
+            return Err(provider_status_error(response.status()).into());
+        }
+        download_bounded_file(response, "Daytona", MAX_WORKSPACE_FILE_BYTES)
+            .await
+            .map_err(RemoteSessionError::Provider)
+    }
+
+    async fn list_directory(
+        &self,
+        session: &RemoteSession,
+        path: Option<&WorkspaceFilePath>,
+    ) -> Result<WorkspaceListing, RemoteSessionError> {
+        let url = self.toolbox_file_url(session, "files")?;
+        let listed = path.map_or(".", WorkspaceFilePath::as_str);
+        let response = self
+            .client
+            .get(url)
+            .bearer_auth(self.credential.as_str())
+            .query(&[("path", listed)])
+            .send()
+            .await
+            .map_err(|_| CodeExecutionError::Unavailable("could not reach Daytona".into()))?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Err(CodeExecutionError::WorkspaceFileNotFound.into());
+        }
+        if matches!(
+            response.status(),
+            StatusCode::GONE | StatusCode::BAD_GATEWAY
+        ) {
+            return Err(RemoteSessionError::Missing);
+        }
+        if !response.status().is_success() {
+            return Err(provider_status_error(response.status()).into());
+        }
+        let files = decode_bounded_json::<Vec<DaytonaFileInfo>>(
+            response,
+            "Daytona",
+            MAX_DAYTONA_RESPONSE_BYTES,
+        )
+        .await
+        .map_err(RemoteSessionError::Provider)?;
+        let mut entries = Vec::new();
+        for file in files {
+            if file.name.is_empty() {
+                continue;
+            }
+            let relative = match path {
+                None => file.name,
+                Some(path) => format!("{}/{}", path.as_str(), file.name),
+            };
+            entries.push(WorkspaceFileEntry {
+                path: relative,
+                directory: file.is_dir,
+                size_bytes: (!file.is_dir).then_some(file.size).flatten(),
+            });
+        }
+        entries.sort_by(|left, right| left.path.cmp(&right.path));
+        let truncated = entries.len() > MAX_WORKSPACE_LIST_ENTRIES;
+        entries.truncate(MAX_WORKSPACE_LIST_ENTRIES);
+        Ok(WorkspaceListing { entries, truncated })
+    }
+
+    async fn destroy_sandbox(&self, session: &RemoteSession) -> Result<(), CodeExecutionError> {
+        validate_sandbox_id(&session.sandbox_id)?;
+        let response = self
+            .client
+            .delete(self.api_url(&format!("/sandbox/{}", session.sandbox_id)))
+            .bearer_auth(self.credential.as_str())
+            .send()
+            .await
+            .map_err(|_| CodeExecutionError::Unavailable("could not reach Daytona".into()))?;
+        if response.status() == StatusCode::NOT_FOUND || response.status().is_success() {
+            return Ok(());
+        }
+        Err(provider_status_error(response.status()))
+    }
+}
+
+#[async_trait]
+impl WorkspaceLifecycle for DaytonaExecutionProvider {
+    async fn create_workspace(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+    ) -> Result<(), CodeExecutionError> {
+        create_remote_workspace(self, &self.pool, workspace.as_str()).await
+    }
+
+    async fn connect_workspace(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+    ) -> Result<bool, CodeExecutionError> {
+        connect_remote_workspace(self, &self.pool, workspace.as_str()).await
+    }
+
+    async fn destroy_workspace(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+    ) -> Result<(), CodeExecutionError> {
+        destroy_remote_workspace(self, &self.pool, workspace.as_str()).await
+    }
+
+    async fn put_workspace_file(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+        path: &WorkspaceFilePath,
+        content: &[u8],
+    ) -> Result<(), CodeExecutionError> {
+        if content.len() > MAX_WORKSPACE_FILE_BYTES {
+            return Err(CodeExecutionError::WorkspaceFileTooLarge);
+        }
+        with_remote_session(
+            self,
+            &self.pool,
+            workspace.as_str(),
+            |adapter, session| async move { adapter.upload_file(&session, path, content).await },
+        )
+        .await
+    }
+
+    async fn get_workspace_file(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+        path: &WorkspaceFilePath,
+    ) -> Result<Vec<u8>, CodeExecutionError> {
+        with_remote_session(
+            self,
+            &self.pool,
+            workspace.as_str(),
+            |adapter, session| async move { adapter.download_file(&session, path).await },
+        )
+        .await
+    }
+
+    async fn list_workspace_files(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+        path: Option<&WorkspaceFilePath>,
+    ) -> Result<WorkspaceListing, CodeExecutionError> {
+        with_remote_session(
+            self,
+            &self.pool,
+            workspace.as_str(),
+            |adapter, session| async move { adapter.list_directory(&session, path).await },
+        )
+        .await
+    }
+}
+
+#[async_trait]
 impl CodeExecutionProvider for DaytonaExecutionProvider {
     async fn execute(
         &self,
@@ -386,15 +681,86 @@ impl CodeExecutionProvider for DaytonaExecutionProvider {
     ) -> Result<CodeExecutionResponse, CodeExecutionError> {
         execute_remote(self, &self.pool, request).await
     }
+
+    fn workspace_lifecycle(&self) -> Option<&dyn WorkspaceLifecycle> {
+        Some(self)
+    }
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateSandboxRequest<'a> {
     labels: HashMap<&'static str, &'a str>,
-    network_block_all: bool,
+    #[serde(flatten)]
+    network: DaytonaNetworkSettings,
     auto_stop_interval: u32,
     auto_delete_interval: u32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DaytonaNetworkSettings {
+    network_block_all: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    network_allow_list: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    domain_allow_list: Option<String>,
+}
+
+/// Compile the host policy into Daytona's creation-time network controls. No
+/// policy keeps today's disclosed open-egress sandbox. Block-all and the
+/// empty allowlist use the block-all switch; a non-empty allowlist becomes
+/// Daytona's comma-separated CIDR and wildcard-domain allowlists, which deny
+/// every other destination the vendor's exception list does not keep open.
+///
+/// A non-empty allowlist emits *both* the CIDR and the domain field, present
+/// but empty when that axis has no entries, rather than omitting the empty
+/// one. This mirrors E2B's explicit `allow_internet_access: false` baseline:
+/// a domain-only policy must still deny raw-IP egress, and an omitted CIDR
+/// field could read as "no restriction on that axis" and leave IP egress
+/// fully open — defeating deny-by-default. Present-but-empty means "allow
+/// nothing on this axis."
+///
+/// A live test against a real Daytona account (issue #888) confirmed that
+/// empty-but-present *is* read as deny-all on that axis: under a domain-only
+/// policy (`domainAllowList` set, `networkAllowList` present but empty) raw-IP
+/// egress was blocked at connect and forbidden by the proxy. The
+/// present-but-empty deny-all shape is therefore relied on, not assumed. The
+/// default (no policy → open egress) is unchanged.
+fn daytona_network_settings(policy: Option<&EgressPolicy>) -> DaytonaNetworkSettings {
+    let open = DaytonaNetworkSettings {
+        network_block_all: false,
+        network_allow_list: None,
+        domain_allow_list: None,
+    };
+    match policy {
+        None => open,
+        Some(EgressPolicy::BlockAll) => DaytonaNetworkSettings {
+            network_block_all: true,
+            ..open
+        },
+        Some(EgressPolicy::Allowlist(allowlist)) => {
+            if allowlist.is_empty() {
+                return DaytonaNetworkSettings {
+                    network_block_all: true,
+                    ..open
+                };
+            }
+            DaytonaNetworkSettings {
+                network_block_all: false,
+                network_allow_list: Some(comma_joined(allowlist.cidrs())),
+                domain_allow_list: Some(comma_joined(allowlist.domains())),
+            }
+        }
+    }
+}
+
+fn comma_joined<T: ToString>(entries: &[T]) -> String {
+    entries
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 #[derive(Deserialize)]
@@ -435,6 +801,17 @@ struct DaytonaErrorResponse {
     code: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DaytonaFileInfo {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    is_dir: bool,
+    #[serde(default)]
+    size: Option<u64>,
+}
+
 /// Preserve the provider-neutral direct argv contract over Daytona's shell-text
 /// transport. Quoting every element keeps metacharacters as argument data; the
 /// shell is only the protocol bridge and is replaced by the requested process.
@@ -468,17 +845,15 @@ fn timeout_seconds(timeout: Duration) -> u32 {
         .max(1)
 }
 
-fn toolbox_execute_url(
+fn toolbox_url(
     endpoint: &str,
     sandbox_id: &str,
     allow_insecure: bool,
+    suffix: &str,
 ) -> Result<Url, CodeExecutionError> {
     validate_sandbox_id(sandbox_id)?;
     let mut url = validate_toolbox_base(endpoint, allow_insecure)?;
-    let path = format!(
-        "{}/{sandbox_id}/process/execute",
-        url.path().trim_end_matches('/')
-    );
+    let path = format!("{}/{sandbox_id}/{suffix}", url.path().trim_end_matches('/'));
     url.set_path(&path);
     Ok(url)
 }
@@ -537,9 +912,11 @@ fn provider_status_error(status: StatusCode) -> CodeExecutionError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap as StdHashMap;
     use std::sync::{Arc, Mutex, OnceLock};
 
-    use axum::extract::{Path, State};
+    use axum::body::Bytes;
+    use axum::extract::{Path, Query, State};
     use axum::http::{HeaderMap, StatusCode};
     use axum::routing::{get, post};
     use axum::{Json, Router};
@@ -552,14 +929,18 @@ mod tests {
     struct MockState {
         base: Arc<OnceLock<String>>,
         requests: Arc<Mutex<Vec<(String, HeaderMap, Value)>>>,
+        files: Arc<Mutex<StdHashMap<String, Vec<u8>>>>,
     }
 
     async fn spawn_mock() -> (String, MockState, tokio::task::JoinHandle<()>) {
         let state = MockState::default();
         let app = Router::new()
+            .route("/api/sandbox/{id}", get(get_sandbox).delete(delete_sandbox))
             .route("/api/sandbox", post(create_sandbox))
-            .route("/api/sandbox/{id}", get(get_sandbox))
             .route("/toolbox/{id}/process/execute", post(execute))
+            .route("/toolbox/{id}/files", get(list_files))
+            .route("/toolbox/{id}/files/upload", post(upload_file))
+            .route("/toolbox/{id}/files/download", get(download_file))
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -633,6 +1014,90 @@ mod tests {
                 Json(json!({"exitCode": 0, "result": "ok\n"})),
             )
         }
+    }
+
+    async fn delete_sandbox(
+        State(state): State<MockState>,
+        Path(id): Path<String>,
+        headers: HeaderMap,
+    ) -> StatusCode {
+        state
+            .requests
+            .lock()
+            .unwrap()
+            .push(("delete".into(), headers, json!({"id": id})));
+        StatusCode::OK
+    }
+
+    async fn upload_file(
+        State(state): State<MockState>,
+        Path(id): Path<String>,
+        Query(query): Query<StdHashMap<String, String>>,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> StatusCode {
+        assert_eq!(id, "sandbox-123");
+        let content = multipart_content(&headers, &body);
+        state.requests.lock().unwrap().push((
+            "upload".into(),
+            headers,
+            json!({"path": query["path"]}),
+        ));
+        state
+            .files
+            .lock()
+            .unwrap()
+            .insert(query["path"].clone(), content);
+        StatusCode::OK
+    }
+
+    async fn download_file(
+        State(state): State<MockState>,
+        Path(id): Path<String>,
+        Query(query): Query<StdHashMap<String, String>>,
+    ) -> Result<Vec<u8>, StatusCode> {
+        assert_eq!(id, "sandbox-123");
+        state
+            .files
+            .lock()
+            .unwrap()
+            .get(&query["path"])
+            .cloned()
+            .ok_or(StatusCode::NOT_FOUND)
+    }
+
+    async fn list_files(
+        State(state): State<MockState>,
+        Path(id): Path<String>,
+        Query(query): Query<StdHashMap<String, String>>,
+    ) -> Json<Value> {
+        assert_eq!(id, "sandbox-123");
+        assert_eq!(query["path"], ".");
+        let files = state.files.lock().unwrap();
+        let entries: Vec<Value> = files
+            .iter()
+            .map(|(path, content)| {
+                json!({
+                    "name": path.rsplit('/').next().unwrap(),
+                    "isDir": false,
+                    "size": content.len(),
+                    "modTime": "2026-07-28T00:00:00Z",
+                })
+            })
+            .collect();
+        Json(json!(entries))
+    }
+
+    fn multipart_content(headers: &HeaderMap, body: &[u8]) -> Vec<u8> {
+        let content_type = headers
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap();
+        let boundary = content_type.split("boundary=").nth(1).unwrap().to_owned();
+        let start = body.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        let tail = format!("\r\n--{boundary}--\r\n");
+        assert!(body.ends_with(tail.as_bytes()));
+        body[start..body.len() - tail.len()].to_vec()
     }
 
     fn request(execution_id: &str) -> CodeExecutionRequest {
@@ -726,6 +1191,8 @@ mod tests {
             .map(|(_, _, body)| body)
             .unwrap();
         assert_eq!(create_body["networkBlockAll"], false);
+        assert!(create_body.get("networkAllowList").is_none());
+        assert!(create_body.get("domainAllowList").is_none());
         assert_eq!(create_body["autoStopInterval"], DAYTONA_IDLE_MINUTES);
         assert_eq!(create_body["autoDeleteInterval"], 0);
         assert_eq!(create_body["labels"]["openwave_workspace_id"], "chat-123");
@@ -740,6 +1207,150 @@ mod tests {
         );
         assert_eq!(execute_body["cwd"], ".");
         assert_eq!(execute_body["timeout"], 5);
+        server.abort();
+    }
+
+    #[test]
+    fn daytona_compiles_the_egress_policy_into_creation_network_fields() {
+        use openwave_egress::{CidrBlock, DomainPattern, EgressAllowlist};
+
+        let allowlist = |domains: &[&str], cidrs: &[&str]| {
+            EgressPolicy::Allowlist(EgressAllowlist::new(
+                domains
+                    .iter()
+                    .map(|pattern| DomainPattern::parse(pattern).unwrap())
+                    .collect(),
+                cidrs
+                    .iter()
+                    .map(|block| CidrBlock::parse(block).unwrap())
+                    .collect(),
+            ))
+        };
+
+        // The wire shape Daytona receives, pinned through the same serde
+        // struct the creation request embeds.
+        let policy = allowlist(&["*.pypi.org", "crates.io"], &["140.82.112.0/20"]);
+        let body = serde_json::to_value(daytona_network_settings(Some(&policy))).unwrap();
+        assert_eq!(body["networkBlockAll"], false);
+        assert_eq!(body["networkAllowList"], "140.82.112.0/20");
+        assert_eq!(body["domainAllowList"], "*.pypi.org,crates.io");
+
+        // A domain-only policy still expresses a deny-all baseline for raw-IP
+        // egress: the CIDR field is present but empty, never omitted, so an
+        // absent axis can't read as "no IP restriction".
+        let domain_only = allowlist(&["*.pypi.org"], &[]);
+        let body = serde_json::to_value(daytona_network_settings(Some(&domain_only))).unwrap();
+        assert_eq!(body["networkBlockAll"], false);
+        assert_eq!(body["networkAllowList"], "");
+        assert_eq!(body["domainAllowList"], "*.pypi.org");
+
+        // Symmetrically, a CIDR-only policy still denies every domain.
+        let cidr_only = allowlist(&[], &["140.82.112.0/20"]);
+        let body = serde_json::to_value(daytona_network_settings(Some(&cidr_only))).unwrap();
+        assert_eq!(body["networkAllowList"], "140.82.112.0/20");
+        assert_eq!(body["domainAllowList"], "");
+
+        // Block-all and the empty allowlist both fail closed on the switch.
+        for policy in [EgressPolicy::BlockAll, allowlist(&[], &[])] {
+            let body = serde_json::to_value(daytona_network_settings(Some(&policy))).unwrap();
+            assert_eq!(body, json!({ "networkBlockAll": true }));
+        }
+
+        // Vendor entry limits fail before any sandbox is created.
+        let provider = || {
+            DaytonaExecutionProvider::new(
+                DaytonaCredential::parse("test-daytona-key").unwrap(),
+                Duration::from_secs(5),
+            )
+            .unwrap()
+        };
+        let cidrs: Vec<String> = (0..11).map(|index| format!("10.0.{index}.0/24")).collect();
+        let cidr_refs: Vec<&str> = cidrs.iter().map(String::as_str).collect();
+        assert!(matches!(
+            provider().with_egress_policy(allowlist(&[], &cidr_refs)),
+            Err(CodeExecutionError::InvalidRequest(_))
+        ));
+        let domains: Vec<String> = (0..21)
+            .map(|index| format!("host{index}.example.com"))
+            .collect();
+        let domain_refs: Vec<&str> = domains.iter().map(String::as_str).collect();
+        assert!(matches!(
+            provider().with_egress_policy(allowlist(&domain_refs, &[])),
+            Err(CodeExecutionError::InvalidRequest(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn daytona_workspace_lifecycle_round_trips_files_over_the_toolbox_api() {
+        let (base, state, server) = spawn_mock().await;
+        let provider = DaytonaExecutionProvider::with_endpoints(
+            DaytonaCredential::parse("test-daytona-key").unwrap(),
+            Duration::from_secs(5),
+            RemoteSessionPool::default(),
+            DaytonaEndpoints {
+                api_base: format!("{base}/api"),
+                allow_insecure_toolbox: true,
+            },
+        )
+        .unwrap();
+        let workspace = ExecutionWorkspaceId::parse("chat-files").unwrap();
+
+        assert!(!provider.connect_workspace(&workspace).await.unwrap());
+        provider.create_workspace(&workspace).await.unwrap();
+        assert!(provider.connect_workspace(&workspace).await.unwrap());
+
+        let path = WorkspaceFilePath::parse("data/report.bin").unwrap();
+        let content = b"\x00daytona\xff".to_vec();
+        provider
+            .put_workspace_file(&workspace, &path, &content)
+            .await
+            .unwrap();
+        assert_eq!(
+            provider
+                .get_workspace_file(&workspace, &path)
+                .await
+                .unwrap(),
+            content
+        );
+        assert!(matches!(
+            provider
+                .get_workspace_file(&workspace, &WorkspaceFilePath::parse("missing").unwrap())
+                .await,
+            Err(CodeExecutionError::WorkspaceFileNotFound)
+        ));
+
+        let listing = provider
+            .list_workspace_files(&workspace, None)
+            .await
+            .unwrap();
+        assert_eq!(listing.entries.len(), 1);
+        assert_eq!(listing.entries[0].path, "report.bin");
+        assert_eq!(listing.entries[0].size_bytes, Some(content.len() as u64));
+
+        provider.destroy_workspace(&workspace).await.unwrap();
+        assert!(!provider.connect_workspace(&workspace).await.unwrap());
+
+        let requests = state.requests.lock().unwrap();
+        let upload = requests
+            .iter()
+            .find(|(kind, _, _)| kind == "upload")
+            .map(|(_, headers, body)| (headers.clone(), body.clone()))
+            .unwrap();
+        assert_eq!(upload.1["path"], "data/report.bin");
+        assert_eq!(
+            upload
+                .0
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer test-daytona-key")
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(kind, _, _)| kind == "delete")
+                .count(),
+            1
+        );
         server.abort();
     }
 

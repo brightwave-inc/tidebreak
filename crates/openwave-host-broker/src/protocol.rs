@@ -10,11 +10,12 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    ConsentMethod, ExecutionContext, GrantSubject, OperationId, RelativePath, RequestId, RootId,
+    Capability, ConsentMethod, ExecutionContext, GrantSubject, OperationId, RelativePath,
+    RequestId, RootId,
 };
 
 /// Current pre-v1 broker protocol. Bump this for incompatible wire changes.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// Largest file the broker returns as opaque bytes.
 ///
@@ -306,7 +307,7 @@ pub enum ControlResult {
 #[serde(tag = "result", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum OperationResult {
-    ListRoots { roots: Vec<RootSummary> },
+    ListRoots { roots: Vec<RootAccess> },
     ListDirectory { entries: Vec<DirectoryEntry> },
     ReadFile(ReadFileResult),
     ReadFileBinary(ReadFileBinaryResult),
@@ -336,6 +337,23 @@ pub struct HelloResult {
 pub struct RootSummary {
     pub root_id: RootId,
     pub display_name: String,
+}
+
+/// One reachable folder together with what the broker would actually allow on
+/// it right now.
+///
+/// `capabilities` is not a stored description of the folder. It is produced by
+/// asking the same authorization path that gates the real operations, for this
+/// exact conversation, so a caller that renders it cannot claim access the
+/// broker would refuse — or hide access it would allow. Only per-folder
+/// capabilities appear here; subject-wide ones such as
+/// [`crate::Capability::ListRoots`] are not properties of a folder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RootAccess {
+    pub root_id: RootId,
+    pub display_name: String,
+    pub capabilities: Vec<Capability>,
 }
 
 /// Result of registering and attaching a selected folder.

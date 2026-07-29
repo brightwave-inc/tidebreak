@@ -8,7 +8,7 @@ mod arguments;
 mod create_deliverable;
 mod definitions;
 mod list_dir;
-mod private_scratch;
+pub(crate) mod private_scratch;
 mod read_file;
 mod write_file;
 

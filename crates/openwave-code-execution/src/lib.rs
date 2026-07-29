@@ -28,6 +28,8 @@ pub use remote::RemoteSessionPool;
 pub use tool::{ExecTool, EXEC_TOOL_NAME};
 pub use types::{
     CodeExecutionError, CodeExecutionProvider, CodeExecutionProviderKind, CodeExecutionRequest,
-    CodeExecutionResponse, ExecutionId, ExecutionWorkspaceId, MAX_ARGUMENTS, MAX_ARGUMENT_BYTES,
-    MAX_CAPTURE_BYTES, MAX_COMMAND_BYTES, MAX_CWD_BYTES,
+    CodeExecutionResponse, ExecutionId, ExecutionWorkspaceId, WorkspaceFileEntry,
+    WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing, MAX_ARGUMENTS, MAX_ARGUMENT_BYTES,
+    MAX_CAPTURE_BYTES, MAX_COMMAND_BYTES, MAX_CWD_BYTES, MAX_WORKSPACE_FILE_BYTES,
+    MAX_WORKSPACE_LIST_ENTRIES, MAX_WORKSPACE_PATH_BYTES,
 };

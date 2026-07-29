@@ -22,6 +22,7 @@ const transcript: ChatTranscript = {
           excerpt: "Bounded source excerpt",
           heading: null,
           pages: [],
+          bounds: [],
         },
       ],
     },
@@ -37,6 +38,7 @@ describe("terminal transcript presentation", () => {
       tool_activity: [
         {
           tool: "spawn_sandbox_agent",
+          result_unreadable: false,
           status: "completed",
           started_at: "2026-07-27T12:00:00Z",
           finished_at: "2026-07-27T12:00:01Z",
@@ -62,6 +64,7 @@ describe("terminal transcript presentation", () => {
         {
           tool: "web_search",
           result: { tool: "web_search_provider_required" },
+          result_unreadable: false,
           status: "failed",
           started_at: "2026-07-27T12:00:00Z",
           finished_at: "2026-07-27T12:00:01Z",
@@ -104,6 +107,7 @@ describe("terminal transcript presentation", () => {
             excerpt: "Bounded source excerpt",
             heading: null,
             pages: [],
+            bounds: [],
           },
         ],
       },
@@ -196,6 +200,7 @@ describe("terminal transcript presentation", () => {
               excerpt: "Second bounded excerpt",
               heading: "Heading",
               pages: [4],
+              bounds: [],
             },
           ],
         },
@@ -217,6 +222,7 @@ describe("terminal transcript presentation", () => {
             excerpt: "Bounded source excerpt",
             heading: null,
             pages: [],
+            bounds: [],
           },
           {
             id: "citation-second",
@@ -226,6 +232,7 @@ describe("terminal transcript presentation", () => {
             excerpt: "Second bounded excerpt",
             heading: "Heading",
             pages: [4],
+            bounds: [],
           },
         ],
       },

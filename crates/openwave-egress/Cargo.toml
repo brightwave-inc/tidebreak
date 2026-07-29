@@ -1,0 +1,13 @@
+[package]
+name = "openwave-egress"
+description = "OpenWave egress policy: one dependency-free decision layer for every enforcement point."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

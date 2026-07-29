@@ -48,7 +48,7 @@ const OFFICE_MEDIA_TYPES: &[&str] = &[
 /// extracted text, so the durable pipeline reparses affected documents. The
 /// fingerprint describes the intended pipeline and is deliberately independent
 /// of whether LibreOffice happens to be installed at runtime.
-const OFFICE_FINGERPRINT: &str = "liteparse:v2.8:office:libreoffice:markdown:no-ocr:v1";
+const OFFICE_FINGERPRINT: &str = "liteparse:v2.8:office:libreoffice:markdown:no-ocr:positioned:v3";
 
 /// Extracts Markdown canonical text from Office documents via LibreOffice +
 /// `liteparse`.
@@ -124,7 +124,7 @@ impl LiteParseOfficeParser {
                     "liteparse could not parse the office document: {error}"
                 ))
             })?;
-        Ok(ParsedDocument::from_text(result.text))
+        Ok(crate::liteparse_regions::parsed_document_from(result))
     }
 }
 
@@ -137,6 +137,12 @@ impl DocumentParser for LiteParseOfficeParser {
 
     fn supports(&self, media_type: &str) -> bool {
         OFFICE_MEDIA_TYPES.contains(&Self::base_media_type(media_type).as_str())
+    }
+
+    /// `liteparse` is configured for Markdown output, so a parsed
+    /// office document carries Markdown regardless of the source's own type.
+    fn canonical_media_type(&self, _media_type: &str) -> String {
+        "text/markdown".to_string()
     }
 
     async fn parse(&self, raw: &[u8], media_type: &str) -> Result<ParsedDocument> {

@@ -80,6 +80,15 @@ pub struct ClientExecutionHeartbeat {
 pub enum ClientExecutionResolution {
     Completed {
         result: String,
+        /// What the executor surfaced, as `{entries, failures}`.
+        ///
+        /// Unvalidated here on purpose: the store builds the projection from it
+        /// against the call's own stored name, so the allowlist and the clamps
+        /// are applied where the name is authoritative rather than trusted from
+        /// a client that could name any tool. Absent from executors that
+        /// predate this field, which simply report no rows.
+        #[serde(default)]
+        rows: Option<serde_json::Value>,
     },
     Failed {
         result: String,
@@ -93,9 +102,18 @@ pub enum ClientExecutionResolution {
 }
 
 impl ClientExecutionResolution {
+    /// The rows the executor reported, if it reported any. Only a completed
+    /// call has any — a failure describes work that did not happen.
+    fn rows(&self) -> Option<&serde_json::Value> {
+        match self {
+            Self::Completed { rows, .. } => rows.as_ref(),
+            Self::Failed { .. } | Self::Cancelled { .. } => None,
+        }
+    }
+
     fn into_core(self) -> ToolCallResolution {
         match self {
-            Self::Completed { result } => ToolCallResolution::Completed { result },
+            Self::Completed { result, .. } => ToolCallResolution::Completed { result },
             Self::Failed {
                 result,
                 error_code,
@@ -329,30 +347,33 @@ pub async fn resolve_client_execution(
 ) -> Result<Json<ResolvedClientExecution>, ServerError> {
     ensure_chat(&state, id).await?;
     ensure_non_nil(body.lease_token, "lease_token")?;
+    let rows = body.resolution.rows().cloned();
     let resolution = body.resolution.into_core();
     validate_resolution(&resolution)?;
     let now = Utc::now();
     let mut resolution_receipt = state
         .store
-        .resolve_client_tool_call_and_append_event(
+        .resolve_client_tool_call_and_append_event_with_rows(
             call_id,
             id,
             body.lease_token,
             now,
             &resolution,
             now,
+            rows.as_ref(),
         )
         .await?;
     if resolution_receipt.outcome == ResolveToolCallOutcome::LeaseLost {
         resolution_receipt = state
             .store
-            .resolve_expired_client_tool_call_and_append_event(
+            .resolve_expired_client_tool_call_and_append_event_with_rows(
                 call_id,
                 id,
                 body.lease_token,
                 now,
                 &resolution,
                 now,
+                rows.as_ref(),
             )
             .await?;
     }

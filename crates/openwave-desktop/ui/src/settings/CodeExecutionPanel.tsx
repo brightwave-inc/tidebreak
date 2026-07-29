@@ -5,8 +5,11 @@ import type {
   CodeExecutionConfigInfo,
   CodeExecutionCredentialReadiness,
   CodeExecutionProviderKind,
+  EgressConfig,
 } from "../api";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import {
   ActiveProviderField,
   ProviderCredentialField,
@@ -15,6 +18,7 @@ import {
 } from "./ProviderFields";
 import {
   SettingsError,
+  SettingsField,
   SettingsPanel,
   SettingsSection,
   SettingsStatus,
@@ -38,6 +42,10 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
   const [apiKeys, setApiKeys] = useState<
     Partial<Record<CodeExecutionProviderKind, string>>
   >({});
+  // Egress restriction is opt-in: off means today's open-internet sandboxes.
+  const [restrictEgress, setRestrictEgress] = useState(false);
+  const [egressDomains, setEgressDomains] = useState("");
+  const [egressCidrs, setEgressCidrs] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [removing, setRemoving] = useState<CodeExecutionProviderKind | null>(
@@ -60,6 +68,7 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
         setCredentials(nextCredentials.credentials);
         setProvider(nextConfig.provider ?? "");
         setTimeoutSeconds(String(nextConfig.timeout_ms / 1000));
+        hydrateEgress(nextConfig.egress.policy);
       } catch (err) {
         if (!cancelled) setError(String(err));
       } finally {
@@ -73,6 +82,18 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
 
   const working = saving || removing !== null;
   const state = codeExecutionState(config);
+
+  function hydrateEgress(policy: EgressConfig) {
+    if (policy.mode === "allowlist") {
+      setRestrictEgress(true);
+      setEgressDomains(policy.domains.join("\n"));
+      setEgressCidrs(policy.cidrs.join("\n"));
+    } else {
+      setRestrictEgress(false);
+      setEgressDomains("");
+      setEgressCidrs("");
+    }
+  }
 
   async function save() {
     const timeout = timeoutMsFromSeconds(
@@ -99,12 +120,20 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
       const nextConfig = await client.putCodeExecutionConfig({
         provider: provider || null,
         timeout_ms: timeout.timeoutMs,
+        egress: restrictEgress
+          ? {
+              mode: "allowlist",
+              domains: splitEntries(egressDomains),
+              cidrs: splitEntries(egressCidrs),
+            }
+          : { mode: "open" },
       });
       const nextCredentials = await client.listCodeExecutionCredentials();
       setConfig(nextConfig);
       setCredentials(nextCredentials.credentials);
       setProvider(nextConfig.provider ?? "");
       setTimeoutSeconds(String(nextConfig.timeout_ms / 1000));
+      hydrateEgress(nextConfig.egress.policy);
       toast.success("Saved code-execution settings");
     } catch (err) {
       setError(String(err));
@@ -206,6 +235,72 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
             />
           </SettingsSection>
 
+          <SettingsSection
+            title="Network egress"
+            description="Cloud sandboxes reach the internet freely by default. Turn on restriction to allow only the destinations you list; everything else is denied. The local sandbox already blocks all network."
+          >
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex flex-col gap-0.5">
+                <span className="font-bold">Restrict network egress</span>
+                <span className="text-sm text-muted-foreground">
+                  {restrictEgress
+                    ? "Only the domains and address blocks below are reachable from the cloud sandbox."
+                    : "Open egress — the cloud sandbox can reach any destination, as it does today."}
+                </span>
+              </div>
+              <Switch
+                checked={restrictEgress}
+                disabled={working}
+                onCheckedChange={setRestrictEgress}
+                aria-label="Restrict network egress"
+              />
+            </div>
+
+            {restrictEgress && (
+              <>
+                <SettingsField
+                  label="Allowed domains"
+                  hint="One per line. An exact host (api.example.com) or a leading wildcard (*.pypi.org)."
+                >
+                  <textarea
+                    className={ENTRY_TEXTAREA_CLASS}
+                    rows={4}
+                    spellCheck={false}
+                    value={egressDomains}
+                    disabled={working}
+                    placeholder={"*.pypi.org\nfiles.pythonhosted.org"}
+                    onChange={(event) => setEgressDomains(event.target.value)}
+                  />
+                </SettingsField>
+
+                <SettingsField
+                  label="Allowed address blocks"
+                  hint="One per line, in CIDR notation (140.82.112.0/20) or a bare address."
+                >
+                  <textarea
+                    className={ENTRY_TEXTAREA_CLASS}
+                    rows={3}
+                    spellCheck={false}
+                    value={egressCidrs}
+                    disabled={working}
+                    placeholder={"140.82.112.0/20"}
+                    onChange={(event) => setEgressCidrs(event.target.value)}
+                  />
+                </SettingsField>
+
+                <p className="text-sm leading-relaxed text-muted-foreground">
+                  An empty allowlist blocks all egress. Domain and address rules
+                  are independent: a domain grant never opens a raw IP, and an
+                  address block never opens a hostname.
+                </p>
+              </>
+            )}
+
+            <EgressEnforcementDisclosure
+              enforcement={config.egress.enforcement}
+            />
+          </SettingsSection>
+
           {/* One save for the whole surface: it stores every key typed above
               and the selection together, so a provider cannot go active in a
               pass that failed to save its key. */}
@@ -226,6 +321,100 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
       )}
       {error && <SettingsError>{error}</SettingsError>}
     </SettingsPanel>
+  );
+}
+
+/** Textarea styled to match the shared `Input`, sized for a list of entries. */
+const ENTRY_TEXTAREA_CLASS =
+  "flex w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50";
+
+/**
+ * Split a textarea of grants into trimmed, non-empty entries. Newlines and
+ * commas both separate, so a pasted comma-joined list works as well as one per
+ * line; the server re-validates each entry's grammar.
+ */
+function splitEntries(value: string): string[] {
+  return value
+    .split(/[\n,]/)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
+type EgressEnforcementRow =
+  CodeExecutionConfigInfo["egress"]["enforcement"][number];
+
+/**
+ * How each enforcement status reads: the badge never claims a boundary a
+ * provider does not have, and the caveat sits inline beside it rather than in
+ * prose below. Driven by the server's status, which is itself derived from the
+ * enforcement model, so the UI cannot oversell what the model won't back.
+ */
+const EGRESS_STATUS_PRESENTATION: Record<
+  EgressEnforcementRow["status"],
+  { badge: "success" | "info" | "warning" | "critical"; label: string; lead: string }
+> = {
+  boundary: {
+    badge: "success",
+    label: "Boundary",
+    lead: "Enforced as a full network boundary.",
+  },
+  // A real boundary, but gated on a precondition the host can't verify. Shown
+  // in the informational tone rather than plain green, with the requirement
+  // rendered inline below, so it never reads as an unconditional boundary.
+  conditional_boundary: {
+    badge: "info",
+    label: "Boundary — conditional",
+    lead: "A strict per-sandbox boundary when enforced: unlisted domains, raw IPs, and unlisted-domain DNS are all blocked — stronger than E2B. Not guaranteed on every account:",
+  },
+  applied_with_gaps: {
+    badge: "warning",
+    label: "Applied — not a full boundary",
+    lead: "The allowlist is applied, but these stay reachable regardless of policy:",
+  },
+  unconfirmed: {
+    badge: "warning",
+    label: "Unconfirmed",
+    lead: "A policy is sent at creation, but enforcement is not yet confirmed against the live API. These stay reachable regardless of policy:",
+  },
+};
+
+/**
+ * Per-provider egress enforcement, disclosed honestly: the badge reflects the
+ * model's own status and the gaps the vendor leaves open are listed inline, so
+ * a provider that is not a full boundary can never read as one.
+ */
+function EgressEnforcementDisclosure({
+  enforcement,
+}: {
+  enforcement: CodeExecutionConfigInfo["egress"]["enforcement"];
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      {enforcement.map((row) => {
+        const presentation = EGRESS_STATUS_PRESENTATION[row.status];
+        return (
+          <div key={row.provider} className="flex items-start gap-2 text-sm">
+            <Badge variant={presentation.badge} size="sm">
+              {presentation.label}
+            </Badge>
+            <span className="text-muted-foreground">
+              <span className="font-medium text-foreground">
+                {codeExecutionProviderLabel(row.provider)}
+              </span>{" "}
+              — {presentation.lead}
+              {row.gaps.length > 0 && ` ${row.gaps.join("; ")}.`}
+              {row.requirement && (
+                <span className="font-medium text-foreground">
+                  {" "}
+                  Requires {row.requirement}. On a lower tier the per-sandbox
+                  override is refused and the account default applies.
+                </span>
+              )}
+            </span>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 

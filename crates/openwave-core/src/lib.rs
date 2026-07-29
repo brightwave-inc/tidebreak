@@ -36,6 +36,11 @@ pub mod context;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub mod db;
 pub mod deliverable;
+// Host-side acceptance writes bytes into private scratch, so it depends on the
+// capability filesystem and async runtime that only the `tools` feature pulls
+// in. The persisted contract and migration below stay available without it.
+#[cfg(feature = "tools")]
+pub mod deliverable_acceptance;
 pub mod error;
 pub mod event;
 pub mod id;
@@ -46,6 +51,7 @@ pub mod model;
 pub mod preview;
 pub mod provider;
 mod renderer_tool;
+pub mod secret_cache;
 pub mod semantic_checkpoint;
 pub mod steer;
 pub mod storage;
@@ -79,8 +85,9 @@ pub use approval::{
 pub use blob::FsBlobStore;
 pub use cancel::{CancelToken, Cancelled};
 pub use citation::{
-    format_source_reference, parse_assistant_citations, AssistantCitationReference,
-    AssistantCitationSnapshot, CitationSpan, ParsedAssistantCitations, MAX_ASSISTANT_CITATIONS,
+    format_citation_directive, format_source_reference, parse_assistant_citations,
+    AssistantCitationReference, AssistantCitationSnapshot, CitationPageBounds, CitationSpan,
+    ParsedAssistantCitations, MAX_ASSISTANT_CITATIONS, MAX_CITATION_BOUNDS,
     MAX_CITATION_EXCERPT_CHARS, MAX_CITATION_HEADING_CHARS, MAX_CITATION_PAGES,
 };
 pub use client_tools::{
@@ -102,11 +109,16 @@ pub use config::{Config, Profile};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use db::DbStore;
 pub use deliverable::{
-    deliverable_media_type, output_revision_relative_path, validate_deliverable_name, CreateOutput,
-    NewOutputRevision, OutputCitationSnapshot, OutputRecord, OutputRevision,
-    DELIVERABLES_DIRECTORY, MAX_DELIVERABLE_BYTES, MAX_DELIVERABLE_NAME_CHARS,
-    MAX_OUTPUT_CITATIONS, MAX_OUTPUT_REVISIONS, OUTPUTS_DIRECTORY,
+    deliverable_media_type, media_type_is_text, output_revision_relative_path,
+    revision_byte_ceiling, validate_binary_deliverable, validate_deliverable_media_type,
+    validate_deliverable_name, validate_portable_filename, CreateOutput, DeliverableKind,
+    NewOutputRevision, OutputCitationSnapshot, OutputRecord, OutputRevision, RevisionProducer,
+    DELIVERABLES_DIRECTORY, MAX_BINARY_DELIVERABLE_BYTES, MAX_DELIVERABLE_BYTES,
+    MAX_DELIVERABLE_MEDIA_TYPE_CHARS, MAX_DELIVERABLE_NAME_CHARS, MAX_OUTPUT_CITATIONS,
+    MAX_OUTPUT_REVISIONS, OUTPUTS_DIRECTORY,
 };
+#[cfg(feature = "tools")]
+pub use deliverable_acceptance::{accept_workspace_artifact, WorkspaceArtifactProposal};
 pub use error::{AgentError, AgentErrorInfo, Result};
 pub use event::{AgentEvent, SequencedEvent};
 pub use id::{
@@ -121,31 +133,35 @@ pub use image::{
 pub use keychain::KeychainSecretProvider;
 pub use model::{
     validate_source_regions, AgentRun, AgentRunCancellationReason, AgentRunCancellationSignal,
-    AgentRunExecution, AgentRunInboxEntry, AgentRunInboxStatus, AgentRunResult,
-    AgentRunResultPayload, AgentRunStatus, AgentRunWaitCondition, AgentRunWaitSetCandidate,
-    AgentRunWaitSetCheckpointRequest, BeginRootAttachmentChange, BlobRetirement,
-    BlobRetirementStatus, ByteSpan, Chat, ChatRootAttachment, ClientToolCallRequest,
-    DelegatedFileReadClaim, DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus,
-    DocumentListCursor, DocumentParseOutput, DocumentProcessingStatus, DocumentRecord,
-    DocumentScope, DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert,
-    Message, MessageAttachment, Project, ReasoningEffort, RetrievalEvidence,
-    RetrievalEvidenceInput, RetrievalEvidenceSource, Role, RootAttachmentChange,
-    RootAttachmentChangeAction, RootAttachmentChangeFailure, RootAttachmentChangePhase,
-    RootAttachmentChangeTerminal, RootAttachmentOrigin, RootAttachmentSubjectKind,
-    SandboxAgentAdmission, SandboxSpawnCheckpoint, SandboxSpawnCheckpointRequest, SandboxToolCall,
-    SandboxToolCallReceipt, SandboxToolCallRequest, SandboxToolCallStatus, SourceLocation,
-    SourceReadiness, SourceRegion, ToolCallExecution, ToolCallRecord, ToolCallResolution,
-    ToolCallStatus, TurnAgentRunWait, TurnAgentRunWaitSet, TurnAgentRunWaitStatus,
-    TurnCheckpointProgress, TurnClientWait, TurnClientWaitStatus, TurnFailureReceipt,
-    TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer, TurnSteerStatus, MAX_ATTACHMENT_REVISION,
-    MAX_MESSAGE_ATTACHMENTS, MAX_ROOT_ATTACHMENTS,
+    AgentRunExecutionLocation, AgentRunInboxEntry, AgentRunInboxStatus, AgentRunResult,
+    AgentRunResultPayload, AgentRunStatus, AgentRunTier, AgentRunWaitCondition,
+    AgentRunWaitSetCandidate, AgentRunWaitSetCheckpointRequest, BeginRootAttachmentChange,
+    BlobRetirement, BlobRetirementStatus, ByteSpan, Chat, ChatRootAttachment,
+    ClientToolCallRequest, DelegatedFileReadClaim, DocumentGeneration, DocumentJob,
+    DocumentJobKind, DocumentJobStatus, DocumentListCursor, DocumentParseOutput,
+    DocumentProcessingStatus, DocumentRecord, DocumentScope, DocumentSourceBlob,
+    DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, MessageAttachment,
+    PageBounds, Project, ReasoningEffort, RetrievalEvidence, RetrievalEvidenceInput,
+    RetrievalEvidenceSource, Role, RootAttachmentChange, RootAttachmentChangeAction,
+    RootAttachmentChangeFailure, RootAttachmentChangePhase, RootAttachmentChangeTerminal,
+    RootAttachmentOrigin, RootAttachmentSubjectKind, SandboxAgentAdmission, SandboxSpawnCheckpoint,
+    SandboxSpawnCheckpointRequest, SandboxToolCall, SandboxToolCallReceipt, SandboxToolCallRequest,
+    SandboxToolCallStatus, SourceLocation, SourceReadiness, SourceRegion, ToolCallExecution,
+    ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnAgentRunWait, TurnAgentRunWaitSet,
+    TurnAgentRunWaitStatus, TurnCheckpointProgress, TurnClientWait, TurnClientWaitStatus,
+    TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer, TurnSteerStatus,
+    MAX_ATTACHMENT_REVISION, MAX_MESSAGE_ATTACHMENTS, MAX_ROOT_ATTACHMENTS, PAGE_BOUNDS_SCALE,
 };
-pub use preview::{ToolActionPreview, ToolResultPreview};
+pub use preview::{
+    format_bytes, ResultEntry, ResultEntryKind, ResultFailure, ToolActionPreview,
+    ToolResultPreview, MAX_RESULT_ENTRIES, MAX_RESULT_ENTRY_CHARS,
+};
 pub use provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId,
     RefusalDetails, RefusalOutcome, ResponseFormat, StopReason, ToolChoice, Usage,
 };
 pub use renderer_tool::RendererToolName;
+pub use secret_cache::CachingSecretProvider;
 pub use semantic_checkpoint::{
     ContextCheckpoint, ContextCheckpointPayloadV1, SaveContextCheckpointOutcome,
     CONTEXT_CHECKPOINT_FORMAT_V1, MAX_CONTEXT_CHECKPOINT_BYTES, MAX_CONTEXT_CHECKPOINT_ITEMS,
@@ -167,6 +183,7 @@ pub use storage::{
     FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
     FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
     JournaledToolApprovalOutcome, JournaledTurnOutcome, JournaledTurnSteerOutcome,
+    OperationClaimOutcome, OperationLogEntry, OperationLogState, OperationLogWrite,
     ParkSandboxToolCallOutcome, ParkTurnForAgentRunInboxOutcome, ParkTurnForAgentRunWaitSetOutcome,
     ParkTurnForClientCallOutcome, PendingChatPrompt, RecordTurnFailureOutcome,
     RequestAgentRunCancellationOutcome, RequestToolApprovalOutcome, RequestTurnCancellationOutcome,

@@ -17,6 +17,7 @@ use openwave_core::Config;
 mod attachments;
 mod broker;
 mod client_execution;
+mod deep_link;
 mod deliverables;
 mod documents;
 mod host_access;
@@ -161,22 +162,28 @@ pub fn run() {
 
     let (info_tx, info_rx) = watch::channel(None);
     let state = Arc::new(AppState { info_rx });
+    // Filled once the embedded server binds; the deep-link pairing handler
+    // waits on it, because a provision link often launches the app.
+    let (store_tx, store_rx) = watch::channel(None);
 
     let builder = tauri::Builder::default();
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-        if let Some(window) = app.get_webview_window("main") {
-            let _ = window.unminimize();
-            let _ = window.show();
-            let _ = window.set_focus();
-        }
+        // On Windows and Linux an `openwave://` link opens a second instance
+        // with the link as its argument. The plugin's `deep-link` feature has
+        // already forwarded `_args` to the deep-link plugin (raising the same
+        // open-URL event macOS delivers natively) before this callback runs,
+        // so the callback itself only surfaces the window.
+        deep_link::focus_main_window(app);
     }));
 
     let app = builder
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state)
+        .manage(deep_link::PairingStore::new(store_rx))
         .manage(documents::PendingLibraryDrop::default())
         .manage(updater::UpdateManager::default())
         .invoke_handler(tauri::generate_handler![
@@ -209,6 +216,7 @@ pub fn run() {
         .setup(move |app| {
             let handle = app.handle().clone();
             point_pdfium_at_bundle(&handle);
+            deep_link::install(&handle);
             updater::spawn_update_loop(handle.clone());
             let data = data_dir(&handle)?;
             let home = home_dir(&handle)?;
@@ -216,7 +224,7 @@ pub fn run() {
             app.manage(host_access);
 
             tauri::async_runtime::spawn(async move {
-                if let Err(error) = boot_server(handle, &info_tx, data.clone()).await {
+                if let Err(error) = boot_server(handle, &info_tx, store_tx, data.clone()).await {
                     // stderr for terminal launches, the app-data log for
                     // GUI launches, and the watch channel for the window.
                     eprintln!("openwave-desktop: {error}");
@@ -257,6 +265,7 @@ fn log_boot_failure(data_dir: &Path, error: &str) {
 async fn boot_server(
     app: tauri::AppHandle,
     info_tx: &watch::Sender<Option<BootOutcome>>,
+    store_tx: watch::Sender<Option<Arc<dyn openwave_core::Store>>>,
     data_dir: PathBuf,
 ) -> Result<(), String> {
     let client_executor_id = app.state::<host_access::HostAccess>().client_executor_id();
@@ -277,6 +286,8 @@ async fn boot_server(
         .map_err(|e| e.to_string())?;
     app.state::<host_access::HostAccess>()
         .initialize_store(server.store())?;
+    // Unblock any pairing task parked on a deep link that arrived pre-boot.
+    let _ = store_tx.send(Some(server.store()));
     let base_url = format!("http://{}", server.local_addr());
     let token = server.token().to_string();
     let executor_token = server.client_executor_token().to_string();

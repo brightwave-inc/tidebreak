@@ -11,6 +11,7 @@ function source(overrides: Partial<AssistantSource> = {}): AssistantSource {
     excerpt: "A short supporting excerpt.",
     heading: "Project notes",
     pages: [2, 3],
+    bounds: [],
     ...overrides,
   };
 }

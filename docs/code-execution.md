@@ -15,8 +15,8 @@ The authenticated local API owns provider selection and timeout policy:
 
 | Route | Purpose |
 | --- | --- |
-| `GET /code-execution` | Return the selected provider, timeout, and host readiness |
-| `PUT /code-execution` | Select a fixed provider or disable execution, and update the bounded timeout |
+| `GET /code-execution` | Return the selected provider, timeout, egress policy, and host readiness |
+| `PUT /code-execution` | Select a fixed provider or disable execution, update the bounded timeout, and set the managed-sandbox egress policy |
 | `GET /code-execution/credentials` | Read readiness for the fixed E2B and Daytona key slots |
 | `PUT /code-execution/credentials/{e2b\|daytona}` | Store that provider's API key in its fixed host-secret slot |
 | `DELETE /code-execution/credentials/{e2b\|daytona}` | Remove only that provider's saved API key |
@@ -44,6 +44,70 @@ value, or secret reference is accepted by the non-secret settings surface.
 `GET /code-execution` reports `has_credential` for the selected provider only,
 while `GET /code-execution/credentials` reports readiness for both managed slots
 independently. Local execution needs no credential and has no slot to report.
+
+### Egress policy
+
+`GET`/`PUT /code-execution` also carry a host-owned, non-secret egress policy for
+the managed sandboxes, under the `egress` field. It is a store setting, not a
+keychain secret: it holds only an allowlist of domain patterns and CIDR blocks,
+or `open`, and the surface accepts no endpoint or secret. The model never sets
+it — it is host configuration, like provider selection and timeout.
+
+The `policy` is one of:
+
+```json
+{ "mode": "open" }
+{ "mode": "allowlist", "domains": ["*.pypi.org"], "cidrs": ["140.82.112.0/20"] }
+```
+
+Egress restriction is **opt-in, and the default is `open`**. Managed sandboxes
+have always been created with open internet access, and flipping the default to
+deny would break package installs and network fetches inside code execution, so
+`open` stays the out-of-the-box behavior and is disclosed as such in settings.
+Configuring an allowlist switches every managed sandbox created afterwards to
+deny-by-default: only the listed domains and address blocks are reachable, and
+an empty allowlist denies all egress. Domain and address rules are independent —
+a domain grant never opens a raw IP and an address block never opens a
+hostname — matching the decision layer in
+[sandbox providers](sandbox-providers.md). Each pattern is validated to that
+layer's grammar at `PUT` time, so a malformed grant is a bad request rather than
+a silent widening; a malformed *stored* policy fails closed by refusing
+execution, never by reverting to open egress. The local provider already denies
+all network and is unaffected.
+
+The `enforcement` field discloses, per managed provider, an honest `status`
+(`boundary`, `conditional_boundary`, `applied_with_gaps`, or `unconfirmed`),
+plus the `gaps` the vendor leaves reachable regardless of policy and an optional
+`requirement` when a boundary is gated on a precondition. The status is
+**derived from the shipped enforcement model** (`EgressEnforcement`), not
+asserted per provider, so the settings surface and the decision layer can never
+disagree — if the model says a vendor's mechanism leaves a general-purpose
+destination reachable, the surface cannot present it as a full boundary.
+
+- **E2B — `applied_with_gaps`.** A configured allowlist becomes E2B's
+  per-sandbox `allowOut` rules with `allow_internet_access: false`, and this is
+  confirmed against the live API. It is **not a full boundary**: domain rules
+  are enforced only on ports 80/443 and DNS resolution stays open, so code in
+  the sandbox can still reach arbitrary hosts on other ports or tunnel over DNS.
+  The model's `is_credential_boundary()` returns false for exactly this reason,
+  and the projection reads that value rather than a hardcoded flag.
+- **Daytona — `conditional_boundary`, requiring org tier 3+.** A configured
+  policy is sent at sandbox creation (block-all switch or comma-separated
+  allowlists). A live test against a real Daytona account confirmed that a
+  per-sandbox policy is a *strict*, externally enforced allowlist: only listed
+  domains are reachable, and raw IPs, unlisted domains, unlisted-domain DNS, and
+  the package registries / git hosting / container registries / AI APIs that
+  were once assumed always-reachable are **all blocked**. There is no
+  general-purpose carve-out, so `is_credential_boundary()` returns true and
+  Daytona is in fact a stronger boundary than E2B. The one caveat is a
+  precondition the host cannot read statically: the per-sandbox egress override
+  requires **Daytona org tier 3+**. On tier 1–2 the override is refused and the
+  org default applies, so the boundary is not guaranteed — the projection
+  therefore reports it as a *conditional* boundary with that requirement inline,
+  never an unconditional green one.
+
+The local sandbox is the only tier that denies all network outright — the actual
+boundary — and it does so unconditionally, independent of this policy.
 
 The `exec` tool remains registered with a stable schema while settings change.
 The host resolves the selected provider immediately before execution, so a
@@ -92,6 +156,34 @@ Every provider returns the same bounded shape: provider kind, optional exit
 code, stdout, stderr, timeout and truncation flags, and duration. Provider-native
 responses, credentials, absolute host paths, and unbounded logs do not cross
 the contract.
+
+## Workspace lifecycle
+
+Beside `execute`, a provider may offer an optional durable-workspace
+capability: create/connect/destroy a chat's workspace, put one file, get one
+file, and list one directory. The capability is flagged — a provider that has
+no durable session reports none, and callers degrade instead of failing. It is
+host-internal only: no model-facing tool is registered over it, and gating any
+model-facing surface is a separate step in the
+[sandbox providers](sandbox-providers.md) delivery sequence.
+
+The same rules as `execute` bound the surface. Paths are workspace-relative
+with only normal components (no traversal, no absolute host paths), file
+transfers are capped in both directions, listings are capped with an explicit
+truncation flag, and errors are normalized — a missing file, an oversized
+transfer, and an unreachable backend are distinct outcomes. No credential or
+provider-native response crosses the contract.
+
+The local provider implements it directly over private per-chat scratch,
+rejecting symlinked files and symlinked intermediate directories, and offers
+it even on hosts where the native confinement primitive for `execute` is
+unavailable, because managing scratch files executes nothing. E2B and Daytona
+implement it over their session and toolbox file APIs through the same shared
+remote-session layer as commands, so file operations serialize with command
+execution per chat and reconcile the remote sandbox first. Connect reports
+reachable only for a sandbox the host holds a live handle to; destroy releases
+the handle only after the backend acknowledges, so a failed teardown stays
+retryable.
 
 ## Local native sandbox
 
@@ -151,5 +243,8 @@ The provider adapters own only their control-plane and command transports:
 Managed credentials remain in the OS secret store and never enter configuration,
 tool arguments, logs, or renderer responses. Remote API endpoints are fixed by
 the build; Daytona toolbox URLs returned by the control plane are restricted to
-HTTPS Daytona origins. Both managed providers allow internet access inside the
-sandbox, unlike the local native provider.
+HTTPS Daytona origins. By default both managed providers allow internet access
+inside the sandbox, unlike the local native provider; a configured
+[egress policy](#egress-policy) restricts that access at sandbox creation. E2B's
+enforcement is confirmed but applied-with-gaps; Daytona's per-sandbox policy is a
+strict, live-confirmed boundary conditional on org tier 3+.

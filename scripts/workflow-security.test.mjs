@@ -107,11 +107,20 @@ test("Rust CI requires the same PostgreSQL lane on pull requests and main", () =
     /^on:\n  push:\n    branches: \[main\]\n  pull_request:/m,
   );
   assert.doesNotMatch(ci, /^  build:$/m);
-  assert.match(postgres, /if:.*needs\.changes\.outputs\.rust == 'true'/);
+  // Scoped to the lanes that skip openwave-desktop, but still never exempted
+  // from pull requests the way the durable vector store is.
+  assert.match(postgres, /if:.*needs\.changes\.outputs\.workspace == 'true'/);
   assert.doesNotMatch(postgres, /github\.event_name != 'pull_request'/);
   assert.match(postgres, /OPENWAVE_REQUIRE_POSTGRES_TEST: "true"/);
   assert.match(aggregate, /^\s+postgres,$/m);
   assert.match(aggregate, /test "\$POSTGRES_RESULT" = success/);
+  // The narrower `workspace` scope must imply the `rust` one. Without this the
+  // crate-coverage lanes could be gated on a scope that never ran for them, and
+  // the aggregate would check their results against the wrong bit.
+  assert.match(
+    aggregate,
+    /if test "\$WORKSPACE_CHANGED" = true && test "\$RUST_CHANGED" != true; then/,
+  );
   assert.match(
     aggregate,
     /pull_request\) test "\$PR_TITLE_RESULT" = success ;;/,

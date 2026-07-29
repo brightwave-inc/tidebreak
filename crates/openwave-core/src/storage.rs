@@ -36,7 +36,7 @@ use crate::id::{
 };
 use crate::image::ImageRef;
 use crate::model::{
-    AgentRun, AgentRunExecution, AgentRunInboxEntry, AgentRunResult, AgentRunWaitSetCandidate,
+    AgentRun, AgentRunInboxEntry, AgentRunResult, AgentRunTier, AgentRunWaitSetCandidate,
     BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus, Chat, ClientToolCallRequest,
     DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
     DocumentParseOutput, DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert,
@@ -176,6 +176,17 @@ pub struct ChatToolActivitySnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub result: Option<crate::preview::ToolResultPreview>,
+    /// Set when this call retained a projection that no longer deserializes.
+    ///
+    /// The projection is a closed union that is allowed to move, and rows
+    /// written before a change may no longer parse against it. Distinguishing
+    /// that from "this call projected nothing" is the difference between a card
+    /// that says its result can no longer be shown and one that silently
+    /// vanishes — which would read as the call never having produced anything.
+    ///
+    /// A property of reading storage, not of the result: the live stream builds
+    /// its projection in memory and can never set this.
+    pub result_unreadable: bool,
     // Present only for the fixed `spawn_sandbox_agent` renderer tool. It lets
     // the transcript attach the durable child status without exposing a
     // canonical tool record, delegated task, or executor identity.
@@ -967,6 +978,92 @@ fn root_attachment_storage_unavailable<T>() -> Result<T> {
     ))
 }
 
+fn operation_log_storage_unavailable<T>() -> Result<T> {
+    Err(AgentError::Store(
+        "durable operation-log storage is not implemented by this Store".into(),
+    ))
+}
+
+/// Where one entry of the durable reverse-RPC operation log stands.
+///
+/// This is the storage-tier projection of the protocol's operation state
+/// machine (`openwave-sandbox-protocol::oplog`): a `Claimed` entry has been
+/// dispatched but has no terminal outcome yet; `Recorded`/`Failed` are terminal.
+/// The recorded body itself is an opaque blob to the store — the protocol tier
+/// owns its typed shape — so this tier stays free of reverse-RPC wire types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperationLogState {
+    /// Dispatched, no terminal outcome recorded.
+    Claimed,
+    /// Terminal success; a response body is retained (unless evicted per #859).
+    Recorded,
+    /// Terminal failure; an error body is retained (unless evicted per #859).
+    Failed,
+}
+
+/// The outcome of atomically claiming an operation identity against the durable
+/// log. This is the storage half of the reverse-RPC commit predicate; the
+/// protocol tier maps it onto `ClaimOutcome`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OperationClaimOutcome {
+    /// The identity was unseen and is now `Claimed`, owned by the caller's
+    /// epoch. The caller must execute the effect exactly once.
+    Fresh,
+    /// The identity is already terminally recorded; the opaque response body to
+    /// replay without re-executing.
+    Recorded(Vec<u8>),
+    /// The identity already failed terminally; the opaque error body to replay.
+    Failed(Vec<u8>),
+    /// The identity is terminal (recorded or failed) but its body has been
+    /// evicted to a commit marker (#859) and is gone. It ran exactly once and
+    /// must not be re-executed; there is no body to replay. This is distinct
+    /// from a backend failure — the row is intact, only its body is absent — so
+    /// the caller answers "already done, do not re-execute", never the
+    /// after-crash ambiguity.
+    TerminalEvicted,
+    /// The identity is `Claimed` by the caller's *own* epoch — a concurrent
+    /// duplicate this process lifetime, which attaches to the live execution
+    /// rather than re-executing.
+    OwnedClaim,
+    /// The identity is `Claimed` by a *different* epoch that never recorded — the
+    /// after-crash ambiguity for an external-effect operation. The caller must
+    /// fail conservatively rather than re-execute a possibly-spent call.
+    ForeignClaim,
+    /// The identity was reused for a structurally different request fingerprint.
+    Conflict,
+}
+
+/// The outcome of a terminal write (`record`/`fail`) against the durable log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperationLogWrite {
+    /// The `Claimed` entry transitioned to the requested terminal state.
+    Committed,
+    /// The entry was already in the requested terminal state; an idempotent
+    /// no-op, so a re-delivered terminal write is acknowledged, not rejected.
+    AlreadyTerminal,
+    /// No `Claimed` entry to settle — unknown, or already in the *other*
+    /// terminal state.
+    NotClaimed,
+}
+
+/// A read-back of one durable operation-log entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationLogEntry {
+    /// The entry's state.
+    pub state: OperationLogState,
+    /// The recorded terminal body (response for `Recorded`, error for
+    /// `Failed`), present only while the entry is terminal *and* its body is
+    /// still retained. `None` while `Claimed`, or once #859 evicts the body and
+    /// leaves a commit marker.
+    pub body: Option<Vec<u8>>,
+    /// Whether the operation carried an external effect when claimed. Retention
+    /// (#859) and audit read this without re-deriving it from the request.
+    pub external_effect: bool,
+    /// Whether the terminal body is still retained. #859 flips this to `false`
+    /// when it replaces a full body with a commit marker.
+    pub retained: bool,
+}
+
 /// Durable metadata and conversation state.
 ///
 /// Implementations must be safe to share across threads (`Send + Sync`) and are
@@ -1618,7 +1715,7 @@ pub trait Store: Send + Sync {
         _chat_id: ChatId,
         _parent_id: Option<AgentRunId>,
         _spawn_call_id: Option<CallId>,
-        _execution: AgentRunExecution,
+        _tier: AgentRunTier,
         _input: Option<&str>,
     ) -> Result<AcceptAgentRunOutcome> {
         agent_run_storage_unavailable()
@@ -2610,6 +2707,26 @@ pub trait Store: Send + Sync {
             .await
     }
 
+    /// Resolve a server call, retaining its evidence and the renderer
+    /// projection of what it produced.
+    ///
+    /// Separate from [`Self::resolve_server_tool_call_with_evidence`] rather
+    /// than replacing it: most callers resolve a call that projects nothing,
+    /// and a store that cannot retain a projection should still resolve. The
+    /// default drops the projection, which costs the card on reload and
+    /// nothing else.
+    async fn resolve_server_tool_call_with_artifacts(
+        &self,
+        id: CallId,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+        evidence: &[crate::RetrievalEvidenceInput],
+        _preview: Option<&crate::ToolResultPreview>,
+    ) -> Result<ResolveToolCallOutcome> {
+        self.resolve_server_tool_call_with_evidence(id, resolution, resolved_at, evidence)
+            .await
+    }
+
     /// Resolve a server tool result and retain its evidence only if the same
     /// live turn lease that accepted the call still owns the turn. The result,
     /// evidence, and lease comparison commit atomically.
@@ -2626,6 +2743,34 @@ pub trait Store: Send + Sync {
         _evidence: &[crate::RetrievalEvidenceInput],
     ) -> Result<ResolveToolCallOutcome> {
         turn_storage_unavailable()
+    }
+
+    /// The claimed-lease counterpart of
+    /// [`Self::resolve_server_tool_call_with_artifacts`].
+    #[allow(clippy::too_many_arguments)]
+    async fn resolve_claimed_server_tool_call_with_artifacts(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        turn_id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+        evidence: &[crate::RetrievalEvidenceInput],
+        _preview: Option<&crate::ToolResultPreview>,
+    ) -> Result<ResolveToolCallOutcome> {
+        self.resolve_claimed_server_tool_call_with_evidence(
+            id,
+            chat_id,
+            turn_id,
+            lease_token,
+            now,
+            resolution,
+            resolved_at,
+            evidence,
+        )
+        .await
     }
 
     /// Resolve a pending server call recovered at worker startup without
@@ -2692,6 +2837,37 @@ pub trait Store: Send + Sync {
         resolved_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<JournaledClientToolCallOutcome>;
 
+    /// Resolve a live client call, retaining the rows it reported.
+    ///
+    /// `rows` is the executor's *unvalidated* `{entries, failures}` payload, not
+    /// a projection. The store builds the projection from it against the call's
+    /// own stored name, so the allowlist and every clamp are applied here rather
+    /// than trusted from the executor — a client cannot award itself a card for
+    /// a tool that has none, nor an unbounded row.
+    ///
+    /// The default drops the rows, which costs the card and nothing else.
+    #[allow(clippy::too_many_arguments)]
+    async fn resolve_client_tool_call_and_append_event_with_rows(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+        _rows: Option<&serde_json::Value>,
+    ) -> Result<JournaledClientToolCallOutcome> {
+        self.resolve_client_tool_call_and_append_event(
+            id,
+            chat_id,
+            lease_token,
+            now,
+            resolution,
+            resolved_at,
+        )
+        .await
+    }
+
     /// Resolve a known outcome after the exact client lease expired.
     ///
     /// This is the explicit recovery path for an ambiguous native interaction;
@@ -2729,6 +2905,30 @@ pub trait Store: Send + Sync {
         resolution: &ToolCallResolution,
         resolved_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<JournaledClientToolCallOutcome>;
+
+    /// The expired-lease counterpart of
+    /// [`Self::resolve_client_tool_call_and_append_event_with_rows`].
+    #[allow(clippy::too_many_arguments)]
+    async fn resolve_expired_client_tool_call_and_append_event_with_rows(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+        _rows: Option<&serde_json::Value>,
+    ) -> Result<JournaledClientToolCallOutcome> {
+        self.resolve_expired_client_tool_call_and_append_event(
+            id,
+            chat_id,
+            lease_token,
+            now,
+            resolution,
+            resolved_at,
+        )
+        .await
+    }
 
     /// List unclaimed and claimed client work for authoritative recovery.
     async fn list_pending_client_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>>;
@@ -2835,6 +3035,82 @@ pub trait Store: Send + Sync {
     /// List a chat's journaled events with `seq` greater than `after`, in
     /// sequence order. Pass `0` to replay from the start.
     async fn list_events(&self, chat_id: ChatId, after: i64) -> Result<Vec<SequencedEvent>>;
+
+    // --- Durable reverse-RPC operation log (issue #858) ---
+    //
+    // These back the crash-safe `OperationStore` seam of
+    // `openwave-sandbox-protocol`. The store persists an opaque
+    // `(fingerprint, body)` pair keyed by `(run_id, operation_id)` and enforces
+    // the commit predicate transactionally; the protocol tier owns the typed
+    // meaning of those bytes and the mapping to `ClaimOutcome`. Retention and
+    // body eviction are #859; `evict_operation` is that seam.
+
+    /// Atomically claim `operation_id` under `run_id` for `fingerprint`, or
+    /// observe its existing state, in a single transaction.
+    ///
+    /// `owner_epoch` identifies the claiming process lifetime: a `Claimed` entry
+    /// found under a *different* epoch is the after-crash ambiguity
+    /// ([`OperationClaimOutcome::ForeignClaim`]) for an `external_effect`
+    /// operation; under the *same* epoch it is a concurrent duplicate
+    /// ([`OperationClaimOutcome::OwnedClaim`]). A foreign `Claimed` with no
+    /// external effect is safe to re-drive, so ownership is taken over and the
+    /// claim reported [`OperationClaimOutcome::Fresh`].
+    async fn claim_operation(
+        &self,
+        _run_id: uuid::Uuid,
+        _operation_id: uuid::Uuid,
+        _fingerprint: &[u8],
+        _external_effect: bool,
+        _owner_epoch: uuid::Uuid,
+    ) -> Result<OperationClaimOutcome> {
+        operation_log_storage_unavailable()
+    }
+
+    /// Settle a `Claimed` entry to `Recorded` with `body`, transactionally.
+    /// Idempotent: a re-delivered record for an already-`Recorded` entry is
+    /// acknowledged ([`OperationLogWrite::AlreadyTerminal`]) without overwriting
+    /// the first-committed body.
+    async fn record_operation(
+        &self,
+        _run_id: uuid::Uuid,
+        _operation_id: uuid::Uuid,
+        _body: &[u8],
+    ) -> Result<OperationLogWrite> {
+        operation_log_storage_unavailable()
+    }
+
+    /// Settle a `Claimed` entry to `Failed` with `body`, transactionally.
+    /// Idempotent for an already-`Failed` entry.
+    async fn fail_operation(
+        &self,
+        _run_id: uuid::Uuid,
+        _operation_id: uuid::Uuid,
+        _body: &[u8],
+    ) -> Result<OperationLogWrite> {
+        operation_log_storage_unavailable()
+    }
+
+    /// The current state of an operation-log entry, if the log knows it.
+    async fn operation_state(
+        &self,
+        _run_id: uuid::Uuid,
+        _operation_id: uuid::Uuid,
+    ) -> Result<Option<OperationLogEntry>> {
+        operation_log_storage_unavailable()
+    }
+
+    /// Drop an entry once the sandbox can no longer re-issue it. This slice
+    /// removes the row; #859 owns *when* eviction is safe and may instead null
+    /// the body and clear `retained` to leave a commit marker.
+    async fn evict_operation(&self, _run_id: uuid::Uuid, _operation_id: uuid::Uuid) -> Result<()> {
+        operation_log_storage_unavailable()
+    }
+
+    /// How many operation-log entries a run currently retains. For tests and,
+    /// later, retention accounting.
+    async fn operation_log_len(&self, _run_id: uuid::Uuid) -> Result<usize> {
+        operation_log_storage_unavailable()
+    }
 }
 
 /// Credential custody: secrets keyed by a stable reference string (e.g.

@@ -9,8 +9,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::deliverable::{
-    output_revision_relative_path, validate_deliverable_name, CreateOutput, NewOutputRevision,
-    DELIVERABLES_DIRECTORY, MAX_DELIVERABLE_BYTES, MAX_DELIVERABLE_NAME_CHARS,
+    output_revision_relative_path, validate_deliverable_name, CreateOutput, DeliverableKind,
+    NewOutputRevision, DELIVERABLES_DIRECTORY, MAX_DELIVERABLE_BYTES, MAX_DELIVERABLE_NAME_CHARS,
 };
 use crate::error::Result;
 use crate::id::{OutputId, OutputRevisionId};
@@ -184,9 +184,11 @@ impl Tool for CreateDeliverable {
             byte_len: content_len as u64,
             sha256: Sha256::digest(&published).into(),
             turn_id: Some(call.turn_id),
+            producing_run_id: None,
             citations: Vec::new(),
             created_at: call.created_at,
         };
+        let listed = filename.clone();
         let record = match requested_output_id {
             Some(existing) => self.store.append_output_revision(existing, &revision).await,
             None => {
@@ -195,6 +197,7 @@ impl Tool for CreateDeliverable {
                         id: output_id,
                         chat_id: ctx.chat_id,
                         filename,
+                        kind: DeliverableKind::Text,
                         revision,
                     })
                     .await
@@ -209,7 +212,16 @@ impl Tool for CreateDeliverable {
                 "output_id": record.id,
                 "revision_id": record.current_revision,
                 "revision_count": record.revision_count,
-            }))),
+            }))
+            // The revision number is the fact a reader needs: a second
+            // `create_deliverable` on the same output looks identical in the
+            // rail whether it replaced the file or appended to its history.
+            .with_entries(vec![crate::ResultEntry::new(
+                crate::ResultEntryKind::Output,
+                listed,
+            )
+            .with_detail(format!("revision {}", record.current_revision))
+            .with_meta(crate::format_bytes(content_len as u64))])),
             Err(error) => Ok(ToolOutput::error(format!(
                 "could not publish deliverable: {error}"
             ))),

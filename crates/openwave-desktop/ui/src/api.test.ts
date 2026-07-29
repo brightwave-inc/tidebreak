@@ -804,4 +804,143 @@ describe("parseToolResultPreview closed results", () => {
       expect(parseToolResultPreview(value)).toBeNull();
     }
   });
+
+  it("drops rows it cannot read and counts them as not shown", () => {
+    // A row the parser rejects is a result the call returned and the card is
+    // not showing. Dropping it silently would leave the count saying the
+    // search found three things when it found five.
+    expect(
+      parseToolResultPreview({
+        tool: "entries",
+        elided: 2,
+        entries: [
+          { kind: "file", label: "notes.md", detail: "scratch", meta: "1.2 KB" },
+          { kind: "sabotage", label: "notes.md" },
+          { kind: "file", label: "" },
+          { kind: "folder", label: "reports" },
+        ],
+        failures: [
+          { label: "q4.md", error: "unreadable" },
+          // No reason to show, so no row — but still counted.
+          { label: "q5.md" },
+        ],
+      }),
+    ).toEqual({
+      tool: "entries",
+      elided: 5,
+      entries: [
+        { kind: "file", label: "notes.md", detail: "scratch", meta: "1.2 KB" },
+        { kind: "folder", label: "reports", detail: null, meta: null },
+      ],
+      failures: [{ label: "q4.md", error: "unreadable" }],
+    });
+  });
+
+  it("keeps an empty list, which is a result and not the absence of one", () => {
+    expect(
+      parseToolResultPreview({
+        tool: "entries",
+        entries: [],
+        failures: [],
+        elided: 0,
+      }),
+    ).toEqual({ tool: "entries", entries: [], failures: [], elided: 0 });
+  });
+});
+
+describe("source download progress", () => {
+  /** A response whose body arrives in chunks, as a real transfer would. */
+  function streamed(chunks: string[], headers: Record<string, string> = {}) {
+    const encoder = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+        controller.close();
+      },
+    });
+    return new Response(body, { status: 200, headers });
+  }
+
+  const megabyte = "x".repeat(1024 * 1024);
+
+  it("reports against the declared length, ending on the total", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        streamed([megabyte, megabyte, megabyte], {
+          "Content-Length": String(3 * 1024 * 1024),
+          "Content-Type": "text/markdown",
+        }),
+      ),
+    );
+    const client = new ApiClient("http://127.0.0.1", "token");
+    const seen: number[] = [];
+
+    const file = await client.getChatDocumentFile("chat-1", "doc-1", undefined, (p) =>
+      seen.push(p.loaded),
+    );
+
+    // Every chunk but the last may be swallowed by the throttle; the last must
+    // not be, or the bar stops short of the end.
+    expect(seen.at(-1)).toBe(3 * 1024 * 1024);
+    expect(file.bytes.length).toBe(3 * 1024 * 1024);
+    // The stored media type has to survive being reassembled from chunks.
+    expect(file.contentType).toBe("text/markdown");
+  });
+
+  it("stays quiet for a small file, whose bar would only flash", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        streamed(["small"], { "Content-Length": "5" }),
+      ),
+    );
+    const client = new ApiClient("http://127.0.0.1", "token");
+    const onProgress = vi.fn();
+
+    const { bytes } = await client.getChatDocumentFile(
+      "chat-1",
+      "doc-1",
+      undefined,
+      onProgress,
+    );
+
+    expect(onProgress).not.toHaveBeenCalled();
+    expect(new TextDecoder().decode(bytes)).toBe("small");
+  });
+
+  it("stays quiet when the response declares no length to divide by", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(streamed([megabyte, megabyte, megabyte])),
+    );
+    const client = new ApiClient("http://127.0.0.1", "token");
+    const onProgress = vi.fn();
+
+    const { bytes } = await client.getChatDocumentFile(
+      "chat-1",
+      "doc-1",
+      undefined,
+      onProgress,
+    );
+
+    expect(onProgress).not.toHaveBeenCalled();
+    expect(bytes.length).toBe(3 * 1024 * 1024);
+  });
+
+  it("surfaces the server's own message when the transfer is refused", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ message: "source has been deleted" }), {
+          status: 410,
+        }),
+      ),
+    );
+    const client = new ApiClient("http://127.0.0.1", "token");
+
+    await expect(client.getChatDocumentFile("chat-1", "doc-1")).rejects.toThrow(
+      "410: source has been deleted",
+    );
+  });
 });

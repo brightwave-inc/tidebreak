@@ -24,6 +24,7 @@ mod desktop_schema;
 mod document_auditor;
 mod document_stage;
 mod document_worker;
+mod durable_oplog;
 mod error;
 mod event_projection;
 mod extract;
@@ -33,12 +34,15 @@ mod managed_policy;
 mod mcp_config;
 mod model_registry;
 mod model_roles;
+mod pairing;
 mod provider;
 mod providers;
 mod resolver;
 mod routes;
 mod sandbox_agent_run_worker;
 mod sandbox_web_search_worker;
+/// Rewriting stored credentials so the running binary owns their keychain items.
+pub mod secret_rehome;
 mod source_tools;
 mod state;
 mod turn_worker;
@@ -52,7 +56,7 @@ use std::sync::Arc;
 
 use axum::extract::DefaultBodyLimit;
 use axum::http::{header, Method};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::Router;
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -68,9 +72,9 @@ use openwave_core::{
     validate_import_connected_file_arguments, validate_list_connected_folders_arguments,
     validate_list_folder_arguments, validate_read_connected_file_arguments,
     validate_request_folder_access_arguments, validate_write_output_to_connected_folder_arguments,
-    write_output_to_connected_folder_tool_spec, AgentConfig, AgentError, Config, CreateDeliverable,
-    KeychainSecretProvider, ListDir, Profile, ReadFile, Result, SecretProvider, Store, Tool,
-    ToolRegistry, WriteFile,
+    write_output_to_connected_folder_tool_spec, AgentConfig, AgentError, CachingSecretProvider,
+    Config, CreateDeliverable, KeychainSecretProvider, ListDir, Profile, ReadFile, Result,
+    SecretProvider, Store, Tool, ToolRegistry, WriteFile,
 };
 #[cfg(feature = "vec-lance")]
 use openwave_retrieval::LanceVectorStore;
@@ -81,7 +85,9 @@ use openwave_retrieval::{
 
 use resolver::KeyedResolver;
 
+pub use durable_oplog::DurableOperationStore;
 pub use error::ServerError;
+pub use pairing::pair_with_gateway;
 pub use state::AppState;
 
 const MAX_RAW_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
@@ -109,11 +115,7 @@ pub fn app(state: AppState) -> Router {
         )
         .route(
             "/chats/{chat_id}/documents/{document_id}",
-            get(routes::get_chat_document).delete(routes::delete_chat_document),
-        )
-        .route(
-            "/chats/{chat_id}/documents/{document_id}/file-content",
-            get(routes::get_chat_document_file_content),
+            delete(routes::delete_chat_document),
         )
         .route(
             "/chats/{chat_id}/documents/{document_id}/retry",
@@ -208,8 +210,23 @@ pub fn app(state: AppState) -> Router {
             "/chats/{id}/client-executions/{call_id}/resolve",
             post(routes::resolve_client_execution),
         );
+    // The reader's half of the document surface. `ChatDocumentDetail` omits the
+    // catalog's `uri` and index bookkeeping, so unlike the full-fidelity routes
+    // below there is nothing here to withhold from an untrusted client — and a
+    // renderer-shaped client, this webview or a web one later, holds only the
+    // primary bearer and is the thing that draws the document.
+    let renderer_document_api = Router::new()
+        .route(
+            "/chats/{chat_id}/documents/{document_id}",
+            get(routes::get_chat_document),
+        )
+        .route(
+            "/chats/{chat_id}/documents/{document_id}/file-content",
+            get(routes::get_chat_document_file_content),
+        );
+
     // A native embedding gives the renderer only the primary bearer, so its
-    // canonical document surface joins the native-only router. A headless
+    // full-fidelity document surface joins the native-only router. A headless
     // embedding has no separate renderer trust boundary and deliberately keeps
     // the same API on its primary bearer for CLI/API compatibility.
     let (client_executor_api, public_document_api) = if state.root_attachment_routes_enabled {
@@ -331,6 +348,7 @@ pub fn app(state: AppState) -> Router {
             axum::routing::delete(routes::delete_provider_credential),
         )
         .merge(public_document_api)
+        .merge(renderer_document_api)
         // The transcript must fetch pixels with its bearer rather than putting
         // a token in an image URL. Unlike image publication, this is renderer
         // presentation of an image already durably attached to the chat.
@@ -583,6 +601,28 @@ pub async fn bind_configured_with_desktop_executor(
     bind_inner(config, Some(client_executor_id), mcp_servers).await
 }
 
+/// The secret store the configured profile keeps its credentials in.
+///
+/// Wrapped in a [`CachingSecretProvider`] so a key costs one keychain read per
+/// process rather than one per turn: [`resolver::ConfiguredResolver`] rebuilds
+/// its route set on every turn, and each candidate route reads its provider's
+/// credential to decide whether it exists.
+fn secret_provider(config: &Config) -> Arc<dyn SecretProvider> {
+    let keychain: Arc<dyn SecretProvider> = Arc::new(match &config.keychain_service {
+        Some(service) => KeychainSecretProvider::with_service(service),
+        None => KeychainSecretProvider::new(),
+    });
+    Arc::new(CachingSecretProvider::new(keychain))
+}
+
+/// Re-home the configured profile's credentials — see [`secret_rehome`]. Does
+/// not open the data directory, so it runs without the daemon's instance lock.
+pub async fn rehome_configured_secrets(
+    config: &Config,
+) -> Vec<(String, secret_rehome::RehomeOutcome)> {
+    secret_rehome::rehome_secrets(&*secret_provider(config)).await
+}
+
 async fn bind_inner(
     config: Config,
     client_executor_id: Option<Uuid>,
@@ -593,10 +633,7 @@ async fn bind_inner(
     // directory and its worker set.
     let instance_lock = InstanceLock::acquire(&config)?;
     let store = connect_store(&config).await?;
-    let secrets: Arc<dyn SecretProvider> = Arc::new(match &config.keychain_service {
-        Some(service) => KeychainSecretProvider::with_service(service),
-        None => KeychainSecretProvider::new(),
-    });
+    let secrets = secret_provider(&config);
     // Pre-providers installs may only have an env/legacy key — enable Anthropic
     // so `KeyedResolver`'s enabled check doesn't fail-closed on upgrade.
     providers::migrate_legacy_anthropic(&*store, &*secrets).await?;

@@ -28,7 +28,7 @@ overflow-checks = true
 [workspace.dependencies]
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
-schemars = { version = "=1.2.1", features = ["uuid1"] }
+schemars = { version = "=1.2.2", features = ["uuid1"] }
 async-trait = "=0.1.91"
 cap-std = "=4.0.2"
 cap-fs-ext = "=4.0.2"
@@ -53,13 +53,13 @@ windows-sys = "=0.61.2"
 sea-orm = { version = "=2.0.0", default-features = false, features = ["macros", "runtime-tokio-rustls", "with-uuid", "with-chrono", "with-json"] }
 sea-orm-migration = { version = "=2.0.0", default-features = false, features = ["runtime-tokio-rustls"] }
 tokio = { version = "=1.53.1", features = ["rt", "macros", "fs"] }
-tokio-util = { version = "=0.7.18", features = ["io-util"] }
+tokio-util = { version = "=0.7.19", features = ["io-util"] }
 reqwest = { version = "=0.12.28", default-features = false, features = ["json", "stream", "rustls-tls"] }
 ring = "=0.17.14"
 sha2 = "=0.11.0"
-base64 = "=0.22.1"
-libc = "=0.2.186"
+base64 = "=0.23.0"
+libc = "=0.2.189"
 async-stream = "=0.3.6"
 axum = { version = "=0.8.9", features = ["ws"] }
 tempfile = "=3.27.0"
-zip = { version = "=4.6.1", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2"] }

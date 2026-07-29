@@ -17,14 +17,16 @@ import {
   useState,
 } from "react";
 
+import type { ApiClient } from "@/api";
 import { Button } from "@/components/ui/button";
 import {
   Popover,
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import { useFileDownload } from "./useFileDownload";
+import { useFileDownload } from "@/document/useFileDownload";
 import { cn } from "@/lib/utils";
+import { FileDownloadProgressIndicator } from "./FileDownloadProgress";
 
 // ---------------------------------------------------------------------------
 // Collapse signaling
@@ -110,6 +112,7 @@ function isContainer(value: unknown): boolean {
 // ---------------------------------------------------------------------------
 
 interface JsonViewerProps extends HTMLAttributes<HTMLDivElement> {
+  client: Pick<ApiClient, "getChatDocumentFile">;
   chatId: string;
   documentID: string;
   /** Glom-style dot-notation path to highlight, e.g. "items.0.invoice_number" */
@@ -117,13 +120,16 @@ interface JsonViewerProps extends HTMLAttributes<HTMLDivElement> {
 }
 
 export function JsonViewer({
+  client,
   chatId,
   documentID,
   highlightPath,
   className,
   ...props
 }: JsonViewerProps) {
-  const fileDownload = useFileDownload(chatId, documentID, { parseAs: "text" });
+  const fileDownload = useFileDownload(client, chatId, documentID, {
+    parseAs: "text",
+  });
 
   const parsed = useMemo(() => {
     if (!fileDownload.data) return undefined;
@@ -188,7 +194,7 @@ export function JsonViewer({
     }
   }, [highlightPath, parsed]);
 
-  if (fileDownload.isError) {
+  if (fileDownload.error) {
     return (
       <div className={cn("relative overflow-auto", className)} {...props}>
         <div className="text-muted-foreground flex h-64 items-center justify-center">
@@ -204,7 +210,11 @@ export function JsonViewer({
         className={cn("flex items-center justify-center", className)}
         {...props}
       >
-        <Loader2Icon className="text-muted-foreground size-6 animate-spin" />
+        {fileDownload.progress ? (
+          <FileDownloadProgressIndicator progress={fileDownload.progress} />
+        ) : (
+          <Loader2Icon className="text-muted-foreground size-6 animate-spin" />
+        )}
       </div>
     );
   }

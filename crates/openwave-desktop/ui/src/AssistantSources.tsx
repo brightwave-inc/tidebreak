@@ -1,5 +1,7 @@
 import { ChevronRight } from "lucide-react";
 
+import type { CitationPageBounds } from "@/api";
+
 export type AssistantSource = Readonly<{
   id: string;
   ordinal: number;
@@ -13,6 +15,13 @@ export type AssistantSource = Readonly<{
   excerpt: string;
   heading: string | null;
   pages: number[];
+  /**
+   * Where on those pages the passage sits, for a source whose parser resolved
+   * it that finely. Empty for page-granular sources, which is every source
+   * imported before regions were recorded; `pages` is the complete answer
+   * either way.
+   */
+  bounds: readonly CitationPageBounds[];
 }>;
 
 type AssistantSourcesProps = {
@@ -113,14 +122,7 @@ function SourceCopy({
   source: AssistantSource;
   onOpen?: (source: AssistantSource) => void;
 }) {
-  const heading = boundedText(source.heading, MAX_HEADING_CHARACTERS);
-  const body = (
-    <>
-      {heading ? <strong>{heading}</strong> : null}
-      <p>{boundedText(source.excerpt, MAX_EXCERPT_CHARACTERS)}</p>
-      <PageReferences pages={source.pages} />
-    </>
-  );
+  const body = <CitationEvidence source={source} />;
 
   if (!onOpen || !source.documentId) {
     return <div className="assistant-source-copy">{body}</div>;
@@ -135,6 +137,23 @@ function SourceCopy({
     >
       {body}
     </button>
+  );
+}
+
+/**
+ * What one citation says for itself: where it came from and what it quoted,
+ * bounded so an unexpected payload cannot grow the DOM. Shared with the popover
+ * an inline citation opens, so the summary row and the phrase in the prose read
+ * the same evidence the same way.
+ */
+export function CitationEvidence({ source }: { source: AssistantSource }) {
+  const heading = boundedText(source.heading, MAX_HEADING_CHARACTERS);
+  return (
+    <>
+      {heading ? <strong>{heading}</strong> : null}
+      <p>{boundedText(source.excerpt, MAX_EXCERPT_CHARACTERS)}</p>
+      <PageReferences pages={source.pages} />
+    </>
   );
 }
 

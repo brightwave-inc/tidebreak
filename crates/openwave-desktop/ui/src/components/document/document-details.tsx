@@ -1,15 +1,32 @@
+/**
+ * `components/document/` is the reading side of a source: the extracted text,
+ * the panel's view switcher below, and the viewers that need nothing more than
+ * the file's characters — image, text/markdown, JSON, XML.
+ *
+ * `document/` next to it is the heavy side: the media-type dispatcher and the
+ * viewers built on a document engine of their own (pdf.js, Univer), each of
+ * which is code-split so opening one format does not fetch the others. The
+ * download itself is shared — both sides use `@/document/useFileDownload`.
+ */
 import { Loader2Icon } from "lucide-react";
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef } from "react";
 
-import type { DocumentDetail } from "@/api";
+import type { CitationPageBounds, DocumentDetail } from "@/api";
 import { useApp } from "@/AppContext";
 import {
   DocumentViewer,
   hasOriginalViewer,
 } from "@/document/DocumentViewer";
+import { cn } from "@/lib/utils";
+import {
+  CITATION_MARK_CLASS,
+  CITATION_MARK_LABEL,
+  CITATION_MARK_STYLE,
+} from "./citationMark";
+import { charRangeForByteSpan, type CitationSpan } from "./citationSpan";
 import { DocumentError } from "./error";
 import { ImageViewer } from "./image-viewer";
-import { MarkdownViewer, type HighlightRange } from "./markdown-viewer";
+import { MarkdownViewer } from "./markdown-viewer";
 
 // Both tree viewers carry their own parsing and node machinery, and neither is
 // on the path of the formats readers open most, so they load on demand.
@@ -66,13 +83,30 @@ type DocumentDetailsProps = {
   info: DocumentDetail;
   view: DocumentView;
   hasOriginalDocumentTab?: boolean;
-  /** Character range in the original to reveal, when opened from a citation. */
-  highlightRange?: HighlightRange;
   /**
    * Node to reveal in a tree viewer, when opened from a citation: a
    * dot-notation path for JSON, an XPath expression for XML.
+   *
+   * Uncalled, and not derivable from a citation: a citation addresses a byte
+   * range of the text read out of the file, and which node of the parsed tree
+   * that range came from is not recorded anywhere. The viewers honour the prop,
+   * so a producer of node paths would only have to reach this far.
    */
   highlightPath?: string;
+  /**
+   * Byte range of the cited passage in the text of record, when opened from a
+   * citation. Highlighted in the extracted text, and in a text-shaped original,
+   * whose text of record is the file verbatim.
+   */
+  citationSpan?: CitationSpan;
+  /** Page of a paginated original to open on, when opened from a citation. */
+  targetPage?: number;
+  /**
+   * Where the cited passage sits on those pages, for a source parsed that
+   * finely. Drawn over the rendered page; empty for a page-granular citation,
+   * which opens on its page with nothing marked on it.
+   */
+  citationBounds?: readonly CitationPageBounds[];
 };
 
 /**
@@ -90,8 +124,10 @@ export function DocumentDetails({
   info,
   view,
   hasOriginalDocumentTab,
-  highlightRange,
   highlightPath,
+  citationSpan,
+  targetPage,
+  citationBounds,
 }: DocumentDetailsProps) {
   const { client } = useApp();
   const type = baseMediaType(info.media_type);
@@ -104,12 +140,16 @@ export function DocumentDetails({
           {hasOriginalViewer(type) ? (
             <DocumentViewer
               client={client}
+              chatId={chatId}
               documentId={info.document_id}
               mediaType={type}
+              targetPage={targetPage}
+              citationBounds={citationBounds}
               className="bg-page-background grow p-4 pt-2"
             />
           ) : type.startsWith("image/") ? (
             <ImageViewer
+              client={client}
               chatId={chatId}
               documentID={info.document_id}
               className="bg-page-background grow"
@@ -118,6 +158,7 @@ export function DocumentDetails({
             <Suspense fallback={<ViewerLoading />}>
               {structured === "json" ? (
                 <JsonViewer
+                  client={client}
                   chatId={chatId}
                   documentID={info.document_id}
                   highlightPath={highlightPath}
@@ -125,6 +166,7 @@ export function DocumentDetails({
                 />
               ) : (
                 <XmlViewer
+                  client={client}
                   chatId={chatId}
                   documentID={info.document_id}
                   highlightPath={highlightPath}
@@ -133,17 +175,23 @@ export function DocumentDetails({
               )}
             </Suspense>
           ) : (
+            // Everything that reaches here is a `text/*` source, and nothing is
+            // extracted out of those: the text of record is the file, so the
+            // citation's own offsets address what the viewer draws.
             <MarkdownViewer
+              client={client}
               chatId={chatId}
               documentID={info.document_id}
-              highlightRange={highlightRange}
+              citationSpan={citationSpan}
               markdown={type === "text/markdown"}
               className="bg-page-background grow"
             />
           )}
         </>
       )}
-      {view === "extracted_text" && <ExtractedText info={info} />}
+      {view === "extracted_text" && (
+        <ExtractedText info={info} citationSpan={citationSpan} />
+      )}
 
     </div>
   );
@@ -160,11 +208,36 @@ function ViewerLoading() {
 /**
  * The text of record, rendered as one contiguous run rather than paginated.
  *
- * That is deliberate: citation offsets index into this exact string, so the
- * day a citation has to be scrolled to and highlighted there is a single text
- * node to find the offset in.
+ * That is what makes a citation reachable: its offsets index into this exact
+ * string, so the cited passage is a slice of the rendered content rather than
+ * something to go looking for. A citation splits the run in three around the
+ * passage, which changes nothing about how it reads or wraps.
  */
-function ExtractedText({ info }: { info: DocumentDetail }) {
+function ExtractedText({
+  info,
+  citationSpan,
+}: {
+  info: DocumentDetail;
+  citationSpan?: CitationSpan;
+}) {
+  // The span is derived afresh from the transcript on every update it makes, so
+  // the offsets are what this depends on rather than the object holding them.
+  const spanStart = citationSpan?.start;
+  const spanEnd = citationSpan?.end;
+  const cited = useMemo(
+    () =>
+      spanStart != null && spanEnd != null
+        ? charRangeForByteSpan(info.content, { start: spanStart, end: spanEnd })
+        : null,
+    [info.content, spanStart, spanEnd],
+  );
+
+  const citedRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!cited) return;
+    citedRef.current?.scrollIntoView({ block: "center" });
+  }, [cited]);
+
   if (info.content.length === 0) {
     switch (info.processing_status) {
       case "failed":
@@ -183,7 +256,21 @@ function ExtractedText({ info }: { info: DocumentDetail }) {
   return (
     <div className="min-h-0 grow overflow-auto p-6">
       <pre className="mx-auto max-w-4xl font-sans text-sm leading-relaxed break-words whitespace-pre-wrap">
-        {info.content}
+        {cited ? (
+          <>
+            {info.content.slice(0, cited.start)}
+            <mark
+              ref={citedRef}
+              aria-label={CITATION_MARK_LABEL}
+              className={cn(CITATION_MARK_CLASS, CITATION_MARK_STYLE)}
+            >
+              {info.content.slice(cited.start, cited.end)}
+            </mark>
+            {info.content.slice(cited.end)}
+          </>
+        ) : (
+          info.content
+        )}
       </pre>
     </div>
   );
