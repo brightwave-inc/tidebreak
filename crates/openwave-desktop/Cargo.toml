@@ -20,10 +20,16 @@ vec-lance = ["openwave-server/vec-lance"]
 [lib]
 name = "openwave_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+# This crate has no executable documentation examples. Its behavior contracts
+# live in the library test suite.
+doctest = false
 
 [[bin]]
 name = "openwave-desktop"
 path = "src/main.rs"
+# The binary is only a four-line launcher into the tested library. The
+# all-targets clippy lane still compiles it on every Rust change.
+test = false
 
 [build-dependencies]
 tauri-build = { version = "=2.6.3", features = [] }
