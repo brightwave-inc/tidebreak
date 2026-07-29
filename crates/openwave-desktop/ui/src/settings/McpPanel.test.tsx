@@ -360,7 +360,9 @@ describe("McpPanel", () => {
     // The gateway mount and its health stay visible; the locked manual server
     // stays listed with the server's own reason rather than disappearing.
     expect(await screen.findByText("Healthy")).toBeInTheDocument();
-    expect(screen.getByText("3 tools available to new turns.")).toBeInTheDocument();
+    expect(
+      screen.getAllByText("3 tools available to new turns.").length,
+    ).toBeGreaterThan(0);
     expect(screen.getByText(/Disabled by managed policy/)).toBeInTheDocument();
 
     // Nothing manual is editable: no fields, and no way to add or save one.
@@ -373,18 +375,33 @@ describe("McpPanel", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("shows no gateway endpoints section without a gateway session", async () => {
-    render(
-      <McpPanel
-        client={api({ servers: [gatewayMount("example-security-tools")] })}
-      />,
-    );
+  it("shows no gateway endpoints section on an unpaired profile", async () => {
+    render(<McpPanel client={api()} />);
 
     await screen.findByText("Healthy");
     expect(screen.queryByText("Gateway endpoints")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("switch", { name: /^Mount / }),
     ).not.toBeInTheDocument();
+  });
+
+  it("lists configured mounts signed out, toggles off, pointing at sign-in", async () => {
+    render(
+      <McpPanel
+        client={api({ servers: [gatewayMount("example-security-tools")] })}
+      />,
+    );
+
+    const toggle = await screen.findByRole("switch", {
+      name: "Mount example-security-tools",
+    });
+    expect(toggle).toBeChecked();
+    expect(toggle).toBeDisabled();
+    expect(
+      screen.getByText(/Sign in to the Model Gateway to mount or unmount/),
+    ).toBeInTheDocument();
+    // Signed out, no entitlements were read, so nothing claims a revocation.
+    expect(screen.queryByText(/No longer granted/)).not.toBeInTheDocument();
   });
 
   it("mounts a gateway endpoint with a session-bound definition", async () => {
@@ -476,11 +493,15 @@ describe("McpPanel", () => {
     render(<McpPanel client={client} />);
 
     // The configured mount keeps its row, with an explanation instead of a
-    // health line.
-    const row = await waitFor(() => mountRow("revoked-tools"));
-    expect(
-      within(row).getByText(/No longer granted to your teams/),
-    ).toBeInTheDocument();
+    // health line once the entitlements land.
+    await waitFor(() =>
+      expect(
+        within(mountRow("revoked-tools")).getByText(
+          /No longer granted to your teams/,
+        ),
+      ).toBeInTheDocument(),
+    );
+    const row = mountRow("revoked-tools");
     expect(within(row).queryByText(/Connecting/)).not.toBeInTheDocument();
 
     // And the toggle still unmounts it.
@@ -505,20 +526,30 @@ describe("McpPanel", () => {
     const user = userEvent.setup();
     render(<McpPanel client={client} />);
 
-    // The failure is visible and named, and the disabled toggle is explained
-    // rather than passing unknown off as unmounted.
+    // The failure is visible and carries the underlying message, and the
+    // disabled toggle is explained rather than passing unknown off as
+    // unmounted.
     expect(
-      await screen.findByText(/Couldn't read the MCP server list/),
+      await screen.findByText(
+        /Couldn't read the MCP server list: mcp backend unavailable/,
+      ),
     ).toBeInTheDocument();
-    const row = mountRow("example-security-tools");
-    expect(within(row).getByRole("switch")).toBeDisabled();
-    expect(within(row).getByText(/Mount state unknown/)).toBeInTheDocument();
+    expect(
+      await screen.findByRole("switch", {
+        name: "Mount example-security-tools",
+      }),
+    ).toBeDisabled();
+    expect(
+      within(mountRow("example-security-tools")).getByText(
+        /Mount state unknown/,
+      ),
+    ).toBeInTheDocument();
 
     listMcpServers.mockResolvedValue({ servers: [] });
     await user.click(screen.getByRole("button", { name: /Retry/ }));
     await waitFor(() =>
       expect(
-        screen.queryByText(/Couldn't read the MCP server list/),
+        screen.queryByText(/mcp backend unavailable/),
       ).not.toBeInTheDocument(),
     );
     expect(
@@ -552,7 +583,9 @@ describe("McpPanel", () => {
       await vi.advanceTimersByTimeAsync(15_100);
     });
     expect(
-      screen.getByText(/Couldn't read the MCP server list/),
+      screen.getByText(
+        /Couldn't read the MCP server list: mcp backend unavailable/,
+      ),
     ).toBeInTheDocument();
     const row = mountRow("example-security-tools");
     expect(within(row).getByText(/3 tools available/)).toBeInTheDocument();
@@ -575,20 +608,28 @@ describe("McpPanel", () => {
 
     // The row survives the apps failure, labeled unknown-entitlements — never
     // misreported as revoked.
-    const row = await waitFor(() => mountRow("example-security-tools"));
     expect(
-      screen.getByText(/Couldn't read your entitlements/),
+      await screen.findByText(/Couldn't read your entitlements/),
     ).toBeInTheDocument();
+    const row = mountRow("example-security-tools");
     expect(within(row).queryByText(/No longer granted/)).not.toBeInTheDocument();
     expect(within(row).getByRole("switch")).toBeChecked();
   });
 
-  it("keeps the gateway endpoint toggles live on a managed profile", async () => {
+  it("mounts on a managed profile, round-tripping a manual server unchanged", async () => {
+    const legacy: McpServerInfo = {
+      ...healthy.servers[0],
+      name: "legacy_docs",
+      health: "disabled",
+      tool_count: 0,
+      diagnostic:
+        "Disabled by managed policy. Gateway-managed MCP endpoints remain available.",
+    };
     const putMcpServers = vi.fn().mockResolvedValue({
-      servers: [gatewayMount("example-security-tools")],
+      servers: [legacy, gatewayMount("example-security-tools")],
     });
     const client = api(
-      { servers: [] },
+      { servers: [legacy] },
       {
         getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
         getGatewayApps: vi.fn().mockResolvedValue(incidentApps),
@@ -599,7 +640,8 @@ describe("McpPanel", () => {
     render(<McpPanel client={client} managed />);
 
     // Manual servers are read-only under managed policy, but a gateway mount
-    // is exactly the write the server admits — so this toggle still writes.
+    // is exactly the write the server admits — and admission depends on the
+    // inert manual definition arriving unchanged, so pin it exactly.
     const toggle = await screen.findByRole("switch", {
       name: "Mount example-security-tools",
     });
@@ -607,10 +649,69 @@ describe("McpPanel", () => {
     await user.click(toggle);
     await waitFor(() =>
       expect(putMcpServers).toHaveBeenCalledWith([
+        {
+          name: "legacy_docs",
+          command: "/opt/mcp/docs",
+          args: ["--stdio"],
+          env: { LOG_LEVEL: "info" },
+          env_from: ["PRIVATE_DOCS_TOKEN"],
+          cwd: "/tmp/docs",
+          url: null,
+          bearer_token_env: null,
+          gateway_endpoint: null,
+          request_timeout_ms: 60_000,
+          enabled: true,
+        },
         expect.objectContaining({
           gateway_endpoint: "example-security-tools",
         }),
       ]),
     );
+  });
+
+  it("keeps a mount made during unsaved edits through the next save", async () => {
+    const mount = gatewayMount("example-security-tools");
+    const putMcpServers = vi
+      .fn()
+      .mockResolvedValue({ servers: [...healthy.servers, mount] });
+    const client = api(healthy, {
+      getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
+      getGatewayApps: vi.fn().mockResolvedValue(incidentApps),
+      putMcpServers,
+    });
+    const user = userEvent.setup();
+    render(<McpPanel client={client} />);
+
+    // An unsaved manual edit first, so the draft is dirty when the mount lands.
+    await user.type(
+      await screen.findByPlaceholderText("/absolute/path/to/server"),
+      "-edited",
+    );
+    await user.click(
+      await screen.findByRole("switch", {
+        name: "Mount example-security-tools",
+      }),
+    );
+    // The mount write is rebuilt from the saved configuration: nobody's
+    // toggle persists an unsaved edit.
+    await waitFor(() =>
+      expect(putMcpServers).toHaveBeenCalledWith([
+        expect.objectContaining({ command: "/opt/mcp/docs" }),
+        expect.objectContaining({
+          gateway_endpoint: "example-security-tools",
+        }),
+      ]),
+    );
+
+    // Saving the dirty draft carries the mount instead of silently
+    // reverting it.
+    await user.click(screen.getByRole("button", { name: "Save and verify" }));
+    await waitFor(() => expect(putMcpServers).toHaveBeenCalledTimes(2));
+    expect(putMcpServers).toHaveBeenLastCalledWith([
+      expect.objectContaining({ command: "/opt/mcp/docs-edited" }),
+      expect.objectContaining({
+        gateway_endpoint: "example-security-tools",
+      }),
+    ]);
   });
 });

@@ -286,38 +286,42 @@ export function GatewayPanel({
         )}
       </SettingsSection>
 
-      {status.signed_in && apps?.supported && (
-        <SettingsSection
-          title="Connected apps"
-          description="The apps your teams have granted this deployment. Mounting their MCP endpoints happens under MCP servers, beside the health of what is mounted."
-        >
-          {apps.apps.length === 0 ? (
-            <p className="text-muted-foreground text-sm">
-              No connected apps are granted to your teams yet.
-            </p>
-          ) : (
-            <ul className="flex flex-col gap-2">
-              {apps.apps.map((app) => (
-                <li key={app.id} className="rounded-md border px-3 py-2 text-sm">
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium">{app.name}</span>
-                    <span className="text-muted-foreground text-xs">
-                      {app.app_kind}
-                    </span>
-                    {!app.enabled && (
-                      <span className="text-muted-foreground text-xs">
-                        disabled
-                      </span>
-                    )}
-                  </div>
-                  {app.mcp_endpoint_slugs.length > 0 && (
-                    <p className="text-muted-foreground text-xs">
-                      via {app.mcp_endpoint_slugs.join(", ")}
-                    </p>
-                  )}
-                </li>
-              ))}
-            </ul>
+      {status.signed_in && (
+        <>
+          {apps?.supported && (
+            <SettingsSection
+              title="Connected apps"
+              description="The apps your teams have granted this deployment. Mounting their MCP endpoints happens under MCP servers, beside the health of what is mounted."
+            >
+              {apps.apps.length === 0 ? (
+                <p className="text-muted-foreground text-sm">
+                  No connected apps are granted to your teams yet.
+                </p>
+              ) : (
+                <ul className="flex flex-col gap-2">
+                  {apps.apps.map((app) => (
+                    <li key={app.id} className="rounded-md border px-3 py-2 text-sm">
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium">{app.name}</span>
+                        <span className="text-muted-foreground text-xs">
+                          {app.app_kind}
+                        </span>
+                        {!app.enabled && (
+                          <span className="text-muted-foreground text-xs">
+                            disabled
+                          </span>
+                        )}
+                      </div>
+                      {app.mcp_endpoint_slugs.length > 0 && (
+                        <p className="text-muted-foreground text-xs">
+                          via {app.mcp_endpoint_slugs.join(", ")}
+                        </p>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </SettingsSection>
           )}
           <Button
             type="button"
@@ -328,7 +332,7 @@ export function GatewayPanel({
             <PlugZap size={14} />
             Mount endpoints in MCP servers
           </Button>
-        </SettingsSection>
+        </>
       )}
 
       <p className="text-sm leading-relaxed text-muted-foreground">

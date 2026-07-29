@@ -23,7 +23,7 @@ Each server has:
     (`gateway_endpoint`). The endpoint URL and a short-lived `mcp:<slug>`
     bearer are resolved from the signed-in gateway session at every
     connection; nothing is copied, selected by name, or stored. Mount these
-    from **Settings → Model Gateway → Connected apps** with a toggle. Signed
+    from **Settings → MCP servers → Gateway endpoints** with a toggle. Signed
     out, the mount degrades to a "sign in to reconnect" diagnostic and
     recovers on the next reconnect after sign-in;
 - a request timeout from 1 to 3,600,000 milliseconds; and

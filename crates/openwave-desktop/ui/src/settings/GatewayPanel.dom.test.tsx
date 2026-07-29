@@ -31,8 +31,6 @@ function api(overrides: Partial<Record<keyof ApiClient, unknown>> = {}) {
     gatewaySignOut: vi.fn().mockResolvedValue(signedOut),
     syncGatewayModels: vi.fn().mockResolvedValue(signedIn),
     getGatewayApps: vi.fn().mockResolvedValue({ supported: true, apps: [] }),
-    listMcpServers: vi.fn().mockResolvedValue({ servers: [] }),
-    putMcpServers: vi.fn().mockResolvedValue({ servers: [] }),
     putProvider: vi.fn().mockResolvedValue({}),
     ...overrides,
   } as unknown as ApiClient;
@@ -208,6 +206,10 @@ describe("GatewayPanel", () => {
     );
     expect(await screen.findByText("Signed in")).toBeInTheDocument();
     expect(screen.queryByText("Connected apps")).not.toBeInTheDocument();
+    // The route to mounting still shows: older gateways mount by slug too.
+    expect(
+      screen.getByRole("button", { name: /Mount endpoints in MCP servers/ }),
+    ).toBeInTheDocument();
   });
 
   it("keeps connected apps informational and sends mounting to the MCP page", async () => {
@@ -222,28 +224,6 @@ describe("GatewayPanel", () => {
             app_kind: "rest_api",
             enabled: true,
             mcp_endpoint_slugs: ["example-security-tools"],
-          },
-        ],
-      }),
-      // A configured mount for that endpoint exists; this panel still shows
-      // no toggle for it — mounting lives on the MCP servers page now.
-      listMcpServers: vi.fn().mockResolvedValue({
-        servers: [
-          {
-            name: "example-security-tools",
-            command: null,
-            args: [],
-            env: {},
-            env_from: [],
-            cwd: null,
-            url: null,
-            bearer_token_env: null,
-            gateway_endpoint: "example-security-tools",
-            request_timeout_ms: 60_000,
-            enabled: true,
-            health: "healthy",
-            tool_count: 3,
-            diagnostic: null,
           },
         ],
       }),
