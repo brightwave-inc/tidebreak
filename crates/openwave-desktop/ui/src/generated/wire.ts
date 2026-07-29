@@ -294,12 +294,47 @@ end: number, };
 /**
  * Renderer-safe configuration and readiness.
  */
-export type CodeExecutionConfigInfo = { provider?: CodeExecutionProviderKind, timeout_ms: number, available: boolean, has_credential: boolean, };
+export type CodeExecutionConfigInfo = { provider?: CodeExecutionProviderKind, timeout_ms: number, available: boolean, has_credential: boolean, 
+/**
+ * The configured egress policy and each managed provider's enforcement
+ * status, so the renderer can present the policy and disclose which
+ * providers actually restrict egress today.
+ */
+egress: CodeExecutionEgressInfo, };
 
 /**
  * Renderer-safe readiness for one managed provider's fixed credential slot.
  */
 export type CodeExecutionCredentialReadiness = { provider: CodeExecutionProviderKind, has_credential: boolean, };
+
+/**
+ * A managed provider's egress-enforcement status, as host knowledge rather
+ * than a claim the backend makes about itself.
+ */
+export type CodeExecutionEgressEnforcement = { provider: CodeExecutionProviderKind, status: EgressEnforcementStatus, 
+/**
+ * Destinations the vendor's mechanism keeps reachable regardless of the
+ * configured policy — each a short purpose string straight from the
+ * enforcement model, so the settings surface can show the caveat inline
+ * instead of burying it in prose the user skims past.
+ */
+gaps: Array<string>, };
+
+/**
+ * Renderer-safe egress policy plus per-provider enforcement disclosure.
+ */
+export type CodeExecutionEgressInfo = { 
+/**
+ * The configured host policy. `Open` is the default: managed sandboxes are
+ * created with open internet access. An allowlist restricts every managed
+ * sandbox created afterwards.
+ */
+policy: EgressConfig, 
+/**
+ * One row per managed provider, stating whether its egress restriction is
+ * confirmed against the live vendor API or still pending confirmation.
+ */
+enforcement: Array<CodeExecutionEgressEnforcement>, };
 
 /**
  * A configured code-execution backend.
@@ -335,6 +370,34 @@ max_output_tokens: number, };
  * preserves the existing stable URI identity used by retrieval ingestion.
  */
 export type DocumentId = string;
+
+/**
+ * Host-owned, non-secret egress policy for the managed exec sandboxes.
+ *
+ * The model never sets this (invariant 1): it is host configuration, carries
+ * no secret, and accepts no endpoint. `Open` is the default and preserves
+ * exec's out-of-the-box behavior — E2B and Daytona are created with open
+ * internet access, as they always have been. Egress restriction is opt-in:
+ * an `Allowlist` switches every managed sandbox created afterwards to
+ * deny-by-default and compiles the listed domain patterns and CIDR blocks
+ * into the vendor's per-sandbox network controls. An empty allowlist denies
+ * everything on both axes.
+ *
+ * The strings are validated to the same [`DomainPattern`] and [`CidrBlock`]
+ * grammar the decision layer uses, so a malformed grant is rejected at
+ * `PUT` time rather than silently widening egress at sandbox creation.
+ */
+export type EgressConfig = { "mode": "open" } | { "mode": "allowlist", domains: Array<string>, cidrs: Array<string>, };
+
+/**
+ * The honest state of a managed provider's egress enforcement.
+ *
+ * Derived from the shipped enforcement model, never asserted per provider, so
+ * the settings surface and the decision layer cannot disagree: if the model
+ * says a vendor's mechanism leaves a general-purpose destination reachable,
+ * the surface must not present it as a full boundary.
+ */
+export type EgressEnforcementStatus = "boundary" | "applied_with_gaps" | "unconfirmed";
 
 /**
  * One entitled connected app, with the slugs of the MCP endpoints that

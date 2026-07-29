@@ -157,6 +157,17 @@ impl E2BExecutionProvider {
         self
     }
 
+    /// The egress policy compiled into this provider's sandboxes, or `None` for
+    /// today's open-internet creation. Exposed so the host wiring that selects
+    /// and applies a policy can be verified without a live API — a dropped
+    /// policy in that path reverts a configured allowlist to open egress, and
+    /// this is what a test asserts against.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn egress_policy(&self) -> Option<&EgressPolicy> {
+        self.egress.as_ref()
+    }
+
     /// Host knowledge about E2B's per-sandbox network enforcement, declared
     /// as what it actually blocks. Vendor exceptions: DNS to `8.8.8.8` stays
     /// open regardless of policy, and domain-pattern rules are enforced only

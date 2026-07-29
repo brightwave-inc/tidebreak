@@ -165,6 +165,15 @@ impl DaytonaExecutionProvider {
         Ok(self)
     }
 
+    /// The egress policy compiled into this provider's sandboxes, or `None` for
+    /// today's open-internet creation. Exposed so the host wiring that selects
+    /// and applies a policy can be verified without a live API.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn egress_policy(&self) -> Option<&EgressPolicy> {
+        self.egress.as_ref()
+    }
+
     /// Host knowledge about Daytona's per-sandbox network enforcement,
     /// declared as what it actually blocks. Daytona keeps a vendor-curated
     /// "essential services" list reachable regardless of policy — package

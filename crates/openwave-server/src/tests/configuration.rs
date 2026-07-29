@@ -632,14 +632,17 @@ async fn code_execution_config_route_is_authenticated_and_preserves_explicit_dis
         .await
         .unwrap();
     assert_eq!(disabled.status(), StatusCode::OK);
-    assert_eq!(
-        json_body::<serde_json::Value>(disabled).await,
-        serde_json::json!({
-            "timeout_ms": crate::code_execution::MIN_TIMEOUT_MS,
-            "available": false,
-            "has_credential": false,
-        })
+    let disabled: serde_json::Value = json_body(disabled).await;
+    assert!(
+        disabled.get("provider").is_none(),
+        "an explicit disable omits the provider key"
     );
+    assert_eq!(
+        disabled["timeout_ms"],
+        crate::code_execution::MIN_TIMEOUT_MS
+    );
+    assert_eq!(disabled["available"], false);
+    assert_eq!(disabled["has_credential"], false);
 
     let e2b = router
         .clone()
@@ -661,15 +664,14 @@ async fn code_execution_config_route_is_authenticated_and_preserves_explicit_dis
         .await
         .unwrap();
     assert_eq!(e2b.status(), StatusCode::OK);
-    assert_eq!(
-        json_body::<serde_json::Value>(e2b).await,
-        serde_json::json!({
-            "provider": "e2b",
-            "timeout_ms": crate::code_execution::DEFAULT_TIMEOUT_MS,
-            "available": false,
-            "has_credential": false,
-        })
-    );
+    let e2b: serde_json::Value = json_body(e2b).await;
+    assert_eq!(e2b["provider"], "e2b");
+    assert_eq!(e2b["timeout_ms"], crate::code_execution::DEFAULT_TIMEOUT_MS);
+    assert_eq!(e2b["available"], false);
+    assert_eq!(e2b["has_credential"], false);
+    // Egress defaults to open and is disclosed on the same surface: managed
+    // sandboxes stay open-internet until a policy is configured.
+    assert_eq!(e2b["egress"]["policy"]["mode"], "open");
 
     let unknown_credential = router
         .clone()
@@ -838,6 +840,123 @@ async fn code_execution_config_route_is_authenticated_and_preserves_explicit_dis
     assert_eq!(ready["provider"], "daytona");
     assert_eq!(ready["available"], true);
     assert_eq!(ready["has_credential"], true);
+}
+
+#[tokio::test]
+async fn code_execution_egress_policy_round_trips_and_rejects_secrets() {
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+
+    let put_egress = |body: serde_json::Value| {
+        let router = router.clone();
+        let bearer = bearer.clone();
+        async move {
+            router
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/code-execution")
+                        .header(header::AUTHORIZATION, &bearer)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        }
+    };
+
+    // The default surface discloses open egress plus each managed provider's
+    // enforcement status: E2B confirmed, Daytona pending live confirmation.
+    let initial = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/code-execution")
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let initial: serde_json::Value = json_body(initial).await;
+    assert_eq!(initial["egress"]["policy"]["mode"], "open");
+    let enforcement = initial["egress"]["enforcement"].as_array().unwrap();
+    let row = |provider: &str| {
+        enforcement
+            .iter()
+            .find(|row| row["provider"] == provider)
+            .unwrap_or_else(|| panic!("{provider} enforcement is disclosed"))
+            .clone()
+    };
+    // E2B is applied but honestly not a full boundary; Daytona is unconfirmed.
+    // Neither is ever shown as a plain boundary, and the gaps are surfaced.
+    assert_eq!(row("e2b")["status"], "applied_with_gaps");
+    assert!(!row("e2b")["gaps"].as_array().unwrap().is_empty());
+    assert_eq!(
+        row("daytona")["status"],
+        "unconfirmed",
+        "Daytona egress is applied but not yet a confirmed boundary"
+    );
+
+    // A configured allowlist round-trips through the store and back out.
+    let saved = put_egress(serde_json::json!({
+        "egress": {
+            "mode": "allowlist",
+            "domains": ["*.pypi.org", "crates.io"],
+            "cidrs": ["140.82.112.0/20"],
+        }
+    }))
+    .await;
+    assert_eq!(saved.status(), StatusCode::OK);
+    let saved: serde_json::Value = json_body(saved).await;
+    assert_eq!(saved["egress"]["policy"]["mode"], "allowlist");
+    assert_eq!(
+        saved["egress"]["policy"]["domains"],
+        serde_json::json!(["*.pypi.org", "crates.io"])
+    );
+    assert_eq!(
+        saved["egress"]["policy"]["cidrs"],
+        serde_json::json!(["140.82.112.0/20"])
+    );
+
+    // A malformed grant is a bad request, never a silent widening to open.
+    let malformed = put_egress(serde_json::json!({
+        "egress": { "mode": "allowlist", "domains": ["not a host"], "cidrs": [] }
+    }))
+    .await;
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+
+    // No secret or endpoint is accepted on this surface: an extra field is
+    // rejected rather than stored.
+    let with_endpoint = put_egress(serde_json::json!({
+        "egress": { "mode": "allowlist", "domains": [], "cidrs": [] },
+        "endpoint": "https://exfil.example",
+    }))
+    .await;
+    assert!(
+        with_endpoint.status().is_client_error(),
+        "an unknown field is rejected, never stored: {}",
+        with_endpoint.status()
+    );
+
+    // The last valid policy is still in place after the rejected writes.
+    let current = router
+        .oneshot(
+            Request::builder()
+                .uri("/code-execution")
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let current: serde_json::Value = json_body(current).await;
+    assert_eq!(current["egress"]["policy"]["mode"], "allowlist");
+    assert_eq!(
+        current["egress"]["policy"]["domains"],
+        serde_json::json!(["*.pypi.org", "crates.io"])
+    );
 }
 
 #[tokio::test]
