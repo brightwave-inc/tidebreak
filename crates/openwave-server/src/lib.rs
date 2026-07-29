@@ -91,7 +91,7 @@ use resolver::KeyedResolver;
 
 pub use durable_oplog::DurableOperationStore;
 pub use error::ServerError;
-pub use pairing::{pair_with_gateway, PairingHandle};
+pub use pairing::{pair_with_gateway, PairingHandle, PairingOutcome};
 pub use state::AppState;
 
 const MAX_RAW_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
@@ -937,9 +937,10 @@ const EMBED_DIMS: usize = 1536;
 ///
 /// Because the embedder is boot-scoped (the vector index is dimension-bound
 /// to it), a profile provisioned managed at runtime keeps a live BYOK
-/// embedder until the next app start: the pairing flow must prompt or
-/// trigger a restart (or index rebuild) to complete enforcement — tracked
-/// in #763.
+/// embedder until the next app start. The desktop deep-link pairing flow
+/// therefore prompts for a restart when a pairing newly manages the profile
+/// (keyed off `PairingOutcome::newly_managed` — #898); either way this gate
+/// closes at the next boot.
 async fn resolve_embedder(
     store: &dyn Store,
     secrets: &dyn SecretProvider,

@@ -191,7 +191,12 @@ fn spawn_pairing(app: tauri::AppHandle, link: ProvisionLink) {
         )
         .await;
         match outcome {
-            Ok(Some(())) => log_pairing(&app, &format!("provisioned to {origin}")),
+            Ok(Some(newly_managed)) => {
+                log_pairing(&app, &format!("provisioned to {origin}"));
+                if newly_managed {
+                    prompt_restart(&app);
+                }
+            }
             Ok(None) => log_pairing(&app, &format!("pairing with {origin} declined")),
             Err(reason) => log_pairing(&app, &format!("pairing failed: {reason}")),
         }
@@ -203,16 +208,18 @@ fn spawn_pairing(app: tauri::AppHandle, link: ProvisionLink) {
 
 /// The confirmation gate, separated from the dialog and the store so the
 /// decision path is testable without a GUI: `confirm` sees only the gateway
-/// origin, and nothing runs `pair` but a confirming answer.
-async fn pair_after_confirmation<C, P, F>(
+/// origin, and nothing runs `pair` but a confirming answer. What a confirmed
+/// pairing yields flows back to the caller — today, whether the profile
+/// newly became managed, which decides the restart prompt.
+async fn pair_after_confirmation<C, P, F, T>(
     link: ProvisionLink,
     confirm: C,
     pair: P,
-) -> Result<Option<()>, String>
+) -> Result<Option<T>, String>
 where
     C: FnOnce(&str) -> bool,
     P: FnOnce(String) -> F,
-    F: std::future::Future<Output = Result<(), String>>,
+    F: std::future::Future<Output = Result<T, String>>,
 {
     if !confirm(&link.origin) {
         return Ok(None);
@@ -242,13 +249,45 @@ fn confirm_pairing(app: &tauri::AppHandle, origin: &str) -> bool {
 
 /// Validate, probe, and provision — all server-side. The sign-in gate is a
 /// separate surface: once policy flips to managed it presents itself on its
-/// next poll, so pairing does not drive the renderer.
-async fn pair(app: tauri::AppHandle, gateway_url: String) -> Result<(), String> {
+/// next poll, so pairing does not drive the renderer. Reports whether this
+/// pairing newly managed the profile — the restart-prompt signal.
+async fn pair(app: tauri::AppHandle, gateway_url: String) -> Result<bool, String> {
     let handle = wait_pairing_handle(&app).await?;
     openwave_server::pair_with_gateway(&handle, &gateway_url)
         .await
-        .map(|_| ())
+        .map(|outcome| outcome.newly_managed)
         .map_err(|error| error.to_string())
+}
+
+/// Offer the restart that completes enforcement, after a pairing that newly
+/// managed this profile. The embeddings client is boot-scoped (the vector
+/// index is dimension-bound to it — see `resolve_embedder` in
+/// `openwave-server`), so a BYOK embedder resolved at launch keeps serving
+/// until the next start; an idempotent re-pair changes nothing and never
+/// reaches here. Declining is honored without nagging, but not silently: one
+/// log line records that enforcement completes at the next launch.
+fn prompt_restart(app: &tauri::AppHandle) {
+    let restart = app
+        .dialog()
+        .message(
+            "Pairing complete — restart OpenWave to finish applying managed \
+             enforcement.\n\nUntil the next launch, document embeddings keep \
+             the configuration the app started with.",
+        )
+        .title("Pairing complete")
+        .kind(MessageDialogKind::Info)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Restart Now".to_string(),
+            "Later".to_string(),
+        ))
+        .blocking_show();
+    if restart {
+        app.restart();
+    }
+    log_pairing(
+        app,
+        "restart deferred; managed enforcement completes at the next launch",
+    );
 }
 
 async fn wait_pairing_handle(app: &tauri::AppHandle) -> Result<PairingHandle, String> {
@@ -371,14 +410,16 @@ mod tests {
             |_| false,
             |_| {
                 paired.store(true, Ordering::SeqCst);
-                async { Ok(()) }
+                async { Ok(true) }
             },
         )
         .await;
         assert_eq!(outcome, Ok(None));
         assert!(!paired.load(Ordering::SeqCst));
 
-        // Confirmed: the dialog sees the origin, the pairing action the URL.
+        // Confirmed: the dialog sees the origin, the pairing action the URL,
+        // and what the pairing yielded (the restart-prompt signal) comes
+        // back to the caller.
         let outcome = pair_after_confirmation(
             link(),
             |origin| {
@@ -387,10 +428,10 @@ mod tests {
             },
             |gateway_url| async move {
                 assert_eq!(gateway_url, "https://gw.example");
-                Ok(())
+                Ok(true)
             },
         )
         .await;
-        assert_eq!(outcome, Ok(Some(())));
+        assert_eq!(outcome, Ok(Some(true)));
     }
 }
