@@ -9,6 +9,7 @@ import type {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 import { useConfirm } from "../components/ConfirmDialog";
 import { SettingsError, SettingsPanel, SettingsSection } from "./primitives";
 import { providerLabel } from "../ModelSelection";
@@ -347,9 +348,9 @@ function ProviderRow({
             Gemini 3 models always use Google&apos;s global endpoint. This
             location applies to models that support regional Vertex endpoints.
           </p>
-          <textarea
+          <Textarea
             aria-label="Google service account JSON"
-            className="min-h-28 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm text-foreground"
+            className="min-h-28 font-mono text-sm text-foreground"
             placeholder="Paste the Google service-account JSON key file"
             value={serviceAccountJson}
             onChange={(event) => setServiceAccountJson(event.target.value)}

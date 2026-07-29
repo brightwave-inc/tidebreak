@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Check, Clock, Loader2, Terminal, X } from "lucide-react";
+import { Check, Clock, Terminal, X } from "lucide-react";
 import {
   isRendererToolName,
   type ExecResultPreview,
@@ -7,6 +7,7 @@ import {
   type ToolActionPreview,
 } from "./api";
 import { Badge } from "@/components/ui/badge";
+import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 import type { ToolTone } from "./ToolStatusIcon";
 import { ScrollableContainer } from "./ScrollableContainer";
@@ -283,7 +284,7 @@ export function ToolCommandCard({
           </ScrollableContainer>
         ) : output === null ? (
           <p className="text-muted-foreground flex items-center gap-1.5 p-2 text-xs">
-            <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+            <Spinner className="size-3.5" aria-hidden="true" />
             Waiting for output…
           </p>
         ) : (
@@ -327,7 +328,7 @@ function ToolStatusBadge({
   if (presentation.tone === "running") {
     return (
       <Badge variant="outline" className="shrink-0 gap-1">
-        <Loader2 className="size-3 animate-spin" aria-hidden="true" />
+        <Spinner className="size-3" aria-hidden="true" />
         Running…
       </Badge>
     );

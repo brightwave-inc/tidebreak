@@ -2,6 +2,8 @@ import { useMemo, useState } from "react";
 import { CornerDownLeft, X } from "lucide-react";
 import type { PendingUserQuestions, UserQuestionAnswer } from "./api";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
 type DraftAnswer =
@@ -144,7 +146,7 @@ export function UserQuestionsCard({
                 onChange={() => updateFreeForm(currentQuestion.id, "")}
                 className="accent-foreground size-[18px] shrink-0"
               />
-              <input
+              <Input
                 type="text"
                 maxLength={2000}
                 value={
@@ -161,7 +163,7 @@ export function UserQuestionsCard({
                 disabled={working}
                 aria-label="Other answer"
                 placeholder="Other"
-                className="border-border bg-background placeholder:text-muted-foreground focus-visible:border-foreground min-w-0 flex-1 rounded-lg border px-2.5 py-2 text-sm outline-hidden"
+                className="h-auto min-w-0 flex-1 rounded-lg px-2.5 py-2 text-sm focus-visible:border-foreground focus-visible:ring-0 focus-visible:ring-offset-0"
               />
             </label>
           )}
@@ -170,7 +172,7 @@ export function UserQuestionsCard({
 
       {currentQuestion.allowFreeForm &&
         currentQuestion.options.length === 0 && (
-          <textarea
+          <Textarea
             maxLength={2000}
             rows={3}
             value={
@@ -182,7 +184,7 @@ export function UserQuestionsCard({
             disabled={working}
             aria-label={currentQuestion.header}
             placeholder="Your answer"
-            className="border-border bg-background placeholder:text-muted-foreground focus-visible:border-foreground min-h-16 w-full resize-y rounded-[10px] border px-3 py-2.5 text-sm outline-hidden disabled:cursor-not-allowed disabled:opacity-50"
+            className="min-h-16 resize-y rounded-[10px] py-2.5 text-sm focus-visible:border-foreground focus-visible:ring-0 focus-visible:ring-offset-0"
           />
         )}
 

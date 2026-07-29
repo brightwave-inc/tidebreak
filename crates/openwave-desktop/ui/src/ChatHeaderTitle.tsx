@@ -4,6 +4,7 @@ import type { Chat } from "./api";
 import { useApp } from "./AppContext";
 import { useChatListStore } from "./ChatListStore";
 import { useTypewriterOnce } from "./useTypewriterOnce";
+import { Input } from "@/components/ui/input";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -39,8 +40,8 @@ export function ChatHeaderTitle({ chat }: { chat: Chat }) {
 
   if (renaming) {
     return (
-      <input
-        className="min-w-0 max-w-sm flex-1 rounded-md border border-input bg-background px-2 py-1 text-center text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      <Input
+        className="h-auto min-w-0 max-w-sm flex-1 px-2 py-1 text-center text-sm"
         autoFocus
         aria-label="Chat title"
         value={renameDraft}
