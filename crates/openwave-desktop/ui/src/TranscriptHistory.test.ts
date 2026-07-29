@@ -170,6 +170,7 @@ describe("hydrateTranscriptHistory", () => {
               excerpt: "safe excerpt",
               heading: "Safe heading",
               pages: [2],
+              bounds: [],
             },
           ],
         },

@@ -81,8 +81,9 @@ pub use blob::FsBlobStore;
 pub use cancel::{CancelToken, Cancelled};
 pub use citation::{
     format_source_reference, parse_assistant_citations, AssistantCitationReference,
-    AssistantCitationSnapshot, CitationSpan, ParsedAssistantCitations, MAX_ASSISTANT_CITATIONS,
-    MAX_CITATION_EXCERPT_CHARS, MAX_CITATION_HEADING_CHARS, MAX_CITATION_PAGES,
+    AssistantCitationSnapshot, CitationPageBounds, CitationSpan, ParsedAssistantCitations,
+    MAX_ASSISTANT_CITATIONS, MAX_CITATION_BOUNDS, MAX_CITATION_EXCERPT_CHARS,
+    MAX_CITATION_HEADING_CHARS, MAX_CITATION_PAGES,
 };
 pub use client_tools::{
     import_connected_file_tool_spec, list_connected_folders_tool_spec, list_folder_tool_spec,

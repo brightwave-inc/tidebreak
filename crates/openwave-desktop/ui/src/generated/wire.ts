@@ -118,7 +118,13 @@ document_id: DocumentId,
  * Half-open byte range of the cited passage in that document's canonical
  * text, which is the text the extracted-text view renders.
  */
-span: CitationSpan, excerpt: string, heading: string | null, pages: Array<number>, };
+span: CitationSpan, excerpt: string, heading: string | null, pages: Array<number>, 
+/**
+ * Where on those pages the passage sits, for sources whose parser resolved
+ * it that finely. Empty for page-granular sources; `pages` is the complete
+ * answer either way.
+ */
+bounds: Array<CitationPageBounds>, };
 
 /**
  * Identifies one tool call, stable across its request/approval/result.
@@ -255,6 +261,19 @@ export type ChatTranscript = { messages: Array<ChatMessageSnapshot>,
  * renderer-safe allowlist. Canonical tool records never cross this API.
  */
 tool_activity: Array<ChatToolActivitySnapshot>, last_event_seq: number, };
+
+/**
+ * One highlight rectangle of a citation, on a named page.
+ */
+export type CitationPageBounds = { 
+/**
+ * One-based page the rectangle falls on.
+ */
+page: number, 
+/**
+ * The rectangle, in that page's normalized coordinate space.
+ */
+bounds: PageBounds, };
 
 /**
  * A citation's byte range, projected for the renderer.
@@ -535,6 +554,39 @@ selection: string | null,
  * the work that depends on it is skipped.
  */
 resolved_key: string | null, };
+
+/**
+ * A rectangle on a page, in the page's own normalized coordinate space.
+ *
+ * Coordinates are fractions of the page's width and height with the origin at
+ * the top-left corner, expressed in ten-thousandths ([`PAGE_BOUNDS_SCALE`]).
+ * Normalizing to the page box is what lets a viewer draw the rectangle at any
+ * zoom or render size — multiply by the rendered page and place it — without
+ * knowing the page dimensions the parser saw.
+ *
+ * Fixed-point rather than floating-point on purpose: these travel through JSON
+ * and comparisons, and integers round-trip exactly, keep the enclosing types
+ * `Eq`/`Hash`, and make containment in the page an invariant that can actually
+ * be checked. A ten-thousandth of a US Letter page is ~0.06pt — far finer than
+ * any highlight needs.
+ */
+export type PageBounds = { 
+/**
+ * Distance from the page's left edge.
+ */
+left: number, 
+/**
+ * Distance from the page's top edge.
+ */
+top: number, 
+/**
+ * Width of the rectangle.
+ */
+width: number, 
+/**
+ * Height of the rectangle.
+ */
+height: number, };
 
 /**
  * Closed renderer-safe pending approval projection. Canonical arguments,
