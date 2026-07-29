@@ -89,7 +89,7 @@ libc = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
 # HKLM policy reads for the Windows managed-policy reader.
-winreg = "=0.55.0"
+winreg = "=0.56.0"
 
 [dev-dependencies]
 # The real in-container agent (loop, supervisor, sandbox-resident tool registry)
