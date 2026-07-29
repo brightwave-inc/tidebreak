@@ -330,7 +330,10 @@ fn provisioning_wire_shapes() {
         ..request
     };
     roundtrip(&taskless);
-    assert!(serde_json::to_value(&taskless).unwrap().get("task").is_none());
+    assert!(serde_json::to_value(&taskless)
+        .unwrap()
+        .get("task")
+        .is_none());
 
     let handle = SandboxHandle {
         reference: "container-abc".to_owned(),
