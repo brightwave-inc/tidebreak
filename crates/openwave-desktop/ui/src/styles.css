@@ -72,10 +72,8 @@
      drive both the inset and the layout maths that has to subtract it. */
   --container-margin: 0.5rem;
   --container-border: 1px;
-  --container-offset: calc(var(--container-margin) * 2 + var(--container-border) * 2);
 
   /* Sidebar rail: a fixed 224px until the window is wide enough to spend more. */
-  --sidebar-compact-flex: 0 0 calc(var(--spacing) * 14);
   --sidebar-expanded-min: calc(var(--spacing) * 56);
   --sidebar-expanded-max: calc(var(--spacing) * 80);
   --sidebar-expanded-flex: 0 0 var(--sidebar-expanded-min);
@@ -85,15 +83,9 @@
   --shadow-lg: 0 0px 12px 0px oklch(0 0 0 / 0.07);
 
   /* Legacy aliases consumed by existing component CSS */
-  --bg: var(--page-background);
   --bg-elevated: var(--background);
   --ink: var(--foreground);
   --line: var(--border);
-  --sidebar-bg: transparent;
-  --sidebar-active: var(--accent);
-  --danger: var(--destructive);
-  --user-bg: var(--muted);
-  --assistant-bg: var(--background);
   --sans: "Inter", "Segoe UI", system-ui, sans-serif;
   --mono: "SF Mono", ui-monospace, Menlo, monospace;
   --code-ink: oklch(0.47 0.13 55);
@@ -238,6 +230,8 @@
   --font-sans: var(--sans);
   --font-mono: var(--mono);
 
+  --text-2xs: 10px;
+
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -337,11 +331,6 @@ body {
   background: var(--page-background);
 }
 
-.new-chat:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
 /* ---------- Routed content ---------- */
 
 /* The card treatment moved onto the panel group itself (`.content-container`),
@@ -369,114 +358,6 @@ body {
   flex: 1 1 auto;
 }
 
-.sidebar-panel-item {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-.chat-workspace {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  min-height: 0;
-  min-width: 0;
-  overflow: hidden;
-}
-
-.chat-workspace[hidden] {
-  display: none;
-}
-
-/* Each surface scrolls inside its own slot; the header above stays put. */
-.workspace-body {
-  display: flex;
-  min-height: 0;
-  min-width: 0;
-  overflow: hidden;
-}
-
-.workspace-slot {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-}
-
-.workspace-slot[hidden] {
-  display: none;
-}
-
-.workspace-transcript {
-  flex: 1 1 auto;
-}
-
-.workspace-panel {
-  flex: 1 1 auto;
-}
-
-.workspace-panel.is-sharing {
-  border-left: 1px solid var(--line);
-}
-
-.panel-resizer {
-  flex: 0 0 auto;
-  width: 0.35rem;
-  margin: 0 -0.175rem;
-  z-index: 1;
-  cursor: col-resize;
-  background: transparent;
-  touch-action: none;
-}
-
-.panel-resizer:hover,
-.panel-resizer:focus-visible {
-  background: var(--accent);
-  outline: none;
-}
-
-.conversation-switcher {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 0.45rem;
-}
-
-.panel-controls {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.15rem;
-}
-
-.panel-control {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  padding: 0.3rem;
-  color: var(--muted-foreground);
-  background: transparent;
-  cursor: pointer;
-}
-
-.panel-control:hover {
-  color: var(--ink);
-  background: var(--muted);
-}
-
-.panel-control[aria-pressed="true"] {
-  color: var(--ink);
-  border-color: var(--line);
-}
-
-/*
- * Surface padding is sized against the viewport, which is too generous once a
- * surface is only part of the width. Scale it to the slot instead.
- */
-
-
-
 /* The panel slot the pane sits in is a plain block, so nothing stretches the
    pane to the slot's height: without this the transcript — `flex: 1 1 0` —
    resolves to nothing and the composer rides up over the messages. */
@@ -488,108 +369,6 @@ body {
   min-width: 0;
   overflow: clip;
 }
-
-.conversation-header {
-  display: flex;
-  min-height: 3.5rem;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 0.65rem clamp(1rem, 3vw, 2rem);
-  border-bottom: 1px solid var(--line);
-}
-
-.conversation-header h1,
-.conversation-header p {
-  margin: 0;
-}
-
-.conversation-header h1 {
-  font-size: 0.95rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-
-.conversation-title-row {
-  display: flex;
-  align-items: center;
-  gap: 0.55rem;
-  min-width: 0;
-}
-
-.conversation-title-row h1 {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.conversation-header-actions,
-.mobile-settings-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.45rem;
-}
-
-.mobile-settings-actions {
-  display: none;
-}
-
-.chat-tabs {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 0.15rem;
-  padding: 0.15rem;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--muted);
-}
-
-.chat-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  border: 0;
-  border-radius: 6px;
-  padding: 0.3rem 0.6rem;
-  color: var(--muted-foreground);
-  background: transparent;
-  font-size: 0.8rem;
-  font-weight: 500;
-  cursor: pointer;
-  transition:
-    background-color 100ms ease,
-    color 100ms ease;
-}
-
-.chat-tab svg {
-  flex: 0 0 auto;
-}
-
-.chat-tab:hover:not(:disabled) {
-  color: var(--ink);
-}
-
-.chat-tab:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.chat-tab.is-active {
-  color: var(--ink);
-  background: var(--bg-elevated);
-  box-shadow: var(--shadow-sm);
-}
-
-.eyebrow {
-  margin-bottom: 0.05rem !important;
-  color: var(--muted-foreground);
-  font-size: 0.68rem;
-  font-weight: 500;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
 
 /* ---------- Agent activity ---------- */
 
@@ -1071,8 +850,8 @@ body {
 
 .message-notice.is-error {
   align-self: stretch;
-  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--line));
-  color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--destructive) 35%, var(--line));
+  color: var(--destructive);
   background: var(--critical-background);
   text-align: left;
 }
@@ -1414,18 +1193,6 @@ body {
 }
 
 
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
-}
-
 /* ---------- Appearance ---------- */
 
 .theme-options {
@@ -1455,13 +1222,7 @@ body {
 }
 
 .settings-status.is-not-configured {
-  border-color: color-mix(in srgb, var(--danger) 30%, var(--line));
-}
-
-.status {
-  font-family: var(--mono);
-  font-size: 0.7rem;
-  color: var(--muted-foreground);
+  border-color: color-mix(in srgb, var(--destructive) 30%, var(--line));
 }
 
 /* ---------- Boot screen ---------- */
@@ -1522,22 +1283,6 @@ body {
     flex-direction: column;
   }
 
-  .sidebar {
-    display: none;
-  }
-
-  .mobile-settings-actions {
-    display: flex;
-  }
-
-  .chat-tab-label {
-    display: none;
-  }
-
-  .chat-tab {
-    padding: 0.35rem 0.45rem;
-  }
-
   .main {
     margin: 0;
     border: 0;
@@ -1547,15 +1292,6 @@ body {
   .messages {
     padding-inline: 1rem;
   }
-
-  .new-activity {
-    right: 1rem;
-  }
-
-  .conversation-header .status {
-    display: none;
-  }
-
 }
 
 .document-drop-target {
@@ -1584,8 +1320,8 @@ body {
 }
 
 .document-drop-target.reject {
-  border-color: color-mix(in srgb, var(--danger) 72%, var(--line));
-  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border-color: color-mix(in srgb, var(--destructive) 72%, var(--line));
+  background: color-mix(in srgb, var(--destructive) 12%, transparent);
 }
 
 } /* @layer components */
@@ -1630,6 +1366,9 @@ body {
 
 .app-shell {
   position: relative;
+  height: 100%;
+  display: flex;
+  background: var(--page-background);
 }
 
 

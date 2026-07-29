@@ -17,7 +17,7 @@ import {
 
 function Keycap({ children }: { children: string }) {
   return (
-    <kbd className="inline-flex h-6 min-w-6 items-center justify-center rounded border bg-muted/60 px-1.5 font-sans text-[11px] leading-none font-medium text-foreground/80">
+    <kbd className="inline-flex h-6 min-w-6 items-center justify-center rounded border bg-muted/60 px-1.5 font-sans text-2xs leading-none font-medium text-foreground/80">
       {children}
     </kbd>
   );
@@ -76,7 +76,7 @@ export function ShortcutsDialog({
             <Fragment key={group}>
               <h3
                 className={cn(
-                  "col-span-2 text-[11px] font-semibold tracking-[0.08em] text-muted-foreground uppercase",
+                  "col-span-2 text-2xs font-semibold tracking-[0.08em] text-muted-foreground uppercase",
                   index > 0 && "mt-4",
                 )}
               >
