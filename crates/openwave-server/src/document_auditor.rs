@@ -433,6 +433,7 @@ mod tests {
             span: ByteSpan::new(0, text.len()),
             location: SourceLocation::Page {
                 number: std::num::NonZeroU32::new(4).unwrap(),
+                bounds: None,
             },
         }];
         let record = store.upsert_document(&input).await.unwrap();

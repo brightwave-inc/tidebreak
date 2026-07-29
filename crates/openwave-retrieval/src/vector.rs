@@ -835,6 +835,7 @@ mod tests {
             span: ByteSpan::new(1, 2),
             location: SourceLocation::Page {
                 number: std::num::NonZeroU32::new(1).unwrap(),
+                bounds: None,
             },
         }];
 

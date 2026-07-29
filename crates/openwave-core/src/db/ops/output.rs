@@ -238,7 +238,7 @@ pub(in crate::db) async fn list_output_revision_citations(
         }
         let mut pages = Vec::new();
         for region in evidence.evidence.source_regions {
-            let SourceLocation::Page { number } = region.location;
+            let SourceLocation::Page { number, .. } = region.location;
             let page = number.get();
             if !pages.contains(&page) {
                 pages.push(page);

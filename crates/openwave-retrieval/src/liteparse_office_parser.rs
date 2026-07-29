@@ -48,7 +48,7 @@ const OFFICE_MEDIA_TYPES: &[&str] = &[
 /// extracted text, so the durable pipeline reparses affected documents. The
 /// fingerprint describes the intended pipeline and is deliberately independent
 /// of whether LibreOffice happens to be installed at runtime.
-const OFFICE_FINGERPRINT: &str = "liteparse:v2.8:office:libreoffice:markdown:no-ocr:v1";
+const OFFICE_FINGERPRINT: &str = "liteparse:v2.8:office:libreoffice:markdown:no-ocr:pages:v2";
 
 /// Extracts Markdown canonical text from Office documents via LibreOffice +
 /// `liteparse`.
@@ -124,7 +124,7 @@ impl LiteParseOfficeParser {
                     "liteparse could not parse the office document: {error}"
                 ))
             })?;
-        Ok(ParsedDocument::from_text(result.text))
+        Ok(crate::liteparse_regions::parsed_document_from(result))
     }
 }
 

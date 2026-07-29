@@ -25,7 +25,7 @@ const PDF_MEDIA_TYPE: &str = "application/pdf";
 /// Stable identity of this parser's canonical-text behavior. Bump the trailing
 /// version tag whenever an implementation or configuration change can alter the
 /// extracted text, so the durable pipeline reparses affected documents.
-const LITEPARSE_FINGERPRINT: &str = "liteparse:v2.8:pdf:markdown:no-ocr:v1";
+const LITEPARSE_FINGERPRINT: &str = "liteparse:v2.8:pdf:markdown:no-ocr:pages:v2";
 
 /// Extracts Markdown canonical text from `application/pdf` bytes via `liteparse`.
 #[derive(Debug, Clone, Copy, Default)]
@@ -97,7 +97,7 @@ impl DocumentParser for LiteParsePdfParser {
             .map_err(|error| {
                 RetrievalError::parse(format!("liteparse could not parse the PDF: {error}"))
             })?;
-        Ok(ParsedDocument::from_text(result.text))
+        Ok(crate::liteparse_regions::parsed_document_from(result))
     }
 }
 

@@ -561,6 +561,7 @@ mod tests {
                 span: ByteSpan::new(0, canonical_text.len()),
                 location: SourceLocation::Page {
                     number: NonZeroU32::new(2).unwrap(),
+                    bounds: None,
                 },
             }],
             updated_at: Utc::now(),
@@ -790,6 +791,7 @@ mod tests {
                 span: ByteSpan::new(1, 8),
                 location: SourceLocation::Page {
                     number: NonZeroU32::new(2).unwrap(),
+                    bounds: None,
                 },
             }]
         );

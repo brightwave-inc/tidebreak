@@ -46,6 +46,46 @@ impl ByteSpan {
     }
 }
 
+/// Scale of [`PageBounds`] coordinates: one unit is 1/10000 of the page box.
+pub const PAGE_BOUNDS_SCALE: u16 = 10_000;
+
+/// A rectangle on a page, in the page's own normalized coordinate space.
+///
+/// Coordinates are fractions of the page's width and height with the origin at
+/// the top-left corner, expressed in ten-thousandths ([`PAGE_BOUNDS_SCALE`]).
+/// Normalizing to the page box is what lets a viewer draw the rectangle at any
+/// zoom or render size — multiply by the rendered page and place it — without
+/// knowing the page dimensions the parser saw.
+///
+/// Fixed-point rather than floating-point on purpose: these travel through JSON
+/// and comparisons, and integers round-trip exactly, keep the enclosing types
+/// `Eq`/`Hash`, and make containment in the page an invariant that can actually
+/// be checked. A ten-thousandth of a US Letter page is ~0.06pt — far finer than
+/// any highlight needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PageBounds {
+    /// Distance from the page's left edge.
+    pub left: u16,
+    /// Distance from the page's top edge.
+    pub top: u16,
+    /// Width of the rectangle.
+    pub width: u16,
+    /// Height of the rectangle.
+    pub height: u16,
+}
+
+impl PageBounds {
+    /// Whether the rectangle is nonempty and falls entirely within the page.
+    #[must_use]
+    pub const fn is_valid(&self) -> bool {
+        // Saturating: an out-of-range pair must fail the check, not overflow.
+        self.width > 0
+            && self.height > 0
+            && self.left.saturating_add(self.width) <= PAGE_BOUNDS_SCALE
+            && self.top.saturating_add(self.height) <= PAGE_BOUNDS_SCALE
+    }
+}
+
 /// Format-specific location in the original source represented by canonical text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -55,6 +95,14 @@ pub enum SourceLocation {
     Page {
         /// One-based page number.
         number: NonZeroU32,
+        /// Where on the page the canonical text sits, when the parser resolved
+        /// it that finely. `None` means the span is known only to be somewhere
+        /// on this page — a page-granular parser, or a block whose position on
+        /// the page could not be recovered. Optional rather than a separate
+        /// variant so that "what page is this on?" stays one match arm whether
+        /// or not geometry is present.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bounds: Option<PageBounds>,
     },
 }
 
@@ -88,6 +136,10 @@ pub fn validate_source_regions(
         }
         if region.span.start < previous_end {
             return Err("source regions must be ordered and nonoverlapping");
+        }
+        let SourceLocation::Page { bounds, .. } = &region.location;
+        if bounds.is_some_and(|bounds| !bounds.is_valid()) {
+            return Err("source region bounds must be nonempty and within the page");
         }
         previous_end = region.span.end;
     }
@@ -2786,6 +2838,7 @@ mod tests {
             span: ByteSpan::new(start, end),
             location: SourceLocation::Page {
                 number: NonZeroU32::new(page).unwrap(),
+                bounds: None,
             },
         }
     }
@@ -2808,5 +2861,55 @@ mod tests {
         assert!(
             validate_source_regions(text, &[page_region(2, 4, 2), page_region(0, 1, 1)]).is_err()
         );
+    }
+
+    #[test]
+    fn source_region_validation_rejects_bounds_outside_the_page() {
+        let text = "aéz";
+        let bounded = |bounds: PageBounds| {
+            vec![SourceRegion {
+                span: ByteSpan::new(0, 3),
+                location: SourceLocation::Page {
+                    number: NonZeroU32::new(1).unwrap(),
+                    bounds: Some(bounds),
+                },
+            }]
+        };
+        let full_page = PageBounds {
+            left: 0,
+            top: 0,
+            width: PAGE_BOUNDS_SCALE,
+            height: PAGE_BOUNDS_SCALE,
+        };
+        assert_eq!(validate_source_regions(text, &bounded(full_page)), Ok(()));
+        // A box a viewer would draw off the page, and a box with no area, are
+        // both geometry we would rather reject than store and render wrong.
+        assert!(validate_source_regions(
+            text,
+            &bounded(PageBounds {
+                left: 1,
+                ..full_page
+            })
+        )
+        .is_err());
+        assert!(validate_source_regions(
+            text,
+            &bounded(PageBounds {
+                height: 0,
+                ..full_page
+            })
+        )
+        .is_err());
+        // Near-overflow coordinates must fail the check, not wrap around it.
+        assert!(validate_source_regions(
+            text,
+            &bounded(PageBounds {
+                left: u16::MAX,
+                top: u16::MAX,
+                width: u16::MAX,
+                height: u16::MAX,
+            })
+        )
+        .is_err());
     }
 }

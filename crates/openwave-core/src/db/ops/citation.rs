@@ -366,7 +366,7 @@ where
         }
         let mut pages = Vec::new();
         for region in evidence.evidence.source_regions {
-            let SourceLocation::Page { number } = region.location;
+            let SourceLocation::Page { number, .. } = region.location;
             let page = number.get();
             if !pages.contains(&page) {
                 pages.push(page);

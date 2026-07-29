@@ -111,7 +111,7 @@ fn render(citations: &[Citation], source_tokens: &[uuid::Uuid]) -> String {
 fn render_pages(citation: &Citation) -> String {
     let mut pages = Vec::new();
     for region in &citation.source_regions {
-        if let SourceLocation::Page { number } = &region.location {
+        if let SourceLocation::Page { number, .. } = &region.location {
             let page = number.get();
             if pages.last() != Some(&page) {
                 pages.push(page);
@@ -554,6 +554,7 @@ mod tests {
             span: ByteSpan::new(start, end),
             location: SourceLocation::Page {
                 number: std::num::NonZeroU32::new(number).unwrap(),
+                bounds: None,
             },
         };
         let mut single = Chunk::new(document_id, 0, ByteSpan::new(0, 4), "body");

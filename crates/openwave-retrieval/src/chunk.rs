@@ -431,12 +431,14 @@ mod tests {
                 span: ByteSpan::new(0, page_two_start),
                 location: SourceLocation::Page {
                     number: NonZeroU32::new(1).unwrap(),
+                    bounds: None,
                 },
             },
             SourceRegion {
                 span: ByteSpan::new(page_two_start, text.len()),
                 location: SourceLocation::Page {
                     number: NonZeroU32::new(2).unwrap(),
+                    bounds: None,
                 },
             },
         ]);

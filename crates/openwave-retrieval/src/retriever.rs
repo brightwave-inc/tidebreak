@@ -741,12 +741,14 @@ The Great Barrier Reef is the world's largest coral reef system.";
                 span: ByteSpan::new(0, 8),
                 location: SourceLocation::Page {
                     number: std::num::NonZeroU32::new(1).unwrap(),
+                    bounds: None,
                 },
             },
             SourceRegion {
                 span: ByteSpan::new(9, 17),
                 location: SourceLocation::Page {
                     number: std::num::NonZeroU32::new(2).unwrap(),
+                    bounds: None,
                 },
             },
         ]);
@@ -767,6 +769,7 @@ The Great Barrier Reef is the world's largest coral reef system.";
             span: ByteSpan::new(1, 2),
             location: SourceLocation::Page {
                 number: std::num::NonZeroU32::new(1).unwrap(),
+                bounds: None,
             },
         }]);
         let retriever = Retriever::new(
