@@ -75,6 +75,11 @@ pub async fn put_mcp_servers(
     State(state): State<AppState>,
     Json(body): Json<McpServersConfig>,
 ) -> Result<Json<McpServersInfo>, ServerError> {
+    // Resolved outside the runtime's mutation lock: a policy that flips
+    // between here and the commit skips the admission check, but the commit
+    // itself re-reads the lockdown under that lock, so such a definition
+    // persists inert and never connects. The residue is a millisecond-wide
+    // cosmetic entry in durable config, not an execution bypass.
     let policy = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
     // Once validation/startup begins, finish the durable/live commit even if
     // the HTTP client disconnects and drops this handler future.

@@ -112,7 +112,10 @@ mod tests {
 
     use super::*;
     use crate::managed_policy::{resolve, NoOsPolicy};
-    use crate::mcp_config::{GatewayEndpointAccess, GatewayEndpoints};
+    use crate::mcp_config::{
+        GatewayEndpointAccess, GatewayEndpoints, McpHealth, McpServerDefinition, McpServersConfig,
+        MANAGED_DISABLED_DIAGNOSTIC,
+    };
 
     /// The signed-out stand-in: pairing never resolves an endpoint.
     struct NoGateway;
@@ -124,16 +127,56 @@ mod tests {
         }
     }
 
-    fn test_handle(store: &Arc<dyn Store>) -> PairingHandle {
-        PairingHandle::new(
+    /// The handle plus the runtime behind it, for the assertions that are
+    /// about what pairing *did* to this process rather than what it wrote.
+    fn test_handle_with_runtime(store: &Arc<dyn Store>) -> (PairingHandle, Arc<McpRuntime>) {
+        let mcp = Arc::new(McpRuntime::new(
+            Arc::new(ToolRegistry::new()),
             store.clone(),
-            Arc::new(McpRuntime::new(
-                Arc::new(ToolRegistry::new()),
-                store.clone(),
-                Arc::new(NoGateway),
-                Arc::new(NoOsPolicy),
-            )),
-        )
+            Arc::new(NoGateway),
+            Arc::new(NoOsPolicy),
+        ));
+        (PairingHandle::new(store.clone(), mcp.clone()), mcp)
+    }
+
+    fn test_handle(store: &Arc<dyn Store>) -> PairingHandle {
+        test_handle_with_runtime(store).0
+    }
+
+    /// A minimal Streamable HTTP MCP server, standing in for a manual server
+    /// the profile was already running when the provision link arrived.
+    async fn serve_manual_mcp() -> String {
+        async fn handler(body: String) -> ([(&'static str, &'static str); 1], String) {
+            let request: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let id = request.get("id").cloned().unwrap_or_default();
+            let result = match request["method"].as_str().unwrap_or_default() {
+                "initialize" => json!({
+                    "protocolVersion": openwave_mcp::PROTOCOL_VERSION,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "pairing-fixture", "version": "1"}
+                }),
+                "tools/list" => json!({
+                    "tools": [{
+                        "name": "lookup",
+                        "description": "Look something up",
+                        "inputSchema": {"type": "object"}
+                    }]
+                }),
+                _ => json!({}),
+            };
+            (
+                [("content-type", "application/json")],
+                json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string(),
+            )
+        }
+
+        let app = axum::Router::new().route("/mcp", axum::routing::post(handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{address}/mcp")
     }
 
     async fn test_store() -> (Arc<dyn Store>, tempfile::TempDir) {
@@ -225,6 +268,52 @@ mod tests {
         pair_with_gateway(&test_handle(&store), &base)
             .await
             .unwrap();
+    }
+
+    /// Pairing applies the policy it writes, not just persists it: a manual
+    /// MCP server this process was already running when the link arrived must
+    /// stop serving tools before `pair_with_gateway` returns, rather than at
+    /// the supervisor's next sweep. Dropping the enforcement call fails here.
+    #[tokio::test]
+    async fn pairing_takes_down_a_manual_mcp_server_this_process_is_running() {
+        let (store, _directory) = test_store().await;
+        let (handle, mcp) = test_handle_with_runtime(&store);
+
+        // A real connection, established while the profile was still open.
+        mcp.replace(McpServersConfig {
+            servers: vec![McpServerDefinition {
+                name: "private_docs".to_string(),
+                command: None,
+                args: Vec::new(),
+                env: std::collections::BTreeMap::new(),
+                env_from: Vec::new(),
+                cwd: None,
+                url: Some(serve_manual_mcp().await),
+                bearer_token_env: None,
+                gateway_endpoint: None,
+                request_timeout_ms: 60_000,
+                enabled: true,
+            }],
+        })
+        .await
+        .unwrap();
+        assert_eq!(mcp.info().await.servers[0].health, McpHealth::Healthy);
+        assert!(mcp.snapshot().get("mcp__private_docs__lookup").is_some());
+
+        pair_with_gateway(&handle, &serve_meta().await)
+            .await
+            .unwrap();
+
+        assert!(
+            mcp.snapshot().get("mcp__private_docs__lookup").is_none(),
+            "pairing must stop the server serving tools, not only record policy"
+        );
+        let info = mcp.info().await;
+        assert_eq!(info.servers[0].health, McpHealth::Disabled);
+        assert_eq!(
+            info.servers[0].diagnostic.as_deref(),
+            Some(MANAGED_DISABLED_DIAGNOSTIC)
+        );
     }
 
     #[tokio::test]
