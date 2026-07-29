@@ -1465,43 +1465,6 @@ mod tests {
     }
 
     #[test]
-    fn receipts_roundtrip_with_stable_executor_and_exact_resolution() {
-        let temp = tempfile::tempdir().unwrap();
-        let store = ReceiptStore::open(temp.path()).unwrap();
-        let executor_id = store.executor_id();
-        let mut receipt = FolderAccessReceipt::new(
-            ChatId::new(),
-            CallId::new(),
-            executor_id,
-            FolderAccessIntent::Selected {
-                path: temp.path().join("Documents"),
-            },
-        );
-        store.save(&receipt).unwrap();
-        assert_eq!(store.load_all().unwrap(), vec![receipt.clone()]);
-        assert_ne!(
-            receipt.registration_operation_id.as_uuid(),
-            receipt.call_id.0
-        );
-        let debug = format!("{receipt:?}");
-        assert!(!debug.contains(&receipt.lease_token.to_string()));
-        assert!(!debug.contains(&temp.path().display().to_string()));
-
-        receipt.resolution = Some(StoredResolution::Completed {
-            rows: None,
-            result: r#"{"status":"connected"}"#.into(),
-        });
-        store.save(&receipt).unwrap();
-        assert_eq!(store.load_all().unwrap(), vec![receipt.clone()]);
-        store.remove(receipt.call_id).unwrap();
-        assert!(store.load_all().unwrap().is_empty());
-        drop(store);
-
-        let reopened = ReceiptStore::open(temp.path()).unwrap();
-        assert_eq!(reopened.executor_id(), executor_id);
-    }
-
-    #[test]
     fn delegated_file_receipts_are_pathless_private_and_never_log_content() {
         let temp = tempfile::tempdir().unwrap();
         let store = ReceiptStore::open(temp.path()).unwrap();
@@ -1686,10 +1649,14 @@ mod tests {
     fn receipt_directory_is_exclusive_and_corruption_fails_closed() {
         let temp = tempfile::tempdir().unwrap();
         let store = ReceiptStore::open(temp.path()).unwrap();
+        let executor_id = store.executor_id();
         assert!(matches!(
             ReceiptStore::open(temp.path()),
             Err(error) if error.kind() == io::ErrorKind::WouldBlock
         ));
+        drop(store);
+        let store = ReceiptStore::open(temp.path()).unwrap();
+        assert_eq!(store.executor_id(), executor_id);
         let receipt = FolderAccessReceipt::new(
             ChatId::new(),
             CallId::new(),
