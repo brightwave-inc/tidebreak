@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use openwave_core::{
-    format_source_reference, ApprovalClass, AssistantCitationReference, ByteSpan, CallId, ChunkId,
-    DocumentId, DocumentProcessingStatus, DocumentScope, Result, RetrievalEvidenceInput,
+    format_citation_directive, ApprovalClass, AssistantCitationReference, ByteSpan, CallId,
+    ChunkId, DocumentId, DocumentProcessingStatus, DocumentScope, Result, RetrievalEvidenceInput,
     RetrievalEvidenceSource, Store, Tool, ToolCtx, ToolOutput, ToolSpec,
 };
 use serde::Deserialize;
@@ -194,8 +194,8 @@ impl Tool for ReadSourceTool {
         ToolSpec {
             name: READ_SOURCE_TOOL.into(),
             description: "Read a bounded text range from one source in this exact conversation. \
-                          The result includes an opaque reference that can be copied into the \
-                          answer to create a grounded citation."
+                          The result carries a citation directive to wrap the wording it \
+                          supports in."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -281,7 +281,11 @@ impl Tool for ReadSourceTool {
         }
 
         let source_token = Uuid::new_v4();
-        let source_reference = format_source_reference(AssistantCitationReference { source_token });
+        // The same citation grammar the search tool teaches: a directive that
+        // carries the phrasing it supports, so a citation authored from a direct
+        // read anchors to text rather than landing without a position.
+        let directive =
+            format_citation_directive("your phrasing", AssistantCitationReference { source_token });
         let title = document
             .title
             .as_deref()
@@ -289,8 +293,9 @@ impl Tool for ReadSourceTool {
             .unwrap_or("Untitled source");
         let content = format!(
             "Source: {title}\nDocument ID: {document_id}\nCharacters: {}..{} of {}\n\
-             To cite this range, copy this source reference exactly into the answer: \
-             {source_reference}\n\n{}",
+             To cite this range, wrap the wording it supports in this citation directive: \
+             your phrasing goes in the brackets and may paraphrase the range, and the \
+             reference is copied exactly.\nCite as: {directive}\n\n{}",
             window.start_character, window.end_character, window.total_characters, window.text
         );
         let span = ByteSpan::new(window.start_byte, window.end_byte);
@@ -519,8 +524,8 @@ fn historical_safe_name(name: &str) -> &'static str {
 mod tests {
     use chrono::Utc;
     use openwave_core::{
-        Chat, ChatId, DbStore, DocumentUpsert, ReasoningEffort, SourceLocation, SourceRegion,
-        Store, ToolCallRecord, TurnId,
+        format_source_reference, Chat, ChatId, DbStore, DocumentUpsert, ReasoningEffort,
+        SourceLocation, SourceRegion, Store, ToolCallRecord, TurnId,
     };
     use serde_json::json;
     use std::num::NonZeroU32;
@@ -795,11 +800,16 @@ mod tests {
                 },
             }]
         );
+        // The read teaches the directive form and hands out nothing copyable in
+        // the legacy marker form: a bare marker cites without a phrase to anchor
+        // to, which is exactly the position-less citation this avoids.
+        let reference = AssistantCitationReference {
+            source_token: evidence.source_token,
+        };
         assert!(read
             .content
-            .contains(&format_source_reference(AssistantCitationReference {
-                source_token: evidence.source_token,
-            })));
+            .contains(&format_citation_directive("your phrasing", reference)));
+        assert!(!read.content.contains(&format_source_reference(reference)));
 
         let denied = ReadSourceTool::new(store)
             .execute(&other_context, json!({ "document_id": document_id }))
