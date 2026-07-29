@@ -6,7 +6,7 @@ use sea_orm::{
 };
 
 use crate::citation::{
-    parse_assistant_citations, project_citation_pages, AssistantCitationReference,
+    parse_assistant_citations, project_citation_location, AssistantCitationReference,
     AssistantCitationSnapshot, CitationSpan, MAX_ASSISTANT_CITATIONS, MAX_CITATION_EXCERPT_CHARS,
     MAX_CITATION_HEADING_CHARS,
 };
@@ -381,8 +381,8 @@ where
                 "assistant citation projection owner is corrupt".into(),
             ));
         }
-        let (pages, bounds) = project_citation_pages(&evidence.evidence.source_regions);
-        let headings = evidence.evidence.heading_path;
+        let location = project_citation_location(&evidence.evidence.location);
+        let headings = evidence.evidence.location.heading_path();
         let heading = (!headings.is_empty()).then(|| {
             headings
                 .join(" > ")
@@ -410,8 +410,7 @@ where
                 .take(MAX_CITATION_EXCERPT_CHARS)
                 .collect(),
             heading,
-            pages,
-            bounds,
+            location,
         });
     }
     Ok(snapshots)

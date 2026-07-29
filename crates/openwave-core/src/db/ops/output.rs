@@ -13,7 +13,7 @@ use sea_orm::{
 };
 
 use crate::citation::{
-    project_citation_pages, AssistantCitationReference, MAX_CITATION_EXCERPT_CHARS,
+    project_citation_location, AssistantCitationReference, MAX_CITATION_EXCERPT_CHARS,
     MAX_CITATION_HEADING_CHARS,
 };
 use crate::deliverable::{
@@ -241,8 +241,8 @@ pub(in crate::db) async fn list_output_revision_citations(
                 "output citation projection owner is corrupt".into(),
             ));
         }
-        let (pages, bounds) = project_citation_pages(&evidence.evidence.source_regions);
-        let headings = evidence.evidence.heading_path;
+        let location = project_citation_location(&evidence.evidence.location);
+        let headings = evidence.evidence.location.heading_path();
         let heading = (!headings.is_empty()).then(|| {
             headings
                 .join(" > ")
@@ -261,8 +261,7 @@ pub(in crate::db) async fn list_output_revision_citations(
                 .take(MAX_CITATION_EXCERPT_CHARS)
                 .collect(),
             heading,
-            pages,
-            bounds,
+            location,
         });
     }
     Ok(snapshots)

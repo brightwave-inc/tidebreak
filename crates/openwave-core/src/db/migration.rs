@@ -40,7 +40,54 @@ impl MigratorTrait for Migrator {
             Box::new(AddChatPermissionMode),
             Box::new(AddToolCallAutoJudgeStatus),
             Box::new(AddChatCitationFormat),
+            Box::new(AddEvidenceLocation),
         ]
+    }
+}
+
+/// Adds the per-kind location payload to retrieval evidence (issue #884).
+///
+/// Evidence is now a taxonomy rather than one shape, and each kind addresses
+/// its source differently: a cell range on a named sheet, or a path into a
+/// structured document. Those carry a payload the existing columns cannot hold,
+/// so it goes in one nullable JSON column.
+///
+/// Document content — every row that exists today, and everything produced
+/// today — keeps its headings and source regions in the columns it always used
+/// and leaves this one null. So the column is additive in the strongest sense:
+/// no existing row is read differently, and none is rewritten.
+struct AddEvidenceLocation;
+
+impl MigrationName for AddEvidenceLocation {
+    fn name(&self) -> &str {
+        "m20260729_000026_add_evidence_location"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddEvidenceLocation {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RetrievalEvidence::Table)
+                    .add_column(ColumnDef::new(RetrievalEvidence::Location).json_binary())
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RetrievalEvidence::Table)
+                    .drop_column(RetrievalEvidence::Location)
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
     }
 }
 
@@ -7033,6 +7080,7 @@ enum RetrievalEvidence {
     SourceRegions,
     SourceKind,
     SourceUri,
+    Location,
 }
 
 #[derive(DeriveIden)]

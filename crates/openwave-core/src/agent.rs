@@ -3884,8 +3884,10 @@ mod tests {
                         chunk_id: crate::ChunkId::derive(document_id, span.start, span.end),
                         span,
                         snippet: "evidence".into(),
-                        heading_path: vec!["Facts".into()],
-                        source_regions: Vec::new(),
+                        location: crate::EvidenceLocation::DocumentContent {
+                            heading_path: vec!["Facts".into()],
+                            source_regions: Vec::new(),
+                        },
                         source: crate::RetrievalEvidenceSource::Inline,
                     },
                 ]),

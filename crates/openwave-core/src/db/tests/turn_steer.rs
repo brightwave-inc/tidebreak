@@ -249,8 +249,10 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
         chunk_id: ChunkId::derive(document_id, span.start, span.end),
         span,
         snippet: "evidence".into(),
-        heading_path: vec!["Section".into()],
-        source_regions: Vec::new(),
+        location: EvidenceLocation::DocumentContent {
+            heading_path: vec!["Section".into()],
+            source_regions: Vec::new(),
+        },
         source: RetrievalEvidenceSource::Inline,
     };
     store

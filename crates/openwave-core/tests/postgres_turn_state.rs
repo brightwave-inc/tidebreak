@@ -171,8 +171,10 @@ async fn postgres_terminal_citations_are_atomic_and_exactly_recoverable() {
                 chunk_id: ChunkId::derive(document_id, span.start, span.end),
                 span,
                 snippet: "fact".into(),
-                heading_path: Vec::new(),
-                source_regions: Vec::new(),
+                location: EvidenceLocation::DocumentContent {
+                    heading_path: Vec::new(),
+                    source_regions: Vec::new(),
+                },
                 source: RetrievalEvidenceSource::Inline,
             }],
         )

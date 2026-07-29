@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 
-use crate::citation::{AssistantCitationReference, CitationPageBounds};
+use crate::citation::{AssistantCitationReference, CitationLocation};
 use crate::id::{AgentRunId, ChatId, OutputCitationId, OutputId, OutputRevisionId, TurnId};
 
 /// Private-scratch directory holding legacy filename-addressed output files.
@@ -171,10 +171,9 @@ pub struct OutputCitationSnapshot {
     pub ordinal: u16,
     pub excerpt: String,
     pub heading: Option<String>,
-    pub pages: Vec<u32>,
-    /// Where on those pages the passage sits, when the parser resolved it that
-    /// finely. Empty for page-granular sources.
-    pub bounds: Vec<CitationPageBounds>,
+    /// Where the passage sits in its source, in the terms that source is
+    /// addressed by.
+    pub location: CitationLocation,
 }
 
 /// Content-identifying fields of a revision the caller has already written.

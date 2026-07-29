@@ -1135,6 +1135,12 @@ pub mod retrieval_evidence {
         pub source_regions: Json,
         pub source_kind: String,
         pub source_uri: Option<String>,
+        /// Location payload for a kind other than document content, whose
+        /// headings and regions stay in the two columns above. Absent on every
+        /// row written before evidence had kinds — which are all document
+        /// content — so no row needs rewriting.
+        #[sea_orm(column_type = "JsonBinary", nullable)]
+        pub location: Option<Json>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

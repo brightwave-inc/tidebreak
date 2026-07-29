@@ -23,8 +23,8 @@ use async_trait::async_trait;
 use openwave_core::{
     citation_authoring_instruction, format_citation_reference, ApprovalClass,
     AssistantCitationReference, ChatId, CitationFormat, DocumentId, DocumentScope,
-    DocumentSummaryRecord, Result, ResultEntry, ResultEntryKind, RetrievalEvidenceInput,
-    RetrievalEvidenceSource, Store, Tool, ToolCtx, ToolOutput, ToolSpec,
+    DocumentSummaryRecord, EvidenceLocation, Result, ResultEntry, ResultEntryKind,
+    RetrievalEvidenceInput, RetrievalEvidenceSource, Store, Tool, ToolCtx, ToolOutput, ToolSpec,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -293,8 +293,10 @@ impl Tool for SearchTool {
                     chunk_id: citation.chunk_id,
                     span: citation.span,
                     snippet: citation.snippet.clone(),
-                    heading_path: citation.heading_path.clone(),
-                    source_regions: citation.source_regions.clone(),
+                    location: EvidenceLocation::DocumentContent {
+                        heading_path: citation.heading_path.clone(),
+                        source_regions: citation.source_regions.clone(),
+                    },
                     source: match &citation.source {
                         crate::DocumentSource::Uri { uri } => {
                             RetrievalEvidenceSource::Uri { uri: uri.clone() }

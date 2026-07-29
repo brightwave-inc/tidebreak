@@ -118,13 +118,12 @@ document_id: DocumentId,
  * Half-open byte range of the cited passage in that document's canonical
  * text, which is the text the extracted-text view renders.
  */
-span: CitationSpan, excerpt: string, heading: string | null, pages: Array<number>, 
+span: CitationSpan, excerpt: string, heading: string | null, 
 /**
- * Where on those pages the passage sits, for sources whose parser resolved
- * it that finely. Empty for page-granular sources; `pages` is the complete
- * answer either way.
+ * Where the passage sits in its source, in the terms that source is
+ * addressed by.
  */
-bounds: Array<CitationPageBounds>, };
+location: CitationLocation, };
 
 /**
  * Where the Auto-mode judge stands on one parked call.
@@ -165,16 +164,6 @@ model: string | null,
  * expose the control; `None` leaves the provider's default in force.
  */
 reasoning_effort: ReasoningEffort | null, 
-/**
- * How much this chat lets the agent do between approvals; `None` means
- * [`PermissionMode::Ask`].
- */
-permission_mode: PermissionMode | null, 
-/**
- * How turns in this chat ask the model to cite; `None` follows the global
- * default.
- */
-citation_format: CitationFormat | null, 
 /**
  * CAS revision of this conversation's exact root projection.
  */
@@ -282,17 +271,19 @@ export type ChatTranscript = { messages: Array<ChatMessageSnapshot>,
 tool_activity: Array<ChatToolActivitySnapshot>, last_event_seq: number, };
 
 /**
- * How a turn asks the model to cite the sources it read.
+ * Where a citation points, projected per evidence kind.
  *
- * Only the authoring instruction changes. Both forms resolve through the same
- * grammar and land in the same durable shape — an ordered reference list, with
- * inline directives as an optional layer on top — so one conversation can hold
- * messages authored under either, and each keeps rendering as it was written.
- *
- * Persisted per chat as the token from [`Self::as_str`], with an absent value
- * meaning "follow the global default".
+ * The discriminant is the renderer's instruction for how to open the passage:
+ * pages and rectangles address a paginated document, a cell range addresses a
+ * sheet, and a path addresses a node. Only document content is produced today.
  */
-export type CitationFormat = "inline" | "sources_attached";
+export type CitationLocation = { "kind": "document_content", pages: Array<number>, 
+/**
+ * Where on those pages the passage sits, for sources whose parser
+ * resolved it that finely. Empty for page-granular sources; `pages`
+ * is the complete answer either way.
+ */
+bounds: Array<CitationPageBounds>, } | { "kind": "spreadsheet_cell_range", start_cell: string, end_cell: string | null, sheet_index: number, sheet_name: string, } | { "kind": "structured_path", path: string, path_type: StructuredPathType, };
 
 /**
  * One highlight rectangle of a citation, on a named page.
@@ -462,16 +453,6 @@ supported: boolean, apps: Array<GatewayAppInfo>, };
  * token material — only what the settings surface displays.
  */
 export type GatewayStatus = { configured: boolean, enabled: boolean, base_url?: string, signed_in: boolean, account_hint?: string, installation_id?: string, model_count: number, sign_in: SignInProgress, };
-
-/**
- * How much a standing grant covers.
- *
- * A grant is easy to widen by accident and hard to notice afterwards, so the
- * scope is stated in the grant itself rather than inferred from the tool. The
- * narrower variants exist because "don't ask me about commands again" is a
- * much larger thing to agree to than "don't ask me about `cargo` again".
- */
-export type GrantScope = { "scope": "exact_action" } & ToolActionPreview | { "scope": "any_args_for", command: string, } | { "scope": "whole_tool" };
 
 /**
  * Opaque identifier for a folder registered with a host broker.
@@ -748,20 +729,6 @@ export type PendingOutputWritebackRequest = { call_id: CallId, turn_id: TurnId, 
 export type PendingUserQuestions = { call_id: CallId, turn_id: TurnId, questions: Array<UserQuestion>, asked_at: string, };
 
 /**
- * How much a chat lets the agent do between approvals.
- *
- * The mode is the fallback, not the whole decision: a standing grant the
- * reader has already made covers its calls in every mode, and `ReadOnly`
- * tools never ask in any mode. The mode only decides what happens to a
- * mutating call that no grant covers — ask the reader, or proceed.
- *
- * Persisted per chat as the token from [`Self::as_str`] and read at turn
- * start, like the model selection: changing it mid-turn applies from the
- * next turn, and a reopened chat runs the way it ran before.
- */
-export type PermissionMode = "ask" | "auto" | "allow";
-
-/**
  * An optional grouping of chats that share project context and a document
  * corpus. A chat may belong to a project or stand alone — unlike some designs
  * that make a project mandatory, OpenWave keeps loose, projectless chats.
@@ -1008,11 +975,6 @@ export type Settings = {
  */
 model: string | null, 
 /**
- * The citation format new chats follow unless they carry their own.
- * Always resolved, so a client never has to know the product default.
- */
-citation_format: CitationFormat, 
-/**
  * Whether a model API key is configured (never the key itself).
  */
 has_api_key: boolean, };
@@ -1023,20 +985,9 @@ has_api_key: boolean, };
 export type SignInProgress = { "state": "idle" } | { "state": "pending", authorization_url: string, } | { "state": "failed", message: string, };
 
 /**
- * One durable "don't ask again" the reader has made, with enough provenance
- * to recognize it later and withdraw it. Grant scopes are already closed
- * renderer-safe projections, so the snapshot carries them verbatim.
+ * How the `path` of a structured-path evidence location is written.
  */
-export type StandingGrantSnapshot = { 
-/**
- * The approval decision that created the grant — also the handle a
- * revocation names.
- */
-source_call_id: CallId, chat_id: ChatId, 
-/**
- * Chat title for provenance; `None` when the chat is untitled.
- */
-chat_title: string | null, action: RendererToolName, approval: ToolApprovalKind, scope: GrantScope, granted_at: string, };
+export type StructuredPathType = "json_dot_notation" | "xml_xpath";
 
 /**
  * The action a call will take, in a form a human can inspect.
@@ -1082,7 +1033,7 @@ end_published_at: string | null, };
  * summary or arguments. `Unsupported` is the fail-closed default: a Sensitive
  * action the server can only reject, never approve.
  */
-export type ToolApprovalKind = "search_may_share_query_and_excerpts" | "web_search_may_share_query" | "exec_may_run_networked_command" | "external_mcp_may_call_server" | "workspace_may_modify_files" | "unsupported";
+export type ToolApprovalKind = "search_may_share_query_and_excerpts" | "web_search_may_share_query" | "exec_may_run_networked_command" | "external_mcp_may_call_server" | "unsupported";
 
 /**
  * What a call produced, in a form a human can read.

@@ -65,16 +65,18 @@ fn transcript_citation_json_is_closed_and_renderer_bounded() {
             span: openwave_core::CitationSpan { start: 0, end: 8 },
             excerpt: "x".repeat(openwave_core::MAX_CITATION_EXCERPT_CHARS),
             heading: Some("h".repeat(openwave_core::MAX_CITATION_HEADING_CHARS)),
-            pages: (1..=u32::try_from(openwave_core::MAX_CITATION_PAGES).unwrap()).collect(),
-            bounds: vec![openwave_core::CitationPageBounds {
-                page: 1,
-                bounds: openwave_core::PageBounds {
-                    left: 100,
-                    top: 200,
-                    width: 5_000,
-                    height: 300,
-                },
-            }],
+            location: openwave_core::CitationLocation::DocumentContent {
+                pages: (1..=u32::try_from(openwave_core::MAX_CITATION_PAGES).unwrap()).collect(),
+                bounds: vec![openwave_core::CitationPageBounds {
+                    page: 1,
+                    bounds: openwave_core::PageBounds {
+                        left: 100,
+                        top: 200,
+                        width: 5_000,
+                        height: 300,
+                    },
+                }],
+            },
         }],
         image_attachments: None,
         refusal: None,
@@ -89,19 +91,33 @@ fn transcript_citation_json_is_closed_and_renderer_bounded() {
             .cloned()
             .collect::<std::collections::BTreeSet<_>>(),
         [
-            "bounds",
             "document_id",
             "excerpt",
             "heading",
             "id",
+            "location",
             "ordinal",
-            "pages",
             "span"
         ]
         .into_iter()
         .map(str::to_owned)
         .collect()
     );
+    // The location is a tagged union: the renderer opens a passage by its kind,
+    // and document content is the kind whose place is pages and rectangles.
+    assert_eq!(
+        citation["location"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["bounds", "kind", "pages"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+    assert_eq!(citation["location"]["kind"], "document_content");
     // The source and the place in it are what make a citation navigable. What
     // stays behind are the retrieval mechanics: the token the model was given,
     // the call it came from, the ranking, and the generation fencing.
@@ -154,8 +170,10 @@ impl Tool for AmbiguousCitationTool {
                     chunk_id: openwave_core::ChunkId::derive(document_id, span.start, span.end),
                     span,
                     snippet: "evidence".into(),
-                    heading_path: vec!["Facts".into()],
-                    source_regions: Vec::new(),
+                    location: openwave_core::EvidenceLocation::DocumentContent {
+                        heading_path: vec!["Facts".into()],
+                        source_regions: Vec::new(),
+                    },
                     source: openwave_core::RetrievalEvidenceSource::Inline,
                 },
             ]),

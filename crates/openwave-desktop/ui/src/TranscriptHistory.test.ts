@@ -169,8 +169,11 @@ describe("hydrateTranscriptHistory", () => {
               span: { start: 0, end: 12 },
               excerpt: "safe excerpt",
               heading: "Safe heading",
-              pages: [2],
-              bounds: [],
+              location: {
+                kind: "document_content",
+                pages: [2],
+                bounds: [],
+              },
             },
           ],
         },
