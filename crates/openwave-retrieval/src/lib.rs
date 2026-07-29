@@ -81,6 +81,8 @@ mod liteparse_image_parser;
 mod liteparse_office_parser;
 #[cfg(feature = "parse-liteparse")]
 mod liteparse_parser;
+#[cfg(feature = "parse-liteparse")]
+mod liteparse_regions;
 #[cfg(feature = "embed-openai")]
 mod openai_embed;
 mod parse;

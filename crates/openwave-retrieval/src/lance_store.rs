@@ -1598,6 +1598,7 @@ mod tests {
                 span: south.chunk.span,
                 location: SourceLocation::Page {
                     number: std::num::NonZeroU32::new(7).unwrap(),
+                    bounds: None,
                 },
             }];
             let expected_source_regions = south.chunk.source_regions.clone();
@@ -1644,6 +1645,7 @@ mod tests {
             hits[0].chunk.source_regions[0].location,
             SourceLocation::Page {
                 number: std::num::NonZeroU32::new(7).unwrap()
+                bounds: None,
             }
         );
     }
@@ -2285,6 +2287,7 @@ mod tests {
             span: ByteSpan::new(1, 2),
             location: SourceLocation::Page {
                 number: std::num::NonZeroU32::new(1).unwrap(),
+                bounds: None,
             },
         }];
 

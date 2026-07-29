@@ -2,10 +2,14 @@
 //! PDF via the local PDFium-backed engine. Runs only when the feature is on.
 #![cfg(feature = "parse-liteparse")]
 
-use openwave_retrieval::{DocumentParser, LiteParsePdfParser};
+use openwave_retrieval::{DocumentParser, LiteParsePdfParser, SourceLocation};
 
 /// A minimal, valid single-page PDF whose text layer contains a known string.
 const MINIMAL_PDF: &[u8] = include_bytes!("fixtures/minimal.pdf");
+
+/// Two pages, each with its own marker string, so a page map that always says
+/// "page one" is distinguishable from one that actually tracks the source.
+const TWO_PAGE_PDF: &[u8] = include_bytes!("fixtures/two-page.pdf");
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn extracts_text_layer_from_a_real_pdf() {
@@ -20,6 +24,39 @@ async fn extracts_text_layer_from_a_real_pdf() {
         "expected the PDF's text layer in the canonical output, got: {:?}",
         parsed.text
     );
+}
+
+/// The assertion the page pathway existed for but could never make: a passage
+/// resolves to the page it is actually printed on, through a real parse.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn maps_each_passage_to_the_page_it_appears_on() {
+    let parser = LiteParsePdfParser::new();
+    let parsed = parser
+        .parse(TWO_PAGE_PDF, "application/pdf")
+        .await
+        .expect("liteparse should parse a valid two-page PDF");
+
+    // Resolve a marker's offset in canonical text to a page the way the
+    // retrieval pipeline does: find the region whose span contains it.
+    let page_of = |marker: &str| {
+        let at = parsed
+            .text
+            .find(marker)
+            .unwrap_or_else(|| panic!("{marker:?} missing from canonical text: {:?}", parsed.text));
+        parsed
+            .source_regions
+            .iter()
+            .find(|region| region.span.start <= at && at < region.span.end)
+            .map(|region| match region.location {
+                SourceLocation::Page { number, .. } => number.get(),
+                #[allow(unreachable_patterns)]
+                _ => panic!("expected a page location"),
+            })
+            .unwrap_or_else(|| panic!("no source region covers {marker:?}"))
+    };
+
+    assert_eq!(page_of("Alpha"), 1);
+    assert_eq!(page_of("Bravo"), 2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

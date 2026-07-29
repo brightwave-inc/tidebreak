@@ -1113,6 +1113,7 @@ async fn document_constraints_reject_invalid_catalog_state() {
         span: ByteSpan::new(4, 5),
         location: SourceLocation::Page {
             number: std::num::NonZeroU32::new(1).unwrap(),
+            bounds: None,
         },
     }];
     assert!(store.create_document(&invalid_regions).await.is_err());
@@ -1171,6 +1172,7 @@ async fn source_regions_roundtrip_and_provenance_changes_advance_revision() {
         span: ByteSpan::new(0, 9),
         location: SourceLocation::Page {
             number: std::num::NonZeroU32::new(number).unwrap(),
+            bounds: None,
         },
     };
     let source = DocumentUpsert {
@@ -1316,6 +1318,7 @@ async fn raw_source_parse_completion_atomically_enqueues_index() {
             span: ByteSpan::new(0, 8),
             location: SourceLocation::Page {
                 number: std::num::NonZeroU32::new(1).unwrap(),
+                bounds: None,
             },
         }],
     };
@@ -11366,6 +11369,7 @@ async fn retrieval_evidence_is_atomic_generation_fenced_and_survives_source_chan
                         u32::try_from(index + 1).expect("test page fits u32"),
                     )
                     .unwrap(),
+                    bounds: None,
                 },
             })
             .collect(),

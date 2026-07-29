@@ -57,7 +57,7 @@ const IMAGE_MEDIA_TYPES: &[&str] = &[
 /// extracted text, so the durable pipeline reparses affected documents. The
 /// fingerprint describes the intended pipeline (notably OCR-off) and is
 /// deliberately independent of whether PDFium happens to be installed at runtime.
-const IMAGE_FINGERPRINT: &str = "liteparse:v2.8:image:pdfium:markdown:no-ocr:v1";
+const IMAGE_FINGERPRINT: &str = "liteparse:v2.8:image:pdfium:markdown:no-ocr:pages:v2";
 
 /// Ingests raster images by converting them to a single-page PDF and parsing it
 /// with `liteparse`. With OCR off it produces canonical text only when the image
@@ -126,7 +126,7 @@ impl LiteParseImageParser {
         let parsed = LiteParse::new(Self::config())
             .parse_input(PdfInput::Bytes(raw.to_vec()))
             .await
-            .map(|result| ParsedDocument::from_text(result.text))
+            .map(crate::liteparse_regions::parsed_document_from)
             // Keep the ingest alive: an image liteparse cannot convert or parse
             // has no text to lose (OCR is off), so store it empty instead of
             // surfacing an error and marking the document failed.
