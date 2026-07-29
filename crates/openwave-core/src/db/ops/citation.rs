@@ -6,13 +6,13 @@ use sea_orm::{
 };
 
 use crate::citation::{
-    parse_assistant_citations, AssistantCitationReference, AssistantCitationSnapshot, CitationSpan,
-    MAX_ASSISTANT_CITATIONS, MAX_CITATION_EXCERPT_CHARS, MAX_CITATION_HEADING_CHARS,
-    MAX_CITATION_PAGES,
+    parse_assistant_citations, project_citation_pages, AssistantCitationReference,
+    AssistantCitationSnapshot, CitationSpan, MAX_ASSISTANT_CITATIONS, MAX_CITATION_EXCERPT_CHARS,
+    MAX_CITATION_HEADING_CHARS,
 };
 use crate::error::{AgentError, Result};
 use crate::id::{AssistantCitationId, ChatId, MessageId, TurnId};
-use crate::model::{Message, Role, SourceLocation};
+use crate::model::{Message, Role};
 use crate::storage::{AppendClaimedMessageOutcome, TurnLeaseFence};
 
 use super::super::{entities, store_err, DbStore};
@@ -364,17 +364,7 @@ where
                 "assistant citation projection owner is corrupt".into(),
             ));
         }
-        let mut pages = Vec::new();
-        for region in evidence.evidence.source_regions {
-            let SourceLocation::Page { number, .. } = region.location;
-            let page = number.get();
-            if !pages.contains(&page) {
-                pages.push(page);
-                if pages.len() == MAX_CITATION_PAGES {
-                    break;
-                }
-            }
-        }
+        let (pages, bounds) = project_citation_pages(&evidence.evidence.source_regions);
         let headings = evidence.evidence.heading_path;
         let heading = (!headings.is_empty()).then(|| {
             headings
@@ -404,6 +394,7 @@ where
                 .collect(),
             heading,
             pages,
+            bounds,
         });
     }
     Ok(snapshots)

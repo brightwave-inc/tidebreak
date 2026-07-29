@@ -4,10 +4,10 @@
 //! references from final text and hands only their typed identities to storage;
 //! renderer clients never see the grammar or its underlying call identity.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use crate::RetrievalEvidenceInput;
-use crate::{AssistantCitationId, DocumentId, MessageId};
+use crate::{AssistantCitationId, DocumentId, MessageId, PageBounds, SourceLocation, SourceRegion};
 
 const SOURCE_REFERENCE_PREFIX: &str = "[[ow-source:";
 const SOURCE_REFERENCE_SUFFIX: &str = "]]";
@@ -24,6 +24,12 @@ pub const MAX_ASSISTANT_CITATIONS: usize = RetrievalEvidenceInput::MAX_RESULTS;
 pub const MAX_CITATION_EXCERPT_CHARS: usize = 600;
 pub const MAX_CITATION_HEADING_CHARS: usize = 160;
 pub const MAX_CITATION_PAGES: usize = 8;
+/// Most highlight rectangles one citation carries to the renderer.
+///
+/// Larger than [`MAX_CITATION_PAGES`] because a passage is drawn line by line:
+/// a handful of pages can easily be twenty rectangles. Overflow costs the
+/// citation nothing beyond precision — the pages it spans are still listed.
+pub const MAX_CITATION_BOUNDS: usize = 32;
 
 /// One opaque reference selected by a model from a search result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -61,6 +67,19 @@ pub struct AssistantCitationSnapshot {
     pub excerpt: String,
     pub heading: Option<String>,
     pub pages: Vec<u32>,
+    /// Where on those pages the passage sits, for sources whose parser resolved
+    /// it that finely. Empty for page-granular sources; `pages` is the complete
+    /// answer either way.
+    pub bounds: Vec<CitationPageBounds>,
+}
+
+/// One highlight rectangle of a citation, on a named page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+pub struct CitationPageBounds {
+    /// One-based page the rectangle falls on.
+    pub page: u32,
+    /// The rectangle, in that page's normalized coordinate space.
+    pub bounds: PageBounds,
 }
 
 /// A citation's byte range, projected for the renderer.
@@ -73,6 +92,47 @@ pub struct CitationSpan {
     pub start: u32,
     /// Exclusive end byte offset.
     pub end: u32,
+}
+
+/// Project the pages and highlight rectangles a citation shows, from the
+/// immutable source regions of the evidence it was made from.
+///
+/// Pages keep the regions' own order and stay first-seen distinct. Rectangles
+/// are ordered by page and then by position down and across it, which is the
+/// order a viewer paints them in, and identical rectangles collapse: regions
+/// are per-span, so one visual line quoted twice is one highlight.
+pub(crate) fn project_citation_pages(
+    regions: &[SourceRegion],
+) -> (Vec<u32>, Vec<CitationPageBounds>) {
+    let mut pages = Vec::new();
+    // Ordered and deduplicated by construction. The leading key is
+    // (page, top, left); width and height only break ties between rectangles
+    // that start at the same point.
+    let mut rects = BTreeSet::new();
+    for region in regions {
+        let SourceLocation::Page { number, bounds } = region.location;
+        let page = number.get();
+        if pages.len() < MAX_CITATION_PAGES && !pages.contains(&page) {
+            pages.push(page);
+        }
+        if let Some(bounds) = bounds {
+            rects.insert((page, bounds.top, bounds.left, bounds.width, bounds.height));
+        }
+    }
+    let bounds = rects
+        .into_iter()
+        .take(MAX_CITATION_BOUNDS)
+        .map(|(page, top, left, width, height)| CitationPageBounds {
+            page,
+            bounds: PageBounds {
+                left,
+                top,
+                width,
+                height,
+            },
+        })
+        .collect();
+    (pages, bounds)
 }
 
 /// Produce the exact closed reference a search result gives to the model.
@@ -231,6 +291,35 @@ mod tests {
         let parsed = parse_assistant_citations(&text);
         assert_eq!(parsed.references, [valid]);
         assert_eq!(parsed.content, text.replace(&valid_marker, ""));
+    }
+
+    /// Evidence may carry many more regions than a highlight list should, and
+    /// the renderer reads the list in order — so the overflow that gets dropped
+    /// has to be the tail, not an arbitrary subset.
+    #[test]
+    fn page_bounds_are_bounded_from_the_front_of_the_reading_order() {
+        let regions = (0..MAX_CITATION_BOUNDS + 4)
+            .rev()
+            .map(|index| SourceRegion {
+                span: crate::ByteSpan::new(index, index + 1),
+                location: SourceLocation::Page {
+                    number: std::num::NonZeroU32::new(1).expect("page one is nonzero"),
+                    bounds: Some(PageBounds {
+                        left: 0,
+                        top: u16::try_from(index).expect("test row fits u16"),
+                        width: 1_000,
+                        height: 1,
+                    }),
+                },
+            })
+            .collect::<Vec<_>>();
+        let (_, bounds) = project_citation_pages(&regions);
+        assert_eq!(bounds.len(), MAX_CITATION_BOUNDS);
+        assert_eq!(bounds[0].bounds.top, 0);
+        assert_eq!(
+            bounds[MAX_CITATION_BOUNDS - 1].bounds.top,
+            u16::try_from(MAX_CITATION_BOUNDS - 1).expect("the cap fits u16")
+        );
     }
 
     #[test]

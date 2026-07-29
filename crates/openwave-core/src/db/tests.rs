@@ -1,7 +1,7 @@
 use super::*;
 use crate::model::{
     ByteSpan, ChatRootAttachment, DocumentParseOutput, DocumentSourceBlob, DocumentSourceUpsert,
-    RetrievalEvidenceInput, RetrievalEvidenceSource, RootAttachmentChangeAction,
+    PageBounds, RetrievalEvidenceInput, RetrievalEvidenceSource, RootAttachmentChangeAction,
     RootAttachmentChangeFailure, RootAttachmentChangeTerminal, RootAttachmentOrigin,
     SourceLocation, SourceRegion, ToolCallExecution, ToolCallResolution, ToolCallStatus,
     MAX_ATTACHMENT_REVISION, MAX_ROOT_ATTACHMENTS,
@@ -11263,6 +11263,20 @@ async fn retrieval_evidence_is_atomic_generation_fenced_and_survives_source_chan
     };
     store.accept_tool_call(&call).await.unwrap();
     let span = ByteSpan::new(0, source.canonical_text.len());
+    // Positioned regions, deliberately not in reading order and with the last
+    // two on the same rectangle: the snapshot has to sort and collapse them.
+    let placed = |start: usize, end: usize, page: u32, left: u16, top: u16| SourceRegion {
+        span: ByteSpan::new(start, end),
+        location: SourceLocation::Page {
+            number: std::num::NonZeroU32::new(page).unwrap(),
+            bounds: Some(PageBounds {
+                left,
+                top,
+                width: 1_000,
+                height: 200,
+            }),
+        },
+    };
     let evidence = RetrievalEvidenceInput {
         rank: 1,
         source_token: uuid::Uuid::new_v4(),
@@ -11272,7 +11286,12 @@ async fn retrieval_evidence_is_atomic_generation_fenced_and_survives_source_chan
         span,
         snippet: source.canonical_text.clone(),
         heading_path: vec!["Archive".into()],
-        source_regions: Vec::new(),
+        source_regions: vec![
+            placed(0, 2, 2, 1_000, 5_000),
+            placed(2, 4, 1, 3_000, 1_000),
+            placed(4, 6, 1, 1_000, 1_000),
+            placed(6, 8, 1, 1_000, 1_000),
+        ],
         source: RetrievalEvidenceSource::Uri {
             uri: source.source_uri.clone().unwrap(),
         },
@@ -11448,6 +11467,19 @@ async fn retrieval_evidence_is_atomic_generation_fenced_and_survives_source_chan
         160
     );
     assert_eq!(snapshot.citations[0].pages, [1, 2, 3, 4, 5, 6, 7, 8]);
+    // A page-granular source has nothing to draw; `pages` is the whole answer.
+    assert!(snapshot.citations[0].bounds.is_empty());
+    // Positioned regions keep their first-seen page order but are projected as
+    // rectangles ordered down and across each page, deduplicated.
+    assert_eq!(snapshot.citations[1].pages, [2, 1]);
+    assert_eq!(
+        snapshot.citations[1]
+            .bounds
+            .iter()
+            .map(|placed| (placed.page, placed.bounds.top, placed.bounds.left))
+            .collect::<Vec<_>>(),
+        [(1, 1_000, 1_000), (1, 1_000, 3_000), (2, 5_000, 1_000)]
+    );
 
     let other_chat = sample_chat();
     store.create_chat(&other_chat).await.unwrap();

@@ -62,7 +62,7 @@ pub const PAGE_BOUNDS_SCALE: u16 = 10_000;
 /// `Eq`/`Hash`, and make containment in the page an invariant that can actually
 /// be checked. A ten-thousandth of a US Letter page is ~0.06pt — far finer than
 /// any highlight needs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
 pub struct PageBounds {
     /// Distance from the page's left edge.
     pub left: u16,
