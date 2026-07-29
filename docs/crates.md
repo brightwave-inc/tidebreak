@@ -14,7 +14,7 @@ libraries.
       libraries          openwave-mcp          openwave-retrieval
                          openwave-router       openwave-web-search
                          openwave-host-broker  openwave-code-execution
-                         openwave-egress
+                         openwave-egress       openwave-sandbox-protocol
                                             │
       the seam                         openwave-core
 
@@ -106,6 +106,28 @@ scratch tools remain separate and confined to app storage.
 See [Host access and connected folders](host-access.md).
 
 **Depends on:** no OpenWave client crate.
+
+## `openwave-sandbox-protocol` — the sandbox-agent wire protocol 🟡
+
+The versioned boundary between the host and a sandbox-resident agent run —
+provisioning, run init, the resumable monotonically sequenced event stream,
+artifact collection, and the reverse-RPC callback channel with host-proxied
+model inference as its first capability. It is a public interface third parties
+implement (a self-hosted backend runs the sandbox side of it), so the wire
+contract, not any one backend, is the deliverable. It follows the host-broker
+envelope discipline: a `PROTOCOL_VERSION` checked for exact equality with an
+attach handshake, deny-by-default capability grants carrying run provenance, a
+reserved control lane for cancel/liveness kept off the request lane, and bounded
+typed results with explicit per-capability bounds. The provision/address/destroy
+decomposition treats a self-hosted backend (no provisioning, just an address and
+a credential) as the conformance test rather than a special case. It ships an
+in-process reference backend and a conformance suite (the CI artifact), plus the
+operation-identity state machine backed by an in-memory store behind a durable
+seam. **The protocol is UNSTABLE until a named release.** The crash-safe durable
+operation log and its retention are split into focused follow-ups.
+See [Execution providers and sandbox-resident agent runs](sandbox-providers.md).
+
+**Depends on:** no OpenWave crate (standalone wire contract).
 
 ## `openwave-retrieval` — parsing, search, citations 🟢
 
