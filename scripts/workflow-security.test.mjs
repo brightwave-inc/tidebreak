@@ -98,9 +98,10 @@ test("workflow container images are pinned by digest", () => {
 
 test("Rust CI requires the same PostgreSQL lane on pull requests and main", () => {
   const ci = workflows["ci.yml"];
+  const changes = workflowJob(ci, "changes");
   const postgres = workflowJob(ci, "postgres");
+  const parsers = workflowJob(ci, "parsers");
   const testJob = workflowJob(ci, "test");
-  const aggregate = workflowJob(ci, "rust");
 
   assert.match(
     ci,
@@ -112,23 +113,18 @@ test("Rust CI requires the same PostgreSQL lane on pull requests and main", () =
   assert.match(postgres, /if:.*needs\.changes\.outputs\.workspace == 'true'/);
   assert.doesNotMatch(postgres, /github\.event_name != 'pull_request'/);
   assert.match(postgres, /OPENWAVE_REQUIRE_POSTGRES_TEST: "true"/);
-  assert.match(aggregate, /^\s+postgres,$/m);
-  assert.match(aggregate, /test "\$POSTGRES_RESULT" = success/);
   // The narrower `workspace` scope must imply the `rust` one. Without this the
-  // crate-coverage lanes could be gated on a scope that never ran for them, and
-  // the aggregate would check their results against the wrong bit.
+  // crate-coverage lanes could be gated on a scope that never ran for them.
   assert.match(
-    aggregate,
-    /if test "\$WORKSPACE_CHANGED" = true && test "\$RUST_CHANGED" != true; then/,
+    changes,
+    /if \[\[ "\$workspace" == true && "\$rust" != true \]\]; then/,
   );
-  assert.match(
-    aggregate,
-    /pull_request\) test "\$PR_TITLE_RESULT" = success ;;/,
-  );
-  assert.match(aggregate, /\*\) test "\$PR_TITLE_RESULT" = skipped ;;/);
+  assert.doesNotMatch(ci, /^  rust:$/m);
+  assert.doesNotMatch(ci, /name: fmt · clippy · build · test/);
 
   for (const job of [
     workflowJob(ci, "lint"),
+    parsers,
     workflowJob(ci, "desktop"),
     testJob,
     postgres,
@@ -146,39 +142,74 @@ test("Rust CI requires the same PostgreSQL lane on pull requests and main", () =
     testJob,
     /cargo test --workspace --exclude openwave-desktop\n\s+--no-default-features\n\s+--features\n\s+openwave-core\/default,openwave-retrieval\/default,openwave-router\/default\n\s+--locked/,
   );
+  assert.match(
+    parsers,
+    /if:.*needs\.changes\.outputs\.parsers == 'true'/,
+  );
+  assert.match(ci, /parsers: \$\{\{ steps\.scope\.outputs\.parsers \}\}/);
+  assert.match(ci, /echo "parsers=\$parsers"/);
+  assert.match(
+    parsers,
+    /parser_features="parse-liteparse,parse-office,parse-image,parse-spreadsheet"/,
+  );
+  assert.match(parsers, /liteparse_parser::tests/);
+  assert.match(parsers, /liteparse_office_parser::tests/);
+  assert.match(parsers, /liteparse_image_parser::tests/);
+  assert.match(parsers, /spreadsheet_parser::tests/);
+  assert.match(
+    parsers,
+    /production_registry_routes_rich_formats_to_the_intended_parser/,
+  );
+  assert.match(parsers, /--test liteparse_pdf/);
+  assert.doesNotMatch(parsers, /cargo test -p openwave-server/);
+  assert.doesNotMatch(parsers, /Install system deps \(Tauri\)/);
+
   const desktop = workflowJob(ci, "desktop");
   assert.match(
     desktop,
-    /parser_features="parse-liteparse,parse-office,parse-image,parse-spreadsheet"/,
+    /cargo test -p openwave-desktop --no-default-features --locked/,
   );
-  assert.match(desktop, /liteparse_parser::tests/);
-  assert.match(desktop, /liteparse_office_parser::tests/);
-  assert.match(desktop, /liteparse_image_parser::tests/);
-  assert.match(desktop, /spreadsheet_parser::tests/);
+  assert.match(desktopCargo, /default = \["document-parsers"\]/);
   assert.match(
-    desktop,
-    /production_registry_routes_rich_formats_to_the_intended_parser/,
+    desktopCargo,
+    /document-parsers = \["openwave-server\/document-parsers"\]/,
   );
-  assert.match(desktop, /--test liteparse_pdf/);
-  assert.doesNotMatch(desktop, /cargo test -p openwave-server/);
+  assert.match(
+    desktopCargo,
+    /openwave-server = \{ path = "\.\.\/openwave-server", default-features = false \}/,
+  );
+  assert.match(
+    changes,
+    /if \[\[ "\$parsers" == true && "\$workspace" != true \]\]; then/,
+  );
 });
 
-test("UI tests and production build run as parallel matrix jobs", () => {
+test("UI tests and production build run as fixed parallel jobs", () => {
   const ci = workflows["ci.yml"];
-  const ui = workflowJob(ci, "ui");
-  const aggregate = workflowJob(ci, "rust");
+  const uiTest = workflowJob(ci, "ui-test");
+  const uiBuild = workflowJob(ci, "ui-build");
 
-  assert.match(ui, /name: desktop UI · \$\{\{ matrix\.task \}\}/);
-  assert.match(ui, /strategy:\n\s+fail-fast: false\n\s+matrix:\n\s+task: \[test, build\]/);
-  assert.match(ui, /run: pnpm install --frozen-lockfile/);
-  assert.match(ui, /run: pnpm \$\{\{ matrix\.task \}\}/);
-  assert.match(aggregate, /UI_RESULT: \$\{\{ needs\.ui\.result \}\}/);
-  assert.match(aggregate, /true\) test "\$UI_RESULT" = success ;;/);
+  for (const job of [uiTest, uiBuild]) {
+    assert.match(job, /if:.*needs\.changes\.outputs\.ui == 'true'/);
+    assert.match(job, /run: pnpm install --frozen-lockfile/);
+  }
+  assert.match(uiTest, /name: desktop UI · test/);
+  assert.match(uiTest, /run: pnpm test/);
+  assert.match(uiBuild, /name: desktop UI · build/);
+  assert.match(uiBuild, /run: pnpm build/);
+  assert.doesNotMatch(ci, /matrix\.task/);
 });
 
 test("PR compiler caches are writable, isolated, and deleted on close", () => {
   const ci = workflows["ci.yml"];
-  for (const name of ["lint", "desktop", "test", "vectors", "postgres"]) {
+  for (const name of [
+    "lint",
+    "parsers",
+    "desktop",
+    "test",
+    "vectors",
+    "postgres",
+  ]) {
     assert.match(workflowJob(ci, name), /SCCACHE_GHA_RW_MODE: READ_WRITE/);
   }
   assert.doesNotMatch(
@@ -205,7 +236,6 @@ test("heavy capability lanes run only for relevant merges and scheduled backstop
   const changes = workflowJob(ci, "changes");
   const vectors = workflowJob(ci, "vectors");
   const sandboxContainer = workflowJob(ci, "sandbox-container");
-  const aggregate = workflowJob(ci, "rust");
 
   assert.match(ci, /^  schedule:\n    - cron: "17 6 \* \* 1"$/m);
   assert.match(changes, /schedule\|workflow_dispatch\)/);
@@ -239,15 +269,13 @@ test("heavy capability lanes run only for relevant merges and scheduled backstop
     sandboxContainer,
     /if:.*needs\.changes\.outputs\.sandbox_container == 'true'.*github\.event_name != 'pull_request'/,
   );
-  assert.match(aggregate, /case "\$VECTORS_CHANGED" in/);
-  assert.match(aggregate, /case "\$SANDBOX_CONTAINER_CHANGED" in/);
   assert.match(
-    aggregate,
-    /vector scope without workspace scope; the detector is wrong/,
+    changes,
+    /if \[\[ "\$vectors" == true && "\$workspace" != true \]\]; then/,
   );
   assert.match(
-    aggregate,
-    /sandbox-container scope without workspace scope; the detector is wrong/,
+    changes,
+    /if \[\[ "\$sandbox_container" == true && "\$workspace" != true \]\]; then/,
   );
 });
 
