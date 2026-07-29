@@ -318,7 +318,15 @@ export type CodeExecutionEgressEnforcement = { provider: CodeExecutionProviderKi
  * enforcement model, so the settings surface can show the caveat inline
  * instead of burying it in prose the user skims past.
  */
-gaps: Array<string>, };
+gaps: Array<string>, 
+/**
+ * A precondition the boundary is gated on that the host cannot verify
+ * statically ("Daytona org tier 3+"). Present only for a
+ * [`EgressEnforcementStatus::ConditionalBoundary`], so the surface can
+ * state the condition inline rather than implying an unconditional
+ * boundary.
+ */
+requirement?: string, };
 
 /**
  * Renderer-safe egress policy plus per-provider enforcement disclosure.
@@ -397,7 +405,7 @@ export type EgressConfig = { "mode": "open" } | { "mode": "allowlist", domains: 
  * says a vendor's mechanism leaves a general-purpose destination reachable,
  * the surface must not present it as a full boundary.
  */
-export type EgressEnforcementStatus = "boundary" | "applied_with_gaps" | "unconfirmed";
+export type EgressEnforcementStatus = "boundary" | "conditional_boundary" | "applied_with_gaps" | "unconfirmed";
 
 /**
  * One entitled connected app, with the slugs of the MCP endpoints that
