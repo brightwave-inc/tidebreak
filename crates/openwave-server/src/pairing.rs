@@ -79,6 +79,7 @@ pub struct PairingOutcome {
 /// Every other failure — invalid URL, unreachable gateway, bad manifest,
 /// store errors — stays the [`AgentError`] it was.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum PairingError {
     /// The link named a different gateway than the one this profile is
     /// provisioned to. Carries the provisioned base URL — normalized and
@@ -88,7 +89,11 @@ pub enum PairingError {
         /// The normalized base URL this profile is provisioned to.
         provisioned_url: String,
     },
-    /// Any other failure. Nothing durable changed.
+    /// Any other failure. No policy was written — though the provider
+    /// configuration may already be repointed: it is deliberately written
+    /// first, so a failure between the writes fails into a still-unmanaged
+    /// profile recoverable from settings (see the ordering comment in
+    /// [`pair_with_gateway`]).
     Other(AgentError),
 }
 

@@ -199,7 +199,7 @@ fn spawn_pairing(app: tauri::AppHandle, link: ProvisionLink) {
             }
             Ok(None) => log_pairing(&app, &format!("pairing with {origin} declined")),
             Err(failure) => {
-                log_pairing(&app, &format!("pairing failed: {failure}"));
+                log_pairing(&app, &format!("pairing failed for {origin}: {failure}"));
                 show_pairing_failure(&app, &origin, &failure);
             }
         }
@@ -317,8 +317,8 @@ fn refusal_message(origin: &str, failure: &PairFailure) -> String {
              your administrator to change gateways."
         ),
         PairFailure::Other(_) => format!(
-            "OpenWave could not pair with {origin}. Nothing was changed; \
-             details are in pairing.log."
+            "OpenWave could not pair with {origin}. This device was not \
+             paired; details are in pairing.log."
         ),
     }
 }
@@ -404,7 +404,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::{
-        pair_after_confirmation, provision_link, refusal_message, PairFailure, ProvisionLink,
+        origin_of, pair_after_confirmation, provision_link, refusal_message, PairFailure,
+        ProvisionLink,
     };
 
     #[test]
@@ -539,5 +540,15 @@ mod tests {
         );
         assert!(other.contains("https://new.example"));
         assert!(!other.contains("token=shh"));
+    }
+
+    /// Pins the load-bearing reduction the conflict dialog's claim rests
+    /// on: scheme, host, and port — nothing else of the stored base URL.
+    #[test]
+    fn a_stored_base_url_reduces_to_its_origin() {
+        assert_eq!(
+            origin_of("https://gw.example:8443/base/path/"),
+            "https://gw.example:8443"
+        );
     }
 }
