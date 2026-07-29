@@ -1562,6 +1562,7 @@ pub trait Store: Send + Sync {
         model: Option<Option<String>>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
         permission_mode: Option<Option<PermissionMode>>,
+        citation_format: Option<Option<crate::citation::CitationFormat>>,
     ) -> Result<bool>;
 
     /// Create a conversation output together with its first revision.

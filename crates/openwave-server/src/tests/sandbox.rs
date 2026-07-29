@@ -230,6 +230,7 @@ async fn delegated_file_routes_are_native_only_and_expose_only_exact_broker_auth
         model: None,
         reasoning_effort: None,
         permission_mode: None,
+        citation_format: None,
         attachment_revision: 1,
         root_attachments: vec![ChatRootAttachment {
             root_id,

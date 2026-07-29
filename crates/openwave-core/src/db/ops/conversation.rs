@@ -7,6 +7,7 @@ use sea_orm::{
     QuerySelect, QueryTrait, Set, TransactionTrait, TryInsertResult,
 };
 
+use crate::citation::CitationFormat;
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{ChatId, DocumentId, HostRootId, MessageId, ProjectId, TurnId};
@@ -190,6 +191,13 @@ where
             Some(mode) => Set(Some(mode.as_str().to_owned())),
             None => sea_orm::ActiveValue::NotSet,
         },
+        // Left unset when absent for the same reason as `reasoning_effort`
+        // above: a newly-created chat carries no override, and skipping the
+        // column keeps `create_chat` insertable against an older schema.
+        citation_format: match &chat.citation_format {
+            Some(format) => Set(Some(format.as_str().to_owned())),
+            None => sea_orm::ActiveValue::NotSet,
+        },
         attachment_revision: Set(chat.attachment_revision),
         created_at: Set(chat.created_at),
     }
@@ -275,8 +283,13 @@ pub(in crate::db) async fn update_chat_metadata(
     model: Option<Option<String>>,
     reasoning_effort: Option<Option<ReasoningEffort>>,
     permission_mode: Option<Option<PermissionMode>>,
+    citation_format: Option<Option<CitationFormat>>,
 ) -> Result<bool> {
-    if title.is_none() && model.is_none() && reasoning_effort.is_none() && permission_mode.is_none()
+    if title.is_none()
+        && model.is_none()
+        && reasoning_effort.is_none()
+        && permission_mode.is_none()
+        && citation_format.is_none()
     {
         return Ok(entities::chat::Entity::find_by_id(id.0)
             .one(&store.conn)
@@ -310,6 +323,14 @@ pub(in crate::db) async fn update_chat_metadata(
         update = update.col_expr(
             entities::chat::Column::PermissionMode,
             sea_orm::sea_query::Expr::value(permission_mode.map(|mode| mode.as_str().to_owned())),
+        );
+    }
+    if let Some(citation_format) = citation_format {
+        update = update.col_expr(
+            entities::chat::Column::CitationFormat,
+            sea_orm::sea_query::Expr::value(
+                citation_format.map(|format| format.as_str().to_owned()),
+            ),
         );
     }
     let result = update
@@ -1208,6 +1229,10 @@ fn chat_from_models(
             .permission_mode
             .as_deref()
             .and_then(PermissionMode::from_str),
+        citation_format: model
+            .citation_format
+            .as_deref()
+            .and_then(CitationFormat::from_str),
         attachment_revision: model.attachment_revision,
         root_attachments,
         created_at: model.created_at,

@@ -9,9 +9,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use openwave_core::{
-    format_citation_directive, ApprovalClass, AssistantCitationReference, ByteSpan, CallId,
-    ChunkId, DocumentId, DocumentProcessingStatus, DocumentScope, Result, RetrievalEvidenceInput,
-    RetrievalEvidenceSource, Store, Tool, ToolCtx, ToolOutput, ToolSpec,
+    citation_authoring_instruction, format_citation_reference, ApprovalClass,
+    AssistantCitationReference, ByteSpan, CallId, ChunkId, DocumentId, DocumentProcessingStatus,
+    DocumentScope, Result, RetrievalEvidenceInput, RetrievalEvidenceSource, Store, Tool, ToolCtx,
+    ToolOutput, ToolSpec,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -195,8 +196,7 @@ impl Tool for ReadSourceTool {
         ToolSpec {
             name: READ_SOURCE_TOOL.into(),
             description: "Read a bounded text range from one source in this exact conversation. \
-                          The result carries a citation directive to wrap the wording it \
-                          supports in."
+                          The result carries the exact reference to cite the range by."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -282,22 +282,27 @@ impl Tool for ReadSourceTool {
         }
 
         let source_token = Uuid::new_v4();
-        // The same citation grammar the search tool teaches: a directive that
-        // carries the phrasing it supports, so a citation authored from a direct
-        // read anchors to text rather than landing without a position.
-        let directive =
-            format_citation_directive("your phrasing", AssistantCitationReference { source_token });
+        // The same citation grammar the search tool teaches, under the same
+        // per-turn format, so a citation authored from a direct read reads
+        // exactly like one authored from a search hit.
+        let reference = format_citation_reference(
+            ctx.citation_format,
+            "your phrasing",
+            AssistantCitationReference { source_token },
+        );
         let title = document
             .title
             .as_deref()
             .filter(|title| !title.trim().is_empty())
             .unwrap_or("Untitled source");
         let content = format!(
-            "Source: {title}\nDocument ID: {document_id}\nCharacters: {}..{} of {}\n\
-             To cite this range, wrap the wording it supports in this citation directive: \
-             your phrasing goes in the brackets and may paraphrase the range, and the \
-             reference is copied exactly.\nCite as: {directive}\n\n{}",
-            window.start_character, window.end_character, window.total_characters, window.text
+            "Source: {title}\nDocument ID: {document_id}\nCharacters: {}..{} of {}\n{}\n\
+             Cite as: {reference}\n\n{}",
+            window.start_character,
+            window.end_character,
+            window.total_characters,
+            citation_authoring_instruction(ctx.citation_format, "range"),
+            window.text
         );
         let span = ByteSpan::new(window.start_byte, window.end_byte);
         let source_regions = document
@@ -526,8 +531,9 @@ fn historical_safe_name(name: &str) -> &'static str {
 mod tests {
     use chrono::Utc;
     use openwave_core::{
-        format_source_reference, Chat, ChatId, DbStore, DocumentUpsert, ReasoningEffort,
-        SourceLocation, SourceRegion, Store, ToolCallRecord, TurnId,
+        format_citation_directive, format_source_reference, Chat, ChatId, CitationFormat, DbStore,
+        DocumentUpsert, ReasoningEffort, SourceLocation, SourceRegion, Store, ToolCallRecord,
+        TurnId,
     };
     use serde_json::json;
     use std::num::NonZeroU32;
@@ -551,6 +557,7 @@ mod tests {
             model: None,
             reasoning_effort: None::<ReasoningEffort>,
             permission_mode: None,
+            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -603,6 +610,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
+            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -753,6 +761,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
+            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -805,9 +814,10 @@ mod tests {
                 },
             }]
         );
-        // The read teaches the directive form and hands out nothing copyable in
-        // the legacy marker form: a bare marker cites without a phrase to anchor
-        // to, which is exactly the position-less citation this avoids.
+        // The read teaches the grammar the turn's format asks for, and hands
+        // out nothing copyable in the other one — an instruction that offered
+        // both would let the model mix anchored and bare citations in one
+        // message.
         let reference = AssistantCitationReference {
             source_token: evidence.source_token,
         };
@@ -815,6 +825,24 @@ mod tests {
             .content
             .contains(&format_citation_directive("your phrasing", reference)));
         assert!(!read.content.contains(&format_source_reference(reference)));
+
+        let attached = ReadSourceTool::new(store.clone())
+            .execute(
+                &context
+                    .clone()
+                    .with_citation_format(CitationFormat::SourcesAttached),
+                json!({ "document_id": document_id }),
+            )
+            .await
+            .unwrap();
+        assert!(!attached.is_error);
+        let attached_reference = AssistantCitationReference {
+            source_token: attached.private_evidence[0].source_token,
+        };
+        assert!(attached
+            .content
+            .contains(&format_source_reference(attached_reference)));
+        assert!(!attached.content.contains(":cit["));
 
         let denied = ReadSourceTool::new(store)
             .execute(&other_context, json!({ "document_id": document_id }))

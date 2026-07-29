@@ -1324,6 +1324,9 @@ pub struct Chat {
     /// How much this chat lets the agent do between approvals; `None` means
     /// [`PermissionMode::Ask`].
     pub permission_mode: Option<PermissionMode>,
+    /// How turns in this chat ask the model to cite; `None` follows the global
+    /// default.
+    pub citation_format: Option<crate::citation::CitationFormat>,
     /// CAS revision of this conversation's exact root projection.
     pub attachment_revision: i64,
     /// Ordered opaque roots available for future broker-backed operations.

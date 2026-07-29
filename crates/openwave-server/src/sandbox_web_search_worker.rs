@@ -490,6 +490,7 @@ mod tests {
             model: Some("model".into()),
             reasoning_effort: None,
             permission_mode: None,
+            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),

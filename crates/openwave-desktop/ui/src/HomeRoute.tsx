@@ -6,7 +6,7 @@ import { ChatExplorer } from "./ChatExplorer";
 import { useChatListStore } from "./ChatListStore";
 import { Composer } from "./Composer";
 import { useFirstMessage } from "./FirstMessage";
-import { ModelMenu, ReasoningEffortMenu } from "./ModelMenu";
+import { CitationFormatMenu, ModelMenu, ReasoningEffortMenu } from "./ModelMenu";
 import { modelForSelection } from "./ModelSelection";
 import { useNewChatSettings } from "./NewChatSettings";
 import { PermissionModeMenu } from "./PermissionModeMenu";
@@ -29,7 +29,7 @@ const firstMessageActions = useFirstMessage.getState();
  */
 export function HomeRoute() {
   const navigate = useNavigate();
-  const { client, models, defaultModelKey } = useApp();
+  const { client, models, defaultModelKey, defaultCitationFormat } = useApp();
   const chatsLoaded = useChatListStore((state) => state.chatsLoaded);
   const creatingChat = useChatListStore((state) => state.creatingChat);
   const [draft, setDraft] = useState("");
@@ -48,6 +48,7 @@ export function HomeRoute() {
       const created = await client.createChat(newChat.model ?? undefined, null, {
         reasoningEffort: newChat.reasoningEffort,
         permissionMode: newChat.permissionMode,
+        citationFormat: newChat.citationFormat,
       });
       chatListActions.prependChat(created);
       chatListActions.setChatsError(null);
@@ -118,6 +119,12 @@ export function HomeRoute() {
                   value={newChat.permissionMode}
                   disabled={creatingChat}
                   onChange={newChat.setPermissionMode}
+                />
+                <CitationFormatMenu
+                  value={newChat.citationFormat}
+                  defaultFormat={defaultCitationFormat}
+                  disabled={creatingChat}
+                  onChange={newChat.setCitationFormat}
                 />
               </>
             }

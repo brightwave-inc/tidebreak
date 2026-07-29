@@ -7,7 +7,7 @@ use crate::model::{
     MAX_ATTACHMENT_REVISION, MAX_ROOT_ATTACHMENTS,
 };
 use crate::storage::ApplyTurnSteerOutcome;
-use crate::{ApprovalClass, ChunkId, ToolApprovalStatus};
+use crate::{ApprovalClass, ChunkId, CitationFormat, ToolApprovalStatus};
 use chrono::{DateTime, Utc};
 
 mod agent_run;
@@ -43,6 +43,7 @@ async fn create_chat_before_agent_run_split(store: &DbStore, chat: &Chat) {
         model: Set(chat.model.clone()),
         reasoning_effort: sea_orm::ActiveValue::NotSet,
         permission_mode: sea_orm::ActiveValue::NotSet,
+        citation_format: sea_orm::ActiveValue::NotSet,
         attachment_revision: Set(chat.attachment_revision),
         created_at: Set(chat.created_at),
     }
@@ -113,6 +114,7 @@ fn sample_chat() -> Chat {
         model: None,
         reasoning_effort: None,
         permission_mode: None,
+        citation_format: None,
         attachment_revision: 0,
         root_attachments: Vec::new(),
         created_at: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
@@ -420,6 +422,7 @@ async fn project_membership_fk_and_attachment_insertions_are_atomic() {
         model: Set(None),
         reasoning_effort: Set(None),
         permission_mode: Set(None),
+        citation_format: sea_orm::ActiveValue::NotSet,
         attachment_revision: Set(0),
         created_at: Set(Utc::now()),
     };
@@ -540,6 +543,7 @@ async fn chats_stored_before_the_effort_scale_widened_still_load() {
             model: Set(None),
             reasoning_effort: Set(Some(stored.to_owned())),
             permission_mode: Set(None),
+            citation_format: sea_orm::ActiveValue::NotSet,
             attachment_revision: Set(0),
             created_at: Set(chat.created_at),
         }
@@ -571,6 +575,40 @@ async fn chats_stored_before_the_effort_scale_widened_still_load() {
                 .unwrap()
                 .reasoning_effort,
             Some(*effort)
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_chats_citation_format_round_trips_and_can_be_cleared() {
+    let (_dir, store) = temp_store().await;
+    for format in CitationFormat::ALL {
+        let mut chat = sample_chat();
+        chat.citation_format = Some(*format);
+        store.create_chat(&chat).await.unwrap();
+        assert_eq!(
+            store
+                .get_chat(chat.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .citation_format,
+            Some(*format)
+        );
+        // Clearing returns the chat to the global default rather than pinning
+        // whatever it happened to resolve to when the choice was made.
+        assert!(store
+            .update_chat_metadata(chat.id, None, None, None, None, Some(None))
+            .await
+            .unwrap());
+        assert_eq!(
+            store
+                .get_chat(chat.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .citation_format,
+            None
         );
     }
 }

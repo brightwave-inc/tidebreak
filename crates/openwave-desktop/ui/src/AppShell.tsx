@@ -4,6 +4,7 @@ import { Outlet, useNavigate } from "@tanstack/react-router";
 import {
   ApiClient,
   type Chat,
+  type CitationFormat,
   type ModelInfo,
   type ProviderInfo,
   type ServerInfo,
@@ -62,6 +63,8 @@ export function AppShell() {
   const [client, setClient] = useState<ApiClient | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [defaultModelKey, setDefaultModelKey] = useState<string | null>(null);
+  const [defaultCitationFormat, setDefaultCitationFormat] =
+    useState<CitationFormat>("inline");
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [status, setStatus] = useState("starting…");
@@ -116,14 +119,16 @@ export function AppShell() {
     let cancelled = false;
     void (async () => {
       try {
-        const [catalog, providerList, existingChats] = await Promise.all([
+        const [catalog, providerList, existingChats, settings] = await Promise.all([
           client.listModels(),
           client.listProviders(),
           client.listChats(),
+          client.getSettings(),
         ]);
         if (cancelled) return;
         setModels(catalog.models);
         setDefaultModelKey(resolvedRoleKey(catalog.roles, "chat"));
+        setDefaultCitationFormat(settings.citation_format);
         setProviders(providerList.providers);
         chatListActions.setChats(existingChats);
       } catch (err) {
@@ -137,12 +142,14 @@ export function AppShell() {
 
   async function refreshCatalog() {
     if (!client) return;
-    const [catalog, providerList] = await Promise.all([
+    const [catalog, providerList, settings] = await Promise.all([
       client.listModels(),
       client.listProviders(),
+      client.getSettings(),
     ]);
     setModels(catalog.models);
     setDefaultModelKey(resolvedRoleKey(catalog.roles, "chat"));
+    setDefaultCitationFormat(settings.citation_format);
     setProviders(providerList.providers);
   }
 
@@ -290,6 +297,7 @@ export function AppShell() {
           client,
           models,
           defaultModelKey,
+          defaultCitationFormat,
           providers,
           refreshCatalog,
           status,

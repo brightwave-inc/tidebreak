@@ -1802,6 +1802,7 @@ impl Store for DbStore {
         model: Option<Option<String>>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
         permission_mode: Option<Option<PermissionMode>>,
+        citation_format: Option<Option<crate::citation::CitationFormat>>,
     ) -> Result<bool> {
         ops::conversation::update_chat_metadata(
             self,
@@ -1810,6 +1811,7 @@ impl Store for DbStore {
             model,
             reasoning_effort,
             permission_mode,
+            citation_format,
         )
         .await
     }

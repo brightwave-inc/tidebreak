@@ -46,6 +46,7 @@ import {
   type UserQuestionOption as WireUserQuestionOption,
   type ChatToolActivitySnapshot,
   type ChatToolActivityStatus,
+  type CitationFormat as WireCitationFormat,
   type CitationPageBounds as WireCitationPageBounds,
   type RendererAgentEvent,
   type RendererChatFrame,
@@ -127,6 +128,9 @@ export type ReasoningEffort = WireReasoningEffort;
 
 /** How much a chat lets the agent do between approvals. */
 export type PermissionMode = WirePermissionMode;
+
+/** How a turn asks the model to cite: anchored inline, or listed at the foot. */
+export type CitationFormat = WireCitationFormat;
 
 export type ProviderInfo = WireProviderInfo;
 
@@ -642,11 +646,14 @@ export class ApiClient {
   }
 
   /**
-   * Update runtime settings. `model` absent leaves it unchanged, `null` resets
+   * Update runtime settings. A field absent leaves it unchanged, `null` resets
    * it to the server default, and a value sets it (matching the double-option
    * body the server expects).
    */
-  putSettings(body: { model?: ModelSelectionKey | null }): Promise<RuntimeSettings> {
+  putSettings(body: {
+    model?: ModelSelectionKey | null;
+    citation_format?: CitationFormat | null;
+  }): Promise<RuntimeSettings> {
     return this.json("/settings", {
       method: "PUT",
       headers: this.headers(true),
@@ -847,6 +854,7 @@ export class ApiClient {
     settings?: {
       reasoningEffort?: ReasoningEffort | null;
       permissionMode?: PermissionMode | null;
+      citationFormat?: CitationFormat | null;
     },
   ): Promise<Chat> {
     return this.json("/chats", {
@@ -857,6 +865,7 @@ export class ApiClient {
         project_id: projectId || undefined,
         reasoning_effort: settings?.reasoningEffort ?? undefined,
         permission_mode: settings?.permissionMode ?? undefined,
+        citation_format: settings?.citationFormat ?? undefined,
       }),
     });
   }
@@ -1052,6 +1061,17 @@ export class ApiClient {
       method: "PATCH",
       headers: this.headers(true),
       body: JSON.stringify({ permission_mode: permissionMode }),
+    });
+  }
+
+  patchChatCitationFormat(
+    chatId: string,
+    citationFormat: CitationFormat | null,
+  ): Promise<Chat> {
+    return this.json(`/chats/${chatId}`, {
+      method: "PATCH",
+      headers: this.headers(true),
+      body: JSON.stringify({ citation_format: citationFormat }),
     });
   }
 

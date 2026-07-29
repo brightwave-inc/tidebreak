@@ -5,6 +5,7 @@ import {
   KeyRound,
   Palette,
   PlugZap,
+  Quote,
   RefreshCw,
   ShieldCheck,
   SquareTerminal,
@@ -14,6 +15,7 @@ import {
 import { useApp } from "@/AppContext";
 import { useManagedPolicy } from "@/managedPolicy";
 import { AppearancePanel } from "./AppearancePanel";
+import { CitationsPanel } from "./CitationsPanel";
 import { CodeExecutionPanel } from "./CodeExecutionPanel";
 import { GatewayPanel } from "./GatewayPanel";
 import { McpPanel } from "./McpPanel";
@@ -78,6 +80,11 @@ function PermissionsSection() {
   return <PermissionsPanel client={client} />;
 }
 
+function CitationsSection() {
+  const { client, refreshCatalog } = useApp();
+  return <CitationsPanel client={client} onChanged={() => void refreshCatalog()} />;
+}
+
 function AppearanceSection() {
   const { themeMode, setThemeMode } = useApp();
   return <AppearancePanel mode={themeMode} onChange={setThemeMode} />;
@@ -134,6 +141,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     icon: ShieldCheck,
     Component: PermissionsSection,
   },
+  { path: "citations", label: "Citations", icon: Quote, Component: CitationsSection },
   { path: "appearance", label: "Appearance", icon: Palette, Component: AppearanceSection },
   { path: "updates", label: "Updates", icon: RefreshCw, Component: UpdatesSection },
 ];

@@ -245,11 +245,11 @@ async fn the_operation_log_migration_is_reversible() {
         .await
         .unwrap();
 
-    // Rolling back the four most recent additive migrations (the judge
-    // status, the chat permission mode, the output-revision
-    // binary/producing-run extension, then this one) drops the table
-    // symmetrically...
-    Migrator::down(&store.conn, Some(4)).await.unwrap();
+    // Rolling back the five most recent additive migrations (the per-chat
+    // citation format, the judge status, the chat permission mode, the
+    // output-revision binary/producing-run extension, then this one) drops the
+    // table symmetrically...
+    Migrator::down(&store.conn, Some(5)).await.unwrap();
     assert!(
         store
             .claim_operation(run, Uuid::new_v4(), b"fp", true, Uuid::new_v4())
