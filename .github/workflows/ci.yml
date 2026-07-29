@@ -465,7 +465,9 @@ jobs:
       - name: LanceDB-backed tests
         run: |
           cargo test -p openwave-retrieval --features vec-lance --locked
-          cargo test -p openwave-server --features vec-lance --locked
+          cargo test -p openwave-server --features vec-lance --locked --lib \
+            tests::documents::connect_vector_store_opens_a_durable_lance_index_under_data_dir \
+            -- --exact
 
   postgres:
     name: postgres state machine

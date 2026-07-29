@@ -189,6 +189,10 @@ test("heavy capability lanes run only for relevant merges and scheduled backstop
     /if:.*needs\.changes\.outputs\.vectors == 'true'.*github\.event_name != 'pull_request'/,
   );
   assert.match(
+    vectors,
+    /cargo test -p openwave-server --features vec-lance --locked --lib \\\n\s+tests::documents::connect_vector_store_opens_a_durable_lance_index_under_data_dir \\\n\s+-- --exact/,
+  );
+  assert.match(
     sandboxContainer,
     /if:.*needs\.changes\.outputs\.sandbox_container == 'true'.*github\.event_name != 'pull_request'/,
   );
