@@ -938,9 +938,9 @@ const EMBED_DIMS: usize = 1536;
 /// Because the embedder is boot-scoped (the vector index is dimension-bound
 /// to it), a profile provisioned managed at runtime keeps a live BYOK
 /// embedder until the next app start. The desktop deep-link pairing flow
-/// therefore prompts for a restart when a pairing newly manages the profile
-/// (keyed off `PairingOutcome::newly_managed` — #898); either way this gate
-/// closes at the next boot.
+/// therefore prompts for a restart when a pairing newly provisions the
+/// profile (keyed off `PairingOutcome::newly_provisioned` — #898); either
+/// way this gate closes at the next boot.
 async fn resolve_embedder(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
