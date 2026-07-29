@@ -39,6 +39,7 @@
 pub mod brave;
 mod credentials;
 pub mod exa;
+mod extract_source;
 mod fetch_policy;
 mod http;
 #[cfg(feature = "extract-native")]
@@ -51,6 +52,9 @@ mod types;
 pub use brave::BraveProvider;
 pub use credentials::{WebSearchCredential, WebSearchCredentialState, WebSearchCredentials};
 pub use exa::ExaProvider;
+pub use extract_source::{
+    ExtractedPageSink, ExtractedPageSinkError, StoredExtractedPage, MAX_EXTRACTED_PAGE_PASSAGES,
+};
 pub use fetch_policy::{
     admit_fetch_address, admit_fetch_url, FetchPolicyViolation, MAX_FETCH_URL_BYTES,
 };
@@ -74,7 +78,7 @@ pub use tool::{
 pub use types::{
     ExtractionMethod, SearchDomain, WebExtractFailure, WebExtractRequest, WebExtractResponse,
     WebSearchError, WebSearchProvider, WebSearchProviderKind, WebSearchRequest, WebSearchResponse,
-    WebSearchResult, MAX_DOMAINS, MAX_EXTRACT_OUTPUT_BYTES, MAX_OUTPUT_BYTES, MAX_OUTPUT_CHARS,
-    MAX_QUERY_CHARS, MAX_RESULTS, MAX_RESULT_CONTENT_CHARS, MAX_RESULT_SNIPPET_CHARS,
-    MAX_RESULT_TITLE_CHARS, MAX_RESULT_URL_BYTES, MIN_EXTRACT_WORDS,
+    WebSearchResult, EXTRACT_TRUNCATION_MARKER, MAX_DOMAINS, MAX_EXTRACT_OUTPUT_BYTES,
+    MAX_OUTPUT_BYTES, MAX_OUTPUT_CHARS, MAX_QUERY_CHARS, MAX_RESULTS, MAX_RESULT_CONTENT_CHARS,
+    MAX_RESULT_SNIPPET_CHARS, MAX_RESULT_TITLE_CHARS, MAX_RESULT_URL_BYTES, MIN_EXTRACT_WORDS,
 };

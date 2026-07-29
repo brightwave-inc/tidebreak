@@ -447,7 +447,7 @@ impl Store for MemStore {
             title: document.title.clone(),
             source_blob: None,
             canonical_text: document.canonical_text.clone(),
-            canonical_fingerprint: None,
+            canonical_fingerprint: document.canonical_fingerprint.clone(),
             source_regions: document.source_regions.clone(),
             content_revision: generation.content_revision,
             revision_token: generation.revision_token,
@@ -501,6 +501,7 @@ impl Store for MemStore {
                 && existing.media_type == document.media_type
                 && existing.title == document.title
                 && existing.canonical_text == document.canonical_text
+                && existing.canonical_fingerprint == document.canonical_fingerprint
                 && existing.source_regions == document.source_regions
         }) {
             if let Some(job) = state.jobs.values().find(|job| {
@@ -529,7 +530,7 @@ impl Store for MemStore {
             title: document.title.clone(),
             source_blob: None,
             canonical_text: document.canonical_text.clone(),
-            canonical_fingerprint: None,
+            canonical_fingerprint: document.canonical_fingerprint.clone(),
             source_regions: document.source_regions.clone(),
             content_revision: generation.content_revision,
             revision_token: generation.revision_token,
@@ -2072,6 +2073,7 @@ fn store_is_object_safe_and_roundtrips() {
     );
 
     let source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -2085,6 +2087,7 @@ fn store_is_object_safe_and_roundtrips() {
     let first =
         block_on(store.upsert_document_and_enqueue_index(&source, "pipeline-v1", 3)).unwrap();
     let retry = DocumentUpsert {
+        canonical_fingerprint: None,
         updated_at: chrono::DateTime::<chrono::Utc>::from_timestamp(2, 0).unwrap(),
         ..source.clone()
     };
@@ -2132,6 +2135,7 @@ fn store_is_object_safe_and_roundtrips() {
     assert_eq!(block_on(store.get_document_job(first.1.id)).unwrap(), None);
 
     let retry_source = DocumentUpsert {
+        canonical_fingerprint: None,
         canonical_text: "retry state".into(),
         source_regions: Vec::new(),
         ..source
@@ -2179,6 +2183,7 @@ fn mem_store_rejects_moving_a_live_document_between_corpora() {
     block_on(store.create_project(&project_a)).unwrap();
     block_on(store.create_project(&project_b)).unwrap();
     let source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: Some(project_a.id),
@@ -2192,6 +2197,7 @@ fn mem_store_rejects_moving_a_live_document_between_corpora() {
     let first =
         block_on(store.upsert_document_and_enqueue_index(&source, "pipeline-v1", 3)).unwrap();
     let moved = DocumentUpsert {
+        canonical_fingerprint: None,
         project_id: Some(project_b.id),
         canonical_text: "must not move".into(),
         source_regions: Vec::new(),
@@ -2208,6 +2214,7 @@ fn mem_store_rejects_moving_a_live_document_between_corpora() {
 fn mem_index_maintenance_requeues_or_advances_by_reason() {
     let store = MemStore::default();
     let source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -2314,6 +2321,7 @@ fn mem_index_maintenance_requeues_or_advances_by_reason() {
 fn mem_store_generation_overflow_leaves_source_job_and_clock_unchanged() {
     let store = MemStore::default();
     let source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -2392,6 +2400,7 @@ fn mem_store_generation_overflow_leaves_source_job_and_clock_unchanged() {
 fn mem_store_document_retirement_is_durable_state_with_exact_completion() {
     let store = MemStore::default();
     let source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -2415,6 +2424,7 @@ fn mem_store_document_retirement_is_durable_state_with_exact_completion() {
     );
 
     let recreated = block_on(store.upsert_document(&DocumentUpsert {
+        canonical_fingerprint: None,
         canonical_text: "new lifecycle".into(),
         source_regions: Vec::new(),
         ..source.clone()
@@ -2575,6 +2585,7 @@ fn mem_store_ensure_parse_job_advances_parser_changes_once() {
 fn mem_store_explicit_retry_only_revives_current_failed_index_job() {
     let store = MemStore::default();
     let source = DocumentUpsert {
+        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
@@ -2715,6 +2726,7 @@ fn mem_store_explicit_retry_only_revives_current_failed_index_job() {
     );
 
     let replacement = DocumentUpsert {
+        canonical_fingerprint: None,
         canonical_text: "replacement".into(),
         source_regions: Vec::new(),
         updated_at: source.updated_at + chrono::Duration::seconds(1),
@@ -2735,6 +2747,7 @@ fn mem_store_explicit_retry_only_revives_current_failed_index_job() {
     );
     let (newer_document, _) = block_on(store.upsert_document_and_enqueue_index(
         &DocumentUpsert {
+            canonical_fingerprint: None,
             canonical_text: "newer replacement".into(),
             source_regions: Vec::new(),
             updated_at: source.updated_at + chrono::Duration::seconds(2),

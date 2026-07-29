@@ -698,16 +698,20 @@ async fn bind_inner(
     ));
     let foreground_web_search =
         Box::new(web_search::foreground_tool(store.clone(), secrets.clone()));
-    let foreground_web_extract = Box::new(web_search::foreground_extract_tool(
-        store.clone(),
-        secrets.clone(),
-    ));
+    let extract_store = store.clone();
+    let extract_secrets = secrets.clone();
     let (retrieval, tools, agent_config) = agent_deps(
         embedder,
         vector_store,
         code_execution,
         foreground_web_search,
-        foreground_web_extract,
+        |retrieval| {
+            Box::new(web_search::foreground_extract_tool(
+                extract_store,
+                extract_secrets,
+                retrieval.index_fingerprint(),
+            ))
+        },
         store.clone(),
     );
     let tools = Arc::new(tools);
@@ -868,10 +872,15 @@ fn agent_deps(
     store: Arc<dyn VectorStore>,
     code_execution: Arc<dyn openwave_code_execution::CodeExecutionProvider>,
     web_search: Box<dyn Tool>,
-    web_extract: Box<dyn Tool>,
+    // Built from the retriever rather than handed in ready-made: extraction now
+    // files each fetched page as a source, which means queueing it for the same
+    // index every other source goes to, and that identity does not exist until
+    // the retriever does.
+    web_extract: impl FnOnce(&Retriever) -> Box<dyn Tool>,
     source_store: Arc<dyn Store>,
 ) -> (Arc<Retriever>, ToolRegistry, AgentConfig) {
     let (retrieval, search) = build_retrieval(embedder, store);
+    let web_extract = web_extract(&retrieval);
     // The document store lets the search card name matched documents (title,
     // media type) instead of listing anonymous passages.
     let search = Box::new(search.with_source_catalog(source_store.clone()));

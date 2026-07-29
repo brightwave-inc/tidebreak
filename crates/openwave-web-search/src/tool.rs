@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use openwave_core::{
     ApprovalClass, ResultEntry, ResultEntryKind, Tool, ToolCtx, ToolErrorCategory, ToolOutput,
     ToolSpec, WebExtractArgs, WebSearchArgs,
@@ -9,6 +10,10 @@ use serde_json::Value;
 use thiserror::Error;
 use url::Url;
 
+use crate::extract_source::{
+    extracted_evidence, extracted_page_result, extracted_passages, uncitable_page_result,
+    ExtractedPageSink,
+};
 use crate::{
     SearchDomain, WebExtractFailure, WebExtractRequest, WebExtractResponse, WebSearchError,
     WebSearchProvider, WebSearchRequest, WebSearchResult, MAX_EXTRACT_OUTPUT_BYTES,
@@ -140,9 +145,16 @@ pub fn extract_request_from_tool_arguments(
 /// configuration and surfaces; a native failure returns a closed, actionable
 /// reason. Nothing degrades silently — every success is stamped with its
 /// extraction method.
+///
+/// A host that supplies a [`ExtractedPageSink`] additionally makes each fetched
+/// page a source of the conversation, so a claim drawn from it can be cited,
+/// anchored, and reopened exactly like a claim drawn from an imported file. A
+/// host without one still extracts; its pages are simply not citable, and the
+/// result says so.
 pub struct WebExtractTool {
     resolver: Arc<dyn WebSearchResolver>,
     native: Option<Arc<dyn PageExtractor>>,
+    sink: Option<Arc<dyn ExtractedPageSink>>,
 }
 
 impl WebExtractTool {
@@ -151,7 +163,44 @@ impl WebExtractTool {
         resolver: Arc<dyn WebSearchResolver>,
         native: Option<Arc<dyn PageExtractor>>,
     ) -> Self {
-        Self { resolver, native }
+        Self {
+            resolver,
+            native,
+            sink: None,
+        }
+    }
+
+    /// Keep every extracted page as a citable conversation source.
+    #[must_use]
+    pub fn with_page_sink(mut self, sink: Arc<dyn ExtractedPageSink>) -> Self {
+        self.sink = Some(sink);
+        self
+    }
+
+    /// Store one extraction and build the citable result, or say plainly that
+    /// it could not be stored.
+    ///
+    /// A storage failure does not fail the call: the fetch already happened and
+    /// its content is still worth reading. What it must not do is leave the
+    /// model believing it can cite a page nobody kept.
+    async fn citable_output(&self, ctx: &ToolCtx, response: &WebExtractResponse) -> ToolOutput {
+        let Some(sink) = &self.sink else {
+            return extraction_output(response, uncitable_page_result(response), Vec::new());
+        };
+        let Ok(stored) = sink.store_page(ctx.chat_id, response, Utc::now()).await else {
+            return extraction_output(response, uncitable_page_result(response), Vec::new());
+        };
+        let passages = extracted_passages(
+            &response.content,
+            openwave_core::RetrievalEvidenceInput::MAX_SNIPPET_BYTES,
+        );
+        if passages.is_empty() {
+            return extraction_output(response, uncitable_page_result(response), Vec::new());
+        }
+        let evidence = extracted_evidence(response, &stored, &passages);
+        let content =
+            extracted_page_result(response, stored.document_id, &passages, ctx.citation_format);
+        extraction_output(response, content, evidence)
     }
 }
 
@@ -165,7 +214,7 @@ impl Tool for WebExtractTool {
         ApprovalClass::Sensitive
     }
 
-    async fn execute(&self, _ctx: &ToolCtx, args: Value) -> openwave_core::Result<ToolOutput> {
+    async fn execute(&self, ctx: &ToolCtx, args: Value) -> openwave_core::Result<ToolOutput> {
         let request = match extract_request_from_tool_arguments(args) {
             Ok(request) => request,
             // The admission reason is closed policy prose ("page URL scheme
@@ -192,7 +241,7 @@ impl Tool for WebExtractTool {
         // way.
         if let Some(provider) = provider.filter(|provider| provider.supports_extract()) {
             match provider.extract(request.clone()).await {
-                Ok(response) => return Ok(extraction_output(&response)),
+                Ok(response) => return Ok(self.citable_output(ctx, &response).await),
                 // A rejected key is the one vendor failure that is about the
                 // host and not about this page. It will reject the next call
                 // and every call after it, and the same key is what web search
@@ -215,7 +264,7 @@ impl Tool for WebExtractTool {
             ));
         };
         match native.extract_page(&request).await {
-            Ok(response) => Ok(extraction_output(&response)),
+            Ok(response) => Ok(self.citable_output(ctx, &response).await),
             Err(failure) => Ok(ToolOutput::error(format!(
                 "Web page extraction failed: {failure}."
             ))),
@@ -223,14 +272,20 @@ impl Tool for WebExtractTool {
     }
 }
 
-/// Serialize one bounded extraction and its result-card row.
-fn extraction_output(response: &WebExtractResponse) -> ToolOutput {
-    let result = match serde_json::to_string(response) {
-        Ok(result) if result.len() <= MAX_EXTRACT_OUTPUT_BYTES => result,
-        Ok(_) | Err(_) => {
-            return ToolOutput::error("Web page extraction returned an invalid response.")
-        }
-    };
+/// One bounded extraction, its evidence, and its result-card row.
+///
+/// `result` is already bounded by construction — the response's own content
+/// budget dominates the fixed framing around it — but the ceiling is asserted
+/// here anyway, because it is the last point before the text enters a model
+/// context.
+fn extraction_output(
+    response: &WebExtractResponse,
+    result: String,
+    evidence: Vec<openwave_core::RetrievalEvidenceInput>,
+) -> ToolOutput {
+    if result.len() > MAX_EXTRACT_OUTPUT_BYTES {
+        return ToolOutput::error("Web page extraction returned an invalid response.");
+    }
     let label = if response.title.is_empty() {
         response.url.as_str()
     } else {
@@ -248,7 +303,9 @@ fn extraction_output(response: &WebExtractResponse) -> ToolOutput {
     } else {
         format!("{} words", response.word_count)
     };
-    ToolOutput::text(result).with_entries(vec![entry.with_meta(meta)])
+    ToolOutput::text(result)
+        .with_entries(vec![entry.with_meta(meta)])
+        .with_private_evidence(evidence)
 }
 
 /// One web result as a card row.
@@ -565,8 +622,7 @@ mod tests {
         let tool = extract_tool(Some(search_only.clone()), Some(native.clone()));
         let output = tool.execute(&context(), EXTRACT_ARGS()).await.unwrap();
         assert!(!output.is_error);
-        let body: Value = serde_json::from_str(&output.content).unwrap();
-        assert_eq!(body["extraction_method"], "native");
+        assert!(output.content.contains("Extracted by: native"));
         assert_eq!(*native.calls.lock().unwrap(), 1);
         assert!(search_only.requests.lock().unwrap().is_empty());
 
@@ -580,8 +636,7 @@ mod tests {
             Some(native.clone()),
         );
         let output = tool.execute(&context(), EXTRACT_ARGS()).await.unwrap();
-        let body: Value = serde_json::from_str(&output.content).unwrap();
-        assert_eq!(body["extraction_method"], "exa");
+        assert!(output.content.contains("Extracted by: exa"));
         assert_eq!(*native.calls.lock().unwrap(), 0);
     }
 
@@ -594,8 +649,7 @@ mod tests {
         );
         let output = tool.execute(&context(), EXTRACT_ARGS()).await.unwrap();
         assert!(!output.is_error);
-        let body: Value = serde_json::from_str(&output.content).unwrap();
-        assert_eq!(body["extraction_method"], "native");
+        assert!(output.content.contains("Extracted by: native"));
         assert_eq!(*native.calls.lock().unwrap(), 1);
         assert!(!output.content.contains("private vendor"));
 

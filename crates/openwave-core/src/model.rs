@@ -1573,6 +1573,16 @@ pub struct DocumentUpsert {
     pub title: Option<String>,
     /// Parsed text-of-record.
     pub canonical_text: String,
+    /// Identity of whatever produced [`Self::canonical_text`], when the caller
+    /// knows it.
+    ///
+    /// Blob-backed sources get this from the parse job, which is the only thing
+    /// that can answer for them. A caller of this path already holds parsed
+    /// text, so it is the only one who can say where the text came from — and
+    /// for a source with no retained original, the answer is unrecoverable
+    /// afterwards. `None` means "not tracked", which is what every historical
+    /// row of this shape holds.
+    pub canonical_fingerprint: Option<String>,
     /// Parser-produced mappings from canonical text to original source pages.
     pub source_regions: Vec<SourceRegion>,
     /// Time of this authoritative write.

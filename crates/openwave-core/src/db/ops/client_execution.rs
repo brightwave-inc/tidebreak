@@ -750,8 +750,14 @@ fn validate_evidence_request(
     if evidence.is_empty() {
         return Ok(());
     }
+    // The closed set of calls that may leave evidence behind. It is a name
+    // list rather than a capability because a tool name is what the durable
+    // record keeps: whatever else changes, a citation must be traceable to a
+    // call that was allowed to make one. `web_extract` is here because a page
+    // it fetched is stored as a source of the conversation, so it produces
+    // spans of durable text exactly as the other two do.
     if call.execution != ToolCallExecution::Server.as_str()
-        || !matches!(call.name.as_str(), "search" | "read_source")
+        || !matches!(call.name.as_str(), "search" | "read_source" | "web_extract")
         || !matches!(resolution, ToolCallResolution::Completed { .. })
         || evidence.len() > RetrievalEvidenceInput::MAX_RESULTS
     {

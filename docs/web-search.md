@@ -229,6 +229,9 @@ flag — bounded before it can reach a model context. The approval card shows th
 whole URL, because the URL is the action: it is both what leaves the device and
 where the request goes.
 
+The page is also kept: see [Fetched pages as sources](#fetched-pages-as-sources)
+below.
+
 Routing is deterministic and derived from the configured provider, with no
 heuristics and no escalation. The `WebSearchProvider` trait carries a
 capability split (`supports_search` / `supports_extract`); extraction goes to
@@ -289,6 +292,70 @@ extraction path exists at all, the tool returns that same typed
 configuration-required failure. Every successful extraction is stamped with its
 `extraction_method` (`native` or the provider name) so degraded extraction
 stays visible downstream.
+
+## Fetched pages as sources
+
+An extracted page is stored as an ordinary source of the conversation that
+fetched it, and the result carries the same closed citation references
+`read_source` and `search` hand out. A claim drawn from a page is therefore
+anchored, highlighted in the source panel, and reopenable, exactly like a claim
+drawn from an imported file — the citation path downstream of the tool is not
+web-specific at all. `read_source` can reopen the page later in the
+conversation, and once its index job completes `search` can match it.
+
+The source is written through the canonical-text path
+(`Store::upsert_document_and_enqueue_index`) rather than the staged blob
+workflow, because a page arrives already parsed: extraction *is* the parse, and
+there are no original bytes to re-derive text from. Its identity is derived from
+the conversation and the page URL, so re-reading a page during a long
+investigation revises one source instead of accumulating one per fetch.
+
+What the source carries:
+
+| | |
+| --- | --- |
+| `source_uri` | the final canonical page URL, after redirects |
+| `title` | the page's own title, sanitized to one line |
+| `updated_at` | when the page was fetched |
+| `media_type` | `text/markdown` — a claim about the text of record, not about the page |
+| `canonical_text` | the extraction, byte for byte |
+| `canonical_fingerprint` | `web-extract=native` or `web-extract=<provider>` |
+
+The fingerprint is where `extraction_method` lands, and it matters more here
+than for a parsed file. A file keeps its original bytes, so its provenance can
+be recomputed; a page cannot be fetched again and be guaranteed to give the same
+answer. Whether a cited passage came from a vendor's rendering of the page or
+from the host's own parse is knowable only because it was written down at the
+time.
+
+**Byte spans are honest by construction.** A citation addresses the text that
+was *stored*, never the text that was fetched: the canonical text is the
+extraction verbatim, and the sink rejects the write rather than store anything
+else, so offsets into one are offsets into the other. Extraction is bounded and
+can drop the middle of a long page, leaving a marker where the cut was — text
+either side of it was never adjacent. The result is cut into passages at those
+markers *before* anything can quote across one, so no single reference can span
+material the page did not have together. Each side gets its own reference and
+stays separately citable; a run longer than one evidence snippet is windowed
+rather than clipped, so the tail of a long article does not fall off the end of
+the only reference on offer.
+
+A fetched page retains no original bytes, so the source panel offers only the
+extracted text, where the cited span is highlighted. `ChatDocumentDetail`
+reports this as `has_original_bytes`, and the panel gates its "Original
+document" tab on it rather than on whether some viewer could in principle draw
+that media type.
+
+Page content is untrusted throughout. Titles and content from every engine —
+vendor and native alike — are stripped of control characters, zero-width marks,
+and bidirectional overrides in `WebExtractResponse::new`, so a page cannot make
+a citation row display something other than what it says. A page that writes
+citation syntax into its own text cannot forge a citation either: references
+resolve only against evidence the store retained for that call and turn, so a
+token copied out of a page binds to nothing and renders as plain prose. If the
+page cannot be stored, the content is still returned and the result says
+plainly that it cannot be cited, rather than offering a reference to a source
+that does not exist.
 
 The server's sandbox checkpoint executor invokes the same resolver and strict
 argument decoder only after it has claimed a persisted `web_search`

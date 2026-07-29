@@ -80,7 +80,10 @@ export function DocumentDetailRoot({
   }, [client, chatId, documentID, reloads]);
 
   const hasOriginalDocumentTab =
-    info != null && info.processing_status !== "failed" && isDocumentRenderable(info.media_type);
+    info != null &&
+    info.processing_status !== "failed" &&
+    info.has_original_bytes &&
+    isDocumentRenderable(info.media_type);
 
   const [view, setView] = useState<DocumentView>("original_doc");
 

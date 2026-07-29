@@ -246,6 +246,15 @@ pub struct ChatDocumentDetail {
     pub processing_status: openwave_core::DocumentProcessingStatus,
     /// Whether a search of this conversation can match this source.
     pub searchable: bool,
+    /// Whether this source retained the bytes it was made from, and so whether
+    /// the file-content route has anything to serve.
+    ///
+    /// Not every source has an original. A fetched web page is stored as the
+    /// readable text extraction produced; the markup it came from is not kept,
+    /// and offering to open "the original" would be offering a view that can
+    /// only fail. This is a fact about what exists, not a permission — the route
+    /// enforces ownership regardless of what a client believes.
+    pub has_original_bytes: bool,
     pub updated_at: chrono::DateTime<Utc>,
     /// Parsed text-of-record. Citation spans index into this string.
     pub content: String,
@@ -253,6 +262,7 @@ pub struct ChatDocumentDetail {
 
 impl From<DocumentRecord> for ChatDocumentDetail {
     fn from(document: DocumentRecord) -> Self {
+        let has_original_bytes = document.source_blob.is_some();
         let summary = DocumentSummary::from(&document);
         Self {
             document_id: summary.document_id,
@@ -260,6 +270,7 @@ impl From<DocumentRecord> for ChatDocumentDetail {
             title: summary.title,
             processing_status: summary.processing_status,
             searchable: summary.searchable,
+            has_original_bytes,
             updated_at: summary.updated_at,
             content: document.canonical_text,
         }
