@@ -202,6 +202,7 @@ describe("tool call lifecycle", () => {
       {
         type: "approval_required",
       auto_judging: false,
+      prefix_rungs: [],
         call_id: "call-1",
         action: "search",
         approval: "search_may_share_query_and_excerpts",
@@ -229,6 +230,7 @@ describe("tool call lifecycle", () => {
       {
         type: "approval_required",
       auto_judging: false,
+      prefix_rungs: [],
         call_id: "call-1",
         action: "search",
         approval: "search_may_share_query_and_excerpts",
@@ -247,6 +249,7 @@ describe("approvals", () => {
   const APPROVAL: AgentEvent = {
     type: "approval_required",
       auto_judging: false,
+      prefix_rungs: [],
     call_id: "call-1",
     action: "search",
     approval: "search_may_share_query_and_excerpts",
@@ -436,6 +439,7 @@ describe("terminal events", () => {
       {
         type: "approval_required",
       auto_judging: false,
+      prefix_rungs: [],
         call_id: "call-1",
         action: "search",
         approval: "search_may_share_query_and_excerpts",

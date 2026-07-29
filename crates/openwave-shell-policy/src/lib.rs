@@ -183,6 +183,40 @@ pub fn analyze_shell_command(command: &str, ruleset: &ShellRuleSet) -> ShellAnal
         return ShellAnalysis::new(ShellVerdict::Ask, "no executable command found");
     }
 
+    evaluate(&acc, ruleset)
+}
+
+/// Classify one already-parsed `argv` against `ruleset`.
+///
+/// For callers whose tool takes an executable and an argument vector rather
+/// than a command line — there is no shell, so there is nothing to parse, but
+/// every reason the analyzer would refuse a leaf still applies. An interpreter
+/// is still an interpreter when it arrives as `["bash", "-c", …]` rather than
+/// as text, and a wrapper is still one that a prefix grant must not reach
+/// through.
+///
+/// Returns `Ask` for an empty `argv`: nothing to run is not something to
+/// allow.
+#[must_use]
+pub fn analyze_argv(argv: &[String], ruleset: &ShellRuleSet) -> ShellAnalysis {
+    let Some(program) = argv.first() else {
+        return ShellAnalysis::new(ShellVerdict::Ask, "empty command");
+    };
+    let acc = Collected {
+        simples: vec![SimpleCmd {
+            program: program.clone(),
+            argv: argv.to_vec(),
+            // An argv carries no redirections; there is no shell to write them.
+            write_targets: Vec::new(),
+            read_targets: Vec::new(),
+        }],
+        ..Collected::default()
+    };
+    evaluate(&acc, ruleset)
+}
+
+/// The three tiers, applied to whatever leaves were collected.
+fn evaluate(acc: &Collected, ruleset: &ShellRuleSet) -> ShellAnalysis {
     // (1) Deny floor — wins over every allow rule, including `All`.
     for sc in &acc.simples {
         if INTERPRETERS.contains(&basename(&sc.program)) {
@@ -1887,6 +1921,45 @@ fn subcommand_prefix(argv: &[String]) -> Vec<String> {
         prefix.push(token.clone());
     }
     prefix
+}
+
+/// The grant rungs worth offering for one `argv`, narrowest first.
+///
+/// The argv analogue of [`suggested_rungs`], and verified the same way: a
+/// rung is offered only when granting exactly that rule would in fact stop
+/// the asking, so a wrapper yields no prefix rung and an interpreter yields
+/// none at all.
+#[must_use]
+pub fn suggested_rungs_for_argv(argv: &[String]) -> Vec<CommandRule> {
+    if argv.is_empty() {
+        return Vec::new();
+    }
+    let mut candidates: Vec<CommandRule> = Vec::new();
+    candidates.extend(CommandRule::new(CommandRuleKind::Exact, argv.to_vec()));
+    candidates.extend(CommandRule::new(
+        CommandRuleKind::Prefix,
+        subcommand_prefix(argv),
+    ));
+    candidates.extend(CommandRule::new(
+        CommandRuleKind::Prefix,
+        vec![argv[0].clone()],
+    ));
+    candidates.extend(CommandRule::new(CommandRuleKind::All, Vec::new()));
+
+    let mut rungs: Vec<CommandRule> = Vec::new();
+    for rule in candidates {
+        if rungs.contains(&rule) {
+            continue;
+        }
+        let ruleset = ShellRuleSet {
+            allow: vec![rule.clone()],
+            deny: Vec::new(),
+        };
+        if analyze_argv(argv, &ruleset).verdict == ShellVerdict::Allow {
+            rungs.push(rule);
+        }
+    }
+    rungs
 }
 
 /// The grant rungs worth offering for `command`, narrowest first.

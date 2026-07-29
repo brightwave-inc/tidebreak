@@ -246,6 +246,7 @@ export function reduceChatSessionEvent(
             canApprove: approval.canApprove,
             canRemember: approval.canRemember,
             autoJudging: event.auto_judging,
+            prefixRungs: event.prefix_rungs,
           }),
         },
         effects,

@@ -40,6 +40,8 @@ describe("validators against real server output", () => {
       preview: { tool: "exec", command: "git", args: ["status"], cwd: "." },
       canApprove: true,
       canRemember: true,
+      // The fixture is real server output: `git` is a one-token prefix rung.
+      prefixRungs: [1],
       autoJudgeStatus: null,
     });
   });

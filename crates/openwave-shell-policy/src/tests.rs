@@ -725,3 +725,63 @@ fn a_compound_command_is_offered_nothing_narrow() {
     );
     assert!(simple_command_argvs("echo ${x:-$(rm -rf ~)}").is_none());
 }
+
+/// The argv path must reach the same floor as the parsed path. A tool that
+/// takes an executable and an argument vector has no shell, but an
+/// interpreter arriving as `["bash", "-c", …]` is the same hazard as one
+/// arriving as text — and the corpus above only exercises the text path.
+#[test]
+fn an_argv_reaches_the_same_floor_as_a_parsed_command() {
+    let argv = |tokens: &[&str]| tokens.iter().map(|t| (*t).to_owned()).collect::<Vec<_>>();
+
+    // Interpreters are denied even under the broadest grant.
+    assert_eq!(
+        analyze_argv(&argv(&["bash", "-c", "id"]), &allow_all()).verdict,
+        ShellVerdict::Deny
+    );
+    // Destructive and escaping arguments still force a human, granted or not.
+    assert_eq!(
+        analyze_argv(&argv(&["rm", "-rf", "/"]), &allow_all()).verdict,
+        ShellVerdict::Ask
+    );
+    assert_eq!(
+        analyze_argv(&argv(&["cat", "../../outside.txt"]), &allow_all()).verdict,
+        ShellVerdict::Ask
+    );
+    assert_eq!(
+        analyze_argv(&argv(&["cat", "/home/someone/.ssh/id_rsa"]), &allow_all()).verdict,
+        ShellVerdict::Ask
+    );
+    // A wrapper cannot be reached through a prefix grant.
+    assert_eq!(
+        analyze_argv(
+            &argv(&["timeout", "5", "sh", "-c", "id"]),
+            &allow(vec![prefix(&["timeout"])])
+        )
+        .verdict,
+        ShellVerdict::Ask
+    );
+    // And an ordinary covered command runs.
+    assert_eq!(
+        analyze_argv(&argv(&["cargo", "test"]), &allow(vec![prefix(&["cargo"])])).verdict,
+        ShellVerdict::Allow
+    );
+}
+
+/// The rung the whole change exists for: something between one invocation and
+/// every command.
+#[test]
+fn an_argv_is_offered_a_subcommand_rung() {
+    let argv = ["cargo", "test", "--all"].map(str::to_owned).to_vec();
+    assert_eq!(
+        suggested_rungs_for_argv(&argv),
+        vec![
+            exact(&["cargo", "test", "--all"]),
+            prefix(&["cargo", "test"]),
+            prefix(&["cargo"]),
+            all_rule(),
+        ]
+    );
+    // An interpreter is offered nothing: no grant would make it run.
+    assert!(suggested_rungs_for_argv(&["bash".to_owned(), "-c".to_owned()]).is_empty());
+}

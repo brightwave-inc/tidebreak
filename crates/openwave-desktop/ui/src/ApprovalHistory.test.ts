@@ -13,6 +13,7 @@ const pending = {
   preview: null,
   canApprove: true,
   canRemember: true,
+  prefixRungs: [],
   autoJudgeStatus: null,
 };
 
@@ -37,6 +38,7 @@ describe("reconcilePendingApprovalCards", () => {
         canApprove: true,
         canRemember: true,
         autoJudging: false,
+        prefixRungs: [],
       },
     ]);
   });

@@ -24,6 +24,7 @@ export function reconcilePendingApprovalCards(
     next = upsertPendingApprovalCard(next, {
       ...approval,
       autoJudging: approval.autoJudgeStatus === "judging",
+      prefixRungs: approval.prefixRungs,
     });
   }
   return next;
@@ -35,7 +36,10 @@ export function upsertPendingApprovalCard(
     PendingToolApproval,
     "callId" | "action" | "approval" | "canApprove" | "canRemember"
   > &
-    Partial<Pick<PendingToolApproval, "preview">> & { autoJudging?: boolean },
+    Partial<Pick<PendingToolApproval, "preview">> & {
+      autoJudging?: boolean;
+      prefixRungs?: readonly number[];
+    },
 ): ChatMessage[] {
     let next = messages;
     const presentation = toolApprovalPresentation(approval.approval);
@@ -82,6 +86,7 @@ export function upsertPendingApprovalCard(
       canApprove: approval.canApprove && presentation.canApprove,
       canRemember: approval.canRemember && presentation.canRemember,
       autoJudging: approval.autoJudging ?? false,
+      prefixRungs: approval.prefixRungs ?? [],
     };
     if (cardIndex >= 0) {
       next = next.map((message, index) => (index === cardIndex ? card : message));

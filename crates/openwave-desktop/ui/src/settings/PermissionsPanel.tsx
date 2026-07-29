@@ -28,8 +28,8 @@ export function toolGrantLabel(action: RendererToolName): string {
 
 /**
  * The scope line, worded as the width of what was agreed to. Mirrors the
- * approval card's rungs: the exact action, an executable with any arguments,
- * or the whole tool.
+ * approval card's rungs: the exact action, a run of command tokens, an
+ * executable with any arguments, or the whole tool.
  */
 export function grantScopeLabel(
   scope: GrantScope,
@@ -49,6 +49,8 @@ export function grantScopeLabel(
     }
     case "any_args_for":
       return `${scope.command} …`;
+    case "command_prefix":
+      return `${scope.tokens.join(" ")} …`;
     case "whole_tool":
       switch (action) {
         case "exec":

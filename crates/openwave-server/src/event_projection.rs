@@ -103,6 +103,10 @@ pub(crate) enum RendererAgentEvent {
         /// automatically" hint.
         #[serde(default)]
         auto_judging: bool,
+        /// Token counts of the command-prefix rungs on offer, narrowest
+        /// first. Empty when the action has none.
+        #[serde(default)]
+        prefix_rungs: Vec<usize>,
         /// The one deliberate opening in this boundary. A human cannot consent
         /// to a command they are not shown, so a tool may project a closed,
         /// field-by-field view of the action under review. Tools without one
@@ -191,6 +195,10 @@ impl From<&SequencedEvent> for RendererSequencedEvent {
                 approval: *kind,
                 class: *class,
                 auto_judging: *auto_judging,
+                prefix_rungs: preview
+                    .as_ref()
+                    .map(crate::routes::prefix_rung_lengths)
+                    .unwrap_or_default(),
                 preview: preview.clone(),
             },
             AgentEvent::ApprovalDecided { call_id, approved } => {
