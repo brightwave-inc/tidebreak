@@ -17,6 +17,7 @@ import {
   DocumentViewer,
   hasOriginalViewer,
 } from "@/document/DocumentViewer";
+import type { SheetHighlightRange } from "@/document/UniverSpreadsheetViewer";
 import { cn } from "@/lib/utils";
 import {
   CITATION_MARK_CLASS,
@@ -107,6 +108,12 @@ type DocumentDetailsProps = {
    * which opens on its page with nothing marked on it.
    */
   citationBounds?: readonly CitationPageBounds[];
+  /**
+   * Cells of a grid original to select and scroll to, when opened from a
+   * citation into a workbook. Recorded when the workbook was read, so the range
+   * is the block the passage actually covered rather than the whole sheet.
+   */
+  citationCellRange?: SheetHighlightRange;
 };
 
 /**
@@ -128,6 +135,7 @@ export function DocumentDetails({
   citationSpan,
   targetPage,
   citationBounds,
+  citationCellRange,
 }: DocumentDetailsProps) {
   const { client } = useApp();
   const type = baseMediaType(info.media_type);
@@ -145,6 +153,7 @@ export function DocumentDetails({
               mediaType={type}
               targetPage={targetPage}
               citationBounds={citationBounds}
+              citationCellRange={citationCellRange}
               className="bg-page-background grow p-4 pt-2"
             />
           ) : type.startsWith("image/") ? (

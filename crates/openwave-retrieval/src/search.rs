@@ -134,6 +134,7 @@ fn render(citations: &[Citation], source_tokens: &[uuid::Uuid], format: Citation
                 source_token: source_tokens[i],
             },
         );
+        let sheet = render_sheet(c);
         out.push_str(&format!(
             "\n\n{}. Cite as: {reference}\n[score {:.3}] document {} (bytes {}..{}){}{}\n{}",
             i + 1,
@@ -141,12 +142,18 @@ fn render(citations: &[Citation], source_tokens: &[uuid::Uuid], format: Citation
             c.document_id,
             c.span.start,
             c.span.end,
-            if c.heading_path.is_empty() {
+            // A workbook passage's section heading is the sheet it is on, which
+            // the range line already says with the cells attached.
+            if c.heading_path.is_empty() || !sheet.is_empty() {
                 String::new()
             } else {
                 format!("\nSection: {}", c.heading_path.join(" > "))
             },
-            render_pages(c),
+            if sheet.is_empty() {
+                render_pages(c)
+            } else {
+                sheet
+            },
             c.snippet.trim()
         ));
     }
@@ -177,15 +184,39 @@ fn render_pages(citation: &Citation) -> String {
     }
 }
 
+/// Where on a workbook a passage sits: the sheet, and the cells it covers.
+///
+/// Empty for a source that is not a workbook, which is how the caller tells the
+/// two apart. The range is the rectangle enclosing every cell the passage
+/// touched on the sheet it started on, computed the same way the evidence the
+/// model will cite is — so what the model is shown and what a reader opens are
+/// the same range rather than two derivations of it.
+fn render_sheet(citation: &Citation) -> String {
+    let EvidenceLocation::SpreadsheetCellRange {
+        start_cell,
+        end_cell,
+        sheet_name,
+        ..
+    } = EvidenceLocation::for_source_regions(Vec::new(), citation.source_regions.clone())
+    else {
+        return String::new();
+    };
+    let range = match &end_cell {
+        Some(end) => format!("{start_cell}:{end}"),
+        None => start_cell,
+    };
+    format!("\nSheet: {sheet_name} ({range})")
+}
+
 #[async_trait]
 impl Tool for SearchTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "search".into(),
             description: "Search the indexed documents for passages relevant to a query. \
-                          Returns ranked, grounded citations (document id, byte span, source \
-                          pages when available, and text). Each result carries the exact \
-                          reference to cite it by."
+                          Returns ranked, grounded citations (document id, byte span, and text, \
+                          plus source pages or the sheet and cell range where the source has \
+                          them). Each result carries the exact reference to cite it by."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -378,12 +409,31 @@ async fn document_entries(
             if let Some(summary) = by_id.get(&document_id) {
                 entry = entry.with_media_type(summary.media_type.clone());
             }
-            if let Some(pages) = pages_detail(group) {
-                entry = entry.with_detail(pages);
+            if let Some(detail) = sheets_detail(group).or_else(|| pages_detail(group)) {
+                entry = entry.with_detail(detail);
             }
             entry
         })
         .collect()
+}
+
+/// The sheets a workbook matched on, in match order and deduplicated.
+///
+/// A card row is scanned, not read, so it names the sheets rather than the
+/// ranges: "Q4 Results, Assumptions" is what tells someone whether the match is
+/// where they expected. The exact cells are on the citation.
+fn sheets_detail(citations: &[&Citation]) -> Option<String> {
+    let mut sheets: Vec<&str> = Vec::new();
+    for citation in citations {
+        for region in &citation.source_regions {
+            if let Some(cells) = region.location.spreadsheet_cells() {
+                if !sheets.contains(&cells.sheet_name) {
+                    sheets.push(cells.sheet_name);
+                }
+            }
+        }
+    }
+    (!sheets.is_empty()).then(|| format!("Sheet {}", sheets.join(", ")))
 }
 
 /// The pages a document matched on, in match order and deduplicated.

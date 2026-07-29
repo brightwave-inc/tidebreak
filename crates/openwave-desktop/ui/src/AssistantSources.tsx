@@ -29,6 +29,19 @@ export type AssistantSource = Readonly<{
    * its span and its pages.
    */
   structuredPath?: Readonly<{ path: string; pathType: StructuredPathType }>;
+  /**
+   * The cells the passage came from, for a source that is a grid rather than a
+   * run of pages. Absent for every other kind of source.
+   */
+  cellRange?: SheetCellRange;
+}>;
+
+/** A rectangle of one sheet of a workbook, as a citation records it. */
+export type SheetCellRange = Readonly<{
+  startCell: string;
+  endCell: string | null;
+  sheetIndex: number;
+  sheetName: string;
 }>;
 
 type AssistantSourcesProps = {

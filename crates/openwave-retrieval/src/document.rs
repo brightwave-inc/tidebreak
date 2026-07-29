@@ -7,7 +7,7 @@
 //! and it gives every answer a precise, verifiable pointer back into the source.
 
 pub use openwave_core::{ByteSpan, PageBounds, SourceLocation, SourceRegion, PAGE_BOUNDS_SCALE};
-use openwave_core::{ChatId, DocumentGeneration, ProjectId, RetrievalEvidenceInput};
+use openwave_core::{CellAddress, ChatId, DocumentGeneration, ProjectId, RetrievalEvidenceInput};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
@@ -185,7 +185,9 @@ impl Document {
     ///
     /// A structured source coalesces the same way one level up the tree: a
     /// passage crossing four hundred cells of a table is at the table, and the
-    /// enclosing node is what survives when the individual ones cannot.
+    /// enclosing node is what survives when the individual ones cannot. A
+    /// workbook coalesces to the rectangle its cells occupy on each sheet, which
+    /// is the shape a spreadsheet passage is read as anyway.
     #[must_use]
     pub fn source_regions_for(&self, span: ByteSpan) -> Vec<SourceRegion> {
         let clipped: Vec<SourceRegion> = self
@@ -209,8 +211,76 @@ impl Document {
         {
             return coalesce_by_ancestor(clipped);
         }
+        if clipped
+            .iter()
+            .all(|region| region.location.spreadsheet_cells().is_some())
+        {
+            return coalesce_by_sheet(clipped);
+        }
         coalesce_by_page(clipped)
     }
+}
+
+/// Merge consecutive regions on the same sheet into one region for the
+/// rectangle they occupy, dropping the individual cells.
+///
+/// A passage over a grid is read as a block, not as three hundred separate
+/// values, so the rectangle enclosing them loses nothing a reader was using —
+/// and unlike a page, a range keeps saying exactly where on the sheet the
+/// passage was. Regions arrive ordered, so a run on one sheet is a contiguous
+/// stretch of the passage; a passage that crosses into another sheet keeps that
+/// sheet's cells as their own region.
+fn coalesce_by_sheet(regions: Vec<SourceRegion>) -> Vec<SourceRegion> {
+    let mut merged: Vec<SourceRegion> = Vec::new();
+    for region in regions {
+        let Some(cells) = region.location.spreadsheet_cells() else {
+            merged.push(region);
+            continue;
+        };
+        let extended = merged.last_mut().and_then(|last| {
+            let previous = last.location.spreadsheet_cells()?;
+            (previous.sheet_index == cells.sheet_index).then_some(last)
+        });
+        let Some(last) = extended else {
+            merged.push(region);
+            continue;
+        };
+        let SourceLocation::SpreadsheetCells {
+            start_cell,
+            end_cell,
+            ..
+        } = &mut last.location
+        else {
+            unreachable!("the location was just read as spreadsheet cells")
+        };
+        let corners = [
+            start_cell.as_str(),
+            end_cell.as_deref().unwrap_or(start_cell),
+            cells.start_cell,
+            cells.end_cell.unwrap_or(cells.start_cell),
+        ]
+        .into_iter()
+        .filter_map(CellAddress::parse)
+        .collect::<Vec<_>>();
+        // A cell that does not read as A1 cannot widen a rectangle, and the
+        // parser's own text is kept rather than replaced by a guess.
+        if let (Some(first), Some(last_corner)) = (corners.first(), corners.last()) {
+            let top_left = corners.iter().fold(*first, |corner, cell| CellAddress {
+                column: corner.column.min(cell.column),
+                row: corner.row.min(cell.row),
+            });
+            let bottom_right = corners
+                .iter()
+                .fold(*last_corner, |corner, cell| CellAddress {
+                    column: corner.column.max(cell.column),
+                    row: corner.row.max(cell.row),
+                });
+            *start_cell = top_left.to_a1();
+            *end_cell = (top_left != bottom_right).then(|| bottom_right.to_a1());
+        }
+        last.span = ByteSpan::new(last.span.start, region.span.end);
+    }
+    merged
 }
 
 /// Fold a run of structured-path regions into at most the number of regions

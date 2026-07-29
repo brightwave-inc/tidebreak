@@ -92,6 +92,18 @@ export function hydrateTranscriptHistory(
                   location.kind === "structured_path"
                     ? { path: location.path, pathType: location.path_type }
                     : undefined,
+                // A workbook is opened at a range: the sheet selects the grid
+                // and the cells select the block on it, neither of which a byte
+                // offset into the extracted text can express.
+                cellRange:
+                  location.kind === "spreadsheet_cell_range"
+                    ? {
+                        startCell: location.start_cell,
+                        endCell: location.end_cell,
+                        sheetIndex: location.sheet_index,
+                        sheetName: location.sheet_name,
+                      }
+                    : undefined,
               }),
             )
           : [],
