@@ -1,3 +1,4 @@
+import { useEffect, useState, type ReactNode } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
   ChevronLeft,
@@ -8,13 +9,14 @@ import {
 } from "lucide-react";
 
 import type { Chat } from "@/api";
-import { useApp } from "@/AppContext";
 import { useChatAttention } from "@/ChatAttention";
-import { useChatListStore } from "@/ChatListStore";
+import { Badge } from "@/components/ui/badge";
+import { listDeliverables } from "@/deliverables";
+import { listLibraryDocuments } from "@/documents";
 import type { PanelType } from "@/panel/panelTypes";
 import { usePanelNav } from "@/panel/usePanelNav";
-import { NewChatButton } from "./NewChatButton";
-import { SidebarButton, SidebarSectionTitle } from "./primitives";
+import { useRefreshSignals } from "@/RefreshSignals";
+import { SidebarButton } from "./primitives";
 import { SidebarFrame } from "./SidebarFrame";
 
 /**
@@ -28,10 +30,7 @@ import { SidebarFrame } from "./SidebarFrame";
  */
 export function ChatSidebar({ chat }: { chat: Chat }) {
   const navigate = useNavigate();
-  const { newChat } = useApp();
   const { layout, openPanel } = usePanelNav();
-  const creatingChat = useChatListStore((state) => state.creatingChat);
-  const deletingChatId = useChatListStore((state) => state.deletingChatId);
   const chatIdsWithPendingPrompts = useChatAttention(
     (state) => state.chatIdsWithPendingPrompts,
   );
@@ -47,6 +46,9 @@ export function ChatSidebar({ chat }: { chat: Chat }) {
   const elsewhereNeedsAttention = [...chatIdsWithPendingPrompts].some(
     (id) => id !== chat.id,
   );
+
+  const sourceCount = useSidebarCount(chat.id, listLibraryDocuments, (c) => c.documents.length);
+  const outputCount = useSidebarCount(chat.id, listDeliverables, (c) => c.deliverables.length);
 
   return (
     <SidebarFrame>
@@ -64,27 +66,23 @@ export function ChatSidebar({ chat }: { chat: Chat }) {
         )}
       </SidebarButton>
 
-      <NewChatButton
-        onClick={newChat}
-        disabled={creatingChat || deletingChatId !== null}
-        creating={creatingChat}
-      />
-
-      <SidebarSectionTitle className="mt-4">
-        {chat.title?.trim() || "New chat"}
-      </SidebarSectionTitle>
-
       <ChatPanelButton
         label="Sources"
         icon={<Library />}
         active={openPanelTypes.has("sources")}
         onClick={() => openPanel({ type: "sources" })}
+        badge={sourceCount > 0 ? (
+          <Badge variant="outline" className="-my-0.5">{sourceCount}</Badge>
+        ) : undefined}
       />
       <ChatPanelButton
         label="Outputs"
         icon={<Shapes />}
         active={openPanelTypes.has("outputs")}
         onClick={() => openPanel({ type: "outputs" })}
+        badge={outputCount > 0 ? (
+          <Badge variant="outline" className="-my-0.5">{outputCount}</Badge>
+        ) : undefined}
       />
       <ChatPanelButton
         label="Folders"
@@ -100,11 +98,13 @@ function ChatPanelButton({
   label,
   icon,
   active,
+  badge,
   onClick,
 }: {
   label: string;
-  icon: React.ReactNode;
+  icon: ReactNode;
   active: boolean;
+  badge?: ReactNode;
   onClick: () => void;
 }) {
   return (
@@ -116,6 +116,34 @@ function ChatPanelButton({
     >
       {icon}
       <span>{label}</span>
+      {badge}
     </SidebarButton>
   );
+}
+
+/**
+ * Fetch a count on mount and whenever the refresh-signal store ticks any of the
+ * targets that could change the number (folder access for sources, output
+ * writebacks for deliverables). Errors are swallowed — the badge simply stays at
+ * its last known value or zero.
+ */
+function useSidebarCount<T>(
+  chatId: string,
+  fetcher: (chatId: string) => Promise<T>,
+  extract: (result: T) => number,
+): number {
+  const [count, setCount] = useState(0);
+  const folderAccess = useRefreshSignals((s) => s.folderAccess);
+  const outputWritebacks = useRefreshSignals((s) => s.outputWritebacks);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetcher(chatId).then(
+      (result) => { if (!cancelled) setCount(extract(result)); },
+      () => { /* swallow — stale count is acceptable */ },
+    );
+    return () => { cancelled = true; };
+  }, [chatId, folderAccess, outputWritebacks, fetcher, extract]);
+
+  return count;
 }
