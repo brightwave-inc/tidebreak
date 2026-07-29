@@ -50,6 +50,15 @@ pub(crate) struct GatewayRuntime {
     /// shell through [`crate::register_pending_pairing`] — the renderer can
     /// read and dismiss it, never set it or choose its URL.
     pending_pairing: Mutex<Option<PendingPairing>>,
+    /// True when this launch resolved the BYOK (OpenAI) embedder — the one
+    /// piece of enforcement only a fresh boot can apply once a pairing
+    /// commits (see `resolve_embedder`). Stamped once during bind.
+    boot_embedder_byok: std::sync::atomic::AtomicBool,
+    /// Flipped to `true` when a pairing commit finds the BYOK embedder
+    /// live: the desktop shell watches this and restarts the app to close
+    /// the enforcement gap immediately. Never reset — the restart is the
+    /// reset.
+    enforcement_restart: tokio::sync::watch::Sender<bool>,
 }
 
 /// The shell-registered pairing a sign-in may commit.
@@ -132,7 +141,23 @@ impl GatewayRuntime {
             sign_in: Mutex::new(SignInProgress::Idle),
             sign_in_generation: std::sync::atomic::AtomicU64::new(0),
             pending_pairing: Mutex::new(None),
+            boot_embedder_byok: std::sync::atomic::AtomicBool::new(false),
+            enforcement_restart: tokio::sync::watch::channel(false).0,
         })
+    }
+
+    /// Record that this launch resolved the BYOK embedder. Called once
+    /// during bind; a pairing commit in this process then wants a restart.
+    pub(crate) fn note_boot_embedder_byok(&self) {
+        self.boot_embedder_byok
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Watch for the enforcement restart a pairing commit may request. The
+    /// desktop shell restarts the app when this reads `true`; headless
+    /// embedders may ignore it (the gap still closes at their next start).
+    pub(crate) fn enforcement_restart_watch(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.enforcement_restart.subscribe()
     }
 
     /// The one policy read every surface here shares.
@@ -338,6 +363,17 @@ impl GatewayRuntime {
         )
         .await?;
         *self.pending_pairing.lock().await = None;
+        // The one enforcement a running process cannot apply: a BYOK
+        // embedder resolved at boot keeps serving until the next start, so
+        // ask the shell for that start now rather than leaving the gap open
+        // until the user happens to relaunch. Fresh installs boot with the
+        // offline embedder and never restart.
+        if self
+            .boot_embedder_byok
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            let _ = self.enforcement_restart.send(true);
+        }
         Ok(())
     }
 
@@ -1163,6 +1199,59 @@ mod tests {
         assert_eq!(runtime.pending_pairing_url().await, None);
         assert_eq!(runtime.status().await.unwrap().sign_in, SignInProgress::Idle);
         assert!(runtime.begin_sign_in().await.is_err());
+    }
+
+    /// The restart request is keyed to an actual enforcement gap: a commit
+    /// on a launch that resolved the BYOK embedder asks for the restart
+    /// that swaps it out; a fresh install's offline-embedder launch commits
+    /// without one.
+    #[tokio::test]
+    async fn a_commit_requests_a_restart_only_when_the_byok_embedder_is_live() {
+        async fn runtime_with_pending() -> (Arc<GatewayRuntime>, PendingPairing, tempfile::TempDir)
+        {
+            let directory = tempfile::tempdir().unwrap();
+            let store: Arc<dyn Store> = Arc::new(
+                DbStore::connect(&format!(
+                    "sqlite://{}?mode=rwc",
+                    directory.path().join("gateway.db").display()
+                ))
+                .await
+                .unwrap(),
+            );
+            let runtime = GatewayRuntime::new(
+                store.clone(),
+                Arc::new(MockSecrets::default()),
+                Arc::new(crate::managed_policy::NoOsPolicy),
+            );
+            let mcp = Arc::new(crate::mcp_config::McpRuntime::new(
+                Arc::new(openwave_core::ToolRegistry::new()),
+                store,
+                runtime.clone(),
+                Arc::new(crate::managed_policy::NoOsPolicy),
+            ));
+            let pending = PendingPairing {
+                base_url: "http://gw.invalid/".to_string(),
+                mcp,
+            };
+            (runtime, pending, directory)
+        }
+
+        let (runtime, pending, _directory) = runtime_with_pending().await;
+        let mut restart = runtime.enforcement_restart_watch();
+        runtime.note_boot_embedder_byok();
+        runtime.commit_pairing(&pending).await.unwrap();
+        assert!(
+            *restart.borrow_and_update(),
+            "a live BYOK embedder at commit must request the restart"
+        );
+
+        let (runtime, pending, _directory) = runtime_with_pending().await;
+        let mut restart = runtime.enforcement_restart_watch();
+        runtime.commit_pairing(&pending).await.unwrap();
+        assert!(
+            !*restart.borrow_and_update(),
+            "an offline-embedder launch has no gap and must not restart"
+        );
     }
 
     #[tokio::test]

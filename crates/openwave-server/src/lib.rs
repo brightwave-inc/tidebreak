@@ -576,6 +576,15 @@ impl Server {
         PairingHandle::new(self.store.clone(), self.mcp.clone(), self.gateway.clone())
     }
 
+    /// Watch for the restart a pairing commit may request: `true` means this
+    /// launch's BYOK embedder is still live on a profile that just became
+    /// managed, and only a fresh start applies the embedder lockdown. The
+    /// desktop shell restarts the app on it; an embedder that ignores it
+    /// still closes the gap at its next start.
+    pub fn enforcement_restart_watch(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.gateway.enforcement_restart_watch()
+    }
+
     /// Run the accept loop until the process exits.
     pub async fn serve(self) -> Result<()> {
         axum::serve(self.listener, self.router)
@@ -708,7 +717,11 @@ async fn bind_inner(
         gateway.clone(),
         os_policy.clone(),
     ));
-    let embedder = resolve_embedder(&*store, &*secrets, byok_boot_allowed).await;
+    let (embedder, byok_embedder_live) =
+        resolve_embedder(&*store, &*secrets, byok_boot_allowed).await;
+    if byok_embedder_live {
+        gateway.note_boot_embedder_byok();
+    }
     let vector_store = connect_vector_store(&config, embedder.dimensions()).await?;
     let code_execution = Arc::new(code_execution::ConfiguredCodeExecutionProvider::new(
         store.clone(),
@@ -988,13 +1001,15 @@ const EMBED_DIMS: usize = 1536;
 /// Because the embedder is boot-scoped (the vector index is dimension-bound
 /// to it), a profile provisioned managed at runtime keeps a live BYOK
 /// embedder until the next app start; this gate closes at the next boot.
-/// Closing it eagerly — an automatic restart when a pairing commit finds a
-/// live BYOK embedder — is #1024.
+/// The second value reports whether this launch picked the BYOK embedder —
+/// when a pairing commits mid-session with it live, the gateway runtime
+/// signals the desktop shell to restart and close the gate immediately
+/// instead of leaving it open until the user happens to relaunch.
 async fn resolve_embedder(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
     byok_allowed: bool,
-) -> Arc<dyn Embedder> {
+) -> (Arc<dyn Embedder>, bool) {
     let enabled = byok_allowed
         && providers::read_config(store, providers::ProviderKind::Openai)
             .await
@@ -1006,8 +1021,8 @@ async fn resolve_embedder(
         None
     };
     match key {
-        Some(key) => Arc::new(OpenAiEmbedder::new(key, EMBED_MODEL, EMBED_DIMS)),
-        None => Arc::new(HashEmbedder::default()),
+        Some(key) => (Arc::new(OpenAiEmbedder::new(key, EMBED_MODEL, EMBED_DIMS)), true),
+        None => (Arc::new(HashEmbedder::default()), false),
     }
 }
 

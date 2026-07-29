@@ -2575,14 +2575,16 @@ async fn resolve_embedder_uses_openai_only_when_enabled_and_keyed() {
     )
     .await
     .unwrap();
-    let online = resolve_embedder(&*store, &secrets, true).await;
+    let (online, byok) = resolve_embedder(&*store, &secrets, true).await;
     assert_eq!(online.dimensions(), EMBED_DIMS);
+    assert!(byok, "the BYOK pick must be reported — it gates the restart");
     assert_ne!(EMBED_DIMS, HashEmbedder::default().dimensions());
 
     // Enabled + keyed but BYOK disallowed (managed profile, or an unreadable
     // policy) → document text must never egress through the stored key.
-    let locked = resolve_embedder(&*store, &secrets, false).await;
+    let (locked, byok) = resolve_embedder(&*store, &secrets, false).await;
     assert_eq!(locked.dimensions(), HashEmbedder::default().dimensions());
+    assert!(!byok);
 
     // Disabled but keyed → the key is ignored (no silent egress), even though
     // it's present. Deterministic regardless of any ambient OPENAI_API_KEY,
@@ -2599,8 +2601,9 @@ async fn resolve_embedder_uses_openai_only_when_enabled_and_keyed() {
     )
     .await
     .unwrap();
-    let offline = resolve_embedder(&*store, &secrets, true).await;
+    let (offline, byok) = resolve_embedder(&*store, &secrets, true).await;
     assert_eq!(offline.dimensions(), HashEmbedder::default().dimensions());
+    assert!(!byok);
 }
 
 #[cfg(feature = "vec-lance")]

@@ -290,6 +290,22 @@ async fn boot_server(
         .initialize_store(server.store())?;
     // Unblock any pairing task parked on a deep link that arrived pre-boot.
     let _ = store_tx.send(Some(server.pairing_handle()));
+    // A pairing commit that finds this launch's BYOK embedder still live
+    // requests the restart that applies the embedder lockdown; fresh
+    // installs boot with the offline embedder and never trip this.
+    let mut restart_rx = server.enforcement_restart_watch();
+    let restart_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        while restart_rx.changed().await.is_ok() {
+            if *restart_rx.borrow_and_update() {
+                deep_link::log_pairing(
+                    &restart_app,
+                    "restarting to apply managed embedder enforcement",
+                );
+                restart_app.restart();
+            }
+        }
+    });
     let base_url = format!("http://{}", server.local_addr());
     let token = server.token().to_string();
     let executor_token = server.client_executor_token().to_string();

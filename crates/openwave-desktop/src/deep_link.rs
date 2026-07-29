@@ -253,7 +253,7 @@ async fn wait_pairing_handle(app: &tauri::AppHandle) -> Result<PairingHandle, St
 /// launches, `pairing.log` under app-data for GUI launches. Only the gateway
 /// origin is ever named — never the full link or URL — and gateway errors
 /// already strip URLs and token material.
-fn log_pairing(app: &tauri::AppHandle, message: &str) {
+pub(crate) fn log_pairing(app: &tauri::AppHandle, message: &str) {
     use std::io::Write;
     eprintln!("openwave-desktop: gateway pairing: {message}");
     let Ok(dir) = crate::data_dir(app) else {
