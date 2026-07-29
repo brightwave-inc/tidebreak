@@ -41,7 +41,11 @@ impl<C: HttpClient> WebSearchProvider for TavilyProvider<C> {
         let response = self
             .client
             .post_json(HttpRequest {
-                url: self.kind().search_url().into(),
+                url: self
+                    .kind()
+                    .search_url()
+                    .ok_or(WebSearchError::NotConfigured(self.kind()))?
+                    .into(),
                 headers: vec![("content-type".into(), "application/json".into())],
                 body: request_body(&request, self.credential.api_key()),
             })
@@ -300,7 +304,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::{HttpResponse, WebSearchCredentials};
+    use crate::{HttpResponse, WebSearchCredentialState, WebSearchCredentials};
     use openwave_core::{AgentError, SecretProvider};
 
     #[derive(Clone)]
@@ -315,7 +319,7 @@ mod tests {
     impl SecretProvider for StaticSecrets {
         async fn get_secret(&self, key: &str) -> openwave_core::Result<Option<String>> {
             Ok(
-                (key == WebSearchProviderKind::Tavily.credential_key())
+                (Some(key) == WebSearchProviderKind::Tavily.credential_key())
                     .then(|| "tavily-key".into()),
             )
         }
@@ -326,6 +330,15 @@ mod tests {
 
         async fn delete_secret(&self, _key: &str) -> openwave_core::Result<()> {
             Err(AgentError::Secret("read only test secrets".into()))
+        }
+    }
+
+    /// The stored key as a usable credential, failing the test by name if any
+    /// other credential state comes back.
+    async fn test_credential() -> WebSearchCredential {
+        match WebSearchCredentials::resolve(&StaticSecrets, WebSearchProviderKind::Tavily).await {
+            Ok(WebSearchCredentialState::Present(credential)) => credential,
+            other => panic!("expected a stored Tavily key, got {other:?}"),
         }
     }
 
@@ -346,10 +359,7 @@ mod tests {
 
     #[tokio::test]
     async fn maps_tavily_response_and_keeps_credential_out_of_headers() {
-        let credential = WebSearchCredentials::load(&StaticSecrets, WebSearchProviderKind::Tavily)
-            .await
-            .unwrap()
-            .unwrap();
+        let credential = test_credential().await;
         let request = Arc::new(Mutex::new(None));
         let provider = TavilyProvider::new(
             FakeHttpClient {
@@ -373,7 +383,10 @@ mod tests {
         );
         let sent = request.lock().unwrap();
         let sent = sent.as_ref().unwrap();
-        assert_eq!(sent.url, WebSearchProviderKind::Tavily.search_url());
+        assert_eq!(
+            Some(sent.url.as_str()),
+            WebSearchProviderKind::Tavily.search_url()
+        );
         assert_eq!(sent.body["api_key"], "tavily-key");
         assert!(sent.headers.iter().all(|(_, value)| value != "tavily-key"));
     }
@@ -387,10 +400,7 @@ mod tests {
         Result<WebExtractResponse, WebSearchError>,
         Option<HttpRequest>,
     ) {
-        let credential = WebSearchCredentials::load(&StaticSecrets, WebSearchProviderKind::Tavily)
-            .await
-            .unwrap()
-            .unwrap();
+        let credential = test_credential().await;
         let request = Arc::new(Mutex::new(None));
         let provider = TavilyProvider::new(
             FakeHttpClient {

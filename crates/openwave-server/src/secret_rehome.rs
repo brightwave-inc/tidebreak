@@ -24,10 +24,21 @@ use crate::providers::{ProviderKind, LEGACY_ANTHROPIC_API_KEY};
 /// Credential keys for the web-search providers. `credential_key` is a `const
 /// fn`, so the keys resolve here rather than being spelled out again.
 const WEB_SEARCH_CREDENTIAL_KEYS: &[&str] = &[
-    WebSearchProviderKind::Exa.credential_key(),
-    WebSearchProviderKind::Tavily.credential_key(),
-    WebSearchProviderKind::Brave.credential_key(),
+    web_search_credential_key(WebSearchProviderKind::Exa),
+    web_search_credential_key(WebSearchProviderKind::Tavily),
+    web_search_credential_key(WebSearchProviderKind::Brave),
 ];
+
+/// One provider's fixed credential key, in const context.
+///
+/// A credential-free provider (a self-hosted instance) stores nothing and has
+/// nothing to re-home, so listing one above is a compile-time error.
+const fn web_search_credential_key(kind: WebSearchProviderKind) -> &'static str {
+    match kind.credential_key() {
+        Some(key) => key,
+        None => panic!("web-search provider stores no credential"),
+    }
+}
 
 /// Credential keys for the code-execution providers that take one (`Local`
 /// runs in the host sandbox and has none).
@@ -204,10 +215,11 @@ mod tests {
             assert!(keys.contains(&kind.credential_key()), "{kind:?}");
         }
         for kind in WebSearchProviderKind::ALL {
-            assert!(
-                keys.iter().any(|key| key == kind.credential_key()),
-                "{kind:?}"
-            );
+            // A credential-free provider stores nothing to re-home.
+            let Some(expected) = kind.credential_key() else {
+                continue;
+            };
+            assert!(keys.iter().any(|key| key == expected), "{kind:?}");
         }
         // `CodeExecutionProviderKind` is `#[non_exhaustive]`, so a match here
         // cannot stand in for coverage; assert the credentialed kinds' keys

@@ -62,7 +62,11 @@ impl<C: HttpClient> WebSearchProvider for ExaProvider<C> {
         let response = self
             .client
             .post_json(HttpRequest {
-                url: self.kind().search_url().into(),
+                url: self
+                    .kind()
+                    .search_url()
+                    .ok_or(WebSearchError::NotConfigured(self.kind()))?
+                    .into(),
                 headers: vec![
                     ("x-api-key".into(), self.credential.api_key().into()),
                     ("content-type".into(), "application/json".into()),
@@ -340,7 +344,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::{HttpResponse, WebSearchCredentials};
+    use crate::{HttpResponse, WebSearchCredentialState, WebSearchCredentials};
     use openwave_core::{AgentError, SecretProvider};
 
     #[derive(Clone)]
@@ -354,7 +358,10 @@ mod tests {
     #[async_trait]
     impl SecretProvider for StaticSecrets {
         async fn get_secret(&self, key: &str) -> openwave_core::Result<Option<String>> {
-            Ok((key == WebSearchProviderKind::Exa.credential_key()).then(|| "exa-key".into()))
+            Ok(
+                (Some(key) == WebSearchProviderKind::Exa.credential_key())
+                    .then(|| "exa-key".into()),
+            )
         }
 
         async fn set_secret(&self, _key: &str, _value: &str) -> openwave_core::Result<()> {
@@ -363,6 +370,15 @@ mod tests {
 
         async fn delete_secret(&self, _key: &str) -> openwave_core::Result<()> {
             Err(AgentError::Secret("read only test secrets".into()))
+        }
+    }
+
+    /// The stored key as a usable credential, failing the test by name if any
+    /// other credential state comes back.
+    async fn test_credential() -> WebSearchCredential {
+        match WebSearchCredentials::resolve(&StaticSecrets, WebSearchProviderKind::Exa).await {
+            Ok(WebSearchCredentialState::Present(credential)) => credential,
+            other => panic!("expected a stored Exa key, got {other:?}"),
         }
     }
 
@@ -383,10 +399,7 @@ mod tests {
 
     #[tokio::test]
     async fn maps_exa_response_and_sends_bounded_direct_request() {
-        let credential = WebSearchCredentials::load(&StaticSecrets, WebSearchProviderKind::Exa)
-            .await
-            .unwrap()
-            .unwrap();
+        let credential = test_credential().await;
         let seen = Arc::new(Mutex::new(Vec::new()));
         let client = FakeHttpClient {
             seen: Arc::clone(&seen),
@@ -407,7 +420,10 @@ mod tests {
         assert_eq!(response.results[0].snippet, "short summary");
         let sent = seen.lock().unwrap();
         assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].url, WebSearchProviderKind::Exa.search_url());
+        assert_eq!(
+            Some(sent[0].url.as_str()),
+            WebSearchProviderKind::Exa.search_url()
+        );
         assert_eq!(sent[0].body["numResults"], 2);
         assert_eq!(sent[0].body["includeDomains"][0], "docs.example.com");
         assert_eq!(sent[0].headers[0], ("x-api-key".into(), "exa-key".into()));
@@ -419,10 +435,7 @@ mod tests {
         status: u16,
         body: serde_json::Value,
     ) -> (Result<WebExtractResponse, WebSearchError>, Vec<HttpRequest>) {
-        let credential = WebSearchCredentials::load(&StaticSecrets, WebSearchProviderKind::Exa)
-            .await
-            .unwrap()
-            .unwrap();
+        let credential = test_credential().await;
         let seen = Arc::new(Mutex::new(Vec::new()));
         let provider = ExaProvider::new(
             FakeHttpClient {

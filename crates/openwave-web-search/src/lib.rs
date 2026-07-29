@@ -19,9 +19,15 @@
 //! Exa and Tavily implement page extraction as well as search, on the same
 //! fixed authority; a per-URL vendor failure is a typed error rather than an
 //! empty success, so extraction can fall back to the native engine instead of
-//! returning a blank page. Brave is search-only and says so through
+//! returning a blank page. Brave and SearXNG are search-only and say so through
 //! [`WebSearchProvider::supports_extract`], which sends extraction to the
 //! native engine.
+//!
+//! SearXNG is self-hosted, which makes it the one provider that carries no
+//! credential and the one whose address is host configuration rather than a
+//! fixed constant. Both departures are contained in [`searxng`]; the
+//! credentialed providers still fail closed on a missing key, and the transport
+//! is still bound to exactly one [`OutboundOrigin`] before any request exists.
 //!
 //! The `extract-native` feature adds a self-contained extraction engine:
 //! [`NativeExtractor`] fetches one admitted URL — every redirect hop re-vetted
@@ -37,25 +43,29 @@ mod fetch_policy;
 mod http;
 #[cfg(feature = "extract-native")]
 mod native;
+pub mod searxng;
 pub mod tavily;
 mod tool;
 mod types;
 
 pub use brave::BraveProvider;
-pub use credentials::{WebSearchCredential, WebSearchCredentials};
+pub use credentials::{WebSearchCredential, WebSearchCredentialState, WebSearchCredentials};
 pub use exa::ExaProvider;
 pub use fetch_policy::{
     admit_fetch_address, admit_fetch_url, FetchPolicyViolation, MAX_FETCH_URL_BYTES,
 };
 #[cfg(feature = "http")]
 pub use http::ReqwestHttpClient;
-pub use http::{HttpClient, HttpGetRequest, HttpRequest, HttpResponse, MAX_HTTP_RESPONSE_BYTES};
+pub use http::{
+    HttpClient, HttpGetRequest, HttpRequest, HttpResponse, OutboundOrigin, MAX_HTTP_RESPONSE_BYTES,
+};
 #[cfg(feature = "extract-native")]
 pub use native::{
     HostAddressResolver, NativeExtractError, NativeExtraction, NativeExtractor, PageFetchResponse,
     PageFetchTransport, ReqwestPageFetcher, TokioHostResolver, MAX_EXTRACT_CONTENT_CHARS,
     MAX_FETCH_REDIRECT_HOPS, MAX_FETCH_RESPONSE_BYTES, NATIVE_FETCH_USER_AGENT,
 };
+pub use searxng::{SearxngBaseUrl, SearxngProvider};
 pub use tavily::TavilyProvider;
 pub use tool::{
     extract_request_from_tool_arguments, request_from_tool_arguments, PageExtractor,

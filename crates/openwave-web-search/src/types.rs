@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
@@ -50,6 +50,7 @@ pub enum WebSearchProviderKind {
     Exa,
     Tavily,
     Brave,
+    Searxng,
 }
 
 impl WebSearchProviderKind {
@@ -57,7 +58,7 @@ impl WebSearchProviderKind {
     ///
     /// Anything that has to enumerate providers reads this rather than
     /// spelling out a list that a new variant would silently fall out of.
-    pub const ALL: [Self; 3] = [Self::Exa, Self::Tavily, Self::Brave];
+    pub const ALL: [Self; 4] = [Self::Exa, Self::Tavily, Self::Brave, Self::Searxng];
 
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -65,24 +66,37 @@ impl WebSearchProviderKind {
             Self::Exa => "exa",
             Self::Tavily => "tavily",
             Self::Brave => "brave",
+            Self::Searxng => "searxng",
         }
     }
 
     /// Stable key in the application [`SecretProvider`](openwave_core::SecretProvider).
+    ///
+    /// `None` for a provider that authenticates with nothing at all. That is
+    /// not the same as a key being optional: a provider named here is unusable
+    /// until its key is stored, which is what
+    /// [`WebSearchCredentialState`](crate::WebSearchCredentialState) keeps
+    /// distinguishable.
     #[must_use]
-    pub const fn credential_key(self) -> &'static str {
+    pub const fn credential_key(self) -> Option<&'static str> {
         match self {
-            Self::Exa => "web_search.exa.api_key",
-            Self::Tavily => "web_search.tavily.api_key",
-            Self::Brave => "web_search.brave.api_key",
+            Self::Exa => Some("web_search.exa.api_key"),
+            Self::Tavily => Some("web_search.tavily.api_key"),
+            Self::Brave => Some("web_search.brave.api_key"),
+            // A self-hosted instance the operator runs. There is no vendor
+            // account behind it and so no key.
+            Self::Searxng => None,
         }
     }
 
-    pub(crate) const fn search_url(self) -> &'static str {
+    /// Fixed search endpoint, or `None` for a provider whose address is host
+    /// configuration because it has no single hosted address to pin.
+    pub(crate) const fn search_url(self) -> Option<&'static str> {
         match self {
-            Self::Exa => "https://api.exa.ai/search",
-            Self::Tavily => "https://api.tavily.com/search",
-            Self::Brave => "https://api.search.brave.com/res/v1/web/search",
+            Self::Exa => Some("https://api.exa.ai/search"),
+            Self::Tavily => Some("https://api.tavily.com/search"),
+            Self::Brave => Some("https://api.search.brave.com/res/v1/web/search"),
+            Self::Searxng => None,
         }
     }
 
@@ -96,7 +110,7 @@ impl WebSearchProviderKind {
         match self {
             Self::Exa => Some("https://api.exa.ai/contents"),
             Self::Tavily => Some("https://api.tavily.com/extract"),
-            Self::Brave => None,
+            Self::Brave | Self::Searxng => None,
         }
     }
 
@@ -105,12 +119,19 @@ impl WebSearchProviderKind {
     /// Keeping this mapping beside the fixed credential key and endpoint
     /// prevents host configuration or model arguments from selecting an
     /// outbound target.
+    ///
+    /// `None` for a self-hosted provider, whose address the operator supplies.
+    /// The transport is still bound to exactly one origin — see
+    /// [`OutboundOrigin`](crate::OutboundOrigin) — it is just an origin fixed
+    /// at construction from validated host configuration rather than a
+    /// constant.
     #[must_use]
-    pub const fn outbound_domain(self) -> &'static str {
+    pub const fn outbound_domain(self) -> Option<&'static str> {
         match self {
-            Self::Exa => "api.exa.ai",
-            Self::Tavily => "api.tavily.com",
-            Self::Brave => "api.search.brave.com",
+            Self::Exa => Some("api.exa.ai"),
+            Self::Tavily => Some("api.tavily.com"),
+            Self::Brave => Some("api.search.brave.com"),
+            Self::Searxng => None,
         }
     }
 }
@@ -674,6 +695,12 @@ pub enum WebSearchError {
     PageNotExtracted { provider: WebSearchProviderKind },
     #[error("web search provider {provider} returned an invalid response")]
     InvalidResponse { provider: WebSearchProviderKind },
+    /// A self-hosted instance answered, but not with its JSON API. The JSON
+    /// output format is off by default in many deployments, which makes this a
+    /// configuration problem on the instance rather than a bad response — and
+    /// far more actionable to say so.
+    #[error("web search provider {0} did not return its JSON API")]
+    JsonApiUnavailable(WebSearchProviderKind),
     #[error("web search provider returned an invalid result URL")]
     InvalidResultUrl,
 }
@@ -758,6 +785,46 @@ pub(crate) fn result_within_domains(url: &str, domains: &[SearchDomain]) -> bool
         let domain = domain.as_str();
         host == domain || host.ends_with(&format!(".{domain}"))
     })
+}
+
+/// Whether one result falls inside the requested publication window.
+///
+/// Backends that cannot express the window natively still have to honour it.
+/// A result carrying a date outside the window is dropped; an undated result is
+/// kept, because most engines report no date at all and dropping those would
+/// empty an answer rather than narrow it.
+pub(crate) fn result_within_published_window(
+    published_at: Option<DateTime<Utc>>,
+    start: Option<DateTime<Utc>>,
+    end: Option<DateTime<Utc>>,
+) -> bool {
+    let Some(published_at) = published_at else {
+        return true;
+    };
+    start.is_none_or(|start| published_at >= start) && end.is_none_or(|end| published_at <= end)
+}
+
+/// Parse an ISO 8601 instant, with or without a zone offset.
+///
+/// Several backends report a naive local-looking timestamp
+/// (`2026-07-01T09:30:00`) or a bare date. Both are read as UTC, which is what
+/// they mean in practice and what keeps a missing offset from becoming a
+/// dropped date.
+pub(crate) fn parse_iso8601_instant(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|value| value.with_timezone(&Utc))
+        .or_else(|| {
+            NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f")
+                .ok()
+                .map(|value| value.and_utc())
+        })
+        .or_else(|| {
+            NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                .ok()
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+                .map(|value| value.and_utc())
+        })
 }
 
 /// Whether a URL a provider echoed back names the page that was requested.

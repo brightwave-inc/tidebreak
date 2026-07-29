@@ -13,8 +13,10 @@ import {
   TimeoutSecondsField,
   timeoutMsFromSeconds,
 } from "./ProviderFields";
+import { Input } from "@/components/ui/input";
 import {
   SettingsError,
+  SettingsField,
   SettingsPanel,
   SettingsSection,
   SettingsStatus,
@@ -23,11 +25,18 @@ import {
 const MIN_WEB_SEARCH_TIMEOUT_SECONDS = 1;
 const MAX_WEB_SEARCH_TIMEOUT_SECONDS = 60;
 
+/**
+ * SearXNG is self-hosted: the operator runs the instance, so it needs an
+ * address instead of a key and never appears in the credential list.
+ */
+const SEARXNG_PROVIDER: WebSearchProviderKind = "searxng";
+
 export function WebSearchPanel({ client }: { client: ApiClient }) {
   const [config, setConfig] = useState<WebSearchConfigInfo | null>(null);
   const [credentials, setCredentials] = useState<WebSearchCredentialReadiness[]>([]);
   const [provider, setProvider] = useState<WebSearchProviderKind | "">("");
   const [timeoutSeconds, setTimeoutSeconds] = useState("");
+  const [searxngBaseUrl, setSearxngBaseUrl] = useState("");
   // One draft key per provider: a pass can add Exa's key and Tavily's key
   // together, and switching the active provider must not discard either.
   const [apiKeys, setApiKeys] = useState<
@@ -53,6 +62,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
         setCredentials(nextCredentials.credentials);
         setProvider(nextConfig.provider ?? "");
         setTimeoutSeconds(String(nextConfig.timeout_ms / 1000));
+        setSearxngBaseUrl(nextConfig.searxng_base_url ?? "");
       } catch (err) {
         if (!cancelled) setError(String(err));
       } finally {
@@ -92,11 +102,15 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
       const nextConfig = await client.putWebSearchConfig({
         provider: provider || null,
         timeout_ms: timeout.timeoutMs,
+        // An empty field clears the stored address rather than leaving a
+        // stale one behind an emptied box.
+        searxng_base_url: searxngBaseUrl.trim() || null,
       });
       const nextCredentials = await client.listWebSearchCredentials();
       setConfig(nextConfig);
       setCredentials(nextCredentials.credentials);
       setTimeoutSeconds(String(nextConfig.timeout_ms / 1000));
+      setSearxngBaseUrl(nextConfig.searxng_base_url ?? "");
       toast.success("Saved web-search settings");
     } catch (err) {
       setError(String(err));
@@ -170,6 +184,25 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
           </SettingsSection>
 
           <SettingsSection
+            title="Self-hosted instance"
+            description="SearXNG needs no key — it needs the address of the instance you run. Enable the JSON output format on that instance, which is off by default."
+          >
+            <SettingsField
+              label="SearXNG instance URL"
+              hint="For example http://localhost:8888. A loopback or private address is expected here; leave blank to take SearXNG out of service."
+            >
+              <Input
+                type="url"
+                inputMode="url"
+                placeholder="http://localhost:8888"
+                value={searxngBaseUrl}
+                disabled={working}
+                onChange={(event) => setSearxngBaseUrl(event.target.value)}
+              />
+            </SettingsField>
+          </SettingsSection>
+
+          <SettingsSection
             title="Active provider"
             description="Agents search and open pages through this one provider. The others stay configured and idle."
           >
@@ -177,10 +210,16 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
               value={provider}
               disabled={working}
               onChange={setProvider}
-              options={credentials.map((credential) => ({
-                kind: credential.provider,
-                label: providerLabel(credential.provider),
-              }))}
+              options={[
+                ...credentials.map((credential) => ({
+                  kind: credential.provider,
+                  label: providerLabel(credential.provider),
+                })),
+                {
+                  kind: SEARXNG_PROVIDER,
+                  label: providerLabel(SEARXNG_PROVIDER),
+                },
+              ]}
             />
 
             <TimeoutSecondsField
@@ -228,6 +267,8 @@ function providerLabel(provider: WebSearchProviderKind): string {
       return "Tavily";
     case "brave":
       return "Brave Search";
+    case "searxng":
+      return "SearXNG";
     default:
       return provider;
   }
@@ -245,16 +286,22 @@ function webSearchState(config: WebSearchConfigInfo | null): {
       description: "No web-search provider is selected.",
     };
   }
-  if (config.has_credential) {
+  if (config.available) {
     return {
       kind: "ready",
       label: "Ready",
-      description: `${providerLabel(config.provider)} is selected and has a saved key.`,
+      description:
+        config.provider === SEARXNG_PROVIDER
+          ? `${providerLabel(config.provider)} is selected and pointed at ${config.searxng_base_url}.`
+          : `${providerLabel(config.provider)} is selected and has a saved key.`,
     };
   }
   return {
     kind: "not-configured",
     label: "Not configured",
-    description: `${providerLabel(config.provider)} is selected but needs an API key.`,
+    description:
+      config.provider === SEARXNG_PROVIDER
+        ? `${providerLabel(config.provider)} is selected but needs an instance URL.`
+        : `${providerLabel(config.provider)} is selected but needs an API key.`,
   };
 }

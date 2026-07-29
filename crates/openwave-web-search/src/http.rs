@@ -168,22 +168,88 @@ fn redacted_json(value: &Value) -> Value {
     }
 }
 
+/// The exact origin one transport is bound to: scheme, host, and explicit port.
+///
+/// Every hosted provider pins a fixed HTTPS domain through
+/// [`Self::fixed`]. A self-hosted instance has no single address to pin, so its
+/// origin comes from validated host configuration through [`Self::parse`]. The
+/// binding is the same either way — one origin, decided before the client
+/// exists, never reachable from a model argument or a tool input.
+///
+/// [`Self::parse`] is also the one place a non-HTTPS or private destination
+/// becomes reachable, and only because the operator typed the address into
+/// their own settings. That is a different trust class from the URLs the native
+/// extractor fetches, which the model or a fetched page chose; `fetch_policy`
+/// governs those and is deliberately untouched by this.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutboundOrigin {
+    /// Exactly `scheme://host[:port]`, as it must appear at the start of every
+    /// request URL this client dispatches.
+    origin: String,
+    scheme: String,
+    host: String,
+    port: Option<u16>,
+}
+
+impl OutboundOrigin {
+    /// The fixed HTTPS domain a provider's endpoints live on.
+    ///
+    /// `None` for a provider whose address is host configuration.
+    #[must_use]
+    pub fn fixed(provider: crate::WebSearchProviderKind) -> Option<Self> {
+        provider.outbound_domain().map(|domain| Self {
+            origin: format!("https://{domain}"),
+            scheme: "https".into(),
+            host: domain.into(),
+            port: None,
+        })
+    }
+
+    /// The origin of an already validated `http`/`https` base URL.
+    pub fn parse(value: &str) -> Result<Self, WebSearchError> {
+        let parsed = Url::parse(value).map_err(|_| WebSearchError::OutboundNotAllowed)?;
+        let (Some(host), scheme @ ("http" | "https")) = (parsed.host_str(), parsed.scheme()) else {
+            return Err(WebSearchError::OutboundNotAllowed);
+        };
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err(WebSearchError::OutboundNotAllowed);
+        }
+        let host = host.to_ascii_lowercase();
+        let port = parsed.port();
+        let authority = match port {
+            Some(port) => format!("{host}:{port}"),
+            None => host.clone(),
+        };
+        Ok(Self {
+            origin: format!("{scheme}://{authority}"),
+            scheme: scheme.to_owned(),
+            host,
+            port,
+        })
+    }
+
+    /// The `scheme://host[:port]` prefix every request URL must start with.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.origin
+    }
+}
+
 #[cfg(feature = "http")]
 #[derive(Clone, Debug)]
 pub struct ReqwestHttpClient {
     client: reqwest::Client,
-    allowed_domain: &'static str,
+    origin: OutboundOrigin,
 }
 
 #[cfg(feature = "http")]
 impl ReqwestHttpClient {
-    /// Build a client for one provider with a bounded end-to-end timeout.
+    /// Build a client bound to one origin with a bounded end-to-end timeout.
     ///
-    /// The selected provider fixes the only HTTPS domain this client may
-    /// contact. Redirects stay disabled so credentials are never replayed to
-    /// another origin.
+    /// That origin is the only place this client may dial. Redirects stay
+    /// disabled so credentials are never replayed to another origin.
     pub fn with_timeout(
-        provider: crate::WebSearchProviderKind,
+        origin: OutboundOrigin,
         timeout: std::time::Duration,
     ) -> Result<Self, WebSearchError> {
         if timeout.is_zero() {
@@ -200,14 +266,11 @@ impl ReqwestHttpClient {
             .timeout(timeout)
             .build()
             .map_err(|error| WebSearchError::Transport(error.to_string()))?;
-        Ok(Self {
-            client,
-            allowed_domain: provider.outbound_domain(),
-        })
+        Ok(Self { client, origin })
     }
 
-    pub fn new(provider: crate::WebSearchProviderKind) -> Result<Self, WebSearchError> {
-        Self::with_timeout(provider, std::time::Duration::from_secs(20))
+    pub fn new(origin: OutboundOrigin) -> Result<Self, WebSearchError> {
+        Self::with_timeout(origin, std::time::Duration::from_secs(20))
     }
 }
 
@@ -242,7 +305,7 @@ impl ReqwestHttpClient {
 #[async_trait]
 impl HttpClient for ReqwestHttpClient {
     async fn post_json(&self, request: HttpRequest) -> Result<HttpResponse, WebSearchError> {
-        validate_outbound_url(&request.url, self.allowed_domain)?;
+        validate_outbound_url(&request.url, &self.origin)?;
         let mut builder = self.client.post(request.url).json(&request.body);
         for (name, value) in request.headers {
             builder = builder.header(name, value);
@@ -253,7 +316,7 @@ impl HttpClient for ReqwestHttpClient {
     async fn get(&self, request: HttpGetRequest) -> Result<HttpResponse, WebSearchError> {
         // The authority is decided by `url` alone, and `query` is appended by
         // the client afterwards, so no query pair can move the destination.
-        validate_outbound_url(&request.url, self.allowed_domain)?;
+        validate_outbound_url(&request.url, &self.origin)?;
         let mut builder = self.client.get(request.url).query(&request.query);
         for (name, value) in request.headers {
             builder = builder.header(name, value);
@@ -262,18 +325,24 @@ impl HttpClient for ReqwestHttpClient {
     }
 }
 
+/// Refuse any request URL that does not sit exactly on the bound origin.
+///
+/// The check is deliberately made twice over. The raw prefix comparison rejects
+/// anything the parser might normalize away — an added default port, a trailing
+/// dot on the host, userinfo, a look-alike suffix — and the parsed comparison
+/// rejects anything the raw form could disguise.
 #[cfg(feature = "http")]
-fn validate_outbound_url(value: &str, allowed_domain: &str) -> Result<(), WebSearchError> {
+fn validate_outbound_url(value: &str, origin: &OutboundOrigin) -> Result<(), WebSearchError> {
     let parsed = Url::parse(value).map_err(|_| WebSearchError::OutboundNotAllowed)?;
-    let authority = value
-        .strip_prefix("https://")
-        .and_then(|remainder| remainder.split(['/', '?', '#']).next());
-    if authority != Some(allowed_domain)
-        || parsed.scheme() != "https"
-        || parsed.host_str() != Some(allowed_domain)
+    let boundary_is_clean = value
+        .strip_prefix(&origin.origin)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '?', '#']));
+    if !boundary_is_clean
+        || parsed.scheme() != origin.scheme
+        || parsed.host_str() != Some(origin.host.as_str())
+        || parsed.port() != origin.port
         || !parsed.username().is_empty()
         || parsed.password().is_some()
-        || parsed.port().is_some()
     {
         return Err(WebSearchError::OutboundNotAllowed);
     }
@@ -337,7 +406,10 @@ mod tests {
     #[cfg(feature = "http")]
     #[tokio::test]
     async fn reqwest_client_rejects_requests_outside_its_provider_domain() {
-        let client = ReqwestHttpClient::new(crate::WebSearchProviderKind::Exa).unwrap();
+        let client = ReqwestHttpClient::new(
+            OutboundOrigin::fixed(crate::WebSearchProviderKind::Exa).unwrap(),
+        )
+        .unwrap();
         for url in [
             "http://api.exa.ai/search",
             "https://api.tavily.com/search",
@@ -380,13 +452,53 @@ mod tests {
     #[test]
     fn provider_endpoints_satisfy_their_fixed_domain_policy() {
         for provider in crate::WebSearchProviderKind::ALL {
-            for endpoint in std::iter::once(provider.search_url()).chain(provider.extract_url()) {
+            let Some(origin) = OutboundOrigin::fixed(provider) else {
+                // A self-hosted provider has no fixed domain to check; its
+                // origin is validated where the operator configures it.
+                continue;
+            };
+            for endpoint in provider
+                .search_url()
+                .into_iter()
+                .chain(provider.extract_url())
+            {
                 assert!(
-                    validate_outbound_url(endpoint, provider.outbound_domain()).is_ok(),
+                    validate_outbound_url(endpoint, &origin).is_ok(),
                     "{endpoint} is not on {provider}'s fixed outbound domain"
                 );
             }
         }
+    }
+
+    /// A configured origin is still exactly one origin. Loopback and an
+    /// explicit port are reachable — that is the point of a self-hosted
+    /// instance — but nothing else on the host is.
+    #[cfg(feature = "http")]
+    #[test]
+    fn a_configured_origin_binds_as_tightly_as_a_fixed_one() {
+        let origin = OutboundOrigin::parse("http://localhost:8888").unwrap();
+        assert!(validate_outbound_url("http://localhost:8888/search", &origin).is_ok());
+        for url in [
+            "https://localhost:8888/search",
+            "http://localhost:8889/search",
+            "http://localhost/search",
+            "http://localhost.evil.example:8888/search",
+            "http://user:password@localhost:8888/search",
+            "http://127.0.0.1:8888/search",
+        ] {
+            assert!(
+                matches!(
+                    validate_outbound_url(url, &origin),
+                    Err(WebSearchError::OutboundNotAllowed)
+                ),
+                "{url} was accepted against {}",
+                origin.as_str()
+            );
+        }
+
+        // Userinfo never survives into an origin in the first place.
+        assert!(OutboundOrigin::parse("http://user:password@localhost:8888").is_err());
+        assert!(OutboundOrigin::parse("ftp://localhost").is_err());
     }
 
     #[cfg(feature = "http")]
@@ -415,7 +527,10 @@ mod tests {
                 .unwrap();
         });
 
-        let client = ReqwestHttpClient::new(crate::WebSearchProviderKind::Exa).unwrap();
+        let client = ReqwestHttpClient::new(
+            OutboundOrigin::fixed(crate::WebSearchProviderKind::Exa).unwrap(),
+        )
+        .unwrap();
         let response = client
             .client
             .post(format!("http://{source_address}/search"))

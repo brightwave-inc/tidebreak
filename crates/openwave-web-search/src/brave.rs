@@ -8,10 +8,12 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use serde::Deserialize;
 
-use crate::types::{domain_scoped_query, result_within_domains};
+use crate::types::{
+    domain_scoped_query, parse_iso8601_instant, result_within_domains,
+    result_within_published_window,
+};
 use crate::{
     HttpClient, HttpGetRequest, WebSearchCredential, WebSearchError, WebSearchProvider,
     WebSearchProviderKind, WebSearchRequest, WebSearchResponse, WebSearchResult,
@@ -60,7 +62,11 @@ impl<C: HttpClient> WebSearchProvider for BraveProvider<C> {
         let response = self
             .client
             .get(HttpGetRequest {
-                url: self.kind().search_url().into(),
+                url: self
+                    .kind()
+                    .search_url()
+                    .ok_or(WebSearchError::NotConfigured(self.kind()))?
+                    .into(),
                 query: search_query(&request),
                 headers: vec![
                     (
@@ -92,6 +98,16 @@ impl<C: HttpClient> WebSearchProvider for BraveProvider<C> {
             // domain-restricted call can never return an off-domain page,
             // whatever the upstream ranker did with the operator.
             .filter(|result| result_within_domains(&result.url, &request.domains))
+            // `freshness` only carries a fully closed window, so a half-open
+            // request has nothing sent for it; the window is applied here so it
+            // is honoured either way.
+            .filter(|result| {
+                result_within_published_window(
+                    result.published_at,
+                    request.start_published_at,
+                    request.end_published_at,
+                )
+            })
             .collect();
         Ok(WebSearchResponse::new(self.kind(), results))
     }
@@ -174,7 +190,7 @@ struct BraveResult {
 /// score is reported: the response carries no relevance number, and a
 /// synthesized one would read as vendor data that does not exist.
 fn normalize_result(result: BraveResult) -> Result<WebSearchResult, WebSearchError> {
-    let published_at = result.page_age.as_deref().and_then(parse_page_age);
+    let published_at = result.page_age.as_deref().and_then(parse_iso8601_instant);
     WebSearchResult::new(
         result.url,
         result.title,
@@ -187,30 +203,15 @@ fn normalize_result(result: BraveResult) -> Result<WebSearchResult, WebSearchErr
     )
 }
 
-/// `page_age` is ISO 8601, usually without a zone offset.
-fn parse_page_age(value: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(value)
-        .ok()
-        .map(|value| value.with_timezone(&Utc))
-        .or_else(|| {
-            NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S")
-                .ok()
-                .map(|value| value.and_utc())
-        })
-        .or_else(|| {
-            NaiveDate::parse_from_str(value, "%Y-%m-%d")
-                .ok()
-                .and_then(|date| date.and_hms_opt(0, 0, 0))
-                .map(|value| value.and_utc())
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::{HttpRequest, HttpResponse, SearchDomain, WebExtractRequest, WebSearchCredentials};
+    use crate::{
+        HttpRequest, HttpResponse, SearchDomain, WebExtractRequest, WebSearchCredentialState,
+        WebSearchCredentials,
+    };
     use openwave_core::{AgentError, SecretProvider};
 
     struct StaticSecrets;
@@ -218,7 +219,8 @@ mod tests {
     #[async_trait]
     impl SecretProvider for StaticSecrets {
         async fn get_secret(&self, key: &str) -> openwave_core::Result<Option<String>> {
-            Ok((key == WebSearchProviderKind::Brave.credential_key()).then(|| "brave-key".into()))
+            Ok((Some(key) == WebSearchProviderKind::Brave.credential_key())
+                .then(|| "brave-key".into()))
         }
 
         async fn set_secret(&self, _key: &str, _value: &str) -> openwave_core::Result<()> {
@@ -227,6 +229,15 @@ mod tests {
 
         async fn delete_secret(&self, _key: &str) -> openwave_core::Result<()> {
             Err(AgentError::Secret("read only test secrets".into()))
+        }
+    }
+
+    /// The stored key as a usable credential, failing the test by name if any
+    /// other credential state comes back.
+    async fn test_credential() -> WebSearchCredential {
+        match WebSearchCredentials::resolve(&StaticSecrets, WebSearchProviderKind::Brave).await {
+            Ok(WebSearchCredentialState::Present(credential)) => credential,
+            other => panic!("expected a stored Brave key, got {other:?}"),
         }
     }
 
@@ -249,10 +260,7 @@ mod tests {
     }
 
     async fn provider(status: u16, body: &[u8]) -> BraveProvider<FakeHttpClient> {
-        let credential = WebSearchCredentials::load(&StaticSecrets, WebSearchProviderKind::Brave)
-            .await
-            .unwrap()
-            .unwrap();
+        let credential = test_credential().await;
         BraveProvider::new(
             FakeHttpClient {
                 request: Arc::new(Mutex::new(None)),
@@ -326,7 +334,10 @@ mod tests {
 
         let sent = sent.lock().unwrap();
         let sent = sent.as_ref().unwrap();
-        assert_eq!(sent.url, WebSearchProviderKind::Brave.search_url());
+        assert_eq!(
+            Some(sent.url.as_str()),
+            WebSearchProviderKind::Brave.search_url()
+        );
         let pairs: BTreeMap<&str, &str> = sent
             .query
             .iter()

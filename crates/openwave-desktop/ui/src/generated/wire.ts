@@ -1212,10 +1212,27 @@ export type UserQuestionOption = { id: string, label: string, description: strin
 
 /**
  * Public state returned by the local API. It intentionally reports only
- * selection and credential presence — key material never crosses the secret
- * boundary.
+ * selection, credential presence, and the configured instance URL — key
+ * material never crosses the secret boundary.
  */
-export type WebSearchConfigInfo = { provider?: WebSearchProviderKind, timeout_ms: number, has_credential: boolean, };
+export type WebSearchConfigInfo = { provider?: WebSearchProviderKind, timeout_ms: number, 
+/**
+ * Whether a key is stored for the selected provider. Always false for a
+ * credential-free provider, which has no key slot at all — read
+ * [`Self::available`] to know whether search will actually run.
+ */
+has_credential: boolean, 
+/**
+ * Whether the selected provider has everything it needs to be invoked.
+ *
+ * A key for the credentialed providers, an instance URL for SearXNG.
+ */
+available: boolean, 
+/**
+ * The configured SearXNG instance URL, in the canonical form the host
+ * stored. It is safe to return: validation forbids embedded credentials.
+ */
+searxng_base_url?: string, };
 
 /**
  * Credential readiness for one fixed web-search provider. This public shape
@@ -1227,7 +1244,7 @@ export type WebSearchCredentialReadiness = { provider: WebSearchProviderKind, ha
  * A configured web-search backend. The stable string also selects its secret
  * reference; it is intentionally not a model-controlled argument.
  */
-export type WebSearchProviderKind = "exa" | "tavily" | "brave";
+export type WebSearchProviderKind = "exa" | "tavily" | "brave" | "searxng";
 
 /**
  * Every tool name the renderer will accept, at runtime.

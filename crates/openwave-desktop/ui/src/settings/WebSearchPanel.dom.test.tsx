@@ -54,6 +54,7 @@ describe("WebSearchPanel", () => {
     const { client, putWebSearchConfig, putWebSearchCredential } = clientFor({
       provider: "exa",
       has_credential: false,
+      available: false,
       timeout_ms: 20_000,
     });
 
@@ -80,6 +81,7 @@ describe("WebSearchPanel", () => {
     expect(putWebSearchConfig).toHaveBeenCalledWith({
       provider: "exa",
       timeout_ms: 30_000,
+      searxng_base_url: null,
     });
     // A provider must not go active in a pass that failed to store its key.
     expect(putWebSearchCredential.mock.invocationCallOrder[0]).toBeLessThan(
@@ -89,7 +91,12 @@ describe("WebSearchPanel", () => {
 
   it("removes one provider's saved key without touching the other", async () => {
     const { client, deleteWebSearchCredential } = clientFor(
-      { provider: "exa", has_credential: true, timeout_ms: 20_000 },
+      {
+        provider: "exa",
+        has_credential: true,
+        available: true,
+        timeout_ms: 20_000,
+      },
       [
         { provider: "exa", has_credential: true },
         { provider: "tavily", has_credential: true },
@@ -108,10 +115,40 @@ describe("WebSearchPanel", () => {
     expect(deleteWebSearchCredential).toHaveBeenCalledTimes(1);
   });
 
+  // The self-hosted provider is configured by address, not by key: it has no
+  // credential field, and losing the address field would leave it selected and
+  // unusable with nothing on screen to repair it.
+  it("saves the self-hosted instance URL and offers it no key field", async () => {
+    const { client, putWebSearchConfig, putWebSearchCredential } = clientFor({
+      provider: "searxng",
+      has_credential: false,
+      available: false,
+      timeout_ms: 20_000,
+    });
+
+    render(<WebSearchPanel client={client} />);
+
+    fireEvent.change(await screen.findByLabelText(/SearXNG instance URL/), {
+      target: { value: "  http://localhost:8888  " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+
+    await waitFor(() =>
+      expect(putWebSearchConfig).toHaveBeenCalledWith({
+        provider: "searxng",
+        timeout_ms: 20_000,
+        searxng_base_url: "http://localhost:8888",
+      }),
+    );
+    expect(putWebSearchCredential).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText(/SearXNG API key/)).toBeNull();
+  });
+
   it("rejects a timeout outside the bounds before touching the server", async () => {
     const { client, putWebSearchConfig } = clientFor({
       provider: "exa",
       has_credential: true,
+      available: true,
       timeout_ms: 20_000,
     });
 

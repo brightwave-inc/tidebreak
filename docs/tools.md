@@ -20,7 +20,7 @@ The current foreground agent surface contains nineteen tools:
 | `list_sources` | List bounded metadata for sources in this exact conversation | Server, read-only |
 | `read_source` | Read a bounded canonical-text range from one source and create citable evidence | Server, read-only |
 | `read_tool_result` | Read past the point a large tool result was cut short for the turn | Server, read-only |
-| `web_search` | Search the public web through the configured provider (Exa, Tavily, or Brave) | Server, sensitive approval |
+| `web_search` | Search the public web through the configured provider (Exa, Tavily, Brave, or a self-hosted SearXNG) | Server, sensitive approval |
 | `web_extract` | Fetch one exact public page URL and return its readable content, through the configured provider or the built-in engine | Server, sensitive approval |
 | `request_folder_access` | Ask the trusted desktop host to connect another folder | Client continuation |
 | `list_connected_folders` | List roots already attached to this chat | Native client continuation |
@@ -273,7 +273,8 @@ HTTP code embedded in the core loop:
 WebSearchProvider
 ├── ExaProvider
 ├── TavilyProvider
-└── BraveProvider
+├── BraveProvider
+└── SearxngProvider
 
 WebSearchService
 ├── timeout and retry policy
@@ -292,9 +293,11 @@ The crate supplies the normalized bounded contract, fixed secret keys, direct
 vendor adapters over plain HTTP through an injected seam, strict tool-argument
 decoding, and the foreground `WebSearchTool`. The server owns a
 disabled-by-default provider selection and a 1–60 second request timeout at
-`GET`/`PUT /web-search`. That setting has no endpoint or credential reference,
-returns only whether the selected fixed key is present, and does not construct
-or call a provider.
+`GET`/`PUT /web-search`. That setting carries no credential reference and does
+not construct or call a provider. The one address it accepts is the base URL of
+a self-hosted SearXNG instance, which is validated at `PUT` time and is the only
+provider address that is not a constant; see [Web search](web-search.md) for why
+that stays safe.
 
 The foreground registry advertises `web_search` as Sensitive. A call is
 persisted, durably approved for sharing the query and explicit filters, and
@@ -304,8 +307,8 @@ approval card, and routed deterministically to the configured provider when it
 implements the extract contract or to the built-in native extraction engine
 otherwise. Exa and Tavily both implement it, so a configured host extracts
 through the vendor and falls back to native — except on a rejected key, which
-surfaces for repair rather than degrading silently. Brave is search-only, so a
-host on it extracts natively. See
+surfaces for repair rather than degrading silently. Brave and SearXNG are
+search-only, so a host on either extracts natively. See
 [Web search](web-search.md) for the routing, wire shapes, and fetch-policy
 details. Turn cancellation drops
 an in-flight tool future, aborting its HTTP request. The sandbox path remains a
