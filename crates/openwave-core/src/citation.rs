@@ -421,12 +421,16 @@ mod tests {
     fn rebinding_matches_parsing_for_the_other_message() {
         let parsed_for = MessageId::new();
         let stored_under = MessageId::new();
-        let reference = AssistantCitationReference {
+        let first = AssistantCitationReference {
+            source_token: uuid::Uuid::new_v4(),
+        };
+        let second = AssistantCitationReference {
             source_token: uuid::Uuid::new_v4(),
         };
         let text = format!(
-            "Grounded {}.",
-            format_citation_directive("claim", reference)
+            "Grounded {} and {}.",
+            format_citation_directive("claim", first),
+            format_citation_directive("other claim", second),
         );
 
         let parsed = parse_assistant_citations(&text, parsed_for);

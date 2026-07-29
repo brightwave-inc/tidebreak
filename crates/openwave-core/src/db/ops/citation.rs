@@ -69,7 +69,7 @@ pub(in crate::db) async fn append_assistant_message(
     .insert(&transaction)
     .await
     .map_err(store_err)?;
-    insert_for_message_on(&transaction, message, &evidence).await?;
+    insert_for_message_on(&transaction, message, references, &evidence).await?;
     transaction.commit().await.map_err(store_err)
 }
 
@@ -151,7 +151,7 @@ pub(in crate::db) async fn append_claimed_assistant_message(
     .insert(&transaction)
     .await
     .map_err(store_err)?;
-    insert_for_message_on(&transaction, message, &evidence).await?;
+    insert_for_message_on(&transaction, message, references, &evidence).await?;
     transaction.commit().await.map_err(store_err)?;
     Ok(AppendClaimedMessageOutcome::Appended)
 }
@@ -250,34 +250,48 @@ where
     Ok(evidence)
 }
 
+/// Record one citation per reference that resolved, numbered by where the model
+/// first used it.
+///
+/// The reference list is the only ordinal authority. A citation's identity is
+/// derived from its message and ordinal, and the message text embeds that same
+/// identity beside the phrase it backs, so numbering the surviving rows 1..n
+/// instead would hand a phrase whose reference resolved to nothing the identity
+/// of the next citation along — a reader would be shown another passage's
+/// evidence under it. A reference that resolves to no evidence leaves a gap
+/// instead: its embedded identity resolves to nothing, which renders as plain
+/// prose.
 pub(in crate::db) async fn insert_for_message_on<C>(
     conn: &C,
     message: &Message,
+    references: &[AssistantCitationReference],
     evidence: &[entities::retrieval_evidence::Model],
 ) -> Result<()>
 where
     C: ConnectionTrait,
 {
-    if evidence.is_empty() {
-        return Ok(());
-    }
-    let rows = evidence
+    let rows = references
         .iter()
         .enumerate()
-        .map(|(index, row)| entities::assistant_citation::ActiveModel {
-            id: Set(AssistantCitationId::derive(
-                message.id,
-                u16::try_from(index + 1).expect("citation limit fits u16"),
-            )
-            .0),
-            message_id: Set(message.id.0),
-            ordinal: Set(i32::try_from(index + 1).expect("citation limit fits i32")),
-            chat_id: Set(message.chat_id.0),
-            turn_id: Set(message.turn_id.0),
-            evidence_call_id: Set(row.call_id),
-            evidence_rank: Set(row.rank),
+        .filter_map(|(index, reference)| {
+            let row = evidence
+                .iter()
+                .find(|row| row.source_token == reference.source_token)?;
+            let ordinal = u16::try_from(index + 1).expect("citation limit fits u16");
+            Some(entities::assistant_citation::ActiveModel {
+                id: Set(AssistantCitationId::derive(message.id, ordinal).0),
+                message_id: Set(message.id.0),
+                ordinal: Set(i32::from(ordinal)),
+                chat_id: Set(message.chat_id.0),
+                turn_id: Set(message.turn_id.0),
+                evidence_call_id: Set(row.call_id),
+                evidence_rank: Set(row.rank),
+            })
         })
         .collect::<Vec<_>>();
+    if rows.is_empty() {
+        return Ok(());
+    }
     entities::assistant_citation::Entity::insert_many(rows)
         .exec(conn)
         .await
@@ -332,15 +346,18 @@ where
         .map_err(store_err)?;
     let mut snapshots = Vec::with_capacity(rows.len());
     let mut ordinal_owner = None;
-    let mut expected_ordinal = 1_i32;
+    // Ordinals ascend within a message but may skip: a reference the message
+    // cited and the store could not resolve holds its place rather than letting
+    // the citations after it inherit identities the text already spent.
+    let mut least_ordinal = 1_i32;
     for (row, evidence) in rows {
         let evidence = evidence
             .ok_or_else(|| AgentError::Store("assistant citation evidence disappeared".into()))?;
         if ordinal_owner != Some(row.message_id) {
             ordinal_owner = Some(row.message_id);
-            expected_ordinal = 1;
+            least_ordinal = 1;
         }
-        if row.ordinal != expected_ordinal
+        if row.ordinal < least_ordinal
             || !(1..=MAX_ASSISTANT_CITATIONS as i32).contains(&row.ordinal)
             || row.id
                 != AssistantCitationId::derive(
@@ -353,7 +370,7 @@ where
                 "assistant citation ordering or identity is corrupt".into(),
             ));
         }
-        expected_ordinal += 1;
+        least_ordinal = row.ordinal + 1;
         let evidence = super::client_execution::evidence_from_model(evidence)?;
         if evidence.chat_id != chat_id
             || evidence.turn_id.0 != row.turn_id
