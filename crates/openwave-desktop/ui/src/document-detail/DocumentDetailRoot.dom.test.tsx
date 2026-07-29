@@ -299,6 +299,51 @@ describe("DocumentDetailRoot", () => {
     expect(screen.queryByText(body)).toBeNull();
   });
 
+  // A tree is navigated by node, so a citation into one carries the path of the
+  // node it quoted beside its span. Everything below the root opens collapsed,
+  // which is why the quoted value is only on screen when the path arrived: it
+  // is what expands the record holding it.
+  const INVOICES_JSON = '{"invoices":[{"number":"A-1"},{"number":"B-2"}]}';
+  const INVOICES_XML =
+    "<invoices><invoice><number>A-1</number></invoice><invoice><number>B-2</number></invoice></invoices>";
+
+  it.each([
+    [
+      "application/json",
+      INVOICES_JSON,
+      { path: "invoices.1.number", pathType: "json_dot_notation" as const },
+    ],
+    [
+      "application/xml",
+      INVOICES_XML,
+      { path: "/invoices[1]/invoice[2]/number[1]", pathType: "xml_xpath" as const },
+    ],
+  ])(
+    "opens a citation into a %s tree at the node it quoted",
+    async (mediaType, body, structuredPath) => {
+      seedTranscript({ id: "cite-tree", structuredPath });
+      await openCitation(
+        detail({ media_type: mediaType, title: "Invoices", content: body }),
+        "cite-tree",
+        body,
+      );
+
+      const cited = await screen.findByText(/B-2/);
+      expect(scrolledTo).toContain(cited.closest("div"));
+    },
+  );
+
+  it("opens a tree collapsed when nothing pointed into it", async () => {
+    await openPanel(
+      detail({ media_type: "application/json", title: "Invoices" }),
+      vi.fn(),
+      INVOICES_JSON,
+    );
+
+    expect(await screen.findByRole("button", { name: "Collapse all" })).toBeVisible();
+    expect(screen.queryByText(/B-2/)).toBeNull();
+  });
+
   // The outline slugs the raw markdown and the renderer slugs the rendered
   // heading, independently. This is the only test that puts the two together,
   // so it is what would catch them drifting apart.

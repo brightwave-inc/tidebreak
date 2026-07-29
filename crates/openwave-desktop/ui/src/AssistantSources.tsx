@@ -1,6 +1,6 @@
 import { ChevronRight } from "lucide-react";
 
-import type { CitationPageBounds } from "@/api";
+import type { CitationPageBounds, StructuredPathType } from "@/api";
 
 export type AssistantSource = Readonly<{
   id: string;
@@ -22,6 +22,13 @@ export type AssistantSource = Readonly<{
    * either way.
    */
   bounds: readonly CitationPageBounds[];
+  /**
+   * The node of a structured source the passage came from, for a source that
+   * is a tree rather than a run of pages: a dot path into JSON, an XPath into
+   * XML or HTML. Absent for every other kind of source, which is addressed by
+   * its span and its pages.
+   */
+  structuredPath?: Readonly<{ path: string; pathType: StructuredPathType }>;
 }>;
 
 type AssistantSourcesProps = {

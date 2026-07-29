@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 
-import type { CitationPageBounds } from "@/api";
+import type { CitationPageBounds, StructuredPathType } from "@/api";
 import { useChatSessionStore } from "@/ChatSessionStore";
 import type { CitationSpan } from "@/components/document/citationSpan";
 import type { ChatMessage } from "@/MessageList";
@@ -17,6 +17,12 @@ export type CitationPlacement = {
    * drawn on it.
    */
   bounds: readonly CitationPageBounds[];
+  /**
+   * The node the passage came from, for a source read as a tree. It is carried
+   * beside the span rather than instead of it: the span still addresses the
+   * extracted text, and the path is what the original view opens at.
+   */
+  structuredPath?: Readonly<{ path: string; pathType: StructuredPathType }>;
 };
 
 /**
@@ -42,6 +48,7 @@ export function findCitationPlacement(
         span: { start: source.span.start, end: source.span.end },
         page: earliestPage(source.pages, source.bounds),
         bounds: source.bounds,
+        structuredPath: source.structuredPath,
       };
     }
   }

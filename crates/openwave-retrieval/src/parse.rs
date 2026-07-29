@@ -187,6 +187,52 @@ impl DocumentParser for PlainTextParser {
     }
 }
 
+/// The parser for tree-shaped text: JSON, XML, and HTML.
+///
+/// Canonical text is the file itself, exactly as [`PlainTextParser`] would have
+/// produced it — nothing is extracted, converted, or reordered, so spans keep
+/// addressing the bytes a reader downloads. What this parser adds is the map
+/// from those spans to the nodes they came from, which is what lets a citation
+/// open the document as a tree rather than as a wall of characters.
+///
+/// A file that does not parse is still indexed: it yields the same text with an
+/// empty map, which is indistinguishable downstream from a format that has no
+/// structure to record.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StructuredTextParser;
+
+impl StructuredTextParser {
+    /// Construct the parser.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait::async_trait]
+impl DocumentParser for StructuredTextParser {
+    fn fingerprint_for(&self, media_type: &str) -> Option<String> {
+        crate::structure::structured_format(media_type).map(crate::structure::structure_fingerprint)
+    }
+
+    fn supports(&self, media_type: &str) -> bool {
+        crate::structure::structured_format(media_type).is_some()
+    }
+
+    async fn parse(&self, raw: &[u8], media_type: &str) -> Result<ParsedDocument> {
+        let format = crate::structure::structured_format(media_type).ok_or_else(|| {
+            RetrievalError::parse(format!(
+                "StructuredTextParser does not support media type `{media_type}`"
+            ))
+        })?;
+        // Lossy for the same reason plain text is: one bad byte in a large
+        // export should cost that byte, not the document.
+        let text = String::from_utf8_lossy(raw).into_owned();
+        let regions = crate::structure::structured_regions(&text, format);
+        Ok(ParsedDocument::from_text(text).with_source_regions(regions))
+    }
+}
+
 /// A last-resort parser that accepts **any** media type so no upload is rejected
 /// for its format alone.
 ///

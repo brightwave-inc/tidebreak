@@ -293,10 +293,10 @@ impl Tool for SearchTool {
                     chunk_id: citation.chunk_id,
                     span: citation.span,
                     snippet: citation.snippet.clone(),
-                    location: EvidenceLocation::DocumentContent {
-                        heading_path: citation.heading_path.clone(),
-                        source_regions: citation.source_regions.clone(),
-                    },
+                    location: EvidenceLocation::for_source_regions(
+                        citation.heading_path.clone(),
+                        citation.source_regions.clone(),
+                    ),
                     source: match &citation.source {
                         crate::DocumentSource::Uri { uri } => {
                             RetrievalEvidenceSource::Uri { uri: uri.clone() }
