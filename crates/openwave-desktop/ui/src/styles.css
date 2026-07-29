@@ -235,6 +235,14 @@
 
   --color-brightwave: var(--brightwave);
 
+  --font-sans: var(--sans);
+  --font-mono: var(--mono);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
   --shadow-2xs: var(--shadow-sm);
   --shadow-xs: var(--shadow-sm);
   --shadow-sm: var(--shadow-sm);
@@ -1421,7 +1429,7 @@ body {
   align-items: center;
   gap: 0.3rem;
   padding: 0.2rem 0.5rem;
-  border: 1px solid oklch(0.32 0.01 285);
+  border: 1px solid var(--code-block-border);
   border-radius: 6px;
   background: var(--code-block-bg);
   color: var(--code-block-ink);
@@ -1519,7 +1527,7 @@ body {
 }
 
 .composer:focus-within {
-  border-color: var(--color-zinc-300, var(--line));
+  border-color: var(--ring);
   box-shadow: var(--shadow-lg);
 }
 
