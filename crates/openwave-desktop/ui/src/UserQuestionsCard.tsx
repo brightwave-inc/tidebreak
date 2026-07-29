@@ -1,7 +1,6 @@
 import { useMemo, useState } from "react";
-import type { KeyboardEvent } from "react";
+import { CornerDownLeft, X } from "lucide-react";
 import type { PendingUserQuestions, UserQuestionAnswer } from "./api";
-import { AttentionCard } from "./AttentionCard";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -23,6 +22,7 @@ export function UserQuestionsCard({
   onCancel: () => void;
 }) {
   const [drafts, setDrafts] = useState<Record<string, DraftAnswer>>({});
+  const [currentPage, setCurrentPage] = useState(0);
   const answers = useMemo(
     () =>
       request.questions.flatMap<UserQuestionAnswer>((question) => {
@@ -37,6 +37,11 @@ export function UserQuestionsCard({
     [drafts, request.questions],
   );
   const complete = answers.length === request.questions.length;
+  const currentQuestion =
+    request.questions[Math.min(currentPage, request.questions.length - 1)];
+  if (!currentQuestion) return null;
+  const currentDraft = drafts[currentQuestion.id];
+  const isLastPage = currentPage === request.questions.length - 1;
 
   const chooseOption = (questionId: string, optionId: string) =>
     setDrafts((current) => ({
@@ -44,124 +49,208 @@ export function UserQuestionsCard({
       [questionId]: { kind: "option", value: optionId },
     }));
 
+  const updateFreeForm = (questionId: string, value: string) =>
+    setDrafts((current) => ({
+      ...current,
+      [questionId]: { kind: "free_form", value },
+    }));
+
   return (
-    <AttentionCard
-      title="A few details"
-      titleId={`questions-${request.callId}`}
-      busy={working}
-      error={error}
+    <section
+      className="bg-background flex w-full max-w-prose flex-col gap-3 rounded-[20px] border p-3.5 shadow-sm"
+      aria-labelledby={`questions-${request.callId}`}
+      aria-busy={working}
     >
-      <div className="flex flex-col gap-5">
-        {request.questions.map((question) => {
-          const draft = drafts[question.id];
-          return (
-            <fieldset
-              className="flex min-w-0 flex-col gap-2 border-0 p-0"
-              key={question.id}
-              disabled={working}
-            >
-              <legend className="text-muted-foreground text-xs font-semibold tracking-wide uppercase">
-                {question.header}
-              </legend>
-              <p className="break-words">{question.question}</p>
-              {question.options.length > 0 && (
-                <div
-                  role="radiogroup"
-                  aria-label={question.header}
-                  className="flex flex-col gap-0.5"
-                >
-                  {question.options.map((option) => {
-                    const selected =
-                      draft?.kind === "option" && draft.value === option.id;
-                    const labelId = `${request.callId}-${question.id}-${option.id}-label`;
-                    const descId = option.description
-                      ? `${request.callId}-${question.id}-${option.id}-desc`
-                      : undefined;
-                    const onKeyDown = (
-                      event: KeyboardEvent<HTMLDivElement>,
-                    ) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        chooseOption(question.id, option.id);
-                      }
-                    };
-                    return (
-                      <div
-                        key={option.id}
-                        role="radio"
-                        aria-checked={selected}
-                        aria-labelledby={labelId}
-                        aria-describedby={descId}
-                        tabIndex={working ? -1 : 0}
-                        onClick={() => chooseOption(question.id, option.id)}
-                        onKeyDown={onKeyDown}
-                        className={cn(
-                          "focus-visible:ring-ring flex cursor-pointer flex-col gap-0.5 rounded-md px-3 py-2 text-sm outline-hidden focus-visible:ring-2",
-                          selected ? "bg-muted" : "hover:bg-muted/60",
-                          working && "pointer-events-none opacity-60",
-                        )}
-                      >
-                        <span id={labelId} className="font-medium">
-                          {option.label}
-                        </span>
-                        {option.description && (
-                          <span
-                            id={descId}
-                            className="text-muted-foreground text-xs"
-                          >
-                            {option.description}
-                          </span>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-              {question.allowFreeForm && (
-                <label className="flex flex-col gap-1">
-                  <span className="text-muted-foreground text-sm">
-                    {question.options.length > 0
-                      ? "Something else"
-                      : "Your answer"}
-                  </span>
-                  <textarea
-                    className="border-border bg-background ring-offset-background placeholder:text-muted-foreground focus-visible:ring-ring w-full resize-y rounded-md border px-3 py-2 text-sm outline-hidden focus-visible:ring-2 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
-                    maxLength={2000}
-                    rows={3}
-                    value={draft?.kind === "free_form" ? draft.value : ""}
-                    onChange={(event) =>
-                      setDrafts((current) => ({
-                        ...current,
-                        [question.id]: {
-                          kind: "free_form",
-                          value: event.target.value,
-                        },
-                      }))
-                    }
-                  />
-                </label>
-              )}
-            </fieldset>
-          );
-        })}
-      </div>
-      <div className="flex flex-wrap gap-2">
+      <div className="flex items-start gap-2.5">
+        <div className="min-w-0 flex-1">
+          <p className="text-muted-foreground text-xs font-semibold tracking-wide uppercase">
+            {currentQuestion.header}
+          </p>
+          <h3
+            id={`questions-${request.callId}`}
+            className="mt-1 text-[15px] leading-5 font-semibold break-words"
+          >
+            {currentQuestion.question}
+          </h3>
+        </div>
         <Button
-          size="sm"
-          disabled={working || !complete}
-          onClick={() => onAnswer(answers)}
-        >
-          {working ? "Sending…" : "Continue"}
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
+          type="button"
+          variant="ghost"
+          size="icon-xs"
           disabled={working}
           onClick={onCancel}
+          aria-label="Cancel turn"
+          title="Cancel turn"
+          className="text-muted-foreground shrink-0"
         >
-          Cancel turn
+          <X aria-hidden="true" />
         </Button>
       </div>
-    </AttentionCard>
+
+      {currentQuestion.options.length > 0 && (
+        <div
+          role="radiogroup"
+          aria-label={currentQuestion.header}
+          className="grid gap-1"
+        >
+          {currentQuestion.options.map((option) => {
+            const selected =
+              currentDraft?.kind === "option" &&
+              currentDraft.value === option.id;
+            return (
+              <label
+                key={option.id}
+                className={cn(
+                  "hover:bg-muted/40 flex min-w-0 cursor-pointer items-start gap-2.5 rounded-[10px] border px-2.5 py-2.5 transition-colors",
+                  selected && "border-foreground bg-muted",
+                  working && "pointer-events-none opacity-60",
+                )}
+              >
+                <input
+                  type="radio"
+                  name={`${request.callId}-${currentQuestion.id}`}
+                  checked={selected}
+                  disabled={working}
+                  onChange={() =>
+                    chooseOption(currentQuestion.id, option.id)
+                  }
+                  className="accent-foreground mt-0.5 size-[18px] shrink-0"
+                />
+                <span className="min-w-0">
+                  <span className="block text-sm font-medium break-words">
+                    {option.label}
+                  </span>
+                  {option.description && (
+                    <span className="text-muted-foreground mt-0.5 block text-xs leading-4 break-words">
+                      {option.description}
+                    </span>
+                  )}
+                </span>
+              </label>
+            );
+          })}
+          {currentQuestion.allowFreeForm && (
+            <label
+              className={cn(
+                "flex min-w-0 items-center gap-2.5 px-1 py-1.5",
+                working && "pointer-events-none opacity-60",
+              )}
+            >
+              <input
+                type="radio"
+                name={`${request.callId}-${currentQuestion.id}`}
+                checked={currentDraft?.kind === "free_form"}
+                disabled={working}
+                onChange={() => updateFreeForm(currentQuestion.id, "")}
+                className="accent-foreground size-[18px] shrink-0"
+              />
+              <input
+                type="text"
+                maxLength={2000}
+                value={
+                  currentDraft?.kind === "free_form" ? currentDraft.value : ""
+                }
+                onFocus={() => {
+                  if (currentDraft?.kind !== "free_form") {
+                    updateFreeForm(currentQuestion.id, "");
+                  }
+                }}
+                onChange={(event) =>
+                  updateFreeForm(currentQuestion.id, event.target.value)
+                }
+                disabled={working}
+                aria-label="Other answer"
+                placeholder="Other"
+                className="border-border bg-background placeholder:text-muted-foreground focus-visible:border-foreground min-w-0 flex-1 rounded-lg border px-2.5 py-2 text-sm outline-hidden"
+              />
+            </label>
+          )}
+        </div>
+      )}
+
+      {currentQuestion.allowFreeForm &&
+        currentQuestion.options.length === 0 && (
+          <textarea
+            maxLength={2000}
+            rows={3}
+            value={
+              currentDraft?.kind === "free_form" ? currentDraft.value : ""
+            }
+            onChange={(event) =>
+              updateFreeForm(currentQuestion.id, event.target.value)
+            }
+            disabled={working}
+            aria-label={currentQuestion.header}
+            placeholder="Your answer"
+            className="border-border bg-background placeholder:text-muted-foreground focus-visible:border-foreground min-h-16 w-full resize-y rounded-[10px] border px-3 py-2.5 text-sm outline-hidden disabled:cursor-not-allowed disabled:opacity-50"
+          />
+        )}
+
+      {request.questions.length > 1 && (
+        <div
+          className="flex items-center justify-center gap-1.5 pt-0.5"
+          aria-label="Questions"
+        >
+          {request.questions.map((question, index) => (
+            <button
+              key={question.id}
+              type="button"
+              disabled={working}
+              onClick={() => setCurrentPage(index)}
+              aria-label={`Go to question ${index + 1}`}
+              aria-current={index === currentPage ? "step" : undefined}
+              className={cn(
+                "size-1.5 rounded-full transition-opacity",
+                index === currentPage
+                  ? "bg-foreground"
+                  : "bg-muted-foreground opacity-40 hover:opacity-70",
+              )}
+            />
+          ))}
+        </div>
+      )}
+
+      {error && (
+        <p className="text-destructive text-xs break-words" role="alert">
+          {error}
+        </p>
+      )}
+
+      <div className="flex items-center justify-between gap-2 pt-0.5">
+        <div>
+          {currentPage > 0 && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={working}
+              onClick={() => setCurrentPage((page) => page - 1)}
+            >
+              Back
+            </Button>
+          )}
+        </div>
+        {isLastPage ? (
+          <Button
+            type="button"
+            size="sm"
+            disabled={working || !complete}
+            onClick={() => onAnswer(answers)}
+          >
+            {working ? "Sending…" : "Continue"}
+            {!working && <CornerDownLeft aria-hidden="true" />}
+          </Button>
+        ) : (
+          <Button
+            type="button"
+            size="sm"
+            disabled={working}
+            onClick={() => setCurrentPage((page) => page + 1)}
+          >
+            Next
+          </Button>
+        )}
+      </div>
+    </section>
   );
 }
