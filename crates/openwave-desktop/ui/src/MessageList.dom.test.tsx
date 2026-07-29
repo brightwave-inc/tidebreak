@@ -814,7 +814,6 @@ describe("citation anchors", () => {
     );
 
     await user.click(screen.getByRole("button", { name: /citation 1$/ }));
-    await user.click(screen.getByRole("button", { name: "Open source" }));
     await user.click(screen.getByRole("button", { name: "Open source 1" }));
 
     expect(openCitation).toHaveBeenCalledTimes(2);
