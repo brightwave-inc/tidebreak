@@ -1402,7 +1402,10 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
 
 /// Roles resolve on read, against whatever the user has credentialed: the
 /// ordered defaults skip providers that cannot serve a request, a pin overrides
-/// them, and enabling a provider changes the answer without a restart.
+/// them, and enabling a provider changes the answer without a restart. When the
+/// profile flips to managed, both roles' reads re-route to entitled gateway
+/// models rather than reporting selections no turn could serve — and a message
+/// sent against the stale default runs on the re-routed model.
 #[tokio::test]
 async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
     let dir = tempfile::tempdir().unwrap();
@@ -1432,7 +1435,7 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
             ),
             Arc::new(crate::managed_policy::NoOsPolicy),
         )),
-        secrets,
+        secrets.clone(),
         Arc::new(ToolRegistry::new()),
         retrieval,
         AgentConfig {
@@ -1579,6 +1582,138 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
     assert_eq!(
         role_row(&role_rows().await, "utility")["resolved_key"],
         "gemini::gemini-3.5-flash-lite"
+    );
+    // Unmanaged, the chat role reports even a dead default (OpenAI is now
+    // disabled) rather than re-routing it: the open experience refuses loudly
+    // at send instead of silently moving a foreground turn. This pins the
+    // unmanaged early return in `effective_chat_policy`.
+    assert_eq!(
+        role_row(&role_rows().await, "chat")["resolved_key"],
+        "openai::gpt-5.6-sol"
+    );
+
+    // A managed flip with a BYOK chat pin carried in from before it: the pin
+    // stays stored — a profile returned to the open experience gets it back —
+    // but both roles' effective resolutions move to entitled gateway models.
+    // Chat lands on the first model the gateway lists (the row the composer
+    // picker offers first); utility keeps #901's cheapest-first walk.
+    configure_provider("openai", serde_json::json!({"enabled": true})).await;
+    let pinned = put_role(
+        "chat",
+        serde_json::json!({"selection": "openai::gpt-5.6-sol"}),
+    )
+    .await;
+    assert_eq!(pinned.status(), StatusCode::OK);
+    // A chat with its own explicit override, created while OpenAI could still
+    // serve it — the re-route must not cover it after the flip.
+    let overridden_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/chats")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"model": "openai::gpt-5.6-sol"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(overridden_response.status(), StatusCode::CREATED);
+    let overridden: Chat = json_body(overridden_response).await;
+
+    crate::managed_policy::provision(&*store, "https://corp.gateway")
+        .await
+        .unwrap();
+    let credentials: openwave_connectors::GatewayCredentials =
+        serde_json::from_value(serde_json::json!({
+            "base_url": "https://corp.gateway/",
+            "installation_id": "install-1",
+            "user_id": "user-1",
+            "refresh_token": "mg_rt_seed",
+            "access_tokens": {}
+        }))
+        .unwrap();
+    openwave_connectors::CredentialVault::new(secrets)
+        .save(&credentials)
+        .await
+        .unwrap();
+    providers::write_config(
+        &*store,
+        providers::ProviderKind::ModelGateway,
+        &providers::ProviderConfig {
+            enabled: true,
+            base_url: Some("https://corp.gateway/".to_string()),
+            vertex_location: None,
+            // Flagship-first, as a gateway well might list them: chat takes
+            // the gateway's first pick, utility must not.
+            models: vec![
+                providers::CustomModelConfig {
+                    id: "gateway-flagship".to_string(),
+                    display_name: Some("Gateway Flagship".to_string()),
+                    context_window: 1_000_000,
+                    max_output_tokens: 64_000,
+                },
+                providers::CustomModelConfig {
+                    id: "gateway-haiku".to_string(),
+                    display_name: Some("Gateway Haiku".to_string()),
+                    context_window: 200_000,
+                    max_output_tokens: 8_192,
+                },
+            ],
+        },
+    )
+    .await
+    .unwrap();
+
+    let roles = role_rows().await;
+    let chat = role_row(&roles, "chat");
+    assert_eq!(chat["selection"], "openai::gpt-5.6-sol");
+    assert_eq!(chat["resolved_key"], "model_gateway::gateway-flagship");
+    assert_eq!(
+        role_row(&roles, "utility")["resolved_key"],
+        "model_gateway::gateway-haiku"
+    );
+
+    // The label is what the turn gets: a message sent against that stale BYOK
+    // default is accepted and frozen on the gateway model the roles read
+    // named, not refused with `model_provider_unavailable`. This is the
+    // field-reported failure — remove the re-route from the accept path and
+    // this send 409s.
+    let chat_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/chats")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(chat_response.status(), StatusCode::CREATED);
+    let chat: Chat = json_body(chat_response).await;
+    let turn_id = TurnId::new();
+    assert_eq!(
+        send_message_with_id(&router, &bearer, chat.id, turn_id, "hello").await,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        store.get_turn_run(turn_id).await.unwrap().unwrap().model,
+        "model_gateway::gateway-flagship"
+    );
+
+    // The re-route covers exactly what the roles read labels: the default. A
+    // per-chat override is the user's explicit pick, and its pill still names
+    // it — a dead one is refused honestly rather than silently swapped, and
+    // the picker offers only gateway models to fix it.
+    assert_eq!(
+        send_message_with_id(&router, &bearer, overridden.id, TurnId::new(), "hello").await,
+        StatusCode::CONFLICT
     );
 }
 

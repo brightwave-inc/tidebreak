@@ -913,6 +913,11 @@ pub async fn put_model_role(
 }
 
 /// The catalog key `role` resolves to right now, given its stored `selection`.
+///
+/// This is the server's one answer for "what does this role's default mean" —
+/// the settings page and the composer both label their automatic choice with
+/// it, which is why the managed re-route below lives here rather than in a
+/// client.
 async fn resolved_role_key(
     state: &AppState,
     role: ModelRole,
@@ -921,18 +926,24 @@ async fn resolved_role_key(
     match role {
         // The chat role goes through the same seam a new execution does, minus
         // the per-chat override there is no chat here to read — so the label a
-        // client shows for "default" is what the next turn actually gets. Its
-        // last resort is the boot default, which no role's list can name.
+        // client shows for "default" is what the next turn actually gets: the
+        // accept path below freezes its model through the same
+        // `effective_chat_policy`, managed re-route included. Its last resort
+        // is the boot default, which no role's list can name.
         ModelRole::Chat => {
             let fallback = match selection {
                 Some(selection) => selection.to_owned(),
                 None => chat_role_model(&*state.store, &state.agent_config.model).await?,
             };
-            Ok(
-                providers::resolve_model_policy(&*state.store, &fallback, true)
-                    .await?
-                    .map(|policy| policy.key),
+            let managed = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
+            Ok(model_roles::effective_chat_policy(
+                &*state.store,
+                &*state.secrets,
+                &managed,
+                &fallback,
             )
+            .await?
+            .map(|policy| policy.key))
         }
         _ => Ok(
             model_roles::resolve(&*state.store, &*state.secrets, &*state.os_policy, role)
@@ -2039,6 +2050,22 @@ pub async fn post_message(
         existing.model
     } else {
         let selected = resolve_chat_model(&*state.store, &chat, &state.agent_config.model).await?;
+        // The managed re-route the roles read applies, on exactly the domain
+        // that read labels: the role default, and only for a managed profile.
+        // Unmanaged sends pass through untouched — free-form ids included —
+        // and a per-chat override is the user's explicit pick, so a dead one
+        // gets the honest validation refusal below rather than a silent swap
+        // out from under the label the pill still shows; the picker offers
+        // only gateway models to fix it. A managed profile with nothing
+        // entitled also keeps the raw selection, refused with the real reason.
+        let managed = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
+        let selected = if managed.managed && chat.model.is_none() {
+            model_roles::effective_chat_policy(&*state.store, &*state.secrets, &managed, &selected)
+                .await?
+                .map_or(selected, |policy| policy.key)
+        } else {
+            selected
+        };
         validate_model_selection(&state, &selected, true).await?
     };
     let images = resolve_message_attachments(&state, &body.attachments).await?;

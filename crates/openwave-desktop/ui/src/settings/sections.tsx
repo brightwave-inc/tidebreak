@@ -50,10 +50,12 @@ function GatewaySection() {
 
 function ModelsSection() {
   const { client, models, refreshCatalog } = useApp();
+  const { managed } = useManagedPolicy();
   return (
     <ModelsPanel
       client={client}
       models={models}
+      managed={managed}
       onChanged={() => void refreshCatalog()}
     />
   );
