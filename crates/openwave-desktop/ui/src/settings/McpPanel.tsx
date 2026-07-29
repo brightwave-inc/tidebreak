@@ -1,8 +1,9 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { Plus, RefreshCw, Trash2 } from "lucide-react";
 import type {
   ApiClient,
+  GatewayApps,
   McpServerDefinition,
   McpServerInfo,
 } from "../api";
@@ -19,6 +20,13 @@ import {
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_TIMEOUT_MS = 3_600_000;
+/** Mount health lives in the local MCP supervisor, so a modest refresh while
+ * the section is visible keeps the health lines honest without gateway load. */
+const MOUNT_REFRESH_MS = 15_000;
+/** Server names cap at 32 bytes (the MCP tool namespace); endpoint slugs go
+ * to 127, so the mount name is derived, not the slug itself. Mount identity
+ * is always the `gateway_endpoint` field, never the name. */
+const MAX_NAMESPACE_BYTES = 32;
 
 function emptyServer(index: number): McpServerInfo {
   return {
@@ -78,10 +86,10 @@ export function McpPanel({
   managed = false,
 }: {
   client: ApiClient;
-  /** On a managed profile the server refuses manual server writes, so this
-   * panel becomes a read-only view of what is mounted. Gateway mounts and
-   * their health stay visible; they are added and removed from the Model
-   * Gateway panel, which is where they come from. */
+  /** On a managed profile the server refuses manual server writes, so the
+   * manual half of this panel becomes a read-only view of what is mounted.
+   * The gateway endpoints section keeps its toggles: a `gateway_endpoint`
+   * definition is exactly the write managed policy admits. */
   managed?: boolean;
 }) {
   const [servers, setServers] = useState<McpServerInfo[]>([]);
@@ -138,6 +146,13 @@ export function McpPanel({
     }
   }
 
+  /** A mount toggled in the gateway section rewrites the same configuration
+   * this list edits, so adopt its result — unless the reader has unsaved
+   * edits here, which must never be replaced underneath them. */
+  function adoptMounts(next: McpServerInfo[]) {
+    if (!dirty) setServers(next);
+  }
+
   async function reconnect(name: string) {
     setReconnecting(name);
     setError(null);
@@ -173,6 +188,7 @@ export function McpPanel({
         description="Tool servers provided by your organization's model gateway."
         busy={loading}
       >
+        <GatewayEndpoints client={client} onMountsChanged={adoptMounts} />
         {loading ? (
           <p className="text-sm text-muted-foreground">Loading MCP servers…</p>
         ) : (
@@ -189,6 +205,7 @@ export function McpPanel({
       description="Connect local stdio tool servers or remote HTTP endpoints without a shell or a desktop restart."
       busy={loading || working}
     >
+      <GatewayEndpoints client={client} onMountsChanged={adoptMounts} />
       {loading ? (
         <p className="text-sm text-muted-foreground">
           Loading MCP servers…
@@ -257,7 +274,7 @@ export function McpPanel({
                   Managed by the Model Gateway (endpoint{" "}
                   <code>{server.gateway_endpoint}</code>). Its URL and
                   short-lived credentials come from the signed-in gateway
-                  session; mount or unmount it from the Model Gateway panel.
+                  session; mount or unmount it under Gateway endpoints above.
                 </p>
               )}
 
@@ -483,6 +500,298 @@ export function McpPanel({
   );
 }
 
+/** A valid, unused namespace for a mount: the slug, truncated to the name
+ * limit and de-duplicated against every configured server. */
+function mountName(slug: string, taken: ReadonlySet<string>): string {
+  const base = slug.slice(0, MAX_NAMESPACE_BYTES);
+  if (!taken.has(base)) return base;
+  for (let n = 2; ; n += 1) {
+    const suffix = `_${n}`;
+    const candidate =
+      base.slice(0, MAX_NAMESPACE_BYTES - suffix.length) + suffix;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
+/** Sentence-shaped status for a mount row; diagnostics already are one. */
+function mountStatus(mounted: McpServerInfo): string {
+  if (mounted.health === "healthy") {
+    return `${mounted.tool_count} tool${mounted.tool_count === 1 ? "" : "s"} available to new turns.`;
+  }
+  if (mounted.diagnostic) return mounted.diagnostic;
+  switch (mounted.health) {
+    case "initializing":
+    case "reconnecting":
+      return "Connecting…";
+    case "disabled":
+      return "Disabled below.";
+    default:
+      return "Needs attention. See its entry below.";
+  }
+}
+
+/** A message that can sit mid-sentence: `String(err)` would keep the error
+ * class prefix ("HttpError: ...") in front of it. */
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** A fresh gateway mount: everything comes from the session except the name,
+ * which doubles as the tool namespace. */
+function mountDefinition(slug: string, name: string): McpServerDefinition {
+  return {
+    name,
+    command: null,
+    args: [],
+    env: {},
+    env_from: [],
+    cwd: null,
+    url: null,
+    bearer_token_env: null,
+    gateway_endpoint: slug,
+    request_timeout_ms: DEFAULT_TIMEOUT_MS,
+    enabled: true,
+  };
+}
+
+/**
+ * The gateway's MCP endpoints, and the toggle that mounts each one.
+ *
+ * Mounting belongs beside the health of what is mounted, so it lives here
+ * rather than in the Model Gateway panel, which keeps the connected apps as
+ * an informational list. A `gateway_endpoint` definition is the one write
+ * managed policy admits, so these toggles stay live on a managed profile
+ * where every manual server below is read-only.
+ *
+ * The section carries its own view of the configured servers, separate from
+ * the editable list around it, so a background refresh can keep the health
+ * lines honest without touching a form the reader is part-way through.
+ * Nothing renders at all until a gateway session exists.
+ */
+function GatewayEndpoints({
+  client,
+  onMountsChanged,
+}: {
+  client: ApiClient;
+  /** The fresh server list a mount write returns, so the page around this
+   * section reflects the mount it just made. */
+  onMountsChanged: (servers: McpServerInfo[]) => void;
+}) {
+  const [signedIn, setSignedIn] = useState(false);
+  const [apps, setApps] = useState<GatewayApps | null>(null);
+  // Distinguishes "the apps read failed" from "no apps granted": a failure
+  // must not make configured mounts masquerade as revoked, nor hide them.
+  const [appsFailed, setAppsFailed] = useState(false);
+  const [servers, setServers] = useState<McpServerInfo[] | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
+  // Bumped by the Retry affordance; re-runs the mount-list effect immediately
+  // and restarts its cadence.
+  const [refreshNonce, setRefreshNonce] = useState(0);
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Monotonic id for mount-list reads: a slow in-flight read must not clobber
+  // the fresher list a toggle write (or a newer read) has since installed.
+  const requestRef = useRef(0);
+
+  // An unreachable or unpaired gateway is simply no section, not an error on
+  // a page whose subject is the local MCP configuration.
+  useEffect(() => {
+    let cancelled = false;
+    client
+      .getGatewayStatus()
+      .then((status) => {
+        if (!cancelled) setSignedIn(status.signed_in);
+      })
+      .catch(() => {
+        if (!cancelled) setSignedIn(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client]);
+
+  // Entitled apps are never cached server-side (a revoked grant disappears on
+  // the next request), so fetch them fresh whenever the signed-in state turns
+  // on. A fetch failure hides the apps list but is remembered, so mount rows
+  // can say entitlements are unknown instead of claiming anything.
+  useEffect(() => {
+    if (!signedIn) {
+      setApps(null);
+      setAppsFailed(false);
+      return;
+    }
+    let cancelled = false;
+    client
+      .getGatewayApps()
+      .then((next) => {
+        if (!cancelled) {
+          setApps(next);
+          setAppsFailed(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setApps(null);
+          setAppsFailed(true);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, signedIn]);
+
+  // Keep re-reading the configuration while the section is visible, so a
+  // mount that degrades after the first read doesn't keep a stale healthy
+  // line. A failed read keeps the last-known rows and surfaces a retryable
+  // error instead of silently disabling every toggle.
+  useEffect(() => {
+    if (!signedIn) {
+      setServers(null);
+      setListError(null);
+      return;
+    }
+    const refresh = async () => {
+      const request = ++requestRef.current;
+      try {
+        const next = await client.listMcpServers();
+        if (request !== requestRef.current) return;
+        setServers(next.servers);
+        setListError(null);
+      } catch (err) {
+        if (request !== requestRef.current) return;
+        setListError(errorMessage(err));
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), MOUNT_REFRESH_MS);
+    return () => {
+      // Invalidate any in-flight read; a re-run issues fresh ids above this.
+      requestRef.current += 1;
+      window.clearInterval(timer);
+    };
+  }, [client, signedIn, refreshNonce]);
+
+  async function setMounted(slug: string, mounted: boolean) {
+    setWorking(true);
+    setError(null);
+    try {
+      // Rebuild from the live configuration, not this section's cache, so a
+      // mount toggled here never drops a server edited elsewhere meanwhile.
+      const current = (await client.listMcpServers()).servers.map(definition);
+      const without = current.filter(
+        (server) => server.gateway_endpoint !== slug,
+      );
+      const taken = new Set(without.map((server) => server.name));
+      const next = mounted
+        ? [...without, mountDefinition(slug, mountName(slug, taken))]
+        : without;
+      const result = await client.putMcpServers(next);
+      // Supersede any in-flight background read; this list is fresher.
+      requestRef.current += 1;
+      setServers(result.servers);
+      setListError(null);
+      onMountsChanged(result.servers);
+      toast.success(mounted ? `Mounted ${slug}` : `Unmounted ${slug}`);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  const entitledSlugs = new Set(
+    apps?.apps.flatMap((app) => app.mcp_endpoint_slugs) ?? [],
+  );
+  // Rows are the union of what's entitled and what's configured: a mount
+  // whose grant was revoked must keep its row (and unmount toggle), not drop
+  // to being visible only as a failing server further down the page.
+  const endpointSlugs = [
+    ...new Set([
+      ...entitledSlugs,
+      ...(servers ?? [])
+        .map((server) => server.gateway_endpoint)
+        .filter((slug): slug is string => slug !== null),
+    ]),
+  ];
+  // "Revoked" is only a claim we can make after actually reading the
+  // entitlements; a failed or unsupported apps read leaves them unknown.
+  const entitlementsKnown = apps?.supported === true;
+  /** The one line under a mount row: unknown beats revoked beats health. */
+  const rowNote = (slug: string, mounted: McpServerInfo | undefined) => {
+    if (servers === null) return "Mount state unknown.";
+    if (entitlementsKnown && !entitledSlugs.has(slug)) {
+      return "No longer granted to your teams. Switch off to unmount it.";
+    }
+    return mounted ? mountStatus(mounted) : null;
+  };
+
+  // Deliberately NOT gated on the apps read: a configured mount keeps its row
+  // — and a list failure its Retry — even when entitlements can't be read.
+  if (!signedIn || (endpointSlugs.length === 0 && listError === null)) {
+    return null;
+  }
+
+  return (
+    <SettingsSection
+      title="Gateway endpoints"
+      description="Mounted endpoints connect with your gateway session — no tokens to copy, and they reconnect after you sign back in."
+    >
+      {appsFailed && (
+        <p className="text-muted-foreground text-xs">
+          Couldn't read your entitlements from the gateway; these are the
+          configured mounts.
+        </p>
+      )}
+      {listError !== null && (
+        <div className="flex items-center justify-between gap-4">
+          <SettingsError>
+            Couldn't read the MCP server list: {listError}
+          </SettingsError>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={working}
+            onClick={() => setRefreshNonce((nonce) => nonce + 1)}
+          >
+            <RefreshCw size={14} />
+            Retry
+          </Button>
+        </div>
+      )}
+      {endpointSlugs.length > 0 && (
+        <ul className="flex flex-col gap-2">
+          {endpointSlugs.map((slug) => {
+            const mounted = servers?.find(
+              (server) => server.gateway_endpoint === slug,
+            );
+            const note = rowNote(slug, mounted);
+            return (
+              <li
+                key={slug}
+                className="flex items-center justify-between gap-4 rounded-md border px-3 py-2 text-sm"
+              >
+                <div className="min-w-0 flex-1">
+                  <code className="font-medium">{slug}</code>
+                  {note && (
+                    <p className="text-muted-foreground text-xs">{note}</p>
+                  )}
+                </div>
+                <Switch
+                  aria-label={`Mount ${slug}`}
+                  checked={mounted !== undefined}
+                  disabled={working || servers === null}
+                  onCheckedChange={(checked) => void setMounted(slug, checked)}
+                />
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {error && <SettingsError>{error}</SettingsError>}
+    </SettingsSection>
+  );
+}
+
 /**
  * The managed read-only view: what is mounted and whether it is working.
  *
@@ -498,7 +807,7 @@ function ManagedServerList({ servers }: { servers: McpServerInfo[] }) {
         <SettingsSection>
           <p className="text-sm text-muted-foreground">
             No MCP servers are mounted. Mount the endpoints you are entitled to
-            from the Model Gateway section.
+            under Gateway endpoints above.
           </p>
         </SettingsSection>
       )}
@@ -521,8 +830,8 @@ function ManagedServerList({ servers }: { servers: McpServerInfo[] }) {
           {transportOf(server) === "gateway" ? (
             <p className="text-sm text-muted-foreground">
               Managed by the Model Gateway (endpoint{" "}
-              <code>{server.gateway_endpoint}</code>). Mount or unmount it from
-              the Model Gateway section.
+              <code>{server.gateway_endpoint}</code>). Mount or unmount it under
+              Gateway endpoints above.
             </p>
           ) : (
             <p className="text-sm text-muted-foreground">
