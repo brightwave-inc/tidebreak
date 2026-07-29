@@ -193,7 +193,7 @@ test("PR compiler caches are writable, isolated, and deleted on close", () => {
   assert.match(cleanup, /^permissions:\n  actions: write\n  contents: read$/m);
   assert.match(
     cleanup,
-    /gh cache delete --all --ref "refs\/pull\/\$\{PR_NUMBER\}\/merge"/,
+    /gh cache delete --repo "\$GITHUB_REPOSITORY"\n\s+--all --succeed-on-no-caches\n\s+--ref "refs\/pull\/\$\{PR_NUMBER\}\/merge"/,
   );
   assert.doesNotMatch(cleanup, /actions\/checkout|secrets\./);
 });

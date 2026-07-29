@@ -18,10 +18,16 @@ jobs:
   cleanup:
     name: delete closed PR caches
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # sccache stores compiler objects as many small Actions cache entries. The
+    # CLI deletes them individually, so a compile-heavy PR can take a few
+    # minutes to drain even though this runs only once, after the PR closes.
+    timeout-minutes: 10
     steps:
       - name: Delete the PR merge-ref cache scope
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: gh cache delete --all --ref "refs/pull/${PR_NUMBER}/merge"
+        run: >-
+          gh cache delete --repo "$GITHUB_REPOSITORY"
+          --all --succeed-on-no-caches
+          --ref "refs/pull/${PR_NUMBER}/merge"
