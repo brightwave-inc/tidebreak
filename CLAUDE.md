@@ -115,23 +115,29 @@ is the whole rule, and it is coarse on purpose:
 - Any changed file outside `*.md`, `docs/`, `assets/`, `LICENSE`, `NOTICE`, and
   `crates/openwave-desktop/ui/` marks the change **Rust** — including
   `Cargo.toml` and `Cargo.lock`. That runs rustfmt, clippy (`--all-targets
-  -D warnings`), the rich document-parser contracts, and the desktop tests.
-  Every cargo invocation passes `--locked`, so a lockfile drift fails there too.
+  -D warnings`), and the desktop tests. Every cargo invocation passes `--locked`,
+  so a lockfile drift fails there too.
 - A Rust change also marks the **workspace** scope, which adds the headless
   workspace tests with the server's rich parser adapters disabled, plus the
   PostgreSQL turn-state lane, unless every changed file is one of
-  `openwave-desktop`'s own sources. Parser-specific tests run in the already-rich
-  desktop lane instead of linking PDF/Office/image/spreadsheet support into every
-  headless test binary. Nothing in the workspace depends on the desktop crate and
-  the headless lane already excludes it, so those lanes cannot see such a change.
+  `openwave-desktop`'s own sources. Nothing in the workspace depends on the
+  desktop crate and the headless lane already excludes it, so those lanes cannot
+  see such a change.
   Its `Cargo.toml` is not covered by the carve-out — it forwards features into
   `openwave-server` — and neither is
   `ui/src/generated/`, whose staleness check lives in `openwave-server`.
+- Parser, feature-wiring, dependency, and CI changes also mark the **parser**
+  scope. Its focused PDF/Office/image/spreadsheet contracts run in a headless
+  job parallel to the desktop behavior suite. Normal desktop builds keep those
+  parsers enabled by default; the desktop test harness disables them because the
+  focused lane already covers their behavior and clippy compile-checks the rich
+  production topology.
 - Any file under `crates/openwave-desktop/ui/` marks it **UI**, which runs
-  `pnpm test` and `pnpm build` as parallel matrix jobs.
-- The aggregate `fmt · clippy · build · test` check asserts each lane either
-  succeeded or was legitimately skipped, and branch protection requires it. A
-  lane is skipped only when the change could not have affected it.
+  `pnpm test` and `pnpm build` as two fixed parallel jobs.
+- Branch protection requires the pull-request gate jobs directly. Conditional
+  jobs report a successful skip when their scope is false; the always-running
+  change detector rejects impossible narrower-scope combinations before those
+  jobs consume them. There is no serial aggregate wrapper after the slowest job.
 - The two heavyweight capability lanes are scoped separately on merges to
   `main`. `durable vector store` runs when retrieval, its server/CLI/desktop
   feature wiring, or dependency/toolchain inputs change. `sandbox-resident
@@ -153,9 +159,9 @@ wasted time. Run a cheap subset for fast feedback on what you actually touched �
 
 **The real trap is a PR that got no CI at all.** A conflicting PR runs nothing
 but the trivial policy checks, so "no checks failed" reads green while nothing
-was verified. Judge by whether the required aggregate check ran and passed, not
-by the absence of red. `gh pr checks <n>` shows the truth; rebase a conflicting
-PR before believing anything about it.
+was verified. Judge by whether every applicable required job is present and
+passed, not by the absence of red. `gh pr checks <n>` shows the truth; rebase a
+conflicting PR before believing anything about it.
 
 Enable auto-merge (`gh pr merge <n> --squash --auto --delete-branch`) so a PR
 lands the moment its lanes go green instead of waiting for you to come back.

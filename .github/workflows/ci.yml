@@ -95,6 +95,7 @@ jobs:
     name: change scope
     runs-on: ubuntu-latest
     outputs:
+      parsers: ${{ steps.scope.outputs.parsers }}
       rust: ${{ steps.scope.outputs.rust }}
       sandbox_container: ${{ steps.scope.outputs.sandbox_container }}
       ui: ${{ steps.scope.outputs.ui }}
@@ -116,6 +117,7 @@ jobs:
           full_validation() {
             {
               echo "rust=true"
+              echo "parsers=true"
               echo "sandbox_container=true"
               echo "ui=true"
               echo "vectors=true"
@@ -157,6 +159,7 @@ jobs:
           # change cannot reach them. `workspace` implies `rust`; the gate below
           # asserts that.
           rust=false
+          parsers=false
           sandbox_container=false
           ui=false
           vectors=false
@@ -168,6 +171,7 @@ jobs:
               *.md|docs/*|assets/*|LICENSE|NOTICE) ;;
               .github/workflows/ci.yml)
                 rust=true
+                parsers=true
                 sandbox_container=true
                 ui=true
                 vectors=true
@@ -177,6 +181,7 @@ jobs:
               # behavior for either heavyweight capability.
               .cargo/*|Cargo.lock|Cargo.toml|rust-toolchain.toml)
                 rust=true
+                parsers=true
                 sandbox_container=true
                 vectors=true
                 workspace=true
@@ -193,12 +198,14 @@ jobs:
               # change how the rest of the workspace builds. Its sources cannot.
               crates/openwave-desktop/Cargo.toml)
                 rust=true
+                parsers=true
                 vectors=true
                 workspace=true
                 ;;
               # The CLI forwards the release-only durable-store feature.
               crates/openwave-cli/Cargo.toml)
                 rust=true
+                parsers=true
                 vectors=true
                 workspace=true
                 ;;
@@ -206,17 +213,20 @@ jobs:
               # only surfaces the durable-store lane adds over headless tests.
               crates/openwave-retrieval/*)
                 rust=true
+                parsers=true
                 vectors=true
                 workspace=true
                 ;;
               crates/openwave-server/Cargo.toml)
                 rust=true
+                parsers=true
                 sandbox_container=true
                 vectors=true
                 workspace=true
                 ;;
               crates/openwave-server/build.rs|crates/openwave-server/src/lib.rs|crates/openwave-server/src/tests/documents.rs)
                 rust=true
+                parsers=true
                 vectors=true
                 workspace=true
                 ;;
@@ -234,8 +244,30 @@ jobs:
               *) rust=true; workspace=true ;;
             esac
           done < "$RUNNER_TEMP/changed-files"
+
+          # Keep narrower scopes honest here, before conditional jobs consume
+          # them. Required skipped jobs report success, so an impossible scope
+          # combination must fail the always-running detector itself.
+          if [[ "$workspace" == true && "$rust" != true ]]; then
+            echo "workspace scope without Rust scope; the detector is wrong." >&2
+            exit 1
+          fi
+          if [[ "$parsers" == true && "$workspace" != true ]]; then
+            echo "parser scope without workspace scope; the detector is wrong." >&2
+            exit 1
+          fi
+          if [[ "$vectors" == true && "$workspace" != true ]]; then
+            echo "vector scope without workspace scope; the detector is wrong." >&2
+            exit 1
+          fi
+          if [[ "$sandbox_container" == true && "$workspace" != true ]]; then
+            echo "sandbox-container scope without workspace scope; the detector is wrong." >&2
+            exit 1
+          fi
+
           {
             echo "rust=$rust"
+            echo "parsers=$parsers"
             echo "sandbox_container=$sandbox_container"
             echo "ui=$ui"
             echo "vectors=$vectors"
@@ -320,6 +352,56 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+  parsers:
+    name: rich document parser contracts
+    needs: changes
+    if: ${{ needs.changes.outputs.parsers == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: READ_WRITE
+      RUSTC_WRAPPER: sccache
+      RUSTFLAGS: -C link-arg=-fuse-ld=mold
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install toolchain (honors rust-toolchain.toml)
+        run: rustup show
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: v0.16.0
+      - name: Install headless system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mold
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: cargo-registry-v3-${{ hashFiles('Cargo.lock') }}
+          add-job-id-key: "false"
+          add-rust-environment-hash-key: "false"
+          cache-bin: false
+          cache-targets: false
+          save-if: false
+      - name: Exercise rich parser contracts
+        run: |
+          parser_features="parse-liteparse,parse-office,parse-image,parse-spreadsheet"
+          cargo test -p openwave-retrieval --features "$parser_features" --locked \
+            liteparse_parser::tests
+          cargo test -p openwave-retrieval --features "$parser_features" --locked \
+            liteparse_office_parser::tests
+          cargo test -p openwave-retrieval --features "$parser_features" --locked \
+            liteparse_image_parser::tests
+          cargo test -p openwave-retrieval --features "$parser_features" --locked \
+            spreadsheet_parser::tests
+          cargo test -p openwave-retrieval --features "$parser_features" --locked \
+            production_registry_routes_rich_formats_to_the_intended_parser
+          cargo test -p openwave-retrieval --features "$parser_features" --locked \
+            --test liteparse_pdf
+
   desktop:
     name: desktop test
     needs: changes
@@ -359,23 +441,8 @@ jobs:
           cache-bin: false
           cache-targets: false
           save-if: false
-      - name: rich document parser contracts
-        run: |
-          parser_features="parse-liteparse,parse-office,parse-image,parse-spreadsheet"
-          cargo test -p openwave-retrieval --features "$parser_features" --locked \
-            liteparse_parser::tests
-          cargo test -p openwave-retrieval --features "$parser_features" --locked \
-            liteparse_office_parser::tests
-          cargo test -p openwave-retrieval --features "$parser_features" --locked \
-            liteparse_image_parser::tests
-          cargo test -p openwave-retrieval --features "$parser_features" --locked \
-            spreadsheet_parser::tests
-          cargo test -p openwave-retrieval --features "$parser_features" --locked \
-            production_registry_routes_rich_formats_to_the_intended_parser
-          cargo test -p openwave-retrieval --features "$parser_features" --locked \
-            --test liteparse_pdf
       - name: desktop tests
-        run: cargo test -p openwave-desktop --locked
+        run: cargo test -p openwave-desktop --no-default-features --locked
 
   test:
     name: test
@@ -594,16 +661,12 @@ jobs:
           sandbox_container_run::tests::docker_end_to_end_drives_a_real_container
           -- --ignored --exact --nocapture
 
-  ui:
-    name: desktop UI · ${{ matrix.task }}
+  ui-test:
+    name: desktop UI · test
     needs: changes
     if: ${{ needs.changes.outputs.ui == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        task: [test, build]
     defaults:
       run:
         working-directory: crates/openwave-desktop/ui
@@ -619,144 +682,29 @@ jobs:
           cache-dependency-path: crates/openwave-desktop/ui/pnpm-lock.yaml
       - name: Install UI dependencies
         run: pnpm install --frozen-lockfile
-      - name: Run UI ${{ matrix.task }}
-        run: pnpm ${{ matrix.task }}
+      - name: Run UI tests
+        run: pnpm test
 
-  rust:
-    # Keep this historical name stable because branch protection requires it.
-    # PostgreSQL is part of this gate even though the old display name omits it.
-    name: fmt · clippy · build · test
-    if: ${{ always() }}
-    needs:
-      [
-        pr-title,
-        release-policy,
-        changes,
-        fmt,
-        lint,
-        desktop,
-        test,
-        vectors,
-        postgres,
-        sandbox-container,
-        ui,
-      ]
+  ui-build:
+    name: desktop UI · build
+    needs: changes
+    if: ${{ needs.changes.outputs.ui == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: crates/openwave-desktop/ui
     steps:
-      - name: Require every Rust lane
-        env:
-          FMT_RESULT: ${{ needs.fmt.result }}
-          LINT_RESULT: ${{ needs.lint.result }}
-          DESKTOP_RESULT: ${{ needs.desktop.result }}
-          TEST_RESULT: ${{ needs.test.result }}
-          VECTORS_RESULT: ${{ needs.vectors.result }}
-          POSTGRES_RESULT: ${{ needs.postgres.result }}
-          SANDBOX_CONTAINER_RESULT: ${{ needs.sandbox-container.result }}
-          UI_RESULT: ${{ needs.ui.result }}
-          PR_TITLE_RESULT: ${{ needs.pr-title.result }}
-          RELEASE_POLICY_RESULT: ${{ needs.release-policy.result }}
-          CHANGES_RESULT: ${{ needs.changes.result }}
-          RUST_CHANGED: ${{ needs.changes.outputs.rust }}
-          UI_CHANGED: ${{ needs.changes.outputs.ui }}
-          VECTORS_CHANGED: ${{ needs.changes.outputs.vectors }}
-          WORKSPACE_CHANGED: ${{ needs.changes.outputs.workspace }}
-          SANDBOX_CONTAINER_CHANGED: ${{ needs.changes.outputs.sandbox_container }}
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          test "$CHANGES_RESULT" = success
-          test "$RELEASE_POLICY_RESULT" = success
-          case "$EVENT_NAME" in
-            pull_request) test "$PR_TITLE_RESULT" = success ;;
-            *) test "$PR_TITLE_RESULT" = skipped ;;
-          esac
-
-          case "$UI_CHANGED" in
-            true) test "$UI_RESULT" = success ;;
-            false) test "$UI_RESULT" = skipped ;;
-            *)
-              echo "invalid UI change detector output: $UI_CHANGED" >&2
-              exit 1
-              ;;
-          esac
-
-          case "$RUST_CHANGED" in
-            true)
-              test "$FMT_RESULT" = success
-              test "$LINT_RESULT" = success
-              test "$DESKTOP_RESULT" = success
-              ;;
-            false)
-              test "$FMT_RESULT" = skipped
-              test "$LINT_RESULT" = skipped
-              test "$DESKTOP_RESULT" = skipped
-              ;;
-            *)
-              echo "invalid Rust change detector output: $RUST_CHANGED" >&2
-              exit 1
-              ;;
-          esac
-
-          # A workspace-scoped change is always Rust-scoped. If the detector ever
-          # reports otherwise it has a hole, and the lanes below would be checked
-          # against a scope the ones above never ran for.
-          if test "$WORKSPACE_CHANGED" = true && test "$RUST_CHANGED" != true; then
-            echo "workspace scope without Rust scope; the detector is wrong." >&2
-            exit 1
-          fi
-          if test "$VECTORS_CHANGED" = true && test "$WORKSPACE_CHANGED" != true; then
-            echo "vector scope without workspace scope; the detector is wrong." >&2
-            exit 1
-          fi
-          if test "$SANDBOX_CONTAINER_CHANGED" = true && test "$WORKSPACE_CHANGED" != true; then
-            echo "sandbox-container scope without workspace scope; the detector is wrong." >&2
-            exit 1
-          fi
-
-          # The lanes that cover the workspace minus openwave-desktop. A change
-          # confined to that crate's own sources cannot affect them.
-          case "$WORKSPACE_CHANGED" in
-            true)
-              test "$TEST_RESULT" = success
-              test "$POSTGRES_RESULT" = success
-              ;;
-            false)
-              test "$TEST_RESULT" = skipped
-              test "$POSTGRES_RESULT" = skipped
-              ;;
-            *)
-              echo "invalid workspace change detector output: $WORKSPACE_CHANGED" >&2
-              exit 1
-              ;;
-          esac
-
-          # The durable vector store is deliberately not a pull-request gate
-          # (see the job's own comment and #760). Assert the exemption and the
-          # post-merge scope rather than dropping the lane from the aggregate.
-          if test "$EVENT_NAME" = pull_request; then
-            test "$VECTORS_RESULT" = skipped
-          else
-            case "$VECTORS_CHANGED" in
-              true) test "$VECTORS_RESULT" = success ;;
-              false) test "$VECTORS_RESULT" = skipped ;;
-              *)
-                echo "invalid vector change detector output: $VECTORS_CHANGED" >&2
-                exit 1
-                ;;
-            esac
-          fi
-
-          # The sandbox-resident container e2e is post-merge only for the same
-          # reason (see the job's own comment): it builds the agent image. Assert
-          # the exemption and the post-merge scope here too.
-          if test "$EVENT_NAME" = pull_request; then
-            test "$SANDBOX_CONTAINER_RESULT" = skipped
-          else
-            case "$SANDBOX_CONTAINER_CHANGED" in
-              true) test "$SANDBOX_CONTAINER_RESULT" = success ;;
-              false) test "$SANDBOX_CONTAINER_RESULT" = skipped ;;
-              *)
-                echo "invalid sandbox-container change detector output: $SANDBOX_CONTAINER_CHANGED" >&2
-                exit 1
-                ;;
-            esac
-          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: crates/openwave-desktop/ui/pnpm-lock.yaml
+      - name: Install UI dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build production UI
+        run: pnpm build

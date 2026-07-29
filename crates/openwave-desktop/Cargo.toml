@@ -11,6 +11,11 @@ authors.workspace = true
 workspace = true
 
 [features]
+# Keep ordinary desktop builds feature-complete while allowing the behavior
+# suite to exercise the shell without compiling parser adapters that have their
+# own focused contracts.
+default = ["document-parsers"]
+document-parsers = ["openwave-server/document-parsers"]
 # Forwards the server's durable, on-disk vector store. Off by default so a dev
 # build and the workspace tests skip the LanceDB dependency tree; every shipped
 # bundle enables it (`cargo tauri build --features vec-lance`), and
@@ -44,7 +49,7 @@ futures.workspace = true
 infer = { version = "=0.22.0", default-features = false }
 openwave-core = { path = "../openwave-core", default-features = false }
 openwave-host-broker = { path = "../openwave-host-broker" }
-openwave-server = { path = "../openwave-server" }
+openwave-server = { path = "../openwave-server", default-features = false }
 reqwest = { workspace = true }
 sha2 = { workspace = true }
 tauri = { version = "=2.11.5", features = [] }
