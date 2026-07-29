@@ -2,15 +2,21 @@ import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 
 import { useApp } from "./AppContext";
+import { attachChatFiles } from "./attachments";
 import { ChatExplorer } from "./ChatExplorer";
 import { useChatListStore } from "./ChatListStore";
-import { Composer } from "./Composer";
+import { Composer, type ComposerImages } from "./Composer";
+import type { LibraryImportSuccess } from "./documents";
 import { useFirstMessage } from "./FirstMessage";
 import { hasNativeHost } from "./host";
+import {
+  readyImageAttachment,
+  type ImageAttachment,
+  type PickedImage,
+} from "./ImageAttachments";
 import { ModelMenu, ReasoningEffortMenu } from "./ModelMenu";
 import { modelForSelection } from "./ModelSelection";
 import { useNewChatSettings } from "./NewChatSettings";
-import { usePendingAttach } from "./PendingAttach";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import { RouteFrame } from "./RouteFrame";
 import { HomeSidebar } from "./sidebar/HomeSidebar";
@@ -18,19 +24,13 @@ import { ToolsMenu } from "./ToolsMenu";
 
 const chatListActions = useChatListStore.getState();
 const firstMessageActions = useFirstMessage.getState();
-const pendingAttachActions = usePendingAttach.getState();
 
-/**
- * Where the app opens, and where the logo goes back to.
- *
- * The composer here starts a conversation rather than posting into one. It
- * hands the text to the chat it creates instead of sending it directly, so
- * there is still exactly one send path — see [useFirstMessage].
- *
- * Nothing on this route is scoped to a conversation, including its rail. A
- * conversation's sources, outputs and folders are reachable from inside one,
- * which is the only place they describe anything.
- */
+function isImportedDocument(
+  result: { status: string },
+): result is LibraryImportSuccess {
+  return result.status === "imported" || result.status === "already_present";
+}
+
 export function HomeRoute() {
   const navigate = useNavigate();
   const { client, models, defaultModelKey, defaultCitationFormat } = useApp();
@@ -39,9 +39,61 @@ export function HomeRoute() {
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
   const newChat = useNewChatSettings();
-  // Only the levels the pending model accepts are offerable, the same rule the
-  // conversation composer follows.
   const efforts = modelForSelection(models, newChat.model)?.reasoning_efforts ?? [];
+
+  // A chat created silently when the user attaches files before typing. The
+  // chat exists on the server so files can upload, but the user stays on the
+  // home page until they send.
+  const [pendingChatId, setPendingChatId] = useState<string | null>(null);
+  const [pendingImages, setPendingImages] = useState<ImageAttachment[]>([]);
+  const [pendingSourceName, setPendingSourceName] = useState<string | null>(null);
+  const [attaching, setAttaching] = useState(false);
+  const [attachError, setAttachError] = useState<string | null>(null);
+
+  async function ensurePendingChat(): Promise<string> {
+    if (pendingChatId) return pendingChatId;
+    const created = await client.createChat(newChat.model ?? undefined, null, {
+      reasoningEffort: newChat.reasoningEffort,
+      permissionMode: newChat.permissionMode,
+      citationFormat: newChat.citationFormat,
+    });
+    chatListActions.prependChat(created);
+    chatListActions.setChatsError(null);
+    setPendingChatId(created.id);
+    return created.id;
+  }
+
+  async function onAttach() {
+    if (attaching || creatingChat) return;
+    setAttaching(true);
+    setAttachError(null);
+    try {
+      const chatId = await ensurePendingChat();
+      const attached = await attachChatFiles(chatId);
+      if (!attached) return;
+      if (attached.images.length > 0) {
+        setPendingImages((prev) => [
+          ...prev,
+          ...attached.images.map((img: PickedImage) =>
+            readyImageAttachment(crypto.randomUUID(), img),
+          ),
+        ]);
+      }
+      const source = attached.documents?.results.find(isImportedDocument);
+      if (source) setPendingSourceName(source.document.displayName);
+      const [firstFailure] = attached.failedImages;
+      if (firstFailure) {
+        setAttachError(`${firstFailure.fileName}: ${firstFailure.message}`);
+      }
+    } catch (err) {
+      setAttachError(
+        String(err).replace(/^Error:\s*/, "").trim() ||
+          "Could not attach that file.",
+      );
+    } finally {
+      setAttaching(false);
+    }
+  }
 
   async function startChat() {
     const content = draft.trim();
@@ -49,16 +101,30 @@ export function HomeRoute() {
     chatListActions.setCreatingChat(true);
     setError(null);
     try {
-      const created = await client.createChat(newChat.model ?? undefined, null, {
-        reasoningEffort: newChat.reasoningEffort,
-        permissionMode: newChat.permissionMode,
-        citationFormat: newChat.citationFormat,
-      });
-      chatListActions.prependChat(created);
-      chatListActions.setChatsError(null);
-      firstMessageActions.hold(created.id, content);
+      // Reuse the chat that was silently created for file attachments, or
+      // create a fresh one.
+      let chatId = pendingChatId;
+      if (!chatId) {
+        const created = await client.createChat(
+          newChat.model ?? undefined,
+          null,
+          {
+            reasoningEffort: newChat.reasoningEffort,
+            permissionMode: newChat.permissionMode,
+            citationFormat: newChat.citationFormat,
+          },
+        );
+        chatListActions.prependChat(created);
+        chatListActions.setChatsError(null);
+        chatId = created.id;
+      }
+      firstMessageActions.hold(chatId, content);
       setDraft("");
-      await navigate({ to: "/c/$chatId", params: { chatId: created.id } });
+      setPendingChatId(null);
+      setPendingImages([]);
+      setPendingSourceName(null);
+      setAttachError(null);
+      await navigate({ to: "/c/$chatId", params: { chatId } });
     } catch (err) {
       setError(`Could not start a chat: ${String(err)}`);
     } finally {
@@ -66,32 +132,22 @@ export function HomeRoute() {
     }
   }
 
-  async function attachToNewChat() {
-    if (creatingChat) return;
-    chatListActions.setCreatingChat(true);
-    setError(null);
-    try {
-      const created = await client.createChat(newChat.model ?? undefined, null, {
-        reasoningEffort: newChat.reasoningEffort,
-        permissionMode: newChat.permissionMode,
-        citationFormat: newChat.citationFormat,
-      });
-      chatListActions.prependChat(created);
-      chatListActions.setChatsError(null);
-      pendingAttachActions.hold(created.id);
-      await navigate({ to: "/c/$chatId", params: { chatId: created.id } });
-    } catch (err) {
-      setError(`Could not start a chat: ${String(err)}`);
-    } finally {
-      chatListActions.setCreatingChat(false);
-    }
-  }
+  const composerImages: ComposerImages | undefined =
+    pendingImages.length > 0
+      ? {
+          items: pendingImages,
+          error: null,
+          unsupportedModel: null,
+          onAttachFiles: () => {},
+          onRemove: (id) =>
+            setPendingImages((prev) => prev.filter((img) => img.id !== id)),
+          onRetry: () => {},
+        }
+      : undefined;
 
   return (
     <RouteFrame sidebar={<HomeSidebar />}>
       <div className="content-container flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden px-[clamp(0.5rem,4%,5rem)]">
-        {/* The greeting and the list of past chats scroll together and stay
-            centred while there is room; the composer below does not move. */}
         <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto">
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-8 py-10">
             <div className="space-y-2 text-center">
@@ -107,9 +163,6 @@ export function HomeRoute() {
           </div>
         </div>
 
-        {/* Docked at the foot of the page: the composer here starts a chat
-            rather than posting into one, but it stays put while the list above
-            scrolls, the way it does inside a conversation. */}
         <div className="z-10 mx-auto w-full max-w-3xl pb-2">
           {error && <p className="pb-2 text-sm text-critical">{error}</p>}
           <Composer
@@ -119,6 +172,10 @@ export function HomeRoute() {
             cancelPending={false}
             disabled={creatingChat}
             draft={draft}
+            images={composerImages}
+            attachedSourceName={pendingSourceName}
+            attachError={attachError}
+            onDismissAttachedSource={() => setPendingSourceName(null)}
             resetKey="home"
             steerError={null}
             steerPending={false}
@@ -127,7 +184,8 @@ export function HomeRoute() {
               <>
                 <ToolsMenu
                   disabled={creatingChat}
-                  onAttach={hasNativeHost() ? attachToNewChat : undefined}
+                  onAttach={hasNativeHost() ? onAttach : undefined}
+                  attaching={attaching}
                   citationFormat={newChat.citationFormat}
                   defaultCitationFormat={defaultCitationFormat}
                   onCitationFormatChange={newChat.setCitationFormat}

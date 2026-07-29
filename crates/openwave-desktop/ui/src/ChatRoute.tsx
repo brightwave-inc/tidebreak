@@ -27,7 +27,6 @@ import {
   presentChatTranscript,
 } from "./ChatTranscriptPresentation";
 import { useFirstMessage } from "./FirstMessage";
-import { usePendingAttach } from "./PendingAttach";
 import { ChatView } from "./ChatView";
 import { OutputDetailRoot } from "./outputs/OutputDetailRoot";
 import { OutputsView } from "./outputs/OutputsView";
@@ -81,7 +80,6 @@ const sessionDeps = {
 
 const chatListActions = useChatListStore.getState();
 const firstMessageActions = useFirstMessage.getState();
-const pendingAttachActions = usePendingAttach.getState();
 const { signal: signalRefresh } = useRefreshSignals.getState();
 const { signal: signalTurnLifecycle } = useTurnLifecycle.getState();
 
@@ -130,14 +128,6 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     if (!chat) return;
     const pending = firstMessageActions.take(chatId);
     if (pending) void sendMessage(pending);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chat, chatId]);
-
-  // "Upload files" on the home page creates the chat and navigates here; the
-  // signal tells us to open the native picker immediately.
-  useEffect(() => {
-    if (!chat) return;
-    if (pendingAttachActions.take(chatId)) void onAttach();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chat, chatId]);
 
