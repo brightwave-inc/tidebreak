@@ -142,6 +142,23 @@ test("Rust CI requires the same PostgreSQL lane on pull requests and main", () =
   }
   assert.match(testJob, /save-if: \$\{\{ github\.ref == 'refs\/heads\/main' \}\}/);
   assert.match(testJob, /cache-on-failure: true/);
+  assert.match(
+    testJob,
+    /cargo test --workspace --exclude openwave-desktop\n\s+--no-default-features\n\s+--features\n\s+openwave-core\/default,openwave-retrieval\/default,openwave-router\/default\n\s+--locked/,
+  );
+  const desktop = workflowJob(ci, "desktop");
+  assert.match(
+    desktop,
+    /parser_features="parse-liteparse,parse-office,parse-image,parse-spreadsheet"/,
+  );
+  assert.match(desktop, /liteparse_parser::tests/);
+  assert.match(desktop, /liteparse_office_parser::tests/);
+  assert.match(desktop, /liteparse_image_parser::tests/);
+  assert.match(desktop, /spreadsheet_parser::tests/);
+  assert.match(
+    desktop,
+    /tests::documents::raw_ingest_parses_and_indexes_a_pdf_end_to_end \\\n\s+-- --exact/,
+  );
 });
 
 test("UI tests and production build run as parallel matrix jobs", () => {

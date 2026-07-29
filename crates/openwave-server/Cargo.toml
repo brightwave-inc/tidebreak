@@ -15,7 +15,13 @@ workspace = true
 # default so the desktop and `openwave serve` accept `application/pdf` uploads.
 # The liteparse build downloads a prebuilt PDFium binary; build with
 # `--no-default-features` for a lean, text-only pipeline with no such fetch.
-default = ["parse-liteparse", "parse-office", "parse-image", "parse-spreadsheet"]
+default = ["document-parsers"]
+document-parsers = [
+    "parse-liteparse",
+    "parse-office",
+    "parse-image",
+    "parse-spreadsheet",
+]
 parse-liteparse = ["openwave-retrieval/parse-liteparse"]
 # Rich Office ingestion (Word/Excel/PowerPoint/OpenDocument) via liteparse's
 # LibreOffice conversion path. On by default, adding no build cost beyond
