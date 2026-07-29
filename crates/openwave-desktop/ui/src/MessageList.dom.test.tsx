@@ -6,6 +6,7 @@ import { ApprovalCard } from "./ApprovalCard";
 import { AppContextProvider, type AppContextValue } from "./AppContext";
 import type { ApiClient } from "./api";
 import { MessageBubble, MessageList, type ChatMessage } from "./MessageList";
+import { SourceNavProvider } from "./panel/SourceNav";
 import { renderWithRouter } from "./test/router";
 
 const noop = () => undefined;
@@ -779,5 +780,58 @@ describe("actionable tool results", () => {
     await waitFor(() => {
       expect(router.state.location.pathname).toBe("/settings/web-search");
     });
+  });
+});
+
+describe("citation anchors", () => {
+  const CITATION = "0b2b1f2c-9d3e-4a5b-8c7d-6e5f4a3b2c1d";
+
+  const message: ChatMessage = {
+    id: "assistant-1",
+    role: "assistant",
+    text: `The reef :cit[is the largest in the world]{citation_id=${CITATION}}.`,
+    sources: [
+      {
+        id: CITATION,
+        ordinal: 1,
+        documentId: "document-1",
+        span: { start: 0, end: 26 },
+        excerpt: "A short supporting excerpt.",
+        heading: "Project notes",
+        pages: [2],
+        bounds: [],
+      },
+    ],
+  };
+
+  it("opens the same place from the phrase and from the sources row", async () => {
+    const user = userEvent.setup();
+    const openCitation = vi.fn();
+    render(
+      <SourceNavProvider value={{ openCitation }}>
+        <MessageBubble message={message} busy={false} />
+      </SourceNavProvider>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Citation 1" }));
+    await user.click(screen.getByRole("button", { name: "Open source" }));
+    await user.click(screen.getByRole("button", { name: "Open source 1" }));
+
+    expect(openCitation).toHaveBeenCalledTimes(2);
+    expect(openCitation.mock.calls[0]).toEqual(openCitation.mock.calls[1]);
+    expect(openCitation).toHaveBeenLastCalledWith({
+      documentId: "document-1",
+      citationId: CITATION,
+    });
+  });
+
+  it("copies what the message reads as, not how a citation is stored", async () => {
+    const user = userEvent.setup();
+    render(<MessageBubble message={message} busy={false} />);
+
+    await user.click(screen.getByRole("button", { name: "Copy" }));
+    expect(await window.navigator.clipboard.readText()).toBe(
+      "The reef is the largest in the world.",
+    );
   });
 });

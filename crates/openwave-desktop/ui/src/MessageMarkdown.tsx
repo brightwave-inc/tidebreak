@@ -9,11 +9,17 @@ import rehypeHighlight from "rehype-highlight";
 import rehypeKatex from "rehype-katex";
 import { ClipboardCopyButton } from "./ClipboardCopyButton";
 import {
+  CITATION_ID_PROPERTY,
+  hasCitationDirective,
+  rehypeCitationDirectives,
+} from "./citationDirectives";
+import {
   pieceStartOffsets,
   rangeWithinPiece,
   rehypeHighlightRange,
   type HighlightRange,
 } from "./components/document/citationMark";
+import { InlineCitation } from "./InlineCitation";
 import { splitMarkdownBlocks } from "./markdownBlocks";
 import { escapeLatexText } from "./markdownLatex";
 import { slugify } from "./markdownHeadings";
@@ -168,6 +174,16 @@ const components: Components = {
     );
   },
   blockquote: ({ children }) => <blockquote>{children}</blockquote>,
+  // Most spans in a rendered message are syntax-highlighting tokens and pass
+  // straight through; the ones {@link rehypeCitationDirectives} built carry the
+  // citation they cite and become the phrase a reader can open.
+  span: ({ children, node, ...props }) => {
+    const citationId = node?.properties?.[CITATION_ID_PROPERTY];
+    if (typeof citationId !== "string") {
+      return <span {...props}>{children}</span>;
+    }
+    return <InlineCitation citationId={citationId}>{children}</InlineCitation>;
+  },
 };
 
 /**
@@ -211,6 +227,9 @@ const remarkPlugins: Options["remarkPlugins"] = [
 ];
 
 const rehypePlugins: NonNullable<Options["rehypePlugins"]> = [
+  // Before anything rewrites the tree: the citations are read out of text nodes
+  // as the parser left them, which highlighting and math no longer are.
+  rehypeCitationDirectives,
   // Highlight only fence-tagged languages; auto-detection on unlabeled blocks
   // guesses wrong too often to be worth it.
   [rehypeHighlight, { detect: false }],
@@ -218,30 +237,18 @@ const rehypePlugins: NonNullable<Options["rehypePlugins"]> = [
 ];
 
 /**
- * A stored citation, which wraps the phrase it backs: `:cit[phrase]{citation_id=…}`.
+ * Normalize raw model output before the parser sees it: rewrite LaTeX
+ * delimiters into the dollar forms remark-math understands, then convert single
+ * newlines into hard breaks so intended line breaks survive without leaking
+ * source indentation.
  *
- * The phrase cannot contain `]` — the parser that writes this form closes it at
- * the first one — so a single non-greedy match is the whole grammar.
- */
-const CITATION_DIRECTIVE =
-  /:cit\[([^\]]*)\]\{citation_id=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}/gi;
-
-/**
- * Reduce stored citations to the phrasing they wrap, which is what the message
- * reads as until citations render as marks of their own.
- */
-export function stripCitationDirectives(input: string): string {
-  return input.replace(CITATION_DIRECTIVE, "$1");
-}
-
-/**
- * Normalize raw model output before the parser sees it: reduce citations to
- * their phrasing, rewrite LaTeX delimiters into the dollar forms remark-math
- * understands, then convert single newlines into hard breaks so intended line
- * breaks survive without leaking source indentation.
+ * Citations are deliberately not touched here. They are read off the parsed
+ * tree, where the phrase they wrap is already the inline nodes it was written
+ * as, rather than off the source, where taking them apart would mean parsing
+ * Markdown twice.
  */
 export function processMarkdownContent(input: string): string {
-  return preserveLineBreaks(escapeLatexText(stripCitationDirectives(input)));
+  return preserveLineBreaks(escapeLatexText(input));
 }
 
 /**
@@ -301,9 +308,10 @@ function blockRehypePlugins(
 ): NonNullable<Options["rehypePlugins"]> {
   if (start == null || end == null || end <= start) return rehypePlugins;
   if (escapeLatexText(block) !== block) return rehypePlugins;
-  // A citation the block carries is removed from the text the parser reads, for
-  // the same reason: the offsets were measured against text that still had it.
-  if (stripCitationDirectives(block) !== block) return rehypePlugins;
+  // A block carrying a citation is left alone too: the mark would split the
+  // text the citation is read out of, leaving the two passes to argue over the
+  // same nodes for a passage that is already marked by the citation itself.
+  if (hasCitationDirective(block)) return rehypePlugins;
   return [
     [
       rehypeHighlightRange,

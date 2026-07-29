@@ -1061,6 +1061,70 @@ body {
   font-weight: 550;
 }
 
+/* ---------- Inline citations ---------- */
+
+/* The cited phrase is prose first: it inherits the type around it and carries
+   the same underline a link does, so a sentence still reads as a sentence. */
+.inline-citation {
+  display: inline;
+  margin: 0;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+  background: none;
+  font: inherit;
+  text-align: inherit;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 30%, transparent);
+  text-decoration-style: dotted;
+  text-underline-offset: 0.16em;
+}
+
+.inline-citation:hover,
+.inline-citation:focus-visible,
+.inline-citation[data-state="open"] {
+  text-decoration-color: currentColor;
+}
+
+.inline-citation-ordinal {
+  margin-left: 0.12em;
+  color: var(--muted-foreground);
+  font-size: 0.68em;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.inline-citation:hover .inline-citation-ordinal,
+.inline-citation:focus-visible .inline-citation-ordinal,
+.inline-citation[data-state="open"] .inline-citation-ordinal {
+  color: var(--ink);
+}
+
+.inline-citation-popover {
+  display: grid;
+  gap: 0.5rem;
+  font-size: 0.78rem;
+}
+
+.inline-citation-open {
+  justify-self: start;
+  border: 0;
+  border-radius: 6px;
+  padding: 0.2rem 0.4rem;
+  margin: 0 -0.4rem -0.2rem;
+  cursor: pointer;
+  color: var(--ink);
+  background: none;
+  font: inherit;
+  font-weight: 600;
+}
+
+.inline-citation-open:hover,
+.inline-citation-open:focus-visible {
+  background: color-mix(in srgb, var(--accent) 58%, transparent);
+}
+
 /* ---------- Notices ---------- */
 
 .message-notice {
