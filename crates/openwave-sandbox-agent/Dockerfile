@@ -43,12 +43,23 @@ RUN cargo build --release --locked -p openwave-sandbox-agent
 # applets) and the workspace root the tools are scoped to, then copy just those
 # into the runtime. busybox is a deliberate, bounded surface for running the
 # model's commands, not a general package manager.
+#
+# The applet symlinks must resolve in the RUNTIME image, where this staging tree
+# lands at `/`. `busybox --install -s` would bake in the *build-time* absolute
+# path (`/rootfs/bin/busybox`), which does not exist after the copy — every
+# symlink would dangle and `/bin/sh -c` would fail for every exec. So create each
+# applet as a RELATIVE symlink to `busybox`: at runtime `/bin/sh -> busybox`
+# resolves to `/bin/busybox`, which is there. Correct by construction regardless
+# of where the staging tree was assembled.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends busybox-static \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /rootfs/bin /rootfs/workspace \
     && cp /bin/busybox /rootfs/bin/busybox \
-    && /rootfs/bin/busybox --install -s /rootfs/bin
+    && for applet in $(/rootfs/bin/busybox --list); do \
+         [ "$applet" = busybox ] || ln -s busybox /rootfs/bin/"$applet"; \
+       done \
+    && test "$(readlink /rootfs/bin/sh)" = busybox
 
 # ---- runtime stage ---------------------------------------------------------
 # distroless/cc provides glibc and libgcc for the dynamically-linked binary; the

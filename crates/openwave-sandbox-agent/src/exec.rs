@@ -24,7 +24,7 @@
 //! until externally-enforced egress (the run's egress policy applied to the
 //! container's network) and the transport-auth gate land. See the crate docs.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -203,7 +203,7 @@ mod capture {
 }
 
 #[cfg(unix)]
-async fn run_bounded(command: &str, workspace: &PathBuf, timeout: Duration) -> ExecOutcome {
+async fn run_bounded(command: &str, workspace: &Path, timeout: Duration) -> ExecOutcome {
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
     use std::sync::{Arc, Mutex};
@@ -326,7 +326,7 @@ async fn run_bounded(command: &str, workspace: &PathBuf, timeout: Duration) -> E
 }
 
 #[cfg(not(unix))]
-async fn run_bounded(_command: &str, _workspace: &PathBuf, _timeout: Duration) -> ExecOutcome {
+async fn run_bounded(_command: &str, _workspace: &Path, _timeout: Duration) -> ExecOutcome {
     ExecOutcome {
         stderr: "in-container exec is only supported on unix".to_owned(),
         ..ExecOutcome::default()
@@ -367,10 +367,14 @@ mod tests {
     async fn echoes_and_runs_in_the_workspace() {
         let dir = workspace();
         let tool = ExecTool::new(dir.path(), DEFAULT_EXEC_TIMEOUT);
-        let out = tool
-            .execute(&ctx(), serde_json::json!({ "command": "printf hi; pwd" }))
-            .await
-            .unwrap();
+        // Bound the whole call so a wedged /bin/sh fails fast instead of hanging.
+        let out = tokio::time::timeout(
+            Duration::from_secs(10),
+            tool.execute(&ctx(), serde_json::json!({ "command": "printf hi; pwd" })),
+        )
+        .await
+        .expect("exec returned within the outer bound")
+        .unwrap();
         assert!(!out.is_error, "{out:?}");
         assert!(out.content.contains("exit code: 0"), "{}", out.content);
         assert!(out.content.contains("hi"), "{}", out.content);
