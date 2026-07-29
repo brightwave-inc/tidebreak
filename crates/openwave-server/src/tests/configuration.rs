@@ -1401,7 +1401,9 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
 
 /// Roles resolve on read, against whatever the user has credentialed: the
 /// ordered defaults skip providers that cannot serve a request, a pin overrides
-/// them, and enabling a provider changes the answer without a restart.
+/// them, and enabling a provider changes the answer without a restart. When the
+/// profile flips to managed, both roles' reads re-route to entitled gateway
+/// models rather than reporting selections no turn could serve.
 #[tokio::test]
 async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
     let dir = tempfile::tempdir().unwrap();
@@ -1431,7 +1433,7 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
             ),
             Arc::new(crate::managed_policy::NoOsPolicy),
         )),
-        secrets,
+        secrets.clone(),
         Arc::new(ToolRegistry::new()),
         retrieval,
         AgentConfig {
@@ -1578,6 +1580,72 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
     assert_eq!(
         role_row(&role_rows().await, "utility")["resolved_key"],
         "gemini::gemini-3.5-flash-lite"
+    );
+
+    // A managed flip with a BYOK chat pin carried in from before it: the pin
+    // stays stored — a profile returned to the open experience gets it back —
+    // but both roles' effective resolutions move to entitled gateway models.
+    // Chat lands on the first model the gateway lists (the row the composer
+    // picker offers first); utility keeps #901's cheapest-first walk.
+    configure_provider("openai", serde_json::json!({"enabled": true})).await;
+    let pinned = put_role(
+        "chat",
+        serde_json::json!({"selection": "openai::gpt-5.6-sol"}),
+    )
+    .await;
+    assert_eq!(pinned.status(), StatusCode::OK);
+
+    crate::managed_policy::provision(&*store, "https://corp.gateway")
+        .await
+        .unwrap();
+    let credentials: openwave_connectors::GatewayCredentials =
+        serde_json::from_value(serde_json::json!({
+            "base_url": "https://corp.gateway/",
+            "installation_id": "install-1",
+            "user_id": "user-1",
+            "refresh_token": "mg_rt_seed",
+            "access_tokens": {}
+        }))
+        .unwrap();
+    openwave_connectors::CredentialVault::new(secrets)
+        .save(&credentials)
+        .await
+        .unwrap();
+    providers::write_config(
+        &*store,
+        providers::ProviderKind::ModelGateway,
+        &providers::ProviderConfig {
+            enabled: true,
+            base_url: Some("https://corp.gateway/".to_string()),
+            vertex_location: None,
+            // Flagship-first, as a gateway well might list them: chat takes
+            // the gateway's first pick, utility must not.
+            models: vec![
+                providers::CustomModelConfig {
+                    id: "gateway-flagship".to_string(),
+                    display_name: Some("Gateway Flagship".to_string()),
+                    context_window: 1_000_000,
+                    max_output_tokens: 64_000,
+                },
+                providers::CustomModelConfig {
+                    id: "gateway-haiku".to_string(),
+                    display_name: Some("Gateway Haiku".to_string()),
+                    context_window: 200_000,
+                    max_output_tokens: 8_192,
+                },
+            ],
+        },
+    )
+    .await
+    .unwrap();
+
+    let roles = role_rows().await;
+    let chat = role_row(&roles, "chat");
+    assert_eq!(chat["selection"], "openai::gpt-5.6-sol");
+    assert_eq!(chat["resolved_key"], "model_gateway::gateway-flagship");
+    assert_eq!(
+        role_row(&roles, "utility")["resolved_key"],
+        "model_gateway::gateway-haiku"
     );
 }
 

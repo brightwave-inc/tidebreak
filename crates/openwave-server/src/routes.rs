@@ -908,6 +908,11 @@ pub async fn put_model_role(
 }
 
 /// The catalog key `role` resolves to right now, given its stored `selection`.
+///
+/// This is the server's one answer for "what does this role's default mean" —
+/// the settings page and the composer both label their automatic choice with
+/// it, which is why the managed re-route below lives here rather than in a
+/// client.
 async fn resolved_role_key(
     state: &AppState,
     role: ModelRole,
@@ -923,10 +928,49 @@ async fn resolved_role_key(
                 Some(selection) => selection.to_owned(),
                 None => chat_role_model(&*state.store, &state.agent_config.model).await?,
             };
+            let resolved = providers::resolve_model_policy(&*state.store, &fallback, true).await?;
+            let managed = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
+            if !managed.managed {
+                return Ok(resolved.map(|policy| policy.key));
+            }
+            // Managed: the stored selection — or the boot default behind it —
+            // may name a BYOK model the policy has locked out, typically a
+            // default carried in from before the profile was managed. That
+            // resolution names a model no turn can run, so the role lands on
+            // the first entitled gateway model instead: the row the composer
+            // picker offers first, in the gateway's own order. (The `utility`
+            // role re-routes inside `model_roles::resolve`, which walks the
+            // entitled list cheapest-first.)
+            if let Some(policy) = resolved {
+                if providers::provider_is_usable(
+                    &*state.store,
+                    &*state.secrets,
+                    policy.provider,
+                    &managed,
+                )
+                .await?
+                {
+                    return Ok(Some(policy.key));
+                }
+            }
+            if !providers::provider_is_usable(
+                &*state.store,
+                &*state.secrets,
+                ProviderKind::ModelGateway,
+                &managed,
+            )
+            .await?
+            {
+                return Ok(None);
+            }
             Ok(
-                providers::resolve_model_policy(&*state.store, &fallback, true)
+                providers::read_config(&*state.store, ProviderKind::ModelGateway)
                     .await?
-                    .map(|policy| policy.key),
+                    .models
+                    .first()
+                    .map(|model| {
+                        crate::model_registry::selection_key(ProviderKind::ModelGateway, &model.id)
+                    }),
             )
         }
         _ => Ok(
