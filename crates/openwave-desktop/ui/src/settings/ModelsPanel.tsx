@@ -383,6 +383,12 @@ function ModelRoleRow({
   const selectedValue =
     selected?.provider === provider ? (canonical ?? "") : "";
   const unresolvedSelection = info.selection !== null && selected === null;
+  // A pin left behind by the retired additive gateway mode. The catalog has
+  // no gateway models on an unmanaged profile, so it resolves to nothing —
+  // and the openai_compatible advice below cannot apply to it.
+  const retiredGatewayPin =
+    unresolvedSelection &&
+    (info.selection?.startsWith("model_gateway::") ?? false);
 
   return (
     <SettingsSection title={title}>
@@ -446,11 +452,19 @@ function ModelRoleRow({
           </SelectContent>
         </Select>
       </SettingsField>
-      {unresolvedSelection && (
+      {retiredGatewayPin ? (
         <SettingsError>
-          The saved model “{info.selection}” is not uniquely registered. Add it
-          under the OpenAI-compatible provider, then choose it here.
+          The saved model “{info.selection}” came from a model gateway, and
+          this profile is not connected to one. Pick a model here, or connect
+          from your gateway&apos;s page.
         </SettingsError>
+      ) : (
+        unresolvedSelection && (
+          <SettingsError>
+            The saved model “{info.selection}” is not uniquely registered. Add
+            it under the OpenAI-compatible provider, then choose it here.
+          </SettingsError>
+        )
       )}
     </SettingsSection>
   );

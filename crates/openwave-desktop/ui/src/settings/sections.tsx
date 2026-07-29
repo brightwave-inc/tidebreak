@@ -46,6 +46,7 @@ function ProvidersSection() {
 
 function GatewaySection() {
   const { client, refreshCatalog } = useApp();
+  const policy = useManagedPolicy();
   const navigate = useNavigate();
   // Settings sections are registered from a runtime table, so TanStack's
   // generated route union contains `/settings` but not each literal child.
@@ -53,6 +54,8 @@ function GatewaySection() {
   return (
     <GatewayPanel
       client={client}
+      managed={policy.managed}
+      gatewayUrl={policy.gateway_url ?? null}
       onChanged={() => void refreshCatalog()}
       onOpenMcpSettings={() => void navigate({ to: mcpPath })}
     />
@@ -124,6 +127,9 @@ export type SettingsSectionDef = {
    * deep link or a stale history entry must land on something legible — and
    * the panel itself renders its locked state. */
   managedHidden?: boolean;
+  /** Kept out of the rail on an unmanaged profile, same deep-link contract:
+   * the route resolves and the panel renders its not-connected state. */
+  unmanagedHidden?: boolean;
 };
 
 /**
@@ -138,7 +144,13 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     Component: ProvidersSection,
     managedHidden: true,
   },
-  { path: "gateway", label: "Model Gateway", icon: Waypoints, Component: GatewaySection },
+  {
+    path: "gateway",
+    label: "Model Gateway",
+    icon: Waypoints,
+    Component: GatewaySection,
+    unmanagedHidden: true,
+  },
   { path: "models", label: "Models", icon: Cpu, Component: ModelsSection },
   { path: "web-search", label: "Web search", icon: Globe, Component: WebSearchSection },
   {
@@ -165,12 +177,14 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
  * A managed profile has no bring-your-own credentials to manage, so the
  * Providers section is dropped and the Model Gateway — the one place its
  * models and session come from — becomes the first section, and therefore
- * where settings opens.
+ * where settings opens. An unmanaged profile has no gateway at all — policy
+ * is the only gateway source, and connecting happens from the gateway's own
+ * page — so the Model Gateway section is dropped from its rail instead.
  */
 export function settingsSectionsFor(managed: boolean): SettingsSectionDef[] {
-  return managed
-    ? SETTINGS_SECTIONS.filter((section) => !section.managedHidden)
-    : SETTINGS_SECTIONS;
+  return SETTINGS_SECTIONS.filter((section) =>
+    managed ? !section.managedHidden : !section.unmanagedHidden,
+  );
 }
 
 export function defaultSettingsPathFor(managed: boolean): string {

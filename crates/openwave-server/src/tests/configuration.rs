@@ -1640,13 +1640,10 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         .save(&credentials)
         .await
         .unwrap();
-    providers::write_config(
+    providers::write_gateway_snapshot(
         &*store,
-        providers::ProviderKind::ModelGateway,
-        &providers::ProviderConfig {
-            enabled: true,
-            base_url: Some("https://corp.gateway/".to_string()),
-            vertex_location: None,
+        &providers::GatewayModelSnapshot {
+            gateway_url: "https://corp.gateway/".to_string(),
             // Flagship-first, as a gateway well might list them: chat takes
             // the gateway's first pick, utility must not.
             models: vec![
@@ -2109,7 +2106,9 @@ async fn a_managed_profile_offers_only_the_gateway_route() {
     }
 
     // Unmanaged control: the same store offers the BYOK routes, and the env
-    // fallback is honored — so the managed delta below is load-bearing.
+    // fallback is honored — so the managed delta below is load-bearing. The
+    // enabled legacy gateway row builds nothing even with a token source in
+    // hand: policy is the only gateway source in both directions.
     let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
         .await
         .unwrap();
@@ -2121,6 +2120,7 @@ async fn a_managed_profile_offers_only_the_gateway_route() {
             .collect();
     assert!(kinds.contains(&openwave_router::RouteKind::Anthropic));
     assert!(kinds.contains(&openwave_router::RouteKind::Gemini));
+    assert!(!kinds.contains(&openwave_router::RouteKind::ModelGateway));
 
     // Provisioned: only the gateway remains, aimed at the policy URL. The
     // stale stored row and every BYOK credential — stored or env — are inert.
@@ -2252,13 +2252,29 @@ async fn delete(router: &Router, bearer: &str, uri: &str) -> axum::response::Res
 }
 
 /// Every locked write path over the real routes: BYOK credential/endpoint
-/// writes, the legacy api-key shim, credential deletion, and a gateway
-/// re-point all refuse with the stable `managed_profile` kind — while an
-/// enable toggle and a same-gateway base URL write stay open.
+/// writes, the legacy api-key shim, and credential deletion refuse with the
+/// stable `managed_profile` kind — while an enable toggle stays open — and
+/// the model gateway kind refuses every write in every state with its own
+/// stable `gateway_policy` kind: policy is the only gateway source.
 #[tokio::test]
 async fn a_managed_profile_refuses_byok_and_gateway_repoint_writes() {
     let (router, token, store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");
+
+    // Unmanaged first: the retired additive configuration is not writable
+    // even on an open profile — there is no URL field to type into any more.
+    let response = put_json(
+        &router,
+        &bearer,
+        "/providers/model_gateway",
+        serde_json::json!({"enabled": true, "base_url": "https://byo.gateway"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let info: AgentErrorInfo = json_body(response).await;
+    assert_eq!(info.kind, "gateway_policy");
+    assert!(info.message.contains("pair via your gateway"));
+
     crate::managed_policy::provision(&*store, "https://corp.gateway")
         .await
         .unwrap();
@@ -2294,25 +2310,19 @@ async fn a_managed_profile_refuses_byok_and_gateway_repoint_writes() {
     .await;
     assert_eq!(response.status(), StatusCode::OK);
 
-    // The gateway base URL is locked to the policy URL: a re-point is refused,
-    // re-asserting the same gateway (modulo normalization) keeps the stored
-    // row in sync.
-    let response = put_json(
-        &router,
-        &bearer,
-        "/providers/model_gateway",
+    // Managed: still refused wholesale — a re-point, and even a write that
+    // matches the policy URL, because the row it would write no longer
+    // exists as a gateway source.
+    for body in [
         serde_json::json!({"base_url": "https://evil.example"}),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let response = put_json(
-        &router,
-        &bearer,
-        "/providers/model_gateway",
         serde_json::json!({"base_url": "https://corp.gateway"}),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
+        serde_json::json!({"enabled": false}),
+    ] {
+        let response = put_json(&router, &bearer, "/providers/model_gateway", body).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let info: AgentErrorInfo = json_body(response).await;
+        assert_eq!(info.kind, "gateway_policy");
+    }
 
     // The legacy api-key shim and credential deletion refuse the same way.
     let response = put_json(

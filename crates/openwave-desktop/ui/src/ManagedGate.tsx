@@ -227,23 +227,9 @@ export function ManagedGate({
     setWorking(true);
     setActionError(null);
     try {
-      // Converge the provider config to the policy's locked gateway before
-      // starting the flow: begin_sign_in refuses without a configured
-      // provider, and the gate blocks the settings route that could fix it.
-      // Convergence only ever writes the policy's own URL — toward the
-      // policy, never away from it.
-      const target = policy.gateway_url;
-      if (
-        target &&
-        (!status?.configured ||
-          !status.enabled ||
-          !sameGateway(status.base_url, target))
-      ) {
-        await client.putProvider("model_gateway", {
-          enabled: true,
-          base_url: target,
-        });
-      }
+      // Sign-in needs no provider convergence: the server derives the
+      // deployment from the policy itself, and the retired provider row is
+      // not writable at all.
       const started = await client.gatewaySignIn();
       await openSignInPage(started.authorization_url);
       await reload();
@@ -300,9 +286,9 @@ export function ManagedGate({
     return <BootScreen>starting…</BootScreen>;
   }
 
-  // The gate lifts only for a session on the policy's own gateway: signed_in
-  // reflects whatever provider URL is configured, which nothing pins to the
-  // policy yet. A session on any other deployment stays gated.
+  // The gate lifts only for a session on the policy's own gateway. The
+  // server already pins signed_in to the policy URL; the comparison stays as
+  // defense in depth for a renderer running against an older server.
   const lockedUrl = policy?.gateway_url ?? null;
   const sessionSatisfiesPolicy =
     status?.signed_in === true && sameGateway(status.base_url, lockedUrl);

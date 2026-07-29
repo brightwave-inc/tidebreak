@@ -737,12 +737,14 @@ pub struct ProvidersList {
     pub providers: Vec<ProviderInfo>,
 }
 
-/// `GET /providers` — every known provider kind and its current config.
+/// `GET /providers` — every known provider kind and its current config. The
+/// model gateway appears only on a managed profile, projected from policy.
 pub async fn list_providers(
     State(state): State<AppState>,
 ) -> Result<Json<ProvidersList>, ServerError> {
+    let policy = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
     Ok(Json(ProvidersList {
-        providers: providers::list_providers(&*state.store, &*state.secrets).await?,
+        providers: providers::list_providers(&*state.store, &*state.secrets, &policy).await?,
     }))
 }
 

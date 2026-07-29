@@ -6,9 +6,9 @@ import type { ApiClient, GatewayStatus, ManagedPolicy } from "./api";
 import { ManagedGate } from "./ManagedGate";
 import { useManagedPolicy } from "./managedPolicy";
 
-// The policy stores its URL normalized with a trailing slash; the provider
-// config carries what the user (or a convergence) saved, typically without.
-// The fixtures differ deliberately so every match exercises normalization.
+// The policy stores its URL normalized with a trailing slash; the status
+// echo may not. The fixtures differ deliberately so every match exercises
+// normalization.
 const managed: ManagedPolicy = {
   managed: true,
   gateway_url: "https://gateway.example/",
@@ -17,8 +17,6 @@ const managed: ManagedPolicy = {
 };
 
 const signedOut: GatewayStatus = {
-  configured: true,
-  enabled: true,
   base_url: "https://gateway.example",
   signed_in: false,
   model_count: 0,
@@ -90,8 +88,8 @@ describe("ManagedGate", () => {
 
     await user.click(screen.getByRole("button", { name: /Connect/ }));
     await waitFor(() => expect(client.gatewaySignIn).toHaveBeenCalled());
-    // The config already points at the policy gateway (modulo the trailing
-    // slash), so there is nothing to converge.
+    // Connecting is the sign-in flow alone: the deployment comes from the
+    // policy server-side, and the retired provider row is never written.
     expect(client.putProvider).not.toHaveBeenCalled();
     expect(open).toHaveBeenCalledWith(
       "http://gw/oauth/authorize?x=1",
@@ -204,36 +202,6 @@ describe("ManagedGate", () => {
     // What is shown is the device's managed gateway, not the stray config.
     expect(screen.getByText("https://gateway.example/")).toBeInTheDocument();
     expect(screen.queryByText(/other\.example/)).not.toBeInTheDocument();
-  });
-
-  it("connect on an unconfigured profile converges the provider to the policy gateway first", async () => {
-    const client = api({
-      getGatewayStatus: vi
-        .fn()
-        .mockResolvedValueOnce({
-          ...signedOut,
-          configured: false,
-          base_url: undefined,
-        })
-        .mockResolvedValue(signedOut),
-    });
-    vi.stubGlobal("open", vi.fn());
-    const user = userEvent.setup();
-    mount(client);
-
-    await screen.findByText("Sign in to continue");
-    await user.click(screen.getByRole("button", { name: /Connect/ }));
-
-    await waitFor(() => expect(client.gatewaySignIn).toHaveBeenCalled());
-    expect(client.putProvider).toHaveBeenCalledWith("model_gateway", {
-      enabled: true,
-      base_url: "https://gateway.example/",
-    });
-    // Converge first, then sign in — the other order still refuses.
-    const putOrder = vi.mocked(client.putProvider).mock.invocationCallOrder[0];
-    const signInOrder = vi.mocked(client.gatewaySignIn).mock
-      .invocationCallOrder[0];
-    expect(putOrder).toBeLessThan(signInOrder);
   });
 
   it("unmanaged profiles see the app untouched and no gateway traffic", async () => {

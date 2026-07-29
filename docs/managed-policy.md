@@ -49,3 +49,33 @@ the permissions are deployment guidance, not an enforced guarantee.
 
 An absent file means no OS policy; an unreadable or malformed file resolves
 managed-but-misconfigured, as above.
+
+## Developer flow — the sqlite policy toggle
+
+There is no unmanaged gateway settings surface: the hand-typed gateway URL
+field and the additive "use model gateway" toggle are retired, and policy is
+the only way a profile becomes gateway-connected. To exercise the real
+managed path against a local gateway without an MDM profile, write the same
+sticky provisioned state that deep-link pairing writes — the
+`managed_policy_v1` row in the profile database:
+
+```sh
+sqlite3 "<data dir>/openwave.db" \
+  "INSERT INTO setting(key, value_json) VALUES
+     ('managed_policy_v1', '{\"gateway_url\":\"http://127.0.0.1:8081\"}')
+   ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json;"
+```
+
+Policy is re-resolved on every read, so the profile turns managed
+(`source: provisioned`) on the next `/policy` read — sign-in, model sync,
+and routing all run the genuine managed path against the URL you provided.
+Delete the row to return to the open profile:
+
+```sh
+sqlite3 "<data dir>/openwave.db" \
+  "DELETE FROM setting WHERE key = 'managed_policy_v1';"
+```
+
+Note that an OS-managed (MDM) assertion always outranks this row, and a
+profile provisioned to one gateway refuses re-provisioning to another —
+delete the row first to switch deployments.
