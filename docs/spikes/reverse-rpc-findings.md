@@ -15,15 +15,17 @@ demonstrated by a passing test against a real framed transport and a real
 concurrent host and supervisor. None of them required exotic machinery; each
 falls out of the same envelope discipline `openwave-host-broker` already uses.
 
-The GO carries **one condition that #822 must discharge**, not a caveat that can
-be deferred: the operation-identity record and its recorded response must be
-*durable* and committed in the right order relative to the model call's external
-effect. The spike proves idempotency across a reconnect within a single host
-process; it does **not** prove it across a host crash, and a host crash mid-call
-reintroduces exactly the ambiguous-external-effect problem the run tier already
-fails conservatively on. This is a known, bounded piece of work with a clear
-shape (below), not an open research question — which is why the recommendation
-is GO rather than "GO if."
+The GO carries **a durable-storage condition #822 must discharge**, not a caveat
+that can be deferred. It has two co-equal parts, both about the operation log:
+(1) the operation-identity record and its recorded response must be *durable* and
+committed in the right order relative to the model call's external effect; and
+(2) that log must have a stated **retention** story, because a sandbox-resident
+loop makes it a high-cardinality per-step structure rather than the bounded
+receipt it resembles. The spike proves idempotency across a reconnect within a
+single host process; it does **not** prove it across a host crash (part 1), and
+its in-memory log is insert-only with no eviction (part 2). Both are known,
+bounded pieces of work with a clear shape (below), not open research questions —
+which is why the recommendation is GO rather than "GO if."
 
 ## What the prototype exercises
 
@@ -119,6 +121,51 @@ is durable state on the **run**, and it maps cleanly onto machinery
   counterpart to that resumable event stream — the host commits a response once,
   keyed by `OperationId`, and a re-delivery is answered from the commit.
 
+### Operation-log retention
+
+The commit-ordering problem above is one of **two** durable-storage design items
+#822 must own; this is the co-equal second, and neither the findings above nor
+sandbox-providers.md currently addresses it.
+
+The analogy to the run tier's "immutable typed receipt keyed by the child" holds
+for *shape* but breaks on *cardinality*, and the break matters. That receipt is
+bounded: one per attempt, a handful of children per run. The reverse-RPC
+operation log is not. A sandbox-resident **loop** issues a reverse model-inference
+request on every step, so a single run can produce thousands of distinct
+`OperationId`s, each with a recorded `Response`. The spike's insert-only
+`HashMap` retaining every full response body is therefore not a small version of
+the durable structure — it is a fundamentally higher-cardinality, unbounded-per-run
+one, and persisting it naively would grow the run row without limit and keep
+every model completion the run ever made.
+
+#822 must decide, explicitly, three things it can leave unstated today only
+because the spike is in-memory and short-lived:
+
+- **What bounds the log.** Is it size-bounded, count-bounded, or bounded by the
+  run's own lifetime? A sandbox-resident run is already bounded by its absolute
+  deadline, the provider lifetime cap, and the token lifetime (invariant 5), so
+  the log's worst case is finite — but "finite" at thousands of entries times a
+  full response body each is still a real storage cost that needs a stated cap.
+- **When a `Recorded` entry can be evicted.** The idempotency guarantee only has
+  to hold while the sandbox can still re-issue that `OperationId`. Once the
+  supervisor has acknowledged consuming the response — the same
+  consume-and-advance-a-cursor shape the event stream already uses — that
+  `OperationId` can never be re-issued, so its recorded entry is safe to evict.
+  This argues for an acknowledgement/cursor protocol on the reverse channel, not
+  an unbounded log: retention is keyed to un-acknowledged operations, not to the
+  whole run history.
+- **Whether the full `Response` body must be retained, or just a commit marker.**
+  Replay requires returning the recorded response *body*, so an un-acknowledged
+  entry must keep it. But an entry that must be retained past acknowledgement for
+  audit or accounting may only need a commit marker (`OperationId` + outcome
+  class + a spend/audit reference), not the completion text. Splitting "retained
+  for replay" from "retained for audit" is what keeps the durable log from
+  carrying every model completion verbatim for the run's whole life.
+
+This is a scoping addition, not a design the spike solves. The point is that the
+durable operation log is a higher-cardinality structure than the receipt it
+resembles, and #822 owns its retention story alongside its commit ordering.
+
 ## Cancellation and backpressure
 
 **Cancellation** (`Call::cancel` → `CancelFrame` → `CapabilityHost::cancel`)
@@ -162,6 +209,12 @@ paused host.
   repository-wide rule that ambiguous execution is failed, never replayed. The
   spike does not implement crash durability; it demonstrates the reconnect path
   the durable record would sit under.
+- **The operation log only grows.** The spike's log is a
+  `HashMap<OperationId, Arc<OperationEntry>>` that only ever inserts and retains
+  the full recorded `Response` per entry. That is fine for a spike but wrong for
+  a real run: it has no retention, eviction, or GC, and its cardinality is
+  fundamentally higher than the receipts it is analogized to (see the retention
+  section below).
 - **Single capability.** Only model inference is carried, as the issue scopes.
   The `ReverseRequest`/`ReverseResult` enums are `#[non_exhaustive]` and adding a
   capability (host search, consent prompt) is a variant plus a handler; the
@@ -188,8 +241,11 @@ either double-spend (re-execute a call that already ran) or lose work
 (fail a call that could have been recorded). It is the same class of problem the
 run tier already solved for result commit with an idempotency key and a
 single-predicate check, so the pattern to copy exists — but it must be built
-deliberately at the protocol step, not assumed. Everything else the spike
-touched was straightforward.
+deliberately at the protocol step, not assumed. Its co-equal companion is the
+operation log's **retention** story (above): a sandbox-resident loop makes the
+durable log a high-cardinality, per-step structure, so #822 owns both how the
+log commits and how it is bounded and evicted. Everything else the spike touched
+was straightforward.
 
 Had the spike been NO-GO, the design already names the cost:
 sandbox-resident runs would require a scoped-token issuer **even while
@@ -208,16 +264,22 @@ sandbox-resident runs can proxy inference through the host.
    external effect fails conservatively rather than re-executing, and the record
    is the run's, surviving any single connection. This is the biggest risk and
    the gating design decision.
-2. **A reserved control lane** for cancel and liveness, separate from the
+2. **Operation-log retention** (see the retention section). Co-equal with item 1:
+   bound the durable log, define when a `Recorded` entry is evictable (an
+   acknowledgement/cursor once the sandbox can no longer re-issue the
+   `OperationId`), and decide whether an entry retains the full `Response` body
+   or only a commit marker. The log is per-step and unbounded-per-run without
+   this, unlike the bounded receipt it resembles.
+3. **A reserved control lane** for cancel and liveness, separate from the
    request/response backlog, so cancellation and heartbeats are never subject to
    request backpressure.
-3. **Version negotiation** on connect, following the broker's exact-equality
+4. **Version negotiation** on connect, following the broker's exact-equality
    `PROTOCOL_VERSION` check (the spike checks equality per request; the protocol
    should also handshake on attach, as the broker's `Hello` does).
-4. **Capability grant provenance.** The spike takes a static grant set; the real
+5. **Capability grant provenance.** The spike takes a static grant set; the real
    host resolves grants per run at admission, deny-by-default, and audits each
    reverse operation with run provenance, as the reachability section requires
    for consent prompts.
-5. **Bounded results and frame-size limits** carried into the protocol
+6. **Bounded results and frame-size limits** carried into the protocol
    explicitly (the spike bounds frame size; the protocol should state per-capability
    result bounds as the broker states `MAX_*` limits).
