@@ -6945,6 +6945,7 @@ dependencies = [
  "openwave-router",
  "openwave-sandbox-agent",
  "openwave-sandbox-protocol",
+ "openwave-shell-policy",
  "openwave-web-search",
  "plist",
  "reqwest 0.12.28",
