@@ -79,9 +79,8 @@ pub(crate) fn install(app: &tauri::AppHandle) {
 }
 
 /// Handle every URL in one delivery. Only a link that parses as a provision
-/// link surfaces the window and starts the (confirmation-gated) pairing; a
-/// malformed link is logged bounded — never echoing the link — and changes
-/// nothing.
+/// link surfaces the window and registers the pending pairing; a malformed
+/// link is logged bounded — never echoing the link — and changes nothing.
 fn handle_deep_link_urls(app: &tauri::AppHandle, urls: &[tauri::Url]) {
     for url in urls {
         match provision_link(url) {
