@@ -144,6 +144,19 @@ test("Rust CI requires the same PostgreSQL lane on pull requests and main", () =
   assert.match(testJob, /cache-on-failure: true/);
 });
 
+test("UI tests and production build run as parallel matrix jobs", () => {
+  const ci = workflows["ci.yml"];
+  const ui = workflowJob(ci, "ui");
+  const aggregate = workflowJob(ci, "rust");
+
+  assert.match(ui, /name: desktop UI · \$\{\{ matrix\.task \}\}/);
+  assert.match(ui, /strategy:\n\s+fail-fast: false\n\s+matrix:\n\s+task: \[test, build\]/);
+  assert.match(ui, /run: pnpm install --frozen-lockfile/);
+  assert.match(ui, /run: pnpm \$\{\{ matrix\.task \}\}/);
+  assert.match(aggregate, /UI_RESULT: \$\{\{ needs\.ui\.result \}\}/);
+  assert.match(aggregate, /true\) test "\$UI_RESULT" = success ;;/);
+});
+
 test("heavy capability lanes run only for relevant merges and scheduled backstops", () => {
   const ci = workflows["ci.yml"];
   const changes = workflowJob(ci, "changes");
