@@ -2045,15 +2045,22 @@ pub async fn post_message(
         existing.model
     } else {
         let selected = resolve_chat_model(&*state.store, &chat, &state.agent_config.model).await?;
-        // The same managed re-route the roles read applies, so the model a
-        // client labeled as the default is the model this freeze lands on. A
-        // managed profile with nothing entitled keeps the raw selection, and
-        // validation refuses it with the real reason.
+        // The managed re-route the roles read applies, on exactly the domain
+        // that read labels: the role default, and only for a managed profile.
+        // Unmanaged sends pass through untouched — free-form ids included —
+        // and a per-chat override is the user's explicit pick, so a dead one
+        // gets the honest validation refusal below rather than a silent swap
+        // out from under the label the pill still shows; the picker offers
+        // only gateway models to fix it. A managed profile with nothing
+        // entitled also keeps the raw selection, refused with the real reason.
         let managed = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
-        let selected =
+        let selected = if managed.managed && chat.model.is_none() {
             model_roles::effective_chat_policy(&*state.store, &*state.secrets, &managed, &selected)
                 .await?
-                .map_or(selected, |policy| policy.key);
+                .map_or(selected, |policy| policy.key)
+        } else {
+            selected
+        };
         validate_model_selection(&state, &selected, true).await?
     };
     let images = resolve_message_attachments(&state, &body.attachments).await?;

@@ -174,7 +174,6 @@ const managedRoles: ModelRoleInfo[] = [
 ];
 
 describe("ModelsPanel under managed policy", () => {
-
   it("offers one flat entitled list per role and reads a dead pin as automatic", async () => {
     const listModels = vi
       .fn()

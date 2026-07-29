@@ -284,21 +284,26 @@ function ManagedModelRoleRow({
     selected.provider === "model_gateway" &&
     selected.available;
   const deadPin = !gatewayServed && info.selection !== null;
+  // The kept-and-restored story belongs to a BYOK pin surviving managed mode.
+  // A gateway pin that is merely unavailable — signed out, say — has no such
+  // story, so it gets no notice.
+  const keptByokPin =
+    deadPin && selected !== null && selected.provider !== "model_gateway";
   const automatic = automaticLabel(models, info);
+  const selectValue =
+    gatewayServed && selected ? selected.key : deadPin ? "" : AUTOMATIC;
 
   return (
     <SettingsSection title={title}>
       <p className="text-sm text-muted-foreground">{hint}</p>
-      {deadPin && (
+      {keptByokPin && (
         <p className="text-sm text-muted-foreground">
-          {`Your previous ${
-            selected ? `${providerLabel(selected.provider)} ` : ""
-          }selection is kept and restored if this device leaves managed mode — picking a model here replaces it.`}
+          {`Your previous ${providerLabel(selected.provider)} selection is kept and restored if this device leaves managed mode — picking a model here replaces it.`}
         </p>
       )}
       <SettingsField label="Model">
         <Select
-          value={gatewayServed && selected ? selected.key : deadPin ? "" : AUTOMATIC}
+          value={selectValue}
           disabled={
             saving ||
             entitled.length === 0 ||

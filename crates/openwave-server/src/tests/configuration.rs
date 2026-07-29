@@ -1603,6 +1603,25 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
     )
     .await;
     assert_eq!(pinned.status(), StatusCode::OK);
+    // A chat with its own explicit override, created while OpenAI could still
+    // serve it — the re-route must not cover it after the flip.
+    let overridden_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/chats")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"model": "openai::gpt-5.6-sol"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(overridden_response.status(), StatusCode::CREATED);
+    let overridden: Chat = json_body(overridden_response).await;
 
     crate::managed_policy::provision(&*store, "https://corp.gateway")
         .await
@@ -1685,6 +1704,15 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
     assert_eq!(
         store.get_turn_run(turn_id).await.unwrap().unwrap().model,
         "model_gateway::gateway-flagship"
+    );
+
+    // The re-route covers exactly what the roles read labels: the default. A
+    // per-chat override is the user's explicit pick, and its pill still names
+    // it — a dead one is refused honestly rather than silently swapped, and
+    // the picker offers only gateway models to fix it.
+    assert_eq!(
+        send_message_with_id(&router, &bearer, overridden.id, TurnId::new(), "hello").await,
+        StatusCode::CONFLICT
     );
 }
 
