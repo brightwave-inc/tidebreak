@@ -137,7 +137,13 @@ impl AppState {
         }
         let blobs: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(config.data_dir.join("blobs")));
         let blob_writes = Arc::new(BlobWriteGuard::new(config.data_dir.join("blob-locks")));
-        let gateway = crate::gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone());
+        let os_policy: Arc<dyn crate::managed_policy::OsPolicySource> =
+            Arc::new(crate::managed_policy::NoOsPolicy);
+        let gateway = crate::gateway_runtime::GatewayRuntime::new(
+            store.clone(),
+            secrets.clone(),
+            os_policy.clone(),
+        );
         let mcp = Arc::new(McpRuntime::new(
             tools.clone(),
             store.clone(),
@@ -152,7 +158,7 @@ impl AppState {
             tools,
             mcp,
             gateway,
-            os_policy: Arc::new(crate::managed_policy::NoOsPolicy),
+            os_policy,
             retrieval,
             document_job_wake: Arc::new(Notify::new()),
             turn_job_wake: Arc::new(Notify::new()),

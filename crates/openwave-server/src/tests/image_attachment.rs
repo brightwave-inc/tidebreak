@@ -576,7 +576,12 @@ async fn a_turn_carrying_images_against_a_text_only_model_is_refused() {
         Arc::new(resolver::ConfiguredResolver::new(
             store.clone(),
             secrets.clone(),
-            crate::gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone()),
+            crate::gateway_runtime::GatewayRuntime::new(
+                store.clone(),
+                secrets.clone(),
+                Arc::new(crate::managed_policy::NoOsPolicy),
+            ),
+            Arc::new(crate::managed_policy::NoOsPolicy),
         )),
         secrets,
         Arc::new(ToolRegistry::new()),
@@ -684,7 +689,12 @@ async fn a_curated_openai_model_answers_after_receiving_png_and_jpeg_attachments
         Arc::new(resolver::ConfiguredResolver::new(
             store.clone(),
             secrets.clone(),
-            crate::gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone()),
+            crate::gateway_runtime::GatewayRuntime::new(
+                store.clone(),
+                secrets.clone(),
+                Arc::new(crate::managed_policy::NoOsPolicy),
+            ),
+            Arc::new(crate::managed_policy::NoOsPolicy),
         )),
         secrets,
         Arc::new(ToolRegistry::new()),
