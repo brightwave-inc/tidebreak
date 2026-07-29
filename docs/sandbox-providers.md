@@ -540,7 +540,17 @@ The implementation is intentionally incremental:
    shipped in this step against an in-process reference backend, and run in
    CI against the local container backend from the next step onward. This
    step exists whether or not the spike says go; its reverse-RPC surface is
-   shaped by the spike's outcome.
+   shaped by the spike's outcome. *(Contract, reference backend, and
+   conformance suite shipped — the `openwave-sandbox-protocol` crate:
+   `PROTOCOL_VERSION` with an exact-equality check and an attach handshake,
+   deny-by-default capability grants with run provenance, a reserved control
+   lane for cancel/liveness, the resumable event-cursor contract, artifact
+   collection, and reverse-RPC model inference with an operation-identity log.
+   The protocol is declared UNSTABLE until a named release. The crash-safe
+   durable operation log (#858) and its retention/eviction (#859) are split
+   out as correctness-critical follow-ups so each gets a focused review; the
+   protocol ships an in-memory `OperationStore` behind the seam they plug
+   into.)*
 7. Sandbox-resident agent runs, in order:
    1. Local container first, attached-only — no vendor account, the
       development loop for everything after, and the reference a
@@ -632,7 +642,14 @@ Consistent with the repository's testing policy, the CI artifact for the
 protocol is one conformance suite, shipped with the protocol step against an
 in-process reference backend and run against the local container backend
 once it exists, including the semantics cases listed in the delivery
-sequence. The managed adapters keep their existing CI coverage through
+sequence. That suite has landed in `openwave-sandbox-protocol` (the
+`conformance` module, surfaced as `tests/conformance.rs`): it covers version-
+mismatch refusal, deny-by-default, the resumable event-cursor contract and
+buffer-overflow checkpointing, reverse-RPC correlation / cancellation /
+disconnect-reissue and operation-id conflict, the provision/address/destroy
+decomposition with the self-hosted backend as the no-special-case test, and
+artifact collection. Re-pointing those scenarios at the local container
+backend is the next step's work; the assertions do not change. The managed adapters keep their existing CI coverage through
 injected HTTP seams; what stays out of CI is live vendor exercise, which
 needs paid accounts and credentials, is unrunnable on forks, and flakes.
 Live verification is out-of-band with repository secrets. Bounding coverage
