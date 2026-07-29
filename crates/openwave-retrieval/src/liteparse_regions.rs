@@ -21,6 +21,11 @@
 //! reflowed table rows) simply get no rectangle. Every page is tiled either
 //! way, so text a scan could not place still resolves to its page, and only
 //! the finer geometry is lost.
+//!
+//! Regions are per **block** — paragraph, heading, table — with the block's
+//! rectangle taken as the union of the lines located inside it. That is the
+//! unit a reader points at, and it keeps a citation from highlighting one
+//! clipped line out of the middle of a paragraph.
 
 use liteparse::types::Rect;
 use liteparse::ParseResult;
@@ -39,7 +44,8 @@ const PAGE_SEPARATOR: &str = "\n\n-----\n\n";
 /// document of dense tables carries tens of thousands of rectangles, each of
 /// which is read and rewritten on every chunking pass. A page that overruns
 /// this keeps its page-level region and loses its geometry — pages that dense
-/// are ones where a per-line highlight would be noise anyway.
+/// are ones where a highlight would be noise anyway. Blocks rather than lines
+/// keep ordinary pages an order of magnitude below this.
 const MAX_POSITIONED_REGIONS_PER_PAGE: usize = 256;
 
 /// One page's contribution to canonical text, with the lines found on it.
@@ -153,8 +159,14 @@ fn source_regions(text: &str, pages: &[PagePiece<'_>]) -> Vec<SourceRegion> {
 
 /// Tile one page's span with regions, positioned where its lines were found.
 ///
-/// The result covers the page's whole span with no gaps and no overlaps: the
-/// lines the scan placed carry their rectangle, and everything between them is
+/// The unit is the block — a paragraph, a heading, a table — not the individual
+/// line. A block is what a reader points at and what the rest of the product
+/// treats as one element, so a citation landing anywhere inside a paragraph
+/// highlights the paragraph rather than the one line it clipped. Lines are only
+/// the means of locating the block and measuring its extent.
+///
+/// The result covers the page's whole span with no gaps and no overlaps: blocks
+/// whose lines the scan placed carry a rectangle, and everything else is
 /// covered by a region that names only the page.
 fn tile_page(
     page_start: usize,
@@ -170,7 +182,7 @@ fn tile_page(
     // Locate each line in the emitted Markdown with a forward-only cursor.
     // Forward-only is what keeps a repeated line ("Total", a page header) from
     // matching an earlier occurrence that another line already claimed.
-    let mut placed: Vec<(usize, usize, PageBounds)> = Vec::new();
+    let mut placed: Vec<(usize, PageBounds)> = Vec::new();
     let mut cursor = 0usize;
     for line in &page.lines {
         let needle = line.text.trim();
@@ -181,18 +193,40 @@ fn tile_page(
             continue;
         };
         let start = cursor + at;
-        placed.push((start, start + needle.len(), line.bounds));
+        placed.push((start, line.bounds));
         cursor = start + needle.len();
-        if placed.len() == MAX_POSITIONED_REGIONS_PER_PAGE {
-            // Too dense to be worth positioning: fall back to a bare page.
-            return vec![region(0, markdown.len(), None)];
+    }
+
+    // Attribute each located line to the block it landed in, and take the
+    // block's rectangle as the union of theirs. A block whose lines were only
+    // partly placed still gets a rectangle covering what was found.
+    let mut positioned: Vec<(usize, usize, PageBounds)> = Vec::new();
+    let mut lines = placed.into_iter().peekable();
+    for (start, end) in block_spans(markdown) {
+        let mut bounds: Option<PageBounds> = None;
+        // Lines and blocks are both in ascending order, so this walks each once.
+        while lines.peek().is_some_and(|(at, _)| *at < end) {
+            let (at, line_bounds) = lines.next().expect("peeked");
+            if at >= start {
+                bounds = Some(match bounds {
+                    Some(existing) => union(existing, line_bounds),
+                    None => line_bounds,
+                });
+            }
         }
+        if let Some(bounds) = bounds {
+            positioned.push((start, end, bounds));
+        }
+    }
+    if positioned.len() > MAX_POSITIONED_REGIONS_PER_PAGE {
+        // Too dense to be worth positioning: fall back to a bare page.
+        return vec![region(0, markdown.len(), None)];
     }
 
     // Fill the gaps so the page's span stays fully covered.
-    let mut regions = Vec::with_capacity(placed.len() * 2 + 1);
+    let mut regions = Vec::with_capacity(positioned.len() * 2 + 1);
     let mut filled = 0usize;
-    for (start, end, bounds) in placed {
+    for (start, end, bounds) in positioned {
         if start > filled {
             regions.push(region(filled, start, None));
         }
@@ -203,6 +237,52 @@ fn tile_page(
         regions.push(region(filled, markdown.len(), None));
     }
     regions
+}
+
+/// The spans of the blocks in one page's Markdown.
+///
+/// Blocks are separated by a blank line, which is how the emitter delimits
+/// paragraphs, headings, list items and tables. The separators themselves are
+/// left out, so they fall to the page-only fill.
+fn block_spans(markdown: &str) -> Vec<(usize, usize)> {
+    let bytes = markdown.as_bytes();
+    let mut spans = Vec::new();
+    let mut start = 0usize;
+    let mut index = 0usize;
+    // Scanning bytes is UTF-8 safe here: `\n` cannot occur inside a multi-byte
+    // sequence, so every offset found is a character boundary.
+    while index + 1 < bytes.len() {
+        if bytes[index] == b'\n' && bytes[index + 1] == b'\n' {
+            if index > start {
+                spans.push((start, index));
+            }
+            while index < bytes.len() && bytes[index] == b'\n' {
+                index += 1;
+            }
+            start = index;
+        } else {
+            index += 1;
+        }
+    }
+    if start < markdown.len() {
+        spans.push((start, markdown.len()));
+    }
+    spans
+}
+
+/// The smallest rectangle containing both.
+fn union(a: PageBounds, b: PageBounds) -> PageBounds {
+    let left = a.left.min(b.left);
+    let top = a.top.min(b.top);
+    // No overflow: both operands are valid, so each edge is within the page.
+    let right = (a.left + a.width).max(b.left + b.width);
+    let bottom = (a.top + a.height).max(b.top + b.height);
+    PageBounds {
+        left,
+        top,
+        width: right - left,
+        height: bottom - top,
+    }
 }
 
 #[cfg(test)]
@@ -317,10 +397,11 @@ mod tests {
     }
 
     #[test]
-    fn located_lines_carry_bounds_and_unmatched_text_still_carries_its_page() {
-        // "middle" is not among the lines: it stands for the emitter's own
-        // output (a rewritten bullet, a rule) that no line will ever match.
-        let markdown = "alpha middle omega";
+    fn located_blocks_carry_bounds_and_unplaced_blocks_still_carry_their_page() {
+        // Three blocks; only the first and last have a line the scan can place.
+        // The middle one stands for emitter output (a rewritten bullet, a rule)
+        // that no line will ever match.
+        let markdown = "alpha\n\nmiddle\n\nomega";
         let text = markdown.to_string();
         let regions = source_regions(
             &text,
@@ -349,9 +430,67 @@ mod tests {
             sliced,
             vec![
                 ("alpha", Some(bounds(0, 0))),
-                (" middle ", None),
+                ("\n\nmiddle\n\n", None),
                 ("omega", Some(bounds(0, 500))),
             ]
+        );
+    }
+
+    #[test]
+    fn a_block_takes_the_rectangle_covering_every_line_placed_in_it() {
+        // One paragraph over three lines: a citation clipping any of them
+        // should mark the paragraph, not the single line it happened to hit.
+        let markdown = "first line\nsecond line\nthird line";
+        let text = markdown.to_string();
+        let regions = source_regions(
+            &text,
+            &[PagePiece {
+                number: 1,
+                markdown,
+                lines: vec![
+                    PositionedLine {
+                        text: "first line",
+                        bounds: PageBounds {
+                            left: 1_000,
+                            top: 1_000,
+                            width: 500,
+                            height: 100,
+                        },
+                    },
+                    PositionedLine {
+                        text: "second line",
+                        bounds: PageBounds {
+                            left: 1_000,
+                            top: 1_200,
+                            width: 800,
+                            height: 100,
+                        },
+                    },
+                    PositionedLine {
+                        text: "third line",
+                        bounds: PageBounds {
+                            left: 900,
+                            top: 1_400,
+                            width: 400,
+                            height: 100,
+                        },
+                    },
+                ],
+            }],
+        );
+
+        assert_tiles(&text, &regions);
+        assert_eq!(regions.len(), 1);
+        assert_eq!(
+            page_of(&regions[0]).1,
+            // Leftmost edge, topmost edge, out to the widest line's right edge
+            // and down to the last line's bottom.
+            Some(PageBounds {
+                left: 900,
+                top: 1_000,
+                width: 900,
+                height: 500,
+            })
         );
     }
 
@@ -359,8 +498,8 @@ mod tests {
     fn a_repeated_line_matches_forward_rather_than_reclaiming_an_earlier_one() {
         // Page headers and "Total" rows repeat. A backward match would give the
         // second occurrence the first one's rectangle — a highlight in the
-        // wrong place on the page.
-        let markdown = "Total x Total";
+        // wrong place on the page. Separate blocks so each keeps its own.
+        let markdown = "Total\n\nTotal";
         let text = markdown.to_string();
         let regions = source_regions(
             &text,
@@ -385,16 +524,18 @@ mod tests {
         assert_eq!(regions[0].span, ByteSpan::new(0, 5));
         assert_eq!(page_of(&regions[0]).1, Some(bounds(0, 0)));
         // The second "Total" is the one at the end of the page, not the start.
-        assert_eq!(regions[2].span, ByteSpan::new(8, 13));
+        assert_eq!(regions[2].span, ByteSpan::new(7, 12));
         assert_eq!(page_of(&regions[2]).1, Some(bounds(0, 900)));
     }
 
     #[test]
     fn a_page_too_dense_to_position_keeps_its_page_and_drops_its_geometry() {
+        // One block per cell, which is what a dense table page looks like once
+        // the emitter is done with it.
         let words: Vec<String> = (0..MAX_POSITIONED_REGIONS_PER_PAGE + 10)
             .map(|i| format!("w{i}"))
             .collect();
-        let markdown = words.join(" ");
+        let markdown = words.join("\n\n");
         let text = markdown.clone();
         let regions = source_regions(
             &text,
