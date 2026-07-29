@@ -658,7 +658,7 @@ impl Store for DbStore {
     }
 
     async fn upsert_document(&self, document: &DocumentUpsert) -> Result<DocumentRecord> {
-        validate_document_source_regions(&document.canonical_text, &document.source_regions)?;
+        validate_document_upsert(document)?;
         loop {
             let transaction = self.conn.begin().await.map_err(store_err)?;
             ops::require_document_scope_write_lock(
@@ -686,7 +686,7 @@ impl Store for DbStore {
         pipeline_fingerprint: &str,
         max_attempts: i32,
     ) -> Result<(DocumentRecord, DocumentJob)> {
-        validate_document_source_regions(&document.canonical_text, &document.source_regions)?;
+        validate_document_upsert(document)?;
         if pipeline_fingerprint.is_empty()
             || pipeline_fingerprint.chars().count() > DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN
         {
@@ -3512,7 +3512,7 @@ fn document_upsert_matches(current: &entities::document::Model, document: &Docum
     current.source_blob_id.is_none()
         && current.source_sha256.is_none()
         && current.source_byte_len.is_none()
-        && current.canonical_fingerprint.is_none()
+        && current.canonical_fingerprint == document.canonical_fingerprint
         && current.chat_id == document.chat_id.map(|id| id.0)
         && current.project_id == document.project_id.map(|id| id.0)
         && current.source_uri == document.source_uri
@@ -3665,10 +3665,13 @@ where
         .await
         .map_err(store_err)?;
     if let Some(existing) = existing.as_ref() {
+        // The retained blob is what makes a document a raw source, and reparsing
+        // one is the staged workflow's job. A canonical fingerprint alone does
+        // not: this path can carry one, and a caller who wrote text with a
+        // producer stamp must be able to write it again.
         if existing.source_blob_id.is_some()
             || existing.source_sha256.is_some()
             || existing.source_byte_len.is_some()
-            || existing.canonical_fingerprint.is_some()
         {
             return Err(AgentError::Store(
                 "raw-source documents require the staged source workflow".into(),
@@ -3723,6 +3726,10 @@ where
             .col_expr(
                 entities::document::Column::CanonicalText,
                 sea_orm::sea_query::Expr::value(document.canonical_text.clone()),
+            )
+            .col_expr(
+                entities::document::Column::CanonicalFingerprint,
+                sea_orm::sea_query::Expr::value(document.canonical_fingerprint.clone()),
             )
             .col_expr(
                 entities::document::Column::SourceRegions,
@@ -3784,7 +3791,7 @@ where
         source_sha256: Set(None),
         source_byte_len: Set(None),
         canonical_text: Set(document.canonical_text.clone()),
-        canonical_fingerprint: Set(None),
+        canonical_fingerprint: Set(document.canonical_fingerprint.clone()),
         source_regions: Set(source_regions_to_db(&document.source_regions)),
         content_revision: Set(advanced.current.content_revision),
         revision_token: Set(advanced.current.revision_token),
@@ -3897,6 +3904,25 @@ fn validate_project_attachments(project: &Project) -> Result<()> {
 fn validate_document_source_regions(text: &str, regions: &[SourceRegion]) -> Result<()> {
     crate::model::validate_source_regions(text, regions)
         .map_err(|message| AgentError::Store(format!("invalid document source regions: {message}")))
+}
+
+/// Semantic checks a canonical-text upsert must pass before it can take a
+/// generation, so a rejected write never advances the revision clock.
+fn validate_document_upsert(document: &DocumentUpsert) -> Result<()> {
+    validate_document_source_regions(&document.canonical_text, &document.source_regions)?;
+    if document
+        .canonical_fingerprint
+        .as_deref()
+        .is_some_and(|value| {
+            value.is_empty()
+                || value.chars().count() > crate::model::DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN
+        })
+    {
+        return Err(AgentError::Store(
+            "document canonical fingerprint must contain 1 to 512 characters".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_document_source_blob(blob: &DocumentSourceBlob) -> Result<i64> {
@@ -4022,7 +4048,7 @@ fn document_from_upsert(
         title: document.title.clone(),
         source_blob: None,
         canonical_text: document.canonical_text.clone(),
-        canonical_fingerprint: None,
+        canonical_fingerprint: document.canonical_fingerprint.clone(),
         source_regions: document.source_regions.clone(),
         content_revision,
         revision_token,

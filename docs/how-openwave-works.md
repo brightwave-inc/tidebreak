@@ -791,7 +791,10 @@ when it has intentionally stopped at the newest 1,000 records.
 The chat's `list_sources`, `read_source`, and `search` tools can see only
 documents owned by that exact conversation. Direct reads become available as
 soon as parsing publishes canonical text, without waiting for embedding, and
-produce the same durable grounded-citation evidence as semantic search.
+produce the same durable grounded-citation evidence as semantic search. A page
+fetched by `web_extract` becomes one of those documents, so a claim drawn from
+the public web is anchored and reopenable on the same terms as one drawn from an
+imported file; it arrives already parsed, so it is citable immediately.
 Conversationless legacy documents, project-scoped documents, and sources owned
 by other chats are not reachable through the current desktop journey.
 

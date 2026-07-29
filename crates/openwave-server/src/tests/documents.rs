@@ -2417,6 +2417,7 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() 
         .await
         .unwrap(),
     );
+    let extract_store = store.clone();
     let (_retrieval, mut tools, config) = agent_deps(
         Arc::new(HashEmbedder::default()),
         Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
@@ -2425,10 +2426,13 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() 
             store.clone(),
             Arc::new(MemSecrets::default()),
         )),
-        Box::new(web_search::foreground_extract_tool(
-            store.clone(),
-            Arc::new(MemSecrets::default()),
-        )),
+        |retrieval| {
+            Box::new(web_search::foreground_extract_tool(
+                extract_store,
+                Arc::new(MemSecrets::default()),
+                retrieval.index_fingerprint(),
+            ))
+        },
         store,
     );
     assert!(

@@ -6992,6 +6992,7 @@ dependencies = [
  "tokio",
  "ts-rs",
  "url",
+ "uuid",
 ]
 
 [[package]]

@@ -112,6 +112,13 @@ export type DocumentDetail = {
   title: string | null;
   processing_status: DocumentProcessingStatus;
   searchable: boolean;
+  /**
+   * Whether the source kept the bytes it was made from. A source with none —
+   * a fetched web page, whose markup is not retained — has no original to draw,
+   * so the panel offers only the extracted text rather than a tab that can
+   * only fail.
+   */
+  has_original_bytes: boolean;
   updated_at: string;
   content: string;
 };

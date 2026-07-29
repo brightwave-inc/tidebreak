@@ -104,6 +104,7 @@ function detail(overrides: Partial<DocumentDetail> = {}): DocumentDetail {
     title: "Floor plan.png",
     processing_status: "ready",
     searchable: false,
+    has_original_bytes: true,
     updated_at: "2026-07-24T00:00:00Z",
     content: "",
     ...overrides,
@@ -292,6 +293,26 @@ describe("DocumentDetailRoot", () => {
     expect(await screen.findByText("Subject: quarterly numbers")).toBeVisible();
     expect(screen.queryByRole("tab", { name: "Original document" })).toBeNull();
     // Nothing is going to draw those bytes, so nothing should pull them over.
+    expect(client.getChatDocumentFile).not.toHaveBeenCalled();
+  });
+
+  // A fetched web page is stored as the readable text extraction produced; the
+  // markup it came from is not kept. Its media type says `text/markdown`, which
+  // a viewer would happily accept, so the tab has to be gated on whether there
+  // are bytes rather than on whether something could draw them.
+  it("offers no original for a source that retained no bytes", async () => {
+    const { client } = await openPanel(
+      detail({
+        media_type: "text/markdown",
+        title: "Ownership Explained",
+        has_original_bytes: false,
+        content: "Ownership moves.",
+        searchable: true,
+      }),
+    );
+
+    expect(await screen.findByText("Ownership moves.")).toBeVisible();
+    expect(screen.queryByRole("tab", { name: "Original document" })).toBeNull();
     expect(client.getChatDocumentFile).not.toHaveBeenCalled();
   });
 
