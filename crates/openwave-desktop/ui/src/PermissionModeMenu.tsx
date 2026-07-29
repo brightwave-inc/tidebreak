@@ -1,5 +1,6 @@
 import { Check, ChevronDown, ShieldCheck, Sparkles, Zap } from "lucide-react";
 import type { PermissionMode } from "./api";
+import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -64,6 +65,11 @@ export function permissionModeOption(mode: PermissionMode | null) {
  * reads as Ask; selecting Ask stores the explicit token rather than clearing,
  * so a chat that was deliberately dialed back stays that way if the default
  * ever changes.
+ *
+ * An elevated mode accents the trigger's text and icon rather than its
+ * background: the row reads as one set of controls, and the one that has been
+ * dialed up should stand out within it without becoming a second kind of
+ * object.
  */
 export function PermissionModeMenu({
   value,
@@ -79,64 +85,56 @@ export function PermissionModeMenu({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          className="model-menu-trigger"
+        <Button
+          variant="ghost"
+          className={cn("h-8 gap-1.5", current.elevated && "text-warning-foreground")}
           disabled={disabled}
           aria-label={`Permissions: ${current.label}`}
-          title={`Permissions: ${current.label}`}
         >
           <CurrentIcon
-            className={cn("size-3.5", current.elevated && "text-warning")}
-          />
-          <span
             className={cn(
-              "model-menu-label",
-              current.elevated && "text-warning",
+              "size-4",
+              current.elevated ? "text-warning-foreground" : "text-muted-foreground",
             )}
-          >
-            {current.label}
-          </span>
-          <ChevronDown className="size-3.5" />
-        </button>
+          />
+          {current.label}
+          <ChevronDown className="size-4 opacity-50" />
+        </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align="start"
-        side="top"
-        className="model-menu-content w-80 overflow-y-auto p-0"
-      >
-        <div className="flex flex-col gap-1 p-1">
-          {PERMISSION_MODE_SCALE.map((option) => {
-            const selected = current.value === option.value;
-            const OptionIcon = option.icon;
-            return (
-              <DropdownMenuItem
-                key={option.value}
-                disabled={disabled}
-                onSelect={(event) => {
-                  event.preventDefault();
-                  if (selected) return;
-                  void onChange(option.value);
-                }}
-                className="flex items-start gap-2"
-              >
-                <OptionIcon
-                  className={cn(
-                    "mt-0.5 size-4 shrink-0",
-                    option.elevated && "text-warning",
-                  )}
-                />
-                <span className="flex min-w-0 flex-col">
-                  <span className="text-sm">{option.label}</span>
-                  <span className="text-muted-foreground text-xs">
-                    {option.description}
-                  </span>
+      <DropdownMenuContent align="end" side="top" className="w-72">
+        {PERMISSION_MODE_SCALE.map((option) => {
+          const selected = current.value === option.value;
+          const OptionIcon = option.icon;
+          return (
+            <DropdownMenuItem
+              key={option.value}
+              disabled={disabled}
+              onSelect={() => {
+                if (selected) return;
+                void onChange(option.value);
+              }}
+              className="flex flex-col items-start gap-0.5 py-3"
+            >
+              <div className="flex w-full items-center justify-between">
+                <span className="flex items-center gap-2 font-medium">
+                  <OptionIcon
+                    className={cn(
+                      "size-4",
+                      option.elevated
+                        ? "text-warning-foreground"
+                        : "text-muted-foreground",
+                    )}
+                  />
+                  {option.label}
                 </span>
-                {selected && <Check className="ml-auto size-4 shrink-0" />}
-              </DropdownMenuItem>
-            );
-          })}
-        </div>
+                {selected && <Check className="size-4" />}
+              </div>
+              <span className="text-muted-foreground pl-6 text-xs">
+                {option.description}
+              </span>
+            </DropdownMenuItem>
+          );
+        })}
       </DropdownMenuContent>
     </DropdownMenu>
   );

@@ -1552,39 +1552,15 @@ body {
 .composer-actions-left {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.5rem;
   min-width: 0;
 }
 
 .composer-actions-right {
   display: flex;
   align-items: center;
-  gap: 0.45rem;
+  gap: 0.5rem;
   margin-left: auto;
-}
-
-.composer-attach {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 2rem;
-  height: 2rem;
-  flex: 0 0 auto;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 0;
-  color: var(--muted-foreground);
-  background: transparent;
-}
-
-.composer-attach:hover:not(:disabled) {
-  color: var(--ink);
-  background: var(--muted);
-}
-
-.composer-attach:disabled {
-  opacity: 0.45;
-  cursor: wait;
 }
 
 .composer-source {
@@ -1787,42 +1763,6 @@ body {
 }
 
 /* ---------- Model menu (composer) ---------- */
-
-.model-menu-trigger {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  max-width: 14rem;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 0.25rem 0.6rem;
-  background: transparent;
-  color: var(--muted-foreground);
-  font-size: 0.8rem;
-  font-weight: 500;
-  transition: color 120ms ease, background-color 120ms ease,
-    border-color 120ms ease;
-}
-
-.model-menu-trigger:hover:not(:disabled) {
-  color: var(--ink);
-  background: var(--accent);
-}
-
-.model-menu-trigger:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.model-menu-trigger svg {
-  flex: 0 0 auto;
-}
-
-.model-menu-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
 .model-menu-content {
   /* Bounded by the space Radix measured between the trigger and the viewport

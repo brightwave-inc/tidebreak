@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { Atom, Check, ChevronDown, Gauge, Info } from "lucide-react";
 import type { ModelInfo, ModelSelectionKey, ProviderKind, ReasoningEffort } from "./api";
 import { canonicalModelSelection, modelForSelection } from "./ModelSelection";
+import { Button } from "@/components/ui/button";
 import { ProviderIcon } from "./ProviderIcons";
 import {
   DropdownMenu,
@@ -172,12 +174,17 @@ export function ModelMenu({
   // the model was chosen here or inherited.
   const pillModel = known ?? (isDefault ? resolvedDefault : null);
 
+  // Controlled so every path that changes the chat's model closes the menu —
+  // including the Default switch, which is a selection like any row but is not
+  // a menu item Radix would close for us.
+  const [open, setOpen] = useState(false);
+
   return (
-    <DropdownMenu>
+    <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          className="model-menu-trigger"
+        <Button
+          variant="ghost"
+          className="h-8 max-w-56 gap-2"
           disabled={disabled}
           aria-label={triggerLabel}
           title={triggerLabel}
@@ -186,14 +193,14 @@ export function ModelMenu({
             <ProviderIcon
               provider={pillModel.provider}
               modelId={pillModel.id}
-              className="size-3.5"
+              className="size-4"
             />
           ) : (
-            <Atom className="size-3.5" />
+            <Atom className="size-4 text-muted-foreground" />
           )}
-          <span className="model-menu-label">{label}</span>
-          <ChevronDown className="size-3.5" />
-        </button>
+          <span className="truncate">{label}</span>
+          <ChevronDown className="size-4 opacity-50" />
+        </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="start"
@@ -211,13 +218,17 @@ export function ModelMenu({
             onToggle={(useDefault) => {
               if (useDefault) {
                 void onChange(null);
+                setOpen(false);
                 return;
               }
               // Turning the default off has to land on something; the first
               // model as the menu renders them, so the check appears at the
               // top of the list rather than mid-scroll.
               const first = firstAvailableModel(models, canonical);
-              if (first) void onChange(first.key);
+              if (first) {
+                void onChange(first.key);
+                setOpen(false);
+              }
             }}
           />
 
@@ -239,11 +250,12 @@ export function ModelMenu({
                   <DropdownMenuItem
                     key={model.key}
                     disabled={disabled || !model.available}
-                    // The menu stays open: the switch above and the rows here
-                    // are one control, and closing on a row would strand a
-                    // reader who meant to flip back to the default.
-                    onSelect={(event) => {
-                      event.preventDefault();
+                    // Picking a model is the whole point of opening this, so
+                    // the menu closes on it. Re-selecting what is already
+                    // chosen still closes: the reader asked for this model and
+                    // has it, and holding the menu open would read as a
+                    // dropped click.
+                    onSelect={() => {
                       if (selected || !model.available) return;
                       void onChange(model.key);
                     }}
@@ -337,20 +349,21 @@ export function ReasoningEffortMenu({
   const options = reasoningEffortOptions(levels);
   const isDefault = value === null;
   const label = isDefault ? "Default" : REASONING_EFFORT_LABELS[value];
+  const [open, setOpen] = useState(false);
   return (
-    <DropdownMenu>
+    <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          className="model-menu-trigger"
+        <Button
+          variant="ghost"
+          className="h-8 gap-1.5"
           disabled={disabled}
           aria-label={`Reasoning effort: ${label}`}
           title={`Reasoning effort: ${label}`}
         >
-          <Gauge className="size-3.5" />
-          <span className="model-menu-label">{label}</span>
-          <ChevronDown className="size-3.5" />
-        </button>
+          <Gauge className="size-4 text-muted-foreground" />
+          <span className="truncate">{label}</span>
+          <ChevronDown className="size-4 opacity-50" />
+        </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="start"
@@ -369,10 +382,14 @@ export function ReasoningEffortMenu({
             onToggle={(useDefault) => {
               if (useDefault) {
                 void onChange(null);
+                setOpen(false);
                 return;
               }
               const first = options[0];
-              if (first) void onChange(first.value);
+              if (first) {
+                void onChange(first.value);
+                setOpen(false);
+              }
             }}
           />
 
@@ -384,8 +401,7 @@ export function ReasoningEffortMenu({
               <DropdownMenuItem
                 key={option.value}
                 disabled={disabled}
-                onSelect={(event) => {
-                  event.preventDefault();
+                onSelect={() => {
                   if (selected) return;
                   void onChange(option.value);
                 }}
