@@ -104,7 +104,11 @@ impl Retriever {
     /// this canonical document under the active chunker.
     pub async fn index_is_complete(&self, document: &Document) -> Result<bool> {
         validate_document_source_regions(document)?;
-        let expected = self.chunker.chunk(document)?.len();
+        // Must resolve the canonical type exactly as `prepare_document_index`
+        // does, or the expected count is computed from different chunking than
+        // the one that produced the stored records.
+        let canonical_media_type = self.parser.canonical_media_type(&document.media_type);
+        let expected = self.chunker.chunk(document, &canonical_media_type)?.len();
         Ok(self.store.document_len(document.id).await? == Some(expected))
     }
 
@@ -213,7 +217,11 @@ impl Retriever {
 
     async fn prepare_document_index(&self, document: &Document) -> Result<Vec<VectorRecord>> {
         validate_document_source_regions(document)?;
-        let chunks = self.chunker.chunk(document)?;
+        // Ask the parser what it emitted rather than trusting the document's
+        // own media type: a PDF's canonical text is Markdown, and chunking has
+        // to treat it as such to partition it at headings.
+        let canonical_media_type = self.parser.canonical_media_type(&document.media_type);
+        let chunks = self.chunker.chunk(document, &canonical_media_type)?;
 
         let records: Vec<VectorRecord> = if chunks.is_empty() {
             Vec::new()
@@ -952,7 +960,7 @@ The Great Barrier Reef is the world's largest coral reef system.";
         assert!(r.canonical_fingerprint_for("application/pdf").is_err());
         assert_eq!(
             r.index_fingerprint(),
-            "chunker=text-window-v3:markdown=atx-heading-context:max_chars=90:overlap=0;embedder=hash-fnv1a-v1:512d"
+            "chunker=text-window-v4:markdown=atx-heading-context:max_chars=90:overlap=0;embedder=hash-fnv1a-v1:512d"
         );
     }
 
@@ -980,7 +988,9 @@ The Great Barrier Reef is the world's largest coral reef system.";
             "text/plain",
             "alpha beta gamma delta epsilon",
         );
-        let chunks = TextChunker::new(60, 12).chunk(&doc).unwrap();
+        let chunks = TextChunker::new(60, 12)
+            .chunk(&doc, &doc.media_type)
+            .unwrap();
         let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
         let embeddings = HashEmbedder::new(512)
             .embed_documents(&texts)

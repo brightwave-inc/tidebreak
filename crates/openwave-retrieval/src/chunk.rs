@@ -34,7 +34,14 @@ pub trait Chunker: Send + Sync {
     }
 
     /// Produce the chunks for `document`, in document order.
-    fn chunk(&self, document: &Document) -> Result<Vec<Chunk>>;
+    ///
+    /// `canonical_media_type` is the media type of `document.text`, which is
+    /// not the document's own `media_type` whenever a parser converted the
+    /// source: a PDF's canonical text is Markdown. It is passed in rather than
+    /// read off the document because the parser is the only thing that knows
+    /// what it emitted, and a caller that assembled the document from storage
+    /// does not.
+    fn chunk(&self, document: &Document, canonical_media_type: &str) -> Result<Vec<Chunk>>;
 }
 
 /// A boundary-aware, fixed-budget, overlapping chunker.
@@ -75,12 +82,12 @@ impl Default for TextChunker {
 impl Chunker for TextChunker {
     fn fingerprint(&self) -> String {
         format!(
-            "text-window-v3:markdown=atx-heading-context:max_chars={}:overlap={}",
+            "text-window-v4:markdown=atx-heading-context:max_chars={}:overlap={}",
             self.max_chars, self.overlap
         )
     }
 
-    fn chunk(&self, document: &Document) -> Result<Vec<Chunk>> {
+    fn chunk(&self, document: &Document, canonical_media_type: &str) -> Result<Vec<Chunk>> {
         let text = &document.text;
 
         // Character view plus each char's starting byte offset. `byte_at[i]` is
@@ -100,7 +107,7 @@ impl Chunker for TextChunker {
             return Ok(Vec::new());
         }
 
-        if is_markdown(&document.media_type) {
+        if is_markdown(canonical_media_type) {
             return Ok(self.chunk_markdown(document, &chars, &byte_at));
         }
 
@@ -394,9 +401,12 @@ mod tests {
 
     #[test]
     fn empty_document_yields_no_chunks() {
-        assert!(TextChunker::default().chunk(&doc("")).unwrap().is_empty());
         assert!(TextChunker::default()
-            .chunk(&doc("   \n  "))
+            .chunk(&doc(""), "text/plain")
+            .unwrap()
+            .is_empty());
+        assert!(TextChunker::default()
+            .chunk(&doc("   \n  "), "text/plain")
             .unwrap()
             .is_empty());
     }
@@ -404,7 +414,7 @@ mod tests {
     #[test]
     fn short_document_is_a_single_chunk() {
         let d = doc("hello world");
-        let chunks = TextChunker::default().chunk(&d).unwrap();
+        let chunks = TextChunker::default().chunk(&d, &d.media_type).unwrap();
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].text, "hello world");
         assert_eq!(chunks[0].span, ByteSpan::new(0, 11));
@@ -414,7 +424,7 @@ mod tests {
     #[test]
     fn spans_slice_back_to_the_exact_source_text() {
         let d = doc("The quick brown fox jumps over the lazy dog. It was a fine day.");
-        let chunks = TextChunker::new(20, 5).chunk(&d).unwrap();
+        let chunks = TextChunker::new(20, 5).chunk(&d, &d.media_type).unwrap();
         assert!(chunks.len() > 1);
         for chunk in &chunks {
             // The recorded span must reproduce the chunk text exactly.
@@ -443,7 +453,9 @@ mod tests {
             },
         ]);
 
-        let chunks = TextChunker::new(15, 4).chunk(&document).unwrap();
+        let chunks = TextChunker::new(15, 4)
+            .chunk(&document, &document.media_type)
+            .unwrap();
         assert!(chunks.len() > 1);
         for chunk in &chunks {
             for region in &chunk.source_regions {
@@ -461,7 +473,7 @@ mod tests {
     #[test]
     fn ordinals_are_contiguous_from_zero() {
         let d = doc("alpha beta gamma delta epsilon zeta eta theta iota kappa");
-        let chunks = TextChunker::new(15, 4).chunk(&d).unwrap();
+        let chunks = TextChunker::new(15, 4).chunk(&d, &d.media_type).unwrap();
         for (i, chunk) in chunks.iter().enumerate() {
             assert_eq!(chunk.ordinal, i);
         }
@@ -470,7 +482,7 @@ mod tests {
     #[test]
     fn consecutive_chunks_overlap() {
         let d = doc("one two three four five six seven eight nine ten eleven twelve");
-        let chunks = TextChunker::new(20, 8).chunk(&d).unwrap();
+        let chunks = TextChunker::new(20, 8).chunk(&d, &d.media_type).unwrap();
         assert!(chunks.len() >= 2);
         // With overlap, each chunk after the first starts before the previous ends.
         for pair in chunks.windows(2) {
@@ -481,7 +493,7 @@ mod tests {
     #[test]
     fn prefers_newline_boundaries() {
         let d = doc("first line here\nsecond line here\nthird line here");
-        let chunks = TextChunker::new(24, 0).chunk(&d).unwrap();
+        let chunks = TextChunker::new(24, 0).chunk(&d, &d.media_type).unwrap();
         // The first cut should land right after a newline, so the first chunk
         // ends cleanly on a line and the next starts a fresh one.
         assert!(chunks[0].text.ends_with('\n') || chunks[0].text.ends_with("here"));
@@ -492,7 +504,7 @@ mod tests {
     fn handles_multibyte_without_splitting_codepoints() {
         // Each `é` is two bytes; a naive byte window could split one.
         let d = doc("café café café café café café café café");
-        let chunks = TextChunker::new(6, 1).chunk(&d).unwrap();
+        let chunks = TextChunker::new(6, 1).chunk(&d, &d.media_type).unwrap();
         assert!(chunks.len() > 1);
         for chunk in &chunks {
             // Spans land on char boundaries => slicing never panics and matches.
@@ -505,7 +517,7 @@ mod tests {
         // overlap >= max_chars is clamped so the window still advances.
         let chunker = TextChunker::new(4, 999);
         let d = doc("abcdefghijklmnop");
-        let chunks = chunker.chunk(&d).unwrap();
+        let chunks = chunker.chunk(&d, &d.media_type).unwrap();
         assert!(!chunks.is_empty());
         // Every byte is covered by the union of spans.
         assert_eq!(chunks.first().unwrap().span.start, 0);
@@ -516,7 +528,7 @@ mod tests {
     fn adjacent_markdown_sections_never_share_overlap() {
         let text = "# Alpha\nalpha alpha alpha\n# Beta\nbeta beta beta";
         let d = markdown("text/markdown", text);
-        let chunks = TextChunker::new(18, 8).chunk(&d).unwrap();
+        let chunks = TextChunker::new(18, 8).chunk(&d, &d.media_type).unwrap();
         let heading = text.find("# Beta").unwrap();
 
         assert!(chunks.iter().any(|chunk| chunk.span.end == heading));
@@ -532,7 +544,7 @@ mod tests {
             "text/markdown",
             "# One\none two three four five six seven eight nine ten eleven twelve",
         );
-        let chunks = TextChunker::new(20, 6).chunk(&d).unwrap();
+        let chunks = TextChunker::new(20, 6).chunk(&d, &d.media_type).unwrap();
 
         assert!(chunks.len() > 2);
         for pair in chunks.windows(2) {
@@ -544,7 +556,7 @@ mod tests {
     fn markdown_windows_prefer_paragraph_boundaries() {
         let text = "# H\nfirst line\n\nsecond paragraph has more words to split";
         let d = markdown("text/markdown", text);
-        let chunks = TextChunker::new(30, 0).chunk(&d).unwrap();
+        let chunks = TextChunker::new(30, 0).chunk(&d, &d.media_type).unwrap();
 
         assert_eq!(chunks[0].text, "# H\nfirst line\n\n");
         assert_eq!(chunks[0].span.end, text.find("second").unwrap());
@@ -562,7 +574,9 @@ mod tests {
             "   ### valid\nafter",
         );
         let d = markdown("text/markdown", text);
-        let chunks = TextChunker::new(10_000, 100).chunk(&d).unwrap();
+        let chunks = TextChunker::new(10_000, 100)
+            .chunk(&d, &d.media_type)
+            .unwrap();
         let valid = text.find("   ### valid").unwrap();
 
         assert_eq!(chunks.len(), 2);
@@ -582,7 +596,9 @@ mod tests {
             "# API\nend",
         );
         let document = markdown("text/x-markdown; charset=utf-8", text);
-        let chunks = TextChunker::new(10_000, 0).chunk(&document).unwrap();
+        let chunks = TextChunker::new(10_000, 0)
+            .chunk(&document, &document.media_type)
+            .unwrap();
 
         assert_eq!(chunks.len(), 5);
         assert_eq!(chunks[0].heading_path, Vec::<String>::new());
@@ -604,7 +620,9 @@ mod tests {
             "### Sibling\nd",
         );
         let document = markdown("text/markdown", text);
-        let chunks = TextChunker::new(10_000, 0).chunk(&document).unwrap();
+        let chunks = TextChunker::new(10_000, 0)
+            .chunk(&document, &document.media_type)
+            .unwrap();
 
         assert_eq!(chunks[0].heading_path, ["Initial"]);
         assert_eq!(chunks[1].heading_path, ["Parent"]);
@@ -615,7 +633,9 @@ mod tests {
     #[test]
     fn closing_only_hashes_are_structural_but_absent_from_breadcrumbs() {
         let document = markdown("text/markdown", "# ###\none\n# #\ntwo\n## Child\nthree");
-        let chunks = TextChunker::new(10_000, 0).chunk(&document).unwrap();
+        let chunks = TextChunker::new(10_000, 0)
+            .chunk(&document, &document.media_type)
+            .unwrap();
 
         assert_eq!(chunks.len(), 3);
         assert!(chunks[0].heading_path.is_empty());
@@ -632,7 +652,9 @@ mod tests {
             "text/markdown",
             "# Guide\none two three four five six seven eight nine ten eleven twelve",
         );
-        let chunks = TextChunker::new(20, 4).chunk(&document).unwrap();
+        let chunks = TextChunker::new(20, 4)
+            .chunk(&document, &document.media_type)
+            .unwrap();
 
         assert!(chunks.len() > 2);
         assert!(chunks.iter().all(|chunk| chunk.heading_path == ["Guide"]));
@@ -648,7 +670,9 @@ mod tests {
     fn heading_like_lines_in_fences_do_not_change_context() {
         let text = "# Outer\n```md\n## Not a child\n```\nafter";
         let document = markdown("text/markdown", text);
-        let chunks = TextChunker::new(10_000, 0).chunk(&document).unwrap();
+        let chunks = TextChunker::new(10_000, 0)
+            .chunk(&document, &document.media_type)
+            .unwrap();
 
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].heading_path, ["Outer"]);
@@ -659,7 +683,7 @@ mod tests {
     fn markdown_utf8_and_crlf_spans_are_exact_source_slices() {
         let text = "préface\r\n# Café\r\naé日🙂 b c d e\r\n## Thé\r\nfin";
         let d = markdown("text/markdown", text);
-        let chunks = TextChunker::new(12, 3).chunk(&d).unwrap();
+        let chunks = TextChunker::new(12, 3).chunk(&d, &d.media_type).unwrap();
 
         for (ordinal, chunk) in chunks.iter().enumerate() {
             assert_eq!(chunk.ordinal, ordinal);
@@ -679,7 +703,7 @@ mod tests {
     fn markdown_lone_cr_headings_and_paragraphs_are_boundaries() {
         let text = "intro words\r\r# Héading\rfirst paragraph\r\rsecond paragraph tail";
         let d = markdown("text/markdown", text);
-        let chunks = TextChunker::new(26, 4).chunk(&d).unwrap();
+        let chunks = TextChunker::new(26, 4).chunk(&d, &d.media_type).unwrap();
         let heading = text.find("# Héading").unwrap();
 
         assert!(chunks.iter().any(|chunk| chunk.span.end == heading));
@@ -705,7 +729,7 @@ mod tests {
     #[test]
     fn plain_text_keeps_v1_boundaries_byte_for_byte() {
         let d = doc("first paragraph\n\nsecond line here\nthird line here and tail");
-        let chunks = TextChunker::new(24, 4).chunk(&d).unwrap();
+        let chunks = TextChunker::new(24, 4).chunk(&d, &d.media_type).unwrap();
         let spans: Vec<_> = chunks.iter().map(|chunk| chunk.span).collect();
         let texts: Vec<_> = chunks.iter().map(|chunk| chunk.text.as_str()).collect();
 
@@ -733,7 +757,7 @@ mod tests {
     fn plain_text_keeps_lone_cr_as_v1_whitespace() {
         let text = "aaaaaaaaaaaa\rb bbbbbbbbbbbbbbbbb";
         let d = doc(text);
-        let chunks = TextChunker::new(24, 0).chunk(&d).unwrap();
+        let chunks = TextChunker::new(24, 0).chunk(&d, &d.media_type).unwrap();
 
         // In v1 a lone CR is generic whitespace, so the later space wins. If
         // CR were promoted to a line ending, this chunk would stop at byte 13.
@@ -749,16 +773,50 @@ mod tests {
             " text/x-markdown ; charset=utf-8",
         ] {
             let d = markdown(media_type, "before\n# Heading\nafter");
-            let chunks = TextChunker::new(1_000, 0).chunk(&d).unwrap();
+            let chunks = TextChunker::new(1_000, 0).chunk(&d, &d.media_type).unwrap();
             assert_eq!(chunks.len(), 2, "{media_type}");
         }
     }
 
     #[test]
-    fn fingerprint_invalidates_v2_markdown_indexes() {
+    fn fingerprint_invalidates_earlier_markdown_indexes() {
         assert_eq!(
             TextChunker::new(90, 10).fingerprint(),
-            "text-window-v3:markdown=atx-heading-context:max_chars=90:overlap=10"
+            "text-window-v4:markdown=atx-heading-context:max_chars=90:overlap=10"
+        );
+    }
+
+    #[test]
+    fn canonical_markdown_is_partitioned_even_when_the_source_is_not_markdown() {
+        // A PDF's canonical text is Markdown. Chunking keyed off the source
+        // type instead of the canonical one, so headings in parsed PDFs were
+        // invisible and no chunk ever carried a section.
+        let document = Document::new(
+            DocumentSource::Inline,
+            "application/pdf",
+            "intro\n\n# Revenue\n\nbody text\n\n## Q1\n\nmore body",
+        );
+
+        let as_source = TextChunker::new(1_000, 0)
+            .chunk(&document, &document.media_type)
+            .unwrap();
+        assert_eq!(as_source.len(), 1);
+        assert!(as_source[0].heading_path.is_empty());
+
+        let as_canonical = TextChunker::new(1_000, 0)
+            .chunk(&document, "text/markdown")
+            .unwrap();
+        assert_eq!(as_canonical.len(), 3);
+        assert_eq!(
+            as_canonical
+                .iter()
+                .map(|chunk| chunk.heading_path.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                vec![],
+                vec!["Revenue".to_string()],
+                vec!["Revenue".to_string(), "Q1".to_string()],
+            ]
         );
     }
 }

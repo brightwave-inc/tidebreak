@@ -62,6 +62,13 @@ impl DocumentParser for ParserRegistry {
         self.selected_parser(media_type).is_some()
     }
 
+    fn canonical_media_type(&self, media_type: &str) -> String {
+        self.selected_parser(media_type).map_or_else(
+            || media_type.to_string(),
+            |parser| parser.canonical_media_type(media_type),
+        )
+    }
+
     async fn parse(&self, raw: &[u8], media_type: &str) -> Result<ParsedDocument> {
         let parser = self.selected_parser(media_type).ok_or_else(|| {
             RetrievalError::parse(format!(
@@ -119,6 +126,19 @@ pub trait DocumentParser: Send + Sync {
 
     /// Whether this parser can handle the given media (MIME) type.
     fn supports(&self, media_type: &str) -> bool;
+
+    /// The media type of the canonical text this parser produces for
+    /// `media_type`.
+    ///
+    /// Defaults to the source's own type, which is right for parsers that pass
+    /// text through. Parsers that *convert* must override it: a PDF's canonical
+    /// text is Markdown, and downstream stages that treat canonical text
+    /// according to its format — chunking at headings, for one — have no other
+    /// way to know that. Getting this wrong is silent: the text is still
+    /// indexed, just handled as though it had no structure.
+    fn canonical_media_type(&self, media_type: &str) -> String {
+        media_type.to_string()
+    }
 
     /// Parse `raw` bytes of the given media type into plain text.
     async fn parse(&self, raw: &[u8], media_type: &str) -> Result<ParsedDocument>;

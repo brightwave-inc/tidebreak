@@ -327,7 +327,9 @@ mod tests {
             "text/plain",
             text,
         );
-        let chunks = TextChunker::new(90, 0).chunk(&doc).unwrap();
+        let chunks = TextChunker::new(90, 0)
+            .chunk(&doc, &doc.media_type)
+            .unwrap();
         let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
         let embeddings = embedder.embed_documents(&texts).await.unwrap();
         let generation = DocumentGeneration {
@@ -673,7 +675,9 @@ mod tests {
                 content_revision: 1,
                 revision_token: uuid::Uuid::new_v4(),
             };
-            let chunks = TextChunker::new(90, 0).chunk(&document).unwrap();
+            let chunks = TextChunker::new(90, 0)
+                .chunk(&document, &document.media_type)
+                .unwrap();
             let texts: Vec<_> = chunks.iter().map(|chunk| chunk.text.clone()).collect();
             let embeddings = embedder.embed_documents(&texts).await.unwrap();
             store
