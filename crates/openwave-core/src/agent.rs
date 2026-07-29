@@ -870,17 +870,16 @@ struct TranscriptSourceBoundary {
 
 /// Why one call in a step's batch cannot run beside its siblings.
 ///
-/// Both reasons are runtime constraints, not mistakes the model made. A call
-/// that parks on the approval gate has to be the turn's only pending row:
-/// [`Agent::resume_pending_server_calls`] recovers an interrupted approval by
-/// identity and cannot choose between two. A checkpoint carries exactly one
-/// call out of the loop. Providers parallelise tool calls by design, so the
-/// loop orders the batch around these instead of asking the model for a shape
-/// it cannot guarantee.
+/// Every variant is a checkpoint: it suspends the turn and carries exactly one
+/// call out of the loop, so a batch can honour only one of them. These are
+/// runtime constraints, not mistakes the model made — providers parallelise
+/// tool calls by design, so the loop orders the batch around them instead of
+/// asking the model for a shape it cannot guarantee. Sensitive calls are not
+/// isolated: they run in-step, sequentially after the plain siblings, which
+/// keeps a parked approval the turn's only pending row without declining
+/// anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CallIsolation {
-    /// Parks on the approval gate; runs in this step, after its siblings.
-    Sensitive,
     /// Leaves the loop as a checkpoint the client resumes.
     Client,
     /// Leaves the loop as a sandbox delegation checkpoint.
@@ -1424,16 +1423,21 @@ impl Agent {
             // sibling call that had already succeeded — to ask for a form the
             // model cannot reliably produce, because providers parallelise
             // tool calls by design. The order below is the fix: plain server
-            // calls run first, and the one call that has to stand alone is
-            // taken after them, once everything else is terminal.
+            // calls run first, approval-bearing calls follow one at a time,
+            // and the one call that has to stand alone is taken last, once
+            // everything else is terminal.
             let isolations: Vec<Option<CallIsolation>> =
                 calls.iter().map(|call| self.call_isolation(call)).collect();
+            let sensitives: Vec<bool> = calls
+                .iter()
+                .enumerate()
+                .map(|(index, call)| isolations[index].is_none() && self.call_is_sensitive(call))
+                .collect();
             let isolated = isolations.iter().position(Option::is_some);
             // A checkpoint suspends the turn instead of consuming a step here,
             // so the budget for the model call that reads its result belongs to
             // the attempt that resumes, not to this one.
-            let checkpointing = isolated
-                .is_some_and(|index| !matches!(isolations[index], Some(CallIsolation::Sensitive)));
+            let checkpointing = isolated.is_some();
 
             // This step is about to persist tool-call rows, execute server tool
             // side effects, and record the assistant message. Fence those on the
@@ -1472,11 +1476,12 @@ impl Agent {
 
             // Admit the plain calls, whose rows may all be pending at once:
             // recovery replays or abandons them without having to guess which
-            // one an approval belonged to. The isolated call is admitted
-            // further down, after these have resolved.
+            // one an approval belonged to. Sensitive calls are admitted lazily
+            // further down, one at a time, and the isolated call last, after
+            // everything else has resolved.
             let mut recovered_results: HashMap<CallId, ToolOutput> = HashMap::new();
             for (index, call) in calls.iter().enumerate() {
-                if isolations[index].is_some() {
+                if isolations[index].is_some() || sensitives[index] {
                     continue;
                 }
                 if let Some(recovered) = self.accept_server_call(chat.id, turn_id, call).await? {
@@ -1623,7 +1628,9 @@ impl Agent {
             }
 
             for (index, call) in calls.iter().enumerate() {
-                if parallel_batch_len.is_some_and(|len| index < len) || isolations[index].is_some()
+                if parallel_batch_len.is_some_and(|len| index < len)
+                    || isolations[index].is_some()
+                    || sensitives[index]
                 {
                     continue;
                 }
@@ -1639,6 +1646,31 @@ impl Agent {
                 );
                 // A cancel that arrived during this tool (including while it was
                 // parked on approval) stops the turn before the next model call.
+                if self.cancel.is_cancelled() {
+                    return Ok(self.finish_cancelled(
+                        events,
+                        total_usage,
+                        step + 1,
+                        publish_terminal,
+                    ));
+                }
+            }
+
+            // Approval-bearing calls run after every plain sibling is terminal,
+            // one at a time: a row is admitted only once the previous one has
+            // resolved, so a call parked on the approval gate is always the
+            // turn's only pending row and recovery never has to choose between
+            // two. Nothing here is declined — a second Sensitive call simply
+            // waits its turn.
+            for (index, call) in calls.iter().enumerate() {
+                if !sensitives[index] {
+                    continue;
+                }
+                let recovered = self.accept_server_call(chat.id, turn_id, call).await?;
+                outputs[index] = Some(
+                    self.execute_server_call(chat, turn_id, call, events, recovered)
+                        .await?,
+                );
                 if self.cancel.is_cancelled() {
                     return Ok(self.finish_cancelled(
                         events,
@@ -1671,27 +1703,11 @@ impl Agent {
             }
 
             // The isolated call, taken last so every sibling above is already
-            // terminal. That is what makes the pending set unambiguous by
-            // construction: a sensitive call parks as the turn's only pending
-            // row, and a checkpoint leaves nothing unfinished behind it.
+            // terminal: a checkpoint leaves nothing unfinished behind it for
+            // the resuming attempt to guess about.
             if let Some(index) = isolated {
                 let call = &calls[index];
                 match isolations[index].expect("an isolated call has a class") {
-                    CallIsolation::Sensitive => {
-                        let recovered = self.accept_server_call(chat.id, turn_id, call).await?;
-                        outputs[index] = Some(
-                            self.execute_server_call(chat, turn_id, call, events, recovered)
-                                .await?,
-                        );
-                        if self.cancel.is_cancelled() {
-                            return Ok(self.finish_cancelled(
-                                events,
-                                total_usage,
-                                step + 1,
-                                publish_terminal,
-                            ));
-                        }
-                    }
                     CallIsolation::Client => {
                         match self.client_checkpoint(chat, turn_id, call, generation_steer_revision)
                         {
@@ -1796,10 +1812,22 @@ impl Agent {
                 return Some(CallIsolation::AgentWait);
             }
         }
+        None
+    }
+
+    /// Whether `call` parks on the approval gate before it may run.
+    ///
+    /// Sensitive calls stay in-step but are admitted one at a time, after the
+    /// plain siblings: [`Self::resume_pending_server_calls`] recovers an
+    /// interrupted approval by identity and cannot choose between two pending
+    /// rows, so a second row must not exist while one can be parked. Standing
+    /// grants are deliberately not consulted here — whether a grant covers the
+    /// call is decided against its parsed arguments inside [`Self::run_tool`],
+    /// and sequencing must not depend on getting the same answer twice.
+    fn call_is_sensitive(&self, call: &PendingCall) -> bool {
         self.tools
             .get(&call.name)
             .is_some_and(|tool| tool.approval_class() == ApprovalClass::Sensitive)
-            .then_some(CallIsolation::Sensitive)
     }
 
     /// Whether a call may overlap the read-only calls before it in this step.
@@ -5915,9 +5943,9 @@ mod tests {
         );
     }
 
-    /// Provider that asks for two sensitive calls in one step. Only one can be
-    /// taken — a parked call has to be the turn's only pending row — so the
-    /// other must be answered rather than cost the step.
+    /// Provider that asks for two sensitive calls in one step. Both run, one
+    /// at a time — a parked call has to be the turn's only pending row, so the
+    /// second is admitted only once the first is terminal, never declined.
     struct SiblingBoomProvider {
         calls: AtomicUsize,
     }
@@ -5965,9 +5993,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_second_sensitive_call_is_answered_instead_of_discarding_the_step() {
-        use crate::approval::AutoApproveGate;
-
+    async fn a_second_sensitive_call_runs_once_the_first_is_terminal() {
         let db = tempfile::tempdir().unwrap();
         let store: Arc<dyn Store> = Arc::new(
             DbStore::connect(&format!(
@@ -5990,6 +6016,7 @@ mod tests {
         store.create_chat(&chat).await.unwrap();
 
         let ran = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::new(Mutex::new(Vec::new()));
         let tools = Arc::new(ToolRegistry::new().with(Box::new(BoomTool { ran: ran.clone() })));
         let provider = Arc::new(SiblingBoomProvider {
             calls: AtomicUsize::new(0),
@@ -6003,16 +6030,21 @@ mod tests {
                 ..Default::default()
             },
         )
-        .with_approvals(Arc::new(AutoApproveGate));
+        .with_approvals(Arc::new(RecordingGate {
+            store: store.clone(),
+            chat_id: chat.id,
+            observed: observed.clone(),
+        }));
 
         let (tx, rx) = unbounded();
         agent.run_turn(&chat, "go", &tx).await.unwrap();
         drop(tx);
         let events: Vec<AgentEvent> = rx.collect().await;
 
-        // The step stands: one call is taken and parks, the other is answered
-        // with a result the model can act on. This used to be discarded whole,
-        // which cost the step and taught the model nothing.
+        // The step stands and nothing is declined: each call parks in turn and
+        // runs. A sibling used to be answered with "has to run on its own",
+        // which forced the model to re-ask a step later for work it had
+        // already requested correctly.
         assert!(!events
             .iter()
             .any(|e| matches!(e, AgentEvent::StreamInterrupted)));
@@ -6021,10 +6053,9 @@ mod tests {
                 .iter()
                 .filter(|e| matches!(e, AgentEvent::ApprovalRequired { .. }))
                 .count(),
-            1
+            2
         );
-        assert_eq!(ran.load(Ordering::SeqCst), 1);
-        // Both calls are accounted for: the reader saw two start, so two finish.
+        assert_eq!(ran.load(Ordering::SeqCst), 2);
         let completions: Vec<&ToolOutput> = events
             .iter()
             .filter_map(|e| match e {
@@ -6035,16 +6066,23 @@ mod tests {
         assert_eq!(completions.len(), 2, "{completions:?}");
         assert!(completions
             .iter()
-            .any(|output| output.content == "boomed" && !output.is_error));
-        assert!(
-            completions
-                .iter()
-                .any(|output| output.is_error && output.content.starts_with("not run: boom")),
-            "{completions:?}"
-        );
-        // The declined call ran nothing, so it leaves no record to recover.
-        assert_eq!(store.list_tool_calls(chat.id).await.unwrap().len(), 1);
+            .all(|output| output.content == "boomed" && !output.is_error));
+        // Both ran, so both leave a durable record.
+        assert_eq!(store.list_tool_calls(chat.id).await.unwrap().len(), 2);
         assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+        // The recovery invariant, held at both parks: every earlier sibling is
+        // terminal and the parked call is the turn's only pending row.
+        let snapshots = observed.lock().unwrap().clone();
+        assert_eq!(
+            snapshots,
+            vec![
+                vec![("boom".into(), ToolCallStatus::Pending)],
+                vec![
+                    ("boom".into(), ToolCallStatus::Completed),
+                    ("boom".into(), ToolCallStatus::Pending),
+                ],
+            ]
+        );
     }
 
     /// Provider that pairs a plain server call with a sensitive one in the same
@@ -6095,12 +6133,16 @@ mod tests {
         }
     }
 
-    /// Approval gate that photographs the durable record at the instant the
+    /// One durable-record snapshot per approval registration: each row's tool
+    /// name and status at the instant the gate saw the request.
+    type GateSnapshots = Arc<Mutex<Vec<Vec<(String, ToolCallStatus)>>>>;
+
+    /// Approval gate that photographs the durable record at the instant each
     /// request is registered, then approves.
     struct RecordingGate {
         store: Arc<dyn Store>,
         chat_id: ChatId,
-        observed: Arc<Mutex<Vec<(String, ToolCallStatus)>>>,
+        observed: GateSnapshots,
     }
 
     impl crate::approval::ApprovalGate for RecordingGate {
@@ -6111,10 +6153,12 @@ mod tests {
         ) -> crate::approval::ApprovalRegistrationFuture<'_> {
             Box::pin(async move {
                 let calls = self.store.list_tool_calls(self.chat_id).await.unwrap();
-                *self.observed.lock().unwrap() = calls
-                    .into_iter()
-                    .map(|call| (call.name, call.status))
-                    .collect();
+                self.observed.lock().unwrap().push(
+                    calls
+                        .into_iter()
+                        .map(|call| (call.name, call.status))
+                        .collect(),
+                );
                 crate::approval::ApprovalRegistration {
                     decision: Box::pin(async { crate::approval::ApprovalDecision::Approve })
                         as crate::approval::ApprovalFuture,
@@ -6188,7 +6232,7 @@ mod tests {
             .any(|e| matches!(e, AgentEvent::StreamInterrupted)));
         assert_eq!(ran.load(Ordering::SeqCst), 1);
         assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
-        let at_approval = observed.lock().unwrap().clone();
+        let at_approval = observed.lock().unwrap().last().cloned().unwrap();
         assert_eq!(
             at_approval,
             vec![
