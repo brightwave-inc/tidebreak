@@ -245,6 +245,7 @@ export function reduceChatSessionEvent(
             preview: parseToolActionPreview(event.preview),
             canApprove: approval.canApprove,
             canRemember: approval.canRemember,
+            autoJudging: event.auto_judging,
           }),
         },
         effects,

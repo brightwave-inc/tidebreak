@@ -26,6 +26,8 @@ type ApprovalCardProps = {
   preview: ToolActionPreview | null;
   canApprove: boolean;
   canRemember: boolean;
+  /** The Auto-mode judge is deciding. Advisory only: the card stays live. */
+  autoJudging?: boolean;
   deciding: boolean;
   error?: string;
   onDecide: (
@@ -53,6 +55,7 @@ export function ApprovalCard({
   preview,
   canApprove,
   canRemember,
+  autoJudging,
   deciding,
   error,
   onDecide,
@@ -132,6 +135,11 @@ export function ApprovalCard({
       aria-busy={deciding}
     >
       <h3 className="font-medium break-words">{ask.title}</h3>
+      {autoJudging && (
+        <p className="text-muted-foreground text-sm" role="status">
+          Deciding automatically… you can still answer to decide it yourself.
+        </p>
+      )}
       {ask.summaryLine && (
         <p className="text-muted-foreground text-sm break-words">
           {ask.summaryLine}

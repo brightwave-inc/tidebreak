@@ -12,6 +12,7 @@
 //! `WS /chats/{id}/events` to watch it — journaled events are replayed on connect
 //! and then streamed live (snapshot → replay → live).
 
+mod approval_judge;
 mod approvals;
 mod auth;
 mod blob_orphan_auditor;
@@ -484,6 +485,7 @@ pub struct Server {
     _sandbox_web_search_worker: AbortTask,
     _blob_retirement_worker: AbortTask,
     _blob_orphan_auditor: AbortTask,
+    _approval_judge_worker: AbortTask,
     _mcp_supervisor: AbortTask,
     _instance_lock: InstanceLock,
 }
@@ -754,6 +756,13 @@ async fn bind_inner(
         state.blob_writes.clone(),
         blob_retirement_worker::BlobRetirementWorkerConfig::default(),
     );
+    let approval_judge_worker = approval_judge::ApprovalJudgeWorker::new(
+        state.store.clone(),
+        state.resolver.clone(),
+        state.secrets.clone(),
+        state.os_policy.clone(),
+        state.approvals.clone(),
+    );
     let blob_orphan_auditor = blob_orphan_auditor::BlobOrphanAuditor::new(
         state.store.clone(),
         state.config.data_dir.join("blobs"),
@@ -817,6 +826,7 @@ async fn bind_inner(
     let sandbox_web_search_worker = tokio::spawn(sandbox_web_search_worker.run());
     let blob_retirement_worker = tokio::spawn(blob_retirement_worker.run());
     let blob_orphan_auditor = tokio::spawn(blob_orphan_auditor.run());
+    let approval_judge_worker = tokio::spawn(approval_judge_worker.run());
     let mcp_supervisor = tokio::spawn(mcp_runtime.clone().supervise());
 
     Ok(Server {
@@ -834,6 +844,7 @@ async fn bind_inner(
         _sandbox_web_search_worker: AbortTask(sandbox_web_search_worker),
         _blob_retirement_worker: AbortTask(blob_retirement_worker),
         _blob_orphan_auditor: AbortTask(blob_orphan_auditor),
+        _approval_judge_worker: AbortTask(approval_judge_worker),
         _mcp_supervisor: AbortTask(mcp_supervisor),
         _instance_lock: instance_lock,
     })

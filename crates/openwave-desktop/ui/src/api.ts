@@ -409,6 +409,8 @@ export type PendingToolApproval = {
   preview: ToolActionPreview | null;
   canApprove: boolean;
   canRemember: boolean;
+  /** Where the Auto-mode judge stands, or null when no judge was engaged. */
+  autoJudgeStatus: "judging" | "approved" | "declined" | null;
 };
 
 export type FolderAccessHint = "documents" | "downloads";
@@ -1526,6 +1528,7 @@ const PENDING_APPROVAL_KEYS = [
   "preview",
   "can_approve",
   "can_remember",
+  "auto_judge_status",
 ] as const satisfies readonly (keyof PendingApprovalSnapshot)[];
 
 export function parsePendingToolApproval(
@@ -1549,7 +1552,13 @@ export function parsePendingToolApproval(
     typeof value.can_approve !== "boolean" ||
     value.can_approve !== isApprovableKind(value.approval) ||
     typeof value.can_remember !== "boolean" ||
-    value.can_remember !== isRememberableKind(value.approval)
+    value.can_remember !== isRememberableKind(value.approval) ||
+    !(
+      value.auto_judge_status === undefined ||
+      value.auto_judge_status === "judging" ||
+      value.auto_judge_status === "approved" ||
+      value.auto_judge_status === "declined"
+    )
   ) {
     return null;
   }
@@ -1562,6 +1571,7 @@ export function parsePendingToolApproval(
     preview: parseToolActionPreview(value.preview),
     canApprove: value.can_approve,
     canRemember: value.can_remember,
+    autoJudgeStatus: value.auto_judge_status ?? null,
   };
 }
 

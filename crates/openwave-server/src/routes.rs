@@ -2283,6 +2283,11 @@ pub(crate) struct PendingApprovalSnapshot {
     pub preview: Option<openwave_core::ToolActionPreview>,
     pub can_approve: bool,
     pub can_remember: bool,
+    /// Where the Auto-mode judge stands, when one was engaged. Absent means
+    /// no judge ever owned this card.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub auto_judge_status: Option<openwave_core::AutoJudgeStatus>,
 }
 
 impl PendingApprovalSnapshot {
@@ -2297,6 +2302,7 @@ impl PendingApprovalSnapshot {
             preview: approval.preview,
             can_approve: kind.is_approvable(),
             can_remember: kind.is_standing_grantable(),
+            auto_judge_status: approval.auto_judge_status,
         }
     }
 }

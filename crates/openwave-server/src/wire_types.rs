@@ -537,6 +537,7 @@ mod tests {
     /// that consumes it fails.
     fn validator_fixtures() -> Vec<(&'static str, serde_json::Value)> {
         let approval = crate::routes::PendingApprovalSnapshot {
+            auto_judge_status: None,
             call_id: openwave_core::CallId(id(1)),
             turn_id: openwave_core::TurnId(id(2)),
             action: openwave_core::RendererToolName::Exec,
@@ -554,6 +555,7 @@ mod tests {
         // missing" is a distinct case the validator has to survive and the one
         // that hand-authored inputs habitually get wrong.
         let approval_without_preview = crate::routes::PendingApprovalSnapshot {
+            auto_judge_status: None,
             call_id: openwave_core::CallId(id(5)),
             turn_id: openwave_core::TurnId(id(2)),
             action: openwave_core::RendererToolName::AskUserQuestions,

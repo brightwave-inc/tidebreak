@@ -2700,6 +2700,19 @@ impl Store for DbStore {
         ops::approval::list_pending(self, chat_id, limit).await
     }
 
+    async fn list_judging_tool_call_approvals(&self, limit: u64) -> Result<Vec<ToolApproval>> {
+        ops::approval::list_judging(self, limit).await
+    }
+
+    async fn resolve_tool_call_approval_from_judge(
+        &self,
+        chat_id: ChatId,
+        call_id: CallId,
+        approved: bool,
+    ) -> Result<bool> {
+        ops::approval::resolve_from_judge(self, chat_id, call_id, approved).await
+    }
+
     async fn list_standing_tool_grants(&self) -> Result<Vec<crate::approval::StandingGrantRecord>> {
         ops::approval::list_standing_grants(self).await
     }

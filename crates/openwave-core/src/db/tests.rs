@@ -11864,6 +11864,7 @@ async fn claimed_sensitive_call_with(
         AcceptToolCallOutcome::Accepted(_)
     ));
     let request = ApprovalRequest {
+        auto_judge: false,
         call_id: call.id,
         chat_id: chat.id,
         turn_id,

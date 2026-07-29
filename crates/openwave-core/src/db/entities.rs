@@ -1070,6 +1070,7 @@ pub mod tool_call {
         pub approval_decided_at: Option<DateTimeUtc>,
         pub approval_event_seq: Option<i64>,
         pub approval_grant_source_call_id: Option<Uuid>,
+        pub auto_judge_status: Option<String>,
         pub client_executor_id: Option<Uuid>,
         pub client_lease_token: Option<Uuid>,
         pub client_lease_expires_at: Option<DateTimeUtc>,

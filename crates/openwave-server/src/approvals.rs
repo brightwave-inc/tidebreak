@@ -133,6 +133,29 @@ impl ApprovalBroker {
     }
 }
 
+impl ApprovalBroker {
+    /// Land the Auto-mode judge's verdict on one parked call.
+    ///
+    /// A pure compare-and-set against durable state: a human decision that
+    /// already landed wins, and `false` reports the judge no longer owned the
+    /// call. An approval wakes the parked waiter exactly like a human click.
+    pub async fn resolve_from_judge(
+        &self,
+        chat_id: ChatId,
+        call_id: CallId,
+        approved: bool,
+    ) -> Result<bool> {
+        let landed = self
+            .store
+            .resolve_tool_call_approval_from_judge(chat_id, call_id, approved)
+            .await?;
+        if landed && approved {
+            self.wake.notify_waiters();
+        }
+        Ok(landed)
+    }
+}
+
 /// Closed HTTP-facing resolution result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolveApprovalOutcome {
@@ -394,6 +417,7 @@ mod tests {
         (
             store,
             ApprovalRequest {
+                auto_judge: false,
                 call_id,
                 chat_id: chat.id,
                 turn_id,
@@ -413,6 +437,7 @@ mod tests {
         arguments: serde_json::Value,
     ) -> ApprovalRequest {
         let request = ApprovalRequest {
+            auto_judge: false,
             call_id: CallId::new(),
             chat_id,
             turn_id: TurnId::new(),
@@ -446,6 +471,103 @@ mod tests {
             AcceptToolCallOutcome::Accepted(_)
         ));
         request
+    }
+
+    #[tokio::test]
+    async fn exec_can_never_be_offered_to_the_judge() {
+        // The BW-invariant analog: no networked command in front of an LLM.
+        // Storage refuses below every caller, so a future agent bug cannot
+        // widen the judge's reach.
+        let (store, mut request) = setup_with_arguments(
+            "exec",
+            json!({ "command": "cargo", "args": ["test"], "cwd": "." }),
+        )
+        .await;
+        request.auto_judge = true;
+        assert!(store
+            .request_tool_call_approval(&request, Utc::now())
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn judge_verdicts_are_a_cas_the_human_always_wins() {
+        let (store, mut request) =
+            setup_with_arguments("search", json!({ "query": "quarterly filings" })).await;
+        request.auto_judge = true;
+        let broker = ApprovalBroker::new(store.clone());
+        let pending = broker.register(request.clone(), None).await;
+        drop(pending.decision);
+
+        // The park stamped judge ownership durably.
+        let parked = store
+            .get_tool_call_approval(request.call_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parked.auto_judge_status,
+            Some(openwave_core::AutoJudgeStatus::Judging)
+        );
+
+        // A decline moves only the marker: the call stays pending for the
+        // human, and the judge cannot re-own it.
+        assert!(broker
+            .resolve_from_judge(request.chat_id, request.call_id, false)
+            .await
+            .unwrap());
+        let declined = store
+            .get_tool_call_approval(request.call_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(declined.status, openwave_core::ToolApprovalStatus::Pending);
+        assert_eq!(
+            declined.auto_judge_status,
+            Some(openwave_core::AutoJudgeStatus::Declined)
+        );
+        assert!(!broker
+            .resolve_from_judge(request.chat_id, request.call_id, true)
+            .await
+            .unwrap());
+
+        // The human decides; a late judge approval on a human-owned card
+        // no-ops rather than relabeling the decision.
+        assert_eq!(
+            broker
+                .resolve(request.chat_id, request.call_id, ApprovalDecision::Approve)
+                .await
+                .unwrap(),
+            ResolveApprovalOutcome::Resolved
+        );
+        assert!(!broker
+            .resolve_from_judge(request.chat_id, request.call_id, true)
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_judge_approval_resolves_the_parked_decision() {
+        let (store, mut request) =
+            setup_with_arguments("search", json!({ "query": "quarterly filings" })).await;
+        request.auto_judge = true;
+        let broker = ApprovalBroker::new(store.clone());
+        let registration = broker.register(request.clone(), None).await;
+
+        assert!(broker
+            .resolve_from_judge(request.chat_id, request.call_id, true)
+            .await
+            .unwrap());
+        assert_eq!(registration.decision.await, ApprovalDecision::Approve);
+        let approved = store
+            .get_tool_call_approval(request.call_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            approved.auto_judge_status,
+            Some(openwave_core::AutoJudgeStatus::Approved)
+        );
     }
 
     #[tokio::test]
@@ -972,6 +1094,7 @@ mod tests {
             .turn
             .is_some());
         let request = ApprovalRequest {
+            auto_judge: false,
             call_id: CallId::new(),
             chat_id: chat.id,
             turn_id,

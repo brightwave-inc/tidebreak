@@ -274,6 +274,7 @@ describe("pending approval recovery", () => {
       preview: null,
       canApprove: true,
       canRemember: true,
+      autoJudgeStatus: null,
     });
     expect(parsePendingToolApproval({ ...safe, arguments: { query: "private" } })).toBeNull();
     expect(parsePendingToolApproval({ ...safe, can_approve: false })).toBeNull();
