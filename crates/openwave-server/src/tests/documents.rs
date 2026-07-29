@@ -2780,19 +2780,21 @@ async fn connect_vector_store_falls_back_to_an_in_memory_index_without_vec_lance
     assert_eq!(reopened.len().await.unwrap(), 0);
 }
 
-/// Records where the document surface sits in a native embedding, which is the
-/// configuration the desktop actually runs and the one no other test here
-/// builds. Every other test uses the headless router, where these same routes
-/// are on the primary bearer — so none of them can see what the renderer meets.
+/// What the renderer may read in a native embedding, which is the configuration
+/// the desktop runs and the one no other test in this module builds.
 ///
-/// The renderer holds the primary bearer and nothing else, so today it cannot
-/// read a document it has just listed. That is what this asserts, and it is a
-/// boundary rather than an accident: the second credential gates host authority
-/// (see `docs/host-access.md`). It is also why the desktop's document viewers
-/// are unreachable, so the assertion is expected to invert when that is
-/// resolved — deliberately, by a change that has to come here and say so.
+/// The reader's two routes — the narrowed detail projection and the bytes — are
+/// on the primary bearer, because a renderer holds only that and is the thing
+/// drawing the document. Before this, the whole document surface sat behind the
+/// native-only credential, so every viewer in the desktop got a 401 and none of
+/// them had ever loaded a file.
+///
+/// The full-fidelity surface stays where it was, and that is asserted here too:
+/// its catalog carries `uri`, which for an unscoped source is a real filesystem
+/// path. `root_attachment::embedded_renderer_bearer_cannot_reach_canonical_document_routes`
+/// is the test that guards that, and it must keep passing unchanged.
 #[tokio::test]
-async fn a_native_embedding_refuses_the_renderer_its_own_documents() {
+async fn a_native_embedding_serves_the_renderer_the_document_it_draws() {
     let dir = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
         DbStore::connect(&format!(
@@ -2820,13 +2822,15 @@ async fn a_native_embedding_refuses_the_renderer_its_own_documents() {
         Uuid::new_v4(),
     )
     .unwrap();
+    assert!(state.root_attachment_routes_enabled);
     let bearer = format!("Bearer {}", state.token);
     let executor = state.client_executor_token.to_string();
     let router = app(state);
 
     let chat = make_chat(&router, &bearer).await;
-    // Ingest needs the native credential too: in this configuration the whole
-    // document surface is behind it, writes and listings included.
+    // Ingest is full-fidelity and stays native-only, so the host's credential
+    // sets the fixture up. The uri stands in for one a connected-folder import
+    // records; it is the field the renderer must not be handed.
     let ingest: serde_json::Value = json_body(
         router
             .clone()
@@ -2838,8 +2842,12 @@ async fn a_native_embedding_refuses_the_renderer_its_own_documents() {
                     .header(crate::auth::CLIENT_EXECUTOR_HEADER, &executor)
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
-                        serde_json::json!({"uri": "file:///note.txt", "content": "a source"})
-                            .to_string(),
+                        serde_json::json!({
+                            "uri": "file:///Users/private/quarterly-sentinel.md",
+                            "content": "Revenue rose.",
+                            "media_type": "text/markdown",
+                        })
+                        .to_string(),
                     ))
                     .unwrap(),
             )
@@ -2849,29 +2857,68 @@ async fn a_native_embedding_refuses_the_renderer_its_own_documents() {
     .await;
     let document_id = ingest["document_id"].as_str().unwrap().to_owned();
 
-    let fetch = |extra: Option<&'static str>| {
-        let executor_owned = extra.map(|_| executor.clone());
+    let get = |uri: String| {
         let router = router.clone();
         let bearer = bearer.clone();
-        let uri = format!("/chats/{}/documents/{document_id}", chat.id);
         async move {
-            let mut builder = Request::builder()
-                .uri(uri)
-                .header(header::AUTHORIZATION, bearer);
-            if let Some(token) = executor_owned {
-                builder = builder.header(crate::auth::CLIENT_EXECUTOR_HEADER, token);
-            }
             router
-                .oneshot(builder.body(Body::empty()).unwrap())
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header(header::AUTHORIZATION, bearer)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
                 .await
                 .unwrap()
         }
     };
 
-    // What the renderer sends. It holds the primary bearer and nothing else,
-    // so the document it just listed is unreachable to it.
-    assert_eq!(fetch(None).await.status(), StatusCode::UNAUTHORIZED);
-    // What the native host sends, and why the source list works while the
-    // reader that opens one does not.
-    assert_eq!(fetch(Some("native")).await.status(), StatusCode::OK);
+    // The document the reader opens, and the bytes its viewer draws.
+    let detail = get(format!("/chats/{}/documents/{document_id}", chat.id)).await;
+    assert_eq!(detail.status(), StatusCode::OK);
+    let body = String::from_utf8_lossy(&to_bytes(detail.into_body(), usize::MAX).await.unwrap())
+        .into_owned();
+    let detail: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(detail["document_id"], document_id);
+    // Present and a string; no worker runs here, so it is empty until one parses
+    // the source. What matters is that the field the viewers read is served.
+    assert!(detail["content"].is_string());
+    assert_eq!(detail["media_type"], "text/markdown");
+    assert_eq!(
+        get(format!(
+            "/chats/{}/documents/{document_id}/file-content",
+            chat.id
+        ))
+        .await
+        .status(),
+        StatusCode::OK
+    );
+
+    // Nothing about where the file came from, and no index bookkeeping, travels
+    // with it. This is the projection's whole purpose.
+    for sentinel in [
+        "/Users/private",
+        "quarterly-sentinel",
+        "uri",
+        "content_revision",
+        "index_fingerprint",
+    ] {
+        assert!(
+            !body.contains(sentinel),
+            "renderer detail leaked {sentinel}"
+        );
+    }
+
+    // The full-fidelity surface and host authority are both still withheld.
+    assert_eq!(
+        get(format!("/chats/{}/documents", chat.id)).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        get("/root-attachment-changes/pending".into())
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
 }

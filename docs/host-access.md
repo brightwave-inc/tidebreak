@@ -85,7 +85,14 @@ the primary bearer, and therefore unreachable to every future client that is
 renderer-shaped: a web or mobile client, a self-hosted deployment's browser UI,
 or a CLI. That is the intended consequence for host authority and a defect for
 anything else, so the distinction is worth checking rather than inheriting from
-whichever router a route was added next to. Begin and finish retries return stable
+whichever router a route was added next to.
+
+The document surface is the worked example. It sat behind this credential in
+native embeddings, which meant the renderer could list a conversation's sources
+through the native host but could not read one, and no document viewer in the
+desktop could load its bytes. It receives content and returns it; no route there
+reads a path or acts on the machine, so it belongs on the primary bearer and is
+now there in every embedding. Begin and finish retries return stable
 `begun`/`existing` and `finished`/`existing` dispositions. A missing change and
 a change owned by another executor are both reported as not found, while busy
 and revision conflicts do not identify the pending operation.

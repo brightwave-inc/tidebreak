@@ -89,6 +89,12 @@ export type ChatMetadataFrame = RendererChatMetadata;
 /** Generated from `ToolApprovalKind`. */
 export type RendererApprovalKind = ToolApprovalKind;
 
+/**
+ * One source as the renderer may see it, paired with `ChatDocumentDetail` on the
+ * server. Deliberately narrower than the catalog summary, which also carries the
+ * source's `uri` and index bookkeeping — neither of which the renderer is given,
+ * because a `uri` can name a place on the reader's disk.
+ */
 export type DocumentDetail = {
   document_id: string;
   media_type: string;
