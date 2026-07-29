@@ -47,8 +47,9 @@ import {
 } from "./ImageAttachments";
 import { useImageAttachments } from "./useImageAttachments";
 import { modelForSelection } from "./ModelSelection";
-import { CitationFormatMenu, ModelMenu, ReasoningEffortMenu } from "./ModelMenu";
+import { ModelMenu, ReasoningEffortMenu } from "./ModelMenu";
 import { PermissionModeMenu } from "./PermissionModeMenu";
+import { ToolsMenu } from "./ToolsMenu";
 import {
   PICKER_BUSY_MESSAGE,
   PICKER_HOLDERS,
@@ -380,7 +381,6 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             deletingChat={deletingChatId !== null}
             draft={draft}
             draftRef={draftRef}
-            attaching={attaching}
             attachedSourceName={recentSource?.displayName ?? null}
             attachError={attachError}
             composerImages={{
@@ -393,6 +393,14 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             }}
             composerModelMenu={
               <>
+                <ToolsMenu
+                  disabled={deletingChatId !== null}
+                  onAttach={hasNativeHost() ? onAttach : undefined}
+                  attaching={attaching}
+                  citationFormat={chat!.citation_format}
+                  defaultCitationFormat={defaultCitationFormat}
+                  onCitationFormatChange={onCitationFormatChange}
+                />
                 <ModelMenu
                   models={models}
                   value={chat!.model}
@@ -413,16 +421,9 @@ export function ChatRoute({ chatId }: { chatId: string }) {
                   disabled={deletingChatId !== null}
                   onChange={onPermissionModeChange}
                 />
-                <CitationFormatMenu
-                  value={chat!.citation_format}
-                  defaultFormat={defaultCitationFormat}
-                  disabled={deletingChatId !== null}
-                  onChange={onCitationFormatChange}
-                />
               </>
             }
             onDraftChange={setComposerDraft}
-            onAttach={onAttach}
             onDismissAttachedSource={() => setRecentSource(null)}
             onSelectPrompt={setComposerDraft}
             onSend={onSend}

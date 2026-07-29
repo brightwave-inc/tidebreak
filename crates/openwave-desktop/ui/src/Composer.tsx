@@ -12,9 +12,7 @@ import {
   ArrowUpRight,
   FileText,
   Image as ImageIcon,
-  Plus,
   Square,
-  Upload,
   X,
 } from "lucide-react";
 import { MAX_STEER_CHARACTERS } from "./ActiveTurnSteer";
@@ -26,13 +24,6 @@ import {
   transferCarriesFiles,
   type ImageAttachment,
 } from "./ImageAttachments";
-import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { WithTooltip } from "@/components/ui/tooltip";
 
 const MIN_COMPOSER_LINES = 1;
@@ -139,12 +130,8 @@ export type ComposerProps = {
   draft: string;
   modelMenu?: ReactNode;
   images?: ComposerImages;
-  /** Whether the host can open a picker; drop and paste work regardless. */
-  canAttach?: boolean;
-  attaching?: boolean;
   attachedSourceName?: string | null;
   attachError?: string | null;
-  onAttach?: () => Promise<void>;
   onDismissAttachedSource?: () => void;
   onDraftChange: (draft: string) => void;
   onSend: () => Promise<void>;
@@ -165,11 +152,8 @@ export function Composer({
   draft,
   modelMenu,
   images,
-  canAttach = false,
-  attaching = false,
   attachedSourceName = null,
   attachError = null,
-  onAttach,
   onDismissAttachedSource,
   onDraftChange,
   onSend,
@@ -346,32 +330,6 @@ export function Composer({
         />
         <div className="composer-actions">
           <div className="composer-actions-left">
-            {canAttach && onAttach && (
-              <DropdownMenu>
-                <WithTooltip label={attaching ? "Attaching…" : "Add"}>
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      variant="outline"
-                      size="icon-8"
-                      aria-label={attaching ? "Attaching" : "Add to this chat"}
-                      disabled={inputDisabled || attaching || busy}
-                    >
-                      <Plus aria-hidden="true" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                </WithTooltip>
-                {/* A menu rather than a bare button: attaching files is the
-                    first of the things a reader adds to a conversation, and
-                    the sources that follow it belong in the same place rather
-                    than as a second icon in the row. */}
-                <DropdownMenuContent align="start" side="top" className="w-56">
-                  <DropdownMenuItem onSelect={() => void onAttach()}>
-                    <Upload className="size-4" />
-                    Upload files
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            )}
             {modelMenu}
           </div>
           <div className="composer-actions-right">
