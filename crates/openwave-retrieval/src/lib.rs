@@ -116,8 +116,8 @@ pub use liteparse_parser::LiteParsePdfParser;
 pub use openai_embed::OpenAiEmbedder;
 pub use openwave_core::{DocumentGeneration, ProjectId};
 pub use parse::{
-    DocumentParser, FallbackParser, ParsedDocument, ParserRegistry, PlainTextParser,
-    StructuredTextParser,
+    document_parser_registry, DocumentParser, FallbackParser, ParsedDocument, ParserRegistry,
+    PlainTextParser, StructuredTextParser,
 };
 pub use rerank::Reranker;
 pub use retriever::{GenerationIndexOutcome, IngestOutcome, Retriever};

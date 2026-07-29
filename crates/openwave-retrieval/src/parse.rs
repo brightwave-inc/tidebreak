@@ -51,6 +51,43 @@ impl ParserRegistry {
     }
 }
 
+/// Assemble the production document parsers, narrowest first. With the
+/// `parse-liteparse` feature, the PDF parser claims `application/pdf`; with
+/// `parse-spreadsheet`, the spreadsheet parser claims Excel and OpenDocument
+/// workbooks, reading their sheets and cells directly; with `parse-office`, the
+/// Office parser claims the remaining Word/PowerPoint/OpenDocument types
+/// (converting via LibreOffice when present, storing without searchable text
+/// when not); with `parse-image`, the image parser claims common raster types
+/// (PNG/JPEG/WebP/GIF/TIFF/BMP), stored without searchable text until OCR lands;
+/// the [`StructuredTextParser`] claims the tree-shaped text types (JSON, XML,
+/// HTML), whose text it passes through unchanged while recording which node
+/// each part came from; [`PlainTextParser`] claims the rest of `text/*`; the
+/// [`FallbackParser`] claims everything else so **any** upload is accepted —
+/// text-like unknown types stay searchable and binary ones are stored without
+/// polluting the index.
+///
+/// Order carries meaning between the two workbook paths: the Office parser
+/// still claims spreadsheets, and only registering the native one ahead of it
+/// keeps a workbook off the LibreOffice detour. That leaves the fallback
+/// intact — build without `parse-spreadsheet` and workbooks convert exactly as
+/// they did.
+#[must_use]
+pub fn document_parser_registry() -> ParserRegistry {
+    let registry = ParserRegistry::new();
+    #[cfg(feature = "parse-liteparse")]
+    let registry = registry.with_parser(crate::LiteParsePdfParser::new());
+    #[cfg(feature = "parse-spreadsheet")]
+    let registry = registry.with_parser(crate::SpreadsheetParser::new());
+    #[cfg(feature = "parse-office")]
+    let registry = registry.with_parser(crate::LiteParseOfficeParser::new());
+    #[cfg(feature = "parse-image")]
+    let registry = registry.with_parser(crate::LiteParseImageParser::new());
+    registry
+        .with_parser(StructuredTextParser::new())
+        .with_parser(PlainTextParser::new())
+        .with_parser(FallbackParser::new())
+}
+
 #[async_trait::async_trait]
 impl DocumentParser for ParserRegistry {
     fn fingerprint_for(&self, media_type: &str) -> Option<String> {
@@ -279,6 +316,58 @@ impl DocumentParser for FallbackParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(
+        feature = "parse-liteparse",
+        feature = "parse-office",
+        feature = "parse-image",
+        feature = "parse-spreadsheet"
+    ))]
+    #[test]
+    fn production_registry_routes_rich_formats_to_the_intended_parser() {
+        let registry = document_parser_registry();
+        let cases: [(&str, &dyn DocumentParser, &str); 7] = [
+            (
+                "application/pdf",
+                &crate::LiteParsePdfParser::new(),
+                "PDF parser",
+            ),
+            (
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                &crate::SpreadsheetParser::new(),
+                "native spreadsheet parser",
+            ),
+            (
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                &crate::LiteParseOfficeParser::new(),
+                "Office parser",
+            ),
+            (
+                "image/png",
+                &crate::LiteParseImageParser::new(),
+                "image parser",
+            ),
+            (
+                "application/json",
+                &StructuredTextParser::new(),
+                "structured-text parser",
+            ),
+            ("text/plain", &PlainTextParser::new(), "plain-text parser"),
+            (
+                "application/octet-stream",
+                &FallbackParser::new(),
+                "fallback parser",
+            ),
+        ];
+
+        for (media_type, expected_parser, parser_name) in cases {
+            assert_eq!(
+                registry.fingerprint_for(media_type),
+                expected_parser.fingerprint_for(media_type),
+                "{parser_name} should handle {media_type}"
+            );
+        }
+    }
 
     struct PrefixParser {
         media_type: &'static str,
