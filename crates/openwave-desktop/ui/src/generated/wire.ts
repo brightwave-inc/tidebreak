@@ -561,7 +561,15 @@ export type ManagedPolicy = { managed: boolean, gateway_url?: string, source: Ma
  * fail closed — and surfaces can name the authority that needs repair
  * instead of showing an opaque error.
  */
-misconfigured: boolean, };
+misconfigured: boolean, 
+/**
+ * A deep-link pairing awaiting the sign-in that is its consent. Runtime
+ * state merged in by the `/policy` route from [`GatewayRuntime`]
+ * (crate::gateway_runtime), never part of the durable resolution —
+ * [`resolve`] always leaves it `None` — and only ever present while the
+ * profile is unmanaged.
+ */
+pending_gateway_url?: string, };
 
 /**
  * Which authority asserted the active policy.

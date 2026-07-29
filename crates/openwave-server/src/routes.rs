@@ -170,13 +170,24 @@ fn mcp_app_payload_from_events(
 
 /// `GET /policy` — the resolved managed-mode policy. Read-only by design:
 /// provisioning has no renderer-writable route, which is what keeps the
-/// state sticky.
+/// state sticky. A shell-registered pending pairing rides along while the
+/// profile is unmanaged, so the gate can present the sign-in that would
+/// commit it — runtime state, merged here and never part of the durable
+/// resolution.
 pub async fn get_policy(
     State(state): State<AppState>,
 ) -> Result<Json<crate::managed_policy::ManagedPolicy>, ServerError> {
-    Ok(Json(
-        crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?,
-    ))
+    Ok(Json(policy_with_pending(&state).await?))
+}
+
+async fn policy_with_pending(
+    state: &AppState,
+) -> Result<crate::managed_policy::ManagedPolicy, ServerError> {
+    let mut policy = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
+    if !policy.managed {
+        policy.pending_gateway_url = state.gateway.pending_pairing_url().await;
+    }
+    Ok(policy)
 }
 
 /// `GET /gateway/status` — renderer-safe model-gateway connection state.
@@ -199,6 +210,18 @@ pub async fn post_gateway_sign_in(
 #[derive(Serialize)]
 pub struct GatewaySignInStarted {
     authorization_url: String,
+}
+
+/// `POST /gateway/pairing/dismiss` — decline the pending deep-link pairing.
+/// Renderer-reachable, deliberately: declining changes nothing durable, so
+/// the failure direction is safe — a compromised renderer could only cancel
+/// a pairing prompt, never create or approve one. Returns the policy the
+/// gate should now render.
+pub async fn post_gateway_pairing_dismiss(
+    State(state): State<AppState>,
+) -> Result<Json<crate::managed_policy::ManagedPolicy>, ServerError> {
+    state.gateway.dismiss_pending_pairing().await;
+    Ok(Json(policy_with_pending(&state).await?))
 }
 
 /// `POST /gateway/sign-out` — revoke at the gateway (best-effort) and clear

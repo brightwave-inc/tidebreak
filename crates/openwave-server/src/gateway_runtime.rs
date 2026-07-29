@@ -36,11 +36,31 @@ pub(crate) struct GatewayRuntime {
     cached: Mutex<Option<(String, Arc<GatewayConnection>)>>,
     /// The one in-flight browser sign-in, if any.
     sign_in: Mutex<SignInProgress>,
-    /// Bumped by every `begin_sign_in` and `sign_out`; a background exchange
-    /// task may only store its session and stamp its outcome while its own
-    /// generation is still current, so a stale attempt can neither clobber a
-    /// newer one's status nor resurrect a signed-out session.
+    /// Bumped by every `begin_sign_in` and `sign_out` — and by every pending-
+    /// pairing registration or dismissal; a background exchange task may only
+    /// act while its own generation is still current, so a stale attempt can
+    /// neither clobber a newer one's status, resurrect a signed-out session,
+    /// nor commit a pairing that was dismissed or replaced under it.
     sign_in_generation: std::sync::atomic::AtomicU64,
+    /// A deep-link pairing awaiting the sign-in that is its consent.
+    ///
+    /// Process-ephemeral on purpose: nothing durable exists until the user
+    /// completes a sign-in against this gateway, so an unwanted provision
+    /// link dies with a dismissal or the process. Set only by the desktop
+    /// shell through [`crate::register_pending_pairing`] — the renderer can
+    /// read and dismiss it, never set it or choose its URL.
+    pending_pairing: Mutex<Option<PendingPairing>>,
+}
+
+/// The shell-registered pairing a sign-in may commit.
+#[derive(Clone)]
+struct PendingPairing {
+    /// Normalized gateway base URL, already held to the connectors contract.
+    base_url: String,
+    /// Carried from the shell's [`crate::PairingHandle`] at registration so
+    /// the commit cannot run without also applying what it decides to the
+    /// MCP servers this process is running.
+    mcp: Arc<crate::mcp_config::McpRuntime>,
 }
 
 /// Renderer-safe progress of the current sign-in attempt.
@@ -111,7 +131,50 @@ impl GatewayRuntime {
             cached: Mutex::new(None),
             sign_in: Mutex::new(SignInProgress::Idle),
             sign_in_generation: std::sync::atomic::AtomicU64::new(0),
+            pending_pairing: Mutex::new(None),
         })
+    }
+
+    /// The one policy read every surface here shares.
+    pub(crate) async fn policy(&self) -> Result<crate::managed_policy::ManagedPolicy> {
+        crate::managed_policy::resolve(&*self.store, &*self.os_policy).await
+    }
+
+    /// Park a shell-validated pairing until a sign-in consents to it,
+    /// replacing any earlier one — the latest link is the one the user acted
+    /// on. Invalidate any in-flight browser flow the same way `sign_out`
+    /// does: an exchange started against a replaced pairing must abandon
+    /// rather than commit it.
+    pub(crate) async fn register_pending_pairing(
+        &self,
+        base_url: String,
+        mcp: Arc<crate::mcp_config::McpRuntime>,
+    ) {
+        let mut sign_in = self.sign_in.lock().await;
+        self.sign_in_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *sign_in = SignInProgress::Idle;
+        *self.pending_pairing.lock().await = Some(PendingPairing { base_url, mcp });
+    }
+
+    /// The pending pairing's gateway URL, for the `/policy` projection.
+    pub(crate) async fn pending_pairing_url(&self) -> Option<String> {
+        self.pending_pairing
+            .lock()
+            .await
+            .as_ref()
+            .map(|pending| pending.base_url.clone())
+    }
+
+    /// Decline the pending pairing: clear it and invalidate any browser flow
+    /// it started. Renderer-reachable, deliberately — declining changes
+    /// nothing durable, so the failure direction is safe.
+    pub(crate) async fn dismiss_pending_pairing(&self) {
+        let mut sign_in = self.sign_in.lock().await;
+        self.sign_in_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *sign_in = SignInProgress::Idle;
+        *self.pending_pairing.lock().await = None;
     }
 
     /// The renderer-facing connection status, derived from policy alone: a
@@ -172,11 +235,28 @@ impl GatewayRuntime {
 
     /// Start a browser sign-in and return the URL to open.
     ///
+    /// On a managed profile the sign-in targets the policy's gateway. On an
+    /// unmanaged profile with a pending pairing it targets the pairing's
+    /// gateway instead, and a successful exchange is what commits the
+    /// provision — the sign-in the user chose to complete is the pairing's
+    /// consent, so nothing durable exists until it succeeds. Unmanaged with
+    /// no pending pairing keeps the legible refusal.
+    ///
     /// The exchange completes in a background task: on success the session is
-    /// stored and the entitled models synced; on failure the status surface
-    /// carries the bounded error until the next attempt.
+    /// stored (after any pairing commit) and the entitled models synced; on
+    /// failure the status surface carries the bounded error until the next
+    /// attempt.
     pub(crate) async fn begin_sign_in(self: &Arc<Self>) -> Result<String> {
-        let connection = self.managed_connection().await?;
+        let policy = self.policy().await?;
+        let pairing = if policy.managed {
+            None
+        } else {
+            self.pending_pairing.lock().await.clone()
+        };
+        let connection = match &pairing {
+            Some(pending) => self.connection_at(pending.base_url.clone()).await?,
+            None => self.connection_at(require_managed(&policy)?).await?,
+        };
         let pending = connection.auth().start_sign_in().await?;
         let authorization_url = pending.authorization_url().to_string();
         let generation = {
@@ -209,23 +289,56 @@ impl GatewayRuntime {
                 return;
             }
             *sign_in = match finished {
-                Ok(session) => match connection.store_session(&session).await {
-                    Ok(()) => {
-                        // Best-effort: a failed first sync leaves an explicit
-                        // refresh affordance, not a failed sign-in.
-                        let _ = runtime.sync_models().await;
-                        SignInProgress::Idle
+                Ok(session) => {
+                    // A pairing commits before its session persists: if the
+                    // provision cannot be written (an MDM push claimed the
+                    // profile mid-flow), no session lands on a profile the
+                    // pairing's gateway does not manage. The generation
+                    // being current is what proves the pairing was neither
+                    // dismissed nor replaced while the browser flow ran —
+                    // both bump it under this same lock.
+                    let committed = match &pairing {
+                        Some(pending) => runtime.commit_pairing(pending).await,
+                        None => Ok(()),
+                    };
+                    let stored = match committed {
+                        Ok(()) => connection.store_session(&session).await,
+                        Err(error) => Err(error),
+                    };
+                    match stored {
+                        Ok(()) => {
+                            // Best-effort: a failed first sync leaves an
+                            // explicit refresh affordance, not a failed
+                            // sign-in.
+                            let _ = runtime.sync_models().await;
+                            SignInProgress::Idle
+                        }
+                        Err(error) => SignInProgress::Failed {
+                            message: error.to_string(),
+                        },
                     }
-                    Err(error) => SignInProgress::Failed {
-                        message: error.to_string(),
-                    },
-                },
+                }
                 Err(error) => SignInProgress::Failed {
                     message: error.to_string(),
                 },
             };
         });
         Ok(authorization_url)
+    }
+
+    /// Commit the pairing a finishing sign-in consented to, then clear it.
+    /// Runs from the exchange task with the sign-in state lock held, so it
+    /// cannot interleave with a dismissal or re-registration.
+    async fn commit_pairing(&self, pending: &PendingPairing) -> Result<()> {
+        crate::pairing::commit_signed_in_pairing(
+            &*self.store,
+            &*self.os_policy,
+            &pending.mcp,
+            &pending.base_url,
+        )
+        .await?;
+        *self.pending_pairing.lock().await = None;
+        Ok(())
     }
 
     /// Revoke the session (best-effort at the gateway), clear local state, and
@@ -618,6 +731,18 @@ mod tests {
 
     async fn serve(gateway: Arc<FakeGateway>) -> std::net::SocketAddr {
         let app = AxumRouter::new()
+            .route(
+                "/api/v1/meta",
+                get(|| async {
+                    Json(json!({
+                        "api_version": "v1",
+                        "installation_id": "install-1",
+                        "gateway_version": "1.0.0",
+                        "public_url": "http://gateway.test",
+                        "auth_mode": "oidc",
+                    }))
+                }),
+            )
             .route("/oauth/token", post(token))
             .route("/api/v1/cli/models", get(models))
             .route("/mcp/{slug}", post(mcp_endpoint))
@@ -986,6 +1111,58 @@ mod tests {
             Some("tools")
         );
         assert!(mcp.snapshot().get("mcp__tools__lookup").is_none());
+    }
+
+    /// The sign-in surface on an unmanaged profile exists exactly while a
+    /// pending pairing is parked: it targets the pairing's gateway, commits
+    /// nothing by merely starting, and a dismissal restores the refusal —
+    /// the write-path guard the retired confirmation dialog used to be.
+    #[tokio::test]
+    async fn a_pending_pairing_is_what_sign_in_targets_until_dismissed() {
+        let address = serve(Arc::new(FakeGateway::default())).await;
+        let base = format!("http://{address}/");
+        let directory = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                directory.path().join("gateway.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let runtime = GatewayRuntime::new(
+            store.clone(),
+            Arc::new(MockSecrets::default()),
+            Arc::new(crate::managed_policy::NoOsPolicy),
+        );
+        let mcp = Arc::new(crate::mcp_config::McpRuntime::new(
+            Arc::new(openwave_core::ToolRegistry::new()),
+            store.clone(),
+            runtime.clone(),
+            Arc::new(crate::managed_policy::NoOsPolicy),
+        ));
+
+        // Unmanaged with nothing pending: the legible refusal.
+        assert!(runtime.begin_sign_in().await.is_err());
+
+        runtime
+            .register_pending_pairing(base.clone(), mcp.clone())
+            .await;
+        let url = runtime.begin_sign_in().await.unwrap();
+        assert!(
+            url.starts_with(&format!("{base}oauth/authorize")),
+            "sign-in must target the pending gateway: {url}"
+        );
+        // Starting the flow wrote nothing durable.
+        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+            .await
+            .unwrap();
+        assert!(!policy.managed);
+
+        runtime.dismiss_pending_pairing().await;
+        assert_eq!(runtime.pending_pairing_url().await, None);
+        assert_eq!(runtime.status().await.unwrap().sign_in, SignInProgress::Idle);
+        assert!(runtime.begin_sign_in().await.is_err());
     }
 
     #[tokio::test]

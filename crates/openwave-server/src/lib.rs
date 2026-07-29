@@ -95,7 +95,7 @@ use resolver::KeyedResolver;
 
 pub use durable_oplog::DurableOperationStore;
 pub use error::ServerError;
-pub use pairing::{pair_with_gateway, PairingError, PairingHandle, PairingOutcome};
+pub use pairing::{register_pending_pairing, PairingError, PairingHandle, PendingRegistration};
 pub use state::AppState;
 
 const MAX_RAW_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
@@ -333,6 +333,10 @@ pub fn app(state: AppState) -> Router {
         .route("/gateway/sign-in", post(routes::post_gateway_sign_in))
         .route("/gateway/sign-out", post(routes::post_gateway_sign_out))
         .route(
+            "/gateway/pairing/dismiss",
+            post(routes::post_gateway_pairing_dismiss),
+        )
+        .route(
             "/gateway/models/sync",
             post(routes::post_gateway_models_sync),
         )
@@ -483,6 +487,9 @@ pub struct Server {
     /// The live MCP runtime, handed to pairing so a profile that becomes
     /// managed mid-session takes its manual servers down immediately.
     mcp: Arc<mcp_config::McpRuntime>,
+    /// The one gateway runtime, handed to pairing so a registered pending
+    /// pairing lands in the same slot the sign-in surface reads.
+    gateway: Arc<gateway_runtime::GatewayRuntime>,
     listener: TcpListener,
     router: Router,
     _document_auditor: AbortTask,
@@ -564,9 +571,9 @@ impl Server {
     /// The handles the native deep-link pairing flow needs.
     ///
     /// Pairing is exported for native embedders only, and it has live effects
-    /// beyond the store — see [`pair_with_gateway`].
+    /// beyond the store — see [`register_pending_pairing`].
     pub fn pairing_handle(&self) -> PairingHandle {
-        PairingHandle::new(self.store.clone(), self.mcp.clone())
+        PairingHandle::new(self.store.clone(), self.mcp.clone(), self.gateway.clone())
     }
 
     /// Run the accept loop until the process exits.
@@ -833,6 +840,7 @@ async fn bind_inner(
         );
     let server_store = state.store.clone();
     let mcp_runtime = state.mcp.clone();
+    let gateway_runtime = state.gateway.clone();
     let router = app(state);
 
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -858,6 +866,7 @@ async fn bind_inner(
         client_executor_token,
         store: server_store,
         mcp: mcp_runtime,
+        gateway: gateway_runtime,
         listener,
         router,
         _document_auditor: AbortTask(document_auditor),
@@ -978,10 +987,9 @@ const EMBED_DIMS: usize = 1536;
 ///
 /// Because the embedder is boot-scoped (the vector index is dimension-bound
 /// to it), a profile provisioned managed at runtime keeps a live BYOK
-/// embedder until the next app start. The desktop deep-link pairing flow
-/// therefore prompts for a restart when a pairing newly provisions the
-/// profile (keyed off `PairingOutcome::newly_provisioned` — #898); either
-/// way this gate closes at the next boot.
+/// embedder until the next app start; this gate closes at the next boot.
+/// Closing it eagerly — an automatic restart when a pairing commit finds a
+/// live BYOK embedder — is #1024.
 async fn resolve_embedder(
     store: &dyn Store,
     secrets: &dyn SecretProvider,

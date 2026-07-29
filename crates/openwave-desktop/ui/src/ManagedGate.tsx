@@ -81,7 +81,8 @@ function samePolicy(a: ManagedPolicy, b: ManagedPolicy): boolean {
     a.managed === b.managed &&
     a.source === b.source &&
     a.misconfigured === b.misconfigured &&
-    (a.gateway_url ?? null) === (b.gateway_url ?? null)
+    (a.gateway_url ?? null) === (b.gateway_url ?? null) &&
+    (a.pending_gateway_url ?? null) === (b.pending_gateway_url ?? null)
   );
 }
 
@@ -120,6 +121,13 @@ export function ManagedGate({
 
   const policy = policyState.kind === "resolved" ? policyState.policy : null;
   const managed = policy?.managed === true;
+  // A deep-link pairing awaiting the sign-in that is its consent. The gate
+  // presents it exactly like the managed sign-in — full-window, nothing of
+  // the app behind it — because from the user's seat it is the same step:
+  // sign in to the named gateway. The one durable difference (the sign-in
+  // commits the provision) is the server's business.
+  const pendingPairingUrl = !managed ? (policy?.pending_gateway_url ?? null) : null;
+  const gateActive = managed || pendingPairingUrl !== null;
 
   useEffect(() => {
     if (policyState.kind !== "loading") return;
@@ -197,7 +205,7 @@ export function ManagedGate({
   }, [client]);
 
   useEffect(() => {
-    if (!managed) return;
+    if (!gateActive) return;
     let cancelled = false;
     reload().catch((err) => {
       if (!cancelled) setStatusError(String(err));
@@ -205,7 +213,7 @@ export function ManagedGate({
     return () => {
       cancelled = true;
     };
-  }, [managed, reload]);
+  }, [gateActive, reload]);
 
   // The watch is keyed on being managed, not on having a status: if the first
   // fetch failed, the ticks are what recover from it. Each tick retries, and
@@ -213,7 +221,7 @@ export function ManagedGate({
   // pending → signed in lifts the gate, a sign-out anywhere lowers it again.
   const pendingFlow = status?.sign_in.state === "pending";
   useEffect(() => {
-    if (!managed) return;
+    if (!gateActive) return;
     const timer = window.setInterval(
       () => {
         void reload().catch(() => undefined);
@@ -221,7 +229,7 @@ export function ManagedGate({
       pendingFlow ? PENDING_POLL_MS : SESSION_WATCH_MS,
     );
     return () => window.clearInterval(timer);
-  }, [managed, pendingFlow, reload]);
+  }, [gateActive, pendingFlow, reload]);
 
   async function connect() {
     if (!policy) return;
@@ -229,11 +237,25 @@ export function ManagedGate({
     setActionError(null);
     try {
       // Sign-in needs no provider convergence: the server derives the
-      // deployment from the policy itself, and the retired provider row is
-      // not writable at all.
+      // deployment from the policy itself — or from the pending pairing the
+      // shell registered — and the retired provider row is not writable at
+      // all.
       const started = await client.gatewaySignIn();
       await openSignInPage(started.authorization_url);
       await reload();
+    } catch (err) {
+      setActionError(String(err));
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function dismissPairing() {
+    setWorking(true);
+    setActionError(null);
+    try {
+      const next = await client.dismissGatewayPairing();
+      setPolicyState({ kind: "resolved", policy: next });
     } catch (err) {
       setActionError(String(err));
     } finally {
@@ -282,7 +304,7 @@ export function ManagedGate({
   // Everything below the gate reads the same resolved policy the gate did:
   // the settings surfaces gate themselves on it, and re-fetching `/policy`
   // per panel could only produce disagreement.
-  if (!managed) return <Published policy={policy}>{children}</Published>;
+  if (!gateActive) return <Published policy={policy}>{children}</Published>;
 
   if (status === null && statusError === null) {
     return <BootScreen>starting…</BootScreen>;
@@ -290,15 +312,22 @@ export function ManagedGate({
 
   // The gate lifts only for a session on the policy's own gateway. The
   // server already pins signed_in to the policy URL; the comparison stays as
-  // defense in depth for a renderer running against an older server.
+  // defense in depth for a renderer running against an older server. A
+  // pending pairing never lifts here — its sign-in flips the policy to
+  // managed server-side, and the managed branch takes over on the next poll.
   const lockedUrl = policy?.gateway_url ?? null;
   const sessionSatisfiesPolicy =
-    status?.signed_in === true && sameGateway(status.base_url, lockedUrl);
+    managed &&
+    status?.signed_in === true &&
+    sameGateway(status.base_url, lockedUrl);
   if (sessionSatisfiesPolicy) return <Published policy={policy}>{children}</Published>;
 
-  // The device's managed gateway is the policy's URL, wherever the provider
-  // config currently points.
-  const shownUrl = lockedUrl ?? status?.base_url ?? null;
+  const pairing = pendingPairingUrl !== null;
+  // The device's managed gateway is the policy's URL — or, for a pairing
+  // awaiting consent, the URL the shell registered from the provision link.
+  const shownUrl = pairing
+    ? pendingPairingUrl
+    : (lockedUrl ?? status?.base_url ?? null);
   const pendingUrl =
     status?.sign_in.state === "pending"
       ? status.sign_in.authorization_url
@@ -307,18 +336,34 @@ export function ManagedGate({
     status?.sign_in.state === "failed" ? status.sign_in.message : null;
 
   return (
-    <div className="boot" aria-label="Sign in required">
+    <div
+      className="boot"
+      aria-label={pairing ? "Gateway pairing requested" : "Sign in required"}
+    >
       <WindowDragStrip />
       <div className="boot-brand">
         <Logomark />
         <h1>OpenWave</h1>
       </div>
       <div className="welcome-copy">
-        <h2>Sign in to continue</h2>
-        <p>
-          This OpenWave install is managed by your organization. Sign in to
-          your model gateway to get started.
-        </p>
+        {pairing ? (
+          <>
+            <h2>Connect to your model gateway</h2>
+            <p>
+              Signing in connects OpenWave to the gateway below. It will
+              manage this device — it controls which models are available —
+              and the connection cannot be undone from within OpenWave.
+            </p>
+          </>
+        ) : (
+          <>
+            <h2>Sign in to continue</h2>
+            <p>
+              This OpenWave install is managed by your organization. Sign in
+              to your model gateway to get started.
+            </p>
+          </>
+        )}
       </div>
       {shownUrl && (
         <p className="text-muted-foreground text-sm">
@@ -349,10 +394,26 @@ export function ManagedGate({
           </a>
         </p>
       ) : (
-        <Button type="button" disabled={working} onClick={() => void connect()}>
-          <ExternalLink size={14} />
-          Connect
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            disabled={working}
+            onClick={() => void connect()}
+          >
+            <ExternalLink size={14} />
+            {pairing ? "Sign in and connect" : "Connect"}
+          </Button>
+          {pairing && (
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={working}
+              onClick={() => void dismissPairing()}
+            >
+              Not now
+            </Button>
+          )}
+        </div>
       )}
       {actionError && <p className="boot-error-detail">{actionError}</p>}
       {statusError && <p className="boot-error-detail">{statusError}</p>}
