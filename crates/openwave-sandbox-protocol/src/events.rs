@@ -37,6 +37,16 @@ pub enum EventPayload {
     Progress(String),
     /// The run's terminal result submission.
     Result(String),
+    /// The run's loop ended without producing a result — it exhausted its step
+    /// budget, or a model step failed unrecoverably. Terminal, like
+    /// [`Result`](EventPayload::Result): a conforming sandbox emits exactly one
+    /// of the two and then stops producing.
+    ///
+    /// Without this the host cannot tell "still working" from "finished with
+    /// nothing", because the supervisor keeps serving the connection after the
+    /// agent loop returns. A host that only watched for a result would wait on
+    /// the open socket forever and leak the sandbox.
+    Failed(String),
 }
 
 impl EventPayload {
@@ -44,9 +54,19 @@ impl EventPayload {
     #[must_use]
     pub fn within_bounds(&self) -> bool {
         let len = match self {
-            EventPayload::Progress(text) | EventPayload::Result(text) => text.len(),
+            EventPayload::Progress(text)
+            | EventPayload::Result(text)
+            | EventPayload::Failed(text) => text.len(),
         };
         len <= MAX_EVENT_PAYLOAD_BYTES
+    }
+
+    /// Whether this payload terminates the run's event stream — a submitted
+    /// result or a loop that ended without one. The host stops draining and
+    /// terminalizes on either.
+    #[must_use]
+    pub const fn is_terminal(&self) -> bool {
+        matches!(self, EventPayload::Result(_) | EventPayload::Failed(_))
     }
 }
 

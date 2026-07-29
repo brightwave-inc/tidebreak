@@ -1914,6 +1914,12 @@ impl AgentRunTier {
 pub enum AgentRunExecutionLocation {
     /// The loop runs inside the OpenWave server process.
     InProcess,
+    /// The loop runs inside a sandbox-resident container, host-driven over the
+    /// versioned sandbox-agent wire protocol. The in-process scheduler does not
+    /// advance these runs; the sandbox-resident driver provisions the container,
+    /// attaches, proxies model inference back over the reverse channel, and
+    /// commits the result through the same fenced result path.
+    Container,
 }
 
 impl AgentRunExecutionLocation {
@@ -1922,6 +1928,7 @@ impl AgentRunExecutionLocation {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::InProcess => "in_process",
+            Self::Container => "container",
         }
     }
 }

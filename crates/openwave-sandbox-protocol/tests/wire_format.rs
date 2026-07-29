@@ -249,6 +249,22 @@ fn event_stream_wire_shapes() {
     roundtrip(&result);
     golden(&result, &[("/payload/kind", json!("result"))]);
 
+    // The other terminal event: the loop ended without a result.
+    let failed = SandboxEvent {
+        sequence: Sequence::new(3),
+        payload: EventPayload::Failed("step budget exhausted".to_owned()),
+    };
+    roundtrip(&failed);
+    golden(
+        &failed,
+        &[
+            ("/payload/kind", json!("failed")),
+            ("/payload/body", json!("step budget exhausted")),
+        ],
+    );
+    assert!(failed.payload.is_terminal() && result.payload.is_terminal());
+    assert!(!progress.payload.is_terminal());
+
     let batch = EventBatch {
         events: vec![progress],
         overflowed: false,
@@ -296,9 +312,28 @@ fn provisioning_wire_shapes() {
         run_id: RunId::new(),
         tag: SandboxTag::new(),
         lifetime_cap_secs: Some(3600),
+        task: Some("summarize the corpus".to_owned()),
     };
     roundtrip(&request);
-    golden(&request, &[("/lifetime_cap_secs", json!(3600))]);
+    golden(
+        &request,
+        &[
+            ("/lifetime_cap_secs", json!(3600)),
+            ("/task", json!("summarize the corpus")),
+        ],
+    );
+
+    // An absent task is omitted entirely, so a backend that carries no task and
+    // an older encoding both decode.
+    let taskless = ProvisionRequest {
+        task: None,
+        ..request
+    };
+    roundtrip(&taskless);
+    assert!(serde_json::to_value(&taskless)
+        .unwrap()
+        .get("task")
+        .is_none());
 
     let handle = SandboxHandle {
         reference: "container-abc".to_owned(),

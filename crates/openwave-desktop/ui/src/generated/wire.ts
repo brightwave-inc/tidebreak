@@ -43,7 +43,7 @@ export type AgentRunCancellationStatus = "cancelling" | "cancelled";
  * executing inside an execution provider's boundary adds a variant here
  * rather than a second meaning to [`AgentRunTier`].
  */
-export type AgentRunExecutionLocation = "in_process";
+export type AgentRunExecutionLocation = "in_process" | "container";
 
 /**
  * Identifies one durable foreground or sandboxed background agent run.

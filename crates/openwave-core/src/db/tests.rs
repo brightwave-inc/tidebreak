@@ -5345,6 +5345,84 @@ async fn m0006_upgrades_an_existing_store_without_losing_records() {
 }
 
 #[tokio::test]
+async fn m0024_widens_and_narrows_the_execution_location_domain() {
+    // Guards the container-location migration's bespoke SQLite table rebuild in
+    // both directions: after `up` a `container` execution location is accepted,
+    // after `down` it is rejected again, and re-applying `up` restores it — so a
+    // regression in the hand-written rebuild SQL fails here rather than silently.
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        dir.path().join("relocate.db").display()
+    );
+    let conn = Database::connect(&url).await.unwrap();
+    migration::Migrator::up(&conn, None).await.unwrap();
+
+    // A foreground-shaped row is the cheapest row that satisfies the unrelated
+    // shape/lease/finished checks; only its execution location is under test.
+    // Foreign keys are off so no chat row is needed.
+    conn.execute_unprepared("PRAGMA foreign_keys=OFF")
+        .await
+        .unwrap();
+    let insert_container = |conn: DatabaseConnection| async move {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let chat = uuid::Uuid::new_v4().simple().to_string();
+        conn.execute_unprepared(&format!(
+            "INSERT INTO agent_run \
+             (id, chat_id, tier, execution_location, depth, status, attempt_count, \
+              max_attempts, claim_count, available_at, created_at, updated_at) \
+             VALUES (X'{id}', X'{chat}', 'foreground', 'container', 0, 'active', 0, 0, 0, \
+              '2026-07-29 00:00:00+00:00', '2026-07-29 00:00:00+00:00', \
+              '2026-07-29 00:00:00+00:00')"
+        ))
+        .await
+    };
+
+    assert!(
+        insert_container(conn.clone()).await.is_ok(),
+        "container must be accepted after the widening migration"
+    );
+
+    // A rollback with a container row still present is refused up front, and
+    // leaves the schema untouched — rather than failing partway through the
+    // rebuild and stranding the scratch table, which would break the next `up`.
+    let refused = migration::Migrator::down(&conn, Some(1)).await;
+    assert!(
+        refused.is_err(),
+        "narrowing must be refused while a container row remains"
+    );
+    conn.execute_unprepared("PRAGMA foreign_keys=OFF")
+        .await
+        .unwrap();
+    assert!(
+        insert_container(conn.clone()).await.is_ok(),
+        "a refused rollback must leave the widened schema intact"
+    );
+
+    // With the container rows cleared, the rollback proceeds.
+    conn.execute_unprepared("DELETE FROM agent_run")
+        .await
+        .unwrap();
+    migration::Migrator::down(&conn, Some(1)).await.unwrap();
+    conn.execute_unprepared("PRAGMA foreign_keys=OFF")
+        .await
+        .unwrap();
+    assert!(
+        insert_container(conn.clone()).await.is_err(),
+        "container must be rejected once the domain is narrowed back"
+    );
+
+    migration::Migrator::up(&conn, None).await.unwrap();
+    conn.execute_unprepared("PRAGMA foreign_keys=OFF")
+        .await
+        .unwrap();
+    assert!(
+        insert_container(conn.clone()).await.is_ok(),
+        "re-applying the migration restores the widened domain"
+    );
+}
+
+#[tokio::test]
 async fn m0011_preserves_legacy_documents_as_conversationless() {
     let dir = tempfile::tempdir().unwrap();
     let url = format!(

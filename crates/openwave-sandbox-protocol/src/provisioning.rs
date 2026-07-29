@@ -49,6 +49,19 @@ pub struct ProvisionRequest {
     /// outside the sandbox. `None` means the backend cannot cap lifetime, which
     /// (per the design) makes the run attached-only.
     pub lifetime_cap_secs: Option<u64>,
+    /// The delegated task, as bounded UTF-8.
+    ///
+    /// **Interim.** The design delivers the task in the [run
+    /// init](crate::init::RunInit) *after* the handle commits, so a sandbox
+    /// reclaimed before that point never executed anything. No init frame exists
+    /// on the transport yet, so the task rides the provisioning request and the
+    /// backend delivers it through whatever its control plane is (for a local
+    /// container, the container's environment — the same path that already
+    /// carries the per-run transport secret). This field goes away when the init
+    /// frame lands; a backend that cannot carry a task ignores it, and `None`
+    /// leaves the sandbox on its own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
 }
 
 /// An opaque, backend-specific handle to a provisioned sandbox.

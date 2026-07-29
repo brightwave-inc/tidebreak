@@ -6769,6 +6769,7 @@ dependencies = [
  "openwave-mcp",
  "openwave-retrieval",
  "openwave-router",
+ "openwave-sandbox-agent",
  "openwave-sandbox-protocol",
  "openwave-web-search",
  "plist",

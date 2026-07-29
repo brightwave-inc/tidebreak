@@ -160,6 +160,20 @@ impl SandboxRun {
         self.emit(EventPayload::Result(text.into())).await
     }
 
+    /// Emit the run's terminal loop-end failure, returning its sequence.
+    ///
+    /// A conforming sandbox emits exactly one terminal event — this or
+    /// [`emit_result`](Self::emit_result) — when its loop ends, so the host can
+    /// terminalize and tear down instead of waiting on a connection the
+    /// supervisor keeps serving after the agent is done.
+    ///
+    /// # Errors
+    /// [`EmitError::TooLarge`] past the per-event bound, or [`EmitError::Overflow`]
+    /// when the un-acknowledged buffer is full.
+    pub async fn emit_failed(&self, text: impl Into<String>) -> Result<Sequence, EmitError> {
+        self.emit(EventPayload::Failed(text.into())).await
+    }
+
     async fn emit(&self, payload: EventPayload) -> Result<Sequence, EmitError> {
         let event = self.buffer_event(payload)?;
         let sequence = event.sequence;
