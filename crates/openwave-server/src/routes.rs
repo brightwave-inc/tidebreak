@@ -2365,9 +2365,11 @@ pub(crate) struct StandingGrantSnapshot {
     /// The approval decision that created the grant — also the handle a
     /// revocation names.
     pub source_call_id: CallId,
-    pub chat_id: ChatId,
-    /// Chat title for provenance; `None` when the chat is untitled.
-    pub chat_title: Option<String>,
+    /// How far the grant reaches — one chat, or every chat in a project.
+    pub level: openwave_core::GrantLevel,
+    /// The name of whatever the level points at, for provenance. `None` when
+    /// that chat or project is untitled.
+    pub level_title: Option<String>,
     pub action: openwave_core::RendererToolName,
     pub approval: openwave_core::ToolApprovalKind,
     pub scope: openwave_core::GrantScope,
@@ -2382,24 +2384,42 @@ pub(crate) async fn list_standing_grants(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<StandingGrantSnapshot>>, ServerError> {
     let grants = state.store.list_standing_tool_grants().await?;
-    let titles: std::collections::HashMap<ChatId, Option<String>> = state
+    let chat_titles: std::collections::HashMap<ChatId, Option<String>> = state
         .store
         .list_chats()
         .await?
         .into_iter()
         .map(|chat| (chat.id, chat.title))
         .collect();
+    let project_titles: std::collections::HashMap<ProjectId, Option<String>> = state
+        .store
+        .list_projects()
+        .await?
+        .into_iter()
+        .map(|project| (project.id, project.title))
+        .collect();
     Ok(Json(
         grants
             .into_iter()
-            .map(|record| StandingGrantSnapshot {
-                source_call_id: record.source_call_id,
-                chat_id: record.grant.chat_id(),
-                chat_title: titles.get(&record.grant.chat_id()).cloned().flatten(),
-                action: openwave_core::RendererToolName::from(record.grant.tool_name()),
-                approval: record.grant.kind(),
-                scope: record.grant.scope().clone(),
-                granted_at: record.grant.granted_at(),
+            .map(|record| {
+                let level = record.grant.level();
+                let level_title = match level {
+                    openwave_core::GrantLevel::Chat { chat_id } => {
+                        chat_titles.get(&chat_id).cloned().flatten()
+                    }
+                    openwave_core::GrantLevel::Project { project_id } => {
+                        project_titles.get(&project_id).cloned().flatten()
+                    }
+                };
+                StandingGrantSnapshot {
+                    source_call_id: record.source_call_id,
+                    level,
+                    level_title,
+                    action: openwave_core::RendererToolName::from(record.grant.tool_name()),
+                    approval: record.grant.kind(),
+                    scope: record.grant.scope().clone(),
+                    granted_at: record.grant.granted_at(),
+                }
             })
             .collect(),
     ))

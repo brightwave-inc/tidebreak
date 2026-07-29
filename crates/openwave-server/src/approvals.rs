@@ -14,8 +14,8 @@ use tokio::sync::Notify;
 use openwave_core::{
     ApprovalDecision, ApprovalFuture, ApprovalGate, ApprovalJournalIdentity, ApprovalRegistration,
     ApprovalRegistrationFuture, ApprovalRequest, ApprovalRequiredPublication, CallId, ChatId,
-    DecideToolApprovalOutcome, GrantScope, RequestToolApprovalOutcome, Result, StandingGrant,
-    StandingGrants, Store,
+    DecideToolApprovalOutcome, GrantLevel, GrantScope, RequestToolApprovalOutcome, Result,
+    StandingGrant, StandingGrants, Store,
 };
 
 /// Coordinates durable approval state with local low-latency waiters.
@@ -86,9 +86,23 @@ impl ApprovalBroker {
                 }
             }
         };
+        // Read before the decision so the grant is written at the level the
+        // chat actually has, not one inferred after the fact.
+        let chat_project_id = match rung {
+            None => None,
+            Some(_) => self
+                .store
+                .get_chat(chat_id)
+                .await?
+                .and_then(|chat| chat.project_id),
+        };
         let grant = match scope {
             Some(scope) => match StandingGrant::scoped(
-                current.chat_id,
+                // The level follows where the chat lives rather than being
+                // put to the reader: a chat in a project grants across it, a
+                // loose chat has nothing wider to mean. The card's label is
+                // what states which one this is.
+                GrantLevel::for_chat(current.chat_id, chat_project_id),
                 current.tool_name.clone(),
                 current.kind,
                 scope,
@@ -571,6 +585,118 @@ mod tests {
         );
     }
 
+    /// Create a chat filed under a fresh project, plus a parked exec request.
+    async fn setup_in_project(
+        arguments: serde_json::Value,
+    ) -> (Arc<dyn Store>, openwave_core::ProjectId, ApprovalRequest) {
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("approval.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        std::mem::forget(db);
+        let project = openwave_core::Project {
+            id: openwave_core::ProjectId::new(),
+            title: Some("Filings".into()),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_project(&project).await.unwrap();
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: Some(project.id),
+            title: Some("First".into()),
+            model: None,
+            reasoning_effort: None,
+            permission_mode: None,
+            citation_format: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let request = request_for(&store, chat.id, "exec", arguments).await;
+        (store, project.id, request)
+    }
+
+    /// The whole point of the widening: a grant made in one conversation is
+    /// still in force in the next one, instead of being re-asked forever.
+    #[tokio::test]
+    async fn a_grant_made_in_a_project_covers_the_next_chat_in_it() {
+        let exec_args = json!({ "command": "cargo", "args": ["test"], "cwd": "." });
+        let (store, project_id, request) = setup_in_project(exec_args.clone()).await;
+        let broker = ApprovalBroker::new(store.clone());
+        let pending = broker.register(request.clone(), None).await;
+        drop(pending.decision);
+        assert_eq!(
+            broker
+                .resolve_with_grant(
+                    request.chat_id,
+                    request.call_id,
+                    ApprovalDecision::Approve,
+                    Some(crate::routes::ApprovalGrantRung::WholeTool),
+                )
+                .await
+                .unwrap(),
+            ResolveApprovalOutcome::Resolved
+        );
+        // The grant was written at the level the chat lives at, not at the
+        // chat that happened to ask.
+        let listed = store.list_standing_tool_grants().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].grant.level(), GrantLevel::Project { project_id });
+
+        // A different chat in the same project is covered without asking.
+        let sibling = Chat {
+            id: ChatId::new(),
+            project_id: Some(project_id),
+            title: Some("Second".into()),
+            model: None,
+            reasoning_effort: None,
+            permission_mode: None,
+            citation_format: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&sibling).await.unwrap();
+        let covered = request_for(&store, sibling.id, "exec", exec_args.clone()).await;
+        let registration = broker.register(covered, None).await;
+        assert!(matches!(
+            registration.publication,
+            openwave_core::ApprovalRequiredPublication::StandingGrant
+        ));
+        assert_eq!(registration.decision.await, ApprovalDecision::Approve);
+
+        // A chat outside the project is not. A project grant must widen to
+        // its project and no further.
+        let outsider = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: Some("Loose".into()),
+            model: None,
+            reasoning_effort: None,
+            permission_mode: None,
+            citation_format: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&outsider).await.unwrap();
+        let uncovered = request_for(&store, outsider.id, "exec", exec_args).await;
+        let registration = broker.register(uncovered, None).await;
+        assert!(!matches!(
+            registration.publication,
+            openwave_core::ApprovalRequiredPublication::StandingGrant
+        ));
+        drop(registration.decision);
+    }
+
     #[tokio::test]
     async fn a_revoked_grant_leaves_the_list_and_stops_covering() {
         let exec_args = json!({ "command": "cargo", "args": ["test"], "cwd": "." });
@@ -595,7 +721,12 @@ mod tests {
         let listed = store.list_standing_tool_grants().await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].source_call_id, request.call_id);
-        assert_eq!(listed[0].grant.chat_id(), request.chat_id);
+        assert_eq!(
+            listed[0].grant.level(),
+            GrantLevel::Chat {
+                chat_id: request.chat_id
+            }
+        );
         assert_eq!(listed[0].grant.tool_name(), "exec");
 
         // A matching later call is auto-granted while the grant stands…
@@ -738,6 +869,7 @@ mod tests {
         );
         assert!(broker.standing_grants().covers(
             request.chat_id,
+            None,
             &request.tool_name,
             request.kind,
             &json!({})
@@ -887,6 +1019,7 @@ mod tests {
             |command: &str, args: &[&str]| json!({ "command": command, "args": args, "cwd": "." });
         assert!(grants.covers(
             request.chat_id,
+            None,
             "exec",
             request.kind,
             &exec("cargo", &["test"]),
@@ -895,11 +1028,12 @@ mod tests {
         // cannot stretch to a command the human never saw.
         assert!(!grants.covers(
             request.chat_id,
+            None,
             "exec",
             request.kind,
             &exec("cargo", &["publish"]),
         ));
-        assert!(!grants.covers(request.chat_id, "exec", request.kind, &json!({})));
+        assert!(!grants.covers(request.chat_id, None, "exec", request.kind, &json!({})));
     }
 
     #[tokio::test]
@@ -929,6 +1063,7 @@ mod tests {
         let query = |query: &str| json!({ "query": query });
         assert!(grants.covers(
             request.chat_id,
+            None,
             "web_search",
             request.kind,
             &query("quarterly filings"),
@@ -937,6 +1072,7 @@ mod tests {
         // asks.
         assert!(!grants.covers(
             request.chat_id,
+            None,
             "web_search",
             request.kind,
             &query("payroll")
@@ -984,6 +1120,7 @@ mod tests {
         );
         assert!(!broker.standing_grants().covers(
             request.chat_id,
+            None,
             "exec",
             request.kind,
             &json!({})
@@ -1013,6 +1150,7 @@ mod tests {
         );
         assert!(broker.standing_grants().covers(
             request.chat_id,
+            None,
             &request.tool_name,
             request.kind,
             &json!({})

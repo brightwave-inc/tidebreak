@@ -28,6 +28,13 @@ function card(overrides: Partial<Parameters<typeof ApprovalCard>[0]> = {}) {
 
 const ONCE = "1.Yes, allow it once";
 const REMEMBER = "2.Yes, and don't ask again in this chat";
+
+/**
+ * A grant made in a project chat reaches every chat in it, so the widest rung
+ * has to say so — a label that says "this chat" while the server writes
+ * something wider is the failure the ladder exists to prevent.
+ */
+const REMEMBER_IN_PROJECT = "2.Yes, and don't ask again in this project";
 const MORE = "More options";
 
 afterEach(cleanup);
@@ -180,6 +187,17 @@ describe("approval card interactions", () => {
       "5.No, don't allow this",
     ]);
     expect(onDecide).not.toHaveBeenCalled();
+  });
+
+  it("names the project when a remembered answer will reach past this chat", async () => {
+    render(card({ grantScope: "project" }));
+
+    expect(
+      screen.getAllByRole("option").map((row) => row.textContent),
+    ).toEqual([ONCE, REMEMBER_IN_PROJECT, "3.No, don't allow this"]);
+    // And says once, in full, what the rows cannot say without becoming
+    // three long lines.
+    screen.getByText(/Saved answers apply to every chat in this project/);
   });
 
   it("returns the highlight to the narrowest grant when it widens the list", async () => {

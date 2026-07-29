@@ -26,6 +26,8 @@ type ApprovalCardProps = {
   preview: ToolActionPreview | null;
   canApprove: boolean;
   canRemember: boolean;
+  /** How far a remembered answer will reach, for the option labels. */
+  grantScope?: GrantScopeName;
   /** The Auto-mode judge is deciding. Advisory only: the card stays live. */
   autoJudging?: boolean;
   deciding: boolean;
@@ -55,13 +57,14 @@ export function ApprovalCard({
   preview,
   canApprove,
   canRemember,
+  grantScope = "chat",
   autoJudging,
   deciding,
   error,
   onDecide,
 }: ApprovalCardProps) {
   const [expanded, setExpanded] = useState(false);
-  const options = approvalOptions(preview, canApprove, canRemember, expanded);
+  const options = approvalOptions(preview, canApprove, canRemember, expanded, grantScope);
   const [highlight, setHighlight] = useState(0);
   const rowRefs = useRef<Array<HTMLDivElement | null>>([]);
   const hasAutoFocused = useRef(false);
@@ -191,6 +194,12 @@ export function ApprovalCard({
           </div>
         ))}
       </div>
+      {canRemember && grantScope === "project" && (
+        <p className="text-muted-foreground text-xs">
+          Saved answers apply to every chat in this project. Review them under
+          Settings → Permissions.
+        </p>
+      )}
       <div className="flex items-center justify-between gap-2 text-xs">
         <span className="text-muted-foreground">
           ↑↓ choose · 1–{Math.min(options.length, 9)} jump · ↵ submit
@@ -243,11 +252,15 @@ const INLINE_GRANTS = 1;
  * A kind the server will not let the renderer approve offers only the decline,
  * so an unpresentable action can never be waved through from here.
  */
+/** How far a remembered answer reaches, as the label says it. */
+export type GrantScopeName = "chat" | "project";
+
 export function approvalOptions(
   preview: ToolActionPreview | null,
   canApprove: boolean,
   canRemember: boolean,
   expanded = false,
+  scope: GrantScopeName = "chat",
 ): ApprovalOption[] {
   if (!canApprove) return [declineOption()];
 
@@ -264,7 +277,7 @@ export function approvalOptions(
     },
   ];
 
-  const grants = canRemember ? grantLadder(preview) : [];
+  const grants = canRemember ? grantLadder(preview, scope) : [];
   const visible = expanded ? grants : grants.slice(0, INLINE_GRANTS);
   options.push(...visible);
   if (grants.length > visible.length) {
@@ -292,14 +305,21 @@ function declineOption(): ApprovalOption {
  * "allow every web search in this chat". A tool with nothing to describe can
  * only be granted wholesale, because there is no narrower thing to name.
  */
-export function grantLadder(preview: ToolActionPreview | null): ApprovalOption[] {
+export function grantLadder(
+  preview: ToolActionPreview | null,
+  scope: GrantScopeName = "chat",
+): ApprovalOption[] {
+  // The label names the level the server will actually write. A chat filed
+  // under a project grants across it, and saying "this chat" while writing
+  // something wider is the one thing a consent label must never do.
+  const where = scope === "project" ? "in this project" : "in this chat";
   const wholeTool: ApprovalOption = {
     kind: "decide",
     key: "whole-tool",
     label:
       preview?.tool === "exec"
-        ? "Yes, and don't ask again about commands in this chat"
-        : "Yes, and don't ask again in this chat",
+        ? `Yes, and don't ask again about commands ${where}`
+        : `Yes, and don't ask again ${where}`,
     decision: "approve",
     grant: "whole_tool",
   };

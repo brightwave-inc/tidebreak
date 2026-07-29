@@ -1095,7 +1095,8 @@ pub mod standing_tool_grant {
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
         pub source_call_id: Uuid,
-        pub chat_id: Uuid,
+        pub chat_id: Option<Uuid>,
+        pub project_id: Option<Uuid>,
         pub tool_name: String,
         pub approval_kind: String,
         #[sea_orm(column_type = "JsonBinary")]

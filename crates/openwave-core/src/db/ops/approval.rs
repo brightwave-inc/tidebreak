@@ -31,6 +31,7 @@ use super::{acquire_chat_write_lock, acquire_tool_call_write_lock, acquire_turn_
 async fn matching_standing_grant<C>(
     conn: &C,
     chat_id: ChatId,
+    project_id: Option<crate::id::ProjectId>,
     tool_name: &str,
     kind: ToolApprovalKind,
     arguments: &serde_json::Value,
@@ -41,8 +42,17 @@ where
     if !kind.is_standing_grantable() {
         return Ok(None);
     }
+    // Either level can authorize this call, so both are read and the decision
+    // is made per grant by `covers`. A projectless chat can only ever be
+    // covered by its own grants.
+    let mut reachable =
+        sea_orm::Condition::any().add(entities::standing_tool_grant::Column::ChatId.eq(chat_id.0));
+    if let Some(project_id) = project_id {
+        reachable =
+            reachable.add(entities::standing_tool_grant::Column::ProjectId.eq(project_id.0));
+    }
     let grants = entities::standing_tool_grant::Entity::find()
-        .filter(entities::standing_tool_grant::Column::ChatId.eq(chat_id.0))
+        .filter(reachable)
         .filter(entities::standing_tool_grant::Column::ToolName.eq(tool_name))
         .filter(entities::standing_tool_grant::Column::ApprovalKind.eq(kind.standing_grant_key()))
         .order_by_desc(entities::standing_tool_grant::Column::GrantedAt)
@@ -58,20 +68,53 @@ where
         let Ok(scope) = serde_json::from_value::<GrantScope>(row.scope) else {
             continue;
         };
-        let Some(grant) = StandingGrant::scoped(
-            ChatId(row.chat_id),
-            row.tool_name,
-            stored_kind,
-            scope,
-            row.granted_at,
-        ) else {
+        let Some(level) = grant_level_from_row(row.chat_id, row.project_id) else {
             continue;
         };
-        if grant.covers(chat_id, tool_name, kind, arguments) {
+        let Some(grant) =
+            StandingGrant::scoped(level, row.tool_name, stored_kind, scope, row.granted_at)
+        else {
+            continue;
+        };
+        if grant.covers(chat_id, project_id, tool_name, kind, arguments) {
             return Ok(Some(source_call_id));
         }
     }
     Ok(None)
+}
+
+/// The project a chat is filed under, read inside the caller's transaction so
+/// a grant is matched against the same membership the write will see.
+async fn chat_project_id<C>(conn: &C, chat_id: ChatId) -> Result<Option<crate::id::ProjectId>>
+where
+    C: ConnectionTrait,
+{
+    Ok(entities::chat::Entity::find_by_id(chat_id.0)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .and_then(|chat| chat.project_id)
+        .map(crate::id::ProjectId))
+}
+
+/// Recover the level a stored grant was written at.
+///
+/// A row that names neither a chat nor a project — or both — is not a level
+/// this build can honor, so it is skipped rather than guessed at, on the same
+/// terms as an unparseable scope.
+fn grant_level_from_row(
+    chat_id: Option<uuid::Uuid>,
+    project_id: Option<uuid::Uuid>,
+) -> Option<crate::approval::GrantLevel> {
+    match (chat_id, project_id) {
+        (Some(chat_id), None) => Some(crate::approval::GrantLevel::Chat {
+            chat_id: ChatId(chat_id),
+        }),
+        (None, Some(project_id)) => Some(crate::approval::GrantLevel::Project {
+            project_id: crate::id::ProjectId(project_id),
+        }),
+        _ => None,
+    }
 }
 
 /// Every durable standing grant, newest first, hydrated on the same terms as
@@ -90,13 +133,9 @@ pub(in crate::db) async fn list_standing_grants(
         .filter_map(|row| {
             let stored_kind = ToolApprovalKind::from_standing_grant_key(&row.approval_kind)?;
             let scope = serde_json::from_value::<GrantScope>(row.scope).ok()?;
-            let grant = StandingGrant::scoped(
-                ChatId(row.chat_id),
-                row.tool_name,
-                stored_kind,
-                scope,
-                row.granted_at,
-            )?;
+            let level = grant_level_from_row(row.chat_id, row.project_id)?;
+            let grant =
+                StandingGrant::scoped(level, row.tool_name, stored_kind, scope, row.granted_at)?;
             Some(crate::approval::StandingGrantRecord {
                 source_call_id: CallId(row.source_call_id),
                 grant,
@@ -244,6 +283,7 @@ pub(in crate::db) async fn request_and_append_event(
     if let Some(source_call_id) = matching_standing_grant(
         &transaction,
         request.chat_id,
+        chat_project_id(&transaction, request.chat_id).await?,
         &call.name,
         request.kind,
         &call.arguments,
@@ -447,6 +487,7 @@ pub(in crate::db) async fn request(
     if let Some(source_call_id) = matching_standing_grant(
         &transaction,
         request.chat_id,
+        chat_project_id(&transaction, request.chat_id).await?,
         &existing.name,
         request.kind,
         &existing.arguments,
@@ -596,7 +637,13 @@ pub(in crate::db) async fn decide_with_grant(
     }
     if existing.status != ToolCallStatus::Pending.as_str()
         || existing.execution != ToolCallExecution::Server.as_str()
-        || !grant.covers(chat_id, &existing.name, current.kind, &existing.arguments)
+        || !grant.covers(
+            chat_id,
+            chat_project_id(&transaction, chat_id).await?,
+            &existing.name,
+            current.kind,
+            &existing.arguments,
+        )
     {
         transaction.commit().await.map_err(store_err)?;
         return Ok(DecideToolApprovalOutcome::Unavailable);
@@ -635,7 +682,14 @@ where
         .map_err(|error| AgentError::Store(format!("invalid standing grant scope: {error}")))?;
     entities::standing_tool_grant::Entity::insert(entities::standing_tool_grant::ActiveModel {
         source_call_id: Set(source_call_id.0),
-        chat_id: Set(grant.chat_id().0),
+        chat_id: Set(match grant.level() {
+            crate::approval::GrantLevel::Chat { chat_id } => Some(chat_id.0),
+            crate::approval::GrantLevel::Project { .. } => None,
+        }),
+        project_id: Set(match grant.level() {
+            crate::approval::GrantLevel::Chat { .. } => None,
+            crate::approval::GrantLevel::Project { project_id } => Some(project_id.0),
+        }),
         tool_name: Set(grant.tool_name().to_owned()),
         approval_kind: Set(grant.kind().standing_grant_key().into()),
         scope: Set(scope),
@@ -664,10 +718,12 @@ where
     };
     let scope = serde_json::to_value(grant.scope())
         .map_err(|error| AgentError::Store(format!("invalid standing grant scope: {error}")))?;
-    Ok(stored.chat_id == grant.chat_id().0
-        && stored.tool_name == grant.tool_name()
-        && stored.approval_kind == grant.kind().standing_grant_key()
-        && stored.scope == scope)
+    Ok(
+        grant_level_from_row(stored.chat_id, stored.project_id) == Some(grant.level())
+            && stored.tool_name == grant.tool_name()
+            && stored.approval_kind == grant.kind().standing_grant_key()
+            && stored.scope == scope,
+    )
 }
 
 pub(in crate::db) async fn get(store: &DbStore, call_id: CallId) -> Result<Option<ToolApproval>> {

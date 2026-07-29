@@ -22,6 +22,7 @@ import {
   type GatewayStatus as WireGatewayStatus,
   type SignInProgress,
   type StandingGrantSnapshot,
+  type GrantLevel,
   type GrantScope,
   type McpServerInfo as WireMcpServerInfo,
   type ManagedPolicy as WireManagedPolicy,
@@ -65,6 +66,7 @@ import type { DocumentProcessingStatus } from "./documents";
 
 export type {
   ApprovalClass,
+  GrantLevel,
   GrantScope,
   StandingGrantSnapshot,
   ChatToolActivityStatus,
