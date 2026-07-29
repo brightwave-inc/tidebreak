@@ -157,8 +157,10 @@ test("Rust CI requires the same PostgreSQL lane on pull requests and main", () =
   assert.match(desktop, /spreadsheet_parser::tests/);
   assert.match(
     desktop,
-    /tests::documents::raw_ingest_parses_and_indexes_a_pdf_end_to_end \\\n\s+-- --exact/,
+    /production_registry_routes_rich_formats_to_the_intended_parser/,
   );
+  assert.match(desktop, /--test liteparse_pdf/);
+  assert.doesNotMatch(desktop, /cargo test -p openwave-server/);
 });
 
 test("UI tests and production build run as parallel matrix jobs", () => {

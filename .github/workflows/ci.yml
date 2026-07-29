@@ -370,9 +370,10 @@ jobs:
             liteparse_image_parser::tests
           cargo test -p openwave-retrieval --features "$parser_features" --locked \
             spreadsheet_parser::tests
-          cargo test -p openwave-server --features document-parsers --locked --lib \
-            tests::documents::raw_ingest_parses_and_indexes_a_pdf_end_to_end \
-            -- --exact
+          cargo test -p openwave-retrieval --features "$parser_features" --locked \
+            production_registry_routes_rich_formats_to_the_intended_parser
+          cargo test -p openwave-retrieval --features "$parser_features" --locked \
+            --test liteparse_pdf
       - name: desktop tests
         run: cargo test -p openwave-desktop --locked
 
