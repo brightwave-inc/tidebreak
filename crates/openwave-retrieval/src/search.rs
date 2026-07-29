@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use openwave_core::{
-    format_source_reference, ApprovalClass, AssistantCitationReference, Result, ResultEntry,
+    format_citation_directive, ApprovalClass, AssistantCitationReference, Result, ResultEntry,
     ResultEntryKind, RetrievalEvidenceInput, RetrievalEvidenceSource, Tool, ToolCtx, ToolOutput,
     ToolSpec,
 };
@@ -82,15 +82,20 @@ fn render(citations: &[Citation], source_tokens: &[uuid::Uuid]) -> String {
     debug_assert_eq!(citations.len(), source_tokens.len());
     let plural = if citations.len() == 1 { "" } else { "s" };
     let mut out = format!(
-        "Found {} passage{plural}. To cite a passage, copy its opaque source reference exactly into the answer:",
+        "Found {} passage{plural}. To cite a passage, wrap the wording it supports in \
+         that passage's citation directive: your phrasing goes in the brackets and may \
+         paraphrase the passage, and the reference is copied exactly.",
         citations.len()
     );
     for (i, c) in citations.iter().enumerate() {
-        let reference = format_source_reference(AssistantCitationReference {
-            source_token: source_tokens[i],
-        });
+        let reference = format_citation_directive(
+            "your phrasing",
+            AssistantCitationReference {
+                source_token: source_tokens[i],
+            },
+        );
         out.push_str(&format!(
-            "\n\n{}. Source reference: {reference}\n[score {:.3}] document {} (bytes {}..{}){}{}\n{}",
+            "\n\n{}. Cite as: {reference}\n[score {:.3}] document {} (bytes {}..{}){}{}\n{}",
             i + 1,
             c.score,
             c.document_id,
@@ -139,7 +144,8 @@ impl Tool for SearchTool {
             name: "search".into(),
             description: "Search the indexed documents for passages relevant to a query. \
                           Returns ranked, grounded citations (document id, byte span, source \
-                          pages when available, and text)."
+                          pages when available, and text). Each result carries a citation \
+                          directive to wrap the wording it supports in."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -635,11 +641,12 @@ mod tests {
         assert_eq!(out.private_evidence.len(), 1);
         assert!(out.private_evidence[0].snippet.contains("Jupiter"));
         assert_eq!(out.private_evidence[0].rank, 1);
-        assert!(out
-            .content
-            .contains(&format_source_reference(AssistantCitationReference {
+        assert!(out.content.contains(&format_citation_directive(
+            "your phrasing",
+            AssistantCitationReference {
                 source_token: out.private_evidence[0].source_token,
-            })));
+            }
+        )));
         assert_eq!(out.private_evidence[0].generation.content_revision, 1);
     }
 

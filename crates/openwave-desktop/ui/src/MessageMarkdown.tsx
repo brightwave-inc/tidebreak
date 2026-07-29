@@ -218,13 +218,30 @@ const rehypePlugins: NonNullable<Options["rehypePlugins"]> = [
 ];
 
 /**
- * Normalize raw model output before the parser sees it: rewrite LaTeX
- * delimiters into the dollar forms remark-math understands, then convert single
- * newlines into hard breaks so intended line breaks survive without leaking
- * source indentation.
+ * A stored citation, which wraps the phrase it backs: `:cit[phrase]{citation_id=…}`.
+ *
+ * The phrase cannot contain `]` — the parser that writes this form closes it at
+ * the first one — so a single non-greedy match is the whole grammar.
+ */
+const CITATION_DIRECTIVE =
+  /:cit\[([^\]]*)\]\{citation_id=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}/gi;
+
+/**
+ * Reduce stored citations to the phrasing they wrap, which is what the message
+ * reads as until citations render as marks of their own.
+ */
+export function stripCitationDirectives(input: string): string {
+  return input.replace(CITATION_DIRECTIVE, "$1");
+}
+
+/**
+ * Normalize raw model output before the parser sees it: reduce citations to
+ * their phrasing, rewrite LaTeX delimiters into the dollar forms remark-math
+ * understands, then convert single newlines into hard breaks so intended line
+ * breaks survive without leaking source indentation.
  */
 export function processMarkdownContent(input: string): string {
-  return preserveLineBreaks(escapeLatexText(input));
+  return preserveLineBreaks(escapeLatexText(stripCitationDirectives(input)));
 }
 
 /**
@@ -284,6 +301,9 @@ function blockRehypePlugins(
 ): NonNullable<Options["rehypePlugins"]> {
   if (start == null || end == null || end <= start) return rehypePlugins;
   if (escapeLatexText(block) !== block) return rehypePlugins;
+  // A citation the block carries is removed from the text the parser reads, for
+  // the same reason: the offsets were measured against text that still had it.
+  if (stripCitationDirectives(block) !== block) return rehypePlugins;
   return [
     [
       rehypeHighlightRange,

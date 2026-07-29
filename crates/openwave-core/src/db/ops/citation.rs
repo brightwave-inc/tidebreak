@@ -210,7 +210,7 @@ pub(in crate::db) fn validate_assistant_message(
             "citations require a non-nil assistant message".into(),
         ));
     }
-    if parse_assistant_citations(&message.content).content != message.content {
+    if parse_assistant_citations(&message.content, message.id).content != message.content {
         return Err(AgentError::Store(
             "assistant message contains an unstripped source reference".into(),
         ));
