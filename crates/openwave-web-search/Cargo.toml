@@ -19,7 +19,7 @@ http = ["dep:reqwest", "dep:futures"]
 # pass. Opt-in so the HTML parser stack stays out of consumers that only need
 # the search contracts; it implies `http` because the concrete transport and
 # resolver live behind that seam's dependencies.
-extract-native = ["http", "dep:dom_smoothie", "dep:tokio"]
+extract-native = ["http", "dep:dom_smoothie", "dep:dom_query", "dep:tokio"]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -34,7 +34,12 @@ url = "=2.5.8"
 reqwest = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 dom_smoothie = { version = "=0.18.0", optional = true }
-tokio = { workspace = true, features = ["net", "rt"], optional = true }
+# The parser `dom_smoothie` builds on. It is a direct dependency so the fetched
+# document can be parsed once, bounded, and then handed to the readability pass
+# via `Readability::with_document`. That handoff only typechecks against the
+# exact version `dom_smoothie` uses, so the two pins move together.
+dom_query = { version = "=0.28.0", optional = true }
+tokio = { workspace = true, features = ["net", "rt", "time"], optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "time"] }

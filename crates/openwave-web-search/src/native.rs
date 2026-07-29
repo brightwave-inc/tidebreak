@@ -7,18 +7,25 @@
 //! that were vetted. That re-vetting is the defense against DNS rebinding and
 //! redirect-based server-side request forgery: a page may not launder a fetch
 //! toward loopback, private, link-local, or metadata address space through a
-//! redirect or a second DNS answer. Fetches carry no cookies and no ambient
-//! credentials, announce a distinct honest user agent, and retain a bounded
-//! body of an allow-listed textual content type only.
+//! redirect or a second DNS answer. Fetches carry no cookies, no proxy, and no
+//! ambient credentials, announce a distinct honest user agent, and retain a
+//! bounded body of an allow-listed textual content type only.
+//!
+//! One deadline covers the whole extraction — every DNS resolution, every hop,
+//! and the parse — because the individually bounded steps multiply: a host that
+//! black-holes its DNS answers can otherwise stall a caller for minutes out of
+//! a single tool call.
 //!
 //! Extraction itself never returns junk to a caller: a page whose readable
 //! content falls below a small word floor — including script-only shells that
 //! ask the visitor to enable JavaScript — resolves the typed
 //! [`NativeExtractError::NoReadableContent`] so a caller can distinguish
-//! "extracted" from "nothing there".
+//! "extracted" from "nothing there". Adversarial markup is bounded *before* it
+//! is serialized rather than after, and extracted text is stripped of the
+//! control and bidirectional characters that let a page lie to a renderer.
 
 use std::net::IpAddr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -42,7 +49,27 @@ pub const NATIVE_FETCH_USER_AGENT: &str =
 /// Marker inserted between the head and tail of over-budget content.
 const TRUNCATION_MARKER: &str = "\n\n[... content truncated ...]\n\n";
 /// Most document elements the readability pass will parse.
-const MAX_PARSE_ELEMENTS: usize = 200_000;
+///
+/// With [`MAX_PARSE_DEPTH`] this bounds the markdown serializer's worst case:
+/// it indents each list item by four spaces per nesting level, so hostile
+/// markup costs at most `MAX_PARSE_ELEMENTS * MAX_PARSE_DEPTH * 4` bytes of
+/// output — tens of megabytes, not the gigabytes an unbounded document yields
+/// from a few hundred kilobytes of source.
+const MAX_PARSE_ELEMENTS: usize = 50_000;
+/// Deepest element nesting the readability pass will accept.
+///
+/// This is a stack bound, not a taste bound. The markdown serializer recurses
+/// once per nested list level, and a stack overflow is not a catchable Rust
+/// error — it aborts the process, taking the whole host down. Real pages nest
+/// a few dozen levels at most; this sits far above them and far below the
+/// depth at which the serializer runs out of stack.
+const MAX_PARSE_DEPTH: usize = 100;
+/// Longest any single host resolution may take out of the extraction budget.
+///
+/// The OS resolver's own timeout is tens of seconds and a hostile nameserver
+/// can hold every one of them, so the deadline — not `getaddrinfo` — decides
+/// when to give up.
+const MAX_DNS_RESOLUTION_TIME: Duration = Duration::from_secs(5);
 /// Longest content-type echoed back in an error.
 const MAX_CONTENT_TYPE_ECHO_CHARS: usize = 100;
 /// Word ceiling under which JavaScript-shell boilerplate disqualifies a page.
@@ -70,9 +97,16 @@ pub struct NativeExtraction {
 #[derive(Debug, Error)]
 pub enum NativeExtractError {
     #[error("page fetch violates the URL admission policy: {0}")]
-    PolicyViolation(#[from] FetchPolicyViolation),
-    #[error("page host did not resolve: {0}")]
-    DnsResolution(String),
+    PolicyViolation(FetchPolicyViolation),
+    /// The host could not be reached, and deliberately does not say why.
+    ///
+    /// A name that does not resolve, a name that resolves into denied address
+    /// space, and an address literal in denied space all end here. Told apart,
+    /// they answer "does this internal name exist, and what does it point at?"
+    /// for any name a model or a fetched page can name — which is a scanner.
+    /// Told together, they answer nothing.
+    #[error("page host is not a reachable destination")]
+    UnreachableHost,
     #[error("page fetch failed: {0}")]
     Fetch(String),
     #[error("page returned HTTP {0}")]
@@ -83,10 +117,27 @@ pub enum NativeExtractError {
     InvalidRedirect,
     #[error("page response exceeded the byte limit")]
     ResponseTooLarge,
+    #[error("page fetch exceeded its time budget")]
+    Timeout,
     #[error("page content type {0:?} is not extractable")]
     UnsupportedContentType(String),
+    #[error("page markup is too large or too deeply nested to extract")]
+    DocumentTooComplex,
     #[error("page has no readable content")]
     NoReadableContent,
+}
+
+impl From<FetchPolicyViolation> for NativeExtractError {
+    fn from(violation: FetchPolicyViolation) -> Self {
+        match violation {
+            // A denied address is the one violation that describes the network
+            // rather than the caller's own URL string, so it collapses into the
+            // opaque refusal. The rest name a defect in the requested URL, which
+            // the caller can act on and which reveals nothing it did not supply.
+            FetchPolicyViolation::DeniedAddress => Self::UnreachableHost,
+            other => Self::PolicyViolation(other),
+        }
+    }
 }
 
 /// One vetted response from the page transport.
@@ -111,9 +162,10 @@ impl PageFetchResponse {
 }
 
 /// One admitted GET. Implementations must connect only to `addresses` (the
-/// vetted resolution of the URL's host), never follow redirects themselves,
-/// send no cookies or ambient credentials, and cap the retained body at
-/// [`MAX_FETCH_RESPONSE_BYTES`].
+/// vetted resolution of the URL's host) — which rules out an ambient proxy,
+/// since a proxied connection dials the proxy and not the vetted address —
+/// never follow redirects themselves, send no cookies or ambient credentials,
+/// and cap the retained body at [`MAX_FETCH_RESPONSE_BYTES`].
 #[async_trait]
 pub trait PageFetchTransport: Send + Sync {
     async fn get(
@@ -134,7 +186,7 @@ pub trait HostAddressResolver: Send + Sync {
 /// The native extraction engine, backed by an injected transport and resolver.
 ///
 /// It has no default constructor because the host must explicitly decide the
-/// transport policy and the request timeout.
+/// transport policy and the time budget.
 #[derive(Clone, Debug)]
 pub struct NativeExtractor<T, R> {
     transport: T,
@@ -143,6 +195,9 @@ pub struct NativeExtractor<T, R> {
 }
 
 impl<T, R> NativeExtractor<T, R> {
+    /// Build an extractor whose `timeout` is the budget for one whole
+    /// [`extract`](NativeExtractor::extract) call — every DNS resolution, every
+    /// redirect hop, and the parse together, not per request.
     pub fn new(transport: T, resolver: R, timeout: Duration) -> Result<Self, NativeExtractError> {
         if timeout.is_zero() {
             return Err(NativeExtractError::Fetch(
@@ -158,15 +213,19 @@ impl<T, R> NativeExtractor<T, R> {
 }
 
 impl<T: PageFetchTransport, R: HostAddressResolver> NativeExtractor<T, R> {
-    /// Fetch `url` safely and extract its readable content.
+    /// Fetch `url` safely and extract its readable content, within one budget.
     pub async fn extract(&self, url: &str) -> Result<NativeExtraction, NativeExtractError> {
-        let (final_url, response) = self.fetch_vetted(url).await?;
+        let deadline = Instant::now() + self.timeout;
+        let (final_url, response) = self.fetch_vetted(url, deadline).await?;
         let media_type = extractable_media_type(response.content_type.as_deref())?;
-        let body = String::from_utf8_lossy(&response.body);
+        let body = String::from_utf8_lossy(&response.body).into_owned();
         let (title, content) = match media_type {
-            PageMediaType::Html => readable_article(&body, &final_url)?,
+            PageMediaType::Html => {
+                readable_article(body, final_url.clone(), remaining(deadline)?).await?
+            }
             PageMediaType::Text => (String::new(), body.trim().to_owned()),
         };
+        let content = sanitized_content(&content);
         let word_count = count_words(&content);
         if word_count < MIN_EXTRACT_WORDS {
             return Err(NativeExtractError::NoReadableContent);
@@ -174,7 +233,7 @@ impl<T: PageFetchTransport, R: HostAddressResolver> NativeExtractor<T, R> {
         let (content, truncated) = truncate_head_tail(&content, MAX_EXTRACT_CONTENT_CHARS);
         Ok(NativeExtraction {
             url: final_url.into(),
-            title: crate::types::truncate(title.trim(), crate::MAX_RESULT_TITLE_CHARS),
+            title: crate::types::truncate(&sanitized_title(&title), crate::MAX_RESULT_TITLE_CHARS),
             content,
             word_count,
             truncated,
@@ -183,18 +242,30 @@ impl<T: PageFetchTransport, R: HostAddressResolver> NativeExtractor<T, R> {
 
     /// Follow redirects manually, re-admitting every hop's URL and freshly
     /// resolved addresses, until a non-redirect response arrives.
+    ///
+    /// Every hop draws from the same `deadline`, so a chain of slow hops cannot
+    /// buy itself more time than one slow hop would.
     async fn fetch_vetted(
         &self,
         url: &str,
+        deadline: Instant,
     ) -> Result<(Url, PageFetchResponse), NativeExtractError> {
         let mut current = admit_fetch_url(url)?;
         for _ in 0..=MAX_FETCH_REDIRECT_HOPS {
-            let addresses = self.vetted_addresses(&current).await?;
-            let response = self
-                .transport
-                .get(&current, &addresses, self.timeout)
-                .await?;
-            if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
+            let addresses = self.vetted_addresses(&current, deadline).await?;
+            let budget = remaining(deadline)?;
+            // The timeout is also passed to the transport, which is expected to
+            // apply it; wrapping the call keeps a transport that ignores it —
+            // this trait is a seam a host implements — inside the deadline.
+            let response =
+                tokio::time::timeout(budget, self.transport.get(&current, &addresses, budget))
+                    .await
+                    .map_err(|_| NativeExtractError::Timeout)??;
+            // Bound the body before anything reads it, on every hop: this is
+            // the check that holds a custom transport to its contract, and a
+            // redirect response is as much a transport response as the last one.
+            response.ensure_bounded()?;
+            if is_redirect_status(response.status) {
                 let location = response
                     .location
                     .as_deref()
@@ -208,7 +279,6 @@ impl<T: PageFetchTransport, R: HostAddressResolver> NativeExtractor<T, R> {
             if !(200..300).contains(&response.status) {
                 return Err(NativeExtractError::HttpStatus(response.status));
             }
-            response.ensure_bounded()?;
             return Ok((current, response));
         }
         Err(NativeExtractError::TooManyRedirects)
@@ -216,25 +286,47 @@ impl<T: PageFetchTransport, R: HostAddressResolver> NativeExtractor<T, R> {
 
     /// Resolve the URL's host and admit every address, so the transport can
     /// pin its connection to exactly what was vetted.
-    async fn vetted_addresses(&self, url: &Url) -> Result<Vec<IpAddr>, NativeExtractError> {
+    async fn vetted_addresses(
+        &self,
+        url: &Url,
+        deadline: Instant,
+    ) -> Result<Vec<IpAddr>, NativeExtractError> {
         let addresses = match url.host() {
             // `admit_fetch_url` already vetted a literal, but hops are cheap
             // to re-check and the policy is the boundary.
             Some(Host::Ipv4(address)) => vec![IpAddr::V4(address)],
             Some(Host::Ipv6(address)) => vec![IpAddr::V6(address)],
-            Some(Host::Domain(host)) => self.resolver.resolve(host).await?,
+            Some(Host::Domain(host)) => {
+                let budget = remaining(deadline)?.min(MAX_DNS_RESOLUTION_TIME);
+                tokio::time::timeout(budget, self.resolver.resolve(host))
+                    .await
+                    .map_err(|_| NativeExtractError::Timeout)??
+            }
             None => return Err(FetchPolicyViolation::MissingHost.into()),
         };
         if addresses.is_empty() {
-            return Err(NativeExtractError::DnsResolution(
-                "host resolved to no addresses".into(),
-            ));
+            return Err(NativeExtractError::UnreachableHost);
         }
         for address in &addresses {
             admit_fetch_address(*address)?;
         }
         Ok(addresses)
     }
+}
+
+/// What is left of the extraction budget, or the refusal to start another step.
+fn remaining(deadline: Instant) -> Result<Duration, NativeExtractError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(NativeExtractError::Timeout);
+    }
+    Ok(remaining)
+}
+
+/// Statuses the extractor follows itself, and whose bodies it therefore never
+/// needs to read.
+fn is_redirect_status(status: u16) -> bool {
+    matches!(status, 301 | 302 | 303 | 307 | 308)
 }
 
 enum PageMediaType {
@@ -262,20 +354,85 @@ fn extractable_media_type(value: Option<&str>) -> Result<PageMediaType, NativeEx
 }
 
 /// Run the readability pass over fetched HTML and return `(title, markdown)`.
-fn readable_article(html: &str, url: &Url) -> Result<(String, String), NativeExtractError> {
+///
+/// Parsing and serializing a page is CPU-bound and can run for seconds on a
+/// large document, so it goes to the blocking pool rather than stalling a
+/// runtime worker for the whole turn.
+async fn readable_article(
+    html: String,
+    url: Url,
+    budget: Duration,
+) -> Result<(String, String), NativeExtractError> {
+    let parse = tokio::task::spawn_blocking(move || readable_article_blocking(&html, &url));
+    match tokio::time::timeout(budget, parse).await {
+        Ok(Ok(article)) => article,
+        Ok(Err(_)) => Err(NativeExtractError::Fetch("page extraction failed".into())),
+        // A blocking task cannot be cancelled, so this abandons the parse
+        // rather than stopping it. That is bounded work — `MAX_PARSE_ELEMENTS`
+        // and `MAX_PARSE_DEPTH` are checked before serialization — and the
+        // caller gets its deadline back either way.
+        Err(_) => Err(NativeExtractError::Timeout),
+    }
+}
+
+fn readable_article_blocking(
+    html: &str,
+    url: &Url,
+) -> Result<(String, String), NativeExtractError> {
+    // The document is parsed here rather than inside `Readability::new` so its
+    // shape can be bounded before the readability pass serializes it. This
+    // requires the exact `dom_query` version `dom_smoothie` builds against; a
+    // mismatch is a type error at `with_document`, not a silent fallback.
+    let document = dom_query::Document::from(html);
+    if exceeds_element_depth(document.root(), MAX_PARSE_DEPTH) {
+        return Err(NativeExtractError::DocumentTooComplex);
+    }
     let config = dom_smoothie::Config {
         max_elements_to_parse: MAX_PARSE_ELEMENTS,
         text_mode: dom_smoothie::TextMode::Markdown,
         ..dom_smoothie::Config::default()
     };
-    let article = dom_smoothie::Readability::new(html, Some(url.as_str()), Some(config))
-        .and_then(|mut readability| readability.parse())
-        .map_err(|_| NativeExtractError::NoReadableContent)?;
+    let article =
+        dom_smoothie::Readability::with_document(document, Some(url.as_str()), Some(config))
+            // One attempt under the strict policy, rather than `parse`'s sieve
+            // of four: the sieve clones the whole document per attempt and
+            // retains the best one, which is the memory cost this page budget
+            // cannot afford on hostile input. A page the strict policy cannot
+            // grab resolves as `NoReadableContent`.
+            .and_then(|mut readability| {
+                readability.parse_with_policy(dom_smoothie::ParsePolicy::Strict)
+            })
+            .map_err(|error| match error {
+                dom_smoothie::ReadabilityError::TooManyElements(..) => {
+                    NativeExtractError::DocumentTooComplex
+                }
+                _ => NativeExtractError::NoReadableContent,
+            })?;
     let content = article.text_content.trim().to_owned();
     if looks_like_script_shell(&content) {
         return Err(NativeExtractError::NoReadableContent);
     }
     Ok((article.title, content))
+}
+
+/// Whether any element in the tree nests deeper than `cap`.
+///
+/// The walk is iterative on purpose: the thing it protects against is
+/// unbounded recursion, and it would be absurd to measure that recursively.
+fn exceeds_element_depth(root: dom_query::NodeRef<'_>, cap: usize) -> bool {
+    let mut pending = vec![(root, 0_usize)];
+    while let Some((node, depth)) = pending.pop() {
+        let depth = depth + usize::from(node.is_element());
+        if depth > cap {
+            return true;
+        }
+        let mut child = node.first_child();
+        while let Some(current) = child {
+            child = current.next_sibling();
+            pending.push((current, depth));
+        }
+    }
+    false
 }
 
 /// A near-empty page that asks the visitor to enable JavaScript is an
@@ -294,6 +451,47 @@ fn looks_like_script_shell(extracted: &str) -> bool {
     ]
     .iter()
     .any(|tell| lower.contains(tell))
+}
+
+/// Characters extracted text must never carry to a renderer: the C0/C1
+/// controls that carry ANSI escape sequences, and the Unicode bidirectional
+/// and zero-width formatting characters that let a page display something
+/// other than what it says.
+///
+/// Line breaks and tabs are structure in markdown, not hazard, so they stay.
+fn is_display_hazard(value: char) -> bool {
+    (value.is_control() && value != '\n' && value != '\t')
+        || matches!(value,
+            '\u{200b}'..='\u{200f}'   // zero-width and directional marks
+            | '\u{202a}'..='\u{202e}' // bidirectional embedding and override
+            | '\u{2066}'..='\u{2069}' // bidirectional isolates
+            | '\u{feff}') // zero-width no-break space
+}
+
+/// Strip display hazards from extracted content.
+///
+/// The sibling search-result path rejects a whole result that carries a
+/// control character. Extraction sanitizes instead: it holds one page that
+/// cost a fetch and a parse, and a single stray control character somewhere in
+/// a long article is not a reason to return nothing. The characters that could
+/// mislead a reader are removed; the article survives.
+fn sanitized_content(value: &str) -> String {
+    value
+        .chars()
+        .filter(|value| !is_display_hazard(*value))
+        .collect()
+}
+
+/// Reduce an extracted title to one clean line.
+///
+/// A title is a single-line field, so every hazard becomes a space and runs of
+/// whitespace collapse — a title cannot smuggle line breaks into a list.
+fn sanitized_title(value: &str) -> String {
+    let cleaned: String = value
+        .chars()
+        .map(|value| if is_display_hazard(value) { ' ' } else { value })
+        .collect();
+    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Words that carry content: whitespace-separated tokens with at least one
@@ -347,15 +545,25 @@ impl PageFetchTransport for ReqwestPageFetcher {
             ));
         }
         let mut builder = reqwest::Client::builder()
+            // Load-bearing, not tidiness: reqwest defaults to discovering a
+            // proxy from `HTTPS_PROXY`/`ALL_PROXY` and system configuration,
+            // and a proxied connection dials the *proxy* — the pinned
+            // addresses below are never consulted, so the deny list and the
+            // per-hop re-vetting silently become advisory, a loopback proxy
+            // becomes reachable, and proxy userinfo would be turned into a
+            // `Proxy-Authorization` header on a model-chosen request. Removing
+            // this line removes the address pinning.
+            .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .https_only(true)
             .user_agent(NATIVE_FETCH_USER_AGENT)
             .connect_timeout(timeout.min(Duration::from_secs(10)))
             .timeout(timeout);
         if let Some(Host::Domain(host)) = url.host() {
+            let port = url.port_or_known_default().unwrap_or(443);
             let pinned: Vec<std::net::SocketAddr> = addresses
                 .iter()
-                .map(|address| std::net::SocketAddr::new(*address, 443))
+                .map(|address| std::net::SocketAddr::new(*address, port))
                 .collect();
             builder = builder.resolve_to_addrs(host, &pinned);
         }
@@ -381,14 +589,17 @@ impl PageFetchTransport for ReqwestPageFetcher {
         };
         let content_type = header(reqwest::header::CONTENT_TYPE);
         let location = header(reqwest::header::LOCATION);
-        let mut stream = response.bytes_stream();
         let mut body = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|error| NativeExtractError::Fetch(error.to_string()))?;
-            if body.len().saturating_add(chunk.len()) > MAX_FETCH_RESPONSE_BYTES {
-                return Err(NativeExtractError::ResponseTooLarge);
+        // A redirect's body is never read: the extractor only wants the
+        // `Location` header, and downloading up to the cap on every hop would
+        // move megabytes per extract to throw them away. Dropping the response
+        // here ends the transfer.
+        if !is_redirect_status(status) {
+            let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|error| NativeExtractError::Fetch(error.to_string()))?;
+                push_bounded(&mut body, &chunk)?;
             }
-            body.extend_from_slice(&chunk);
         }
         Ok(PageFetchResponse {
             status,
@@ -399,6 +610,17 @@ impl PageFetchTransport for ReqwestPageFetcher {
     }
 }
 
+/// Retain one streamed chunk, refusing the response the moment it would cross
+/// [`MAX_FETCH_RESPONSE_BYTES`] — before the bytes are kept, so an unbounded
+/// or lying `Content-Length` never turns into an unbounded allocation.
+fn push_bounded(body: &mut Vec<u8>, chunk: &[u8]) -> Result<(), NativeExtractError> {
+    if body.len().saturating_add(chunk.len()) > MAX_FETCH_RESPONSE_BYTES {
+        return Err(NativeExtractError::ResponseTooLarge);
+    }
+    body.extend_from_slice(chunk);
+    Ok(())
+}
+
 /// Host resolver backed by the operating system's resolver.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TokioHostResolver;
@@ -406,9 +628,13 @@ pub struct TokioHostResolver;
 #[async_trait]
 impl HostAddressResolver for TokioHostResolver {
     async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, NativeExtractError> {
+        // `lookup_host` runs `getaddrinfo` on the blocking pool, whose own
+        // timeout is the OS resolver's — tens of seconds. The extractor caps
+        // how long it *waits*; abandoning the wait does not stop the syscall,
+        // which is why the cap matters and why nothing here retries.
         let resolved = tokio::net::lookup_host((host, 443))
             .await
-            .map_err(|error| NativeExtractError::DnsResolution(error.to_string()))?;
+            .map_err(|_| NativeExtractError::UnreachableHost)?;
         let mut addresses = Vec::new();
         for address in resolved.map(|socket| socket.ip()) {
             if !addresses.contains(&address) {
@@ -428,6 +654,16 @@ mod tests {
 
     const PUBLIC_V4: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(93, 184, 216, 34));
     const PRIVATE_V4: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 5));
+
+    /// A title an attacker would like a renderer to obey rather than print:
+    /// a right-to-left override and an ANSI escape introducer.
+    const HOSTILE_TITLE: &str = "Rust\u{202e} Ownership\u{1b} Explained";
+
+    /// [`ARTICLE_HTML`] with the hostile title in both the `<title>` and the
+    /// `<h1>`, so the assertion holds whichever one the readability pass picks.
+    fn hostile_title_html() -> String {
+        ARTICLE_HTML.replace("Rust Ownership Explained", HOSTILE_TITLE)
+    }
 
     const ARTICLE_HTML: &str = r#"<!doctype html>
 <html><head><title>Rust Ownership Explained</title>
@@ -498,7 +734,7 @@ relationships between references are ambiguous.</p>
             self.0
                 .get(host)
                 .cloned()
-                .ok_or_else(|| NativeExtractError::DnsResolution(format!("unknown host {host}")))
+                .ok_or(NativeExtractError::UnreachableHost)
         }
     }
 
@@ -537,7 +773,7 @@ relationships between references are ambiguous.</p>
         let extractor = build_extractor(
             vec![
                 redirect_response("/articles/ownership"),
-                html_response(200, ARTICLE_HTML),
+                html_response(200, &hostile_title_html()),
             ],
             &[("example.com", vec![PUBLIC_V4])],
         );
@@ -547,7 +783,6 @@ relationships between references are ambiguous.</p>
             .unwrap();
 
         assert_eq!(extraction.url, "https://example.com/articles/ownership");
-        assert_eq!(extraction.title, "Rust Ownership Explained");
         assert!(extraction.content.contains("single owner"));
         assert!(extraction.content.contains("Lifetimes"));
         assert!(!extraction.content.contains("do-not-extract-this-token"));
@@ -555,12 +790,19 @@ relationships between references are ambiguous.</p>
         assert!(extraction.word_count >= MIN_EXTRACT_WORDS);
         assert!(!extraction.truncated);
 
-        // Both hops were dialed with the vetted address, fragment stripped.
+        // The page's control and directional characters do not survive into
+        // either field a renderer will show.
+        assert_eq!(extraction.title, "Rust Ownership Explained");
+        assert!(!extraction.content.contains('\u{202e}'));
+        assert!(!extraction.content.contains('\u{1b}'));
+
+        // Every hop was dialed with the vetted address, fragment stripped.
         let seen = extractor.transport.seen.lock().unwrap();
         assert_eq!(seen.len(), 2);
         assert_eq!(seen[0].0, "https://example.com/start");
         assert_eq!(seen[0].1, vec![PUBLIC_V4]);
         assert_eq!(seen[1].0, "https://example.com/articles/ownership");
+        assert_eq!(seen[1].1, vec![PUBLIC_V4]);
     }
 
     #[tokio::test]
@@ -581,10 +823,10 @@ relationships between references are ambiguous.</p>
             .extract("https://example.com/start")
             .await
             .unwrap_err();
-        assert!(matches!(
-            error,
-            NativeExtractError::PolicyViolation(FetchPolicyViolation::DeniedAddress(_))
-        ));
+        // The refusal does not say which address the host resolved to, or that
+        // it resolved at all.
+        assert!(matches!(error, NativeExtractError::UnreachableHost));
+        assert!(!error.to_string().contains("10.0.0.5"));
         assert_eq!(extractor.transport.seen.lock().unwrap().len(), 1);
 
         // A redirect straight to a denied IP literal is refused by URL
@@ -594,10 +836,7 @@ relationships between references are ambiguous.</p>
             .extract("https://example.com/start")
             .await
             .unwrap_err();
-        assert!(matches!(
-            error,
-            NativeExtractError::PolicyViolation(FetchPolicyViolation::DeniedAddress(_))
-        ));
+        assert!(matches!(error, NativeExtractError::UnreachableHost));
         assert_eq!(extractor.transport.seen.lock().unwrap().len(), 1);
     }
 
@@ -659,6 +898,93 @@ relationships between references are ambiguous.</p>
                 .unwrap_err(),
             NativeExtractError::NoReadableContent
         ));
+    }
+
+    #[tokio::test]
+    async fn deeply_nested_markup_is_refused_before_it_is_serialized() {
+        // The markdown serializer recurses once per nested list level and
+        // indents by four spaces per level, so this shape is both a stack bomb
+        // and a quadratic output bomb. It has to be refused on the parsed
+        // document, before anything walks it.
+        let depth = MAX_PARSE_DEPTH + 20;
+        let html = format!(
+            "<!doctype html><html><body>{}<p>nested</p>{}</body></html>",
+            "<ul><li>".repeat(depth),
+            "</li></ul>".repeat(depth)
+        );
+        let extractor = build_extractor(
+            vec![html_response(200, &html)],
+            &[("example.com", vec![PUBLIC_V4])],
+        );
+        assert!(matches!(
+            extractor
+                .extract("https://example.com/deep")
+                .await
+                .unwrap_err(),
+            NativeExtractError::DocumentTooComplex
+        ));
+    }
+
+    #[tokio::test]
+    async fn oversized_transport_bodies_are_refused_on_every_hop() {
+        // A transport is contractually capped, so this only bites when a host
+        // supplies its own — which is exactly when the extractor has to check.
+        let oversized = vec![b'a'; MAX_FETCH_RESPONSE_BYTES + 1];
+        let mut terminal = html_response(200, "");
+        terminal.body = oversized.clone();
+        let extractor = build_extractor(vec![terminal], &[("example.com", vec![PUBLIC_V4])]);
+        assert!(matches!(
+            extractor
+                .extract("https://example.com/big")
+                .await
+                .unwrap_err(),
+            NativeExtractError::ResponseTooLarge
+        ));
+
+        // Including a redirect's body, which is read before the hop is taken.
+        let mut redirect = redirect_response("/next");
+        redirect.body = oversized;
+        let extractor = build_extractor(
+            vec![redirect, html_response(200, ARTICLE_HTML)],
+            &[("example.com", vec![PUBLIC_V4])],
+        );
+        assert!(matches!(
+            extractor
+                .extract("https://example.com/start")
+                .await
+                .unwrap_err(),
+            NativeExtractError::ResponseTooLarge
+        ));
+        assert_eq!(extractor.transport.seen.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_black_holed_resolver_cannot_outlive_the_extraction_budget() {
+        struct SlowResolver;
+
+        #[async_trait]
+        impl HostAddressResolver for SlowResolver {
+            async fn resolve(&self, _host: &str) -> Result<Vec<IpAddr>, NativeExtractError> {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                Ok(vec![PUBLIC_V4])
+            }
+        }
+
+        let extractor = NativeExtractor::new(
+            ScriptedTransport::new(vec![html_response(200, ARTICLE_HTML)]),
+            SlowResolver,
+            Duration::from_millis(100),
+        )
+        .unwrap();
+        let started = Instant::now();
+        let error = extractor
+            .extract("https://example.com/slow")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, NativeExtractError::Timeout));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(extractor.transport.seen.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

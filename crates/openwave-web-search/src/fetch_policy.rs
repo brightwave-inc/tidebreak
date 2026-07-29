@@ -9,7 +9,7 @@
 //! it on every hop and every freshly resolved address without a transport in
 //! hand.
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::LazyLock;
 
 use openwave_egress::CidrBlock;
@@ -21,9 +21,12 @@ pub const MAX_FETCH_URL_BYTES: usize = crate::MAX_RESULT_URL_BYTES;
 
 /// Why a URL or resolved address may not be fetched.
 ///
-/// The enum is closed and carries no attacker-controlled text beyond the
-/// denied address itself, so a reason can surface in diagnostics without
-/// echoing an arbitrary URL.
+/// The enum is closed and carries no attacker-controlled text and, in
+/// particular, no address. Which address a host resolved to *is* the sensitive
+/// datum: it is an internal DNS answer for a name that a model — or a page
+/// that redirected us — chose, so repeating it back would turn a refusal into
+/// an internal-topology oracle. The address stays inside the check that made
+/// it.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum FetchPolicyViolation {
     #[error("page URL is not valid")]
@@ -38,8 +41,8 @@ pub enum FetchPolicyViolation {
     MissingHost,
     #[error("page URL must use the default https port")]
     ForbiddenPort,
-    #[error("page address {0} is in a denied network range")]
-    DeniedAddress(IpAddr),
+    #[error("page address is not an allowed destination")]
+    DeniedAddress,
 }
 
 /// Admit a model-supplied URL for fetching, or say precisely why not.
@@ -78,29 +81,29 @@ pub fn admit_fetch_url(value: &str) -> Result<Url, FetchPolicyViolation> {
     Ok(parsed)
 }
 
-/// Admit one resolved (or literal) address, or name it as denied.
+/// Admit one resolved (or literal) address, or refuse it as a destination.
 ///
 /// The denied list covers loopback, unspecified, RFC 1918, link-local (which
-/// includes cloud metadata services), CGNAT, IPv6 unique-local, and
-/// multicast/broadcast/reserved space. An IPv6 address that embeds an IPv4
-/// address — the mapped `::ffff:a.b.c.d` form and the NAT64 `64:ff9b::/96`
-/// prefix — is judged by the embedded IPv4 address, so `::ffff:10.0.0.1` is
-/// exactly as denied as `10.0.0.1`.
+/// includes cloud metadata services), CGNAT, benchmarking, documentation and
+/// TEST-NET ranges, IPv6 unique-local and site-local, and
+/// multicast/broadcast/reserved space.
+///
+/// An IPv6 address that embeds an IPv4 address is *also* judged by every IPv4
+/// address it embeds, because the host stack will route it back onto the IPv4
+/// internet: the mapped `::ffff:a.b.c.d` form, the NAT64 `64:ff9b::/96`
+/// prefix, 6to4 `2002::/16`, and Teredo `2001::/32` (both the relay's address
+/// and the obfuscated client address). So `2002:7f00:1::` is exactly as denied
+/// as `127.0.0.1`.
 pub fn admit_fetch_address(address: IpAddr) -> Result<(), FetchPolicyViolation> {
     let denied = match address {
         IpAddr::V4(v4) => is_denied_v4(v4),
         IpAddr::V6(v6) => {
-            if let Some(mapped) = v6.to_ipv4_mapped() {
-                is_denied_v4(mapped)
-            } else if let Some(embedded) = nat64_embedded_v4(u128::from(v6)) {
-                is_denied_v4(embedded)
-            } else {
-                DENIED_V6_BLOCKS.iter().any(|block| block.contains(address))
-            }
+            DENIED_V6_BLOCKS.iter().any(|block| block.contains(address))
+                || embedded_v4_addresses(v6).into_iter().any(is_denied_v4)
         }
     };
     if denied {
-        return Err(FetchPolicyViolation::DeniedAddress(address));
+        return Err(FetchPolicyViolation::DeniedAddress);
     }
     Ok(())
 }
@@ -111,33 +114,71 @@ fn is_denied_v4(address: Ipv4Addr) -> bool {
         .any(|block| block.contains(IpAddr::V4(address)))
 }
 
-/// The IPv4 address a NAT64 (`64:ff9b::/96`) IPv6 address translates to.
-fn nat64_embedded_v4(bits: u128) -> Option<Ipv4Addr> {
-    const NAT64_PREFIX: u128 = 0x0064_ff9b_0000_0000_0000_0000_0000_0000;
-    (bits >> 32 == NAT64_PREFIX >> 32).then(|| Ipv4Addr::from((bits & 0xffff_ffff) as u32))
+/// Every IPv4 address an IPv6 address embeds, across the transition formats a
+/// host stack translates back to IPv4.
+///
+/// A format is only recognized by its prefix, so an address may yield no
+/// embedded IPv4 at all; each one that is found is judged by the IPv4 list.
+fn embedded_v4_addresses(address: Ipv6Addr) -> Vec<Ipv4Addr> {
+    /// `64:ff9b::/96`, the well-known NAT64 prefix (RFC 6052). The local-use
+    /// `64:ff9b:1::/48` prefix carries the IPv4 address at a position that
+    /// varies with the prefix length, so it is denied wholesale instead.
+    const NAT64_WELL_KNOWN: u128 = 0x0064_ff9b_0000_0000_0000_0000_0000_0000;
+
+    let bits = u128::from(address);
+    let embedded_at = |shift: u32| Ipv4Addr::from(((bits >> shift) & 0xffff_ffff) as u32);
+    let mut addresses = Vec::new();
+    if let Some(mapped) = address.to_ipv4_mapped() {
+        addresses.push(mapped);
+    }
+    if bits >> 32 == NAT64_WELL_KNOWN >> 32 {
+        addresses.push(embedded_at(0));
+    }
+    // 6to4 (RFC 3056): the 32 bits after the `2002::/16` prefix are the IPv4
+    // tunnel endpoint, so `2002:7f00:1::` reaches 127.0.0.1.
+    if bits >> 112 == 0x2002 {
+        addresses.push(embedded_at(80));
+    }
+    // Teredo (RFC 4380): the 32 bits after the `2001::/32` prefix are the
+    // server, and the last 32 bits are the client's IPv4 address stored as its
+    // bitwise complement. Traffic can reach either, so both are judged.
+    if bits >> 96 == 0x2001_0000 {
+        addresses.push(embedded_at(64));
+        addresses.push(Ipv4Addr::from(!((bits & 0xffff_ffff) as u32)));
+    }
+    addresses
 }
 
-static DENIED_V4_BLOCKS: LazyLock<[CidrBlock; 9]> = LazyLock::new(|| {
+static DENIED_V4_BLOCKS: LazyLock<[CidrBlock; 15]> = LazyLock::new(|| {
     [
-        "0.0.0.0/8",      // unspecified and "this network"
-        "10.0.0.0/8",     // RFC 1918
-        "100.64.0.0/10",  // CGNAT shared address space
-        "127.0.0.0/8",    // loopback
-        "169.254.0.0/16", // link-local, including cloud metadata endpoints
-        "172.16.0.0/12",  // RFC 1918
-        "192.168.0.0/16", // RFC 1918
-        "224.0.0.0/4",    // multicast
-        "240.0.0.0/4",    // reserved, including the broadcast address
+        "0.0.0.0/8",       // unspecified and "this network"
+        "10.0.0.0/8",      // RFC 1918
+        "100.64.0.0/10",   // CGNAT shared address space
+        "127.0.0.0/8",     // loopback
+        "169.254.0.0/16",  // link-local, including cloud metadata endpoints
+        "172.16.0.0/12",   // RFC 1918
+        "192.0.0.0/24",    // IETF protocol assignments
+        "192.0.2.0/24",    // TEST-NET-1
+        "192.88.99.0/24",  // 6to4 relay anycast
+        "192.168.0.0/16",  // RFC 1918
+        "198.18.0.0/15",   // benchmarking, routed by some SD-WAN and VPN clients
+        "198.51.100.0/24", // TEST-NET-2
+        "203.0.113.0/24",  // TEST-NET-3
+        "224.0.0.0/4",     // multicast
+        "240.0.0.0/4",     // reserved, including the broadcast address
     ]
     .map(|block| CidrBlock::parse(block).expect("static deny CIDR must parse"))
 });
 
-static DENIED_V6_BLOCKS: LazyLock<[CidrBlock; 4]> = LazyLock::new(|| {
+static DENIED_V6_BLOCKS: LazyLock<[CidrBlock; 7]> = LazyLock::new(|| {
     [
-        "::/96",     // unspecified, loopback, and deprecated IPv4-compatible space
-        "fc00::/7",  // unique local addresses
-        "fe80::/10", // link-local
-        "ff00::/8",  // multicast
+        "::/96",          // unspecified, loopback, and deprecated IPv4-compatible space
+        "64:ff9b:1::/48", // local-use NAT64 (RFC 8215)
+        "2001:db8::/32",  // documentation
+        "fc00::/7",       // unique local addresses
+        "fe80::/10",      // link-local
+        "fec0::/10",      // deprecated site-local, still configured on some networks
+        "ff00::/8",       // multicast
     ]
     .map(|block| CidrBlock::parse(block).expect("static deny CIDR must parse"))
 });
@@ -204,11 +245,17 @@ mod tests {
             "https://[ff02::1]/",
             "https://[::ffff:10.0.0.1]/", // IPv4-mapped RFC 1918
             "https://[64:ff9b::a00:1]/",  // NAT64-embedded 10.0.0.1
+            "https://[2002:7f00:1::]/",   // 6to4-embedded 127.0.0.1
+            "https://[2001:0:7f00:1::]/", // Teredo server 127.0.0.1
+            "https://198.18.0.1/",
+            "https://192.0.2.1/",
+            "https://[fec0::1]/",
+            "https://[2001:db8::1]/",
         ] {
             assert!(
                 matches!(
                     admit_fetch_url(url),
-                    Err(FetchPolicyViolation::DeniedAddress(_))
+                    Err(FetchPolicyViolation::DeniedAddress)
                 ),
                 "{url} was admitted"
             );
@@ -225,6 +272,13 @@ mod tests {
             "::ffff:192.168.1.1",
             "fc00::1234",
             "64:ff9b::7f00:1",
+            "64:ff9b:1::1",
+            // Teredo relayed through a public server, but tunnelled to a
+            // loopback client: the client address is the complement of
+            // 127.0.0.1.
+            "2001:0:5db8:d822::80ff:fffe",
+            "192.88.99.1",
+            "203.0.113.9",
         ] {
             let address: IpAddr = address.parse().unwrap();
             assert!(admit_fetch_address(address).is_err(), "{address} admitted");
@@ -242,9 +296,11 @@ mod tests {
         for address in [
             "93.184.216.34",
             "2606:2800:220:1:248:1893:25c8:1946",
-            // Public IPv4 carried in mapped and NAT64 forms stays admissible.
+            // Public IPv4 carried in mapped, NAT64, and 6to4 forms stays
+            // admissible.
             "::ffff:93.184.216.34",
             "64:ff9b::5db8:d822",
+            "2002:5db8:d822::1",
         ] {
             let address: IpAddr = address.parse().unwrap();
             assert!(admit_fetch_address(address).is_ok(), "{address} denied");
