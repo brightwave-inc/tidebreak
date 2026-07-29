@@ -52,11 +52,29 @@ impl PairingHandle {
     }
 }
 
+/// What a successful pairing did, beyond the writes themselves.
+#[derive(Debug)]
+pub struct PairingOutcome {
+    /// The normalized gateway base URL now on record.
+    pub base_url: String,
+    /// True when this call is the one that provisioned the profile; false
+    /// for an idempotent re-pair of the gateway already on record, which
+    /// changed no policy. The desktop shell keys its restart prompt off
+    /// this, and the claim is one-directional: enforcement that only a
+    /// fresh boot can apply (the boot-scoped embedder) is outstanding only
+    /// if this call did the provisioning. A profile already managed by OS
+    /// policy was gated at boot and first-pairs with nothing outstanding,
+    /// and a deferred restart stays outstanding through later re-pairs
+    /// that report false.
+    pub newly_provisioned: bool,
+}
+
 /// Validate `gateway_url`, probe the gateway, and provision this profile.
 ///
-/// Returns the normalized gateway base URL on success. Nothing is written
-/// unless the URL passes the gateway contract and the deployment answers
-/// `GET /api/v1/meta`; a conflicting re-provision is refused inside
+/// Returns a [`PairingOutcome`] on success — the normalized gateway base URL
+/// plus whether this call is the one that provisioned the profile. Nothing
+/// is written unless the URL passes the gateway contract and the deployment
+/// answers `GET /api/v1/meta`; a conflicting re-provision is refused inside
 /// [`managed_policy::provision`] and leaves both the policy and the provider
 /// configuration untouched. Success also points the ModelGateway provider at
 /// the gateway and enables it, dropping any model snapshot synced from a
@@ -66,7 +84,10 @@ impl PairingHandle {
 /// servers running under the previously open profile are taken down here
 /// rather than at the supervisor's next sweep, so no locked child keeps
 /// serving tools across the window in between.
-pub async fn pair_with_gateway(handle: &PairingHandle, gateway_url: &str) -> Result<String> {
+pub async fn pair_with_gateway(
+    handle: &PairingHandle,
+    gateway_url: &str,
+) -> Result<PairingOutcome> {
     let store = &*handle.store;
     let config = GatewayAuthConfig::new(gateway_url)?;
     let base_url = config.base_url().to_string();
@@ -78,13 +99,14 @@ pub async fn pair_with_gateway(handle: &PairingHandle, gateway_url: &str) -> Res
     // provider-first fails into a still-unmanaged profile recoverable from
     // settings, while policy-first could strand a permanently managed
     // profile with no configured provider.
-    if let Some(existing) = managed_policy::provisioned_url(store).await? {
-        if existing != base_url {
+    let already_provisioned = match managed_policy::provisioned_url(store).await? {
+        Some(existing) if existing != base_url => {
             return Err(AgentError::config(
                 "this profile is already provisioned to a different gateway",
             ));
         }
-    }
+        other => other.is_some(),
+    };
     let mut provider = providers::read_config(store, ProviderKind::ModelGateway).await?;
     if provider.base_url.as_deref() != Some(base_url.as_str()) {
         // A model snapshot synced from a previously configured gateway does
@@ -96,7 +118,10 @@ pub async fn pair_with_gateway(handle: &PairingHandle, gateway_url: &str) -> Res
     providers::write_config(store, ProviderKind::ModelGateway, &provider).await?;
     managed_policy::provision(store, &base_url).await?;
     handle.mcp.enforce_manual_lockdown().await;
-    Ok(base_url)
+    Ok(PairingOutcome {
+        base_url,
+        newly_provisioned: !already_provisioned,
+    })
 }
 
 #[cfg(test)]
@@ -248,9 +273,14 @@ mod tests {
         .await
         .unwrap();
 
-        let normalized = pair_with_gateway(&test_handle(&store), &base)
+        let outcome = pair_with_gateway(&test_handle(&store), &base)
             .await
             .unwrap();
+        assert!(
+            outcome.newly_provisioned,
+            "the first pairing is the one that provisions"
+        );
+        let normalized = outcome.base_url;
         assert_eq!(normalized, format!("{base}/"));
 
         let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
@@ -264,10 +294,13 @@ mod tests {
         assert_eq!(provider.base_url.as_deref(), Some(normalized.as_str()));
         assert!(provider.models.is_empty());
 
-        // Re-pairing the same gateway is idempotent.
-        pair_with_gateway(&test_handle(&store), &base)
+        // Re-pairing the same gateway is idempotent, and reports that no
+        // transition happened — the desktop shell keys its restart prompt
+        // off this distinction.
+        let repaired = pair_with_gateway(&test_handle(&store), &base)
             .await
             .unwrap();
+        assert!(!repaired.newly_provisioned);
     }
 
     /// Pairing applies the policy it writes, not just persists it: a manual
@@ -338,7 +371,8 @@ mod tests {
         let second = serve_meta().await;
         let normalized = pair_with_gateway(&test_handle(&store), &first)
             .await
-            .unwrap();
+            .unwrap()
+            .base_url;
         let error = pair_with_gateway(&test_handle(&store), &second)
             .await
             .err()
