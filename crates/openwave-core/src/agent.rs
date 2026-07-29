@@ -2525,9 +2525,8 @@ impl Agent {
             // must see the real query, never a clamped rendering of it.
             let auto_judge = matches!(mode, PermissionMode::Auto)
                 && durable_approval.is_none()
-                && kind.is_auto_judgeable()
                 && serde_json::from_str::<Value>(&call.args).is_ok_and(|arguments| {
-                    ToolActionPreview::describes_exactly(&call.name, &arguments)
+                    crate::approval::is_auto_judge_candidate(kind, &call.name, &arguments)
                 });
             let auto_judging = durable_approval.map_or(auto_judge, |approval| {
                 matches!(

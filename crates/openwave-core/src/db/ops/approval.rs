@@ -167,6 +167,17 @@ fn stored_approval_class(_class: ApprovalClass) -> &'static str {
     ApprovalClass::Sensitive.as_str()
 }
 
+/// Whether the judge may own this call, decided on the arguments the call is
+/// actually parked on rather than on what the caller believed about them.
+///
+/// A request that does not qualify simply loses its judge and becomes an
+/// ordinary card. Refusing the whole registration would fail a turn over an
+/// optimization, and the thing worth preventing — an ineligible command
+/// reaching the model — is prevented either way.
+fn judge_may_own(request: &ApprovalRequest, arguments: &serde_json::Value) -> bool {
+    crate::approval::is_auto_judge_candidate(request.kind, &request.tool_name, arguments)
+}
+
 pub(in crate::db) async fn request_and_append_event(
     store: &DbStore,
     request: &ApprovalRequest,
@@ -314,13 +325,14 @@ pub(in crate::db) async fn request_and_append_event(
         &event,
     )
     .await?;
+    let arguments_for_judge = call.arguments.clone();
     let mut active: entities::tool_call::ActiveModel = call.into();
     active.approval_status = Set(Some(ToolApprovalStatus::Pending.as_str().into()));
     active.approval_class = Set(Some(stored_approval_class(request.class).into()));
     active.approval_kind = Set(Some(request.kind.as_str().into()));
     active.approval_requested_at = Set(Some(requested_at));
     active.approval_event_seq = Set(Some(seq));
-    if request.auto_judge {
+    if request.auto_judge && judge_may_own(request, &arguments_for_judge) {
         active.auto_judge_status = Set(Some(AutoJudgeStatus::Judging.as_str().into()));
     }
     let approval = approval_from_model(&active.update(&transaction).await.map_err(store_err)?)?;
@@ -505,12 +517,13 @@ pub(in crate::db) async fn request(
         transaction.commit().await.map_err(store_err)?;
         return Ok(RequestToolApprovalOutcome::Granted(approval));
     }
+    let arguments_for_judge = existing.arguments.clone();
     let mut active: entities::tool_call::ActiveModel = existing.into();
     active.approval_status = Set(Some(ToolApprovalStatus::Pending.as_str().into()));
     active.approval_class = Set(Some(stored_approval_class(request.class).into()));
     active.approval_kind = Set(Some(request.kind.as_str().into()));
     active.approval_requested_at = Set(Some(requested_at));
-    if request.auto_judge {
+    if request.auto_judge && judge_may_own(request, &arguments_for_judge) {
         active.auto_judge_status = Set(Some(AutoJudgeStatus::Judging.as_str().into()));
     }
     let inserted = active.update(&transaction).await.map_err(store_err)?;

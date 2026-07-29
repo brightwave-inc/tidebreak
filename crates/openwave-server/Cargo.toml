@@ -50,6 +50,7 @@ parse-image = ["openwave-retrieval/parse-image"]
 vec-lance = ["openwave-retrieval/vec-lance"]
 
 [dependencies]
+openwave-shell-policy = { path = "../openwave-shell-policy" }
 openwave-code-execution = { path = "../openwave-code-execution" }
 openwave-core = { path = "../openwave-core", default-features = false, features = ["sqlite", "tools", "keychain", "blob-fs"] }
 openwave-connectors = { path = "../openwave-connectors" }

@@ -209,20 +209,27 @@ impl ToolApprovalKind {
         )
     }
 
-    /// Whether an uncovered call of this kind may be offered to the Auto-mode
+    /// Whether a call of this kind may ever be offered to the Auto-mode
     /// judge instead of parking straight on the human card.
     ///
-    /// Deliberately only the query-egress kinds. `exec` has no deterministic
-    /// safety floor here — no command parser, no guaranteed network-blocked
-    /// jail — so a judge would be the *sole* gate on arbitrary networked
-    /// shell, which is exactly the position a fail-closed judge must never
-    /// hold. MCP is excluded on the same replaceable-executable grounds as
-    /// standing grants.
+    /// A necessary condition, not a sufficient one — see
+    /// [`is_auto_judge_candidate`], which additionally requires a command to
+    /// have cleared the analyzer. The judge must never be the only thing
+    /// standing between a call and its effect; it may shorten the path to
+    /// yes for something already known to be structurally benign, and
+    /// nothing else.
+    ///
+    /// MCP stays out on the same replaceable-executable grounds as standing
+    /// grants: consent given to a namespace is not consent to whatever
+    /// Settings later puts behind it.
     #[must_use]
     pub const fn is_auto_judgeable(self) -> bool {
         matches!(
             self,
-            Self::SearchMayShareQueryAndExcerpts | Self::WebSearchMayShareQuery
+            Self::SearchMayShareQueryAndExcerpts
+                | Self::WebSearchMayShareQuery
+                | Self::WebExtractMayFetchUrl
+                | Self::ExecMayRunNetworkedCommand
         )
     }
 
@@ -283,6 +290,52 @@ impl AutoJudgeStatus {
             Self::Approved => "approved",
             Self::Declined => "declined",
         }
+    }
+}
+
+/// Whether an uncovered call may be handed to the Auto-mode judge.
+///
+/// Three things have to hold, and the third is the one that matters. The
+/// kind must be judgeable at all; the action must be describable *exactly*,
+/// so the judge sees the real call rather than a clamped rendering of it;
+/// and a command must additionally have cleared the deterministic analyzer
+/// under the broadest possible rule.
+///
+/// That last condition is what makes judging a command defensible. The
+/// analyzer has already refused interpreters, destructive operations, writes
+/// to sensitive paths, and anything reaching outside the workspace — so what
+/// reaches the model is the structurally benign residue, and a model that
+/// answers badly can only fail towards asking. It cannot widen what the
+/// floor already refused.
+#[must_use]
+pub fn is_auto_judge_candidate(
+    kind: ToolApprovalKind,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+) -> bool {
+    if !kind.is_auto_judgeable() || !ToolActionPreview::describes_exactly(tool_name, arguments) {
+        return false;
+    }
+    let Some(action) = ToolActionPreview::build(tool_name, arguments) else {
+        return false;
+    };
+    match &action {
+        ToolActionPreview::Exec { command, args, .. } => {
+            let broadest = openwave_shell_policy::ShellRuleSet {
+                allow: openwave_shell_policy::CommandRule::new(
+                    openwave_shell_policy::CommandRuleKind::All,
+                    Vec::new(),
+                )
+                .into_iter()
+                .collect(),
+                deny: Vec::new(),
+            };
+            openwave_shell_policy::analyze_argv(&exec_argv(command, args), &broadest).verdict
+                == openwave_shell_policy::ShellVerdict::Allow
+        }
+        // A query carries no effect of its own; the egress it describes is
+        // the whole of what is being judged.
+        _ => true,
     }
 }
 
