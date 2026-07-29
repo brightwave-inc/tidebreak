@@ -21,7 +21,7 @@ The current foreground agent surface contains nineteen tools:
 | `read_source` | Read a bounded canonical-text range from one source and create citable evidence | Server, read-only |
 | `read_tool_result` | Read past the point a large tool result was cut short for the turn | Server, read-only |
 | `web_search` | Search the public web through the configured Exa or Tavily provider | Server, sensitive approval |
-| `web_extract` | Fetch one exact public page URL and return its readable content | Server, sensitive approval |
+| `web_extract` | Fetch one exact public page URL and return its readable content, through the configured provider or the built-in engine | Server, sensitive approval |
 | `request_folder_access` | Ask the trusted desktop host to connect another folder | Client continuation |
 | `list_connected_folders` | List roots already attached to this chat | Native client continuation |
 | `list_folder` | List one directory below an attached root | Native client continuation |
@@ -301,7 +301,10 @@ only then resolves current host policy and credentials. `web_extract` sits
 beside it on the same terms: Sensitive, with the exact page URL on the
 approval card, and routed deterministically to the configured provider when it
 implements the extract contract or to the built-in native extraction engine
-otherwise — see [Web search](web-search.md) for the routing and fetch-policy
+otherwise. Exa and Tavily both implement it, so a configured host extracts
+through the vendor and falls back to native — except on a rejected key, which
+surfaces for repair rather than degrading silently. See
+[Web search](web-search.md) for the routing, wire shapes, and fetch-policy
 details. Turn cancellation drops
 an in-flight tool future, aborting its HTTP request. The sandbox path remains a
 separate checkpoint executor: it attaches host policy only after claiming and

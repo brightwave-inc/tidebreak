@@ -1,4 +1,4 @@
-//! Tavily's direct `/search` adapter.
+//! Tavily's direct `/search` and `/extract` adapter.
 
 use std::collections::BTreeMap;
 
@@ -7,9 +7,11 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::types::{count_words, same_page_url};
 use crate::{
-    HttpClient, HttpRequest, WebSearchCredential, WebSearchError, WebSearchProvider,
-    WebSearchProviderKind, WebSearchRequest, WebSearchResponse, WebSearchResult,
+    admit_fetch_url, ExtractionMethod, HttpClient, HttpRequest, WebExtractRequest,
+    WebExtractResponse, WebSearchCredential, WebSearchError, WebSearchProvider,
+    WebSearchProviderKind, WebSearchRequest, WebSearchResponse, WebSearchResult, MIN_EXTRACT_WORDS,
 };
 
 /// Tavily adapter backed by an injected HTTP client.
@@ -63,6 +65,45 @@ impl<C: HttpClient> WebSearchProvider for TavilyProvider<C> {
             .filter_map(|result| normalize_result(result).ok())
             .collect();
         Ok(WebSearchResponse::new(self.kind(), results))
+    }
+
+    fn supports_extract(&self) -> bool {
+        true
+    }
+
+    async fn extract(
+        &self,
+        request: WebExtractRequest,
+    ) -> Result<WebExtractResponse, WebSearchError> {
+        request.validate()?;
+        let response = self
+            .client
+            .post_json(HttpRequest {
+                url: self.kind().extract_url().into(),
+                headers: vec![
+                    // `/extract` takes the key as a bearer token only; the body
+                    // `api_key` field the search path still sends is not part
+                    // of this endpoint's contract.
+                    (
+                        "authorization".into(),
+                        format!("Bearer {}", self.credential.api_key()),
+                    ),
+                    ("content-type".into(), "application/json".into()),
+                ],
+                body: extract_request_body(request.url()),
+            })
+            .await?;
+        response.ensure_bounded()?;
+        if !(200..300).contains(&response.status) {
+            return Err(extract_status_error(response.status));
+        }
+        let payload: TavilyExtractResponse =
+            serde_json::from_slice(&response.body).map_err(|_| {
+                WebSearchError::InvalidResponse {
+                    provider: self.kind(),
+                }
+            })?;
+        normalize_extraction(request.url(), payload)
     }
 }
 
@@ -126,6 +167,112 @@ fn normalize_result(result: TavilyResult) -> Result<WebSearchResult, WebSearchEr
     )
 }
 
+/// One URL, whole page, markdown.
+///
+/// `query` is deliberately absent. Supplying one switches `raw_content` from
+/// the page to reranked chunks joined by a literal `"[...]"` marker, which is a
+/// different product from the extraction contract this adapter implements.
+/// `basic` depth is the whole-page read; `advanced` doubles the cost for table
+/// and dynamic-content recovery that the native engine already backstops. No
+/// body `timeout` is sent either — the host's clamped transport timeout is the
+/// single deadline, and a second one in the payload could only disagree with it.
+fn extract_request_body(url: &str) -> serde_json::Value {
+    json!({
+        "urls": [url],
+        "extract_depth": "basic",
+        "format": "markdown",
+        "include_images": false,
+    })
+}
+
+/// Project a request-level status onto the crate's typed errors.
+fn extract_status_error(status: u16) -> WebSearchError {
+    let provider = WebSearchProviderKind::Tavily;
+    match status {
+        401 => WebSearchError::CredentialRejected(provider),
+        // Tavily splits "you are going too fast" from "you are out of credit"
+        // across nonstandard statuses: 432 is the plan allowance, 433 the
+        // pay-as-you-go balance. Neither is fixed by backing off, so they must
+        // not be folded into 429.
+        432 | 433 => WebSearchError::QuotaExhausted(provider),
+        429 => WebSearchError::RateLimited(provider),
+        status => WebSearchError::HttpStatus { provider, status },
+    }
+}
+
+#[derive(Deserialize)]
+struct TavilyExtractResponse {
+    #[serde(default)]
+    results: Vec<TavilyExtractResult>,
+    /// URLs the vendor could not read. Its per-entry `error` prose is
+    /// deliberately not deserialized: it would only ever be forwarded, and no
+    /// vendor string belongs in a model context.
+    #[serde(default)]
+    failed_results: Vec<TavilyFailedResult>,
+}
+
+#[derive(Deserialize)]
+struct TavilyExtractResult {
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    raw_content: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TavilyFailedResult {
+    #[serde(default)]
+    url: String,
+}
+
+/// Turn one `/extract` payload into a bounded extraction, or a typed failure.
+///
+/// The endpoint answers HTTP 200 even when every URL failed, splitting the
+/// outcome across `results` and `failed_results`, so the requested URL is
+/// looked up by key in both. A missing or too-thin page is a failure rather
+/// than an extraction with nothing in it.
+fn normalize_extraction(
+    requested: &str,
+    payload: TavilyExtractResponse,
+) -> Result<WebExtractResponse, WebSearchError> {
+    let provider = WebSearchProviderKind::Tavily;
+    let failed = || WebSearchError::PageNotExtracted { provider };
+    if payload
+        .failed_results
+        .iter()
+        .any(|entry| same_page_url(&entry.url, requested))
+    {
+        return Err(failed());
+    }
+    let result = payload
+        .results
+        .into_iter()
+        .find(|result| same_page_url(&result.url, requested))
+        .ok_or_else(failed)?;
+    let content = result.raw_content.unwrap_or_default();
+    let content = content.trim();
+    let word_count = count_words(content);
+    if word_count < MIN_EXTRACT_WORDS {
+        return Err(failed());
+    }
+    let url = admit_fetch_url(&result.url).map_or_else(|_| requested.to_owned(), String::from);
+    WebExtractResponse::new(
+        ExtractionMethod::Provider(provider),
+        url,
+        // `/extract` returns no title field, so there is none to report. An
+        // empty title is what the contract already means by "the page did not
+        // provide one"; inventing one from the first markdown heading would put
+        // a guess where a fact belongs, and the result card falls back to the
+        // page host on its own.
+        "",
+        content,
+        word_count,
+        // Tavily applies no length cap of its own, so anything shortened here
+        // is shortened by the output budget, which sets this itself.
+        false,
+    )
+}
+
 fn parse_provider_timestamp(value: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value)
         .ok()
@@ -149,6 +296,7 @@ mod tests {
     #[derive(Clone)]
     struct FakeHttpClient {
         request: Arc<Mutex<Option<HttpRequest>>>,
+        response: HttpResponse,
     }
 
     struct StaticSecrets;
@@ -175,10 +323,7 @@ mod tests {
     impl HttpClient for FakeHttpClient {
         async fn post_json(&self, request: HttpRequest) -> Result<HttpResponse, WebSearchError> {
             *self.request.lock().unwrap() = Some(request);
-            Ok(HttpResponse {
-                status: 200,
-                body: br#"{"results":[{"url":"https://example.com/t","title":"Tavily","content":"bounded content","score":0.5,"published_date":"2026-01-01"}]}"#.to_vec(),
-            })
+            Ok(self.response.clone())
         }
     }
 
@@ -192,6 +337,10 @@ mod tests {
         let provider = TavilyProvider::new(
             FakeHttpClient {
                 request: Arc::clone(&request),
+                response: HttpResponse {
+                    status: 200,
+                    body: br#"{"results":[{"url":"https://example.com/t","title":"Tavily","content":"bounded content","score":0.5,"published_date":"2026-01-01"}]}"#.to_vec(),
+                },
             },
             credential,
         )
@@ -210,5 +359,150 @@ mod tests {
         assert_eq!(sent.url, WebSearchProviderKind::Tavily.search_url());
         assert_eq!(sent.body["api_key"], "tavily-key");
         assert!(sent.headers.iter().all(|(_, value)| value != "tavily-key"));
+    }
+
+    const EXTRACT_URL: &str = "https://example.com/article";
+
+    async fn extract(
+        status: u16,
+        body: serde_json::Value,
+    ) -> (
+        Result<WebExtractResponse, WebSearchError>,
+        Option<HttpRequest>,
+    ) {
+        let credential = WebSearchCredentials::load(&StaticSecrets, WebSearchProviderKind::Tavily)
+            .await
+            .unwrap()
+            .unwrap();
+        let request = Arc::new(Mutex::new(None));
+        let provider = TavilyProvider::new(
+            FakeHttpClient {
+                request: Arc::clone(&request),
+                response: HttpResponse {
+                    status,
+                    body: serde_json::to_vec(&body).unwrap(),
+                },
+            },
+            credential,
+        )
+        .unwrap();
+        let result = provider
+            .extract(WebExtractRequest::new(EXTRACT_URL).unwrap())
+            .await;
+        let sent = request.lock().unwrap().clone();
+        (result, sent)
+    }
+
+    #[tokio::test]
+    async fn extract_requests_the_whole_page_and_normalizes_it_within_budget() {
+        let raw_content = "openwave ".repeat(8_000);
+        let (result, sent) = extract(
+            200,
+            serde_json::json!({
+                "results": [{ "url": EXTRACT_URL, "raw_content": raw_content }],
+                "failed_results": [],
+                "response_time": 1.23,
+                "usage": { "credits": 1 },
+            }),
+        )
+        .await;
+
+        let response = result.unwrap();
+        assert_eq!(
+            response.extraction_method,
+            ExtractionMethod::Provider(WebSearchProviderKind::Tavily)
+        );
+        assert_eq!(response.url, EXTRACT_URL);
+        // `/extract` returns no title, and none is invented for it.
+        assert!(response.title.is_empty());
+        assert_eq!(response.word_count, 8_000);
+        // Tavily caps nothing itself, so the output budget is what shortened
+        // this page, and it says so.
+        assert!(response.truncated);
+        assert!(
+            serde_json::to_vec(&response).unwrap().len() <= crate::MAX_EXTRACT_OUTPUT_BYTES,
+            "extraction exceeded its serialized output budget"
+        );
+
+        let sent = sent.unwrap();
+        assert_eq!(sent.url, WebSearchProviderKind::Tavily.extract_url());
+        assert_eq!(sent.body["urls"], serde_json::json!([EXTRACT_URL]));
+        assert_eq!(sent.body["format"], "markdown");
+        // A query would turn `raw_content` into reranked chunks instead of the
+        // page, so it must never be sent from the extraction path.
+        assert!(sent.body.get("query").is_none());
+        assert_eq!(
+            sent.headers[0],
+            ("authorization".into(), "Bearer tavily-key".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn extract_maps_per_url_failure_and_distinctive_statuses_to_typed_errors() {
+        let other = "https://example.com/other";
+        let page = "openwave ".repeat(40);
+        let cases = [
+            // The whole point: a wholly failed batch is still HTTP 200, with
+            // the reason parked in `failed_results`.
+            (
+                serde_json::json!({
+                    "results": [],
+                    "failed_results": [{ "url": EXTRACT_URL, "error": "unreachable host" }],
+                }),
+                "per-URL failure inside HTTP 200",
+            ),
+            // A success for some other URL must not be adopted by position.
+            (
+                serde_json::json!({
+                    "results": [{ "url": other, "raw_content": page }],
+                    "failed_results": [],
+                }),
+                "result for a different URL",
+            ),
+            (
+                serde_json::json!({
+                    "results": [{ "url": EXTRACT_URL, "raw_content": "Enable JavaScript." }],
+                    "failed_results": [],
+                }),
+                "content below the readable floor",
+            ),
+        ];
+        for (body, case) in cases {
+            let (result, _) = extract(200, body).await;
+            assert!(
+                matches!(
+                    result,
+                    Err(WebSearchError::PageNotExtracted {
+                        provider: WebSearchProviderKind::Tavily
+                    })
+                ),
+                "{case} did not produce a typed per-URL failure"
+            );
+        }
+
+        let empty = || serde_json::json!({});
+        assert!(matches!(
+            extract(401, empty()).await.0,
+            Err(WebSearchError::CredentialRejected(_))
+        ));
+        // 432 (plan allowance) and 433 (pay-as-you-go balance) are Tavily's own
+        // statuses and are not rate limits: retrying cannot clear either.
+        for status in [432, 433] {
+            assert!(
+                matches!(
+                    extract(status, empty()).await.0,
+                    Err(WebSearchError::QuotaExhausted(_))
+                ),
+                "HTTP {status} was not mapped to an exhausted quota"
+            );
+        }
+        assert!(matches!(
+            extract(429, empty()).await.0,
+            Err(WebSearchError::RateLimited(_))
+        ));
+        assert!(matches!(
+            extract(503, empty()).await.0,
+            Err(WebSearchError::HttpStatus { status: 503, .. })
+        ));
     }
 }

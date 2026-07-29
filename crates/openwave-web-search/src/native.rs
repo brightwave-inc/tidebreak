@@ -32,6 +32,8 @@ use thiserror::Error;
 use url::{Host, Url};
 
 use crate::fetch_policy::{admit_fetch_address, admit_fetch_url, FetchPolicyViolation};
+use crate::types::count_words;
+use crate::MIN_EXTRACT_WORDS;
 
 /// Largest response body retained for one native page fetch.
 pub const MAX_FETCH_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
@@ -40,8 +42,6 @@ pub const MAX_FETCH_REDIRECT_HOPS: usize = 5;
 /// Maximum Unicode scalar values of extracted content returned to a caller,
 /// including the truncation marker when one is inserted.
 pub const MAX_EXTRACT_CONTENT_CHARS: usize = 24_000;
-/// Below this many extracted words a page has no readable content.
-pub const MIN_EXTRACT_WORDS: usize = 20;
 /// The honest, distinct user agent every native page fetch announces.
 pub const NATIVE_FETCH_USER_AGENT: &str =
     "OpenWavePageExtractor/1.0 (+https://github.com/brightwave-inc/openwave)";
@@ -547,13 +547,6 @@ fn sanitized_title(value: &str) -> String {
 
 /// Words that carry content: whitespace-separated tokens with at least one
 /// alphanumeric character, so markdown punctuation does not inflate the count.
-fn count_words(value: &str) -> usize {
-    value
-        .split_whitespace()
-        .filter(|token| token.chars().any(char::is_alphanumeric))
-        .count()
-}
-
 /// Keep the head and tail of over-budget content with an explicit marker in
 /// between; the result never exceeds `budget` characters.
 fn truncate_head_tail(value: &str, budget: usize) -> (String, bool) {
