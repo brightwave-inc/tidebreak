@@ -352,6 +352,14 @@ where
         closed: Arc::clone(&closed),
     };
 
+    // Spawn the writer BEFORE pushing anything onto the outbound queues. The
+    // resume replay below can enqueue far more events than the request-lane queue
+    // depth (up to MAX_BUFFERED_EVENTS), and if the writer that drains `data_rx`
+    // is not already running, the replay loop wedges on a full channel and the
+    // connection never starts serving. With the writer live, `data_rx` drains as
+    // the replay fills it.
+    let writer = tokio::spawn(write_prioritized(write_half, control_rx, data_rx));
+
     // Publish this connection as the run's live connection, then replay buffered
     // events strictly newer than the host's resume cursor. `send_replace`, not
     // `send`: the run holds no long-lived receiver, so `send` would be rejected
@@ -363,8 +371,6 @@ where
             break;
         }
     }
-
-    let writer = tokio::spawn(write_prioritized(write_half, control_rx, data_rx));
 
     // Serve inbound frames: correlate reverse responses, answer pings, and take
     // event acknowledgements.

@@ -349,6 +349,108 @@ async fn control_lane_cancel_preempts_a_saturated_request_lane() {
     .await;
 }
 
+/// A resume that replays more buffered events than the outbound request-lane
+/// queue depth still delivers every event: the writer drains the queue while the
+/// replay fills it, rather than the replay wedging on a full channel.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resume_replays_more_events_than_the_request_lane_depth() {
+    bounded(async {
+        let run = SandboxRun::new([]);
+        // Buffer far more events than the outbound `data` queue depth
+        // (MAX_INFLIGHT_REQUESTS = 16), the earlier deadlock's trigger.
+        const COUNT: u64 = 40;
+        for index in 0..COUNT {
+            run.emit_progress(format!("event-{index}"))
+                .await
+                .expect("emit");
+        }
+        let addr = spawn_sandbox(run).await;
+
+        let (host, _store) = host_with(Vec::new(), echo().0);
+        let mut conn = connect(addr, host, EventCursor::START)
+            .await
+            .expect("attach accepted");
+        let mut sequences = Vec::new();
+        for _ in 0..COUNT {
+            let event = conn.next_event().await.expect("stream open");
+            sequences.push(event.sequence.get());
+        }
+        assert_eq!(
+            sequences,
+            (1..=COUNT).collect::<Vec<_>>(),
+            "every buffered event replays past the queue depth, in order"
+        );
+    })
+    .await;
+}
+
+/// Run-scoped state outlives the connection over the real wire: a reverse call
+/// whose connection drops fails to the sandbox, its host-side execution keeps
+/// running and records, and re-issuing the same operation identity on a fresh
+/// connection replays the recorded outcome with the model still run exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reverse_call_survives_a_disconnect_and_reissue_replays_exactly_once() {
+    bounded(async {
+        let run = SandboxRun::new([Capability::ModelInference]);
+        let addr = spawn_sandbox(run.clone()).await;
+
+        // A gated host model, shared run-scoped across both connections.
+        let gate = Arc::new(Semaphore::new(0));
+        let started = Arc::new(AtomicUsize::new(0));
+        let finished = Arc::new(AtomicUsize::new(0));
+        let responder = Arc::new(GateResponder {
+            gate: Arc::clone(&gate),
+            started: Arc::clone(&started),
+            finished: Arc::clone(&finished),
+        });
+        let (host, store) = host_with(vec![Capability::ModelInference], responder);
+
+        let operation = OperationId::new();
+
+        // Connection 1: issue a call, let the host start executing, then drop the
+        // connection with the call still in flight.
+        let conn1 = connect(addr, host.clone(), EventCursor::START)
+            .await
+            .expect("attach accepted");
+        let inflight = {
+            let run = run.clone();
+            tokio::spawn(async move { run.call(operation, infer("job")).await })
+        };
+        while started.load(Ordering::SeqCst) < 1 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        drop(conn1);
+        match inflight.await.expect("join") {
+            ReverseOutcome::Disconnected => {}
+            other => panic!("a dropped connection must fail the in-flight call, got {other:?}"),
+        }
+
+        // The detached host-side execution outlives the connection; release it so
+        // it runs to completion and records.
+        gate.add_permits(1);
+
+        // Connection 2 over a fresh stream, same run-scoped host: re-issue the same
+        // operation identity. Whether the record has landed or the execution is
+        // still live, the host answers once — never a second execution.
+        let _conn2 = connect(addr, host.clone(), EventCursor::START)
+            .await
+            .expect("reattach accepted");
+        match run.call(operation, infer("job")).await {
+            ReverseOutcome::Settled(Response::Ok(result)) => {
+                assert_eq!(completion(&result), "done:job");
+            }
+            other => panic!("expected the recorded outcome to replay, got {other:?}"),
+        }
+        assert_eq!(
+            finished.load(Ordering::SeqCst),
+            1,
+            "the model executed exactly once across the disconnect and re-issue"
+        );
+        assert_eq!(store.len(), 1, "one operation-log record");
+    })
+    .await;
+}
+
 fn echo() -> (Arc<dyn CapabilityResponder>, Arc<AtomicUsize>) {
     let executions = Arc::new(AtomicUsize::new(0));
     let responder = Arc::new(EchoResponder {

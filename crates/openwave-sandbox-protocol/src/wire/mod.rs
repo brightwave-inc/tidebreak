@@ -43,7 +43,7 @@ pub mod sandbox;
 
 use serde::{Deserialize, Serialize};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     sync::mpsc,
 };
 
@@ -119,29 +119,48 @@ pub enum FrameError {
 
 /// Read the next [`WireFrame`] from a buffered reader, or report why none came.
 ///
-/// `read_until` reassembles a frame that spans several underlying reads and the
-/// [`BufReader`] retains any bytes past the newline for the next call — the
-/// framing behavior a real socket forces, which an in-process channel would not
-/// have exercised.
+/// The read is bounded to [`MAX_FRAME_BYTES`] `+ 1` bytes by an
+/// [`AsyncReadExt::take`] before it looks for the delimiter, so the *buffering
+/// itself* is capped, not just checked after the fact: a peer that streams bytes
+/// without ever sending `\n` cannot grow the frame buffer without limit and OOM
+/// this side. Within that budget, `read_until` reassembles a frame that spans
+/// several underlying reads and the [`BufReader`] retains any bytes past the
+/// newline for the next call — the framing behavior a real socket forces.
 ///
 /// # Errors
-/// [`FrameError::Closed`] at EOF, [`FrameError::TooLarge`] past
-/// [`MAX_FRAME_BYTES`], [`FrameError::Malformed`] on invalid JSON, or
-/// [`FrameError::Io`] on a transport failure.
+/// [`FrameError::Closed`] at EOF on a frame boundary, [`FrameError::TooLarge`]
+/// once the byte budget is exhausted before a delimiter, [`FrameError::Malformed`]
+/// on invalid JSON, or [`FrameError::Io`] on a transport failure.
 pub async fn read_frame<R>(reader: &mut BufReader<R>) -> Result<WireFrame, FrameError>
 where
     R: AsyncRead + Unpin,
 {
+    // One byte past the cap: a maximal frame (MAX_FRAME_BYTES of content plus its
+    // delimiter) still fits, and anything larger trips the budget before a
+    // delimiter is seen.
+    let budget = MAX_FRAME_BYTES as u64 + 1;
     let mut line = Vec::new();
-    let read = reader.read_until(b'\n', &mut line).await?;
+    let read = (&mut *reader)
+        .take(budget)
+        .read_until(b'\n', &mut line)
+        .await?;
     if read == 0 {
         return Err(FrameError::Closed);
     }
-    if line.len() > MAX_FRAME_BYTES {
-        return Err(FrameError::TooLarge);
-    }
     if line.last() == Some(&b'\n') {
         line.pop();
+    } else {
+        // No delimiter within the budget. Either the peer exhausted the byte cap
+        // without a newline (a flood, or an over-bound frame) or the stream ended
+        // mid-frame; the buffer never exceeded the cap either way.
+        return if line.len() as u64 >= budget {
+            Err(FrameError::TooLarge)
+        } else {
+            Err(FrameError::Closed)
+        };
+    }
+    if line.len() > MAX_FRAME_BYTES {
+        return Err(FrameError::TooLarge);
     }
     serde_json::from_slice(&line).map_err(|_| FrameError::Malformed)
 }
@@ -258,5 +277,20 @@ mod tests {
             Err(FrameError::Closed)
         ));
         feed.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_no_newline_flood_is_refused_as_too_large_without_unbounded_buffering() {
+        // An endless stream of non-delimiter bytes must be refused once the byte
+        // budget is spent, not buffered without bound. `repeat` never yields a
+        // newline and never ends, so a correct `read_frame` returns after reading
+        // the bounded budget; a regression that buffers unboundedly would run the
+        // machine out of memory instead of returning here.
+        let flood = tokio::io::repeat(b'x');
+        let mut reader = BufReader::new(flood);
+        match read_frame(&mut reader).await {
+            Err(FrameError::TooLarge) => {}
+            other => panic!("a no-newline flood must be refused as TooLarge, got {other:?}"),
+        }
     }
 }

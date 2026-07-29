@@ -56,7 +56,7 @@ pub enum ConnectError {
 /// attached-only run, checkpoints and waits.
 pub struct HostConnection {
     accepted: AttachAccepted,
-    events: mpsc::Receiver<SandboxEvent>,
+    events: mpsc::UnboundedReceiver<SandboxEvent>,
     outbound: Outbound,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -129,8 +129,13 @@ impl WireClient {
                 Err(error) => return Err(ConnectError::Transport(error)),
             };
 
-            let (event_tx, event_rx) =
-                mpsc::channel::<SandboxEvent>(crate::protocol::MAX_INFLIGHT_REQUESTS);
+            // The event channel is unbounded so forwarding an event never blocks
+            // the read loop that also dispatches reverse requests and answers
+            // pings — a slow `next_event` consumer must not stall the reverse
+            // lane. A conforming sandbox bounds the backlog for us: it stops
+            // producing once MAX_BUFFERED_EVENTS go un-acknowledged, and
+            // [`HostConnection::acknowledge`] is how the host advances that.
+            let (event_tx, event_rx) = mpsc::unbounded_channel::<SandboxEvent>();
             let writer = tokio::spawn(write_prioritized(write_half, control_rx, data_rx));
             let reader_task = tokio::spawn(read_loop(reader, host, outbound.clone(), event_tx));
 
@@ -154,6 +159,13 @@ impl HostConnection {
 
     /// Await the next event on the sandbox's stream, or `None` once the
     /// connection has drained and closed.
+    ///
+    /// The owner MUST keep draining this: forwarded events are buffered off the
+    /// read loop's path so a slow consumer cannot stall reverse-request dispatch
+    /// or liveness, and the only thing that bounds that buffer is the sandbox's
+    /// own flow control — it stops producing once MAX_BUFFERED_EVENTS go
+    /// un-acknowledged. Draining (and [`acknowledge`](Self::acknowledge)ing) keeps
+    /// that backlog from parking the run.
     pub async fn next_event(&mut self) -> Option<SandboxEvent> {
         self.events.recv().await
     }
@@ -192,7 +204,7 @@ async fn read_loop<R>(
     mut reader: BufReader<R>,
     host: CapabilityHost,
     outbound: Outbound,
-    events: mpsc::Sender<SandboxEvent>,
+    events: mpsc::UnboundedSender<SandboxEvent>,
 ) where
     R: AsyncRead + Unpin + Send + 'static,
 {
@@ -234,8 +246,10 @@ async fn read_loop<R>(
             }
             WireFrame::Control(ControlFrame::Pong { .. }) => {}
             WireFrame::Event(event) => {
-                if events.send(event).await.is_err() {
-                    // The caller dropped the connection; stop forwarding.
+                // Non-blocking: forwarding an event must never stall this loop's
+                // reverse-request dispatch or ping handling. An error means the
+                // caller dropped the connection, so stop forwarding.
+                if events.send(event).is_err() {
                     break;
                 }
             }
