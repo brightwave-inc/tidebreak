@@ -27,6 +27,7 @@ use openwave_core::{
 use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
 use crate::code_execution::{
     self, CodeExecutionConfigInfo, CodeExecutionConfigUpdate, CodeExecutionCredentialReadiness,
+    CodeExecutionCredentialsInfo,
 };
 use crate::error::ServerError;
 use crate::event_projection::{RendererChatFrame, RendererChatMetadata, RendererSequencedEvent};
@@ -416,6 +417,14 @@ pub async fn put_code_execution_config(
     ))
 }
 
+/// `GET /code-execution/credentials` — readiness for the fixed E2B and Daytona
+/// credential slots. Local execution needs no credential and is absent here.
+pub async fn get_code_execution_credentials(
+    State(state): State<AppState>,
+) -> Json<CodeExecutionCredentialsInfo> {
+    Json(code_execution::credentials_info(&*state.secrets).await)
+}
+
 const MAX_CODE_EXECUTION_CREDENTIAL_BYTES: usize = 8 * 1024;
 
 /// Body of `PUT /code-execution/credentials/{provider}`. Debug output always
@@ -505,7 +514,7 @@ pub async fn put_web_search_credential(
     Path(provider): Path<String>,
     Json(body): Json<WebSearchCredentialUpdate>,
 ) -> Result<Json<WebSearchCredentialReadiness>, ServerError> {
-    let provider = parse_web_search_provider(&provider)?;
+    let provider = web_search::credential_provider(&provider)?;
     if body.api_key.len() > MAX_WEB_SEARCH_CREDENTIAL_BYTES {
         return Err(ServerError::bad_request(format!(
             "web search api_key must be at most {MAX_WEB_SEARCH_CREDENTIAL_BYTES} bytes"
@@ -528,22 +537,10 @@ pub async fn delete_web_search_credential(
     State(state): State<AppState>,
     Path(provider): Path<String>,
 ) -> Result<Json<WebSearchCredentialReadiness>, ServerError> {
-    let provider = parse_web_search_provider(&provider)?;
+    let provider = web_search::credential_provider(&provider)?;
     Ok(Json(
         web_search::delete_credential(&*state.secrets, provider).await?,
     ))
-}
-
-fn parse_web_search_provider(
-    value: &str,
-) -> std::result::Result<openwave_web_search::WebSearchProviderKind, ServerError> {
-    match value {
-        "exa" => Ok(openwave_web_search::WebSearchProviderKind::Exa),
-        "tavily" => Ok(openwave_web_search::WebSearchProviderKind::Tavily),
-        _ => Err(ServerError::not_found(format!(
-            "unknown web search provider kind: {value}"
-        ))),
-    }
 }
 
 /// The configured chat model, if any — the `chat` role's explicit selection.
@@ -1335,7 +1332,7 @@ pub async fn delete_chat(
         )),
         DeleteChatOutcome::RootAttachmentStateUnresolved => Err(ServerError::conflict_kind(
             "chat_root_attachment_unresolved",
-            "reconcile connected-folder changes before deleting this conversation",
+            "a connected-folder change is still finishing; try deleting again in a moment",
         )),
     }
 }

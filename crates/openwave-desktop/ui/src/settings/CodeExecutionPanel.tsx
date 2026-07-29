@@ -3,149 +3,141 @@ import { toast } from "sonner";
 import type {
   ApiClient,
   CodeExecutionConfigInfo,
+  CodeExecutionCredentialReadiness,
   CodeExecutionProviderKind,
 } from "../api";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+  ActiveProviderField,
+  ProviderCredentialField,
+  TimeoutSecondsField,
+  timeoutMsFromSeconds,
+} from "./ProviderFields";
 import {
   SettingsError,
-  SettingsField,
   SettingsPanel,
   SettingsSection,
+  SettingsStatus,
 } from "./primitives";
 
-const MIN_CODE_EXECUTION_TIMEOUT_MS = 1_000;
-const MAX_CODE_EXECUTION_TIMEOUT_MS = 120_000;
+const MIN_CODE_EXECUTION_TIMEOUT_SECONDS = 1;
+const MAX_CODE_EXECUTION_TIMEOUT_SECONDS = 120;
 
-// Radix Select reserves the empty string, so "Disabled" (no provider) rides on
-// a sentinel value the wire never carries.
-const NO_PROVIDER = "__disabled__";
+/** The local sandbox needs no credential, so it never appears in the key list. */
+const LOCAL_PROVIDER: CodeExecutionProviderKind = "local";
 
 export function CodeExecutionPanel({ client }: { client: ApiClient }) {
   const [config, setConfig] = useState<CodeExecutionConfigInfo | null>(null);
+  const [credentials, setCredentials] = useState<
+    CodeExecutionCredentialReadiness[]
+  >([]);
   const [provider, setProvider] = useState<CodeExecutionProviderKind | "">("");
-  const [timeoutMs, setTimeoutMs] = useState("");
-  const [apiKey, setApiKey] = useState("");
+  const [timeoutSeconds, setTimeoutSeconds] = useState("");
+  // One draft key per managed provider, so E2B and Daytona can be configured
+  // together and switching the active provider discards neither.
+  const [apiKeys, setApiKeys] = useState<
+    Partial<Record<CodeExecutionProviderKind, string>>
+  >({});
   const [loading, setLoading] = useState(true);
-  const [savingConfig, setSavingConfig] = useState(false);
-  const [savingCredential, setSavingCredential] = useState(false);
-  const [removingCredential, setRemovingCredential] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [removing, setRemoving] = useState<CodeExecutionProviderKind | null>(
+    null,
+  );
   const [error, setError] = useState<string | null>(null);
-
-  async function refresh() {
-    const nextConfig = await client.getCodeExecutionConfig();
-    setConfig(nextConfig);
-    setProvider(nextConfig.provider ?? "");
-    setTimeoutMs(String(nextConfig.timeout_ms));
-  }
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    void client
-      .getCodeExecutionConfig()
-      .then((nextConfig) => {
+    void (async () => {
+      try {
+        const [nextConfig, nextCredentials] = await Promise.all([
+          client.getCodeExecutionConfig(),
+          client.listCodeExecutionCredentials(),
+        ]);
         if (cancelled) return;
         setConfig(nextConfig);
+        setCredentials(nextCredentials.credentials);
         setProvider(nextConfig.provider ?? "");
-        setTimeoutMs(String(nextConfig.timeout_ms));
-      })
-      .catch((err) => {
+        setTimeoutSeconds(String(nextConfig.timeout_ms / 1000));
+      } catch (err) {
         if (!cancelled) setError(String(err));
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) setLoading(false);
-      });
+      }
+    })();
     return () => {
       cancelled = true;
     };
   }, [client]);
 
+  const working = saving || removing !== null;
   const state = codeExecutionState(config);
-  const activeProvider = config?.provider;
-  const managedProvider =
-    activeProvider === "e2b" || activeProvider === "daytona"
-      ? activeProvider
-      : null;
-  const managedProviderLabel = managedProvider
-    ? codeExecutionProviderLabel(managedProvider)
-    : null;
-  const working = savingConfig || savingCredential || removingCredential;
 
-  async function saveConfig() {
-    const parsedTimeout = Number(timeoutMs);
-    if (
-      !Number.isInteger(parsedTimeout) ||
-      parsedTimeout < MIN_CODE_EXECUTION_TIMEOUT_MS ||
-      parsedTimeout > MAX_CODE_EXECUTION_TIMEOUT_MS
-    ) {
-      setError(
-        `Timeout must be a whole number between ${MIN_CODE_EXECUTION_TIMEOUT_MS.toLocaleString()} and ${MAX_CODE_EXECUTION_TIMEOUT_MS.toLocaleString()} ms.`,
-      );
+  async function save() {
+    const timeout = timeoutMsFromSeconds(
+      timeoutSeconds,
+      MIN_CODE_EXECUTION_TIMEOUT_SECONDS,
+      MAX_CODE_EXECUTION_TIMEOUT_SECONDS,
+    );
+    if ("error" in timeout) {
+      setError(timeout.error);
       return;
     }
 
-    setSavingConfig(true);
+    setSaving(true);
     setError(null);
     try {
+      // Keys go first so the newly active provider never lands
+      // selected-but-unusable when the caller supplied both in one pass.
+      for (const credential of credentials) {
+        const key = apiKeys[credential.provider]?.trim();
+        if (!key) continue;
+        await client.putCodeExecutionCredential(credential.provider, key);
+        setApiKeys((current) => ({ ...current, [credential.provider]: "" }));
+      }
       const nextConfig = await client.putCodeExecutionConfig({
         provider: provider || null,
-        timeout_ms: parsedTimeout,
+        timeout_ms: timeout.timeoutMs,
       });
+      const nextCredentials = await client.listCodeExecutionCredentials();
       setConfig(nextConfig);
+      setCredentials(nextCredentials.credentials);
       setProvider(nextConfig.provider ?? "");
-      setTimeoutMs(String(nextConfig.timeout_ms));
-      toast.success("Saved code-execution configuration");
+      setTimeoutSeconds(String(nextConfig.timeout_ms / 1000));
+      toast.success("Saved code-execution settings");
     } catch (err) {
       setError(String(err));
     } finally {
-      setSavingConfig(false);
+      setSaving(false);
     }
   }
 
-  async function saveCredential() {
-    if (!managedProvider || !managedProviderLabel || !apiKey.trim()) return;
-    setSavingCredential(true);
+  async function removeCredential(target: CodeExecutionProviderKind) {
+    setRemoving(target);
     setError(null);
     try {
-      await client.putCodeExecutionCredential(managedProvider, apiKey.trim());
-      setApiKey("");
-      await refresh();
-      toast.success(`Saved the ${managedProviderLabel} API key`);
+      await client.deleteCodeExecutionCredential(target);
+      const [nextConfig, nextCredentials] = await Promise.all([
+        client.getCodeExecutionConfig(),
+        client.listCodeExecutionCredentials(),
+      ]);
+      setConfig(nextConfig);
+      setCredentials(nextCredentials.credentials);
+      toast.success(
+        `Removed the saved ${codeExecutionProviderLabel(target)} API key`,
+      );
     } catch (err) {
       setError(String(err));
     } finally {
-      setSavingCredential(false);
-    }
-  }
-
-  async function removeCredential() {
-    if (!managedProvider || !managedProviderLabel) return;
-    setRemovingCredential(true);
-    setError(null);
-    try {
-      await client.deleteCodeExecutionCredential(managedProvider);
-      await refresh();
-      toast.success(`Removed the saved ${managedProviderLabel} API key`);
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setRemovingCredential(false);
+      setRemoving(null);
     }
   }
 
   return (
     <SettingsPanel
       title="Code execution"
-      description="Choose an isolated execution provider and a host-enforced timeout."
+      description="Configure as many cloud sandboxes as you like, choose where agents execute, and bound every run. Saved keys are never shown here."
       busy={loading}
     >
       {loading ? (
@@ -158,116 +150,70 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
         </p>
       ) : (
         <>
-          <div className={`web-search-state is-${state.kind}`} role="status">
-            <strong>{state.label}</strong>
-            <span>{state.description}</span>
-          </div>
+          <SettingsStatus
+            tone={state.kind}
+            label={state.label}
+            description={state.description}
+          />
 
-          <SettingsSection>
-            <SettingsField label="Provider">
-              <Select
-                value={provider === "" ? NO_PROVIDER : provider}
+          <SettingsSection
+            title="Cloud sandbox keys"
+            description="Give a key to every managed provider you want available. The local sandbox needs none."
+          >
+            {credentials.map((credential) => (
+              <ProviderCredentialField
+                key={credential.provider}
+                provider={codeExecutionProviderLabel(credential.provider)}
+                hasCredential={credential.has_credential}
+                value={apiKeys[credential.provider] ?? ""}
                 disabled={working}
-                onValueChange={(value) =>
-                  setProvider(
-                    value === NO_PROVIDER
-                      ? ""
-                      : (value as CodeExecutionProviderKind),
-                  )
+                removing={removing === credential.provider}
+                onChange={(value) =>
+                  setApiKeys((current) => ({
+                    ...current,
+                    [credential.provider]: value,
+                  }))
                 }
-              >
-                <SelectTrigger aria-label="Provider">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={NO_PROVIDER}>Disabled</SelectItem>
-                  <SelectItem value="local">Local native sandbox</SelectItem>
-                  <SelectItem value="e2b">E2B cloud sandbox</SelectItem>
-                  <SelectItem value="daytona">
-                    Daytona cloud sandbox
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </SettingsField>
-
-            <SettingsField
-              label="Execution timeout (ms)"
-              hint={`Between ${MIN_CODE_EXECUTION_TIMEOUT_MS.toLocaleString()} and ${MAX_CODE_EXECUTION_TIMEOUT_MS.toLocaleString()} ms.`}
-            >
-              <Input
-                type="number"
-                inputMode="numeric"
-                min={MIN_CODE_EXECUTION_TIMEOUT_MS}
-                max={MAX_CODE_EXECUTION_TIMEOUT_MS}
-                step="1000"
-                value={timeoutMs}
-                disabled={working}
-                onChange={(event) => setTimeoutMs(event.target.value)}
+                onRemove={() => void removeCredential(credential.provider)}
               />
-            </SettingsField>
-
-            <Button
-              type="button"
-              className="self-start"
-              disabled={working}
-              onClick={() => void saveConfig()}
-            >
-              {savingConfig ? "Saving…" : "Save configuration"}
-            </Button>
+            ))}
           </SettingsSection>
 
-          {managedProvider && managedProviderLabel && (
-            <SettingsSection title={`${managedProviderLabel} credential`}>
-              <span className="text-xs text-muted-foreground">
-                {config.has_credential
-                  ? "credential saved"
-                  : "no credential saved"}
-              </span>
-              <SettingsField
-                label={config.has_credential ? "Replace API key" : "API key"}
-              >
-                <Input
-                  type="password"
-                  placeholder={`Paste a new ${managedProviderLabel} API key`}
-                  value={apiKey}
-                  maxLength={8_192}
-                  autoComplete="new-password"
-                  disabled={working}
-                  onChange={(event) => setApiKey(event.target.value)}
-                />
-              </SettingsField>
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  type="button"
-                  disabled={working || !apiKey.trim()}
-                  onClick={() => void saveCredential()}
-                >
-                  {savingCredential
-                    ? "Saving…"
-                    : config.has_credential
-                      ? "Update key"
-                      : "Save key"}
-                </Button>
-                {config.has_credential && (
-                  <Button
-                    type="button"
-                    variant="destructive"
-                    disabled={working}
-                    onClick={() => void removeCredential()}
-                  >
-                    {removingCredential ? "Removing…" : "Remove saved key"}
-                  </Button>
-                )}
-              </div>
-            </SettingsSection>
-          )}
+          <SettingsSection
+            title="Active provider"
+            description="Agents execute in this one provider. The others stay configured and idle."
+          >
+            <ActiveProviderField
+              value={provider}
+              disabled={working}
+              onChange={setProvider}
+              options={[
+                { kind: LOCAL_PROVIDER, label: "Local native sandbox" },
+                ...credentials.map((credential) => ({
+                  kind: credential.provider,
+                  label: `${codeExecutionProviderLabel(credential.provider)} cloud sandbox`,
+                })),
+              ]}
+            />
 
-          {provider !== (activeProvider ?? "") && (
-            <p className="text-xs text-muted-foreground">
-              Save the provider configuration before managing that provider’s
-              key.
-            </p>
-          )}
+            <TimeoutSecondsField
+              label="Execution timeout"
+              minSeconds={MIN_CODE_EXECUTION_TIMEOUT_SECONDS}
+              maxSeconds={MAX_CODE_EXECUTION_TIMEOUT_SECONDS}
+              value={timeoutSeconds}
+              disabled={working}
+              onChange={setTimeoutSeconds}
+            />
+          </SettingsSection>
+
+          {/* One save for the whole surface: it stores every key typed above
+              and the selection together, so a provider cannot go active in a
+              pass that failed to save its key. */}
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" disabled={working} onClick={() => void save()}>
+              {saving ? "Saving…" : "Save settings"}
+            </Button>
+          </div>
 
           <p className="text-sm leading-relaxed text-muted-foreground">
             Local execution blocks network and confines writes to private chat
@@ -300,12 +246,12 @@ function codeExecutionState(config: CodeExecutionConfigInfo | null): {
       kind: "ready",
       label: "Ready",
       description:
-        config.provider !== "local"
+        config.provider !== LOCAL_PROVIDER
           ? `${codeExecutionProviderLabel(config.provider)} is selected and has a saved credential.`
           : "The local native sandbox is available.",
     };
   }
-  if (config.provider !== "local" && !config.has_credential) {
+  if (config.provider !== LOCAL_PROVIDER && !config.has_credential) {
     return {
       kind: "not-configured",
       label: "Not configured",

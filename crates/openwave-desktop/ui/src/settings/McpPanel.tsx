@@ -14,6 +14,7 @@ import {
   SettingsField,
   SettingsPanel,
   SettingsSection,
+  SettingsStatus,
 } from "./primitives";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -181,18 +182,16 @@ export function McpPanel({ client }: { client: ApiClient }) {
               key={index}
               title={server.name || `Server ${index + 1}`}
             >
-              <div
-                className={`web-search-state is-${healthTone(server.health)}`}
-                role="status"
-              >
-                <strong>{healthLabel(server.health)}</strong>
-                <span>
-                  {server.health === "healthy"
+              <SettingsStatus
+                tone={healthTone(server.health)}
+                label={healthLabel(server.health)}
+                description={
+                  server.health === "healthy"
                     ? `${server.tool_count} tool${server.tool_count === 1 ? "" : "s"} available to new turns.`
                     : server.diagnostic ??
-                      "Save the configuration to verify this server."}
-                </span>
-              </div>
+                      "Save the configuration to verify this server."
+                }
+              />
 
               <div className="flex items-center justify-between gap-4">
                 <div className="flex-1">

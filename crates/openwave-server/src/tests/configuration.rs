@@ -574,6 +574,44 @@ async fn code_execution_config_route_is_authenticated_and_preserves_explicit_dis
     assert!(initial["available"].is_boolean());
     assert_eq!(initial["has_credential"], false);
 
+    let unauthenticated_credentials = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/code-execution/credentials")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        unauthenticated_credentials.status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    let credentials = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/code-execution/credentials")
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(credentials.status(), StatusCode::OK);
+    assert_eq!(
+        json_body::<serde_json::Value>(credentials).await,
+        serde_json::json!({
+            "credentials": [
+                {"provider": "e2b", "has_credential": false},
+                {"provider": "daytona", "has_credential": false}
+            ]
+        }),
+        "local execution needs no credential and has no slot to report"
+    );
+
     let disabled = router
         .clone()
         .oneshot(
@@ -762,6 +800,28 @@ async fn code_execution_config_route_is_authenticated_and_preserves_explicit_dis
             .as_deref(),
         Some(key),
         "managed providers retain separate fixed credential slots"
+    );
+
+    let credentials = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/code-execution/credentials")
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        json_body::<serde_json::Value>(credentials).await,
+        serde_json::json!({
+            "credentials": [
+                {"provider": "e2b", "has_credential": true},
+                {"provider": "daytona", "has_credential": true}
+            ]
+        }),
+        "readiness is reported per provider, not only for the selected one"
     );
 
     let ready = router

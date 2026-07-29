@@ -676,16 +676,27 @@ fn mutation_terminal(
                 }))
             }
         }
-        RootAttachmentMutationReceipt::Failed { .. } => {
-            Ok(Some(RootAttachmentChangeTerminal::Failed {
-                broker_changed: None,
-                broker_currently_attached: None,
-                failure: safe_failure(
-                    "broker_attachment_failed",
-                    "The host broker could not complete this folder attachment change.",
-                ),
-            }))
-        }
+        // A rejected mutation still has a knowable outcome: what the broker is
+        // attached to now. Recording that rather than "unknown" is what keeps
+        // this change conclusive — an unknown observation can never be revisited,
+        // because nothing re-drives a terminal change, and it leaves the
+        // conversation permanently undeletable.
+        RootAttachmentMutationReceipt::Failed {
+            currently_attached, ..
+        } if currently_attached == desired => Ok(Some(RootAttachmentChangeTerminal::Completed {
+            broker_changed: false,
+            broker_currently_attached: currently_attached,
+        })),
+        RootAttachmentMutationReceipt::Failed {
+            currently_attached, ..
+        } => Ok(Some(RootAttachmentChangeTerminal::Failed {
+            broker_changed: Some(false),
+            broker_currently_attached: Some(currently_attached),
+            failure: safe_failure(
+                "broker_attachment_failed",
+                "The host broker could not complete this folder attachment change.",
+            ),
+        })),
         _ => Err("host broker returned an unsupported attachment receipt".to_owned()),
     }
 }
@@ -949,6 +960,7 @@ mod tests {
                     message: "/private/secret/path".to_owned(),
                     retryable: true,
                 },
+                currently_attached: true,
             },
             root_id,
             RootAttachmentChangeAction::Detach,
@@ -960,5 +972,47 @@ mod tests {
         };
         assert!(!failure.message.contains("secret"));
         assert!(!failure.retryable);
+    }
+
+    /// A terminal change is never re-driven, so an unknown broker observation is
+    /// unknown forever — and the delete gate reads exactly that field, which is
+    /// how a rejected attach used to leave a conversation undeletable. Every
+    /// rejected mutation must settle on what the broker actually holds.
+    #[test]
+    fn a_rejected_mutation_settles_on_the_state_the_broker_reports() {
+        let root_id = RootId::new();
+        let rejected = |action| {
+            mutation_terminal(
+                RootAttachmentMutationReceipt::Failed {
+                    error: ErrorResponse {
+                        code: ErrorCode::Denied,
+                        message: "denied".to_owned(),
+                        retryable: false,
+                    },
+                    currently_attached: false,
+                },
+                root_id,
+                action,
+            )
+            .unwrap()
+            .unwrap()
+        };
+
+        assert!(matches!(
+            rejected(RootAttachmentChangeAction::Attach),
+            RootAttachmentChangeTerminal::Failed {
+                broker_currently_attached: Some(false),
+                ..
+            }
+        ));
+        // Nothing is attached and nothing was wanted, so the world already
+        // matches the intent however the operation itself ended.
+        assert!(matches!(
+            rejected(RootAttachmentChangeAction::Detach),
+            RootAttachmentChangeTerminal::Completed {
+                broker_currently_attached: false,
+                ..
+            }
+        ));
     }
 }

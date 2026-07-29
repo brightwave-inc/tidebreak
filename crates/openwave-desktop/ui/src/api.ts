@@ -584,6 +584,14 @@ export class ApiClient {
     });
   }
 
+  listCodeExecutionCredentials(): Promise<{
+    credentials: CodeExecutionCredentialReadiness[];
+  }> {
+    return this.json("/code-execution/credentials", {
+      headers: this.headers(),
+    });
+  }
+
   putCodeExecutionCredential(
     provider: CodeExecutionProviderKind,
     apiKey: string,

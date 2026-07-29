@@ -1,3 +1,6 @@
+import { Loader2Icon } from "lucide-react";
+import { lazy, Suspense } from "react";
+
 import type { DocumentDetail } from "@/api";
 import { useApp } from "@/AppContext";
 import {
@@ -7,6 +10,11 @@ import {
 import { DocumentError } from "./error";
 import { ImageViewer } from "./image-viewer";
 import { MarkdownViewer, type HighlightRange } from "./markdown-viewer";
+
+// Both tree viewers carry their own parsing and node machinery, and neither is
+// on the path of the formats readers open most, so they load on demand.
+const JsonViewer = lazy(() => import("./json-viewer"));
+const XmlViewer = lazy(() => import("./xml-viewer"));
 
 /** Which of a document's two views is on screen. */
 export type DocumentView = "extracted_text" | "original_doc";
@@ -33,10 +41,24 @@ export function isDocumentRenderable(mediaType: string): boolean {
   return (
     type.startsWith("image/") ||
     type.startsWith("text/") ||
-    type === "application/json" ||
-    type === "application/xml" ||
+    structuredKind(type) !== null ||
     hasOriginalViewer(type)
   );
+}
+
+/**
+ * Whether a media type is a structured tree, and which of the two it is.
+ *
+ * The `+json` and `+xml` suffixes are matched as well as the base types: a
+ * source sniffed as `image/svg+xml` or `application/ld+json` is that tree
+ * shape, and a reader opening one wants the tree rather than a wall of text.
+ */
+function structuredKind(type: string): "json" | "xml" | null {
+  if (type === "application/json" || type.endsWith("+json")) return "json";
+  if (type === "application/xml" || type === "text/xml" || type.endsWith("+xml")) {
+    return "xml";
+  }
+  return null;
 }
 
 type DocumentDetailsProps = {
@@ -46,6 +68,11 @@ type DocumentDetailsProps = {
   hasOriginalDocumentTab?: boolean;
   /** Character range in the original to reveal, when opened from a citation. */
   highlightRange?: HighlightRange;
+  /**
+   * Node to reveal in a tree viewer, when opened from a citation: a
+   * dot-notation path for JSON, an XPath expression for XML.
+   */
+  highlightPath?: string;
 };
 
 /**
@@ -64,9 +91,11 @@ export function DocumentDetails({
   view,
   hasOriginalDocumentTab,
   highlightRange,
+  highlightPath,
 }: DocumentDetailsProps) {
   const { client } = useApp();
   const type = baseMediaType(info.media_type);
+  const structured = structuredKind(type);
 
   return (
     <div className="flex min-h-0 grow flex-col overflow-hidden">
@@ -85,6 +114,24 @@ export function DocumentDetails({
               documentID={info.document_id}
               className="bg-page-background grow"
             />
+          ) : structured !== null ? (
+            <Suspense fallback={<ViewerLoading />}>
+              {structured === "json" ? (
+                <JsonViewer
+                  chatId={chatId}
+                  documentID={info.document_id}
+                  highlightPath={highlightPath}
+                  className="grow"
+                />
+              ) : (
+                <XmlViewer
+                  chatId={chatId}
+                  documentID={info.document_id}
+                  highlightPath={highlightPath}
+                  className="grow"
+                />
+              )}
+            </Suspense>
           ) : (
             <MarkdownViewer
               chatId={chatId}
@@ -97,6 +144,15 @@ export function DocumentDetails({
         </>
       )}
       {view === "extracted_text" && <ExtractedText info={info} />}
+
+    </div>
+  );
+}
+
+function ViewerLoading() {
+  return (
+    <div className="flex grow items-center justify-center bg-page-background">
+      <Loader2Icon className="size-6 animate-spin text-muted-foreground" />
     </div>
   );
 }

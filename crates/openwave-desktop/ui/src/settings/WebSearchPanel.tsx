@@ -7,27 +7,21 @@ import type {
   WebSearchProviderKind,
 } from "../api";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+  ActiveProviderField,
+  ProviderCredentialField,
+  TimeoutSecondsField,
+  timeoutMsFromSeconds,
+} from "./ProviderFields";
 import {
   SettingsError,
-  SettingsField,
   SettingsPanel,
   SettingsSection,
+  SettingsStatus,
 } from "./primitives";
 
 const MIN_WEB_SEARCH_TIMEOUT_SECONDS = 1;
 const MAX_WEB_SEARCH_TIMEOUT_SECONDS = 60;
-
-// Radix Select reserves the empty string, so "Disabled" (no provider) rides on
-// a sentinel value the wire never carries.
-const NO_PROVIDER = "__disabled__";
 
 export function WebSearchPanel({ client }: { client: ApiClient }) {
   const [config, setConfig] = useState<WebSearchConfigInfo | null>(null);
@@ -74,16 +68,13 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
   const state = webSearchState(config);
 
   async function save() {
-    const seconds = Number(timeoutSeconds);
-    if (
-      !Number.isFinite(seconds) ||
-      timeoutSeconds.trim() === "" ||
-      seconds < MIN_WEB_SEARCH_TIMEOUT_SECONDS ||
-      seconds > MAX_WEB_SEARCH_TIMEOUT_SECONDS
-    ) {
-      setError(
-        `Timeout must be between ${MIN_WEB_SEARCH_TIMEOUT_SECONDS} and ${MAX_WEB_SEARCH_TIMEOUT_SECONDS} seconds.`,
-      );
+    const timeout = timeoutMsFromSeconds(
+      timeoutSeconds,
+      MIN_WEB_SEARCH_TIMEOUT_SECONDS,
+      MAX_WEB_SEARCH_TIMEOUT_SECONDS,
+    );
+    if ("error" in timeout) {
+      setError(timeout.error);
       return;
     }
 
@@ -100,7 +91,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
       }
       const nextConfig = await client.putWebSearchConfig({
         provider: provider || null,
-        timeout_ms: Math.round(seconds * 1000),
+        timeout_ms: timeout.timeoutMs,
       });
       const nextCredentials = await client.listWebSearchCredentials();
       setConfig(nextConfig);
@@ -149,59 +140,32 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
         </p>
       ) : (
         <>
-          <div className={`web-search-state is-${state.kind}`} role="status">
-            <strong>{state.label}</strong>
-            <span>{state.description}</span>
-          </div>
+          <SettingsStatus
+            tone={state.kind}
+            label={state.label}
+            description={state.description}
+          />
 
           <SettingsSection
             title="Providers"
             description="Give a key to every provider you want available. Each key is stored in the system keychain and never shown again."
           >
             {credentials.map((credential) => (
-              <div className="flex flex-col gap-1.5" key={credential.provider}>
-                <SettingsField
-                  label={`${providerLabel(credential.provider)} API key`}
-                  hint={
-                    credential.has_credential
-                      ? "A key is already saved. Type a new one to replace it."
-                      : undefined
-                  }
-                >
-                  <Input
-                    type="password"
-                    placeholder={
-                      credential.has_credential
-                        ? "Saved — leave blank to keep it"
-                        : `Paste your ${providerLabel(credential.provider)} API key`
-                    }
-                    value={apiKeys[credential.provider] ?? ""}
-                    maxLength={8_192}
-                    autoComplete="new-password"
-                    disabled={working}
-                    onChange={(event) =>
-                      setApiKeys((current) => ({
-                        ...current,
-                        [credential.provider]: event.target.value,
-                      }))
-                    }
-                  />
-                </SettingsField>
-                {credential.has_credential && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="self-start"
-                    disabled={working}
-                    onClick={() => void removeCredential(credential.provider)}
-                  >
-                    {removing === credential.provider
-                      ? "Removing…"
-                      : `Remove saved ${providerLabel(credential.provider)} key`}
-                  </Button>
-                )}
-              </div>
+              <ProviderCredentialField
+                key={credential.provider}
+                provider={providerLabel(credential.provider)}
+                hasCredential={credential.has_credential}
+                value={apiKeys[credential.provider] ?? ""}
+                disabled={working}
+                removing={removing === credential.provider}
+                onChange={(value) =>
+                  setApiKeys((current) => ({
+                    ...current,
+                    [credential.provider]: value,
+                  }))
+                }
+                onRemove={() => void removeCredential(credential.provider)}
+              />
             ))}
           </SettingsSection>
 
@@ -209,50 +173,24 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
             title="Active provider"
             description="Agents search through this one provider. The others stay configured and idle."
           >
-            <SettingsField label="Provider">
-              <Select
-                value={provider === "" ? NO_PROVIDER : provider}
-                disabled={working}
-                onValueChange={(value) =>
-                  setProvider(
-                    value === NO_PROVIDER
-                      ? ""
-                      : (value as WebSearchProviderKind),
-                  )
-                }
-              >
-                <SelectTrigger aria-label="Provider">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={NO_PROVIDER}>Disabled</SelectItem>
-                  {credentials.map((credential) => (
-                    <SelectItem
-                      key={credential.provider}
-                      value={credential.provider}
-                    >
-                      {providerLabel(credential.provider)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </SettingsField>
+            <ActiveProviderField
+              value={provider}
+              disabled={working}
+              onChange={setProvider}
+              options={credentials.map((credential) => ({
+                kind: credential.provider,
+                label: providerLabel(credential.provider),
+              }))}
+            />
 
-            <SettingsField
-              label="Request timeout (seconds)"
-              hint={`Between ${MIN_WEB_SEARCH_TIMEOUT_SECONDS} and ${MAX_WEB_SEARCH_TIMEOUT_SECONDS} seconds.`}
-            >
-              <Input
-                type="number"
-                inputMode="numeric"
-                min={MIN_WEB_SEARCH_TIMEOUT_SECONDS}
-                max={MAX_WEB_SEARCH_TIMEOUT_SECONDS}
-                step="1"
-                value={timeoutSeconds}
-                disabled={working}
-                onChange={(event) => setTimeoutSeconds(event.target.value)}
-              />
-            </SettingsField>
+            <TimeoutSecondsField
+              label="Request timeout"
+              minSeconds={MIN_WEB_SEARCH_TIMEOUT_SECONDS}
+              maxSeconds={MAX_WEB_SEARCH_TIMEOUT_SECONDS}
+              value={timeoutSeconds}
+              disabled={working}
+              onChange={setTimeoutSeconds}
+            />
           </SettingsSection>
 
           {/* One save for the whole surface: it stores every key typed above
