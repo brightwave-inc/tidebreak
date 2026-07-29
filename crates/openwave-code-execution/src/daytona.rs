@@ -468,6 +468,18 @@ struct DaytonaNetworkSettings {
 /// empty allowlist use the block-all switch; a non-empty allowlist becomes
 /// Daytona's comma-separated CIDR and wildcard-domain allowlists, which deny
 /// every other destination the vendor's exception list does not keep open.
+///
+/// A non-empty allowlist emits *both* the CIDR and the domain field, present
+/// but empty when that axis has no entries, rather than omitting the empty
+/// one. This mirrors E2B's explicit `allow_internet_access: false` baseline:
+/// a domain-only policy must still deny raw-IP egress, and an omitted CIDR
+/// field could read as "no restriction on that axis" and leave IP egress
+/// fully open — defeating deny-by-default. Present-but-empty is intended to
+/// mean "allow nothing on this axis."
+///
+/// Vendor semantics of an empty-but-present allowlist need live confirmation
+/// against Daytona before this surface is trusted as an enforcement boundary;
+/// the default (no policy → open egress) is not changed here.
 fn daytona_network_settings(policy: Option<&EgressPolicy>) -> DaytonaNetworkSettings {
     let open = DaytonaNetworkSettings {
         network_block_all: false,
@@ -489,24 +501,19 @@ fn daytona_network_settings(policy: Option<&EgressPolicy>) -> DaytonaNetworkSett
             }
             DaytonaNetworkSettings {
                 network_block_all: false,
-                network_allow_list: comma_joined(allowlist.cidrs()),
-                domain_allow_list: comma_joined(allowlist.domains()),
+                network_allow_list: Some(comma_joined(allowlist.cidrs())),
+                domain_allow_list: Some(comma_joined(allowlist.domains())),
             }
         }
     }
 }
 
-fn comma_joined<T: ToString>(entries: &[T]) -> Option<String> {
-    if entries.is_empty() {
-        return None;
-    }
-    Some(
-        entries
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(","),
-    )
+fn comma_joined<T: ToString>(entries: &[T]) -> String {
+    entries
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 #[derive(Deserialize)]
@@ -881,6 +888,21 @@ mod tests {
         assert_eq!(body["networkBlockAll"], false);
         assert_eq!(body["networkAllowList"], "140.82.112.0/20");
         assert_eq!(body["domainAllowList"], "*.pypi.org,crates.io");
+
+        // A domain-only policy still expresses a deny-all baseline for raw-IP
+        // egress: the CIDR field is present but empty, never omitted, so an
+        // absent axis can't read as "no IP restriction".
+        let domain_only = allowlist(&["*.pypi.org"], &[]);
+        let body = serde_json::to_value(daytona_network_settings(Some(&domain_only))).unwrap();
+        assert_eq!(body["networkBlockAll"], false);
+        assert_eq!(body["networkAllowList"], "");
+        assert_eq!(body["domainAllowList"], "*.pypi.org");
+
+        // Symmetrically, a CIDR-only policy still denies every domain.
+        let cidr_only = allowlist(&[], &["140.82.112.0/20"]);
+        let body = serde_json::to_value(daytona_network_settings(Some(&cidr_only))).unwrap();
+        assert_eq!(body["networkAllowList"], "140.82.112.0/20");
+        assert_eq!(body["domainAllowList"], "");
 
         // Block-all and the empty allowlist both fail closed on the switch.
         for policy in [EgressPolicy::BlockAll, allowlist(&[], &[])] {
