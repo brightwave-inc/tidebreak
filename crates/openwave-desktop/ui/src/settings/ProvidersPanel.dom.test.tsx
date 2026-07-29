@@ -168,4 +168,27 @@ describe("ProvidersPanel", () => {
       }),
     );
   });
+
+  it("offers no credential editing on a managed profile", () => {
+    const putProvider = vi.fn();
+    const client = { putProvider } as unknown as ApiClient;
+
+    render(
+      <ProvidersPanel
+        providers={[compatible]}
+        client={client}
+        managed
+        onChanged={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText(/configured by your organization/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Save configuration" }),
+    ).not.toBeInTheDocument();
+    expect(putProvider).not.toHaveBeenCalled();
+  });
 });

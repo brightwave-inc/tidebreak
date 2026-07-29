@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 
 import { useApp } from "@/AppContext";
+import { useManagedPolicy } from "@/managedPolicy";
 import { AppearancePanel } from "./AppearancePanel";
 import { CodeExecutionPanel } from "./CodeExecutionPanel";
 import { GatewayPanel } from "./GatewayPanel";
@@ -27,10 +28,12 @@ import { WebSearchPanel } from "./WebSearchPanel";
  */
 function ProvidersSection() {
   const { client, providers, refreshCatalog } = useApp();
+  const { managed } = useManagedPolicy();
   return (
     <ProvidersPanel
       providers={providers}
       client={client}
+      managed={managed}
       onChanged={() => void refreshCatalog()}
     />
   );
@@ -64,7 +67,8 @@ function CodeExecutionSection() {
 
 function McpSection() {
   const { client } = useApp();
-  return <McpPanel client={client} />;
+  const { managed } = useManagedPolicy();
+  return <McpPanel client={client} managed={managed} />;
 }
 
 function AppearanceSection() {
@@ -89,6 +93,10 @@ export type SettingsSectionDef = {
   label: string;
   icon: ComponentType<{ size?: number }>;
   Component: FunctionComponent;
+  /** Kept out of the rail on a managed profile. The route still resolves — a
+   * deep link or a stale history entry must land on something legible — and
+   * the panel itself renders its locked state. */
+  managedHidden?: boolean;
 };
 
 /**
@@ -96,7 +104,13 @@ export type SettingsSectionDef = {
  * `/settings` redirects, so it is the section a reader lands on by default.
  */
 export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
-  { path: "providers", label: "Providers", icon: KeyRound, Component: ProvidersSection },
+  {
+    path: "providers",
+    label: "Providers",
+    icon: KeyRound,
+    Component: ProvidersSection,
+    managedHidden: true,
+  },
   { path: "gateway", label: "Model Gateway", icon: Waypoints, Component: GatewaySection },
   { path: "models", label: "Models", icon: Cpu, Component: ModelsSection },
   { path: "web-search", label: "Web search", icon: Globe, Component: WebSearchSection },
@@ -111,4 +125,21 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   { path: "updates", label: "Updates", icon: RefreshCw, Component: UpdatesSection },
 ];
 
-export const DEFAULT_SETTINGS_PATH = `/settings/${SETTINGS_SECTIONS[0].path}`;
+/**
+ * The sections a profile actually navigates, in rail order.
+ *
+ * A managed profile has no bring-your-own credentials to manage, so the
+ * Providers section is dropped and the Model Gateway — the one place its
+ * models, session, and MCP mounts come from — becomes the first section, and
+ * therefore where settings opens.
+ */
+export function settingsSectionsFor(managed: boolean): SettingsSectionDef[] {
+  return managed
+    ? SETTINGS_SECTIONS.filter((section) => !section.managedHidden)
+    : SETTINGS_SECTIONS;
+}
+
+export function defaultSettingsPathFor(managed: boolean): string {
+  return `/settings/${settingsSectionsFor(managed)[0].path}`;
+}
+

@@ -143,45 +143,80 @@ pub async fn write_selection(
 /// provider can serve it, else the first usable entry in the role's ordered
 /// defaults.
 ///
+/// On a managed profile the curated defaults name BYOK providers the policy
+/// has locked out, so the ordered walk is over the gateway's own entitled
+/// models instead — otherwise background work would silently stop happening
+/// for every managed install. The walk is the same shape either way: first
+/// usable wins, and nothing usable degrades to `None`.
+///
 /// `None` means this install has no model for the role. Callers skip the work.
 pub async fn resolve(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
+    os_policy: &dyn crate::managed_policy::OsPolicySource,
     role: ModelRole,
 ) -> Result<Option<ResolvedModelPolicy>> {
+    let managed = crate::managed_policy::resolve(store, os_policy).await?;
     if let Some(selection) = read_selection(store, role).await? {
         // A selection whose provider has since been disabled or lost its
         // credential falls through to the defaults rather than issuing a
         // request that would fail.
-        if let Some(policy) = usable_policy(store, secrets, &selection).await? {
+        if let Some(policy) = usable_policy(store, secrets, &managed, &selection).await? {
             return Ok(Some(policy));
         }
     }
-    for key in role.defaults() {
-        if let Some(policy) = usable_policy(store, secrets, key).await? {
+    // `chat` has no default list on purpose — its last resort is process
+    // state, not a registry row — so the managed substitution applies only to
+    // roles that walk one at all.
+    let defaults: Vec<String> = if managed.managed && !role.defaults().is_empty() {
+        gateway_defaults(store).await?
+    } else {
+        role.defaults()
+            .iter()
+            .map(|key| (*key).to_owned())
+            .collect()
+    };
+    for key in defaults {
+        if let Some(policy) = usable_policy(store, secrets, &managed, &key).await? {
             return Ok(Some(policy));
         }
     }
     Ok(None)
 }
 
-/// Resolve `selection` only if its provider is enabled and credentialed.
+/// A managed profile's ordered role defaults: the models the gateway has
+/// synced as entitled, smallest context window first.
+///
+/// The curated lists these stand in for name each provider's *cheapest* row,
+/// because a role like `utility` runs work the user did not ask for and must
+/// not bill it to a flagship. The gateway describes entitlement, not price,
+/// so context window is the proxy available — it tracks model tier closely
+/// enough to keep that intent, and ties keep the gateway's own order.
+async fn gateway_defaults(store: &dyn Store) -> Result<Vec<String>> {
+    let mut models = providers::read_config(store, providers::ProviderKind::ModelGateway)
+        .await?
+        .models;
+    models.sort_by_key(|model| model.context_window);
+    Ok(models
+        .iter()
+        .map(|model| {
+            crate::model_registry::selection_key(providers::ProviderKind::ModelGateway, &model.id)
+        })
+        .collect())
+}
+
+/// Resolve `selection` only if its provider is usable under `managed`.
 async fn usable_policy(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
+    managed: &crate::managed_policy::ManagedPolicy,
     selection: &str,
 ) -> Result<Option<ResolvedModelPolicy>> {
     let Some(policy) = providers::resolve_model_policy(store, selection, false).await? else {
         return Ok(None);
     };
-    // Roles read only the sticky store authority for now: threading the OS
-    // policy source through every role caller (the turn worker included)
-    // belongs to the slice that makes background roles policy-aware. A
-    // provisioned profile already locks BYOK roles out here; a pure
-    // OS-asserted one still hits the egress lockdown in `collect_routes`.
-    let managed = crate::managed_policy::resolve(store, &crate::managed_policy::NoOsPolicy).await?;
     Ok(
-        providers::provider_is_usable(store, secrets, policy.provider, &managed)
+        providers::provider_is_usable(store, secrets, policy.provider, managed)
             .await?
             .then_some(policy),
     )
@@ -194,9 +229,10 @@ async fn usable_policy(
 pub async fn resolve_utility_model(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
+    os_policy: &dyn crate::managed_policy::OsPolicySource,
 ) -> Result<Option<UtilityModel>> {
     let role = ModelRole::Utility;
-    let Some(policy) = resolve(store, secrets, role).await? else {
+    let Some(policy) = resolve(store, secrets, os_policy, role).await? else {
         return Ok(None);
     };
     Ok(Some(UtilityModel {
@@ -216,9 +252,32 @@ pub async fn resolve_utility_model(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use openwave_core::DbStore;
+
     use super::*;
     use crate::model_registry;
-    use crate::providers::ProviderKind;
+    use crate::providers::{CustomModelConfig, ProviderConfig, ProviderKind};
+
+    #[derive(Default)]
+    struct TestSecrets(Mutex<HashMap<String, String>>);
+
+    #[async_trait::async_trait]
+    impl SecretProvider for TestSecrets {
+        async fn get_secret(&self, key: &str) -> Result<Option<String>> {
+            Ok(self.0.lock().unwrap().get(key).cloned())
+        }
+        async fn set_secret(&self, key: &str, value: &str) -> Result<()> {
+            self.0.lock().unwrap().insert(key.into(), value.into());
+            Ok(())
+        }
+        async fn delete_secret(&self, key: &str) -> Result<()> {
+            self.0.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
 
     #[test]
     fn every_role_default_names_a_curated_model() {
@@ -254,5 +313,118 @@ mod tests {
                 "a user credentialed only on {provider} has no default utility model",
             );
         }
+    }
+
+    /// Utility work on a managed profile: the curated defaults all name BYOK
+    /// providers the policy locked out, so before this the role resolved to
+    /// nothing and chat titling silently stopped. It now walks the gateway's
+    /// entitled models — and still degrades to `None`, exactly as an install
+    /// with no model configured does, when the gateway has none to offer.
+    #[tokio::test]
+    async fn a_managed_profile_resolves_the_utility_role_to_a_gateway_model() {
+        let directory = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                directory.path().join("roles.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let secrets: Arc<dyn SecretProvider> = Arc::new(TestSecrets::default());
+        let os_policy = crate::managed_policy::NoOsPolicy;
+
+        // A credentialed BYOK provider: the role resolves to its curated
+        // default while the profile is open.
+        providers::write_credential(
+            &*secrets,
+            ProviderKind::Anthropic,
+            &crate::providers::ProviderCredential::api_key("sk-anthropic"),
+        )
+        .await
+        .unwrap();
+        providers::write_config(
+            &*store,
+            ProviderKind::Anthropic,
+            &ProviderConfig {
+                enabled: true,
+                ..ProviderConfig::disabled()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            resolve_utility_model(&*store, &*secrets, &os_policy)
+                .await
+                .unwrap()
+                .map(|model| model.model),
+            Some("claude-haiku-4-5-20251001".to_string())
+        );
+
+        // Managed, with no gateway session yet: the BYOK key is locked out and
+        // there is nothing to fall back to, so consumers skip their work.
+        crate::managed_policy::provision(&*store, "https://corp.gateway")
+            .await
+            .unwrap();
+        assert!(resolve_utility_model(&*store, &*secrets, &os_policy)
+            .await
+            .unwrap()
+            .is_none());
+
+        // Signed in, with entitled models synced: the walk lands on the
+        // gateway's first usable model.
+        let credentials: openwave_connectors::GatewayCredentials =
+            serde_json::from_value(serde_json::json!({
+                "base_url": "https://corp.gateway/",
+                "installation_id": "install-1",
+                "user_id": "user-1",
+                "refresh_token": "mg_rt_seed",
+                "access_tokens": {}
+            }))
+            .unwrap();
+        openwave_connectors::CredentialVault::new(secrets.clone())
+            .save(&credentials)
+            .await
+            .unwrap();
+        providers::write_config(
+            &*store,
+            ProviderKind::ModelGateway,
+            &ProviderConfig {
+                enabled: true,
+                base_url: Some("https://corp.gateway/".to_string()),
+                vertex_location: None,
+                // Listed flagship-first, as a gateway well might: the walk
+                // must not bill background work to the biggest model it is
+                // entitled to.
+                models: vec![
+                    CustomModelConfig {
+                        id: "gateway-flagship".to_string(),
+                        display_name: Some("Gateway Flagship".to_string()),
+                        context_window: 1_000_000,
+                        max_output_tokens: 64_000,
+                    },
+                    CustomModelConfig {
+                        id: "gateway-haiku".to_string(),
+                        display_name: Some("Gateway Haiku".to_string()),
+                        context_window: 200_000,
+                        max_output_tokens: 8_192,
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap();
+        let utility = resolve_utility_model(&*store, &*secrets, &os_policy)
+            .await
+            .unwrap()
+            .expect("a managed profile resolves the utility role to a gateway model");
+        assert_eq!(
+            utility.model, "gateway-haiku",
+            "the cheapest entitled model, not the first listed"
+        );
+        assert_eq!(
+            utility.provider,
+            Some(ProviderId::new(ProviderKind::ModelGateway.as_str()))
+        );
     }
 }

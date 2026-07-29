@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient, GatewayStatus, ManagedPolicy } from "./api";
 import { ManagedGate } from "./ManagedGate";
+import { useManagedPolicy } from "./managedPolicy";
 
 // The policy stores its URL normalized with a trailing slash; the provider
 // config carries what the user (or a convergence) saved, typically without.
@@ -49,6 +50,13 @@ function mount(client: ApiClient) {
       <p>the open product</p>
     </ManagedGate>,
   );
+}
+
+/** Stands in for the settings panels, which gate themselves on the policy the
+ * gate publishes rather than fetching it again. */
+function PolicyProbe() {
+  const policy = useManagedPolicy();
+  return <p>policy: {policy.managed ? "managed" : "unmanaged"}</p>;
 }
 
 afterEach(() => {
@@ -116,6 +124,68 @@ describe("ManagedGate", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5_100);
     });
+    expect(screen.getByText("Sign in to continue")).toBeInTheDocument();
+    expect(screen.queryByText("the open product")).not.toBeInTheDocument();
+  });
+
+  it("pairing mid-session flips the app to managed without a restart", async () => {
+    const unmanaged: ManagedPolicy = {
+      managed: false,
+      source: "unmanaged",
+      misconfigured: false,
+    };
+    // The profile starts open, then a deep-link pairing provisions it and the
+    // session already satisfies the new policy.
+    const getPolicy = vi
+      .fn()
+      .mockResolvedValueOnce(unmanaged)
+      .mockResolvedValue(managed);
+    const client = api({
+      getPolicy,
+      getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
+    });
+    vi.useFakeTimers();
+    render(
+      <ManagedGate client={client}>
+        <PolicyProbe />
+      </ManagedGate>,
+    );
+    await act(async () => {});
+    // Unmanaged: the app renders, and what it reads from the gate says so —
+    // this is the value the Providers and MCP panels gate themselves on.
+    expect(screen.getByText("policy: unmanaged")).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_100);
+    });
+    await act(async () => {});
+    expect(screen.getByText("policy: managed")).toBeInTheDocument();
+  });
+
+  it("a mid-session sign-out on a newly managed profile raises the gate", async () => {
+    const getPolicy = vi
+      .fn()
+      .mockResolvedValueOnce({
+        managed: false,
+        source: "unmanaged",
+        misconfigured: false,
+      } satisfies ManagedPolicy)
+      .mockResolvedValue(managed);
+    const client = api({
+      getPolicy,
+      getGatewayStatus: vi.fn().mockResolvedValue(signedOut),
+    });
+    vi.useFakeTimers();
+    mount(client);
+    await act(async () => {});
+    expect(screen.getByText("the open product")).toBeInTheDocument();
+
+    // Policy flips to managed with no session: the gate comes up on the same
+    // watch tick rather than at the next launch.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_100);
+    });
+    await act(async () => {});
     expect(screen.getByText("Sign in to continue")).toBeInTheDocument();
     expect(screen.queryByText("the open product")).not.toBeInTheDocument();
   });

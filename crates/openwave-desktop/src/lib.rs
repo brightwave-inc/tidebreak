@@ -265,7 +265,7 @@ fn log_boot_failure(data_dir: &Path, error: &str) {
 async fn boot_server(
     app: tauri::AppHandle,
     info_tx: &watch::Sender<Option<BootOutcome>>,
-    store_tx: watch::Sender<Option<Arc<dyn openwave_core::Store>>>,
+    store_tx: watch::Sender<Option<openwave_server::PairingHandle>>,
     data_dir: PathBuf,
 ) -> Result<(), String> {
     let client_executor_id = app.state::<host_access::HostAccess>().client_executor_id();
@@ -287,7 +287,7 @@ async fn boot_server(
     app.state::<host_access::HostAccess>()
         .initialize_store(server.store())?;
     // Unblock any pairing task parked on a deep link that arrived pre-boot.
-    let _ = store_tx.send(Some(server.store()));
+    let _ = store_tx.send(Some(server.pairing_handle()));
     let base_url = format!("http://{}", server.local_addr());
     let token = server.token().to_string();
     let executor_token = server.client_executor_token().to_string();

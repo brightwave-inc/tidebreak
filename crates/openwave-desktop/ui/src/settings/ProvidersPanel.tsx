@@ -16,12 +16,34 @@ import { providerLabel } from "../ModelSelection";
 export function ProvidersPanel({
   providers,
   client,
+  managed = false,
   onChanged,
 }: {
   providers: ProviderInfo[];
   client: ApiClient;
+  /** A managed profile's models all come from its gateway, and the server
+   * refuses every credential and endpoint write here — so the editors are not
+   * shown at all rather than offered and then rejected. */
+  managed?: boolean;
   onChanged: () => void;
 }) {
+  if (managed) {
+    return (
+      <SettingsPanel
+        title="Providers"
+        description="This OpenWave is managed by your organization."
+      >
+        <SettingsSection>
+          <p className="text-sm text-muted-foreground">
+            Model providers are configured by your organization&apos;s model
+            gateway. Your own API keys and endpoints are not used, and cannot
+            be added here. See the Model Gateway section for the models and
+            tools available to you.
+          </p>
+        </SettingsSection>
+      </SettingsPanel>
+    );
+  }
   return (
     <SettingsPanel
       title="Providers"

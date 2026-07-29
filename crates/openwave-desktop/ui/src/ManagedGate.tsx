@@ -4,6 +4,7 @@ import { ExternalLink, RefreshCw } from "lucide-react";
 import type { ApiClient, GatewayStatus, ManagedPolicy } from "./api";
 import { Button } from "@/components/ui/button";
 import { Logomark } from "./Logomark";
+import { ManagedPolicyContext } from "./managedPolicy";
 import { openSignInPage } from "./openSignInPage";
 
 /** While the browser flow is pending the exchange lands out of band, so the
@@ -70,6 +71,17 @@ function sameGateway(
 ): boolean {
   const left = normalizedGatewayUrl(a);
   return left !== null && left === normalizedGatewayUrl(b);
+}
+
+/** Whether two resolutions say the same thing. The watch re-renders the whole
+ * app below the gate, so an unchanged answer must be a no-op. */
+function samePolicy(a: ManagedPolicy, b: ManagedPolicy): boolean {
+  return (
+    a.managed === b.managed &&
+    a.source === b.source &&
+    a.misconfigured === b.misconfigured &&
+    (a.gateway_url ?? null) === (b.gateway_url ?? null)
+  );
 }
 
 /**
@@ -144,6 +156,37 @@ export function ManagedGate({
       if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [client, policyState.kind]);
+
+  // Policy is watched, not read once. A profile can become managed while the
+  // app is running — an MDM push, or the deep-link pairing flow mid-session —
+  // and until this the renderer went on presenting the whole open surface:
+  // no sign-in gate, and Providers and MCP still editable against a server
+  // that had already started refusing them. `/policy` is a local read, so the
+  // session cadence is affordable.
+  const watching = policyState.kind === "resolved";
+  useEffect(() => {
+    if (!watching) return;
+    const timer = window.setInterval(() => {
+      void client
+        .getPolicy()
+        .then((next) => {
+          setPolicyState((current) =>
+            current.kind === "resolved" && samePolicy(current.policy, next)
+              ? current
+              : { kind: "resolved", policy: next },
+          );
+        })
+        .catch((err) => {
+          // An error *response* means the server says the policy is
+          // unreadable, which fails closed exactly as it does on first read.
+          // A transport failure says nothing, so the last answer stands.
+          if (httpStatusOf(err) !== null && httpStatusOf(err) !== 404) {
+            setPolicyState({ kind: "blocked" });
+          }
+        });
+    }, SESSION_WATCH_MS);
+    return () => window.clearInterval(timer);
+  }, [client, watching]);
 
   const reload = useCallback(async () => {
     const next = await client.getGatewayStatus();
@@ -248,7 +291,10 @@ export function ManagedGate({
     );
   }
 
-  if (!managed) return <>{children}</>;
+  // Everything below the gate reads the same resolved policy the gate did:
+  // the settings surfaces gate themselves on it, and re-fetching `/policy`
+  // per panel could only produce disagreement.
+  if (!managed) return <Published policy={policy}>{children}</Published>;
 
   if (status === null && statusError === null) {
     return <BootScreen>starting…</BootScreen>;
@@ -260,7 +306,7 @@ export function ManagedGate({
   const lockedUrl = policy?.gateway_url ?? null;
   const sessionSatisfiesPolicy =
     status?.signed_in === true && sameGateway(status.base_url, lockedUrl);
-  if (sessionSatisfiesPolicy) return <>{children}</>;
+  if (sessionSatisfiesPolicy) return <Published policy={policy}>{children}</Published>;
 
   // The device's managed gateway is the policy's URL, wherever the provider
   // config currently points.
@@ -326,6 +372,21 @@ export function ManagedGate({
         never sees your identity provider credentials.
       </p>
     </div>
+  );
+}
+
+function Published({
+  policy,
+  children,
+}: {
+  policy: ManagedPolicy | null;
+  children: ReactNode;
+}) {
+  if (policy === null) return <>{children}</>;
+  return (
+    <ManagedPolicyContext.Provider value={policy}>
+      {children}
+    </ManagedPolicyContext.Provider>
   );
 }
 

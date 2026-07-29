@@ -21,20 +21,21 @@
 //! compromised renderer cannot forge the plugin's open-URL event.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 use tauri::Manager;
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tokio::sync::watch;
 
-use openwave_core::Store;
+use openwave_server::PairingHandle;
 
-/// Where the pairing handler waits for the embedded server's store: filled
-/// once boot has bound the server. A provision link commonly *launches* the
-/// app, so the handler awaits this instead of racing the boot task.
+/// Where the pairing handler waits for the embedded server's pairing handle:
+/// filled once boot has bound the server. A provision link commonly
+/// *launches* the app, so the handler awaits this instead of racing the boot
+/// task. The handle rather than the store, because pairing also applies the
+/// policy it writes to the running process.
 pub(crate) struct PairingStore {
-    rx: watch::Receiver<Option<Arc<dyn Store>>>,
+    rx: watch::Receiver<Option<PairingHandle>>,
     /// One pairing at a time. While a confirmation dialog is up or a probe
     /// is in flight, further provision links are dropped with a log line
     /// instead of stacking dialogs and long-timeout probes.
@@ -42,7 +43,7 @@ pub(crate) struct PairingStore {
 }
 
 impl PairingStore {
-    pub(crate) fn new(rx: watch::Receiver<Option<Arc<dyn Store>>>) -> Self {
+    pub(crate) fn new(rx: watch::Receiver<Option<PairingHandle>>) -> Self {
         Self {
             rx,
             in_flight: AtomicBool::new(false),
@@ -243,18 +244,18 @@ fn confirm_pairing(app: &tauri::AppHandle, origin: &str) -> bool {
 /// separate surface: once policy flips to managed it presents itself on its
 /// next poll, so pairing does not drive the renderer.
 async fn pair(app: tauri::AppHandle, gateway_url: String) -> Result<(), String> {
-    let store = wait_store(&app).await?;
-    openwave_server::pair_with_gateway(&*store, &gateway_url)
+    let handle = wait_pairing_handle(&app).await?;
+    openwave_server::pair_with_gateway(&handle, &gateway_url)
         .await
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
 
-async fn wait_store(app: &tauri::AppHandle) -> Result<Arc<dyn Store>, String> {
+async fn wait_pairing_handle(app: &tauri::AppHandle) -> Result<PairingHandle, String> {
     let mut rx = app.state::<PairingStore>().rx.clone();
     loop {
-        if let Some(store) = rx.borrow().clone() {
-            return Ok(store);
+        if let Some(handle) = rx.borrow().clone() {
+            return Ok(handle);
         }
         rx.changed()
             .await
