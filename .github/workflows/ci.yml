@@ -280,7 +280,9 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
       SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_RW_MODE: ${{ github.event_name == 'pull_request' && 'READ_ONLY' || 'READ_WRITE' }}
+      # GitHub scopes pull-request caches to the PR merge ref. Let reruns reuse
+      # changed compiler outputs; cache-cleanup.yml removes that scope on close.
+      SCCACHE_GHA_RW_MODE: READ_WRITE
       RUSTC_WRAPPER: sccache
       RUSTFLAGS: -C link-arg=-fuse-ld=mold
     steps:
@@ -329,7 +331,7 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
       SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_RW_MODE: ${{ github.event_name == 'pull_request' && 'READ_ONLY' || 'READ_WRITE' }}
+      SCCACHE_GHA_RW_MODE: READ_WRITE
       RUSTC_WRAPPER: sccache
       RUSTFLAGS: -C link-arg=-fuse-ld=mold
     steps:
@@ -371,7 +373,7 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
       SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_RW_MODE: ${{ github.event_name == 'pull_request' && 'READ_ONLY' || 'READ_WRITE' }}
+      SCCACHE_GHA_RW_MODE: READ_WRITE
       RUSTC_WRAPPER: sccache
       RUSTFLAGS: -C link-arg=-fuse-ld=mold
     steps:
@@ -420,7 +422,7 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
       SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_RW_MODE: ${{ github.event_name == 'pull_request' && 'READ_ONLY' || 'READ_WRITE' }}
+      SCCACHE_GHA_RW_MODE: READ_WRITE
       RUSTC_WRAPPER: sccache
       RUSTFLAGS: -C link-arg=-fuse-ld=mold
     steps:
@@ -494,7 +496,7 @@ jobs:
       OPENWAVE_POSTGRES_TEST_URL: postgres://postgres:postgres@localhost:5432/openwave_test
       OPENWAVE_REQUIRE_POSTGRES_TEST: "true"
       SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_RW_MODE: ${{ github.event_name == 'pull_request' && 'READ_ONLY' || 'READ_WRITE' }}
+      SCCACHE_GHA_RW_MODE: READ_WRITE
       RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
