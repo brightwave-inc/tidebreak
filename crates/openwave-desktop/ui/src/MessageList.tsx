@@ -26,7 +26,6 @@ import { stripCitationDirectives } from "./citationDirectives";
 import { MessageCitationsProvider } from "./InlineCitation";
 import { McpAppCard } from "./McpAppCard";
 import { ToolCommandCard, type ToolCallStatus } from "./ToolCallCard";
-import { ToolEntriesCard } from "./ToolEntriesCard";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { ToolActivityGroup } from "./ToolActivityGroup";
 import { WelcomeState } from "./WelcomeState";
@@ -528,21 +527,6 @@ function surfacedCards(
       continue;
     }
     if (entry.role !== "tool") continue;
-    // A call whose retained projection this build can no longer read. Saying so
-    // beats rendering nothing: the alternative reads as a call that produced
-    // no result, which is a different and untrue claim.
-    if (entry.resultUnreadable && !parked.has(entry.callId)) {
-      cards.push(
-        <p
-          key={entry.id}
-          className="text-muted-foreground bg-muted max-w-prose rounded-md px-3 py-2 text-xs"
-          role="status"
-        >
-          This tool completed, but its result can no longer be displayed.
-        </p>,
-      );
-      continue;
-    }
     if (
       entry.result?.tool === "web_search_provider_required" &&
       !parked.has(entry.callId)
@@ -565,20 +549,9 @@ function surfacedCards(
       );
       continue;
     }
-    // Also keyed on the result, and for the same reason as an MCP view: what
-    // the call found is the card, and most of these tools project no action
-    // preview because their arguments say nothing a reader needs.
-    if (entry.result?.tool === "entries" && !parked.has(entry.callId)) {
-      cards.push(
-        <ToolEntriesCard
-          key={entry.id}
-          name={entry.name}
-          status={entry.status}
-          result={entry.result}
-        />,
-      );
-      continue;
-    }
+    // What a call found, read, or wrote renders inside the expanded rail,
+    // under its own row — collapsed, a phase is one line, and a run of
+    // searches must not stack a column of standing cards.
     // The approval card already shows this command and owns the decision.
     if (!entry.preview || parked.has(entry.callId)) continue;
     // A card earns its place by carrying something the rail cannot: a command

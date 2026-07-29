@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApprovalCard } from "./ApprovalCard";
@@ -669,19 +669,69 @@ describe("mcp app views", () => {
       />,
     );
 
-    // The count is on the collapsed header, and it counts the rows the card is
-    // not showing — a reader must not have to open the card to learn there
-    // were five results.
-    const card = screen.getByRole("status", {
-      name: "Browse files: File browse complete",
-    });
-    expect(within(card).getByText("5 results")).toBeInTheDocument();
+    // Collapsed, the phase is one line: no standing card, no rows.
     expect(screen.queryByText("notes.md")).not.toBeInTheDocument();
 
-    await user.click(within(card).getByRole("button"));
+    await user.click(screen.getByRole("button", { name: /Browsed files/ }));
+    // The count line counts the rows the list is not showing — the reader
+    // must not be told the call found two things when it found five.
+    expect(screen.getByText("Found 5 items")).toBeInTheDocument();
     expect(screen.getByText("notes.md")).toBeInTheDocument();
     expect(screen.getByText("reports")).toBeInTheDocument();
     expect(screen.getByText("3 more not shown")).toBeInTheDocument();
+  });
+
+  it("shows a search as its query over the documents it matched", async () => {
+    const user = userEvent.setup();
+    render(
+      <MessageList
+        messages={[
+          {
+            id: "t1",
+            role: "tool",
+            callId: "c1",
+            name: "search",
+            status: "completed",
+            preview: { tool: "search", query: "quarterly revenue" },
+            result: {
+              tool: "entries",
+              elided: 0,
+              entries: [
+                {
+                  kind: "source",
+                  label: "Q3 Report",
+                  detail: "Pages 3, 7",
+                  meta: "2 matches",
+                  mediaType: "application/pdf",
+                },
+              ],
+              failures: [],
+            },
+          },
+        ]}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
+        busy={false}
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /Searched sources/ }));
+    // The row reads as the title over the query — what ran and what it was
+    // about — over the documents it matched, named and counted.
+    expect(screen.getByText("quarterly revenue")).toBeInTheDocument();
+    expect(screen.getByText("Searched 1 source")).toBeInTheDocument();
+    expect(screen.getByText("Q3 Report")).toBeInTheDocument();
+    expect(screen.getByText("2 matches")).toBeInTheDocument();
   });
 
   it("says on the collapsed header that some of the call failed", async () => {
@@ -724,15 +774,10 @@ describe("mcp app views", () => {
       />,
     );
 
-    // A partial success read as a clean one is the failure this whole channel
-    // exists to prevent: the reader must not have to open the card to find out
-    // that two of the three files never made it.
-    const card = screen.getByRole("status", {
-      name: "Read a file: File read complete",
-    });
-    expect(within(card).getByText(/1 result · 2 failed/)).toBeInTheDocument();
-
-    await user.click(within(card).getByRole("button"));
+    // A partial success is not a clean one: the failures render in their own
+    // divided section of the same list, not silently dropped.
+    await user.click(screen.getByRole("button", { name: /Read a file/ }));
+    expect(screen.getByText("q3.md")).toBeInTheDocument();
     expect(screen.getByText("file is not valid UTF-8")).toBeInTheDocument();
     // A failure the tool could not name still gets a row rather than vanishing.
     expect(screen.getByText("the folder is no longer available")).toBeInTheDocument();

@@ -1,7 +1,10 @@
 import { useState, type ReactNode } from "react";
 import { ChevronDown } from "lucide-react";
+import type { ToolActionPreview, ToolResultPreview } from "./api";
 import { toolCallPresentation, type ToolCallStatus } from "./ToolCallCard";
+import { ToolEntriesList } from "./ToolEntriesList";
 import { ToolIcon } from "./ToolIcon";
+import { toolPreviewPresentation } from "./ToolPreview";
 import { ToolStatusIcon } from "./ToolStatusIcon";
 import { useTypewriterOnce } from "./useTypewriterOnce";
 import { Button } from "@/components/ui/button";
@@ -19,6 +22,12 @@ export type ToolActivity = {
   id?: string;
   name: string;
   status: ToolCallStatus;
+  /** The tool's own closed view of what it is doing, when it has one. */
+  preview?: ToolActionPreview | null;
+  /** What the call produced, rendered under the row when it is a list. */
+  result?: ToolResultPreview | null;
+  /** Set when a retained projection no longer parses against this build. */
+  resultUnreadable?: boolean;
 };
 
 type ToolActivityGroupProps = {
@@ -122,6 +131,13 @@ export function ToolActivityGroup({
 
 function ToolActivityRow({ activity }: { activity: ToolActivity }) {
   const presentation = toolCallPresentation(activity.name, activity.status);
+  // The action under the title, the way the group's cards say it: a search
+  // row reads as "Searched sources" over its query. A command's preview stays
+  // off the rail — its card below the group already leads with it.
+  const headline =
+    activity.preview && activity.preview.tool !== "exec"
+      ? toolPreviewPresentation(activity.preview).headline
+      : null;
 
   return (
     <div className="grid gap-1" role="listitem">
@@ -147,6 +163,19 @@ function ToolActivityRow({ activity }: { activity: ToolActivity }) {
           {presentation.title}
         </p>
       </div>
+      {headline !== null && (
+        <p className="text-muted-foreground truncate">{headline}</p>
+      )}
+      {/* A call whose retained projection this build can no longer read.
+          Saying so beats rendering nothing: the alternative reads as a call
+          that produced no result, which is a different and untrue claim. */}
+      {activity.resultUnreadable ? (
+        <p className="text-muted-foreground text-xs" role="status">
+          This tool completed, but its result can no longer be displayed.
+        </p>
+      ) : activity.result?.tool === "entries" ? (
+        <ToolEntriesList name={activity.name} result={activity.result} />
+      ) : null}
     </div>
   );
 }
@@ -314,6 +343,17 @@ function normalizeActivities(activities: unknown): ToolActivity[] {
           : {}),
         name: candidate.name,
         status: candidate.status as ToolCallStatus,
+        // Already validated field by field at the API boundary; carried here
+        // so the expanded row can say what the call did and what it found.
+        ...(typeof candidate.preview === "object"
+          ? { preview: candidate.preview as ToolActionPreview | null }
+          : {}),
+        ...(typeof candidate.result === "object"
+          ? { result: candidate.result as ToolResultPreview | null }
+          : {}),
+        ...(typeof candidate.resultUnreadable === "boolean"
+          ? { resultUnreadable: candidate.resultUnreadable }
+          : {}),
       },
     ];
   });
