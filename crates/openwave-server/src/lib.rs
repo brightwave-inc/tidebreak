@@ -70,9 +70,9 @@ use openwave_core::{
     validate_import_connected_file_arguments, validate_list_connected_folders_arguments,
     validate_list_folder_arguments, validate_read_connected_file_arguments,
     validate_request_folder_access_arguments, validate_write_output_to_connected_folder_arguments,
-    write_output_to_connected_folder_tool_spec, AgentConfig, AgentError, Config, CreateDeliverable,
-    KeychainSecretProvider, ListDir, Profile, ReadFile, Result, SecretProvider, Store, Tool,
-    ToolRegistry, WriteFile,
+    write_output_to_connected_folder_tool_spec, AgentConfig, AgentError, CachingSecretProvider,
+    Config, CreateDeliverable, KeychainSecretProvider, ListDir, Profile, ReadFile, Result,
+    SecretProvider, Store, Tool, ToolRegistry, WriteFile,
 };
 #[cfg(feature = "vec-lance")]
 use openwave_retrieval::LanceVectorStore;
@@ -598,11 +598,17 @@ pub async fn bind_configured_with_desktop_executor(
 }
 
 /// The secret store the configured profile keeps its credentials in.
+///
+/// Wrapped in a [`CachingSecretProvider`] so a key costs one keychain read per
+/// process rather than one per turn: [`resolver::ConfiguredResolver`] rebuilds
+/// its route set on every turn, and each candidate route reads its provider's
+/// credential to decide whether it exists.
 fn secret_provider(config: &Config) -> Arc<dyn SecretProvider> {
-    Arc::new(match &config.keychain_service {
+    let keychain: Arc<dyn SecretProvider> = Arc::new(match &config.keychain_service {
         Some(service) => KeychainSecretProvider::with_service(service),
         None => KeychainSecretProvider::new(),
-    })
+    });
+    Arc::new(CachingSecretProvider::new(keychain))
 }
 
 /// Re-home the configured profile's credentials — see [`secret_rehome`]. Does
