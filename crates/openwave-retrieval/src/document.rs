@@ -262,21 +262,30 @@ fn coalesce_by_sheet(regions: Vec<SourceRegion>) -> Vec<SourceRegion> {
         .into_iter()
         .filter_map(CellAddress::parse)
         .collect::<Vec<_>>();
-        // A cell that does not read as A1 cannot widen a rectangle, and the
-        // parser's own text is kept rather than replaced by a guess.
-        if let (Some(first), Some(last_corner)) = (corners.first(), corners.last()) {
-            let top_left = corners.iter().fold(*first, |corner, cell| CellAddress {
+        // A cell that does not read as A1 cannot widen a rectangle, and neither
+        // can a rectangle whose corners will not write back as A1. Either way
+        // the regions keep the cells they arrived with rather than a guess, and
+        // only their spans merge.
+        let widened = corners.first().zip(corners.last()).and_then(|(a, b)| {
+            let top_left = corners.iter().fold(*a, |corner, cell| CellAddress {
                 column: corner.column.min(cell.column),
                 row: corner.row.min(cell.row),
             });
-            let bottom_right = corners
-                .iter()
-                .fold(*last_corner, |corner, cell| CellAddress {
-                    column: corner.column.max(cell.column),
-                    row: corner.row.max(cell.row),
-                });
-            *start_cell = top_left.to_a1();
-            *end_cell = (top_left != bottom_right).then(|| bottom_right.to_a1());
+            let bottom_right = corners.iter().fold(*b, |corner, cell| CellAddress {
+                column: corner.column.max(cell.column),
+                row: corner.row.max(cell.row),
+            });
+            let start = top_left.to_a1()?;
+            let end = if top_left == bottom_right {
+                None
+            } else {
+                Some(bottom_right.to_a1()?)
+            };
+            Some((start, end))
+        });
+        if let Some((start, end)) = widened {
+            *start_cell = start;
+            *end_cell = end;
         }
         last.span = ByteSpan::new(last.span.start, region.span.end);
     }

@@ -60,6 +60,13 @@ const MAX_CELLS: usize = 100_000;
 /// cell, and the passage a reader wants from it is at its start.
 const MAX_CELL_CHARS: usize = 512;
 
+/// Longest sheet name recorded, in characters.
+///
+/// The bound evidence enforces is in bytes, and a character can be four of
+/// them, so this is a quarter of it — comfortably past what any spreadsheet
+/// application lets a sheet be called.
+const MAX_SHEET_NAME_CHARS: usize = openwave_core::EvidenceLocation::MAX_SHEET_NAME_BYTES / 4;
+
 /// Reads workbooks natively, preserving sheet and cell addresses.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SpreadsheetParser;
@@ -143,10 +150,11 @@ impl Rendering {
             self.text.push('\n');
         }
         // The heading is the sheet's name as a reader sees it in the tab bar.
-        // Newlines are the one character that would end the heading early;
-        // a sheet name may hold them in OpenDocument.
-        self.text
-            .push_str(&format!("## {}\n\n", one_line(name).trim()));
+        // A name is required on every cell recorded from this sheet, so an
+        // unusable one is replaced here rather than left to fail validation and
+        // cost the whole workbook its index.
+        let name = sheet_name(name, index);
+        self.text.push_str(&format!("## {name}\n\n"));
 
         let Some(range) = range.filter(|range| range.get_size() != (0, 0)) else {
             self.text.push_str("_(empty sheet)_\n");
@@ -159,7 +167,7 @@ impl Rendering {
                     .push_str("_(the rest of this workbook was not transcribed)_\n");
                 return;
             }
-            self.row(index, name, row, first_row, first_column, row_offset);
+            self.row(index, &name, row, first_row, first_column, row_offset);
         }
     }
 
@@ -185,22 +193,25 @@ impl Rendering {
             return;
         };
         let mut line = String::from("|");
-        let mut pending: Vec<(ByteSpan, CellAddress)> = Vec::new();
+        let mut pending: Vec<(ByteSpan, String)> = Vec::new();
         for (column_offset, value) in row.iter().enumerate() {
             let Ok(column_offset) = u32::try_from(column_offset) else {
                 break;
             };
             line.push(' ');
             let rendered = one_line(&render_cell(value));
-            if !rendered.is_empty() {
+            // A cell past what A1 notation addresses keeps its text and loses
+            // its address: no real sheet is that wide or tall, and recording a
+            // reference nothing downstream accepts would cost the workbook its
+            // whole index rather than that one cell its position.
+            let address = CellAddress {
+                column: first_column.saturating_add(column_offset),
+                row: first_row.saturating_add(row_offset),
+            }
+            .to_a1();
+            if let (false, Some(address)) = (rendered.is_empty(), address) {
                 let start = self.text.len() + line.len();
-                pending.push((
-                    ByteSpan::new(start, start + rendered.len()),
-                    CellAddress {
-                        column: first_column.saturating_add(column_offset),
-                        row: first_row.saturating_add(row_offset),
-                    },
-                ));
+                pending.push((ByteSpan::new(start, start + rendered.len()), address));
             }
             line.push_str(&rendered);
             line.push_str(" |");
@@ -209,15 +220,34 @@ impl Rendering {
         self.text.push_str(&line);
         self.cells += pending.len();
         self.regions
-            .extend(pending.into_iter().map(|(span, cell)| SourceRegion {
+            .extend(pending.into_iter().map(|(span, start_cell)| SourceRegion {
                 span,
                 location: SourceLocation::SpreadsheetCells {
                     sheet_index,
                     sheet_name: sheet_name.to_owned(),
-                    start_cell: cell.to_a1(),
+                    start_cell,
                     end_cell: None,
                 },
             }));
+    }
+}
+
+/// The name a sheet is recorded and shown under.
+///
+/// Every cell recorded from a sheet carries its name, and a name that is empty,
+/// past the bound evidence enforces, or spread over several lines would fail
+/// validation for the whole document. A sheet with no usable name of its own is
+/// named by its position instead, the way a spreadsheet application does.
+fn sheet_name(name: &str, index: i32) -> String {
+    let flattened = one_line(name);
+    let bounded = match flattened.char_indices().nth(MAX_SHEET_NAME_CHARS) {
+        Some((cut, _)) => flattened[..cut].trim_end().to_owned(),
+        None => flattened,
+    };
+    if bounded.is_empty() {
+        format!("Sheet {}", index.saturating_add(1))
+    } else {
+        bounded
     }
 }
 

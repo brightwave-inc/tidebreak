@@ -219,8 +219,13 @@ impl CellAddress {
     }
 
     /// Write this address back as A1 notation.
+    ///
+    /// `None` for an address past the widest and tallest worksheet A1 addresses,
+    /// which no real sheet reaches but a malformed file can claim. Producers
+    /// leave such a cell out rather than recording a reference that would be
+    /// rejected downstream, taking the whole document with it.
     #[must_use]
-    pub fn to_a1(self) -> String {
+    pub fn to_a1(self) -> Option<String> {
         let mut letters = Vec::new();
         let mut column = self.column;
         loop {
@@ -232,7 +237,8 @@ impl CellAddress {
         }
         letters.reverse();
         let letters = String::from_utf8(letters).expect("ASCII column letters are UTF-8");
-        format!("{letters}{}", self.row + 1)
+        let cell = format!("{letters}{}", self.row.checked_add(1)?);
+        is_a1_reference(&cell).then_some(cell)
     }
 }
 
@@ -1128,18 +1134,26 @@ impl EvidenceLocation {
                 });
             }
         }
-        // Cells that do not read as A1 leave the range unresolved. Passing the
-        // parser's own text through keeps the location honest — it is checked
-        // by `is_well_formed` like any other, and a reader is not sent to a cell
+        // Cells that do not read as A1, or a rectangle whose corners cannot be
+        // written back as A1, leave the range unresolved. Passing the parser's
+        // own text through keeps the location honest — it is checked by
+        // `is_well_formed` like any other, and a reader is not sent to a cell
         // that was invented here.
-        let (start_cell, end_cell) = match (top_left, bottom_right) {
-            (Some(start), Some(end)) if start == end => (start.to_a1(), None),
-            (Some(start), Some(end)) => (start.to_a1(), Some(end.to_a1())),
-            _ => (
+        let resolved = top_left.zip(bottom_right).and_then(|(start, end)| {
+            let start_cell = start.to_a1()?;
+            let end_cell = if start == end {
+                None
+            } else {
+                Some(end.to_a1()?)
+            };
+            Some((start_cell, end_cell))
+        });
+        let (start_cell, end_cell) = resolved.unwrap_or_else(|| {
+            (
                 sheet.start_cell.to_owned(),
                 sheet.end_cell.map(str::to_owned),
-            ),
-        };
+            )
+        });
         Self::SpreadsheetCellRange {
             start_cell,
             end_cell,
@@ -3442,10 +3456,29 @@ mod tests {
         ] {
             let address = CellAddress::parse(cell).expect("an A1 reference parses");
             assert_eq!(address, CellAddress { column, row }, "{cell}");
-            assert_eq!(address.to_a1(), cell);
+            assert_eq!(address.to_a1().as_deref(), Some(cell));
         }
         assert_eq!(CellAddress::parse("aa1"), CellAddress::parse("AA1"));
         assert_eq!(CellAddress::parse("A0"), None);
+        // No worksheet is this wide or tall, but a malformed file can claim a
+        // cell that is. It has no A1 form, and a producer that wrote one anyway
+        // would fail validation for the whole document rather than that cell.
+        assert_eq!(
+            CellAddress {
+                column: 18_278,
+                row: 0
+            }
+            .to_a1(),
+            None
+        );
+        assert_eq!(
+            CellAddress {
+                column: 0,
+                row: 10_000_000
+            }
+            .to_a1(),
+            None
+        );
     }
 
     #[test]
