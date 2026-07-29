@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import {
@@ -139,7 +140,7 @@ async function openFailingPanel(rejection: unknown) {
  * The transcript beside the panel, holding the citation the panel is opened
  * from. This is where the panel resolves it: no request is made for it.
  */
-function seedTranscript(source: Partial<AssistantSource> & { id: string }) {
+function seedTranscript(...sources: (Partial<AssistantSource> & { id: string })[]) {
   useChatSessionStore.getState().update((session) => ({
     ...session,
     messages: [
@@ -147,18 +148,16 @@ function seedTranscript(source: Partial<AssistantSource> & { id: string }) {
         id: "m1",
         role: "assistant",
         text: "Revenue rose in the second quarter.",
-        sources: [
-          {
-            ordinal: 1,
-            documentId: "doc-1",
-            span: { start: 0, end: 0 },
-            excerpt: "",
-            heading: null,
-            pages: [],
-            bounds: [],
-            ...source,
-          },
-        ],
+        sources: sources.map((source, index) => ({
+          ordinal: index + 1,
+          documentId: "doc-1",
+          span: { start: 0, end: 0 },
+          excerpt: "",
+          heading: null,
+          pages: [],
+          bounds: [],
+          ...source,
+        })),
       },
     ],
   }));
@@ -187,6 +186,44 @@ async function openCitation(
     </AppContextProvider>,
     { initialUrl: `/c/chat-1?left=sources.doc-1.${citationId}&right=chat` },
   );
+}
+
+/**
+ * The panel opened at one citation, with a control that moves it to another —
+ * which is what a second click in the transcript does to the panel already open
+ * beside it.
+ */
+async function openCitationThenAnother(
+  info: DocumentDetail,
+  first: string,
+  second: string,
+) {
+  const client = {
+    getChatDocument: vi.fn().mockResolvedValue(info),
+    getChatDocumentFile: vi.fn().mockResolvedValue({
+      bytes: new TextEncoder().encode("bytes"),
+      contentType: info.media_type,
+    }),
+  };
+  function Harness() {
+    const [citationId, setCitationId] = useState(first);
+    return (
+      <AppContextProvider value={{ client } as unknown as AppContextValue}>
+        <button type="button" onClick={() => setCitationId(second)}>
+          Click the second citation
+        </button>
+        <DocumentDetailRoot
+          chatId="chat-1"
+          documentID="doc-1"
+          citationId={citationId}
+          position="left"
+        />
+      </AppContextProvider>
+    );
+  }
+  return renderWithRouter(<Harness />, {
+    initialUrl: `/c/chat-1?left=sources.doc-1.${first}&right=chat`,
+  });
 }
 
 /** One rectangle of a citation, in the ten-thousandths the wire carries. */
@@ -440,6 +477,53 @@ describe("DocumentDetailRoot", () => {
     await user.click(screen.getByRole("button", { name: "Next page" }));
     expect(await screen.findByText("Page 5")).toBeVisible();
     await waitFor(() => expect(drawnHighlights()).toHaveLength(1));
+  });
+
+  // The panel is already open at a citation when the next one is clicked, and
+  // two citations into one source usually want the same view — so the view a
+  // citation asks for cannot tell the second click from the first. A reader who
+  // had switched views in between used to stay where they were, and the second
+  // citation landed nowhere.
+  it("lands a second citation into a source the reader had switched views on", async () => {
+    const user = userEvent.setup();
+    seedTranscript(
+      { id: "cite-6", pages: [2], span: { start: 0, end: 4 } },
+      { id: "cite-7", pages: [7], span: { start: 5, end: 9 } },
+    );
+    await openCitationThenAnother(
+      detail({ media_type: "application/pdf", title: "Report.pdf", content: "text" }),
+      "cite-6",
+      "cite-7",
+    );
+
+    expect(await screen.findByText("Page 2")).toBeVisible();
+    await user.click(screen.getByRole("tab", { name: "Extracted text" }));
+
+    await user.click(screen.getByRole("button", { name: "Click the second citation" }));
+
+    expect(
+      await screen.findByRole("tab", { name: "Original document", selected: true }),
+    ).toBeVisible();
+    expect(await screen.findByText("Page 7")).toBeVisible();
+  });
+
+  // A citation can outlive the reading of the source it points into — the file
+  // is re-read on import and the parse fails the second time. There is no
+  // original view behind the tab then, and sending the reader to it left the
+  // panel drawing nothing at all.
+  it("says a source failed rather than opening a citation on an empty panel", async () => {
+    seedTranscript({ id: "cite-8", pages: [3], span: { start: 0, end: 4 } });
+    await openCitation(
+      detail({
+        media_type: "application/pdf",
+        title: "Report.pdf",
+        processing_status: "failed",
+        content: "",
+      }),
+      "cite-8",
+    );
+
+    expect(await screen.findByText("Failed to process document")).toBeVisible();
   });
 
   // The panel unmounts the viewer whenever the reader switches views, so

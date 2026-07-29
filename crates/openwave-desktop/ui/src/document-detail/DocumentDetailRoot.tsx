@@ -95,17 +95,30 @@ export function DocumentDetailRoot({
   // the recorded page of a paginated original, or else the extracted text,
   // where the passage itself is highlighted. A citation the transcript cannot
   // resolve opens the document the same way the source list does.
+  //
+  // The original view is only worth landing on where there is one: a source
+  // whose processing failed has no viewer behind that tab, however precisely
+  // the citation addresses it, and sending the reader there left the panel
+  // showing nothing at all rather than saying what went wrong.
   const citationView: DocumentView | null = !placement
     ? null
-    : citationPage != null
+    : citationPage != null && hasOriginalDocumentTab
       ? "original_doc"
       : "extracted_text";
 
   // Reset the view when the document changes. A format with no viewer has only
   // the extracted text to land on.
+  //
+  // Landing is per citation rather than per resolution. Two citations into one
+  // source often want the same view, so the view alone cannot tell the second
+  // click from the first: without the citation in the dependencies, a reader who
+  // had since switched views stayed on the view they were on and the second
+  // citation landed nowhere. The citation only changes when the reader clicks
+  // one, so the transcript re-resolving the citation the panel is already open
+  // at still leaves a deliberate view switch alone.
   useEffect(() => {
     setView(citationView ?? (hasOriginalDocumentTab ? "original_doc" : "extracted_text"));
-  }, [documentID, hasOriginalDocumentTab, citationView]);
+  }, [documentID, hasOriginalDocumentTab, citationView, citationId]);
 
   const documentName = info ? documentTitle(info) : undefined;
 
