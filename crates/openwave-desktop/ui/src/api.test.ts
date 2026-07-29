@@ -599,6 +599,47 @@ describe("project-scoped conversation API", () => {
     );
   });
 
+  it("creates a chat already set up the way it will run", async () => {
+    // The home composer has nowhere to PATCH: its choices have to ride along
+    // with creation, or the first turn runs against a chat that was created
+    // before the reader's choices reached it.
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          id: "chat-1",
+          project_id: null,
+          title: null,
+          model: "anthropic::model-1",
+          reasoning_effort: "high",
+          permission_mode: "auto",
+          attachment_revision: 0,
+          root_attachments: [],
+          created_at: "2026-07-29T12:00:00Z",
+        }),
+        { status: 201 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("http://127.0.0.1", "token");
+
+    await client.createChat("anthropic::model-1", null, {
+      reasoningEffort: "high",
+      permissionMode: "auto",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1/chats",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          model: "anthropic::model-1",
+          reasoning_effort: "high",
+          permission_mode: "auto",
+        }),
+      }),
+    );
+  });
+
   it("keeps a loose chat explicitly outside project scope", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(
