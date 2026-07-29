@@ -9,8 +9,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::deliverable::{
-    output_revision_relative_path, validate_deliverable_name, CreateOutput, NewOutputRevision,
-    DELIVERABLES_DIRECTORY, MAX_DELIVERABLE_BYTES, MAX_DELIVERABLE_NAME_CHARS,
+    output_revision_relative_path, validate_deliverable_name, CreateOutput, DeliverableKind,
+    NewOutputRevision, DELIVERABLES_DIRECTORY, MAX_DELIVERABLE_BYTES, MAX_DELIVERABLE_NAME_CHARS,
 };
 use crate::error::Result;
 use crate::id::{OutputId, OutputRevisionId};
@@ -184,6 +184,7 @@ impl Tool for CreateDeliverable {
             byte_len: content_len as u64,
             sha256: Sha256::digest(&published).into(),
             turn_id: Some(call.turn_id),
+            producing_run_id: None,
             citations: Vec::new(),
             created_at: call.created_at,
         };
@@ -196,6 +197,7 @@ impl Tool for CreateDeliverable {
                         id: output_id,
                         chat_id: ctx.chat_id,
                         filename,
+                        kind: DeliverableKind::Text,
                         revision,
                     })
                     .await
