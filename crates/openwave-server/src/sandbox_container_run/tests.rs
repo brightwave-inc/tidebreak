@@ -22,9 +22,9 @@ use async_trait::async_trait;
 use futures::stream::{self, BoxStream};
 use futures::StreamExt;
 use openwave_core::{
-    AdmitSandboxAgentRunOutcome, AgentRun, AgentRunExecutionLocation, AgentRunId, AgentRunStatus,
-    CallId, Chat, ChatId, ChatRequest, DbStore, ModelProvider, ProviderEvent, ProviderId, Result,
-    StopReason, Store,
+    AdmitSandboxAgentRunOutcome, AgentConfig, AgentRun, AgentRunExecutionLocation, AgentRunId,
+    AgentRunStatus, CallId, Chat, ChatId, ChatRequest, DbStore, ModelProvider, ProviderEvent,
+    ProviderId, Result, StopReason, Store,
 };
 use openwave_sandbox_agent::run_agent;
 use openwave_sandbox_protocol::{
@@ -55,6 +55,13 @@ use crate::resolver::ProviderResolver;
 struct ScriptedProvider {
     completions: Mutex<Vec<String>>,
     calls: AtomicUsize,
+    /// Every prompt the sandbox asked the host to complete. The sandbox's
+    /// transcript opens with `Task: <task>`, so this is where a test reads back
+    /// which task the container actually received.
+    prompts: Mutex<Vec<String>>,
+    /// How long each completion stalls, so a test can hold a drive open across
+    /// several lease periods.
+    delay: Duration,
 }
 
 impl ScriptedProvider {
@@ -62,7 +69,27 @@ impl ScriptedProvider {
         Self {
             completions: Mutex::new(completions),
             calls: AtomicUsize::new(0),
+            prompts: Mutex::new(Vec::new()),
+            delay: Duration::ZERO,
         }
+    }
+
+    /// The same provider, but stalling `delay` before answering each completion,
+    /// so a drive spans several lease periods.
+    fn slow(completions: Vec<String>, delay: Duration) -> Self {
+        Self {
+            delay,
+            ..Self::new(completions)
+        }
+    }
+
+    fn first_prompt(&self) -> String {
+        self.prompts
+            .lock()
+            .unwrap()
+            .first()
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
@@ -72,8 +99,15 @@ impl ModelProvider for ScriptedProvider {
         ProviderId::new("scripted-host-model")
     }
 
-    async fn stream(&self, _request: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+    async fn stream(&self, request: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
         let index = self.calls.fetch_add(1, Ordering::SeqCst);
+        for message in &request.messages {
+            for block in &message.content {
+                if let openwave_core::ContentBlock::Text { text } = block {
+                    self.prompts.lock().unwrap().push(text.clone());
+                }
+            }
+        }
         let text = self
             .completions
             .lock()
@@ -81,6 +115,9 @@ impl ModelProvider for ScriptedProvider {
             .get(index)
             .cloned()
             .unwrap_or_else(|| "the final answer".to_owned());
+        if !self.delay.is_zero() {
+            tokio::time::sleep(self.delay).await;
+        }
         Ok(stream::iter(vec![
             ProviderEvent::TextDelta { text },
             ProviderEvent::Stop {
@@ -104,22 +141,51 @@ impl ProviderResolver for FixedResolver {
 
 // --- Mock Docker backend ------------------------------------------------------
 
-/// A [`SandboxBackend`] that stands in for Docker: `provision` and `destroy`
-/// only record, and `address` returns a fixed loopback address the test's own
-/// sandbox listener is bound to (or an unreachable one, to exercise failure).
+/// A [`SandboxBackend`] that stands in for Docker.
+///
+/// `provision` starts the real in-container agent on a loopback listener with
+/// **the task the driver asked to be delivered** — the same relationship Docker
+/// has to the container's `OPENWAVE_SANDBOX_TASK` environment. That is what makes
+/// task delivery genuinely testable here: if the driver failed to pass the run's
+/// task, the sandbox would run the image's default task and the committed result
+/// would answer the wrong question.
 struct MockBackend {
+    /// When set, `address` resolves here instead of the provisioned sandbox —
+    /// used to point the driver at an unreachable port.
+    address_override: Option<String>,
+    /// The loopback address of the sandbox started at provision.
     address: Mutex<Option<String>>,
     provisions: AtomicUsize,
     destroys: AtomicUsize,
+    delivered_task: Mutex<Option<String>>,
 }
 
 impl MockBackend {
-    fn reachable(base_url: String) -> Arc<Self> {
+    /// A backend that starts the real agent on provision, carrying whatever task
+    /// the driver delivered.
+    fn spawning() -> Arc<Self> {
         Arc::new(Self {
-            address: Mutex::new(Some(base_url)),
+            address_override: None,
+            address: Mutex::new(None),
             provisions: AtomicUsize::new(0),
             destroys: AtomicUsize::new(0),
+            delivered_task: Mutex::new(None),
         })
+    }
+
+    /// A backend whose containers are never reachable at `base_url`.
+    fn unreachable(base_url: String) -> Arc<Self> {
+        Arc::new(Self {
+            address_override: Some(base_url),
+            address: Mutex::new(None),
+            provisions: AtomicUsize::new(0),
+            destroys: AtomicUsize::new(0),
+            delivered_task: Mutex::new(None),
+        })
+    }
+
+    fn task_delivered(&self) -> Option<String> {
+        self.delivered_task.lock().unwrap().clone()
     }
 }
 
@@ -130,6 +196,17 @@ impl SandboxBackend for MockBackend {
         request: ProvisionRequest,
     ) -> std::result::Result<SandboxHandle, BackendError> {
         self.provisions.fetch_add(1, Ordering::SeqCst);
+        *self.delivered_task.lock().unwrap() = request.task.clone();
+        if self.address_override.is_none() {
+            // Start the sandbox on the delivered task, exactly as the image does
+            // from its environment. A driver that delivered nothing gets the
+            // image's default task, which is the failure this models.
+            let task = request
+                .task
+                .clone()
+                .unwrap_or_else(|| "Summarize what this sandbox agent can do.".to_owned());
+            *self.address.lock().unwrap() = Some(spawn_sandbox_agent(&task).await);
+        }
         Ok(SandboxHandle {
             reference: format!("mock-{}", request.run_id),
             tag: request.tag,
@@ -140,8 +217,14 @@ impl SandboxBackend for MockBackend {
         &self,
         _handle: &SandboxHandle,
     ) -> std::result::Result<SandboxAddress, BackendError> {
-        let Some(base_url) = self.address.lock().unwrap().clone() else {
-            return Err(BackendError::Unaddressable("no address".to_owned()));
+        let base_url = match &self.address_override {
+            Some(base_url) => base_url.clone(),
+            None => self
+                .address
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| BackendError::Unaddressable("not provisioned".to_owned()))?,
         };
         Ok(SandboxAddress {
             base_url,
@@ -172,6 +255,7 @@ async fn store() -> (tempfile::TempDir, Arc<dyn Store>, Chat) {
         project_id: None,
         title: Some("container".into()),
         model: Some("host-model".into()),
+        permission_mode: None,
         reasoning_effort: None,
         attachment_revision: 0,
         root_attachments: Vec::new(),
@@ -246,8 +330,8 @@ async fn spawn_sandbox_agent(task: &str) -> String {
 fn fast_config() -> SandboxContainerRunConfig {
     SandboxContainerRunConfig {
         lease: Duration::from_secs(30),
+        heartbeat: Duration::from_secs(5),
         dial_timeout: Duration::from_secs(2),
-        max_tokens: 256,
         reattach_attempts: 2,
         reattach_backoff: Duration::from_millis(10),
     }
@@ -258,15 +342,18 @@ fn fast_config() -> SandboxContainerRunConfig {
 /// The whole stack over loopback: admit a container run, drive it with the real
 /// in-container agent loop answering `word_count` and dialing the host for model
 /// inference, and assert the host committed the result exactly once, proxied
-/// each model step through the resolver, and tore the container down.
+/// each model step through the resolver, delivered the run's ACTUAL task, and
+/// tore the container down.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn drives_a_container_run_end_to_end_over_loopback() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let (_dir, store, chat) = store().await;
-        let run_id = admit_container_run(&store, chat.id, "count some words").await;
+        let task = "count the words in this delegated sentence";
+        let run_id = admit_container_run(&store, chat.id, task).await;
 
-        let base_url = spawn_sandbox_agent("count some words").await;
-        let backend = MockBackend::reachable(base_url);
+        // The backend starts the sandbox on whatever task the driver delivered,
+        // exactly as Docker starts the container from its environment.
+        let backend = MockBackend::spawning();
         // Step 1: run word_count on three words. Step 2: the final answer.
         let provider = Arc::new(ScriptedProvider::new(vec![
             "use-tool:word_count:{\"text\":\"one two three\"}".to_owned(),
@@ -296,9 +383,176 @@ async fn drives_a_container_run_end_to_end_over_loopback() {
             "each model step should proxy through the host exactly once"
         );
 
+        // The run's ACTUAL delegated task reached the container — not the image's
+        // default — and is what the container asked the host to reason about.
+        assert_eq!(backend.task_delivered().as_deref(), Some(task));
+        assert!(
+            provider.first_prompt().contains(task),
+            "the container must work on the delegated task, got prompt: {}",
+            provider.first_prompt()
+        );
+
         // The container was provisioned once and torn down.
         assert_eq!(backend.provisions.load(Ordering::SeqCst), 1);
         assert_eq!(backend.destroys.load(Ordering::SeqCst), 1);
+    })
+    .await
+    .expect("test completed within its time bound");
+}
+
+/// An agent loop that ends WITHOUT submitting a result — it exhausts its step
+/// budget — still terminalizes the run and tears the container down.
+///
+/// This is the container-leak case a reachable-but-resultless container creates:
+/// the supervisor keeps serving after the agent loop returns, so a driver that
+/// only watched for a result would wait on the open socket forever, never tear
+/// down, and leave the run to be reaped. The agent's terminal failure event is
+/// what closes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminalizes_and_tears_down_when_the_agent_loop_ends_without_a_result() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (_dir, store, chat) = store().await;
+        let run_id = admit_container_run(&store, chat.id, "never finishes").await;
+
+        let backend = MockBackend::spawning();
+        // Every completion is another tool directive, so the loop never submits a
+        // final answer and exhausts MAX_STEPS.
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            "use-tool:word_count:{\"text\":\"a\"}".to_owned();
+            16
+        ]));
+        let resolver = Arc::new(FixedResolver(provider.clone()));
+
+        let runner =
+            SandboxContainerRunner::new(store.clone(), backend.clone(), resolver, fast_config());
+        let outcome = runner
+            .drive(run_id)
+            .await
+            .expect("driving succeeds")
+            .expect("the container run is claimable");
+        assert_eq!(outcome, SandboxContainerRunOutcome::Failed(run_id));
+
+        let failed = store.get_agent_run(run_id).await.unwrap().unwrap();
+        assert_eq!(failed.status, AgentRunStatus::Failed);
+        assert_eq!(
+            failed.last_error_code.as_deref(),
+            Some("sandbox_agent_failed"),
+            "a loop that ended without a result is an agent failure, not a transport one"
+        );
+        // The container did not leak: teardown ran even though no result arrived.
+        assert_eq!(backend.destroys.load(Ordering::SeqCst), 1);
+    })
+    .await
+    .expect("test completed within its time bound");
+}
+
+/// The driver keeps the run's lease live while the container works, so a run that
+/// outlives one lease period is not reaped mid-flight.
+///
+/// The lease here is deliberately short and the heartbeat shorter: the drive is
+/// held open past several lease periods, and the run must still be `running` with
+/// a lease extended beyond its original expiry rather than terminalized.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn heartbeats_the_lease_so_a_long_run_is_not_reaped() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (_dir, store, chat) = store().await;
+        let run_id = admit_container_run(&store, chat.id, "takes a while").await;
+
+        let backend = MockBackend::spawning();
+        // A provider that stalls each completion keeps the container working, so
+        // the drive stays open across several lease periods.
+        let provider = Arc::new(ScriptedProvider::slow(
+            vec![
+                "use-tool:word_count:{\"text\":\"a b\"}".to_owned(),
+                "done".to_owned(),
+            ],
+            Duration::from_millis(700),
+        ));
+        let resolver = Arc::new(FixedResolver(provider.clone()));
+
+        let runner = SandboxContainerRunner::new(
+            store.clone(),
+            backend.clone(),
+            resolver,
+            SandboxContainerRunConfig {
+                lease: Duration::from_secs(2),
+                heartbeat: Duration::from_millis(100),
+                ..fast_config()
+            },
+        );
+
+        // Observe the lease while the drive runs: it must be extended past the
+        // original 2s expiry rather than left to lapse.
+        let observer = {
+            let store = store.clone();
+            tokio::spawn(async move {
+                let mut seen: Vec<chrono::DateTime<chrono::Utc>> = Vec::new();
+                for _ in 0..30 {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    if let Ok(Some(run)) = store.get_agent_run(run_id).await {
+                        if let Some(expiry) = run.lease_expires_at {
+                            seen.push(expiry);
+                        }
+                        if run.status != AgentRunStatus::Running {
+                            break;
+                        }
+                    }
+                }
+                seen
+            })
+        };
+
+        let outcome = runner
+            .drive(run_id)
+            .await
+            .expect("driving succeeds")
+            .expect("the container run is claimable");
+        // The run completed normally rather than being reaped out from under the
+        // still-working container.
+        assert_eq!(outcome, SandboxContainerRunOutcome::Completed(run_id));
+
+        let seen = observer.await.unwrap();
+        assert!(
+            seen.windows(2).any(|pair| pair[1] > pair[0]),
+            "the lease must be extended while the container works, saw: {seen:?}"
+        );
+    })
+    .await
+    .expect("test completed within its time bound");
+}
+
+/// A container run is exempt from the in-process lease reaper: its lease
+/// expiring does not terminalize it, because no in-process worker holds it and
+/// the container may still be working and spending.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_in_process_reaper_leaves_an_expired_container_lease_alone() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (_dir, store, chat) = store().await;
+        let run_id = admit_container_run(&store, chat.id, "reaper bait").await;
+
+        // Claim with a lease that expires immediately, then let the in-process
+        // scheduler scan. Its lease reaper would otherwise fail this run (a
+        // container run has max_attempts = 1, so attempt_count >= max_attempts
+        // the moment it is claimed).
+        let lease = Uuid::new_v4();
+        store
+            .claim_container_agent_run(run_id, lease, chrono::Duration::milliseconds(1))
+            .await
+            .unwrap()
+            .expect("the container claim should pick up the queued run");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let _ = store
+            .claim_agent_run(Uuid::new_v4(), chrono::Duration::minutes(5), 4, 4)
+            .await
+            .unwrap();
+
+        let after = store.get_agent_run(run_id).await.unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            AgentRunStatus::Running,
+            "the in-process reaper must not terminalize a container run on lease expiry"
+        );
     })
     .await
     .expect("test completed within its time bound");
@@ -325,8 +579,10 @@ async fn host_model_proxy_answers_a_reissued_inference_from_the_op_log() {
             ),
             Arc::new(HostModelProxy {
                 resolver: Arc::new(FixedResolver(provider.clone())),
-                model: "host-model".to_owned(),
-                max_tokens: 256,
+                config: AgentConfig {
+                    model: "host-model".to_owned(),
+                    ..AgentConfig::default()
+                },
             }),
             Arc::new(DurableOperationStore::new(store.clone(), run_id)),
         );
@@ -381,7 +637,7 @@ async fn fails_terminally_and_tears_down_when_the_container_is_unreachable() {
         let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let dead_addr = dead.local_addr().unwrap();
         drop(dead);
-        let backend = MockBackend::reachable(format!("http://{dead_addr}"));
+        let backend = MockBackend::unreachable(format!("http://{dead_addr}"));
         let resolver = Arc::new(FixedResolver(Arc::new(ScriptedProvider::new(vec![]))));
 
         let runner =

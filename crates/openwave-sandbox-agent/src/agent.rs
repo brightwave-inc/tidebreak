@@ -59,7 +59,19 @@ pub enum AgentRunError {
 /// [`AgentRunError::Model`] if a model step fails, or [`AgentRunError::StepLimit`]
 /// if the model never submits a final answer within the step bound.
 pub async fn run_agent(run: SandboxRun, task: impl Into<String>) -> Result<String, AgentRunError> {
-    let task = task.into();
+    let outcome = run_loop(run.clone(), task.into()).await;
+    // Every exit from the loop must put a terminal event on the stream. The
+    // supervisor keeps serving the connection after this returns, so a host that
+    // saw neither a result nor a failure would wait on an open socket forever
+    // and leak the sandbox. `run_loop` emits the result on the success path; a
+    // failure is signalled here, once, on every other path.
+    if let Err(error) = &outcome {
+        let _ = run.emit_failed(error.to_string()).await;
+    }
+    outcome
+}
+
+async fn run_loop(run: SandboxRun, task: String) -> Result<String, AgentRunError> {
     let tools = sandbox_tool_registry();
     let model = HostModel::new(run.clone());
     // The sandbox loop has no host chat identity or filesystem scratch; a fresh

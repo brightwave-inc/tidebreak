@@ -2329,6 +2329,17 @@ where
 {
     entities::agent_run::Entity::find()
         .filter(entities::agent_run::Column::Tier.eq(AgentRunTier::Background.as_str()))
+        // Lease expiry means "the in-process worker that held this run died".
+        // A sandbox-resident run holds no in-process worker: its driver keeps
+        // the lease live by heartbeat while the container works, and a driver
+        // that dies is recovered by reconciling the existing container, not by
+        // reaping the run out from under a container that is still spending.
+        // Its absolute deadline (checked by the deadline scan above, which has
+        // no such exemption) remains the backstop.
+        .filter(
+            entities::agent_run::Column::ExecutionLocation
+                .eq(AgentRunExecutionLocation::InProcess.as_str()),
+        )
         .filter(entities::agent_run::Column::Id.in_subquery(admitted_child_id_subquery()))
         .filter(
             sea_orm::Condition::any()

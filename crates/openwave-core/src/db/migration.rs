@@ -409,8 +409,10 @@ impl MigrationTrait for AllowContainerExecutionLocation {
 async fn reject_down_with_container_rows(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     let conn = manager.get_connection();
     let backend = manager.get_database_backend();
+    // sea-orm 2.0: `query_one` takes a `StatementBuilder`; a prepared raw
+    // `Statement` goes through `query_one_raw`.
     let remaining = conn
-        .query_one(sea_orm::Statement::from_string(
+        .query_one_raw(sea_orm::Statement::from_string(
             backend,
             "SELECT COUNT(*) AS remaining FROM agent_run WHERE execution_location = 'container'",
         ))

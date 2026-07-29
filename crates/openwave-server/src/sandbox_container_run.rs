@@ -40,8 +40,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::StreamExt;
 use openwave_core::{
-    AgentError, AgentRun, AgentRunExecutionLocation, AgentRunId, AgentRunStatus, ChatMessage,
-    ChatRequest, ProviderEvent, Result, Role, Store, SubmitAgentRunResultOutcome,
+    AgentConfig, AgentError, AgentRun, AgentRunExecutionLocation, AgentRunId, AgentRunStatus,
+    ChatMessage, ChatRequest, ProviderEvent, Result, Role, Store, SubmitAgentRunResultOutcome,
 };
 use openwave_sandbox_protocol::{
     events::EventPayload,
@@ -71,10 +71,14 @@ pub struct SandboxContainerRunConfig {
     /// The bounded lease the driver claims the run under; the same lease fences
     /// the result commit.
     pub lease: Duration,
+    /// How often the driver extends that lease while the container works.
+    ///
+    /// A container run outlives one lease period, and the in-process reaper
+    /// terminalizes a background run whose lease expires. Must be well under
+    /// [`lease`](Self::lease).
+    pub heartbeat: Duration,
     /// How long to wait for one TCP dial of the container's loopback address.
     pub dial_timeout: Duration,
-    /// Upper bound on tokens the host requests per proxied model completion.
-    pub max_tokens: u32,
     /// How many times the driver re-dials after an unplanned disconnect before
     /// giving up on an attached-only run. Reattachment resumes the event stream
     /// from the committed cursor and replays any recorded reverse answer.
@@ -87,8 +91,8 @@ impl Default for SandboxContainerRunConfig {
     fn default() -> Self {
         Self {
             lease: Duration::from_secs(60),
+            heartbeat: Duration::from_secs(15),
             dial_timeout: Duration::from_secs(10),
-            max_tokens: 4_096,
             reattach_attempts: 5,
             reattach_backoff: Duration::from_millis(250),
         }
@@ -121,8 +125,12 @@ pub enum SandboxContainerRunOutcome {
 /// reconnect replays that record rather than spending a second time.
 struct HostModelProxy {
     resolver: Arc<dyn ProviderResolver>,
-    model: String,
-    max_tokens: u32,
+    /// The run's model selection already resolved through the host's model
+    /// registry (provider route, reasoning shape, token and effort bounds), so
+    /// every proxied completion egresses under exactly the policy an in-process
+    /// run would. Resolved once at attach and failed closed there, never
+    /// re-derived per request from an untrusted prompt.
+    config: AgentConfig,
 }
 
 #[async_trait]
@@ -139,10 +147,16 @@ impl CapabilityResponder for HostModelProxy {
             ));
         };
         let provider = self.resolver.resolve().await;
+        // The sandbox names no model, provider, or endpoint: it supplies only a
+        // prompt, and the host's policy-resolved config decides where it goes.
         let request = ChatRequest {
-            model: self.model.clone(),
+            provider: self.config.provider.clone(),
+            model: self.config.model.clone(),
+            reasoning_model: self.config.reasoning_model,
             messages: vec![ChatMessage::text(Role::User, params.prompt)],
-            max_tokens: Some(self.max_tokens),
+            max_tokens: self.config.max_tokens,
+            temperature: self.config.temperature,
+            reasoning_effort: self.config.reasoning_effort,
             ..Default::default()
         };
         let mut stream = match provider.stream(request).await {
@@ -273,7 +287,23 @@ impl SandboxContainerRunner {
                     .await;
             }
         };
-        let model = run.model.clone().unwrap_or_default();
+        // Resolve the run's model through the host's registry BEFORE any
+        // container exists, and fail closed if it does not resolve: the in-process
+        // worker gates every egress on the registry, and a container run must
+        // egress under the same policy rather than a looser one.
+        let config = match self.resolve_model_config(&run).await {
+            Ok(config) => config,
+            Err(error) => {
+                return self
+                    .fail(
+                        run_id,
+                        lease_token,
+                        "model_policy_refused",
+                        &error.to_string(),
+                    )
+                    .await;
+            }
+        };
 
         // Provisioning intent and correlation tag before the create call: the
         // host mints the tag, and the backend stamps it into the container's
@@ -290,6 +320,8 @@ impl SandboxContainerRunner {
                 // A local container has no external lifetime cap, which is why
                 // the run is attached-only.
                 lifetime_cap_secs: None,
+                // The delegated task. Interim delivery: see `ProvisionRequest::task`.
+                task: Some(task),
             })
             .await
         {
@@ -304,20 +336,53 @@ impl SandboxContainerRunner {
         // From here on a container exists, so every terminal path must drive its
         // teardown obligation.
         let outcome = self
-            .attach_and_drive(&run, lease_token, protocol_run_id, task, model, &handle)
+            .attach_and_drive(&run, lease_token, protocol_run_id, config, &handle)
             .await;
         self.teardown(&handle).await;
         outcome
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// Resolve the run's frozen model selection into an egress config under the
+    /// host's model-registry policy, exactly as the in-process worker does.
+    ///
+    /// Fails closed: an absent or unregistered model refuses the run rather than
+    /// egressing on an empty or unvetted selection.
+    async fn resolve_model_config(&self, run: &AgentRun) -> Result<AgentConfig> {
+        let Some(model) = run.model.clone().filter(|model| !model.is_empty()) else {
+            return Err(AgentError::config(
+                "container agent run has no frozen model selection",
+            ));
+        };
+        let chat = self
+            .store
+            .get_chat(run.chat_id)
+            .await?
+            .ok_or_else(|| AgentError::msg("container agent run has no chat"))?;
+        let mut config = AgentConfig::default();
+        if self.resolver.enforces_model_registry() {
+            let Some(policy) =
+                crate::providers::resolve_model_policy(&*self.store, &model, true).await?
+            else {
+                return Err(AgentError::config(
+                    "container sandbox model is not registered for its provider",
+                ));
+            };
+            crate::providers::apply_model_policy(&mut config, &policy, chat.reasoning_effort)?;
+        } else {
+            // A test or custom embedder that injects one provider keeps its
+            // free-form model contract, as elsewhere in the server.
+            config.model = model;
+            config.reasoning_effort = chat.reasoning_effort;
+        }
+        Ok(config)
+    }
+
     async fn attach_and_drive(
         &self,
         run: &AgentRun,
         lease_token: Uuid,
         protocol_run_id: RunId,
-        task: String,
-        model: String,
+        config: AgentConfig,
         handle: &SandboxHandle,
     ) -> Result<SandboxContainerRunOutcome> {
         let run_id = run.id;
@@ -333,53 +398,127 @@ impl SandboxContainerRunner {
             GrantSet::new(provenance, [Capability::ModelInference]),
             Arc::new(HostModelProxy {
                 resolver: Arc::clone(&self.resolver),
-                model,
-                max_tokens: self.config.max_tokens,
+                config,
             }),
             Arc::new(DurableOperationStore::new(
                 Arc::clone(&self.store),
                 protocol_run_id,
             )),
         );
-        // The task is delivered out of band into the container (its environment
-        // today); the run-init frame is a protocol follow-up. Retained here so
-        // the driver is the single place that would deliver it once the frame
-        // lands.
-        let _ = task;
 
+        // Drive the container while holding the lease live. A container run
+        // routinely outlives one lease period, and the in-process reaper
+        // terminalizes a background run whose lease expires — so without this
+        // heartbeat the run is failed out from under a container that is still
+        // working and still spending. The whole drive is additionally bounded by
+        // the run's absolute deadline, so no path can wait forever.
+        let drive = self.drive_events(protocol_run_id, handle, &host);
+        tokio::pin!(drive);
+        let mut heartbeat = tokio::time::interval(self.config.heartbeat);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        heartbeat.tick().await;
+        let deadline = self.deadline_sleep(run);
+        tokio::pin!(deadline);
+
+        let end = loop {
+            tokio::select! {
+                end = &mut drive => break end,
+                () = &mut deadline => break DriveEnd::DeadlineExceeded,
+                _ = heartbeat.tick() => {
+                    if !self
+                        .store
+                        .heartbeat_agent_run(
+                            run_id,
+                            lease_token,
+                            chrono_duration(self.config.lease)?,
+                        )
+                        .await?
+                    {
+                        // The lease is gone (cancelled, or reaped): stop driving
+                        // rather than keep a container working for a run this
+                        // host no longer owns. Teardown still runs.
+                        break DriveEnd::LeaseLost;
+                    }
+                }
+            }
+        };
+
+        match end {
+            DriveEnd::Result(text) => self.commit_result(run_id, lease_token, &text).await,
+            DriveEnd::AgentFailed(detail) => {
+                self.fail(run_id, lease_token, "sandbox_agent_failed", &detail)
+                    .await
+            }
+            DriveEnd::TransportFailed(detail) => {
+                self.fail(run_id, lease_token, "sandbox_transport_failed", &detail)
+                    .await
+            }
+            DriveEnd::Unreachable => {
+                self.fail(
+                    run_id,
+                    lease_token,
+                    "sandbox_unreachable",
+                    "container did not deliver a terminal event before its reattach budget",
+                )
+                .await
+            }
+            DriveEnd::DeadlineExceeded => {
+                self.fail(
+                    run_id,
+                    lease_token,
+                    "deadline_exceeded",
+                    "container run exceeded its absolute deadline",
+                )
+                .await
+            }
+            DriveEnd::LeaseLost => Ok(SandboxContainerRunOutcome::LeaseLost(run_id)),
+        }
+    }
+
+    /// A sleep that fires at the run's absolute deadline. A run with no deadline
+    /// (which the schema forbids for a background run) never fires, and the
+    /// reattach budget still bounds the drive.
+    async fn deadline_sleep(&self, run: &AgentRun) {
+        let Some(deadline_at) = run.deadline_at else {
+            return std::future::pending().await;
+        };
+        let remaining = deadline_at.signed_duration_since(chrono::Utc::now());
+        // A negative remaining duration means the deadline already passed, and
+        // `to_std` refuses it — fire immediately in that case.
+        if let Ok(remaining) = remaining.to_std() {
+            tokio::time::sleep(remaining).await;
+        }
+    }
+
+    /// Attach and drain the container's event stream until it reports a terminal
+    /// event, reattaching across unplanned disconnects within the budget.
+    async fn drive_events(
+        &self,
+        protocol_run_id: RunId,
+        handle: &SandboxHandle,
+        host: &CapabilityHost,
+    ) -> DriveEnd {
         let mut cursor = EventCursor::START;
         let mut attempt = 0u32;
         loop {
             match self
-                .drain_connection(protocol_run_id, handle, &host, &mut cursor)
+                .drain_connection(protocol_run_id, handle, host, &mut cursor)
                 .await
             {
-                DrainOutcome::Result(text) => {
-                    return self.commit_result(run_id, lease_token, &text).await;
-                }
+                DrainOutcome::Result(text) => return DriveEnd::Result(text),
+                DrainOutcome::AgentFailed(detail) => return DriveEnd::AgentFailed(detail),
                 DrainOutcome::Disconnected => {
                     // An attached-only run that lost its host takes no new model
                     // step; reattachment resumes the stream from the committed
                     // cursor. Bound the retries so a container that never comes
                     // back is failed rather than driven forever.
                     if attempt >= self.config.reattach_attempts {
-                        return self
-                            .fail(
-                                run_id,
-                                lease_token,
-                                "sandbox_unreachable",
-                                "container did not deliver a result before its reattach budget",
-                            )
-                            .await;
+                        return DriveEnd::Unreachable;
                     }
                     attempt += 1;
                     tokio::time::sleep(self.config.reattach_backoff).await;
                 }
-                DrainOutcome::Failed(detail) => {
-                    return self
-                        .fail(run_id, lease_token, "sandbox_transport_failed", &detail)
-                        .await;
-                }
+                DrainOutcome::Failed(detail) => return DriveEnd::TransportFailed(detail),
             }
         }
     }
@@ -425,14 +564,19 @@ impl SandboxContainerRunner {
                 };
             }
         };
-        // Drain events, committing the cursor by acknowledging each, until the
-        // result arrives or the connection closes.
+        // Drain events, committing the cursor by acknowledging each, until a
+        // terminal event arrives or the connection closes. Both terminal events
+        // end the drive: the supervisor keeps serving after its agent loop
+        // returns, so waiting only for a result would hang on an open socket and
+        // leak the container.
         while let Some(event) = conn.next_event().await {
             let payload = event.payload.clone();
             *cursor = EventCursor::committed(event.sequence);
             conn.acknowledge(*cursor).await;
-            if let EventPayload::Result(text) = payload {
-                return DrainOutcome::Result(text);
+            match payload {
+                EventPayload::Result(text) => return DrainOutcome::Result(text),
+                EventPayload::Failed(detail) => return DrainOutcome::AgentFailed(detail),
+                _ => {}
             }
         }
         DrainOutcome::Disconnected
@@ -531,11 +675,32 @@ impl SandboxContainerRunner {
 enum DrainOutcome {
     /// The container delivered its terminal result.
     Result(String),
-    /// The connection dropped (or could not be established) with no result; an
-    /// attached-only run reattaches and resumes from the committed cursor.
+    /// The container's agent loop ended without a result — it exhausted its step
+    /// budget or a model step failed. Terminal, and distinct from a transport
+    /// failure: the container worked and reported an outcome.
+    AgentFailed(String),
+    /// The connection dropped (or could not be established) with no terminal
+    /// event; an attached-only run reattaches and resumes from the committed
+    /// cursor.
     Disconnected,
     /// A terminal transport condition (version refusal, vanished container).
     Failed(String),
+}
+
+/// How the whole drive ended, across every connection to the container.
+enum DriveEnd {
+    /// The container submitted a result to commit.
+    Result(String),
+    /// The container's agent loop ended without a result.
+    AgentFailed(String),
+    /// A terminal transport condition.
+    TransportFailed(String),
+    /// The container never came back within the reattach budget.
+    Unreachable,
+    /// The run's absolute deadline passed while the container worked.
+    DeadlineExceeded,
+    /// The lease was lost mid-drive; this host no longer owns the run.
+    LeaseLost,
 }
 
 fn chrono_duration(duration: Duration) -> Result<chrono::Duration> {

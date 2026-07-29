@@ -57,6 +57,10 @@ pub const RUN_TAG_LABEL: &str = "openwave.run-tag";
 pub const RUN_ID_LABEL: &str = "openwave.run-id";
 /// Environment variable carrying the per-run transport secret into the container.
 const TRANSPORT_SECRET_ENV: &str = "OPENWAVE_TRANSPORT_SECRET";
+/// Environment variable carrying the delegated task into the container. The
+/// agent image reads its task from here; see [`ProvisionRequest::task`] for why
+/// this rides provisioning rather than a run-init frame today.
+const TASK_ENV: &str = "OPENWAVE_SANDBOX_TASK";
 /// Go-template that lists a tagged container's id and correlation tag, tab-separated.
 /// Kept in sync with [`RUN_TAG_LABEL`] by a unit test.
 const TAG_LIST_FORMAT: &str = "{{.ID}}\t{{.Label \"openwave.run-tag\"}}";
@@ -250,10 +254,20 @@ impl SandboxBackend for DockerSandboxBackend {
         // `lifetime_cap_secs` is not enforceable here and is intentionally ignored.
         let secret = Uuid::new_v4().to_string();
         let mut command = self.command();
-        command.args(run_args(&self.config, request.tag, request.run_id));
+        command.args(run_args(
+            &self.config,
+            request.tag,
+            request.run_id,
+            request.task.is_some(),
+        ));
         // Set the secret on the runtime CLI's own environment and pass it through with
         // a valueless `--env`, so it never appears in this process's argv.
         command.env(TRANSPORT_SECRET_ENV, &secret);
+        // The delegated task travels the same way: by name only, so task text
+        // never lands in this process's argv or in `ps` output.
+        if let Some(task) = &request.task {
+            command.env(TASK_ENV, task);
+        }
         let output = command
             .output()
             .await
@@ -315,7 +329,7 @@ impl SandboxBackend for DockerSandboxBackend {
 
 /// The `docker run` argument vector for one provisioning. Factored out so the
 /// label, publish, and env-passthrough composition is testable without a runtime.
-fn run_args(config: &DockerConfig, tag: SandboxTag, run_id: RunId) -> Vec<String> {
+fn run_args(config: &DockerConfig, tag: SandboxTag, run_id: RunId, with_task: bool) -> Vec<String> {
     let mut args = vec![
         "run".to_owned(),
         "-d".to_owned(),
@@ -325,10 +339,16 @@ fn run_args(config: &DockerConfig, tag: SandboxTag, run_id: RunId) -> Vec<String
         format!("{RUN_ID_LABEL}={run_id}"),
         "--env".to_owned(),
         TRANSPORT_SECRET_ENV.to_owned(),
+    ];
+    if with_task {
+        args.push("--env".to_owned());
+        args.push(TASK_ENV.to_owned());
+    }
+    args.extend([
         "--publish".to_owned(),
         format!("127.0.0.1::{}", config.listener_port),
         config.image.clone(),
-    ];
+    ]);
     args.extend(config.command.iter().cloned());
     args
 }
@@ -472,6 +492,7 @@ mod tests {
             run_id: RunId::new(),
             tag: SandboxTag::new(),
             lifetime_cap_secs: None,
+            task: None,
         };
         assert!(matches!(
             backend.provision(request).await,
@@ -510,7 +531,7 @@ mod tests {
             command: vec!["sleep".to_owned(), "infinity".to_owned()],
             ..DockerConfig::default()
         };
-        let args = run_args(&config, tag, run_id);
+        let args = run_args(&config, tag, run_id, true);
 
         assert_eq!(args[0], "run");
         assert!(args.contains(&"-d".to_owned()));
@@ -522,6 +543,12 @@ mod tests {
         assert!(args
             .iter()
             .all(|arg| !arg.contains(TRANSPORT_SECRET_ENV) || arg == TRANSPORT_SECRET_ENV));
+        // The delegated task is passed by name only too, so task text never
+        // reaches this process's argv.
+        assert!(args.contains(&TASK_ENV.to_owned()));
+        assert!(args
+            .iter()
+            .all(|arg| !arg.contains(TASK_ENV) || arg == TASK_ENV));
         assert!(args.contains(&"127.0.0.1::9000".to_owned()));
         // The image precedes the container command.
         let image_at = args
@@ -531,6 +558,11 @@ mod tests {
         let command_at = args.iter().position(|arg| arg == "sleep").unwrap();
         assert!(image_at < command_at);
         assert_eq!(args.last().unwrap(), "infinity");
+
+        // With no task to deliver the passthrough is omitted entirely, leaving
+        // the image on its own default.
+        let taskless = run_args(&config, tag, run_id, false);
+        assert!(!taskless.contains(&TASK_ENV.to_owned()));
     }
 
     #[test]
@@ -695,6 +727,7 @@ mod tests {
                 run_id: RunId::new(),
                 tag: live_tag,
                 lifetime_cap_secs: None,
+                task: None,
             })
             .await
             .expect("provision live container");
@@ -706,6 +739,7 @@ mod tests {
                 run_id: RunId::new(),
                 tag: orphan_tag,
                 lifetime_cap_secs: None,
+                task: None,
             })
             .await
             .expect("provision orphan container");
