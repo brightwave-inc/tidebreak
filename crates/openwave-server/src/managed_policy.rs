@@ -133,6 +133,11 @@ pub(crate) fn platform_source(_config: &Config) -> Arc<dyn OsPolicySource> {
 pub(crate) struct ManagedPreferencesSource {
     /// Candidate plist paths in precedence order.
     paths: Vec<PathBuf>,
+    /// The uid a channel plist must be owned by to be honored — root in
+    /// production, where MDM materializes the artifacts. Tests point it at
+    /// themselves so channel behavior can be exercised with files a test
+    /// can actually create.
+    trusted_owner: u32,
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -144,11 +149,32 @@ impl ManagedPreferencesSource {
         // resolved from the user database — never `$USER`, which any launcher
         // controls and could point at another account's channel or, via path
         // separators, outside the managed-preferences tree entirely.
-        if let Some(user) = effective_user_name().filter(|name| is_safe_path_component(name)) {
-            paths.push(root.join(&user).join(format!("{bundle_id}.plist")));
+        if let Some(user) = effective_user_name() {
+            if is_safe_path_component(&user) {
+                paths.push(root.join(&user).join(format!("{bundle_id}.plist")));
+            } else {
+                tracing::warn!(
+                    "resolved account name {user:?} is not a safe path component; \
+                     skipping the user-scoped managed-preferences channel"
+                );
+            }
         }
         paths.push(root.join(format!("{bundle_id}.plist")));
-        Self { paths }
+        Self {
+            paths,
+            trusted_owner: 0,
+        }
+    }
+
+    /// Test seam: the production paths are fixed OS locations, so tests
+    /// inject their own channel files here. Ownership is still held to the
+    /// production requirement (root) unless the test relaxes it.
+    #[cfg(test)]
+    fn with_paths(paths: Vec<PathBuf>) -> Self {
+        Self {
+            paths,
+            trusted_owner: 0,
+        }
     }
 }
 
@@ -212,7 +238,7 @@ impl OsPolicySource for ManagedPreferencesSource {
             // device-channel policy the organization actually deployed.
             // Misconfigured is reported only when no channel yields a usable
             // value and at least one had a present-but-broken artifact.
-            match managed_plist_channel(path) {
+            match managed_plist_channel(path, self.trusted_owner) {
                 Ok(Some(url)) => return Ok(Some(url)),
                 Ok(None) => {}
                 Err(error) => {
@@ -229,11 +255,12 @@ impl OsPolicySource for ManagedPreferencesSource {
 }
 
 /// Read one managed-preferences channel: an absent file (or absent key) is
-/// `None`. Only a root-owned file is honored — MDM materializes these as
-/// root, and a plist planted by an unprivileged user must never assert
-/// device policy. Ownership is taken from the opened handle, so the check
-/// and the read cannot be raced apart.
-fn managed_plist_channel(path: &Path) -> Result<Option<String>> {
+/// `None`. Only a file owned by `trusted_owner` (root in production) is
+/// honored — MDM materializes these as root, and a plist planted by an
+/// unprivileged user must never assert device policy. Ownership is taken
+/// from the opened handle, so the check and the read cannot be raced apart.
+#[cfg_attr(not(unix), allow(unused_variables))]
+fn managed_plist_channel(path: &Path, trusted_owner: u32) -> Result<Option<String>> {
     use std::io::Read;
 
     let mut file = match std::fs::File::open(path) {
@@ -258,9 +285,9 @@ fn managed_plist_channel(path: &Path) -> Result<Option<String>> {
                 ))
             })?
             .uid();
-        if owner != 0 {
+        if owner != trusted_owner {
             return Err(AgentError::config(format!(
-                "managed preferences {} are owned by uid {owner}, not root; refusing to honor them",
+                "managed preferences {} are owned by uid {owner}, not uid {trusted_owner}; refusing to honor them",
                 path.display()
             )));
         }
@@ -706,6 +733,80 @@ mod tests {
         ] {
             assert!(gateway_url_from_managed_plist(broken).is_err());
         }
+    }
+
+    /// The channel-fallthrough decision, end to end through resolution: a
+    /// broken user-channel artifact must not hide the device-channel policy
+    /// the organization actually deployed, and misconfigured is reported
+    /// only when no channel yields a usable value. A refactor restoring
+    /// abort-on-first-error fails here.
+    #[tokio::test]
+    async fn a_broken_user_channel_falls_through_to_the_device_channel() {
+        let (store, _directory) = test_store().await;
+        let directory = tempfile::tempdir().unwrap();
+        let user_path = directory.path().join("user").join("app.plist");
+        let device_path = directory.path().join("app.plist");
+        std::fs::create_dir_all(user_path.parent().unwrap()).unwrap();
+        std::fs::write(&user_path, b"not a plist").unwrap();
+        std::fs::write(
+            &device_path,
+            br#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>GatewayURL</key><string>https://corp.gateway</string></dict></plist>"#,
+        )
+        .unwrap();
+
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut reader = ManagedPreferencesSource::with_paths(vec![user_path, device_path.clone()]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            // Trust files owned like the ones this test just wrote.
+            reader.trusted_owner = std::fs::metadata(&device_path).unwrap().uid();
+        }
+
+        let policy = resolve(&*store, &reader).await.unwrap();
+        assert!(policy.managed && !policy.misconfigured);
+        assert_eq!(policy.source, ManagedPolicySource::Os);
+        assert_eq!(policy.gateway_url.as_deref(), Some("https://corp.gateway/"));
+
+        // With no device channel behind it, the broken user channel is what
+        // the reader has to say: misconfigured, never silently unmanaged.
+        std::fs::remove_file(&device_path).unwrap();
+        let policy = resolve(&*store, &reader).await.unwrap();
+        assert!(policy.managed && policy.misconfigured);
+        assert!(policy.gateway_url.is_none());
+    }
+
+    /// The ownership refusal, in the direction testable without root: a
+    /// channel plist owned by the (non-root) test user must be refused
+    /// rather than honored as device policy.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_channel_plist_not_owned_by_root_is_refused() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (store, _directory) = test_store().await;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("app.plist");
+        std::fs::write(
+            &path,
+            br#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>GatewayURL</key><string>https://planted.example</string></dict></plist>"#,
+        )
+        .unwrap();
+        if std::fs::metadata(&path).unwrap().uid() == 0 {
+            // Running as root: the file is genuinely root-owned and the
+            // refusal cannot be observed.
+            return;
+        }
+
+        let reader = ManagedPreferencesSource::with_paths(vec![path]);
+        let policy = resolve(&*store, &reader).await.unwrap();
+        assert!(policy.managed && policy.misconfigured);
+        assert_eq!(policy.source, ManagedPolicySource::Os);
+        assert!(policy.gateway_url.is_none());
     }
 
     /// The guard between the user database and the filesystem join: no

@@ -38,10 +38,14 @@ The native 64-bit view of the hive is read explicitly.
 
 ## Linux — policy file
 
-Install a root-owned JSON file:
+Install a JSON file:
 
 - Path: `/etc/openwave/managed-policy.json`
 - Schema: `{ "gateway_url": "https://gateway.example.com" }`
+
+Deploy it root-owned and not world-writable, as `/etc` content should be.
+Unlike the macOS reader, the file reader does not verify ownership today —
+the permissions are deployment guidance, not an enforced guarantee.
 
 An absent file means no OS policy; an unreadable or malformed file resolves
 managed-but-misconfigured, as above.
