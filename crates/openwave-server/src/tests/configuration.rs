@@ -882,17 +882,20 @@ async fn code_execution_egress_policy_round_trips_and_rejects_secrets() {
     let initial: serde_json::Value = json_body(initial).await;
     assert_eq!(initial["egress"]["policy"]["mode"], "open");
     let enforcement = initial["egress"]["enforcement"].as_array().unwrap();
-    let confirmed = |provider: &str| {
+    let row = |provider: &str| {
         enforcement
             .iter()
             .find(|row| row["provider"] == provider)
-            .unwrap_or_else(|| panic!("{provider} enforcement is disclosed"))["confirmed"]
+            .unwrap_or_else(|| panic!("{provider} enforcement is disclosed"))
             .clone()
     };
-    assert_eq!(confirmed("e2b"), serde_json::json!(true));
+    // E2B is applied but honestly not a full boundary; Daytona is unconfirmed.
+    // Neither is ever shown as a plain boundary, and the gaps are surfaced.
+    assert_eq!(row("e2b")["status"], "applied_with_gaps");
+    assert!(!row("e2b")["gaps"].as_array().unwrap().is_empty());
     assert_eq!(
-        confirmed("daytona"),
-        serde_json::json!(false),
+        row("daytona")["status"],
+        "unconfirmed",
         "Daytona egress is applied but not yet a confirmed boundary"
     );
 

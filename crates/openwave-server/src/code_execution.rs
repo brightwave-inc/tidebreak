@@ -19,7 +19,9 @@ use openwave_code_execution::{
     E2B_CREDENTIAL_KEY,
 };
 use openwave_core::{Result, SecretProvider, Store};
-use openwave_egress::{CidrBlock, DomainPattern, EgressAllowlist, EgressError, EgressPolicy};
+use openwave_egress::{
+    CidrBlock, DomainPattern, EgressAllowlist, EgressEnforcement, EgressError, EgressPolicy,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ServerError;
@@ -157,6 +159,41 @@ fn resolve_egress_policy(
     })
 }
 
+/// Build the E2B adapter with the configured egress policy applied.
+///
+/// This is the wiring a dropped-policy regression would silently break —
+/// reverting a configured allowlist to open egress — so it is a named function
+/// the resolve path and its test share, rather than an inline arm nothing
+/// exercises. `Open` leaves today's open-internet creation intact.
+fn configured_e2b(
+    credential: E2BCredential,
+    timeout: Duration,
+    pool: RemoteSessionPool,
+    egress: &EgressConfig,
+) -> std::result::Result<E2BExecutionProvider, CodeExecutionError> {
+    let provider = E2BExecutionProvider::with_session_pool(credential, timeout, pool)?;
+    Ok(match resolve_egress_policy(egress)? {
+        Some(policy) => provider.with_egress_policy(policy),
+        None => provider,
+    })
+}
+
+/// Build the Daytona adapter with the configured egress policy applied. The
+/// same policy compiles into Daytona's block-all switch and allowlists; an
+/// over-limit allowlist is rejected here before any sandbox is created.
+fn configured_daytona(
+    credential: DaytonaCredential,
+    timeout: Duration,
+    pool: RemoteSessionPool,
+    egress: &EgressConfig,
+) -> std::result::Result<DaytonaExecutionProvider, CodeExecutionError> {
+    let provider = DaytonaExecutionProvider::with_session_pool(credential, timeout, pool)?;
+    match resolve_egress_policy(egress)? {
+        Some(policy) => provider.with_egress_policy(policy),
+        None => Ok(provider),
+    }
+}
+
 /// Renderer-safe configuration and readiness.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 pub struct CodeExecutionConfigInfo {
@@ -184,43 +221,93 @@ pub struct CodeExecutionEgressInfo {
     pub enforcement: Vec<CodeExecutionEgressEnforcement>,
 }
 
+/// The honest state of a managed provider's egress enforcement.
+///
+/// Derived from the shipped enforcement model, never asserted per provider, so
+/// the settings surface and the decision layer cannot disagree: if the model
+/// says a vendor's mechanism leaves a general-purpose destination reachable,
+/// the surface must not present it as a full boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum EgressEnforcementStatus {
+    /// External enforcement with no general-purpose holes: a full network
+    /// boundary. No managed provider reaches this today.
+    Boundary,
+    /// External enforcement is applied, but the vendor's mechanism leaves
+    /// general-purpose destinations reachable, so a configured allowlist is
+    /// not a full boundary and must not be presented as one.
+    AppliedWithGaps,
+    /// A policy is sent at creation, but the vendor's enforcement is not yet
+    /// confirmed against the live API.
+    Unconfirmed,
+}
+
 /// A managed provider's egress-enforcement status, as host knowledge rather
 /// than a claim the backend makes about itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 pub struct CodeExecutionEgressEnforcement {
     pub provider: CodeExecutionProviderKind,
-    /// `true` once the vendor's per-sandbox network semantics are confirmed to
-    /// enforce the configured allowlist. E2B is confirmed; Daytona is not yet,
-    /// so a configured policy is applied but must not be relied on as a
-    /// boundary until its deny-all semantics are confirmed against the live API.
-    pub confirmed: bool,
-    /// Plain-language disclosure for the settings surface.
-    pub note: String,
+    pub status: EgressEnforcementStatus,
+    /// Destinations the vendor's mechanism keeps reachable regardless of the
+    /// configured policy — each a short purpose string straight from the
+    /// enforcement model, so the settings surface can show the caveat inline
+    /// instead of burying it in prose the user skims past.
+    pub gaps: Vec<String>,
 }
 
-/// The managed providers' egress-enforcement disclosure. This is host
-/// knowledge compiled into the build — E2B's per-sandbox `allowOut` semantics
-/// are documented and confirmed, while Daytona's empty-but-present allowlist
-/// "deny that axis" behavior is not yet confirmed against the live API.
+/// The managed providers' egress-enforcement disclosure, derived from the
+/// shipped [`EgressEnforcement`] declarations.
+///
+/// E2B's enforcement is confirmed against the live API, so its status is
+/// whatever the model reports — and the model reports *not a boundary*, because
+/// its domain rules cover only HTTP/HTTPS ports and DNS stays open. Daytona's
+/// wiring is not yet confirmed against the live API (its empty-but-present
+/// "deny that axis" semantics are unverified), which dominates the display
+/// regardless of tier.
 fn egress_enforcement_status() -> Vec<CodeExecutionEgressEnforcement> {
     vec![
-        CodeExecutionEgressEnforcement {
-            provider: CodeExecutionProviderKind::E2b,
-            confirmed: true,
-            note: "E2B enforces the per-sandbox allowlist. DNS resolution and \
-                   non-HTTP/S ports stay reachable regardless of policy."
-                .to_owned(),
-        },
-        CodeExecutionEgressEnforcement {
-            provider: CodeExecutionProviderKind::Daytona,
-            confirmed: false,
-            note: "A configured policy is sent at creation, but whether an empty \
-                   allowlist denies that axis is not yet confirmed against the \
-                   live Daytona API, and Daytona keeps general-purpose services \
-                   reachable. Do not rely on it as a network boundary yet."
-                .to_owned(),
-        },
+        enforcement_row(
+            CodeExecutionProviderKind::E2b,
+            &E2BExecutionProvider::egress_enforcement(),
+            true,
+        ),
+        enforcement_row(
+            CodeExecutionProviderKind::Daytona,
+            &DaytonaExecutionProvider::egress_enforcement(),
+            false,
+        ),
     ]
+}
+
+/// Project one provider's enforcement declaration into the renderer-safe row.
+///
+/// The status reads straight from the model: an unconfirmed vendor is
+/// `Unconfirmed`; otherwise `is_credential_boundary()` — external tier with no
+/// general-purpose holes — decides `Boundary` versus `AppliedWithGaps`. Every
+/// declared exception is surfaced as a gap so nothing the vendor leaves open is
+/// hidden from the user.
+fn enforcement_row(
+    provider: CodeExecutionProviderKind,
+    enforcement: &EgressEnforcement,
+    confirmed: bool,
+) -> CodeExecutionEgressEnforcement {
+    let status = if !confirmed {
+        EgressEnforcementStatus::Unconfirmed
+    } else if enforcement.is_credential_boundary() {
+        EgressEnforcementStatus::Boundary
+    } else {
+        EgressEnforcementStatus::AppliedWithGaps
+    };
+    let gaps = enforcement
+        .exceptions()
+        .iter()
+        .map(|exception| exception.purpose.to_owned())
+        .collect();
+    CodeExecutionEgressEnforcement {
+        provider,
+        status,
+        gaps,
+    }
 }
 
 impl CodeExecutionEgressInfo {
@@ -459,38 +546,23 @@ impl ConfiguredCodeExecutionProvider {
                 let credential = E2BCredential::load(&*self.secrets)
                     .await?
                     .ok_or(CodeExecutionError::NotConfigured)?;
-                let provider = E2BExecutionProvider::with_session_pool(
+                Ok(Box::new(configured_e2b(
                     credential,
                     Duration::from_millis(config.timeout_ms),
                     self.remote_sessions.clone(),
-                )?;
-                // A configured allowlist becomes E2B's per-sandbox network
-                // rules; `Open` leaves today's open-internet creation intact.
-                let provider = match resolve_egress_policy(&config.egress)? {
-                    Some(policy) => provider.with_egress_policy(policy),
-                    None => provider,
-                };
-                Ok(Box::new(provider))
+                    &config.egress,
+                )?))
             }
             CodeExecutionProviderKind::Daytona => {
                 let credential = DaytonaCredential::load(&*self.secrets)
                     .await?
                     .ok_or(CodeExecutionError::NotConfigured)?;
-                let provider = DaytonaExecutionProvider::with_session_pool(
+                Ok(Box::new(configured_daytona(
                     credential,
                     Duration::from_millis(config.timeout_ms),
                     self.remote_sessions.clone(),
-                )?;
-                // The same policy compiles into Daytona's block-all switch and
-                // allowlists. Enforcement of the empty-present "deny that axis"
-                // case is still pending live confirmation (see the enforcement
-                // disclosure in `egress_enforcement_status`); the default
-                // (`Open` -> open egress) is unchanged.
-                let provider = match resolve_egress_policy(&config.egress)? {
-                    Some(policy) => provider.with_egress_policy(policy)?,
-                    None => provider,
-                };
-                Ok(Box::new(provider))
+                    &config.egress,
+                )?))
             }
             _ => Err(CodeExecutionError::Unavailable(
                 "selected provider is not supported by this build".into(),
@@ -709,24 +781,87 @@ mod tests {
     }
 
     #[test]
-    fn egress_enforcement_reports_e2b_confirmed_and_daytona_pending() {
+    fn egress_enforcement_never_oversells_a_provider_past_its_model() {
         let status = egress_enforcement_status();
-        let e2b = status
-            .iter()
-            .find(|row| row.provider == CodeExecutionProviderKind::E2b)
-            .expect("E2B enforcement is disclosed");
-        let daytona = status
-            .iter()
-            .find(|row| row.provider == CodeExecutionProviderKind::Daytona)
-            .expect("Daytona enforcement is disclosed");
+        let row = |provider| {
+            status
+                .iter()
+                .find(|row| row.provider == provider)
+                .unwrap_or_else(|| panic!("{provider} enforcement is disclosed"))
+        };
+        let e2b = row(CodeExecutionProviderKind::E2b);
+        let daytona = row(CodeExecutionProviderKind::Daytona);
+
+        // E2B is confirmed, but its own enforcement model says it is not a full
+        // boundary — domain rules cover only HTTP/HTTPS and DNS stays open — so
+        // the surface must report gaps, not a boundary. Reading it from the
+        // model is what keeps the two from ever disagreeing.
         assert!(
-            e2b.confirmed,
-            "E2B's per-sandbox egress semantics are confirmed"
+            !E2BExecutionProvider::egress_enforcement().is_credential_boundary(),
+            "the model itself does not treat E2B as a boundary"
         );
+        assert_eq!(e2b.status, EgressEnforcementStatus::AppliedWithGaps);
         assert!(
-            !daytona.confirmed,
-            "Daytona's deny-all semantics are pending live confirmation and must not be claimed as a boundary"
+            !e2b.gaps.is_empty(),
+            "the ports/DNS holes that make E2B not-a-boundary must be surfaced"
         );
+
+        // Daytona's wiring is unconfirmed against the live API; that dominates.
+        assert_eq!(daytona.status, EgressEnforcementStatus::Unconfirmed);
+        assert!(!daytona.gaps.is_empty());
+    }
+
+    #[test]
+    fn resolve_glue_applies_the_configured_policy_to_the_managed_providers() {
+        // The catastrophic-but-silent regression is the resolve path dropping
+        // the policy — a configured allowlist reverting to open egress. These
+        // assert the exact wiring resolve uses carries the policy through to the
+        // provider; the adapter tests then prove that policy compiles into the
+        // create body.
+        let timeout = Duration::from_millis(DEFAULT_TIMEOUT_MS);
+        let pool = RemoteSessionPool::default();
+        let allowlist = EgressConfig::Allowlist {
+            domains: vec!["*.pypi.org".to_owned()],
+            cidrs: vec!["140.82.112.0/20".to_owned()],
+        };
+        let expected = allowlist.to_policy().unwrap().unwrap();
+
+        let e2b = configured_e2b(
+            E2BCredential::parse("test-e2b-key").unwrap(),
+            timeout,
+            pool.clone(),
+            &allowlist,
+        )
+        .unwrap();
+        assert_eq!(e2b.egress_policy(), Some(&expected));
+
+        let daytona = configured_daytona(
+            DaytonaCredential::parse("test-daytona-key").unwrap(),
+            timeout,
+            pool.clone(),
+            &allowlist,
+        )
+        .unwrap();
+        assert_eq!(daytona.egress_policy(), Some(&expected));
+
+        // Open leaves both providers on today's open-internet creation: no
+        // policy is threaded in.
+        let open_e2b = configured_e2b(
+            E2BCredential::parse("test-e2b-key").unwrap(),
+            timeout,
+            pool.clone(),
+            &EgressConfig::Open,
+        )
+        .unwrap();
+        assert_eq!(open_e2b.egress_policy(), None);
+        let open_daytona = configured_daytona(
+            DaytonaCredential::parse("test-daytona-key").unwrap(),
+            timeout,
+            pool,
+            &EgressConfig::Open,
+        )
+        .unwrap();
+        assert_eq!(open_daytona.egress_policy(), None);
     }
 
     #[tokio::test]

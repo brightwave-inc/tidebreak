@@ -15,15 +15,19 @@ import type {
 } from "../api";
 import { CodeExecutionPanel } from "./CodeExecutionPanel";
 
-/** The default egress projection: open policy, E2B confirmed, Daytona pending. */
+/** The default egress projection: open policy, E2B applied-with-gaps, Daytona unconfirmed. */
 const OPEN_EGRESS: CodeExecutionConfigInfo["egress"] = {
   policy: { mode: "open" },
   enforcement: [
-    { provider: "e2b", confirmed: true, note: "E2B enforces the allowlist." },
+    {
+      provider: "e2b",
+      status: "applied_with_gaps",
+      gaps: ["DNS resolution", "domain filtering covers HTTP and HTTPS ports only"],
+    },
     {
       provider: "daytona",
-      confirmed: false,
-      note: "Applied but pending live confirmation.",
+      status: "unconfirmed",
+      gaps: ["package registries", "git hosting"],
     },
   ],
 };
@@ -168,6 +172,26 @@ describe("CodeExecutionPanel", () => {
         },
       }),
     );
+  });
+
+  it("does not present E2B as a full boundary and surfaces its gaps inline", async () => {
+    const { client } = clientFor({
+      provider: "e2b",
+      timeout_ms: 20_000,
+      available: true,
+      has_credential: true,
+      egress: OPEN_EGRESS,
+    });
+
+    render(<CodeExecutionPanel client={client} />);
+
+    // The E2B badge must read "not a full boundary", never a plain green
+    // "Enforced"/boundary, and the reachable holes are shown next to it.
+    await screen.findByText(/not a full boundary/i);
+    expect(screen.queryByText(/^Boundary$/)).toBeNull();
+    expect(
+      screen.getByText(/domain filtering covers HTTP and HTTPS ports only/i),
+    ).toBeInTheDocument();
   });
 
   it("rejects a timeout outside the bounds before touching the server", async () => {

@@ -75,20 +75,31 @@ a silent widening; a malformed *stored* policy fails closed by refusing
 execution, never by reverting to open egress. The local provider already denies
 all network and is unaffected.
 
-The `enforcement` field discloses, per managed provider, whether its egress
-restriction is confirmed against the live vendor API:
+The `enforcement` field discloses, per managed provider, an honest `status`
+(`boundary`, `applied_with_gaps`, or `unconfirmed`) plus the `gaps` the vendor
+leaves reachable regardless of policy. The status is **derived from the shipped
+enforcement model** (`EgressEnforcement`), not asserted per provider, so the
+settings surface and the decision layer can never disagree — if the model says a
+vendor's mechanism leaves a general-purpose destination reachable, the surface
+cannot present it as a full boundary.
 
-- **E2B is confirmed.** A configured allowlist becomes E2B's per-sandbox
-  `allowOut` rules with `allow_internet_access: false`. DNS resolution and
-  non-HTTP/S ports stay reachable regardless of policy, as E2B's mechanism
-  allows.
-- **Daytona is pending.** A configured policy is sent at sandbox creation
+- **E2B — `applied_with_gaps`.** A configured allowlist becomes E2B's
+  per-sandbox `allowOut` rules with `allow_internet_access: false`, and this is
+  confirmed against the live API. It is **not a full boundary**: domain rules
+  are enforced only on ports 80/443 and DNS resolution stays open, so code in
+  the sandbox can still reach arbitrary hosts on other ports or tunnel over DNS.
+  The model's `is_credential_boundary()` returns false for exactly this reason,
+  and the projection reads that value rather than a hardcoded flag.
+- **Daytona — `unconfirmed`.** A configured policy is sent at sandbox creation
   (block-all switch or comma-separated allowlists), but whether an
   empty-but-present allowlist denies that axis is not yet confirmed against the
   live Daytona API, and Daytona keeps general-purpose services (package
   registries, git hosting, container registries, AI APIs) reachable regardless
   of policy. Daytona egress is therefore applied but must not be relied on as a
   network boundary until confirmed.
+
+The local sandbox is the only tier that denies all network outright — the actual
+boundary — and it does so unconditionally, independent of this policy.
 
 The `exec` tool remains registered with a stable schema while settings change.
 The host resolves the selected provider immediately before execution, so a

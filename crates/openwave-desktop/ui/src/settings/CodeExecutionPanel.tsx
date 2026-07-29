@@ -340,9 +340,40 @@ function splitEntries(value: string): string[] {
     .filter((entry) => entry.length > 0);
 }
 
+type EgressEnforcementRow =
+  CodeExecutionConfigInfo["egress"]["enforcement"][number];
+
 /**
- * Per-provider egress enforcement, disclosed honestly: which managed providers
- * actually restrict egress today (confirmed) versus applied-but-unconfirmed.
+ * How each enforcement status reads: the badge never claims a boundary a
+ * provider does not have, and the caveat sits inline beside it rather than in
+ * prose below. Driven by the server's status, which is itself derived from the
+ * enforcement model, so the UI cannot oversell what the model won't back.
+ */
+const EGRESS_STATUS_PRESENTATION: Record<
+  EgressEnforcementRow["status"],
+  { badge: "success" | "warning" | "critical"; label: string; lead: string }
+> = {
+  boundary: {
+    badge: "success",
+    label: "Boundary",
+    lead: "Enforced as a full network boundary.",
+  },
+  applied_with_gaps: {
+    badge: "warning",
+    label: "Applied — not a full boundary",
+    lead: "The allowlist is applied, but these stay reachable regardless of policy:",
+  },
+  unconfirmed: {
+    badge: "warning",
+    label: "Unconfirmed",
+    lead: "A policy is sent at creation, but enforcement is not yet confirmed against the live API. These stay reachable regardless of policy:",
+  },
+};
+
+/**
+ * Per-provider egress enforcement, disclosed honestly: the badge reflects the
+ * model's own status and the gaps the vendor leaves open are listed inline, so
+ * a provider that is not a full boundary can never read as one.
  */
 function EgressEnforcementDisclosure({
   enforcement,
@@ -351,19 +382,23 @@ function EgressEnforcementDisclosure({
 }) {
   return (
     <div className="flex flex-col gap-2">
-      {enforcement.map((row) => (
-        <div key={row.provider} className="flex items-start gap-2 text-sm">
-          <Badge variant={row.confirmed ? "success" : "warning"} size="sm">
-            {row.confirmed ? "Enforced" : "Pending"}
-          </Badge>
-          <span className="text-muted-foreground">
-            <span className="font-medium text-foreground">
-              {codeExecutionProviderLabel(row.provider)}
-            </span>{" "}
-            — {row.note}
-          </span>
-        </div>
-      ))}
+      {enforcement.map((row) => {
+        const presentation = EGRESS_STATUS_PRESENTATION[row.status];
+        return (
+          <div key={row.provider} className="flex items-start gap-2 text-sm">
+            <Badge variant={presentation.badge} size="sm">
+              {presentation.label}
+            </Badge>
+            <span className="text-muted-foreground">
+              <span className="font-medium text-foreground">
+                {codeExecutionProviderLabel(row.provider)}
+              </span>{" "}
+              — {presentation.lead}
+              {row.gaps.length > 0 && ` ${row.gaps.join("; ")}.`}
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }

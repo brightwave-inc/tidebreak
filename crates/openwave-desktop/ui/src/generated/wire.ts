@@ -292,18 +292,14 @@ export type CodeExecutionCredentialReadiness = { provider: CodeExecutionProvider
  * A managed provider's egress-enforcement status, as host knowledge rather
  * than a claim the backend makes about itself.
  */
-export type CodeExecutionEgressEnforcement = { provider: CodeExecutionProviderKind, 
+export type CodeExecutionEgressEnforcement = { provider: CodeExecutionProviderKind, status: EgressEnforcementStatus, 
 /**
- * `true` once the vendor's per-sandbox network semantics are confirmed to
- * enforce the configured allowlist. E2B is confirmed; Daytona is not yet,
- * so a configured policy is applied but must not be relied on as a
- * boundary until its deny-all semantics are confirmed against the live API.
+ * Destinations the vendor's mechanism keeps reachable regardless of the
+ * configured policy — each a short purpose string straight from the
+ * enforcement model, so the settings surface can show the caveat inline
+ * instead of burying it in prose the user skims past.
  */
-confirmed: boolean, 
-/**
- * Plain-language disclosure for the settings surface.
- */
-note: string, };
+gaps: Array<string>, };
 
 /**
  * Renderer-safe egress policy plus per-provider enforcement disclosure.
@@ -373,6 +369,16 @@ export type DocumentId = string;
  * `PUT` time rather than silently widening egress at sandbox creation.
  */
 export type EgressConfig = { "mode": "open" } | { "mode": "allowlist", domains: Array<string>, cidrs: Array<string>, };
+
+/**
+ * The honest state of a managed provider's egress enforcement.
+ *
+ * Derived from the shipped enforcement model, never asserted per provider, so
+ * the settings surface and the decision layer cannot disagree: if the model
+ * says a vendor's mechanism leaves a general-purpose destination reachable,
+ * the surface must not present it as a full boundary.
+ */
+export type EgressEnforcementStatus = "boundary" | "applied_with_gaps" | "unconfirmed";
 
 /**
  * One entitled connected app, with the slugs of the MCP endpoints that
