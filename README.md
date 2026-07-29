@@ -64,9 +64,9 @@ that holds your data and meters your tokens. It should be something you own —
 local by default, model-agnostic, and open.
 
 The open version is **configurable end to end**. Bring your own API keys to
-connect the LLMs and document parsers you prefer — each behind a common
-interface — with sensible, local-friendly defaults out of the box, so it works
-on your machine from the first run.
+connect the LLMs you prefer behind a common interface, with sensible,
+local-friendly defaults out of the box, so it works on your machine from the
+first run.
 
 ## Why
 
@@ -83,8 +83,7 @@ registry; configuration UI remains in development.
 
 - **Local-first & private.** Your files, keys, and history stay on your machine.
 - **Bring your own keys.** Configure Anthropic, OpenAI, or an OpenAI-compatible
-  endpoint (vLLM, LM Studio, Ollama, OpenRouter), along with the document
-  parsers you want — with local-friendly defaults. We never meter tokens.
+  endpoint (vLLM, LM Studio, Ollama, OpenRouter). We never meter tokens.
 - **Slim by default.** Small install; no bundled model weights or language
   runtimes — fetched on first use, cached locally.
 - **Composable tool surface.** The MCP server foundation exposes OpenWave's

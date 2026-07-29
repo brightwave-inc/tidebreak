@@ -10,12 +10,6 @@ authors.workspace = true
 [lints]
 workspace = true
 
-[features]
-# Keep ordinary desktop builds feature-complete while allowing the behavior
-# suite to exercise the shell without compiling parser adapters that have their
-# own focused contracts.
-default = ["document-parsers"]
-document-parsers = ["openwave-server/document-parsers"]
 [lib]
 name = "openwave_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -43,7 +37,7 @@ futures.workspace = true
 infer = { version = "=0.22.0", default-features = false }
 openwave-core = { path = "../openwave-core", default-features = false }
 openwave-host-broker = { path = "../openwave-host-broker" }
-openwave-server = { path = "../openwave-server", default-features = false }
+openwave-server = { path = "../openwave-server" }
 reqwest = { workspace = true }
 sha2 = { workspace = true }
 tauri = { version = "=2.11.5", features = [] }
