@@ -150,30 +150,40 @@ pub async fn pair_with_gateway(
     let base_url = config.base_url().to_string();
     GatewayAuth::new(config)?.meta().await?;
     let _guard = PAIRING.lock().await;
-    // Refuse a conflicting pairing before either write, then write the
-    // provider configuration before the sticky policy. Neither write is
-    // transactional with the other, so the order decides the failure mode:
-    // provider-first fails into a still-unmanaged profile recoverable from
-    // settings, while policy-first could strand a permanently managed
-    // profile with no configured provider.
-    let already_provisioned = match managed_policy::provisioned_url(store).await? {
-        Some(existing) if existing != base_url => {
-            return Err(PairingError::Conflict {
-                provisioned_url: existing,
-            });
+    // The provider row is also written by model sync, sign-out, and
+    // `PUT /providers/model_gateway`, none of which run under PAIRING; hold
+    // the shared row lock across the conflict check, the row write, and the
+    // policy write so no interleaved read-modify-write can resurrect
+    // pre-pairing state. Lock order is PAIRING first, row lock second — this
+    // is the only path that takes both.
+    let already_provisioned = {
+        let _row = providers::GATEWAY_ROW_WRITES.lock().await;
+        // Refuse a conflicting pairing before either write, then write the
+        // provider configuration before the sticky policy. Neither write is
+        // transactional with the other, so the order decides the failure mode:
+        // provider-first fails into a still-unmanaged profile recoverable from
+        // settings, while policy-first could strand a permanently managed
+        // profile with no configured provider.
+        let already_provisioned = match managed_policy::provisioned_url(store).await? {
+            Some(existing) if existing != base_url => {
+                return Err(PairingError::Conflict {
+                    provisioned_url: existing,
+                });
+            }
+            other => other.is_some(),
+        };
+        let mut provider = providers::read_config(store, ProviderKind::ModelGateway).await?;
+        if provider.base_url.as_deref() != Some(base_url.as_str()) {
+            // A model snapshot synced from a previously configured gateway does
+            // not describe this one.
+            provider.models = Vec::new();
+            provider.base_url = Some(base_url.clone());
         }
-        other => other.is_some(),
+        provider.enabled = true;
+        providers::write_config(store, ProviderKind::ModelGateway, &provider).await?;
+        managed_policy::provision(store, &base_url).await?;
+        already_provisioned
     };
-    let mut provider = providers::read_config(store, ProviderKind::ModelGateway).await?;
-    if provider.base_url.as_deref() != Some(base_url.as_str()) {
-        // A model snapshot synced from a previously configured gateway does
-        // not describe this one.
-        provider.models = Vec::new();
-        provider.base_url = Some(base_url.clone());
-    }
-    provider.enabled = true;
-    providers::write_config(store, ProviderKind::ModelGateway, &provider).await?;
-    managed_policy::provision(store, &base_url).await?;
     handle.mcp.enforce_manual_lockdown().await;
     Ok(PairingOutcome {
         base_url,
@@ -403,6 +413,128 @@ mod tests {
         assert_eq!(
             info.servers[0].diagnostic.as_deref(),
             Some(MANAGED_DISABLED_DIAGNOSTIC)
+        );
+    }
+
+    /// The row lock itself, pinned deterministically: an unmanaged provider
+    /// update parked between its row read and row write (inside its keychain
+    /// credential write, a seam on that window) must be holding the shared
+    /// row lock, so a pairing arriving mid-window serializes behind the
+    /// whole update instead of committing inside it and being overwritten by
+    /// the update's stale read. Removing the writers' row-lock acquisitions
+    /// lets the parked update resurrect the old gateway on top of the
+    /// committed pairing, and fails this.
+    #[tokio::test]
+    async fn a_provider_update_parked_mid_write_cannot_overwrite_a_pairing() {
+        /// In-memory secrets that signal and park (once) inside the gateway
+        /// credential write — after `update_provider` has read the row,
+        /// before it writes the row back.
+        struct ParkingSecrets {
+            inner: std::sync::Mutex<std::collections::HashMap<String, String>>,
+            arrived: tokio::sync::mpsc::UnboundedSender<()>,
+            release: Arc<tokio::sync::Notify>,
+            armed: std::sync::atomic::AtomicBool,
+        }
+
+        #[async_trait::async_trait]
+        impl openwave_core::SecretProvider for ParkingSecrets {
+            async fn get_secret(&self, key: &str) -> Result<Option<String>> {
+                Ok(self.inner.lock().unwrap().get(key).cloned())
+            }
+            async fn set_secret(&self, key: &str, value: &str) -> Result<()> {
+                if key == ProviderKind::ModelGateway.credential_key()
+                    && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    self.arrived.send(()).expect("the test is listening");
+                    self.release.notified().await;
+                }
+                self.inner.lock().unwrap().insert(key.into(), value.into());
+                Ok(())
+            }
+            async fn delete_secret(&self, key: &str) -> Result<()> {
+                self.inner.lock().unwrap().remove(key);
+                Ok(())
+            }
+        }
+
+        let (store, _directory) = test_store().await;
+        providers::write_config(
+            &*store,
+            ProviderKind::ModelGateway,
+            &providers::ProviderConfig {
+                enabled: true,
+                base_url: Some("http://old.gateway.test/".into()),
+                vertex_location: None,
+                models: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let (arrived_tx, mut arrived_rx) = tokio::sync::mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let secrets = Arc::new(ParkingSecrets {
+            inner: std::sync::Mutex::new(std::collections::HashMap::new()),
+            arrived: arrived_tx,
+            release: release.clone(),
+            armed: std::sync::atomic::AtomicBool::new(true),
+        });
+
+        let update = tokio::spawn({
+            let store = store.clone();
+            let secrets = secrets.clone();
+            async move {
+                providers::update_provider(
+                    &*store,
+                    &*secrets,
+                    ProviderKind::ModelGateway,
+                    providers::ProviderUpdate {
+                        enabled: Some(true),
+                        base_url: None,
+                        vertex_location: None,
+                        credential: Some(providers::ProviderCredential::Oauth {}),
+                        models: None,
+                    },
+                    &NoOsPolicy,
+                )
+                .await
+            }
+        });
+        arrived_rx
+            .recv()
+            .await
+            .expect("the update reaches its credential write");
+
+        // A pairing arrives inside the update's read-to-write window.
+        let base = serve_meta().await;
+        let mut pairing = tokio::spawn({
+            let handle = test_handle(&store);
+            async move { pair_with_gateway(&handle, &base).await }
+        });
+        // Serialized, the pairing cannot finish while the update is parked
+        // holding the row lock, so only the timeout branch can release the
+        // window; unserialized, the pairing commits first and the release
+        // then lets the update's stale write race in after it.
+        let outcome =
+            match tokio::time::timeout(std::time::Duration::from_millis(500), &mut pairing).await {
+                Ok(joined) => {
+                    release.notify_one();
+                    joined.unwrap().unwrap()
+                }
+                Err(_) => {
+                    release.notify_one();
+                    pairing.await.unwrap().unwrap()
+                }
+            };
+        update.await.unwrap().unwrap();
+
+        let provider = providers::read_config(&*store, ProviderKind::ModelGateway)
+            .await
+            .unwrap();
+        assert_eq!(
+            provider.base_url.as_deref(),
+            Some(outcome.base_url.as_str()),
+            "the pairing's base URL must survive the parked update's write"
         );
     }
 

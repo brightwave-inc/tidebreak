@@ -27,6 +27,22 @@ const CREDENTIAL_SUFFIX: &str = ".credential";
 /// Legacy Anthropic API-key secret (pre-providers). Still read as a fallback.
 pub const LEGACY_ANTHROPIC_API_KEY: &str = "provider.anthropic.api_key";
 
+/// Serializes every writer of the ModelGateway provider row.
+///
+/// Pairing, model sync, sign-out, and `PUT /providers/model_gateway` each
+/// read `provider.model_gateway`, mutate part of it, and write the whole row
+/// back, and the [`Store`] API has no cross-call transaction. Unserialized,
+/// two read-modify-writes can interleave and resurrect fields the other just
+/// replaced — a model sync racing a pairing could stamp the old gateway's
+/// base URL or stale model list over the row the pairing wrote while policy
+/// already points at the new gateway. Process-local for the same reason as
+/// pairing's own mutex: the server's instance lock guarantees one process
+/// owns the store, and a static cannot be accidentally wired into two
+/// instances that no longer exclude each other. Lock order: acquired after
+/// the pairing mutex and after the gateway runtime's sign-in state lock,
+/// never before either, and never held across a network call.
+pub(crate) static GATEWAY_ROW_WRITES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// The known provider kinds. `#[non_exhaustive]` so new kinds can land without
 /// breaking wire clients that match on the string form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
@@ -569,8 +585,18 @@ pub async fn update_provider(
     secrets: &dyn SecretProvider,
     kind: ProviderKind,
     mut update: ProviderUpdate,
-    policy: &crate::managed_policy::ManagedPolicy,
+    os_policy: &dyn crate::managed_policy::OsPolicySource,
 ) -> std::result::Result<ProviderInfo, ServerError> {
+    // The gateway row is also written by pairing, model sync, and sign-out;
+    // serialize this read-modify-write with them. The policy is resolved
+    // under the same lock so a pairing that lands first is seen as managed
+    // here rather than bypassed with a stale resolution. Other kinds have no
+    // concurrent writers and take no lock.
+    let row_lock = match kind {
+        ProviderKind::ModelGateway => Some(GATEWAY_ROW_WRITES.lock().await),
+        _ => None,
+    };
+    let policy = crate::managed_policy::resolve(store, os_policy).await?;
     if policy.managed {
         if kind != ProviderKind::ModelGateway
             && (update.credential.is_some() || update.base_url.is_some())
@@ -621,7 +647,18 @@ pub async fn update_provider(
             if url.is_empty() {
                 return Err(ServerError::bad_request("base_url must not be empty"));
             }
-            config.base_url = Some(url);
+            config.base_url = Some(if kind == ProviderKind::ModelGateway {
+                // Store the normalized contract form on every profile, not
+                // only managed ones: pairing and policy store the normalized
+                // shape, and both the sync recheck and the connection cache
+                // compare exact strings — a verbatim `https://gw` beside a
+                // normalized `https://gw/` would refuse a same-deployment
+                // sync and split the connection cache for one gateway.
+                crate::managed_policy::validated_gateway_url(&url)
+                    .map_err(|error| ServerError::bad_request(error.to_string()))?
+            } else {
+                url
+            });
         }
     }
     match update.vertex_location {
@@ -683,6 +720,9 @@ pub async fn update_provider(
     }
 
     write_config(store, kind, &config).await?;
+    // The response's has_credential is keychain I/O; the row lock exists to
+    // serialize the row write, so drop it before building the response.
+    drop(row_lock);
 
     Ok(ProviderInfo {
         kind,
