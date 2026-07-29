@@ -21,6 +21,9 @@ import {
 } from "./primitives";
 
 const SIGN_IN_POLL_MS = 2_000;
+/** Mount health lives in the local MCP supervisor, so a modest refresh while
+ * the panel is visible keeps the health lines honest without gateway load. */
+const MOUNT_REFRESH_MS = 15_000;
 const DEFAULT_MOUNT_TIMEOUT_MS = 60_000;
 /** Server names cap at 32 bytes (the MCP tool namespace); endpoint slugs go
  * to 127, so the mount name is derived, not the slug itself. Mount identity
@@ -99,6 +102,10 @@ export function GatewayPanel({
   const [status, setStatus] = useState<GatewayStatus | null>(null);
   const [apps, setApps] = useState<GatewayApps | null>(null);
   const [mcpServers, setMcpServers] = useState<McpServerInfo[] | null>(null);
+  const [mcpError, setMcpError] = useState<string | null>(null);
+  // Bumped by the Retry affordance; re-runs the mount-list effect immediately
+  // and restarts its cadence.
+  const [mountsRefreshNonce, setMountsRefreshNonce] = useState(0);
   const [baseUrl, setBaseUrl] = useState("");
   const [dirty, setDirty] = useState(false);
   const [working, setWorking] = useState(false);
@@ -148,25 +155,36 @@ export function GatewayPanel({
   }, [client, status?.signed_in]);
 
   // Mount state lives in the MCP configuration; load it alongside the apps so
-  // each endpoint's toggle reflects what is actually configured.
+  // each endpoint's toggle reflects what is actually configured — and keep
+  // re-reading it while the panel is visible, so a mount that degrades after
+  // the first read doesn't keep a stale healthy line. A failed read keeps the
+  // last-known rows and surfaces a retryable error instead of silently
+  // disabling every toggle.
   useEffect(() => {
     if (!status?.signed_in) {
       setMcpServers(null);
+      setMcpError(null);
       return;
     }
     let cancelled = false;
-    client
-      .listMcpServers()
-      .then((next) => {
-        if (!cancelled) setMcpServers(next.servers);
-      })
-      .catch(() => {
-        if (!cancelled) setMcpServers(null);
-      });
+    const refresh = async () => {
+      try {
+        const next = await client.listMcpServers();
+        if (!cancelled) {
+          setMcpServers(next.servers);
+          setMcpError(null);
+        }
+      } catch (err) {
+        if (!cancelled) setMcpError(String(err));
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), MOUNT_REFRESH_MS);
     return () => {
       cancelled = true;
+      window.clearInterval(timer);
     };
-  }, [client, status?.signed_in]);
+  }, [client, status?.signed_in, mountsRefreshNonce]);
 
   // While the browser flow is pending, watch for its outcome.
   useEffect(() => {
@@ -204,6 +222,7 @@ export function GatewayPanel({
         : without;
       const result = await client.putMcpServers(next);
       setMcpServers(result.servers);
+      setMcpError(null);
       toast.success(mounted ? `Mounted ${slug}` : `Unmounted ${slug}`);
     });
   }
@@ -231,8 +250,20 @@ export function GatewayPanel({
 
   const pendingUrl =
     status.sign_in.state === "pending" ? status.sign_in.authorization_url : null;
+  const entitledSlugs = new Set(
+    apps?.apps.flatMap((app) => app.mcp_endpoint_slugs) ?? [],
+  );
+  // Rows are the union of what's entitled and what's configured: a mount
+  // whose grant was revoked must keep its row (and unmount toggle) here,
+  // not silently drop to being visible only in the MCP panel while
+  // supervision retries it.
   const endpointSlugs = [
-    ...new Set(apps?.apps.flatMap((app) => app.mcp_endpoint_slugs) ?? []),
+    ...new Set([
+      ...entitledSlugs,
+      ...(mcpServers ?? [])
+        .map((server) => server.gateway_endpoint)
+        .filter((slug): slug is string => slug !== null),
+    ]),
   ];
 
   return (
@@ -418,7 +449,7 @@ export function GatewayPanel({
             </ul>
           )}
 
-          {endpointSlugs.length > 0 && (
+          {(endpointSlugs.length > 0 || mcpError !== null) && (
             <div className="flex flex-col gap-2">
               <div>
                 <p className="text-sm font-bold">MCP endpoints</p>
@@ -427,6 +458,22 @@ export function GatewayPanel({
                   tokens to copy, and they reconnect after you sign back in.
                 </p>
               </div>
+              {mcpError !== null && (
+                <div className="flex items-center justify-between gap-4">
+                  <SettingsError>
+                    Couldn't read the MCP server list: {mcpError}
+                  </SettingsError>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={working}
+                    onClick={() => setMountsRefreshNonce((nonce) => nonce + 1)}
+                  >
+                    <RefreshCw size={14} />
+                    Retry
+                  </Button>
+                </div>
+              )}
               <ul className="flex flex-col gap-2">
                 {endpointSlugs.map((slug) => {
                   const mounted = mcpServers?.find(
@@ -439,10 +486,17 @@ export function GatewayPanel({
                     >
                       <div className="min-w-0 flex-1">
                         <code className="font-medium">{slug}</code>
-                        {mounted && (
+                        {!entitledSlugs.has(slug) ? (
                           <p className="text-muted-foreground text-xs">
-                            {mountStatus(mounted)}
+                            No longer granted to your teams. Switch off to
+                            unmount it.
                           </p>
+                        ) : (
+                          mounted && (
+                            <p className="text-muted-foreground text-xs">
+                              {mountStatus(mounted)}
+                            </p>
+                          )
                         )}
                       </div>
                       <Switch
