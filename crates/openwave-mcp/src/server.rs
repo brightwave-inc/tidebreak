@@ -72,7 +72,12 @@ impl ApprovalBridge {
         let action = ToolActionPreview::build(tool_name, arguments);
         // The canonical arguments decide authority; `action` beside it only
         // describes them for the card.
-        if self.grants.covers(chat_id, tool_name, kind, arguments) {
+        // The MCP face carries no project membership, so a grant reaches it
+        // only at chat level.
+        if self
+            .grants
+            .covers(chat_id, None, tool_name, kind, arguments)
+        {
             return None;
         }
         let request = ApprovalRequest {
@@ -365,7 +370,8 @@ mod tests {
     use async_trait::async_trait;
     use chrono::Utc;
     use openwave_core::{
-        ApprovalClass, AutoApproveGate, RefuseGate, StandingGrant, Tool, ToolOutput, ToolSpec,
+        ApprovalClass, AutoApproveGate, GrantLevel, RefuseGate, StandingGrant, Tool, ToolOutput,
+        ToolSpec,
     };
     use serde_json::json;
 
@@ -796,7 +802,7 @@ mod tests {
             ran: Arc::clone(&ran),
         }));
         let grant = StandingGrant::new(
-            chat_id,
+            GrantLevel::Chat { chat_id },
             "search",
             ToolApprovalKind::for_tool_name("search"),
             Utc::now(),

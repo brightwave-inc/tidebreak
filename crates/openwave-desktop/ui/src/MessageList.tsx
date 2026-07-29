@@ -11,7 +11,7 @@ import type {
   ToolResultPreview,
   UserQuestionAnswer,
 } from "./api";
-import { ApprovalCard } from "./ApprovalCard";
+import { ApprovalCard, type GrantScopeName } from "./ApprovalCard";
 import { AssistantWorkingIndicator } from "./AssistantWorkingIndicator";
 import { FolderAccessCard } from "./FolderAccessCard";
 import type {
@@ -109,6 +109,8 @@ type MessageListProps = {
   userQuestionErrors?: Record<string, string>;
   decidingApprovalCalls: Set<string>;
   approvalErrors: Record<string, string>;
+  /** How far a remembered approval reaches, for the card's labels. */
+  grantScope?: GrantScopeName;
   backgroundAgentRuns?: AgentRun[];
   backgroundAgentRunsLoading?: boolean;
   backgroundAgentRunsError?: string | null;
@@ -165,6 +167,7 @@ export function MessageList({
   userQuestionErrors = {},
   decidingApprovalCalls,
   approvalErrors,
+  grantScope,
   backgroundAgentRuns = [],
   backgroundAgentRunsLoading = false,
   backgroundAgentRunsError = null,
@@ -190,8 +193,8 @@ export function MessageList({
   // Stable identity between renders so memoized rows only re-render when the
   // approval state itself changes, not on every streamed token.
   const approvalState = useMemo(
-    () => ({ decidingApprovalCalls, approvalErrors }),
-    [decidingApprovalCalls, approvalErrors],
+    () => ({ decidingApprovalCalls, approvalErrors, grantScope }),
+    [decidingApprovalCalls, approvalErrors, grantScope],
   );
   const { items: messageItems, lastTurnStart } = groupMessageItems(
     messages,
@@ -363,6 +366,7 @@ export function groupMessageItems(
   approvalState?: {
     decidingApprovalCalls: Set<string>;
     approvalErrors: Record<string, string>;
+    grantScope?: GrantScopeName;
   },
   imageClient?: Pick<ApiClient, "getChatImageAttachment">,
   chatId?: string,
@@ -502,6 +506,7 @@ function surfacedCards(
   approvalState?: {
     decidingApprovalCalls: Set<string>;
     approvalErrors: Record<string, string>;
+    grantScope?: GrantScopeName;
   },
   chatId?: string,
 ): ReactNode[] {
@@ -519,6 +524,7 @@ function surfacedCards(
           preview={entry.preview ?? null}
           canApprove={entry.canApprove}
           canRemember={entry.canRemember}
+          grantScope={approvalState?.grantScope ?? "chat"}
           autoJudging={entry.autoJudging ?? false}
           deciding={
             approvalState?.decidingApprovalCalls.has(entry.callId) ?? false

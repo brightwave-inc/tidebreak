@@ -69,9 +69,27 @@ export function shortOpaqueId(id: string): string {
   return id.length <= 10 ? id : `${id.slice(0, 6)}…${id.slice(-4)}`;
 }
 
-export function chatLabel(grant: StandingGrantSnapshot): string {
-  const title = grant.chat_title?.trim();
-  return title || `Chat ${shortOpaqueId(grant.chat_id)}`;
+/** The identity of whatever a grant reaches, for grouping. */
+export function levelKey(grant: StandingGrantSnapshot): string {
+  return grant.level.level === "chat"
+    ? `chat:${grant.level.chat_id}`
+    : `project:${grant.level.project_id}`;
+}
+
+/**
+ * What a group of grants applies to, named the way the reader chose it. A
+ * project grant says so out loud: it reaches conversations that have not been
+ * started yet, which is the whole point and also the thing worth being able
+ * to see.
+ */
+export function levelLabel(grant: StandingGrantSnapshot): string {
+  const title = grant.level_title?.trim();
+  if (grant.level.level === "project") {
+    return title
+      ? `Everything in ${title}`
+      : `Everything in project ${shortOpaqueId(grant.level.project_id)}`;
+  }
+  return title || `Chat ${shortOpaqueId(grant.level.chat_id)}`;
 }
 
 function grantedAtLabel(grantedAt: string): string {
@@ -84,23 +102,19 @@ function grantedAtLabel(grantedAt: string): string {
   })}`;
 }
 
-/** Grants in listing order, bucketed by chat without reordering across rows. */
-export function groupByChat(
+/** Grants in listing order, bucketed by what they reach, order preserved. */
+export function groupByLevel(
   grants: readonly StandingGrantSnapshot[],
-): { chatId: string; label: string; grants: StandingGrantSnapshot[] }[] {
+): { key: string; label: string; grants: StandingGrantSnapshot[] }[] {
   const groups = new Map<
     string,
-    { chatId: string; label: string; grants: StandingGrantSnapshot[] }
+    { key: string; label: string; grants: StandingGrantSnapshot[] }
   >();
   for (const grant of grants) {
-    const group = groups.get(grant.chat_id);
+    const key = levelKey(grant);
+    const group = groups.get(key);
     if (group) group.grants.push(grant);
-    else
-      groups.set(grant.chat_id, {
-        chatId: grant.chat_id,
-        label: chatLabel(grant),
-        grants: [grant],
-      });
+    else groups.set(key, { key, label: levelLabel(grant), grants: [grant] });
   }
   return [...groups.values()];
 }
@@ -164,7 +178,7 @@ export function PermissionsPanel({ client }: { client: ApiClient }) {
       ).toLowerCase()} covered by “${grantScopeLabel(
         grant.scope,
         grant.action,
-      )}” in ${chatLabel(grant)}.`,
+      )}” in ${levelLabel(grant).toLowerCase()}.`,
       confirmLabel: "Revoke",
       destructive: true,
     });
@@ -200,8 +214,8 @@ export function PermissionsPanel({ client }: { client: ApiClient }) {
         </p>
       )}
       {grants !== null &&
-        groupByChat(grants).map((group) => (
-          <SettingsSection key={group.chatId} title={group.label}>
+        groupByLevel(grants).map((group) => (
+          <SettingsSection key={group.key} title={group.label}>
             <div className="flex flex-col gap-4">
               {group.grants.map((grant) => (
                 <GrantRow

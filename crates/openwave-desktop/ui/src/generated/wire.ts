@@ -478,6 +478,19 @@ supported: boolean, apps: Array<GatewayAppInfo>, };
 export type GatewayStatus = { configured: boolean, enabled: boolean, base_url?: string, signed_in: boolean, account_hint?: string, installation_id?: string, model_count: number, sign_in: SignInProgress, };
 
 /**
+ * How far a standing grant reaches.
+ *
+ * A grant used to cover exactly one chat, so "always allow `cargo`" was
+ * re-asked in the next conversation and the one after it — the single
+ * biggest source of prompting in the model. The level is chosen from where
+ * the chat lives rather than put to the reader as a question: a chat in a
+ * project grants across that project, and a loose chat has nothing wider to
+ * mean, so it grants for itself. The card states which one it is about to
+ * write; a grant nobody expected is the failure the ladder exists to prevent.
+ */
+export type GrantLevel = { "level": "chat", chat_id: ChatId, } | { "level": "project", project_id: ProjectId, };
+
+/**
  * How much a standing grant covers.
  *
  * A grant is easy to widen by accident and hard to notice afterwards, so the
@@ -1046,11 +1059,16 @@ export type StandingGrantSnapshot = {
  * The approval decision that created the grant — also the handle a
  * revocation names.
  */
-source_call_id: CallId, chat_id: ChatId, 
+source_call_id: CallId, 
 /**
- * Chat title for provenance; `None` when the chat is untitled.
+ * How far the grant reaches — one chat, or every chat in a project.
  */
-chat_title: string | null, action: RendererToolName, approval: ToolApprovalKind, scope: GrantScope, granted_at: string, };
+level: GrantLevel, 
+/**
+ * The name of whatever the level points at, for provenance. `None` when
+ * that chat or project is untitled.
+ */
+level_title: string | null, action: RendererToolName, approval: ToolApprovalKind, scope: GrantScope, granted_at: string, };
 
 /**
  * How the `path` of a structured-path evidence location is written.

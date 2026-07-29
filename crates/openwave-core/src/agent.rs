@@ -2496,8 +2496,13 @@ impl Agent {
         let action = call_action_preview(call);
         let bypass_by_explicit_grant = durable_approval.is_none()
             && serde_json::from_str::<Value>(&call.args).is_ok_and(|arguments| {
-                self.standing_grants
-                    .covers(chat.id, &call.name, kind_for_call, &arguments)
+                self.standing_grants.covers(
+                    chat.id,
+                    chat.project_id,
+                    &call.name,
+                    kind_for_call,
+                    &arguments,
+                )
             });
         // A recovered call re-enters the gate whatever the mode now says: its
         // durable approval may already hold a rejection the mode must not
@@ -6430,12 +6435,12 @@ mod tests {
 
     #[tokio::test]
     async fn standing_grant_runs_sensitive_tool_without_parking() {
-        use crate::approval::{StandingGrant, StandingGrants};
+        use crate::approval::{GrantLevel, StandingGrant, StandingGrants};
 
         let store = search_grant_store().await;
         let chat = search_grant_chat(&store).await;
         let grants = Arc::new(StandingGrants::from_grants(vec![StandingGrant::new(
-            chat.id,
+            GrantLevel::Chat { chat_id: chat.id },
             "search",
             ToolApprovalKind::for_tool_name("search"),
             Utc::now(),
@@ -6466,13 +6471,15 @@ mod tests {
 
     #[tokio::test]
     async fn standing_grant_for_another_chat_does_not_bypass_the_gate() {
-        use crate::approval::{StandingGrant, StandingGrants};
+        use crate::approval::{GrantLevel, StandingGrant, StandingGrants};
 
         let store = search_grant_store().await;
         let chat = search_grant_chat(&store).await;
         // A grant scoped to a different chat must not cover this chat's call.
         let grants = Arc::new(StandingGrants::from_grants(vec![StandingGrant::new(
-            ChatId::new(),
+            GrantLevel::Chat {
+                chat_id: ChatId::new(),
+            },
             "search",
             ToolApprovalKind::for_tool_name("search"),
             Utc::now(),
@@ -6759,12 +6766,12 @@ mod tests {
 
     #[tokio::test]
     async fn standing_grant_runs_escaping_exec_without_parking() {
-        use crate::approval::{StandingGrant, StandingGrants};
+        use crate::approval::{GrantLevel, StandingGrant, StandingGrants};
 
         let store = search_grant_store().await;
         let chat = search_grant_chat(&store).await;
         let grants = Arc::new(StandingGrants::from_grants(vec![StandingGrant::new(
-            chat.id,
+            GrantLevel::Chat { chat_id: chat.id },
             "exec",
             ToolApprovalKind::for_tool_name("exec"),
             Utc::now(),

@@ -5344,6 +5344,21 @@ async fn m0006_upgrades_an_existing_store_without_losing_records() {
     assert_eq!(stored, document);
 }
 
+/// How many migrations were registered strictly after `name`.
+///
+/// A test that wants to roll back one specific migration has to get past
+/// whatever was appended after it. Deriving that keeps every new migration
+/// from having to find and bump a literal count in an unrelated test.
+pub(super) fn migrations_added_after(name: &str) -> u32 {
+    use sea_orm_migration::MigratorTrait;
+    let all = migration::Migrator::migrations();
+    let index = all
+        .iter()
+        .position(|migration| migration.name() == name)
+        .expect("the migration under test is registered");
+    u32::try_from(all.len() - index - 1).expect("migration count fits in u32")
+}
+
 #[tokio::test]
 async fn m0024_widens_and_narrows_the_execution_location_domain() {
     // Guards the container-location migration's bespoke SQLite table rebuild in
@@ -5382,6 +5397,15 @@ async fn m0024_widens_and_narrows_the_execution_location_domain() {
         insert_container(conn.clone()).await.is_ok(),
         "container must be accepted after the widening migration"
     );
+
+    // Roll back anything appended after this migration, so the `down(1)` calls
+    // below exercise *its* rollback rather than whatever landed most recently.
+    let appended = migrations_added_after("m20260729_000027_allow_container_execution_location");
+    if appended > 0 {
+        migration::Migrator::down(&conn, Some(appended))
+            .await
+            .unwrap();
+    }
 
     // A rollback with a container row still present is refused up front, and
     // leaves the schema untouched — rather than failing partway through the

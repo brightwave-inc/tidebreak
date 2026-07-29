@@ -14,7 +14,7 @@ use std::pin::Pin;
 use std::sync::RwLock;
 
 use crate::event::SequencedEvent;
-use crate::id::{CallId, ChatId, TurnId};
+use crate::id::{CallId, ChatId, ProjectId, TurnId};
 use crate::preview::ToolActionPreview;
 use crate::tool::ApprovalClass;
 use chrono::{DateTime, Utc};
@@ -350,6 +350,49 @@ impl ToolApproval {
     }
 }
 
+/// How far a standing grant reaches.
+///
+/// A grant used to cover exactly one chat, so "always allow `cargo`" was
+/// re-asked in the next conversation and the one after it — the single
+/// biggest source of prompting in the model. The level is chosen from where
+/// the chat lives rather than put to the reader as a question: a chat in a
+/// project grants across that project, and a loose chat has nothing wider to
+/// mean, so it grants for itself. The card states which one it is about to
+/// write; a grant nobody expected is the failure the ladder exists to prevent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[serde(tag = "level", rename_all = "snake_case")]
+pub enum GrantLevel {
+    /// Every later matching call in one chat.
+    Chat { chat_id: ChatId },
+    /// Every later matching call in any chat filed under one project.
+    Project { project_id: ProjectId },
+}
+
+impl GrantLevel {
+    /// The level a grant made from this chat should be written at.
+    #[must_use]
+    pub const fn for_chat(chat_id: ChatId, project_id: Option<ProjectId>) -> Self {
+        match project_id {
+            Some(project_id) => Self::Project { project_id },
+            None => Self::Chat { chat_id },
+        }
+    }
+
+    /// Whether this level reaches a call made in `chat_id` under
+    /// `project_id`.
+    #[must_use]
+    pub fn reaches(self, chat_id: ChatId, project_id: Option<ProjectId>) -> bool {
+        match self {
+            Self::Chat { chat_id: granted } => granted == chat_id,
+            // A project grant covers the project it names, and only a chat
+            // that is actually filed under it.
+            Self::Project {
+                project_id: granted,
+            } => project_id == Some(granted),
+        }
+    }
+}
+
 /// A remembered approval that lets a repeated in-scope Sensitive action run
 /// without re-prompting.
 ///
@@ -360,7 +403,7 @@ impl ToolApproval {
 /// capability-model issue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StandingGrant {
-    chat_id: ChatId,
+    level: GrantLevel,
     tool_name: String,
     kind: ToolApprovalKind,
     scope: GrantScope,
@@ -465,12 +508,12 @@ impl StandingGrant {
     /// the gate every call.
     #[must_use]
     pub fn new(
-        chat_id: ChatId,
+        level: GrantLevel,
         tool_name: impl Into<String>,
         kind: ToolApprovalKind,
         granted_at: DateTime<Utc>,
     ) -> Option<Self> {
-        Self::scoped(chat_id, tool_name, kind, GrantScope::WholeTool, granted_at)
+        Self::scoped(level, tool_name, kind, GrantScope::WholeTool, granted_at)
     }
 
     /// Record consent limited to `scope`.
@@ -478,7 +521,7 @@ impl StandingGrant {
     /// Returns `None` on the same terms as [`StandingGrant::new`].
     #[must_use]
     pub fn scoped(
-        chat_id: ChatId,
+        level: GrantLevel,
         tool_name: impl Into<String>,
         kind: ToolApprovalKind,
         scope: GrantScope,
@@ -488,7 +531,7 @@ impl StandingGrant {
             return None;
         }
         Some(Self {
-            chat_id,
+            level,
             tool_name: tool_name.into(),
             kind,
             scope,
@@ -502,10 +545,10 @@ impl StandingGrant {
         &self.scope
     }
 
-    /// Chat the standing consent belongs to.
+    /// How far this standing consent reaches.
     #[must_use]
-    pub const fn chat_id(&self) -> ChatId {
-        self.chat_id
+    pub const fn level(&self) -> GrantLevel {
+        self.level
     }
 
     /// Tool name the consent covers.
@@ -531,11 +574,12 @@ impl StandingGrant {
     pub(crate) fn covers(
         &self,
         chat_id: ChatId,
+        project_id: Option<ProjectId>,
         tool_name: &str,
         kind: ToolApprovalKind,
         arguments: &serde_json::Value,
     ) -> bool {
-        self.chat_id == chat_id
+        self.level.reaches(chat_id, project_id)
             && self.tool_name == tool_name
             && self.kind == kind
             && kind.is_approvable()
@@ -578,7 +622,7 @@ impl StandingGrants {
     pub fn record(&self, grant: StandingGrant) {
         let mut grants = self.write();
         if !grants.iter().any(|existing| {
-            existing.chat_id == grant.chat_id
+            existing.level == grant.level
                 && existing.tool_name == grant.tool_name
                 && existing.kind == grant.kind
                 && existing.scope == grant.scope
@@ -591,13 +635,14 @@ impl StandingGrants {
     pub fn covers(
         &self,
         chat_id: ChatId,
+        project_id: Option<ProjectId>,
         tool_name: &str,
         kind: ToolApprovalKind,
         arguments: &serde_json::Value,
     ) -> bool {
         self.read()
             .iter()
-            .any(|grant| grant.covers(chat_id, tool_name, kind, arguments))
+            .any(|grant| grant.covers(chat_id, project_id, tool_name, kind, arguments))
     }
 
     pub fn clear(&self) {
@@ -762,7 +807,7 @@ mod standing_grant_tests {
 
     fn grant(chat_id: ChatId, tool: &str) -> StandingGrant {
         StandingGrant::new(
-            chat_id,
+            GrantLevel::Chat { chat_id },
             tool,
             ToolApprovalKind::for_tool_name(tool),
             Utc::now(),
@@ -801,9 +846,9 @@ mod standing_grant_tests {
         let chat = ChatId::new();
         let grants = StandingGrants::from_grants(vec![grant(chat, "exec")]);
         let kind = ToolApprovalKind::for_tool_name("exec");
-        assert!(grants.covers(chat, "exec", kind, &no_args()));
+        assert!(grants.covers(chat, None, "exec", kind, &no_args()));
         // Deny-by-default still holds for a different chat.
-        assert!(!grants.covers(ChatId::new(), "exec", kind, &no_args()));
+        assert!(!grants.covers(ChatId::new(), None, "exec", kind, &no_args()));
     }
 
     #[test]
@@ -812,16 +857,23 @@ mod standing_grant_tests {
         assert_eq!(kind, ToolApprovalKind::ExternalMcpMayCallServer);
         assert!(kind.is_approvable());
         assert!(!kind.is_standing_grantable());
-        assert!(
-            StandingGrant::new(ChatId::new(), "mcp__documents__search", kind, Utc::now(),)
-                .is_none()
-        );
+        assert!(StandingGrant::new(
+            GrantLevel::Chat {
+                chat_id: ChatId::new()
+            },
+            "mcp__documents__search",
+            kind,
+            Utc::now(),
+        )
+        .is_none());
     }
 
     #[test]
     fn non_approvable_tools_cannot_be_granted() {
         assert!(StandingGrant::new(
-            ChatId::new(),
+            GrantLevel::Chat {
+                chat_id: ChatId::new()
+            },
             "third_party_sensitive",
             ToolApprovalKind::for_tool_name("third_party_sensitive"),
             Utc::now(),
@@ -835,6 +887,7 @@ mod standing_grant_tests {
         let grants = StandingGrants::new();
         assert!(!grants.covers(
             chat,
+            None,
             "search",
             ToolApprovalKind::for_tool_name("search"),
             &no_args()
@@ -848,10 +901,11 @@ mod standing_grant_tests {
         let grants = StandingGrants::from_grants(vec![grant(chat, "search")]);
         let kind = ToolApprovalKind::for_tool_name("search");
 
-        assert!(grants.covers(chat, "search", kind, &no_args()));
-        assert!(!grants.covers(other_chat, "search", kind, &no_args()));
+        assert!(grants.covers(chat, None, "search", kind, &no_args()));
+        assert!(!grants.covers(other_chat, None, "search", kind, &no_args()));
         assert!(!grants.covers(
             chat,
+            None,
             "third_party_sensitive",
             ToolApprovalKind::for_tool_name("third_party_sensitive"),
             &no_args(),
@@ -895,7 +949,7 @@ mod standing_grant_tests {
         let grants = StandingGrants::new();
         grants.record(
             StandingGrant::scoped(
-                chat,
+                GrantLevel::Chat { chat_id: chat },
                 "exec",
                 kind,
                 exact_command("cargo", &["test"]),
@@ -904,11 +958,11 @@ mod standing_grant_tests {
             .unwrap(),
         );
 
-        assert!(grants.covers(chat, "exec", kind, &exec_args("cargo", &["test"])));
-        assert!(!grants.covers(chat, "exec", kind, &exec_args("cargo", &["publish"])));
-        assert!(!grants.covers(chat, "exec", kind, &exec_args("rm", &["test"])));
+        assert!(grants.covers(chat, None, "exec", kind, &exec_args("cargo", &["test"])));
+        assert!(!grants.covers(chat, None, "exec", kind, &exec_args("cargo", &["publish"])));
+        assert!(!grants.covers(chat, None, "exec", kind, &exec_args("rm", &["test"])));
         // An action the renderer could not describe was never the one granted.
-        assert!(!grants.covers(chat, "exec", kind, &no_args()));
+        assert!(!grants.covers(chat, None, "exec", kind, &no_args()));
     }
 
     #[test]
@@ -919,7 +973,7 @@ mod standing_grant_tests {
         let grants = StandingGrants::new();
         grants.record(
             StandingGrant::scoped(
-                chat,
+                GrantLevel::Chat { chat_id: chat },
                 "exec",
                 kind,
                 exact_command("bash", &["-c", &long]),
@@ -931,10 +985,16 @@ mod standing_grant_tests {
         // Truncation: a longer script sharing the granted prefix projects to
         // the same preview. Keying on the projection would run it unprompted.
         let appended = format!("{long}; rm -rf ~");
-        assert!(!grants.covers(chat, "exec", kind, &exec_args("bash", &["-c", &appended])));
+        assert!(!grants.covers(
+            chat,
+            None,
+            "exec",
+            kind,
+            &exec_args("bash", &["-c", &appended])
+        ));
         // A value exactly at the bound is not truncated, so it stays faithful
         // and the grant still covers the command it was actually given for.
-        assert!(grants.covers(chat, "exec", kind, &exec_args("bash", &["-c", &long])));
+        assert!(grants.covers(chat, None, "exec", kind, &exec_args("bash", &["-c", &long])));
         // Nothing at or past the bound can be turned into a narrow grant.
         assert_eq!(
             GrantScope::ladder_for("exec", &exec_args("bash", &["-c", &appended])),
@@ -949,7 +1009,7 @@ mod standing_grant_tests {
         let grants = StandingGrants::new();
         grants.record(
             StandingGrant::scoped(
-                chat,
+                GrantLevel::Chat { chat_id: chat },
                 "exec",
                 kind,
                 exact_command("foo", &["bar"]),
@@ -958,15 +1018,16 @@ mod standing_grant_tests {
             .unwrap(),
         );
 
-        assert!(grants.covers(chat, "exec", kind, &exec_args("foo", &["bar"])));
+        assert!(grants.covers(chat, None, "exec", kind, &exec_args("foo", &["bar"])));
         // An empty argument used to clamp away entirely, making these two
         // different calls indistinguishable.
-        assert!(!grants.covers(chat, "exec", kind, &exec_args("foo", &["", "bar"])));
+        assert!(!grants.covers(chat, None, "exec", kind, &exec_args("foo", &["", "bar"])));
         // A control character used to be stripped, so these collapsed too.
-        assert!(!grants.covers(chat, "exec", kind, &exec_args("foo", &["b\u{0}ar"])));
+        assert!(!grants.covers(chat, None, "exec", kind, &exec_args("foo", &["b\u{0}ar"])));
         // A non-string argument used to be dropped, changing the call's arity.
         assert!(!grants.covers(
             chat,
+            None,
             "exec",
             kind,
             &serde_json::json!({ "command": "foo", "args": ["bar", 7] })
@@ -978,6 +1039,7 @@ mod standing_grant_tests {
             .collect();
         assert!(!grants.covers(
             chat,
+            None,
             "exec",
             kind,
             &serde_json::json!({ "command": "foo", "args": many })
@@ -991,7 +1053,7 @@ mod standing_grant_tests {
         let grants = StandingGrants::new();
         grants.record(
             StandingGrant::scoped(
-                chat,
+                GrantLevel::Chat { chat_id: chat },
                 "exec",
                 kind,
                 GrantScope::ExactAction(ToolActionPreview::Exec {
@@ -1006,9 +1068,9 @@ mod standing_grant_tests {
 
         let in_dir =
             |cwd: &str| serde_json::json!({ "command": "npm", "args": ["install"], "cwd": cwd });
-        assert!(grants.covers(chat, "exec", kind, &in_dir("./sandbox")));
+        assert!(grants.covers(chat, None, "exec", kind, &in_dir("./sandbox")));
         // The card showed the directory, so the grant is about that directory.
-        assert!(!grants.covers(chat, "exec", kind, &in_dir("/")));
+        assert!(!grants.covers(chat, None, "exec", kind, &in_dir("/")));
     }
 
     #[test]
@@ -1018,7 +1080,7 @@ mod standing_grant_tests {
         let grants = StandingGrants::new();
         grants.record(
             StandingGrant::scoped(
-                chat,
+                GrantLevel::Chat { chat_id: chat },
                 "exec",
                 kind,
                 GrantScope::AnyArgsFor {
@@ -1029,9 +1091,9 @@ mod standing_grant_tests {
             .unwrap(),
         );
 
-        assert!(grants.covers(chat, "exec", kind, &exec_args("cargo", &["test"])));
-        assert!(grants.covers(chat, "exec", kind, &exec_args("cargo", &["publish"])));
-        assert!(!grants.covers(chat, "exec", kind, &exec_args("rm", &["-rf"])));
+        assert!(grants.covers(chat, None, "exec", kind, &exec_args("cargo", &["test"])));
+        assert!(grants.covers(chat, None, "exec", kind, &exec_args("cargo", &["publish"])));
+        assert!(!grants.covers(chat, None, "exec", kind, &exec_args("rm", &["-rf"])));
     }
 
     #[test]
@@ -1041,8 +1103,8 @@ mod standing_grant_tests {
         let grants = StandingGrants::new();
         grants.record(grant(chat, "exec"));
 
-        assert!(grants.covers(chat, "exec", kind, &exec_args("rm", &["-rf"])));
-        assert!(grants.covers(chat, "exec", kind, &no_args()));
+        assert!(grants.covers(chat, None, "exec", kind, &exec_args("rm", &["-rf"])));
+        assert!(grants.covers(chat, None, "exec", kind, &no_args()));
     }
 
     #[test]
@@ -1103,7 +1165,7 @@ mod standing_grant_tests {
         let grants = StandingGrants::new();
         grants.record(
             StandingGrant::scoped(
-                chat,
+                GrantLevel::Chat { chat_id: chat },
                 "web_search",
                 kind,
                 exact_web_search("quarterly filings"),
@@ -1113,14 +1175,21 @@ mod standing_grant_tests {
         );
 
         let query = |query: &str| serde_json::json!({ "query": query });
-        assert!(grants.covers(chat, "web_search", kind, &query("quarterly filings")));
+        assert!(grants.covers(chat, None, "web_search", kind, &query("quarterly filings")));
         // The tool trims before searching, so padding is not a different search.
-        assert!(grants.covers(chat, "web_search", kind, &query("  quarterly filings ")));
-        assert!(!grants.covers(chat, "web_search", kind, &query("payroll")));
+        assert!(grants.covers(
+            chat,
+            None,
+            "web_search",
+            kind,
+            &query("  quarterly filings ")
+        ));
+        assert!(!grants.covers(chat, None, "web_search", kind, &query("payroll")));
         // Same query, different tool: a grant is scoped to the tool it was
         // given for, and a private-source search is not a public web search.
         assert!(!grants.covers(
             chat,
+            None,
             "search",
             ToolApprovalKind::for_tool_name("search"),
             &query("quarterly filings"),
@@ -1129,6 +1198,7 @@ mod standing_grant_tests {
         // filter is a different disclosure and was never the one granted.
         assert!(!grants.covers(
             chat,
+            None,
             "web_search",
             kind,
             &serde_json::json!({ "query": "quarterly filings", "domains": ["sec.gov"] }),
@@ -1136,6 +1206,7 @@ mod standing_grant_tests {
         // Bounding the response is not part of what leaves the machine.
         assert!(grants.covers(
             chat,
+            None,
             "web_search",
             kind,
             &serde_json::json!({ "query": "quarterly filings", "max_results": 10 }),
@@ -1150,7 +1221,7 @@ mod standing_grant_tests {
         for command in ["cargo", "git"] {
             grants.record(
                 StandingGrant::scoped(
-                    chat,
+                    GrantLevel::Chat { chat_id: chat },
                     "exec",
                     kind,
                     GrantScope::AnyArgsFor {
@@ -1162,8 +1233,8 @@ mod standing_grant_tests {
             );
         }
         assert_eq!(grants.read().len(), 2);
-        assert!(grants.covers(chat, "exec", kind, &exec_args("git", &["log"])));
-        assert!(!grants.covers(chat, "exec", kind, &exec_args("npm", &["i"])));
+        assert!(grants.covers(chat, None, "exec", kind, &exec_args("git", &["log"])));
+        assert!(!grants.covers(chat, None, "exec", kind, &exec_args("npm", &["i"])));
     }
 
     #[test]
@@ -1174,9 +1245,9 @@ mod standing_grant_tests {
         grants.record(grant(chat, "search"));
         grants.record(grant(chat, "search"));
         assert_eq!(grants.read().len(), 1);
-        assert!(grants.covers(chat, "search", kind, &no_args()));
+        assert!(grants.covers(chat, None, "search", kind, &no_args()));
 
         grants.clear();
-        assert!(!grants.covers(chat, "search", kind, &no_args()));
+        assert!(!grants.covers(chat, None, "search", kind, &no_args()));
     }
 }

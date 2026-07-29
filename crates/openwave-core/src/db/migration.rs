@@ -42,6 +42,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddChatCitationFormat),
             Box::new(AddEvidenceLocation),
             Box::new(AllowContainerExecutionLocation),
+            Box::new(WidenStandingGrantScope),
         ]
     }
 }
@@ -6939,6 +6940,211 @@ impl MigrationTrait for AddClaimedTurnEffectLeases {
     }
 }
 
+/// Widens a standing grant from one chat to the level it was granted at
+/// (issue #937): `chat_id` becomes nullable and `project_id` joins it, with
+/// exactly one of the two set. A grant made in a chat that belongs to a
+/// project now covers that project, so "always allow" survives into the next
+/// conversation instead of being re-asked.
+///
+/// Existing rows are chat grants and stay chat grants — widening someone's
+/// past decision without asking is the one thing this must not do.
+///
+/// SQLite cannot drop a NOT NULL or add a CHECK in place, so it rebuilds the
+/// table and copies every row across; PostgreSQL alters in place. The `down`
+/// deletes project-level rows first, because they have no representation in
+/// the narrower shape and silently rewriting them to a chat would invent a
+/// scope nobody chose.
+struct WidenStandingGrantScope;
+
+impl MigrationName for WidenStandingGrantScope {
+    fn name(&self) -> &str {
+        "m20260729_000028_widen_standing_grant_scope"
+    }
+}
+
+const STANDING_GRANT_REBUILD: &str = "standing_tool_grant_rebuild";
+
+/// Exactly one of `chat_id` / `project_id` names the level.
+fn standing_grant_level_check(widened: bool) -> SimpleExpr {
+    if widened {
+        Expr::col(StandingToolGrant::ChatId)
+            .is_not_null()
+            .and(Expr::col(StandingToolGrant::ProjectId).is_null())
+            .or(Expr::col(StandingToolGrant::ChatId)
+                .is_null()
+                .and(Expr::col(StandingToolGrant::ProjectId).is_not_null()))
+    } else {
+        Expr::col(StandingToolGrant::ChatId).is_not_null()
+    }
+}
+
+fn standing_grant_rebuild_table(widened: bool) -> TableCreateStatement {
+    let mut table = Table::create();
+    table
+        .table(Alias::new(STANDING_GRANT_REBUILD))
+        .col(
+            ColumnDef::new(StandingToolGrant::SourceCallId)
+                .uuid()
+                .not_null()
+                .primary_key(),
+        )
+        .col({
+            let mut column = ColumnDef::new(StandingToolGrant::ChatId);
+            column.uuid();
+            if !widened {
+                column.not_null();
+            }
+            column
+        })
+        .col(
+            ColumnDef::new(StandingToolGrant::ToolName)
+                .text()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(StandingToolGrant::ApprovalKind)
+                .string_len(64)
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(StandingToolGrant::Scope)
+                .json_binary()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(StandingToolGrant::GrantedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_standing_tool_grant_chat")
+                .from(
+                    Alias::new(STANDING_GRANT_REBUILD),
+                    StandingToolGrant::ChatId,
+                )
+                .to(Chat::Table, Chat::Id)
+                .on_delete(ForeignKeyAction::Cascade),
+        )
+        .check(
+            Func::char_length(Expr::col(StandingToolGrant::ToolName))
+                .between(1, crate::model::ToolCallRecord::MAX_LABEL_LEN as i32),
+        )
+        .check(Expr::col(StandingToolGrant::ApprovalKind).is_in([
+            crate::ToolApprovalKind::SearchMayShareQueryAndExcerpts.standing_grant_key(),
+            crate::ToolApprovalKind::WebSearchMayShareQuery.standing_grant_key(),
+            crate::ToolApprovalKind::ExecMayRunNetworkedCommand.standing_grant_key(),
+        ]));
+    if widened {
+        table
+            .col(ColumnDef::new(StandingToolGrant::ProjectId).uuid())
+            .foreign_key(
+                ForeignKey::create()
+                    .name("fk_standing_tool_grant_project")
+                    .from(
+                        Alias::new(STANDING_GRANT_REBUILD),
+                        StandingToolGrant::ProjectId,
+                    )
+                    .to(Project::Table, Project::Id)
+                    .on_delete(ForeignKeyAction::Cascade),
+            );
+    }
+    table.check(standing_grant_level_check(widened));
+    table.to_owned()
+}
+
+fn standing_grant_rebuild_index() -> IndexCreateStatement {
+    Index::create()
+        .name("idx_standing_tool_grant_lookup")
+        .table(StandingToolGrant::Table)
+        .col(StandingToolGrant::ChatId)
+        .col(StandingToolGrant::ToolName)
+        .col(StandingToolGrant::ApprovalKind)
+        .col(StandingToolGrant::GrantedAt)
+        .to_owned()
+}
+
+async fn rebuild_standing_grant_sqlite(
+    manager: &SchemaManager<'_>,
+    widened: bool,
+) -> Result<(), DbErr> {
+    let shared = "source_call_id, chat_id, tool_name, approval_kind, scope, granted_at";
+    let copy = if widened {
+        format!(
+            "INSERT INTO {STANDING_GRANT_REBUILD} ({shared}, project_id) \
+             SELECT {shared}, NULL FROM standing_tool_grant"
+        )
+    } else {
+        // Project grants cannot be narrowed to a chat without inventing one.
+        format!(
+            "INSERT INTO {STANDING_GRANT_REBUILD} ({shared}) \
+             SELECT {shared} FROM standing_tool_grant WHERE chat_id IS NOT NULL"
+        )
+    };
+    let statements = vec![
+        "PRAGMA foreign_keys=OFF".to_owned(),
+        "BEGIN IMMEDIATE".to_owned(),
+        standing_grant_rebuild_table(widened).to_string(SqliteQueryBuilder),
+        copy,
+        "DROP TABLE standing_tool_grant".to_owned(),
+        format!("ALTER TABLE {STANDING_GRANT_REBUILD} RENAME TO standing_tool_grant"),
+        standing_grant_rebuild_index().to_string(SqliteQueryBuilder),
+        "COMMIT".to_owned(),
+        "PRAGMA foreign_keys=ON".to_owned(),
+    ];
+    manager
+        .get_connection()
+        .execute_unprepared(&format!("{};", statements.join(";\n")))
+        .await?;
+    Ok(())
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for WidenStandingGrantScope {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if manager.get_database_backend() == DatabaseBackend::Sqlite {
+            return rebuild_standing_grant_sqlite(manager, true).await;
+        }
+        let level = render_postgres_check(standing_grant_level_check(true));
+        let statements = [
+            "ALTER TABLE standing_tool_grant ADD COLUMN project_id uuid".to_owned(),
+            "ALTER TABLE standing_tool_grant ADD CONSTRAINT fk_standing_tool_grant_project \
+             FOREIGN KEY (project_id) REFERENCES project(id) ON DELETE CASCADE"
+                .to_owned(),
+            "ALTER TABLE standing_tool_grant ALTER COLUMN chat_id DROP NOT NULL".to_owned(),
+            format!(
+                "ALTER TABLE standing_tool_grant ADD CONSTRAINT chk_standing_tool_grant_level \
+                 CHECK ({level})"
+            ),
+        ];
+        manager
+            .get_connection()
+            .execute_unprepared(&format!("{};", statements.join(";\n")))
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if manager.get_database_backend() == DatabaseBackend::Sqlite {
+            return rebuild_standing_grant_sqlite(manager, false).await;
+        }
+        let statements = [
+            "DELETE FROM standing_tool_grant WHERE project_id IS NOT NULL".to_owned(),
+            "ALTER TABLE standing_tool_grant DROP CONSTRAINT chk_standing_tool_grant_level"
+                .to_owned(),
+            "ALTER TABLE standing_tool_grant ALTER COLUMN chat_id SET NOT NULL".to_owned(),
+            "ALTER TABLE standing_tool_grant DROP CONSTRAINT fk_standing_tool_grant_project"
+                .to_owned(),
+            "ALTER TABLE standing_tool_grant DROP COLUMN project_id".to_owned(),
+        ];
+        manager
+            .get_connection()
+            .execute_unprepared(&format!("{};", statements.join(";\n")))
+            .await?;
+        Ok(())
+    }
+}
+
 /// Adds `tool_call.auto_judge_status` (issue #756): where the Auto-mode judge
 /// stands on a parked approval (`judging` / `approved` / `declined`, `NULL`
 /// when no judge was engaged). Values are code-enforced; the column carries no
@@ -7812,6 +8018,7 @@ enum StandingToolGrant {
     Table,
     SourceCallId,
     ChatId,
+    ProjectId,
     ToolName,
     ApprovalKind,
     Scope,

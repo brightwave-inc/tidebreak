@@ -7,8 +7,8 @@ import { PermissionsPanel } from "./PermissionsPanel";
 
 const execGrant: StandingGrantSnapshot = {
   source_call_id: "11111111-1111-1111-1111-111111111111",
-  chat_id: "22222222-2222-2222-2222-222222222222",
-  chat_title: "Quarterly filings",
+  level: { level: "chat", chat_id: "22222222-2222-2222-2222-222222222222" },
+  level_title: "Quarterly filings",
   action: "exec",
   approval: "exec_may_run_networked_command",
   scope: { scope: "any_args_for", command: "cargo" },
@@ -51,6 +51,22 @@ describe("PermissionsPanel", () => {
     await waitFor(() =>
       expect(screen.queryByText("cargo …")).not.toBeInTheDocument(),
     );
+  });
+
+  it("names a project grant as reaching past the chat that made it", async () => {
+    const projectGrant: StandingGrantSnapshot = {
+      ...execGrant,
+      level: { level: "project", project_id: "33333333-3333-3333-3333-333333333333" },
+      level_title: "Filings",
+    };
+    const client = api({
+      listStandingGrants: vi.fn().mockResolvedValue([projectGrant]),
+    });
+    render(<PermissionsPanel client={client} />);
+
+    // Not "Filings" alone: the reader has to be able to tell a grant that
+    // covers conversations they have not started yet.
+    await screen.findByText("Everything in Filings");
   });
 
   it("says so when nothing is saved", async () => {

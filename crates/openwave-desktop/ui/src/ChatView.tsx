@@ -265,6 +265,7 @@ export function ChatView({
           userQuestionErrors={userQuestions.errors}
           decidingApprovalCalls={approvals.deciding}
           approvalErrors={approvals.errors}
+          grantScope={chat.project_id ? "project" : "chat"}
           backgroundAgentRuns={agentRuns.runs}
           backgroundAgentRunsLoading={agentRuns.loading}
           backgroundAgentRunsError={agentRuns.error}
