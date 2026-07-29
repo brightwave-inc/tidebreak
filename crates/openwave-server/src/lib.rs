@@ -24,6 +24,7 @@ mod desktop_schema;
 mod document_auditor;
 mod document_stage;
 mod document_worker;
+mod durable_oplog;
 mod error;
 mod event_projection;
 mod extract;
@@ -83,6 +84,7 @@ use openwave_retrieval::{
 
 use resolver::KeyedResolver;
 
+pub use durable_oplog::DurableOperationStore;
 pub use error::ServerError;
 pub use state::AppState;
 

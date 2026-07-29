@@ -154,6 +154,11 @@ pub enum ErrorCode {
     /// An operation identity was found `Claimed` with no live execution — a
     /// crash-ambiguous external effect that must not be replayed.
     OperationAmbiguous,
+    /// The operation completed terminally, but its recorded result was evicted
+    /// by retention (#859). It ran exactly once and must not be re-executed;
+    /// unlike [`OperationAmbiguous`](ErrorCode::OperationAmbiguous) the outcome
+    /// is known, only the body is gone.
+    OperationEvicted,
     /// The in-flight request was cancelled over the control lane.
     Cancelled,
     /// The connection dropped before the response arrived.

@@ -978,6 +978,92 @@ fn root_attachment_storage_unavailable<T>() -> Result<T> {
     ))
 }
 
+fn operation_log_storage_unavailable<T>() -> Result<T> {
+    Err(AgentError::Store(
+        "durable operation-log storage is not implemented by this Store".into(),
+    ))
+}
+
+/// Where one entry of the durable reverse-RPC operation log stands.
+///
+/// This is the storage-tier projection of the protocol's operation state
+/// machine (`openwave-sandbox-protocol::oplog`): a `Claimed` entry has been
+/// dispatched but has no terminal outcome yet; `Recorded`/`Failed` are terminal.
+/// The recorded body itself is an opaque blob to the store — the protocol tier
+/// owns its typed shape — so this tier stays free of reverse-RPC wire types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperationLogState {
+    /// Dispatched, no terminal outcome recorded.
+    Claimed,
+    /// Terminal success; a response body is retained (unless evicted per #859).
+    Recorded,
+    /// Terminal failure; an error body is retained (unless evicted per #859).
+    Failed,
+}
+
+/// The outcome of atomically claiming an operation identity against the durable
+/// log. This is the storage half of the reverse-RPC commit predicate; the
+/// protocol tier maps it onto `ClaimOutcome`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OperationClaimOutcome {
+    /// The identity was unseen and is now `Claimed`, owned by the caller's
+    /// epoch. The caller must execute the effect exactly once.
+    Fresh,
+    /// The identity is already terminally recorded; the opaque response body to
+    /// replay without re-executing.
+    Recorded(Vec<u8>),
+    /// The identity already failed terminally; the opaque error body to replay.
+    Failed(Vec<u8>),
+    /// The identity is terminal (recorded or failed) but its body has been
+    /// evicted to a commit marker (#859) and is gone. It ran exactly once and
+    /// must not be re-executed; there is no body to replay. This is distinct
+    /// from a backend failure — the row is intact, only its body is absent — so
+    /// the caller answers "already done, do not re-execute", never the
+    /// after-crash ambiguity.
+    TerminalEvicted,
+    /// The identity is `Claimed` by the caller's *own* epoch — a concurrent
+    /// duplicate this process lifetime, which attaches to the live execution
+    /// rather than re-executing.
+    OwnedClaim,
+    /// The identity is `Claimed` by a *different* epoch that never recorded — the
+    /// after-crash ambiguity for an external-effect operation. The caller must
+    /// fail conservatively rather than re-execute a possibly-spent call.
+    ForeignClaim,
+    /// The identity was reused for a structurally different request fingerprint.
+    Conflict,
+}
+
+/// The outcome of a terminal write (`record`/`fail`) against the durable log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperationLogWrite {
+    /// The `Claimed` entry transitioned to the requested terminal state.
+    Committed,
+    /// The entry was already in the requested terminal state; an idempotent
+    /// no-op, so a re-delivered terminal write is acknowledged, not rejected.
+    AlreadyTerminal,
+    /// No `Claimed` entry to settle — unknown, or already in the *other*
+    /// terminal state.
+    NotClaimed,
+}
+
+/// A read-back of one durable operation-log entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationLogEntry {
+    /// The entry's state.
+    pub state: OperationLogState,
+    /// The recorded terminal body (response for `Recorded`, error for
+    /// `Failed`), present only while the entry is terminal *and* its body is
+    /// still retained. `None` while `Claimed`, or once #859 evicts the body and
+    /// leaves a commit marker.
+    pub body: Option<Vec<u8>>,
+    /// Whether the operation carried an external effect when claimed. Retention
+    /// (#859) and audit read this without re-deriving it from the request.
+    pub external_effect: bool,
+    /// Whether the terminal body is still retained. #859 flips this to `false`
+    /// when it replaces a full body with a commit marker.
+    pub retained: bool,
+}
+
 /// Durable metadata and conversation state.
 ///
 /// Implementations must be safe to share across threads (`Send + Sync`) and are
@@ -2949,6 +3035,82 @@ pub trait Store: Send + Sync {
     /// List a chat's journaled events with `seq` greater than `after`, in
     /// sequence order. Pass `0` to replay from the start.
     async fn list_events(&self, chat_id: ChatId, after: i64) -> Result<Vec<SequencedEvent>>;
+
+    // --- Durable reverse-RPC operation log (issue #858) ---
+    //
+    // These back the crash-safe `OperationStore` seam of
+    // `openwave-sandbox-protocol`. The store persists an opaque
+    // `(fingerprint, body)` pair keyed by `(run_id, operation_id)` and enforces
+    // the commit predicate transactionally; the protocol tier owns the typed
+    // meaning of those bytes and the mapping to `ClaimOutcome`. Retention and
+    // body eviction are #859; `evict_operation` is that seam.
+
+    /// Atomically claim `operation_id` under `run_id` for `fingerprint`, or
+    /// observe its existing state, in a single transaction.
+    ///
+    /// `owner_epoch` identifies the claiming process lifetime: a `Claimed` entry
+    /// found under a *different* epoch is the after-crash ambiguity
+    /// ([`OperationClaimOutcome::ForeignClaim`]) for an `external_effect`
+    /// operation; under the *same* epoch it is a concurrent duplicate
+    /// ([`OperationClaimOutcome::OwnedClaim`]). A foreign `Claimed` with no
+    /// external effect is safe to re-drive, so ownership is taken over and the
+    /// claim reported [`OperationClaimOutcome::Fresh`].
+    async fn claim_operation(
+        &self,
+        _run_id: uuid::Uuid,
+        _operation_id: uuid::Uuid,
+        _fingerprint: &[u8],
+        _external_effect: bool,
+        _owner_epoch: uuid::Uuid,
+    ) -> Result<OperationClaimOutcome> {
+        operation_log_storage_unavailable()
+    }
+
+    /// Settle a `Claimed` entry to `Recorded` with `body`, transactionally.
+    /// Idempotent: a re-delivered record for an already-`Recorded` entry is
+    /// acknowledged ([`OperationLogWrite::AlreadyTerminal`]) without overwriting
+    /// the first-committed body.
+    async fn record_operation(
+        &self,
+        _run_id: uuid::Uuid,
+        _operation_id: uuid::Uuid,
+        _body: &[u8],
+    ) -> Result<OperationLogWrite> {
+        operation_log_storage_unavailable()
+    }
+
+    /// Settle a `Claimed` entry to `Failed` with `body`, transactionally.
+    /// Idempotent for an already-`Failed` entry.
+    async fn fail_operation(
+        &self,
+        _run_id: uuid::Uuid,
+        _operation_id: uuid::Uuid,
+        _body: &[u8],
+    ) -> Result<OperationLogWrite> {
+        operation_log_storage_unavailable()
+    }
+
+    /// The current state of an operation-log entry, if the log knows it.
+    async fn operation_state(
+        &self,
+        _run_id: uuid::Uuid,
+        _operation_id: uuid::Uuid,
+    ) -> Result<Option<OperationLogEntry>> {
+        operation_log_storage_unavailable()
+    }
+
+    /// Drop an entry once the sandbox can no longer re-issue it. This slice
+    /// removes the row; #859 owns *when* eviction is safe and may instead null
+    /// the body and clear `retained` to leave a commit marker.
+    async fn evict_operation(&self, _run_id: uuid::Uuid, _operation_id: uuid::Uuid) -> Result<()> {
+        operation_log_storage_unavailable()
+    }
+
+    /// How many operation-log entries a run currently retains. For tests and,
+    /// later, retention accounting.
+    async fn operation_log_len(&self, _run_id: uuid::Uuid) -> Result<usize> {
+        operation_log_storage_unavailable()
+    }
 }
 
 /// Credential custody: secrets keyed by a stable reference string (e.g.

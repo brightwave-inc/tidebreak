@@ -148,6 +148,16 @@ impl CapabilityHost {
                 // it after a crash and must fail closed, which is what we do.
                 None => ReverseWaiter::settled(ambiguous()),
             },
+            // The operation ran once and completed; retention evicted its body.
+            // It is done, so it is never re-executed — but the outcome is known,
+            // so this is a distinct refusal, not the after-crash ambiguity.
+            ClaimOutcome::Replay(OperationState::Evicted) => {
+                ReverseWaiter::settled(Response::Error(ErrorResponse::new(
+                    ErrorCode::OperationEvicted,
+                    "operation already completed; its recorded result was evicted",
+                    false,
+                )))
+            }
             // The durable store's after-crash refusal: never re-execute a call
             // whose external effect cannot be proven unexecuted.
             ClaimOutcome::ClaimedElsewhere => ReverseWaiter::settled(ambiguous()),
