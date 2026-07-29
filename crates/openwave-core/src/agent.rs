@@ -38,8 +38,8 @@ use crate::approval::{
 };
 use crate::cancel::CancelToken;
 use crate::citation::{
-    classify_source_reference_candidate, parse_assistant_citations, AssistantCitationReference,
-    SourceReferenceCandidate,
+    classify_source_reference_candidate, parse_assistant_citations, rebind_citation_ids,
+    AssistantCitationReference, SourceReferenceCandidate,
 };
 use crate::context;
 use crate::error::{AgentError, Result};
@@ -898,8 +898,34 @@ fn call_action_preview(call: &PendingCall) -> Option<ToolActionPreview> {
 }
 
 struct AssistantCandidate {
+    /// The message identity the content's citation ids were derived from.
+    message_id: MessageId,
     content: String,
     citations: Vec<AssistantCitationReference>,
+}
+
+impl AssistantCandidate {
+    /// This candidate as a durable message under `message_id`.
+    ///
+    /// A citation is identified by its message and its ordinal, so a candidate
+    /// persisted under an identity other than the one it was parsed for has its
+    /// embedded ids re-derived rather than left pointing at citations the stored
+    /// message does not own.
+    fn message(&self, message_id: MessageId, chat_id: ChatId, turn_id: TurnId) -> Message {
+        Message {
+            id: message_id,
+            chat_id,
+            turn_id,
+            role: Role::Assistant,
+            content: rebind_citation_ids(
+                &self.content,
+                self.message_id,
+                message_id,
+                self.citations.len(),
+            ),
+            created_at: Utc::now(),
+        }
+    }
 }
 
 enum AcceptedServerCall {
@@ -1372,8 +1398,19 @@ impl Agent {
                 calls.clear();
             }
 
-            let parsed = parse_assistant_citations(&text);
+            // Citation identities are derived from the message a citation
+            // belongs to, so the candidate's identity is settled before its text
+            // is parsed. A boundary steer can still turn a claimed turn's final
+            // candidate into an intermediate message; that path re-derives the
+            // ids for the identity it persists under.
+            let candidate_message_id = if calls.is_empty() && !publish_terminal {
+                output_message_id
+            } else {
+                MessageId::new()
+            };
+            let parsed = parse_assistant_citations(&text, candidate_message_id);
             let candidate = AssistantCandidate {
+                message_id: candidate_message_id,
                 content: parsed.content,
                 citations: parsed.references,
             };
@@ -1448,25 +1485,12 @@ impl Agent {
             }
 
             if calls.is_empty() {
-                // A boundary steer can turn this final candidate into an
-                // intermediate assistant message. Legacy turns persist each
-                // candidate immediately, so each needs its own identity. A
-                // claimed turn keeps the caller's stable completion identity:
-                // steered candidates are persisted separately by
-                // `apply_steers`, and only the actual final output uses it.
-                let candidate_message_id = if publish_terminal {
-                    MessageId::new()
-                } else {
-                    output_message_id
-                };
-                let output = Message {
-                    id: candidate_message_id,
-                    chat_id: chat.id,
-                    turn_id,
-                    role: Role::Assistant,
-                    content: text.clone(),
-                    created_at: Utc::now(),
-                };
+                // Legacy turns persist each candidate immediately, so each needs
+                // its own identity. A claimed turn keeps the caller's stable
+                // completion identity: steered candidates are persisted
+                // separately by `apply_steers`, and only the actual final output
+                // uses it.
+                let output = candidate.message(candidate.message_id, chat.id, turn_id);
                 if publish_terminal && !text.is_empty() {
                     self.append_assistant_exact_retry(&output, &candidate.citations)
                         .await?;
@@ -2096,14 +2120,9 @@ impl Agent {
         }
         let preceding = preceding_assistant
             .filter(|candidate| !candidate.content.is_empty() && !durable.is_empty())
-            .map(|candidate| Message {
-                id: MessageId::new(),
-                chat_id: chat.id,
-                turn_id,
-                role: Role::Assistant,
-                content: candidate.content.clone(),
-                created_at: Utc::now(),
-            });
+            // A steered candidate is not the turn's output, so it takes an
+            // identity of its own and its citation ids are re-derived for it.
+            .map(|candidate| candidate.message(MessageId::new(), chat.id, turn_id));
         let preceding_citations = preceding_assistant
             .filter(|candidate| !candidate.content.is_empty() && !durable.is_empty())
             .map_or(&[][..], |candidate| candidate.citations.as_slice());
@@ -2869,18 +2888,10 @@ impl Agent {
         turn_id: TurnId,
         candidate: &AssistantCandidate,
     ) -> Result<MessageId> {
-        let id = MessageId::new();
-        let message = Message {
-            id,
-            chat_id,
-            turn_id,
-            role: Role::Assistant,
-            content: candidate.content.clone(),
-            created_at: Utc::now(),
-        };
+        let message = candidate.message(candidate.message_id, chat_id, turn_id);
         self.append_assistant_exact_retry(&message, &candidate.citations)
             .await?;
-        Ok(id)
+        Ok(message.id)
     }
 
     async fn append_assistant_exact_retry(

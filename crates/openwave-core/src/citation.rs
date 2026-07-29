@@ -1,16 +1,28 @@
 //! Closed source-reference grammar for durable assistant citations.
 //!
-//! Search tools expose opaque references to the model. The agent removes those
-//! references from final text and hands only their typed identities to storage;
-//! renderer clients never see the grammar or its underlying call identity.
+//! Search tools expose opaque references to the model, which cites a passage by
+//! wrapping its own phrasing in a `:cit[…]{ref=…}` directive. The agent
+//! resolves those references and rewrites each directive to its durable
+//! identity — `:cit[…]{citation_id=…}` — so the cited phrase stays where the
+//! model put it. Renderer clients never see the opaque token or the call
+//! identity behind it.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 
 use crate::RetrievalEvidenceInput;
 use crate::{AssistantCitationId, DocumentId, MessageId, PageBounds, SourceLocation, SourceRegion};
 
 const SOURCE_REFERENCE_PREFIX: &str = "[[ow-source:";
 const SOURCE_REFERENCE_SUFFIX: &str = "]]";
+const SOURCE_TOKEN_LEN: usize = 32;
+
+/// Opens the inline citation directive, ahead of the cited phrase.
+const CITATION_DIRECTIVE_PREFIX: &str = ":cit[";
+/// Closes the cited phrase and opens the model-facing reference attribute.
+const CITATION_REFERENCE_ATTRIBUTE: &str = "]{ref=";
+/// Closes the cited phrase and opens the durable, renderer-facing attribute.
+const CITATION_ID_ATTRIBUTE: &str = "]{citation_id=";
+const CITATION_ATTRIBUTE_SUFFIX: &str = "}";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SourceReferenceCandidate {
@@ -144,28 +156,78 @@ pub fn format_source_reference(reference: AssistantCitationReference) -> String 
     )
 }
 
-/// Strip reserved references without interpreting Markdown.
-///
-/// Structurally complete reserved tokens are always removed from user-visible
-/// text. Exact lowercase-hex tokens become typed references; unknown tokens can
-/// be ignored by storage. Duplicates retain their first
-/// position and the result is bounded independently of provider output size.
+/// Produce the exact citation directive a search result asks the model to
+/// author around the phrasing that a passage supports.
 #[must_use]
-pub fn parse_assistant_citations(text: &str) -> ParsedAssistantCitations {
+pub fn format_citation_directive(phrase: &str, reference: AssistantCitationReference) -> String {
+    format!(
+        "{CITATION_DIRECTIVE_PREFIX}{phrase}{CITATION_REFERENCE_ATTRIBUTE}{}{CITATION_ATTRIBUTE_SUFFIX}",
+        reference.source_token.simple()
+    )
+}
+
+/// Resolve reserved references without interpreting Markdown.
+///
+/// A citation directive whose token is well formed keeps its cited phrase and
+/// is rewritten to the durable identity the phrase will be stored under; a bare
+/// reserved token is removed from user-visible text, as it always has been.
+/// Exact lowercase-hex tokens become typed references; unknown tokens can be
+/// ignored by storage. Duplicates retain their first position — and their first
+/// citation identity — and the result is bounded independently of provider
+/// output size.
+///
+/// `message_id` is the identity the parsed content will be stored under, since
+/// a citation's identity is derived from its message and its first-use ordinal.
+#[must_use]
+pub fn parse_assistant_citations(text: &str, message_id: MessageId) -> ParsedAssistantCitations {
     let mut content = String::with_capacity(text.len());
-    let mut references = Vec::new();
-    let mut seen = HashSet::new();
+    let mut references: Vec<AssistantCitationReference> = Vec::new();
     let mut remainder = text;
 
-    while let Some(start) = remainder.find(SOURCE_REFERENCE_PREFIX) {
+    loop {
+        // Whichever form opens first; the two openings cannot start at the same
+        // offset because their first bytes differ.
+        let (start, directive_first) = match (
+            remainder.find(SOURCE_REFERENCE_PREFIX),
+            remainder.find(CITATION_DIRECTIVE_PREFIX),
+        ) {
+            (Some(marker), Some(directive)) => (marker.min(directive), directive < marker),
+            (Some(marker), None) => (marker, false),
+            (None, Some(directive)) => (directive, true),
+            (None, None) => break,
+        };
         content.push_str(&remainder[..start]);
-        let token = &remainder[start + SOURCE_REFERENCE_PREFIX.len()..];
-        let Some(payload) = token.get(..32) else {
+        let candidate = &remainder[start..];
+        if directive_first {
+            let Some(directive) = split_citation_directive(candidate) else {
+                // Not a directive after all: release the opening and rescan from
+                // inside it, so directive-like prose is preserved and a bare
+                // reference embedded in the would-be phrase is still stripped.
+                content.push_str(CITATION_DIRECTIVE_PREFIX);
+                remainder = &candidate[CITATION_DIRECTIVE_PREFIX.len()..];
+                continue;
+            };
+            match first_use_ordinal(&mut references, directive.reference) {
+                // A directive with nothing to mark is just a bare marker.
+                Some(_) if directive.phrase.is_empty() => {}
+                Some(ordinal) => content.push_str(&format_bound_citation_directive(
+                    directive.phrase,
+                    AssistantCitationId::derive(message_id, ordinal),
+                )),
+                // Past the citation bound the prose is still the model's; only
+                // the citation is dropped.
+                None => content.push_str(directive.phrase),
+            }
+            remainder = directive.rest;
+            continue;
+        }
+        let token = &candidate[SOURCE_REFERENCE_PREFIX.len()..];
+        let Some(payload) = token.get(..SOURCE_TOKEN_LEN) else {
             content.push_str(SOURCE_REFERENCE_PREFIX);
             remainder = token;
             continue;
         };
-        let Some(after_payload) = token.get(32..) else {
+        let Some(after_payload) = token.get(SOURCE_TOKEN_LEN..) else {
             unreachable!("a 32-byte token prefix has a remainder")
         };
         let Some(reference) = after_payload
@@ -177,9 +239,8 @@ pub fn parse_assistant_citations(text: &str) -> ParsedAssistantCitations {
             remainder = token;
             continue;
         };
-        if references.len() < MAX_ASSISTANT_CITATIONS && seen.insert(reference) {
-            references.push(reference);
-        }
+        // A bare reference marks no phrase, so it is only recorded.
+        let _ = first_use_ordinal(&mut references, reference);
         remainder = &after_payload[SOURCE_REFERENCE_SUFFIX.len()..];
     }
     content.push_str(remainder);
@@ -188,6 +249,81 @@ pub fn parse_assistant_citations(text: &str) -> ParsedAssistantCitations {
         content,
         references,
     }
+}
+
+/// Re-derive the citation identities embedded in parsed content for a different
+/// message identity.
+///
+/// A citation is identified by its message and ordinal, so content persisted
+/// under an identity other than the one it was parsed for would otherwise carry
+/// ids the stored message does not own.
+pub(crate) fn rebind_citation_ids(
+    content: &str,
+    from: MessageId,
+    to: MessageId,
+    citations: usize,
+) -> String {
+    let mut rebound = content.to_owned();
+    if from == to {
+        return rebound;
+    }
+    for ordinal in 1..=citations.min(MAX_ASSISTANT_CITATIONS) {
+        let ordinal = u16::try_from(ordinal).expect("citation limit fits u16");
+        rebound = rebound.replace(
+            &AssistantCitationId::derive(from, ordinal).to_string(),
+            &AssistantCitationId::derive(to, ordinal).to_string(),
+        );
+    }
+    rebound
+}
+
+struct CitationDirective<'a> {
+    phrase: &'a str,
+    reference: AssistantCitationReference,
+    rest: &'a str,
+}
+
+/// Split a well-formed authoring directive off the front of `candidate`.
+///
+/// The first `]` closes the cited phrase: telling a bracket inside the phrase
+/// from the directive's own would take a Markdown parse, so a phrase carrying
+/// one degrades to literal prose instead of being guessed at.
+fn split_citation_directive(candidate: &str) -> Option<CitationDirective<'_>> {
+    let opened = candidate.strip_prefix(CITATION_DIRECTIVE_PREFIX)?;
+    let (phrase, closed) = opened.split_at(opened.find(']')?);
+    let attribute = closed.strip_prefix(CITATION_REFERENCE_ATTRIBUTE)?;
+    let payload = attribute.get(..SOURCE_TOKEN_LEN)?;
+    let rest = attribute
+        .get(SOURCE_TOKEN_LEN..)?
+        .strip_prefix(CITATION_ATTRIBUTE_SUFFIX)?;
+    Some(CitationDirective {
+        phrase,
+        reference: parse_reference_payload(payload)?,
+        rest,
+    })
+}
+
+fn format_bound_citation_directive(phrase: &str, id: AssistantCitationId) -> String {
+    format!(
+        "{CITATION_DIRECTIVE_PREFIX}{phrase}{CITATION_ID_ATTRIBUTE}{id}{CITATION_ATTRIBUTE_SUFFIX}"
+    )
+}
+
+/// The one-based position `reference` holds in first-use order, recording it if
+/// this is its first use and the citation bound leaves room for it.
+fn first_use_ordinal(
+    references: &mut Vec<AssistantCitationReference>,
+    reference: AssistantCitationReference,
+) -> Option<u16> {
+    let position = match references.iter().position(|seen| *seen == reference) {
+        Some(position) => position,
+        None if references.len() < MAX_ASSISTANT_CITATIONS => {
+            references.push(reference);
+            references.len() - 1
+        }
+        None => return None,
+    };
+    Some(u16::try_from(position + 1).expect("citation limit fits u16"))
 }
 
 pub(crate) fn classify_source_reference_candidate(candidate: &str) -> SourceReferenceCandidate {
@@ -238,6 +374,136 @@ fn parse_reference_payload(payload: &str) -> Option<AssistantCitationReference> 
 mod tests {
     use super::*;
 
+    /// The stored form of the citation a directive with `reference` becomes,
+    /// wrapping `phrase`, when it is the `ordinal`-th distinct citation of
+    /// `message_id`.
+    fn bound(phrase: &str, message_id: MessageId, ordinal: u16) -> String {
+        format!(
+            ":cit[{phrase}]{{citation_id={}}}",
+            AssistantCitationId::derive(message_id, ordinal)
+        )
+    }
+
+    #[test]
+    fn directives_keep_their_phrase_and_carry_one_identity_per_evidence() {
+        let message_id = MessageId::new();
+        let first = AssistantCitationReference {
+            source_token: uuid::Uuid::new_v4(),
+        };
+        let second = AssistantCitationReference {
+            source_token: uuid::Uuid::new_v4(),
+        };
+        let text = format!(
+            "{} and {}, plus {}.",
+            format_citation_directive("the sky is blue", first),
+            format_citation_directive("water is wet", second),
+            format_citation_directive("still blue", first),
+        );
+
+        let parsed = parse_assistant_citations(&text, message_id);
+
+        assert_eq!(
+            parsed.content,
+            format!(
+                "{} and {}, plus {}.",
+                bound("the sky is blue", message_id, 1),
+                bound("water is wet", message_id, 2),
+                bound("still blue", message_id, 1),
+            )
+        );
+        assert_eq!(parsed.references, [first, second]);
+        assert!(!parsed
+            .content
+            .contains(&first.source_token.simple().to_string()));
+    }
+
+    #[test]
+    fn rebinding_matches_parsing_for_the_other_message() {
+        let parsed_for = MessageId::new();
+        let stored_under = MessageId::new();
+        let first = AssistantCitationReference {
+            source_token: uuid::Uuid::new_v4(),
+        };
+        let second = AssistantCitationReference {
+            source_token: uuid::Uuid::new_v4(),
+        };
+        let text = format!(
+            "Grounded {} and {}.",
+            format_citation_directive("claim", first),
+            format_citation_directive("other claim", second),
+        );
+
+        let parsed = parse_assistant_citations(&text, parsed_for);
+        let rebound = rebind_citation_ids(
+            &parsed.content,
+            parsed_for,
+            stored_under,
+            parsed.references.len(),
+        );
+
+        assert_eq!(
+            rebound,
+            parse_assistant_citations(&text, stored_under).content
+        );
+    }
+
+    #[test]
+    fn malformed_directives_degrade_to_prose() {
+        let message_id = MessageId::new();
+        let reference = AssistantCitationReference {
+            source_token: uuid::Uuid::new_v4(),
+        };
+        let token = reference.source_token.simple().to_string();
+
+        // An unterminated phrase and an unparseable token are ordinary prose.
+        let unparseable = ":cit[unterminated and :cit[bad]{ref=nope} too";
+        let parsed = parse_assistant_citations(unparseable, message_id);
+        assert_eq!(parsed.content, unparseable);
+        assert!(parsed.references.is_empty());
+
+        // A bracket inside the phrase closes it early, so the directive
+        // degrades — and a bare marker caught inside it is still stripped.
+        let nested = format!(
+            ":cit[nested {} bracket]{{ref={token}}}",
+            format_source_reference(reference)
+        );
+        let parsed = parse_assistant_citations(&nested, message_id);
+        assert_eq!(
+            parsed.content,
+            format!(":cit[nested  bracket]{{ref={token}}}")
+        );
+        assert_eq!(parsed.references, [reference]);
+
+        // A directive with no phrase to mark resolves like a bare marker.
+        let empty = format!("Answer{}", format_citation_directive("", reference));
+        let parsed = parse_assistant_citations(&empty, message_id);
+        assert_eq!(parsed.content, "Answer");
+        assert_eq!(parsed.references, [reference]);
+    }
+
+    #[test]
+    fn directives_past_the_citation_bound_keep_only_their_phrase() {
+        let message_id = MessageId::new();
+        let references = (0..MAX_ASSISTANT_CITATIONS + 1)
+            .map(|_| AssistantCitationReference {
+                source_token: uuid::Uuid::new_v4(),
+            })
+            .collect::<Vec<_>>();
+        let text = references
+            .iter()
+            .map(|reference| format_citation_directive("phrase", *reference))
+            .collect::<String>();
+
+        let parsed = parse_assistant_citations(&text, message_id);
+
+        assert_eq!(parsed.references, references[..MAX_ASSISTANT_CITATIONS]);
+        assert!(parsed.content.ends_with("phrase"));
+        assert_eq!(
+            parsed.content.matches(":cit[").count(),
+            MAX_ASSISTANT_CITATIONS
+        );
+    }
+
     #[test]
     fn parser_strips_and_deduplicates_exact_references_without_markdown() {
         let first = AssistantCitationReference {
@@ -251,7 +517,7 @@ mod tests {
             first_ref = format_source_reference(first),
             second_ref = format_source_reference(second),
         );
-        let parsed = parse_assistant_citations(&text);
+        let parsed = parse_assistant_citations(&text, MessageId::new());
         assert_eq!(parsed.content, "Grounded  answer ");
         assert_eq!(parsed.references, [first, second]);
     }
@@ -262,6 +528,7 @@ mod tests {
             " before [[ow-source:not-a-token]] middle \
              [[ow-source:00000000000000000000000000000000]] after \
              [[ow-source:still-being-written ",
+            MessageId::new(),
         );
         assert_eq!(
             parsed.references,
@@ -288,7 +555,7 @@ mod tests {
              [[ow-source:short ordinary paragraph and a later ]] marker\n\
              {valid_marker} tail 🌊\n"
         );
-        let parsed = parse_assistant_citations(&text);
+        let parsed = parse_assistant_citations(&text, MessageId::new());
         assert_eq!(parsed.references, [valid]);
         assert_eq!(parsed.content, text.replace(&valid_marker, ""));
     }
@@ -333,7 +600,7 @@ mod tests {
             .iter()
             .map(|reference| format_source_reference(*reference))
             .collect::<String>();
-        let parsed = parse_assistant_citations(&text);
+        let parsed = parse_assistant_citations(&text, MessageId::new());
         assert!(parsed.content.is_empty());
         assert_eq!(parsed.references, references[..MAX_ASSISTANT_CITATIONS]);
     }

@@ -5,6 +5,7 @@ import {
   preserveLineBreaks,
   rawCodeText,
   safeMarkdownUrl,
+  stripCitationDirectives,
 } from "./MessageMarkdown";
 
 describe("preserveLineBreaks", () => {
@@ -13,6 +14,28 @@ describe("preserveLineBreaks", () => {
     expect(preserveLineBreaks("para one\n\npara two")).toBe(
       "para one\n\npara two",
     );
+  });
+});
+
+describe("stripCitationDirectives", () => {
+  const id = "0b2b1f2c-9d3e-4a5b-8c7d-6e5f4a3b2c1d";
+
+  it("leaves the cited phrasing in place and the rest of the prose alone", () => {
+    expect(
+      stripCitationDirectives(
+        `The reef :cit[is the largest in the world]{citation_id=${id}}, and it grows.`,
+      ),
+    ).toBe("The reef is the largest in the world, and it grows.");
+  });
+
+  it("keeps directive-shaped prose that is not a stored citation", () => {
+    const prose = [
+      ":cit[unterminated",
+      `:cit[phrase]{ref=0123456789abcdef0123456789abcdef}`,
+      ":cit[phrase]{citation_id=not-a-uuid}",
+    ].join("\n");
+
+    expect(stripCitationDirectives(prose)).toBe(prose);
   });
 });
 

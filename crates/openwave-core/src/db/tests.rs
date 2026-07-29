@@ -11405,14 +11405,6 @@ async fn retrieval_evidence_is_atomic_generation_fenced_and_survives_source_chan
         .await
         .unwrap();
 
-    let assistant = Message {
-        id: MessageId::new(),
-        chat_id: chat.id,
-        turn_id: call.turn_id,
-        role: Role::Assistant,
-        content: "Grounded answer".into(),
-        created_at: resolved_at + chrono::Duration::seconds(1),
-    };
     let reference = crate::AssistantCitationReference {
         source_token: evidence.source_token,
     };
@@ -11421,6 +11413,30 @@ async fn retrieval_evidence_is_atomic_generation_fenced_and_survives_source_chan
     };
     let unknown_reference = crate::AssistantCitationReference {
         source_token: uuid::Uuid::new_v4(),
+    };
+    // The model cites a phantom between two real passages, so the citation the
+    // store cannot resolve sits ahead of ones it can.
+    let assistant_id = MessageId::new();
+    let cited = crate::parse_assistant_citations(
+        &format!(
+            "{} then {} then {}",
+            crate::format_citation_directive("phantom claim", unknown_reference),
+            crate::format_citation_directive("second claim", second_reference),
+            crate::format_citation_directive("first claim", reference),
+        ),
+        assistant_id,
+    );
+    assert_eq!(
+        cited.references,
+        [unknown_reference, second_reference, reference]
+    );
+    let assistant = Message {
+        id: assistant_id,
+        chat_id: chat.id,
+        turn_id: call.turn_id,
+        role: Role::Assistant,
+        content: cited.content.clone(),
+        created_at: resolved_at + chrono::Duration::seconds(1),
     };
     store
         .append_assistant_message_with_citations(
@@ -11453,8 +11469,32 @@ async fn retrieval_evidence_is_atomic_generation_fenced_and_survives_source_chan
     let snapshot = store.get_chat_transcript(chat.id).await.unwrap().unwrap();
     assert_eq!(snapshot.citations.len(), 2);
     assert_eq!(snapshot.citations[0].message_id, assistant.id);
-    assert_eq!(snapshot.citations[0].ordinal, 1);
-    assert_eq!(snapshot.citations[1].ordinal, 2);
+    // The unresolved citation holds ordinal 1 rather than letting the two that
+    // resolved slide onto identities the message text already spent: each
+    // embedded id resolves to the evidence its own phrase cited, and the
+    // phantom's resolves to nothing at all.
+    assert_eq!(snapshot.citations[0].ordinal, 2);
+    assert_eq!(snapshot.citations[1].ordinal, 3);
+    let cited_id = |phrase: &str| {
+        let opened = assistant
+            .content
+            .split_once(&format!(":cit[{phrase}]{{citation_id="))
+            .expect("the phrase is cited")
+            .1;
+        opened
+            .split_once('}')
+            .expect("the citation closes")
+            .0
+            .parse::<crate::AssistantCitationId>()
+            .expect("the citation carries an id")
+    };
+    assert_eq!(cited_id("second claim"), snapshot.citations[0].id);
+    assert_eq!(cited_id("first claim"), snapshot.citations[1].id);
+    let phantom = cited_id("phantom claim");
+    assert!(snapshot
+        .citations
+        .iter()
+        .all(|citation| citation.id != phantom));
     assert_eq!(snapshot.citations[0].excerpt.chars().count(), 600);
     assert!(!snapshot.citations[0].excerpt.contains(private_tail));
     assert_eq!(

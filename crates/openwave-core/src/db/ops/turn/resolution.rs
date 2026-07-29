@@ -352,7 +352,8 @@ async fn complete_turn_run_inner(
         citations,
     )
     .await?;
-    super::super::citation::insert_for_message_on(&transaction, output, &evidence).await?;
+    super::super::citation::insert_for_message_on(&transaction, output, citations, &evidence)
+        .await?;
 
     let completed = entities::turn_run::Entity::update_many()
         .col_expr(

@@ -2,8 +2,64 @@ import { describe, expect, it } from "vitest";
 import { AssistantSourceMarkerStreamScrubber } from "./AssistantSourceMarkerStream";
 
 const MARKER = "[[ow-source:0123456789abcdef0123456789abcdef]]";
+const DIRECTIVE = ":cit[the reef is large]{ref=0123456789abcdef0123456789abcdef}";
 
 describe("AssistantSourceMarkerStreamScrubber", () => {
+  it("keeps a directive's phrase and drops its reference at every delta boundary", () => {
+    const text = `Before ${DIRECTIVE} after.`;
+
+    for (let boundary = 0; boundary <= text.length; boundary += 1) {
+      const scrubber = new AssistantSourceMarkerStreamScrubber();
+      const first = scrubber.push(text.slice(0, boundary));
+      const second = scrubber.push(text.slice(boundary));
+      const finished = scrubber.finish();
+
+      expect(first).not.toContain("{ref=");
+      expect(first + second + finished, `boundary ${boundary}`).toBe(
+        "Before the reef is large after.",
+      );
+    }
+  });
+
+  it("does not flash a reference from a directive delivered one character at a time", () => {
+    const scrubber = new AssistantSourceMarkerStreamScrubber();
+    let visible = "";
+
+    for (const character of `Answer ${DIRECTIVE} continues`) {
+      visible += scrubber.push(character);
+      expect(visible).not.toContain(":cit[");
+      expect(visible).not.toContain("0123456789abcdef");
+    }
+
+    expect(visible + scrubber.finish()).toBe(
+      "Answer the reef is large continues",
+    );
+  });
+
+  it.each([
+    ":cit[phrase]{ref=0123456789abcdef0123456789abcdeG}",
+    ":cit[phrase]{ref=0123456789abcdef0123456789abcdef",
+    ":cit[phrase]{cite=0123456789abcdef0123456789abcdef}",
+    ":cit[phrase with ] bracket]{ref=0123456789abcdef0123456789abcdef}",
+    "ordinary :citation[prose]",
+  ])("preserves malformed directive-like prose: %s", (prose) => {
+    const scrubber = new AssistantSourceMarkerStreamScrubber();
+    const firstHalf = Math.floor(prose.length / 2);
+    const visible =
+      scrubber.push(prose.slice(0, firstHalf)) +
+      scrubber.push(prose.slice(firstHalf)) +
+      scrubber.finish();
+
+    expect(visible).toBe(prose);
+  });
+
+  it("releases an unclosed citation phrase rather than stalling the stream", () => {
+    const scrubber = new AssistantSourceMarkerStreamScrubber();
+    const prose = `:cit[${"long prose ".repeat(80)}`;
+
+    expect(scrubber.push(prose) + scrubber.finish()).toBe(prose);
+  });
+
   it("removes a marker split at every possible delta boundary", () => {
     const text = `Before ${MARKER} after.`;
 
