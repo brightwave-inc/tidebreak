@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 
+import type { CitationPageBounds } from "@/api";
 import { useChatSessionStore } from "@/ChatSessionStore";
 import type { CitationSpan } from "@/components/document/citationSpan";
 import type { ChatMessage } from "@/MessageList";
@@ -10,6 +11,12 @@ export type CitationPlacement = {
   span: CitationSpan;
   /** The page the passage was recorded on, for a paginated source. */
   page?: number;
+  /**
+   * Where on the pages the passage sits, for a source parsed that finely.
+   * Empty for a page-granular source, which opens on its page with nothing
+   * drawn on it.
+   */
+  bounds: readonly CitationPageBounds[];
 };
 
 /**
@@ -33,7 +40,8 @@ export function findCitationPlacement(
       if (source.id !== citationId || source.documentId !== documentId) continue;
       return {
         span: { start: source.span.start, end: source.span.end },
-        page: earliestPage(source.pages),
+        page: earliestPage(source.pages, source.bounds),
+        bounds: source.bounds,
       };
     }
   }
@@ -44,8 +52,17 @@ export function findCitationPlacement(
  * The first page the passage was recorded on, where any was.
  *
  * A span can cross a page break, and the place to open is where it starts.
+ * A page carrying a rectangle wins over one that only appears in `pages`:
+ * that is the page where the reader will actually see the passage marked.
  */
-function earliestPage(pages: readonly number[]): number | undefined {
+function earliestPage(
+  pages: readonly number[],
+  bounds: readonly CitationPageBounds[],
+): number | undefined {
+  return lowestPage(bounds.map((rect) => rect.page)) ?? lowestPage(pages);
+}
+
+function lowestPage(pages: readonly number[]): number | undefined {
   const numbered = pages.filter((page) => Number.isSafeInteger(page) && page > 0);
   return numbered.length > 0 ? Math.min(...numbered) : undefined;
 }

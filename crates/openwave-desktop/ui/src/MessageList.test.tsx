@@ -273,6 +273,7 @@ describe("MessageBubble", () => {
             excerpt: "First source excerpt",
             heading: "First source",
             pages: [4],
+            bounds: [],
           },
         ],
       },

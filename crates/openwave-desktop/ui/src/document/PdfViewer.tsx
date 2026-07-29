@@ -14,10 +14,11 @@ import { Document, Page, pdfjs } from "react-pdf";
 // security policy. Vite emits the file and rewrites this to its final URL.
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
-import type { ApiClient } from "@/api";
+import type { ApiClient, CitationPageBounds } from "@/api";
 import { FileDownloadProgressIndicator } from "@/components/document/FileDownloadProgress";
 import { Button } from "@/components/ui/button";
 import { useRegisterPdfControls } from "@/document/PdfControlsContext";
+import { PdfPageHighlights } from "@/document/PdfPageHighlights";
 import { useFileDownload } from "@/document/useFileDownload";
 import { usePdfPageState } from "@/document/usePdfPageState";
 import { useWheelPageNavigation } from "@/document/useWheelPageNavigation";
@@ -27,12 +28,20 @@ import { cn } from "@/lib/utils";
 
 pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
+/** Shared so a viewer opened without a citation does not remount the overlay. */
+const EMPTY_HIGHLIGHTS: readonly CitationPageBounds[] = [];
+
 interface Props extends HTMLAttributes<HTMLDivElement> {
   client: Pick<ApiClient, "getChatDocumentFile">;
   chatId: string;
   documentId: string;
   /** Open on this page the first time it is requested for this document. */
   targetPage?: number;
+  /**
+   * Rectangles of a cited passage to mark on the pages they were recorded on.
+   * Empty, or absent, for a citation that only knows which pages it came from.
+   */
+  highlights?: readonly CitationPageBounds[];
   /** Render the toolbar at a smaller scale. */
   compact?: boolean;
 }
@@ -40,17 +49,32 @@ interface Props extends HTMLAttributes<HTMLDivElement> {
 interface PdfPageProps {
   pageNumber: number;
   width: number;
+  highlights: readonly CitationPageBounds[];
+  onNavigate: (page: number) => void;
 }
 
-function PdfPage({ pageNumber, width }: PdfPageProps) {
+function PdfPage({ pageNumber, width, highlights, onNavigate }: PdfPageProps) {
+  // The overlay is placed as a fraction of this container, so it can only be
+  // drawn once the page has laid the container out at its real aspect — until
+  // then the container is the loading placeholder, which is a different shape.
+  const [pageRendered, setPageRendered] = useState(false);
+
   return (
     <div style={{ position: "relative", width, display: "inline-block" }}>
       <Page
         pageNumber={pageNumber}
         width={width}
         className="shadow"
+        onRenderSuccess={() => setPageRendered(true)}
         loading={<div className="aspect-4/3 bg-background" style={{ width }} />}
       />
+      {pageRendered && (
+        <PdfPageHighlights
+          page={pageNumber}
+          highlights={highlights}
+          onNavigate={onNavigate}
+        />
+      )}
     </div>
   );
 }
@@ -65,6 +89,7 @@ export function PdfViewer({
   chatId,
   documentId,
   targetPage,
+  highlights,
   compact,
   className,
   ...restProps
@@ -325,6 +350,8 @@ export function PdfViewer({
               key={`page_${currentPage}`}
               pageNumber={currentPage}
               width={pageWidth}
+              highlights={highlights ?? EMPTY_HIGHLIGHTS}
+              onNavigate={setCurrentPage}
             />
           )}
         </Document>

@@ -1,5 +1,7 @@
 import { ChevronRight } from "lucide-react";
 
+import type { CitationPageBounds } from "@/api";
+
 export type AssistantSource = Readonly<{
   id: string;
   ordinal: number;
@@ -13,6 +15,13 @@ export type AssistantSource = Readonly<{
   excerpt: string;
   heading: string | null;
   pages: number[];
+  /**
+   * Where on those pages the passage sits, for a source whose parser resolved
+   * it that finely. Empty for page-granular sources, which is every source
+   * imported before regions were recorded; `pages` is the complete answer
+   * either way.
+   */
+  bounds: readonly CitationPageBounds[];
 }>;
 
 type AssistantSourcesProps = {

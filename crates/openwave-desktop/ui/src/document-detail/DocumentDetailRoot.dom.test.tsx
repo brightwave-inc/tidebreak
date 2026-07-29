@@ -3,26 +3,35 @@ import { cleanup, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
-import { HttpError, type ApiClient, type DocumentDetail } from "@/api";
+import {
+  HttpError,
+  type ApiClient,
+  type CitationPageBounds,
+  type DocumentDetail,
+} from "@/api";
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import type { AssistantSource } from "@/AssistantSources";
 import { useChatSessionStore } from "@/ChatSessionStore";
+import { CITATION_MARK_CLASS } from "@/components/document/citationMark";
 import { clearFileDownloadCache } from "@/document/useFileDownload";
 import { renderWithRouter } from "../test/router";
 import { DocumentDetailRoot } from "./DocumentDetailRoot";
 
 // pdf.js draws to a canvas and runs a worker, neither of which jsdom has, so
 // the page targeting is observed through a stand-in that keeps the real page
-// state hook — the part the panel actually drives.
+// state hook and the real highlight overlay — the parts the panel drives.
 vi.mock("@/document/PdfViewer", async () => {
   const { usePdfPageState } = await import("@/document/usePdfPageState");
+  const { PdfPageHighlights } = await import("@/document/PdfPageHighlights");
   return {
     PdfViewer: ({
       documentId,
       targetPage,
+      highlights,
     }: {
       documentId: string;
       targetPage?: number;
+      highlights?: readonly CitationPageBounds[];
     }) => {
       const { currentPage, setCurrentPage } = usePdfPageState(documentId, {
         numPages: 20,
@@ -34,11 +43,21 @@ vi.mock("@/document/PdfViewer", async () => {
           <button type="button" onClick={() => setCurrentPage(currentPage + 1)}>
             Next page
           </button>
+          <PdfPageHighlights
+            page={currentPage}
+            highlights={highlights ?? []}
+            onNavigate={setCurrentPage}
+          />
         </div>
       );
     },
   };
 });
+
+/** The boxes drawn over the page on screen, however many pages carry them. */
+function drawnHighlights(): Element[] {
+  return [...document.querySelectorAll(`.${CITATION_MARK_CLASS}`)];
+}
 
 const scrolledTo: Element[] = [];
 
@@ -136,6 +155,7 @@ function seedTranscript(source: Partial<AssistantSource> & { id: string }) {
             excerpt: "",
             heading: null,
             pages: [],
+            bounds: [],
             ...source,
           },
         ],
@@ -167,6 +187,11 @@ async function openCitation(
     </AppContextProvider>,
     { initialUrl: `/c/chat-1?left=sources.doc-1.${citationId}&right=chat` },
   );
+}
+
+/** One rectangle of a citation, in the ten-thousandths the wire carries. */
+function rect(page: number, bounds: CitationPageBounds["bounds"]): CitationPageBounds {
+  return { page, bounds };
 }
 
 /** Byte offsets of a passage, which is how a citation reports its span. */
@@ -384,6 +409,37 @@ describe("DocumentDetailRoot", () => {
     // re-resolved with it. The page it asked for must not be applied twice.
     seedTranscript({ id: "cite-2", pages: [4, 5], span: { start: 10, end: 20 } });
     expect(await screen.findByText("Page 5")).toBeVisible();
+
+    // A citation that knows only which pages it came from marks none of them,
+    // which is every source imported before regions were recorded.
+    expect(drawnHighlights()).toHaveLength(0);
+  });
+
+  it("marks where a citation sits on the page it is open at, and only there", async () => {
+    const user = userEvent.setup();
+    seedTranscript({
+      id: "cite-5",
+      pages: [4, 5],
+      bounds: [
+        rect(4, { left: 1_000, top: 2_000, width: 8_000, height: 400 }),
+        rect(4, { left: 1_000, top: 2_500, width: 6_000, height: 400 }),
+        rect(5, { left: 1_000, top: 500, width: 3_000, height: 400 }),
+      ],
+    });
+    await openCitation(
+      detail({ media_type: "application/pdf", title: "Report.pdf", content: "text" }),
+      "cite-5",
+    );
+
+    expect(await screen.findByText("Page 4")).toBeVisible();
+    await waitFor(() => expect(drawnHighlights()).toHaveLength(2));
+    // Placed as a fraction of the page rather than in pixels, so the boxes
+    // survive zooming and resizing without being recomputed.
+    expect(drawnHighlights()[0]).toHaveStyle({ top: "calc(20% - 2px)" });
+
+    await user.click(screen.getByRole("button", { name: "Next page" }));
+    expect(await screen.findByText("Page 5")).toBeVisible();
+    await waitFor(() => expect(drawnHighlights()).toHaveLength(1));
   });
 
   // The panel unmounts the viewer whenever the reader switches views, so
