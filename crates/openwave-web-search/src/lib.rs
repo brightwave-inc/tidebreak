@@ -45,12 +45,13 @@ pub use native::{
 };
 pub use tavily::TavilyProvider;
 pub use tool::{
-    request_from_tool_arguments, WebSearchResolver, WebSearchResolverError, WebSearchTool,
-    DEFAULT_MAX_RESULTS,
+    extract_request_from_tool_arguments, request_from_tool_arguments, PageExtractor,
+    WebExtractTool, WebSearchResolver, WebSearchResolverError, WebSearchTool, DEFAULT_MAX_RESULTS,
 };
 pub use types::{
-    SearchDomain, WebSearchError, WebSearchProvider, WebSearchProviderKind, WebSearchRequest,
-    WebSearchResponse, WebSearchResult, MAX_DOMAINS, MAX_OUTPUT_BYTES, MAX_OUTPUT_CHARS,
+    ExtractionMethod, SearchDomain, WebExtractFailure, WebExtractRequest, WebExtractResponse,
+    WebSearchError, WebSearchProvider, WebSearchProviderKind, WebSearchRequest, WebSearchResponse,
+    WebSearchResult, MAX_DOMAINS, MAX_EXTRACT_OUTPUT_BYTES, MAX_OUTPUT_BYTES, MAX_OUTPUT_CHARS,
     MAX_QUERY_CHARS, MAX_RESULTS, MAX_RESULT_CONTENT_CHARS, MAX_RESULT_SNIPPET_CHARS,
     MAX_RESULT_TITLE_CHARS, MAX_RESULT_URL_BYTES,
 };

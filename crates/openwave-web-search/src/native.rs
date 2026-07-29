@@ -329,6 +329,57 @@ fn is_redirect_status(status: u16) -> bool {
     matches!(status, 301 | 302 | 303 | 307 | 308)
 }
 
+impl From<NativeExtractError> for crate::WebExtractFailure {
+    /// Project the engine's closed error onto the model-facing failure
+    /// vocabulary, dropping the transport prose on the way: the caller gets an
+    /// actionable reason, never a diagnostic payload.
+    ///
+    /// [`NativeExtractError::Fetch`] carries the transport's own error text,
+    /// which can describe the network rather than the request. It collapses
+    /// into the same opaque unreachability as a host that was refused outright,
+    /// so the projection here is the boundary that keeps it out of model
+    /// context.
+    fn from(error: NativeExtractError) -> Self {
+        match error {
+            NativeExtractError::PolicyViolation(_) => Self::UrlNotAllowed,
+            NativeExtractError::UnreachableHost | NativeExtractError::Fetch(_) => {
+                Self::PageUnreachable
+            }
+            NativeExtractError::HttpStatus(status) => Self::HttpStatus(status),
+            NativeExtractError::TooManyRedirects | NativeExtractError::InvalidRedirect => {
+                Self::RedirectNotFollowed
+            }
+            NativeExtractError::ResponseTooLarge => Self::PageTooLarge,
+            NativeExtractError::DocumentTooComplex => Self::PageTooComplex,
+            NativeExtractError::Timeout => Self::ExtractionTimedOut,
+            NativeExtractError::UnsupportedContentType(_) => Self::UnsupportedContentType,
+            NativeExtractError::NoReadableContent => Self::NoReadableContent,
+        }
+    }
+}
+
+#[async_trait]
+impl<T: PageFetchTransport, R: HostAddressResolver> crate::PageExtractor for NativeExtractor<T, R> {
+    async fn extract_page(
+        &self,
+        request: &crate::WebExtractRequest,
+    ) -> Result<crate::WebExtractResponse, crate::WebExtractFailure> {
+        let extraction = self.extract(request.url()).await?;
+        crate::WebExtractResponse::new(
+            crate::ExtractionMethod::Native,
+            &extraction.url,
+            &extraction.title,
+            extraction.content,
+            extraction.word_count,
+            extraction.truncated,
+        )
+        // The final URL came out of the admission policy, so this is
+        // unreachable in practice; refusing the URL is the honest projection
+        // if it ever is not.
+        .map_err(|_| crate::WebExtractFailure::UrlNotAllowed)
+    }
+}
+
 enum PageMediaType {
     Html,
     Text,

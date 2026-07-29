@@ -1,10 +1,10 @@
 # Web search configuration
 
 OpenWave has a bounded `openwave-web-search` library for direct Exa and Tavily
-search. The crate owns the provider-neutral request/result contract, HTTP
-adapters, and foreground `WebSearchTool`; the server supplies current host
-policy and credentials through a resolver. Configuration alone performs no
-outbound request.
+search and for single-page extraction. The crate owns the provider-neutral
+request/result contracts, HTTP adapters, and the foreground `WebSearchTool` and
+`WebExtractTool`; the server supplies current host policy and credentials
+through a resolver. Configuration alone performs no outbound request.
 
 ## Local API
 
@@ -67,6 +67,42 @@ without exposing model-authored arguments. Approval resolves the provider from
 current settings, so enabling, disabling, or changing providers takes effect
 without rebuilding the registry. Cancelling the turn races and drops an
 in-flight tool future, which aborts the underlying HTTP request.
+
+## Page extraction
+
+The Sensitive `web_extract` tool opens one exact public page URL and returns
+its readable content — title, markdown content, word count, and a truncation
+flag — bounded before it can reach a model context. The approval card shows the
+whole URL, because the URL is the action: it is both what leaves the device and
+where the request goes.
+
+Routing is deterministic and derived from the configured provider, with no
+heuristics and no escalation. The `WebSearchProvider` trait carries a
+capability split (`supports_search` / `supports_extract`); extraction goes to
+the configured provider exactly when it implements the extract contract, and to
+the built-in native engine otherwise — including when the provider is
+search-only or when no provider is configured at all. Extraction therefore
+works with zero web-search configuration. Neither Exa nor Tavily implements
+the extract contract yet, so every extraction currently routes native.
+
+The native engine (the crate's `extract-native` feature) admits a URL through
+a strict fetch policy — https only, no userinfo, default port, and a denied
+network list covering loopback, private, link-local/metadata, CGNAT, and ULA
+space in every IP encoding — then follows redirects manually, re-admitting
+every hop with fresh DNS resolution and pinning each connection to the vetted
+addresses. Fetches carry no cookies or ambient credentials, stream under a hard
+byte cap, gate on a textual content-type allowlist, and reduce the page with a
+readability pass to bounded markdown.
+
+Failure is layered and never silent. A vendor extract failure falls back to
+the native engine for that request. A native failure returns a closed,
+actionable reason ("the page returned HTTP 404", "no readable content could be
+extracted from the page") with no transport or vendor diagnostics attached.
+When no extraction path exists at all, the tool returns the same typed
+configuration-required failure web search uses, which the desktop renders as a
+settings card. Every successful extraction is stamped with its
+`extraction_method` (`native` or the provider name) so degraded extraction
+stays visible downstream.
 
 The server's sandbox checkpoint executor invokes the same resolver and strict
 argument decoder only after it has claimed a persisted `web_search`

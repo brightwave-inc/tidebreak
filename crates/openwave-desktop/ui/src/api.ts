@@ -375,6 +375,7 @@ export function isApprovableKind(kind: RendererApprovalKind): boolean {
   return (
     kind === "search_may_share_query_and_excerpts" ||
     kind === "web_search_may_share_query" ||
+    kind === "web_extract_may_fetch_url" ||
     kind === "exec_may_run_networked_command" ||
     kind === "external_mcp_may_call_server" ||
     kind === "workspace_may_modify_files"
@@ -1616,6 +1617,11 @@ export function parseToolActionPreview(
       end_published_at,
     };
   }
+  if (value.tool === "web_extract") {
+    const { url } = value;
+    if (typeof url !== "string" || url.length === 0) return null;
+    return { tool: "web_extract", url };
+  }
   if (value.tool !== "exec") return null;
   const { command, args, cwd } = value;
   if (
@@ -1800,6 +1806,7 @@ function isRendererApprovalKind(value: unknown): value is RendererApprovalKind {
   return (
     value === "search_may_share_query_and_excerpts" ||
     value === "web_search_may_share_query" ||
+    value === "web_extract_may_fetch_url" ||
     value === "exec_may_run_networked_command" ||
     value === "external_mcp_may_call_server" ||
     value === "workspace_may_modify_files" ||

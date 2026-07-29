@@ -31,6 +31,7 @@ registered:
 - private scratch;
 - conversation sources and opaque citation references;
 - public web research;
+- public web page reading;
 - connected folders;
 - user-visible outputs;
 - code execution;

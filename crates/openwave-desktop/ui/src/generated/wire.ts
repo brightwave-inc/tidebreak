@@ -866,7 +866,7 @@ export type RendererSequencedEvent = { seq: number, event: RendererAgentEvent, }
  * are all generated from this enum, so a variant added here cannot leave one of
  * them behind — see `docs/wire-types.md`.
  */
-export type RendererToolName = "search" | "list_sources" | "read_source" | "read_tool_result" | "web_search" | "read_delegated_file" | "read_file" | "list_dir" | "write_file" | "create_deliverable" | "request_folder_access" | "connect_folder" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file" | "write_output_to_connected_folder" | "spawn_sandbox_agent" | "wait_for_agents" | "ask_user_questions" | "exec" | "other";
+export type RendererToolName = "search" | "list_sources" | "read_source" | "read_tool_result" | "web_search" | "web_extract" | "read_delegated_file" | "read_file" | "list_dir" | "write_file" | "create_deliverable" | "request_folder_access" | "connect_folder" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file" | "write_output_to_connected_folder" | "spawn_sandbox_agent" | "wait_for_agents" | "ask_user_questions" | "exec" | "other";
 
 export type RendererToolStatus = "completed" | "failed";
 
@@ -1029,7 +1029,7 @@ start_published_at: string | null,
 /**
  * Latest publication date the search will accept.
  */
-end_published_at: string | null, };
+end_published_at: string | null, } | { "tool": "web_extract", url: string, };
 
 /**
  * Closed immutable consent semantics stored with each approval request.
@@ -1039,7 +1039,7 @@ end_published_at: string | null, };
  * summary or arguments. `Unsupported` is the fail-closed default: a Sensitive
  * action the server can only reject, never approve.
  */
-export type ToolApprovalKind = "search_may_share_query_and_excerpts" | "web_search_may_share_query" | "exec_may_run_networked_command" | "external_mcp_may_call_server" | "workspace_may_modify_files" | "unsupported";
+export type ToolApprovalKind = "search_may_share_query_and_excerpts" | "web_search_may_share_query" | "web_extract_may_fetch_url" | "exec_may_run_networked_command" | "external_mcp_may_call_server" | "workspace_may_modify_files" | "unsupported";
 
 /**
  * What a call produced, in a form a human can read.
@@ -1165,6 +1165,7 @@ export const RENDERER_TOOL_NAMES = [
   "read_source",
   "read_tool_result",
   "web_search",
+  "web_extract",
   "read_delegated_file",
   "read_file",
   "list_dir",

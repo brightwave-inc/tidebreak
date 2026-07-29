@@ -11,8 +11,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use openwave_core::{Result, SecretProvider, Store};
 use openwave_web_search::{
-    ExaProvider, ReqwestHttpClient, TavilyProvider, WebSearchCredentials, WebSearchProvider,
-    WebSearchProviderKind, WebSearchResolver, WebSearchResolverError, WebSearchTool,
+    ExaProvider, NativeExtractor, PageExtractor, ReqwestHttpClient, ReqwestPageFetcher,
+    TavilyProvider, TokioHostResolver, WebExtractFailure, WebExtractRequest, WebExtractResponse,
+    WebExtractTool, WebSearchCredentials, WebSearchProvider, WebSearchProviderKind,
+    WebSearchResolver, WebSearchResolverError, WebSearchTool,
 };
 use serde::{Deserialize, Serialize};
 
@@ -297,6 +299,57 @@ pub(crate) fn foreground_tool(
     secrets: Arc<dyn SecretProvider>,
 ) -> WebSearchTool {
     WebSearchTool::new(Arc::new(HostWebSearchResolver { store, secrets }))
+}
+
+/// Native page extraction under live host policy.
+///
+/// The engine itself is cheap state over stateless transport and resolver
+/// values, so each approved call builds one with the timeout the host policy
+/// holds *now* — the same read-at-execution rule the provider resolver
+/// follows. The timeout is clamped host configuration, never a model argument;
+/// an unreadable store falls back to the default rather than failing a fetch
+/// over a timeout preference.
+struct HostNativePageExtractor {
+    store: Arc<dyn Store>,
+}
+
+#[async_trait]
+impl PageExtractor for HostNativePageExtractor {
+    async fn extract_page(
+        &self,
+        request: &WebExtractRequest,
+    ) -> std::result::Result<WebExtractResponse, WebExtractFailure> {
+        let timeout_ms = read_config(&*self.store)
+            .await
+            .map(|config| config.timeout_ms)
+            .unwrap_or(DEFAULT_TIMEOUT_MS);
+        let extractor = NativeExtractor::new(
+            ReqwestPageFetcher,
+            TokioHostResolver,
+            Duration::from_millis(timeout_ms),
+        )
+        .map_err(|_| WebExtractFailure::PageUnreachable)?;
+        extractor.extract_page(request).await
+    }
+}
+
+/// Build the inert foreground extraction tool.
+///
+/// Registered whenever web search is, and usable without any provider: the
+/// deterministic route is vendor extraction when the configured provider
+/// implements it, the native engine otherwise — including when the provider is
+/// search-only or absent.
+pub(crate) fn foreground_extract_tool(
+    store: Arc<dyn Store>,
+    secrets: Arc<dyn SecretProvider>,
+) -> WebExtractTool {
+    WebExtractTool::new(
+        Arc::new(HostWebSearchResolver {
+            store: store.clone(),
+            secrets,
+        }),
+        Some(Arc::new(HostNativePageExtractor { store })),
+    )
 }
 
 #[cfg(test)]

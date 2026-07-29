@@ -104,6 +104,12 @@ const TOOL_PRESENTATIONS: Record<
     complete: "Web search complete",
     settled: "Searched the web",
   },
+  web_extract: {
+    label: "Read a web page",
+    active: "Reading a web page",
+    complete: "Web page read complete",
+    settled: "Read a web page",
+  },
   read_delegated_file: {
     label: "Read a delegated file",
     active: "Reading a delegated file",
@@ -412,6 +418,14 @@ export function toolApprovalPresentation(
     return {
       summary:
         "Allow web search to send this query and its explicit filters to the configured search provider outside OpenWave?",
+      canApprove: true,
+      canRemember: true,
+    };
+  }
+  if (kind === "web_extract_may_fetch_url") {
+    return {
+      summary:
+        "Allow OpenWave to fetch this exact page from the public web? The URL is shared with the page's site or the configured provider.",
       canApprove: true,
       canRemember: true,
     };
