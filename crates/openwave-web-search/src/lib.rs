@@ -7,13 +7,21 @@
 //! adapter to its provider's exact HTTPS domain before any tool or worker can
 //! use it.
 //!
-//! The Exa and Tavily adapters use their public HTTP APIs through the small
-//! [`HttpClient`] seam; no vendor SDK is required. `ReqwestHttpClient` is opt-in
-//! behind the `http` feature. Requests and normalized output are bounded before
-//! egress and before they can reach a model context. Both adapters implement
-//! page extraction as well as search, on the same fixed authority; a per-URL
-//! vendor failure is a typed error rather than an empty success, so extraction
-//! can fall back to the native engine instead of returning a blank page.
+//! Every adapter talks to its backend over plain HTTP through the small
+//! [`HttpClient`] seam; no vendor SDK is used, and none should be added. Cargo
+//! features are resolved at compile time, so an SDK for a backend most users
+//! never configure would still ship in every binary, while an HTTP adapter
+//! reuses the client that is already there and costs essentially nothing per
+//! backend. `ReqwestHttpClient` is opt-in behind the `http` feature. Requests
+//! and normalized output are bounded before egress and before they can reach a
+//! model context.
+//!
+//! Exa and Tavily implement page extraction as well as search, on the same
+//! fixed authority; a per-URL vendor failure is a typed error rather than an
+//! empty success, so extraction can fall back to the native engine instead of
+//! returning a blank page. Brave is search-only and says so through
+//! [`WebSearchProvider::supports_extract`], which sends extraction to the
+//! native engine.
 //!
 //! The `extract-native` feature adds a self-contained extraction engine:
 //! [`NativeExtractor`] fetches one admitted URL — every redirect hop re-vetted
@@ -22,6 +30,7 @@
 //! The admission policy itself is always compiled because it is pure and
 //! dependency-light; only the parser and transport stack is feature-gated.
 
+pub mod brave;
 mod credentials;
 pub mod exa;
 mod fetch_policy;
@@ -32,6 +41,7 @@ pub mod tavily;
 mod tool;
 mod types;
 
+pub use brave::BraveProvider;
 pub use credentials::{WebSearchCredential, WebSearchCredentials};
 pub use exa::ExaProvider;
 pub use fetch_policy::{
@@ -39,7 +49,7 @@ pub use fetch_policy::{
 };
 #[cfg(feature = "http")]
 pub use http::ReqwestHttpClient;
-pub use http::{HttpClient, HttpRequest, HttpResponse, MAX_HTTP_RESPONSE_BYTES};
+pub use http::{HttpClient, HttpGetRequest, HttpRequest, HttpResponse, MAX_HTTP_RESPONSE_BYTES};
 #[cfg(feature = "extract-native")]
 pub use native::{
     HostAddressResolver, NativeExtractError, NativeExtraction, NativeExtractor, PageFetchResponse,

@@ -18,25 +18,52 @@ pub struct HttpRequest {
 
 impl fmt::Debug for HttpRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let headers: Vec<(&str, &str)> = self
-            .headers
-            .iter()
-            .map(|(name, value)| {
-                (
-                    name.as_str(),
-                    if is_sensitive_name(name) {
-                        "***"
-                    } else {
-                        value
-                    },
-                )
-            })
-            .collect();
         formatter
             .debug_struct("HttpRequest")
             .field("url", &redacted_url(&self.url))
-            .field("headers", &headers)
+            .field("headers", &redacted_pairs(&self.headers))
             .field("body", &redacted_json(&self.body))
+            .finish()
+    }
+}
+
+/// Header or query pairs with every credential-shaped name masked.
+fn redacted_pairs(pairs: &[(String, String)]) -> Vec<(&str, &str)> {
+    pairs
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str(),
+                if is_sensitive_name(name) {
+                    "***"
+                } else {
+                    value.as_str()
+                },
+            )
+        })
+        .collect()
+}
+
+/// One outbound `GET` with its query string supplied as decoded pairs.
+///
+/// The pairs are kept apart from `url` on purpose: the concrete client binds
+/// the request to its provider's authority by inspecting `url` alone, and a
+/// caller that had to pre-encode its own query string could otherwise smuggle
+/// an authority past that check.
+#[derive(Clone, PartialEq)]
+pub struct HttpGetRequest {
+    pub url: String,
+    pub query: Vec<(String, String)>,
+    pub headers: Vec<(String, String)>,
+}
+
+impl fmt::Debug for HttpGetRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HttpGetRequest")
+            .field("url", &redacted_url(&self.url))
+            .field("query", &redacted_pairs(&self.query))
+            .field("headers", &redacted_pairs(&self.headers))
             .finish()
     }
 }
@@ -62,9 +89,18 @@ impl HttpResponse {
 
 /// Minimal outbound HTTP seam. A host can provide proxy, allow-list, test, or
 /// auditing policy here without exposing that machinery to a model tool.
+///
+/// Both verbs are required rather than defaulted. Vendors split evenly between
+/// JSON bodies and query strings, so a seam that could only `POST` would push
+/// the difference into the adapters; and a defaulted `get` that failed at
+/// runtime would let a host look implemented while half the backends could not
+/// egress through it.
 #[async_trait]
 pub trait HttpClient: Send + Sync {
     async fn post_json(&self, request: HttpRequest) -> Result<HttpResponse, WebSearchError>;
+
+    /// Dispatch one `GET`, appending `query` to `url` as a query string.
+    async fn get(&self, request: HttpGetRequest) -> Result<HttpResponse, WebSearchError>;
 }
 
 fn is_sensitive_name(name: &str) -> bool {
@@ -176,16 +212,12 @@ impl ReqwestHttpClient {
 }
 
 #[cfg(feature = "http")]
-#[async_trait]
-impl HttpClient for ReqwestHttpClient {
-    async fn post_json(&self, request: HttpRequest) -> Result<HttpResponse, WebSearchError> {
+impl ReqwestHttpClient {
+    /// Send one already authority-checked request and read its body under the
+    /// hard byte cap.
+    async fn dispatch(builder: reqwest::RequestBuilder) -> Result<HttpResponse, WebSearchError> {
         use futures::StreamExt;
 
-        validate_outbound_url(&request.url, self.allowed_domain)?;
-        let mut builder = self.client.post(request.url).json(&request.body);
-        for (name, value) in request.headers {
-            builder = builder.header(name, value);
-        }
         let response = builder
             .send()
             .await
@@ -203,6 +235,30 @@ impl HttpClient for ReqwestHttpClient {
             body.extend_from_slice(&chunk);
         }
         Ok(HttpResponse { status, body })
+    }
+}
+
+#[cfg(feature = "http")]
+#[async_trait]
+impl HttpClient for ReqwestHttpClient {
+    async fn post_json(&self, request: HttpRequest) -> Result<HttpResponse, WebSearchError> {
+        validate_outbound_url(&request.url, self.allowed_domain)?;
+        let mut builder = self.client.post(request.url).json(&request.body);
+        for (name, value) in request.headers {
+            builder = builder.header(name, value);
+        }
+        Self::dispatch(builder).await
+    }
+
+    async fn get(&self, request: HttpGetRequest) -> Result<HttpResponse, WebSearchError> {
+        // The authority is decided by `url` alone, and `query` is appended by
+        // the client afterwards, so no query pair can move the destination.
+        validate_outbound_url(&request.url, self.allowed_domain)?;
+        let mut builder = self.client.get(request.url).query(&request.query);
+        for (name, value) in request.headers {
+            builder = builder.header(name, value);
+        }
+        Self::dispatch(builder).await
     }
 }
 
@@ -249,7 +305,16 @@ mod tests {
             }),
         };
 
-        let debug = format!("{request:?}");
+        let get = HttpGetRequest {
+            url: "https://url-user:url-password@example.com/search?api_key=url-secret".into(),
+            query: vec![
+                ("q".into(), "public".into()),
+                ("subscription_token".into(), "query-secret".into()),
+            ],
+            headers: vec![("X-Subscription-Token".into(), "brave-secret".into())],
+        };
+
+        let debug = format!("{request:?}{get:?}");
         for secret in [
             "url-secret",
             "url-user",
@@ -260,6 +325,8 @@ mod tests {
             "tavily-secret",
             "nested-secret",
             "credential-secret",
+            "query-secret",
+            "brave-secret",
         ] {
             assert!(!debug.contains(secret), "debug leaked {secret}: {debug}");
         }
@@ -289,7 +356,22 @@ mod tests {
                 .unwrap_err();
             assert!(
                 matches!(error, WebSearchError::OutboundNotAllowed),
-                "unexpected result for {url}: {error}"
+                "unexpected POST result for {url}: {error}"
+            );
+
+            // The GET verb is bound by exactly the same rule; a seam that
+            // checked only one of them would be no boundary at all.
+            let error = client
+                .get(HttpGetRequest {
+                    url: url.into(),
+                    query: vec![("q".into(), "openwave".into())],
+                    headers: vec![("x-subscription-token".into(), "must-not-egress".into())],
+                })
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, WebSearchError::OutboundNotAllowed),
+                "unexpected GET result for {url}: {error}"
             );
         }
     }
@@ -297,11 +379,8 @@ mod tests {
     #[cfg(feature = "http")]
     #[test]
     fn provider_endpoints_satisfy_their_fixed_domain_policy() {
-        for provider in [
-            crate::WebSearchProviderKind::Exa,
-            crate::WebSearchProviderKind::Tavily,
-        ] {
-            for endpoint in [provider.search_url(), provider.extract_url()] {
+        for provider in crate::WebSearchProviderKind::ALL {
+            for endpoint in std::iter::once(provider.search_url()).chain(provider.extract_url()) {
                 assert!(
                     validate_outbound_url(endpoint, provider.outbound_domain()).is_ok(),
                     "{endpoint} is not on {provider}'s fixed outbound domain"

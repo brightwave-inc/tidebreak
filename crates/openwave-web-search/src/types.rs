@@ -49,14 +49,22 @@ const MAX_METADATA_VALUE_CHARS: usize = 256;
 pub enum WebSearchProviderKind {
     Exa,
     Tavily,
+    Brave,
 }
 
 impl WebSearchProviderKind {
+    /// Every backend this crate implements.
+    ///
+    /// Anything that has to enumerate providers reads this rather than
+    /// spelling out a list that a new variant would silently fall out of.
+    pub const ALL: [Self; 3] = [Self::Exa, Self::Tavily, Self::Brave];
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Exa => "exa",
             Self::Tavily => "tavily",
+            Self::Brave => "brave",
         }
     }
 
@@ -66,6 +74,7 @@ impl WebSearchProviderKind {
         match self {
             Self::Exa => "web_search.exa.api_key",
             Self::Tavily => "web_search.tavily.api_key",
+            Self::Brave => "web_search.brave.api_key",
         }
     }
 
@@ -73,15 +82,21 @@ impl WebSearchProviderKind {
         match self {
             Self::Exa => "https://api.exa.ai/search",
             Self::Tavily => "https://api.tavily.com/search",
+            Self::Brave => "https://api.search.brave.com/res/v1/web/search",
         }
     }
 
     /// Fixed page-extraction endpoint, on the same authority as
     /// [`Self::search_url`] so one transport binding covers both calls.
-    pub(crate) const fn extract_url(self) -> &'static str {
+    ///
+    /// `None` for a search-only backend. Extraction routing reads
+    /// [`WebSearchProvider::supports_extract`], so a provider without an
+    /// endpoint here simply never receives an extraction request.
+    pub(crate) const fn extract_url(self) -> Option<&'static str> {
         match self {
-            Self::Exa => "https://api.exa.ai/contents",
-            Self::Tavily => "https://api.tavily.com/extract",
+            Self::Exa => Some("https://api.exa.ai/contents"),
+            Self::Tavily => Some("https://api.tavily.com/extract"),
+            Self::Brave => None,
         }
     }
 
@@ -95,6 +110,7 @@ impl WebSearchProviderKind {
         match self {
             Self::Exa => "api.exa.ai",
             Self::Tavily => "api.tavily.com",
+            Self::Brave => "api.search.brave.com",
         }
     }
 }
@@ -484,7 +500,7 @@ impl<'de> Deserialize<'de> for ExtractionMethod {
         if value == "native" {
             return Ok(Self::Native);
         }
-        [WebSearchProviderKind::Exa, WebSearchProviderKind::Tavily]
+        WebSearchProviderKind::ALL
             .into_iter()
             .find(|kind| kind.as_str() == value)
             .map(Self::Provider)
@@ -688,6 +704,60 @@ pub(crate) fn count_words(value: &str) -> usize {
         .split_whitespace()
         .filter(|token| token.chars().any(char::is_alphanumeric))
         .count()
+}
+
+/// Fold domain filters into the query string as `site:` operators.
+///
+/// Some backends have no domain-filter parameter and instead pass search
+/// operators through in the query. The operators are best effort: whether an
+/// upstream engine honours `site:` is not something this crate can promise, so
+/// [`result_within_domains`] is what actually holds the contract. That also
+/// makes it safe to leave the query alone when the operators would not fit the
+/// engine's query bound — the filter is still enforced, just later.
+pub(crate) fn domain_scoped_query(
+    query: &str,
+    domains: &[SearchDomain],
+    max_chars: usize,
+) -> String {
+    if domains.is_empty() {
+        return query.to_owned();
+    }
+    let operators = domains
+        .iter()
+        .map(|domain| format!("site:{}", domain.as_str()))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let scoped = if domains.len() == 1 {
+        format!("{query} {operators}")
+    } else {
+        format!("{query} ({operators})")
+    };
+    if scoped.chars().count() > max_chars {
+        return query.to_owned();
+    }
+    scoped
+}
+
+/// Whether one result URL falls inside the requested domain filters.
+///
+/// This is what makes a domain filter real for a backend that only understands
+/// operators: a result the engine returned anyway is dropped here. A filter
+/// matches the host itself or any subdomain of it, which is the meaning the
+/// backends that filter natively already give it.
+pub(crate) fn result_within_domains(url: &str, domains: &[SearchDomain]) -> bool {
+    if domains.is_empty() {
+        return true;
+    }
+    let Some(host) = Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+    else {
+        return false;
+    };
+    domains.iter().any(|domain| {
+        let domain = domain.as_str();
+        host == domain || host.ends_with(&format!(".{domain}"))
+    })
 }
 
 /// Whether a URL a provider echoed back names the page that was requested.

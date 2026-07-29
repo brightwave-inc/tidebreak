@@ -148,7 +148,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
 
           <SettingsSection
             title="Providers"
-            description="Give a key to every provider you want available. Each key is stored in the system keychain and never shown again."
+            description="Give a key to every provider you want available. Brave Search has a free tier; Exa and Tavily are paid. Each key is stored in the system keychain and never shown again."
           >
             {credentials.map((credential) => (
               <ProviderCredentialField
@@ -226,6 +226,8 @@ function providerLabel(provider: WebSearchProviderKind): string {
       return "Exa";
     case "tavily":
       return "Tavily";
+    case "brave":
+      return "Brave Search";
     default:
       return provider;
   }

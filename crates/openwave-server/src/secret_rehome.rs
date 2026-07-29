@@ -26,6 +26,7 @@ use crate::providers::{ProviderKind, LEGACY_ANTHROPIC_API_KEY};
 const WEB_SEARCH_CREDENTIAL_KEYS: &[&str] = &[
     WebSearchProviderKind::Exa.credential_key(),
     WebSearchProviderKind::Tavily.credential_key(),
+    WebSearchProviderKind::Brave.credential_key(),
 ];
 
 /// Credential keys for the code-execution providers that take one (`Local`
@@ -192,8 +193,9 @@ mod tests {
     }
 
     /// A provider whose credential key is missing here would keep prompting
-    /// with no way to repair it. The matches are exhaustive, so adding a kind
-    /// fails to compile until its key is listed.
+    /// with no way to repair it. `ProviderKind::ALL` and
+    /// `WebSearchProviderKind::ALL` cover every variant, so adding a kind fails
+    /// this test until its key is listed.
     #[test]
     fn every_credentialed_provider_kind_is_covered() {
         let keys = stored_secret_keys();
@@ -201,10 +203,7 @@ mod tests {
         for kind in ProviderKind::ALL {
             assert!(keys.contains(&kind.credential_key()), "{kind:?}");
         }
-        for kind in [WebSearchProviderKind::Exa, WebSearchProviderKind::Tavily] {
-            match kind {
-                WebSearchProviderKind::Exa | WebSearchProviderKind::Tavily => {}
-            }
+        for kind in WebSearchProviderKind::ALL {
             assert!(
                 keys.iter().any(|key| key == kind.credential_key()),
                 "{kind:?}"

@@ -1,10 +1,19 @@
 # Web search configuration
 
-OpenWave has a bounded `openwave-web-search` library for direct Exa and Tavily
-search and for single-page extraction. The crate owns the provider-neutral
-request/result contracts, HTTP adapters, and the foreground `WebSearchTool` and
-`WebExtractTool`; the server supplies current host policy and credentials
-through a resolver. Configuration alone performs no outbound request.
+OpenWave has a bounded `openwave-web-search` library for direct Exa, Tavily, and
+Brave search and for single-page extraction. The crate owns the
+provider-neutral request/result contracts, HTTP adapters, and the foreground
+`WebSearchTool` and `WebExtractTool`; the server supplies current host policy
+and credentials through a resolver. Configuration alone performs no outbound
+request.
+
+## Backends
+
+| Backend | Needs | Search | Extract |
+| --- | --- | --- | --- |
+| Exa | paid API key | yes | yes |
+| Tavily | paid API key | yes | yes |
+| Brave | API key, free tier available | yes | no — routes to the native engine |
 
 ## Local API
 
@@ -13,9 +22,9 @@ The loopback API exposes a bearer-protected host policy at `/web-search`.
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /web-search` | Read the selected provider, timeout, and whether its fixed key is available. |
-| `PUT /web-search` | Select `exa`, `tavily`, or `null` to disable; optionally set the timeout. |
-| `GET /web-search/credentials` | Read readiness for the fixed Exa and Tavily key slots. |
-| `PUT /web-search/credentials/{provider}` | Store a key for `exa` or `tavily`; returns readiness only. |
+| `PUT /web-search` | Select `exa`, `tavily`, `brave`, or `null` to disable; optionally set the timeout. |
+| `GET /web-search/credentials` | Read readiness for the fixed Exa, Tavily, and Brave key slots. |
+| `PUT /web-search/credentials/{provider}` | Store a key for one of those slots; returns readiness only. |
 | `DELETE /web-search/credentials/{provider}` | Delete that fixed provider key; returns readiness only. |
 
 Example:
@@ -28,28 +37,65 @@ Example:
 ```
 
 Timeouts must be between 1,000 and 60,000 milliseconds. There is no endpoint,
-proxy URL, arbitrary secret reference, or API-key field in this API. The Exa
-and Tavily adapters own their fixed HTTPS endpoints, disable redirects, and
-bound request input and retained response output. The host constructs the
-concrete HTTP client for the selected provider only; that client rejects any
-request whose scheme or exact authority differs from the provider's fixed API
-domain before dispatch.
+proxy URL, arbitrary secret reference, or API-key field in this API. Every
+adapter owns its fixed HTTPS endpoints, disables redirects, and bounds request
+input and retained response output. The host constructs the concrete HTTP
+client for the selected provider only; that client rejects any request whose
+scheme or exact authority differs from the provider's fixed API domain before
+dispatch, on both the `POST` and `GET` verbs of the transport seam.
 
 No response contains a credential. `/web-search` reports only
 `has_credential` for the currently selected provider, while
-`/web-search/credentials` reports readiness for both fixed slots. Keys are read
+`/web-search/credentials` reports readiness for every fixed slot. Keys are read
 from and written to the OS keychain through
-`SecretProvider` under the fixed names `web_search.exa.api_key` and
-`web_search.tavily.api_key`. Credential writes reject empty values and values
-over 8 KiB. They never alter selection or timeout policy. A missing key or
-disabled selection fails closed: there is no provider to invoke.
+`SecretProvider` under the fixed names `web_search.exa.api_key`,
+`web_search.tavily.api_key`, and `web_search.brave.api_key`. Credential writes
+reject empty values and values over 8 KiB. They never alter selection or
+timeout policy. A missing key or disabled selection fails closed: there is no
+provider to invoke.
+
+## Brave Search
+
+Brave is the search-only backend with a free tier, so it is the one a host can
+turn on without a paid plan. It is a `GET` against the fixed
+`https://api.search.brave.com/res/v1/web/search` with the key in the
+`X-Subscription-Token` header — never in the query string, which is the part of
+a `GET` that lands in proxy and server logs — and `Accept: application/json`.
+
+| | Brave |
+| --- | --- |
+| Query | `q`, `count` (the request's `max_results`; the endpoint's own cap is 20) |
+| Snippet markup | `text_decorations=false`, so `description` arrives as plain text instead of `<strong>`-wrapped matches that would have to be stripped |
+| Response scope | `result_filter=web`, keeping the news, video, discussion, and infobox clusters out of the payload |
+| Dates | `freshness=YYYY-MM-DDtoYYYY-MM-DD`, sent only when the request carries both ends, which is what a custom range requires |
+| Domains | no include-domains parameter; `site:` operators are folded into `q` and returned results are then filtered by host |
+| Result mapping | `url`, `title`, `description` → snippet, `page_age` → `published_at`. The sibling `age` is a relative phrase ("2 days ago") and carries no instant, so it is not read. There is no page text or relevance score in the response, so `content` and `score` stay empty rather than being synthesized. |
+
+The domain filter is worth spelling out because it is the one place a backend
+cannot express the request natively. The `site:` operators are a hint — whether
+an upstream ranker honours them is not something this crate can promise — so
+the filter is *also* applied to the returned results by host, matching the
+domain itself or any subdomain of it. That is what actually holds the contract:
+a domain-restricted call cannot return an off-domain page. When the operators
+would push `q` past the endpoint's 400-character limit they are left off and the
+result filter alone does the work.
+
+Statuses map to the crate's typed errors: `401` is a rejected credential and
+`429` is a rate limit. Brave documents no separate quota code — a spent monthly
+allowance answers `429` as well — so `QuotaExhausted` has nothing to map from
+here and no billing status is invented for it. Everything else stays a plain
+HTTP status.
+
+Brave publishes no page-extraction endpoint, so it does not implement the
+extract contract and `web_extract` routes to the native engine (see
+[Page extraction](#page-extraction)).
 
 ## Desktop setup
 
 The desktop sidebar has a **Web search** panel for this same local API. It
 shows whether the saved configuration is disabled, ready, or missing the
-selected provider's key; offers a key field per fixed slot, so Exa and Tavily
-can both hold a key and switching between them needs no retyping; and lets the
+selected provider's key; offers a key field per fixed slot, so every backend
+can hold a key at once and switching between them needs no retyping; and lets the
 user pick which provider is active (or disable search) and set the bounded
 timeout. Existing keys are never displayed or read into the renderer. Saving
 writes every key the user typed before it writes selection, so a provider cannot
@@ -85,7 +131,8 @@ search-only or when no provider is configured at all. Extraction therefore
 works with zero web-search configuration.
 
 Exa and Tavily both implement the extract contract, so a host with either
-selected extracts through the vendor and falls back to native. They reach
+selected extracts through the vendor and falls back to native. Brave is
+search-only and never receives an extraction request. They reach
 `https://api.exa.ai/contents` and `https://api.tavily.com/extract`, on the same
 fixed authority their search calls use, with the key as a bearer token.
 
@@ -153,5 +200,5 @@ egress; when the receipt resolves, its next claim rebuilds the same
 not cross into the foreground registry: that path uses the ordinary durable
 tool-call and approval state machine, while recursive agents remain impossible.
 The concrete transport enforces an exact HTTPS
-outbound-domain policy (`api.exa.ai` for Exa and `api.tavily.com` for Tavily)
-outside model-controlled arguments.
+outbound-domain policy (`api.exa.ai` for Exa, `api.tavily.com` for Tavily, and
+`api.search.brave.com` for Brave) outside model-controlled arguments.

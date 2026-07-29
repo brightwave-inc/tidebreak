@@ -79,7 +79,11 @@ impl<C: HttpClient> WebSearchProvider for TavilyProvider<C> {
         let response = self
             .client
             .post_json(HttpRequest {
-                url: self.kind().extract_url().into(),
+                url: self
+                    .kind()
+                    .extract_url()
+                    .ok_or(WebSearchError::ExtractNotSupported(self.kind()))?
+                    .into(),
                 headers: vec![
                     // `/extract` takes the key as a bearer token only; the body
                     // `api_key` field the search path still sends is not part
@@ -331,6 +335,13 @@ mod tests {
             *self.request.lock().unwrap() = Some(request);
             Ok(self.response.clone())
         }
+
+        async fn get(
+            &self,
+            _request: crate::HttpGetRequest,
+        ) -> Result<HttpResponse, WebSearchError> {
+            unreachable!("the Tavily adapter posts JSON on both endpoints")
+        }
     }
 
     #[tokio::test]
@@ -436,7 +447,10 @@ mod tests {
         );
 
         let sent = sent.unwrap();
-        assert_eq!(sent.url, WebSearchProviderKind::Tavily.extract_url());
+        assert_eq!(
+            Some(sent.url.as_str()),
+            WebSearchProviderKind::Tavily.extract_url()
+        );
         assert_eq!(sent.body["urls"], serde_json::json!([EXTRACT_URL]));
         assert_eq!(sent.body["format"], "markdown");
         // A query would turn `raw_content` into reranked chunks instead of the

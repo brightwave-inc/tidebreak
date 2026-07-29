@@ -11,10 +11,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use openwave_core::{Result, SecretProvider, Store};
 use openwave_web_search::{
-    ExaProvider, NativeExtractor, PageExtractor, ReqwestHttpClient, ReqwestPageFetcher,
-    TavilyProvider, TokioHostResolver, WebExtractFailure, WebExtractRequest, WebExtractResponse,
-    WebExtractTool, WebSearchCredentials, WebSearchProvider, WebSearchProviderKind,
-    WebSearchResolver, WebSearchResolverError, WebSearchTool,
+    BraveProvider, ExaProvider, NativeExtractor, PageExtractor, ReqwestHttpClient,
+    ReqwestPageFetcher, TavilyProvider, TokioHostResolver, WebExtractFailure, WebExtractRequest,
+    WebExtractResponse, WebExtractTool, WebSearchCredentials, WebSearchProvider,
+    WebSearchProviderKind, WebSearchResolver, WebSearchResolverError, WebSearchTool,
 };
 use serde::{Deserialize, Serialize};
 
@@ -34,8 +34,11 @@ pub const MAX_TIMEOUT_MS: u64 = 60_000;
 /// The fixed providers this host can hold a credential for. Keeping this
 /// allow-list here means a local API route can never turn an arbitrary path
 /// segment into a keychain key.
-const CREDENTIAL_PROVIDERS: [WebSearchProviderKind; 2] =
-    [WebSearchProviderKind::Exa, WebSearchProviderKind::Tavily];
+const CREDENTIAL_PROVIDERS: [WebSearchProviderKind; 3] = [
+    WebSearchProviderKind::Exa,
+    WebSearchProviderKind::Tavily,
+    WebSearchProviderKind::Brave,
+];
 
 /// Non-secret host configuration. `provider: None` is the safe default: no
 /// credential lookup and no possible outbound request.
@@ -268,6 +271,10 @@ pub async fn resolve_provider(
         ),
         WebSearchProviderKind::Tavily => Arc::new(
             TavilyProvider::new(client, credential)
+                .map_err(|_| ServerError::internal("web search configuration is unavailable"))?,
+        ),
+        WebSearchProviderKind::Brave => Arc::new(
+            BraveProvider::new(client, credential)
                 .map_err(|_| ServerError::internal("web search configuration is unavailable"))?,
         ),
     };

@@ -106,7 +106,11 @@ impl<C: HttpClient> WebSearchProvider for ExaProvider<C> {
             .post_json(HttpRequest {
                 // The authority is fixed by the provider kind and bound into
                 // the transport before the credential is attached here.
-                url: self.kind().extract_url().into(),
+                url: self
+                    .kind()
+                    .extract_url()
+                    .ok_or(WebSearchError::ExtractNotSupported(self.kind()))?
+                    .into(),
                 headers: vec![
                     // `/contents` documents bearer auth; the legacy `x-api-key`
                     // header the search path still uses is not the shape new
@@ -368,6 +372,13 @@ mod tests {
             self.seen.lock().unwrap().push(request);
             Ok(self.response.clone())
         }
+
+        async fn get(
+            &self,
+            _request: crate::HttpGetRequest,
+        ) -> Result<HttpResponse, WebSearchError> {
+            unreachable!("the Exa adapter posts JSON on both endpoints")
+        }
     }
 
     #[tokio::test]
@@ -469,7 +480,10 @@ mod tests {
             "extraction exceeded its serialized output budget"
         );
 
-        assert_eq!(sent[0].url, WebSearchProviderKind::Exa.extract_url());
+        assert_eq!(
+            Some(sent[0].url.as_str()),
+            WebSearchProviderKind::Exa.extract_url()
+        );
         assert_eq!(sent[0].body["urls"], serde_json::json!([EXTRACT_URL]));
         // Text is always requested explicitly and always bounded at the source,
         // and freshness is expressed through the supported knob.
