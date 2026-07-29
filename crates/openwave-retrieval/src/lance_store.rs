@@ -1644,7 +1644,7 @@ mod tests {
         assert_eq!(
             hits[0].chunk.source_regions[0].location,
             SourceLocation::Page {
-                number: std::num::NonZeroU32::new(7).unwrap()
+                number: std::num::NonZeroU32::new(7).unwrap(),
                 bounds: None,
             }
         );

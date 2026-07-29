@@ -6582,6 +6582,7 @@ dependencies = [
  "arrow-schema 58.4.0",
  "arrow-select 58.4.0",
  "async-trait",
+ "chrono",
  "futures",
  "lancedb",
  "liteparse",

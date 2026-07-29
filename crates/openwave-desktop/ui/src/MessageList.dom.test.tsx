@@ -646,8 +646,8 @@ describe("mcp app views", () => {
               tool: "entries",
               elided: 3,
               entries: [
-                { kind: "file", label: "notes.md", detail: null, meta: "1.2 KB" },
-                { kind: "folder", label: "reports", detail: null, meta: null },
+                { kind: "file", label: "notes.md", detail: null, meta: "1.2 KB", mediaType: null },
+                { kind: "folder", label: "reports", detail: null, meta: null, mediaType: null },
               ],
               failures: [],
             },
@@ -699,7 +699,7 @@ describe("mcp app views", () => {
               tool: "entries",
               elided: 0,
               entries: [
-                { kind: "file", label: "q3.md", detail: null, meta: null },
+                { kind: "file", label: "q3.md", detail: null, meta: null, mediaType: null },
               ],
               failures: [
                 { label: "q4.md", error: "file is not valid UTF-8" },

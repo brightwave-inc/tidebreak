@@ -16,13 +16,14 @@
 //!
 //! Enabled by the `tool` feature.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use openwave_core::{
-    format_citation_directive, ApprovalClass, AssistantCitationReference, Result, ResultEntry,
-    ResultEntryKind, RetrievalEvidenceInput, RetrievalEvidenceSource, Tool, ToolCtx, ToolOutput,
-    ToolSpec,
+    format_citation_directive, ApprovalClass, AssistantCitationReference, ChatId, DocumentId,
+    DocumentScope, DocumentSummaryRecord, Result, ResultEntry, ResultEntryKind,
+    RetrievalEvidenceInput, RetrievalEvidenceSource, Store, Tool, ToolCtx, ToolOutput, ToolSpec,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -33,11 +34,35 @@ use crate::rerank::{rerank_candidates, Reranker};
 use crate::selection::{candidate_limit, select};
 use crate::vector::{SearchScope, VectorStore};
 
+/// The one catalog question the search card asks: which documents exist in a
+/// chat, by title and media type.
+///
+/// A narrow seam rather than the full [`Store`] so the join stays testable and
+/// the tool cannot grow ambient storage powers. Best-effort by contract: a
+/// catalog that cannot answer returns empty, and the card degrades to untitled
+/// rows rather than failing a search that already happened.
+#[async_trait]
+pub trait SourceCatalog: Send + Sync {
+    /// The chat's document summaries, newest first, at most `limit`.
+    async fn document_summaries(&self, chat_id: ChatId, limit: u64) -> Vec<DocumentSummaryRecord>;
+}
+
+/// The server hands its document store straight in.
+#[async_trait]
+impl SourceCatalog for Arc<dyn Store> {
+    async fn document_summaries(&self, chat_id: ChatId, limit: u64) -> Vec<DocumentSummaryRecord> {
+        self.list_document_summaries(DocumentScope::Chat(chat_id), None, limit)
+            .await
+            .unwrap_or_default()
+    }
+}
+
 /// A `Tool` that searches an embedded index and returns grounded citations.
 pub struct SearchTool {
     embedder: Arc<dyn Embedder>,
     store: Arc<dyn VectorStore>,
     reranker: Option<Arc<dyn Reranker>>,
+    source_catalog: Option<Box<dyn SourceCatalog>>,
 }
 
 impl SearchTool {
@@ -51,6 +76,7 @@ impl SearchTool {
             embedder,
             store,
             reranker: None,
+            source_catalog: None,
         }
     }
 
@@ -58,6 +84,19 @@ impl SearchTool {
     #[must_use]
     pub fn with_reranker(mut self, reranker: Arc<dyn Reranker>) -> Self {
         self.reranker = Some(reranker);
+        self
+    }
+
+    /// Let result rows name the documents they matched.
+    ///
+    /// The vector index knows spans, not titles. With a catalog the tool's
+    /// projection lists the matched *documents* — title and media type joined
+    /// from their summaries, the way `list_sources` names them — instead of one
+    /// anonymous row per passage. Without one it falls back to passage rows, so
+    /// the library stays usable with no document catalog at all.
+    #[must_use]
+    pub fn with_source_catalog(mut self, catalog: impl SourceCatalog + 'static) -> Self {
+        self.source_catalog = Some(Box::new(catalog));
         self
     }
 }
@@ -264,12 +303,110 @@ impl Tool for SearchTool {
                 })
             })
             .collect::<std::result::Result<Vec<_>, _>>();
+        let entries = match self.source_catalog.as_deref() {
+            Some(catalog) => document_entries(catalog, ctx.chat_id, &citations).await,
+            None => citations.iter().map(passage_entry).collect(),
+        };
         match evidence {
             Ok(evidence) => Ok(ToolOutput::text(content)
-                .with_entries(citations.iter().map(passage_entry).collect())
+                .with_entries(entries)
                 .with_private_evidence(evidence)),
             Err(output) => Ok(output),
         }
+    }
+}
+
+/// How many document summaries the projection join will read.
+///
+/// The join is per-chat and one page: a conversation with more sources than
+/// this still searches all of them — the documents past the limit just lose
+/// their title and type on the card and render as untitled source rows.
+const SUMMARY_JOIN_LIMIT: u64 = 500;
+
+/// The matched documents as card rows, one per document.
+///
+/// The card answers "what did the search find" the way a reader thinks about
+/// it: which sources matched, and how hard. One row per matched passage says
+/// the same document three times by three heading paths, which reads as three
+/// findings when it is one. So passages fold into their document — title and
+/// media type joined from the summary store, pages gathered across the
+/// document's matches, and the match count as the row's tally.
+///
+/// The join is best-effort on purpose: summaries failing to load, or a
+/// document missing from them, degrades that row's naming — never the search
+/// result itself, which already happened.
+async fn document_entries(
+    catalog: &dyn SourceCatalog,
+    chat_id: ChatId,
+    citations: &[Citation],
+) -> Vec<ResultEntry> {
+    let summaries = catalog
+        .document_summaries(chat_id, SUMMARY_JOIN_LIMIT)
+        .await;
+    let by_id: HashMap<DocumentId, _> = summaries
+        .iter()
+        .map(|summary| (summary.id, summary))
+        .collect();
+
+    let mut order: Vec<DocumentId> = Vec::new();
+    let mut matches: HashMap<DocumentId, Vec<&Citation>> = HashMap::new();
+    for citation in citations {
+        let group = matches.entry(citation.document_id).or_default();
+        if group.is_empty() {
+            order.push(citation.document_id);
+        }
+        group.push(citation);
+    }
+
+    order
+        .into_iter()
+        .map(|document_id| {
+            let group = &matches[&document_id];
+            let count = group.len();
+            let title = by_id
+                .get(&document_id)
+                .and_then(|summary| summary.title.as_deref())
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or("Untitled source");
+            let mut entry = ResultEntry::new(ResultEntryKind::Source, title).with_meta(format!(
+                "{count} {}",
+                if count == 1 { "match" } else { "matches" }
+            ));
+            if let Some(summary) = by_id.get(&document_id) {
+                entry = entry.with_media_type(summary.media_type.clone());
+            }
+            if let Some(pages) = pages_detail(group) {
+                entry = entry.with_detail(pages);
+            }
+            entry
+        })
+        .collect()
+}
+
+/// The pages a document matched on, in match order and deduplicated.
+fn pages_detail(citations: &[&Citation]) -> Option<String> {
+    let mut pages: Vec<u32> = Vec::new();
+    for citation in citations {
+        for region in &citation.source_regions {
+            if let SourceLocation::Page { number, .. } = &region.location {
+                let page = number.get();
+                if !pages.contains(&page) {
+                    pages.push(page);
+                }
+            }
+        }
+    }
+    match pages.as_slice() {
+        [] => None,
+        [page] => Some(format!("Page {page}")),
+        pages => Some(format!(
+            "Pages {}",
+            pages
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
     }
 }
 
@@ -311,7 +448,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
 
-    use openwave_core::{ChatId, DocumentGeneration, ProjectId};
+    use openwave_core::{ChatId, DocumentGeneration, DocumentProcessingStatus, ProjectId};
 
     use crate::chunk::{Chunker, TextChunker};
     use crate::document::{
@@ -648,6 +785,99 @@ mod tests {
             }
         )));
         assert_eq!(out.private_evidence[0].generation.content_revision, 1);
+    }
+
+    /// A document catalog that answers from a fixed summary list.
+    struct SummaryCatalog(Vec<DocumentSummaryRecord>);
+
+    #[async_trait]
+    impl SourceCatalog for SummaryCatalog {
+        async fn document_summaries(
+            &self,
+            _chat_id: ChatId,
+            _limit: u64,
+        ) -> Vec<DocumentSummaryRecord> {
+            self.0.clone()
+        }
+    }
+
+    fn summary(id: DocumentId, title: &str, media_type: &str) -> DocumentSummaryRecord {
+        DocumentSummaryRecord {
+            id,
+            chat_id: Some(test_chat_id()),
+            project_id: None,
+            source_uri: None,
+            media_type: media_type.into(),
+            title: Some(title.into()),
+            source_byte_len: None,
+            content_revision: 1,
+            processing_status: DocumentProcessingStatus::Ready,
+            searchable: true,
+            indexed_revision: Some(1),
+            index_fingerprint: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            indexed_at: None,
+        }
+    }
+
+    /// With a document store attached, the card names matched documents — one
+    /// row per document with its title, media type, pages, and match tally —
+    /// and a document the join cannot name degrades to an untitled row rather
+    /// than losing the result.
+    #[tokio::test]
+    async fn search_card_folds_passages_into_named_documents() {
+        let titled = DocumentId::new();
+        let untitled = DocumentId::new();
+        let page = |start, end, number| SourceRegion {
+            span: ByteSpan::new(start, end),
+            location: SourceLocation::Page {
+                number: std::num::NonZeroU32::new(number).unwrap(),
+                bounds: None,
+            },
+        };
+        let mut first = scored(titled, 0, 0, 40, "annual revenue grew");
+        first.chunk.source_regions = vec![page(0, 40, 3)];
+        let mut second = scored(titled, 1, 100, 140, "cash position");
+        second.chunk.source_regions = vec![page(100, 140, 7)];
+        let third = scored(untitled, 2, 0, 40, "unrelated aside");
+        let tool = SearchTool::new(
+            Arc::new(HashEmbedder::new(DIMS)),
+            Arc::new(SpyVectorStore {
+                candidates: vec![first, second, third],
+                calls: Mutex::new(Vec::new()),
+            }),
+        )
+        .with_source_catalog(SummaryCatalog(vec![summary(
+            titled,
+            "Q3 Report",
+            "application/pdf",
+        )]));
+
+        let output = tool
+            .execute(&ctx(), json!({"query": "revenue", "k": 3}))
+            .await
+            .unwrap();
+
+        assert!(!output.is_error);
+        assert_eq!(
+            openwave_core::ToolResultPreview::build("search", &output),
+            Some(openwave_core::ToolResultPreview::Entries {
+                entries: vec![
+                    ResultEntry::new(ResultEntryKind::Source, "Q3 Report")
+                        .with_media_type("application/pdf")
+                        .with_detail("Pages 3, 7")
+                        .with_meta("2 matches"),
+                    ResultEntry::new(ResultEntryKind::Source, "Untitled source")
+                        .with_meta("1 match"),
+                ],
+                failures: Vec::new(),
+                elided: 0,
+            })
+        );
+        // The model-facing content and durable evidence stay passage-shaped;
+        // only the card folds.
+        assert_eq!(output.private_evidence.len(), 3);
     }
 
     #[tokio::test]
