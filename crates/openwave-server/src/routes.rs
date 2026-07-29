@@ -754,9 +754,14 @@ pub async fn put_provider(
 ) -> Result<Json<ProviderInfo>, ServerError> {
     let kind = ProviderKind::parse(&kind)
         .ok_or_else(|| ServerError::not_found(format!("unknown provider kind: {kind}")))?;
-    let policy = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
-    let info =
-        providers::update_provider(&*state.store, &*state.secrets, kind, body, &policy).await?;
+    let info = providers::update_provider(
+        &*state.store,
+        &*state.secrets,
+        kind,
+        body,
+        &*state.os_policy,
+    )
+    .await?;
     Ok(Json(info))
 }
 

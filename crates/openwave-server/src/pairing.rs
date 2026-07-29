@@ -150,30 +150,40 @@ pub async fn pair_with_gateway(
     let base_url = config.base_url().to_string();
     GatewayAuth::new(config)?.meta().await?;
     let _guard = PAIRING.lock().await;
-    // Refuse a conflicting pairing before either write, then write the
-    // provider configuration before the sticky policy. Neither write is
-    // transactional with the other, so the order decides the failure mode:
-    // provider-first fails into a still-unmanaged profile recoverable from
-    // settings, while policy-first could strand a permanently managed
-    // profile with no configured provider.
-    let already_provisioned = match managed_policy::provisioned_url(store).await? {
-        Some(existing) if existing != base_url => {
-            return Err(PairingError::Conflict {
-                provisioned_url: existing,
-            });
+    // The provider row is also written by model sync, sign-out, and
+    // `PUT /providers/model_gateway`, none of which run under PAIRING; hold
+    // the shared row lock across the conflict check, the row write, and the
+    // policy write so no interleaved read-modify-write can resurrect
+    // pre-pairing state. Lock order is PAIRING first, row lock second — this
+    // is the only path that takes both.
+    let already_provisioned = {
+        let _row = providers::GATEWAY_ROW_WRITES.lock().await;
+        // Refuse a conflicting pairing before either write, then write the
+        // provider configuration before the sticky policy. Neither write is
+        // transactional with the other, so the order decides the failure mode:
+        // provider-first fails into a still-unmanaged profile recoverable from
+        // settings, while policy-first could strand a permanently managed
+        // profile with no configured provider.
+        let already_provisioned = match managed_policy::provisioned_url(store).await? {
+            Some(existing) if existing != base_url => {
+                return Err(PairingError::Conflict {
+                    provisioned_url: existing,
+                });
+            }
+            other => other.is_some(),
+        };
+        let mut provider = providers::read_config(store, ProviderKind::ModelGateway).await?;
+        if provider.base_url.as_deref() != Some(base_url.as_str()) {
+            // A model snapshot synced from a previously configured gateway does
+            // not describe this one.
+            provider.models = Vec::new();
+            provider.base_url = Some(base_url.clone());
         }
-        other => other.is_some(),
+        provider.enabled = true;
+        providers::write_config(store, ProviderKind::ModelGateway, &provider).await?;
+        managed_policy::provision(store, &base_url).await?;
+        already_provisioned
     };
-    let mut provider = providers::read_config(store, ProviderKind::ModelGateway).await?;
-    if provider.base_url.as_deref() != Some(base_url.as_str()) {
-        // A model snapshot synced from a previously configured gateway does
-        // not describe this one.
-        provider.models = Vec::new();
-        provider.base_url = Some(base_url.clone());
-    }
-    provider.enabled = true;
-    providers::write_config(store, ProviderKind::ModelGateway, &provider).await?;
-    managed_policy::provision(store, &base_url).await?;
     handle.mcp.enforce_manual_lockdown().await;
     Ok(PairingOutcome {
         base_url,

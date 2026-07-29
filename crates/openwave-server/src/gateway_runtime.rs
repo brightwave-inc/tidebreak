@@ -259,10 +259,18 @@ impl GatewayRuntime {
         if let Some(connection) = self.connection().await? {
             connection.sign_out().await?;
         }
-        let mut config = providers::read_config(&*self.store, ProviderKind::ModelGateway).await?;
-        if !config.models.is_empty() {
-            config.models = Vec::new();
-            providers::write_config(&*self.store, ProviderKind::ModelGateway, &config).await?;
+        {
+            // Serialize the snapshot clear with the other row writers so it
+            // cannot land inside one of their read-modify-writes. Lock order
+            // matches the sign-in task's sync path: the sign-in state lock is
+            // already held, the row lock nests inside it.
+            let _row = providers::GATEWAY_ROW_WRITES.lock().await;
+            let mut config =
+                providers::read_config(&*self.store, ProviderKind::ModelGateway).await?;
+            if !config.models.is_empty() {
+                config.models = Vec::new();
+                providers::write_config(&*self.store, ProviderKind::ModelGateway, &config).await?;
+            }
         }
         *sign_in = SignInProgress::Idle;
         Ok(())
@@ -288,20 +296,33 @@ impl GatewayRuntime {
         &self,
         policy: &crate::managed_policy::ManagedPolicy,
     ) -> Result<Option<Arc<GatewayConnection>>> {
-        let base_url = if policy.managed {
+        let Some(base_url) = self.effective_base_url(policy).await? else {
+            return Ok(None);
+        };
+        Ok(Some(self.connection_at(base_url).await?))
+    }
+
+    /// The effective deployment URL: the resolved policy's on a managed
+    /// profile, the stored row's otherwise. `None` when neither names one.
+    async fn effective_base_url(
+        &self,
+        policy: &crate::managed_policy::ManagedPolicy,
+    ) -> Result<Option<String>> {
+        Ok(if policy.managed {
             policy.gateway_url.clone()
         } else {
             providers::read_config(&*self.store, ProviderKind::ModelGateway)
                 .await?
                 .base_url
-        };
-        let Some(base_url) = base_url else {
-            return Ok(None);
-        };
+        })
+    }
+
+    /// The cached connection for `base_url`, rebuilt when the URL changes.
+    async fn connection_at(&self, base_url: String) -> Result<Arc<GatewayConnection>> {
         let mut cached = self.cached.lock().await;
         if let Some((url, connection)) = cached.as_ref() {
             if *url == base_url {
-                return Ok(Some(connection.clone()));
+                return Ok(connection.clone());
             }
         }
         let auth_config = GatewayAuthConfig::new(&base_url)?;
@@ -310,7 +331,7 @@ impl GatewayRuntime {
             CredentialVault::new(self.secrets.clone()),
         ));
         *cached = Some((base_url, connection.clone()));
-        Ok(Some(connection))
+        Ok(connection)
     }
 
     /// A router token source, when the provider is configured and a session
@@ -330,15 +351,19 @@ impl GatewayRuntime {
     /// which refuses a revoked model at inference time regardless of what is
     /// cached here.
     pub(crate) async fn sync_models(&self) -> Result<usize> {
-        let connection = self
-            .connection()
+        let policy = crate::managed_policy::resolve(&*self.store, &*self.os_policy).await?;
+        let base_url = self
+            .effective_base_url(&policy)
             .await?
             .ok_or_else(|| AgentError::config("no model gateway is configured"))?;
+        let connection = self.connection_at(base_url.clone()).await?;
         // The gateway routes these models over its Anthropic-compatible
-        // surface, so sync exactly the set that protocol can serve.
-        let models = connection.models(Some("anthropic_messages")).await?;
-        let mut config = providers::read_config(&*self.store, ProviderKind::ModelGateway).await?;
-        config.models = models
+        // surface, so sync exactly the set that protocol can serve. Fetched
+        // before the row lock is taken: the entitlement round-trip must not
+        // stall the other row writers.
+        let models: Vec<CustomModelConfig> = connection
+            .models(Some("anthropic_messages"))
+            .await?
             .into_iter()
             .map(|model| CustomModelConfig {
                 id: model.id,
@@ -349,10 +374,23 @@ impl GatewayRuntime {
             .collect();
         // The gateway is trusted for entitlements, not for shapes: the synced
         // set is held to the same bounds as user-entered custom models.
-        providers::validate_custom_models(&config.models).map_err(|error| {
+        providers::validate_custom_models(&models).map_err(|error| {
             AgentError::config(format!("gateway model sync rejected: {error:?}"))
         })?;
-        let count = config.models.len();
+        let count = models.len();
+        let _row = providers::GATEWAY_ROW_WRITES.lock().await;
+        // The fetch ran outside the lock, so a pairing (or an unmanaged
+        // re-point of the row) may have changed the deployment while it was
+        // in flight. Re-resolve under the lock and refuse to stamp another
+        // gateway's row with this one's model list.
+        let policy = crate::managed_policy::resolve(&*self.store, &*self.os_policy).await?;
+        if self.effective_base_url(&policy).await?.as_deref() != Some(base_url.as_str()) {
+            return Err(AgentError::config(
+                "the model gateway configuration changed during model sync",
+            ));
+        }
+        let mut config = providers::read_config(&*self.store, ProviderKind::ModelGateway).await?;
+        config.models = models;
         providers::write_config(&*self.store, ProviderKind::ModelGateway, &config).await?;
         Ok(count)
     }
@@ -655,6 +693,114 @@ mod tests {
         assert!(gateway_route
             .curated_models
             .contains(&"sample-claude".to_string()));
+    }
+
+    /// The race #896 names, forced deterministically: a model sync whose
+    /// entitlement fetch is still in flight when a pairing re-points the
+    /// profile at a different gateway. The sync must not stamp the old
+    /// gateway's model list (or base URL) over the row the pairing just
+    /// wrote; removing the row serialization or its under-lock recheck lets
+    /// the stale write land and fails this.
+    #[tokio::test]
+    async fn a_sync_racing_a_pairing_cannot_resurrect_the_old_gateways_state() {
+        // Gateway A: answers token refreshes normally but parks the model
+        // list until released — the window the pairing lands in.
+        let (arrived_tx, mut arrived_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let parked_models = {
+            let release = release.clone();
+            move || {
+                let release = release.clone();
+                let arrived = arrived_tx.clone();
+                async move {
+                    arrived.send(()).expect("the test is listening");
+                    release.notified().await;
+                    Json(json!({
+                        "models": [{
+                            "id": "stale-model",
+                            "name": "Stale Model",
+                            "context_window": 200000,
+                            "max_output_tokens": 8192,
+                            "supports_tools": true,
+                            "supports_vision": false
+                        }]
+                    }))
+                }
+            }
+        };
+        let app = AxumRouter::new()
+            .route("/oauth/token", post(token))
+            .route("/api/v1/cli/models", get(parked_models))
+            .with_state(Arc::new(FakeGateway::default()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_a = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        // Gateway B: answers only the pairing probe.
+        let meta = AxumRouter::new().route(
+            "/api/v1/meta",
+            get(|| async {
+                Json(json!({
+                    "api_version": "v1",
+                    "installation_id": "install-2",
+                    "gateway_version": "1.0.0",
+                    "public_url": "http://gateway-b.test",
+                    "auth_mode": "oidc",
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_b = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, meta).await.unwrap();
+        });
+
+        let (runtime, store, _directory) = signed_in_runtime(&base_a).await;
+        let sync = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.sync_models().await }
+        });
+        arrived_rx
+            .recv()
+            .await
+            .expect("the fetch reaches gateway A");
+
+        // While A's model list is in flight, pair the profile to gateway B.
+        let mcp = Arc::new(crate::mcp_config::McpRuntime::new(
+            Arc::new(openwave_core::ToolRegistry::new()),
+            store.clone(),
+            runtime.clone(),
+            Arc::new(crate::managed_policy::NoOsPolicy),
+        ));
+        let handle = crate::pairing::PairingHandle::new(store.clone(), mcp);
+        let outcome = crate::pairing::pair_with_gateway(&handle, &base_b)
+            .await
+            .unwrap();
+
+        release.notify_one();
+        let error = sync
+            .await
+            .unwrap()
+            .expect_err("a sync whose deployment changed mid-fetch must refuse to write");
+        assert!(
+            error.to_string().contains("changed during model sync"),
+            "{error}"
+        );
+
+        let config = providers::read_config(&*store, ProviderKind::ModelGateway)
+            .await
+            .unwrap();
+        assert_eq!(
+            config.base_url.as_deref(),
+            Some(outcome.base_url.as_str()),
+            "the pairing's base URL must survive the racing sync"
+        );
+        assert!(
+            config.models.is_empty(),
+            "gateway A's models must not land on gateway B's row"
+        );
     }
 
     #[tokio::test]
