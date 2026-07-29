@@ -54,7 +54,7 @@ use std::sync::Arc;
 
 use axum::extract::DefaultBodyLimit;
 use axum::http::{header, Method};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::Router;
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -111,11 +111,7 @@ pub fn app(state: AppState) -> Router {
         )
         .route(
             "/chats/{chat_id}/documents/{document_id}",
-            get(routes::get_chat_document).delete(routes::delete_chat_document),
-        )
-        .route(
-            "/chats/{chat_id}/documents/{document_id}/file-content",
-            get(routes::get_chat_document_file_content),
+            delete(routes::delete_chat_document),
         )
         .route(
             "/chats/{chat_id}/documents/{document_id}/retry",
@@ -210,8 +206,23 @@ pub fn app(state: AppState) -> Router {
             "/chats/{id}/client-executions/{call_id}/resolve",
             post(routes::resolve_client_execution),
         );
+    // The reader's half of the document surface. `ChatDocumentDetail` omits the
+    // catalog's `uri` and index bookkeeping, so unlike the full-fidelity routes
+    // below there is nothing here to withhold from an untrusted client — and a
+    // renderer-shaped client, this webview or a web one later, holds only the
+    // primary bearer and is the thing that draws the document.
+    let renderer_document_api = Router::new()
+        .route(
+            "/chats/{chat_id}/documents/{document_id}",
+            get(routes::get_chat_document),
+        )
+        .route(
+            "/chats/{chat_id}/documents/{document_id}/file-content",
+            get(routes::get_chat_document_file_content),
+        );
+
     // A native embedding gives the renderer only the primary bearer, so its
-    // canonical document surface joins the native-only router. A headless
+    // full-fidelity document surface joins the native-only router. A headless
     // embedding has no separate renderer trust boundary and deliberately keeps
     // the same API on its primary bearer for CLI/API compatibility.
     let (client_executor_api, public_document_api) = if state.root_attachment_routes_enabled {
@@ -333,6 +344,7 @@ pub fn app(state: AppState) -> Router {
             axum::routing::delete(routes::delete_provider_credential),
         )
         .merge(public_document_api)
+        .merge(renderer_document_api)
         // The transcript must fetch pixels with its bearer rather than putting
         // a token in an image URL. Unlike image publication, this is renderer
         // presentation of an image already durably attached to the chat.

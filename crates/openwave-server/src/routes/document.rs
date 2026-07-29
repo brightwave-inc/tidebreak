@@ -224,6 +224,48 @@ pub struct DocumentDetail {
     pub content: String,
 }
 
+/// One source as the renderer may see it.
+///
+/// Deliberately narrower than [`DocumentDetail`], which flattens the full
+/// catalog summary. That summary carries `uri` — for a conversation source
+/// either absent or an opaque `connected-folder:{root_id}/{path}` reference, but
+/// for an unscoped source a real filesystem path — along with revision and index
+/// fingerprints that are server bookkeeping. None of it is the renderer's, and a
+/// projection is a guarantee where "it happens to be empty today" is not.
+///
+/// Adding a field here puts it on an untrusted surface. Nothing derived from a
+/// host path belongs in one.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(serde::Deserialize))]
+pub struct ChatDocumentDetail {
+    /// Stable identifier shared with citations and the file-content route.
+    pub document_id: DocumentId,
+    /// Media type of the canonical content, which selects the viewer.
+    pub media_type: String,
+    pub title: Option<String>,
+    pub processing_status: openwave_core::DocumentProcessingStatus,
+    /// Whether a search of this conversation can match this source.
+    pub searchable: bool,
+    pub updated_at: chrono::DateTime<Utc>,
+    /// Parsed text-of-record. Citation spans index into this string.
+    pub content: String,
+}
+
+impl From<DocumentRecord> for ChatDocumentDetail {
+    fn from(document: DocumentRecord) -> Self {
+        let summary = DocumentSummary::from(&document);
+        Self {
+            document_id: summary.document_id,
+            media_type: summary.media_type,
+            title: summary.title,
+            processing_status: summary.processing_status,
+            searchable: summary.searchable,
+            updated_at: summary.updated_at,
+            content: document.canonical_text,
+        }
+    }
+}
+
 impl From<DocumentRecord> for DocumentDetail {
     fn from(document: DocumentRecord) -> Self {
         Self {
@@ -799,14 +841,14 @@ pub async fn get_project_document(
 pub async fn get_chat_document(
     State(state): State<AppState>,
     Path((chat_id, document_id)): Path<(ChatId, DocumentId)>,
-) -> Result<Json<DocumentDetail>, ServerError> {
+) -> Result<Json<ChatDocumentDetail>, ServerError> {
     require_chat(&state, chat_id).await?;
     state
         .store
         .get_document(document_id)
         .await?
         .filter(|document| document.chat_id == Some(chat_id) && document.project_id.is_none())
-        .map(DocumentDetail::from)
+        .map(ChatDocumentDetail::from)
         .map(Json)
         .ok_or_else(|| ServerError::not_found(format!("document {document_id} not found")))
 }
