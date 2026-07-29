@@ -157,6 +157,11 @@ model: string | null,
  */
 reasoning_effort: ReasoningEffort | null, 
 /**
+ * How much this chat lets the agent do between approvals; `None` means
+ * [`PermissionMode::Ask`].
+ */
+permission_mode: PermissionMode | null, 
+/**
  * CAS revision of this conversation's exact root projection.
  */
 attachment_revision: number, 
@@ -701,6 +706,20 @@ export type PendingOutputWritebackRequest = { call_id: CallId, turn_id: TurnId, 
 export type PendingUserQuestions = { call_id: CallId, turn_id: TurnId, questions: Array<UserQuestion>, asked_at: string, };
 
 /**
+ * How much a chat lets the agent do between approvals.
+ *
+ * The mode is the fallback, not the whole decision: a standing grant the
+ * reader has already made covers its calls in every mode, and `ReadOnly`
+ * tools never ask in any mode. The mode only decides what happens to a
+ * mutating call that no grant covers — ask the reader, or proceed.
+ *
+ * Persisted per chat as the token from [`Self::as_str`] and read at turn
+ * start, like the model selection: changing it mid-turn applies from the
+ * next turn, and a reopened chat runs the way it ran before.
+ */
+export type PermissionMode = "ask" | "auto" | "allow";
+
+/**
  * An optional grouping of chats that share project context and a document
  * corpus. A chat may belong to a project or stand alone — unlike some designs
  * that make a project mandatory, OpenWave keeps loose, projectless chats.
@@ -994,7 +1013,7 @@ end_published_at: string | null, };
  * summary or arguments. `Unsupported` is the fail-closed default: a Sensitive
  * action the server can only reject, never approve.
  */
-export type ToolApprovalKind = "search_may_share_query_and_excerpts" | "web_search_may_share_query" | "exec_may_run_networked_command" | "external_mcp_may_call_server" | "unsupported";
+export type ToolApprovalKind = "search_may_share_query_and_excerpts" | "web_search_may_share_query" | "exec_may_run_networked_command" | "external_mcp_may_call_server" | "workspace_may_modify_files" | "unsupported";
 
 /**
  * What a call produced, in a form a human can read.

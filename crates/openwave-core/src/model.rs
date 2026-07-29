@@ -1254,6 +1254,59 @@ impl ReasoningEffort {
     }
 }
 
+/// How much a chat lets the agent do between approvals.
+///
+/// The mode is the fallback, not the whole decision: a standing grant the
+/// reader has already made covers its calls in every mode, and `ReadOnly`
+/// tools never ask in any mode. The mode only decides what happens to a
+/// mutating call that no grant covers — ask the reader, or proceed.
+///
+/// Persisted per chat as the token from [`Self::as_str`] and read at turn
+/// start, like the model selection: changing it mid-turn applies from the
+/// next turn, and a reopened chat runs the way it ran before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionMode {
+    /// Every uncovered mutating call parks on the approval card. The default,
+    /// and the only mode where `Workspace`-class tools ask.
+    Ask,
+    /// The agent proceeds through `Workspace` writes on its own; uncovered
+    /// `Sensitive` calls still ask. This is a standing "yes" to workspace
+    /// edits stated as a mode instead of a per-tool grant.
+    Auto,
+    /// Nothing asks. An explicit per-chat opt-in to full autonomy; the
+    /// approval gate is bypassed for every class.
+    Allow,
+}
+
+impl PermissionMode {
+    /// Every mode, in ascending order of autonomy.
+    pub const ALL: &'static [Self] = &[Self::Ask, Self::Auto, Self::Allow];
+
+    /// The wire/storage token for this mode.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Auto => "auto",
+            Self::Allow => "allow",
+        }
+    }
+
+    /// Parse a stored/wire token back into a mode.
+    ///
+    /// Deliberately returns `Option` (invalid tokens are dropped, not
+    /// errored), so this is not the `FromStr` trait.
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(value: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|mode| mode.as_str() == value)
+    }
+}
+
 /// A persistent conversation with an exact, ordered host-root projection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 pub struct Chat {
@@ -1268,6 +1321,9 @@ pub struct Chat {
     /// Reasoning-effort override for this chat, honored only by models that
     /// expose the control; `None` leaves the provider's default in force.
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// How much this chat lets the agent do between approvals; `None` means
+    /// [`PermissionMode::Ask`].
+    pub permission_mode: Option<PermissionMode>,
     /// CAS revision of this conversation's exact root projection.
     pub attachment_revision: i64,
     /// Ordered opaque roots available for future broker-backed operations.

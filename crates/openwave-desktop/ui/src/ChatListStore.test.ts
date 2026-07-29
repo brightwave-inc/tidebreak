@@ -10,6 +10,7 @@ function chat(id: string, title: string | null): Chat {
     title,
     model: null,
     reasoning_effort: null,
+    permission_mode: null,
     attachment_revision: 0,
     root_attachments: [],
     created_at: "2026-07-28T12:00:00Z",

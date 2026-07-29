@@ -18,10 +18,10 @@ use tokio::sync::broadcast::error::RecvError;
 use openwave_core::{
     AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentError, AgentRun, AgentRunExecutionLocation,
     AgentRunStatus, AgentRunTier, ApprovalDecision, CallId, Chat, ChatId, DeleteChatOutcome,
-    DeleteProjectOutcome, Message as StoredMessage, MessageId, Project, ProjectId, ReasoningEffort,
-    RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, Role, SandboxToolCall,
-    SandboxToolCallStatus, SecretProvider, SequencedEvent, Store, ToolCallExecution,
-    ToolCallRecord, ToolCallStatus, TurnId, TurnSteer, TurnSteerId,
+    DeleteProjectOutcome, Message as StoredMessage, MessageId, PermissionMode, Project, ProjectId,
+    ReasoningEffort, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, Role,
+    SandboxToolCall, SandboxToolCallStatus, SecretProvider, SequencedEvent, Store,
+    ToolCallExecution, ToolCallRecord, ToolCallStatus, TurnId, TurnSteer, TurnSteerId,
 };
 
 use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
@@ -1070,6 +1070,9 @@ pub struct CreateChat {
     /// that expose the control.
     #[serde(default)]
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Optional permission mode for this chat; omitted means `ask`.
+    #[serde(default)]
+    pub permission_mode: Option<PermissionMode>,
 }
 
 /// `POST /chats` — create a chat and return it (`201 Created`).
@@ -1095,6 +1098,7 @@ pub async fn create_chat(
         title: normalize_chat_title(body.title)?,
         model: body.model,
         reasoning_effort: body.reasoning_effort,
+        permission_mode: body.permission_mode,
         attachment_revision: 0,
         root_attachments: Vec::new(),
         created_at: Utc::now(),
@@ -1118,6 +1122,10 @@ pub struct ChatUpdate {
     /// An explicit `null` clears the reasoning-effort override; a value sets it.
     #[serde(default, deserialize_with = "double_option")]
     pub reasoning_effort: Option<Option<ReasoningEffort>>,
+    /// An explicit `null` clears the permission mode (back to `ask`); a value
+    /// sets it.
+    #[serde(default, deserialize_with = "double_option")]
+    pub permission_mode: Option<Option<PermissionMode>>,
 }
 
 /// `PATCH /chats/{id}` — update the human-facing title and/or model selection.
@@ -1141,7 +1149,13 @@ pub async fn patch_chat(
 
     if !state
         .store
-        .update_chat_metadata(id, title.clone(), body.model.clone(), body.reasoning_effort)
+        .update_chat_metadata(
+            id,
+            title.clone(),
+            body.model.clone(),
+            body.reasoning_effort,
+            body.permission_mode,
+        )
         .await?
     {
         return Err(ServerError::not_found(format!("chat {id} not found")));
@@ -1154,6 +1168,9 @@ pub async fn patch_chat(
     }
     if let Some(reasoning_effort) = body.reasoning_effort {
         chat.reasoning_effort = reasoning_effort;
+    }
+    if let Some(permission_mode) = body.permission_mode {
+        chat.permission_mode = permission_mode;
     }
     Ok(Json(chat))
 }

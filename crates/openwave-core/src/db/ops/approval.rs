@@ -74,6 +74,16 @@ where
     Ok(None)
 }
 
+/// The `approval_class` column spelling for a gated call.
+///
+/// Existing databases constrain the column to `"sensitive"`, from before
+/// Workspace-class calls could park. Every gated class stores that legacy
+/// spelling; recovery re-derives the real class from the recovered kind, the
+/// same way the folded kind spellings are re-derived from the tool name.
+fn stored_approval_class(_class: ApprovalClass) -> &'static str {
+    ApprovalClass::Sensitive.as_str()
+}
+
 pub(in crate::db) async fn request_and_append_event(
     store: &DbStore,
     request: &ApprovalRequest,
@@ -177,7 +187,7 @@ pub(in crate::db) async fn request_and_append_event(
         || turn.chat_id != request.chat_id.0
         || turn.status != TurnRunStatus::Running.as_str()
         || !claim_is_live
-        || request.kind != ToolApprovalKind::for_tool_name(&request.tool_name)
+        || request.kind != ToolApprovalKind::for_call(&request.tool_name, request.class)
     {
         transaction.commit().await.map_err(store_err)?;
         return Ok(JournaledToolApprovalOutcome {
@@ -197,7 +207,7 @@ pub(in crate::db) async fn request_and_append_event(
     {
         let mut active: entities::tool_call::ActiveModel = call.into();
         active.approval_status = Set(Some(ToolApprovalStatus::Approved.as_str().into()));
-        active.approval_class = Set(Some(request.class.as_str().into()));
+        active.approval_class = Set(Some(stored_approval_class(request.class).into()));
         active.approval_kind = Set(Some(request.kind.as_str().into()));
         active.approval_requested_at = Set(Some(requested_at));
         active.approval_decided_at = Set(Some(requested_at));
@@ -221,7 +231,7 @@ pub(in crate::db) async fn request_and_append_event(
     .await?;
     let mut active: entities::tool_call::ActiveModel = call.into();
     active.approval_status = Set(Some(ToolApprovalStatus::Pending.as_str().into()));
-    active.approval_class = Set(Some(request.class.as_str().into()));
+    active.approval_class = Set(Some(stored_approval_class(request.class).into()));
     active.approval_kind = Set(Some(request.kind.as_str().into()));
     active.approval_requested_at = Set(Some(requested_at));
     active.approval_event_seq = Set(Some(seq));
@@ -382,7 +392,7 @@ pub(in crate::db) async fn request(
             Ok(RequestToolApprovalOutcome::IdentityConflict)
         };
     }
-    if request.kind != ToolApprovalKind::for_tool_name(&request.tool_name) {
+    if request.kind != ToolApprovalKind::for_call(&request.tool_name, request.class) {
         transaction.commit().await.map_err(store_err)?;
         return Ok(RequestToolApprovalOutcome::IdentityConflict);
     }
@@ -397,7 +407,7 @@ pub(in crate::db) async fn request(
     {
         let mut active: entities::tool_call::ActiveModel = existing.into();
         active.approval_status = Set(Some(ToolApprovalStatus::Approved.as_str().into()));
-        active.approval_class = Set(Some(request.class.as_str().into()));
+        active.approval_class = Set(Some(stored_approval_class(request.class).into()));
         active.approval_kind = Set(Some(request.kind.as_str().into()));
         active.approval_requested_at = Set(Some(requested_at));
         active.approval_decided_at = Set(Some(requested_at));
@@ -408,7 +418,7 @@ pub(in crate::db) async fn request(
     }
     let mut active: entities::tool_call::ActiveModel = existing.into();
     active.approval_status = Set(Some(ToolApprovalStatus::Pending.as_str().into()));
-    active.approval_class = Set(Some(request.class.as_str().into()));
+    active.approval_class = Set(Some(stored_approval_class(request.class).into()));
     active.approval_kind = Set(Some(request.kind.as_str().into()));
     active.approval_requested_at = Set(Some(requested_at));
     let inserted = active.update(&transaction).await.map_err(store_err)?;
@@ -639,7 +649,9 @@ fn validate_request(request: &ApprovalRequest) -> Result<()> {
         || request.turn_id.0.is_nil()
         || request.tool_name.is_empty()
         || request.tool_name.len() > crate::model::ToolCallRecord::MAX_LABEL_LEN
-        || request.class != ApprovalClass::Sensitive
+        // ReadOnly never parks: only the classes the permission mode can gate
+        // may request approval.
+        || request.class == ApprovalClass::ReadOnly
     {
         return Err(AgentError::Store("invalid tool approval request".into()));
     }
@@ -667,14 +679,6 @@ fn approval_from_model(model: &entities::tool_call::Model) -> Result<ToolApprova
             ))
         }
     };
-    let class = match model.approval_class.as_deref() {
-        Some("sensitive") => ApprovalClass::Sensitive,
-        _ => {
-            return Err(AgentError::Store(
-                "invalid durable tool approval class".into(),
-            ))
-        }
-    };
     let kind = match model.approval_kind.as_deref() {
         Some("search_may_share_query_and_excerpts") if model.name.starts_with("mcp__") => {
             ToolApprovalKind::ExternalMcpMayCallServer
@@ -689,10 +693,31 @@ fn approval_from_model(model: &entities::tool_call::Model) -> Result<ToolApprova
             ToolApprovalKind::WebSearchMayShareQuery
         }
         Some("exec_may_run_networked_command") => ToolApprovalKind::ExecMayRunNetworkedCommand,
-        Some("unsupported") => ToolApprovalKind::Unsupported,
+        // The stored spelling folds workspace edits into the legacy vocabulary
+        // (the column has a closed constraint); the tool name recovers the
+        // kind. A workspace tool the name table does not know stays a true
+        // `Unsupported`: rejectable-only, never silently approvable.
+        Some("unsupported") => match ToolApprovalKind::for_tool_name(&model.name) {
+            ToolApprovalKind::WorkspaceMayModifyFiles => ToolApprovalKind::WorkspaceMayModifyFiles,
+            _ => ToolApprovalKind::Unsupported,
+        },
         _ => {
             return Err(AgentError::Store(
                 "invalid durable tool approval kind".into(),
+            ))
+        }
+    };
+    let class = match model.approval_class.as_deref() {
+        // `"sensitive"` is the only stored spelling (the column constraint
+        // predates gated Workspace calls); the recovered kind says which
+        // class actually parked.
+        Some("sensitive") if kind == ToolApprovalKind::WorkspaceMayModifyFiles => {
+            ApprovalClass::Workspace
+        }
+        Some("sensitive") => ApprovalClass::Sensitive,
+        _ => {
+            return Err(AgentError::Store(
+                "invalid durable tool approval class".into(),
             ))
         }
     };

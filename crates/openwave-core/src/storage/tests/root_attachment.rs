@@ -15,6 +15,7 @@ fn mem_attachment_chat(
         title: None,
         model: None,
         reasoning_effort: None,
+        permission_mode: None,
         attachment_revision,
         root_attachments: roots,
         created_at: chrono::DateTime::<chrono::Utc>::from_timestamp(10, 0).unwrap(),

@@ -333,6 +333,7 @@ mod tests {
             title: Some("preservation probe".to_owned()),
             model: None,
             reasoning_effort: None,
+            permission_mode: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
