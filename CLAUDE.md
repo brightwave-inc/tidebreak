@@ -17,18 +17,22 @@ React/TypeScript under `crates/openwave-desktop/ui`.
   a large multi-slice diff on a working branch. Ship a slice, open the PR, move
   on. Small and reviewable beats big and sprawling.
 - **Branch off `main`; PR back into `main`.** Never commit straight to `main`.
-- **Track substantial work on the board first.** For anything beyond a small fix,
-  open (or pick up) an issue, put it on the project board, and move it to
-  *In progress* **before you start editing** — see below. Several agent sessions
-  run in parallel against this repo and the board is how they avoid each other;
-  an issue claimed after the work is done has already failed at its job.
+- **Issues are for deferred or cross-agent work, not for narrating the current
+  task.** Open an issue when work is being set aside for later, or when it needs
+  to be visible to *other* sessions — a slice another agent might pick up, or a
+  claim on contested scope. Work the user is directing interactively in this
+  session doesn't need an issue; filing one adds tracking overhead without
+  coordinating anyone. If you do pick up substantial parallel-track work, claim
+  its issue on the board **before you start editing** — see below.
 - **Only commit or push when asked.** Don't merge your own PRs unless the request
   was explicitly to merge; default to opening the PR for review.
 
 ## Project board
 
 Work is tracked on a repo-scoped GitHub **Project** so the team and separate
-agent sessions can see where things stand without reading commit logs.
+agent sessions can see where things stand without reading commit logs. The
+board matters where sessions can collide or work outlives a session; it is not
+a ledger of everything an agent happens to be doing right now.
 
 - **Claim before you build, not after.** Assign yourself and move the issue to
   *In progress* **before the first edit**. Sessions run in parallel and cannot
