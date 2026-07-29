@@ -76,12 +76,13 @@ execution, never by reverting to open egress. The local provider already denies
 all network and is unaffected.
 
 The `enforcement` field discloses, per managed provider, an honest `status`
-(`boundary`, `applied_with_gaps`, or `unconfirmed`) plus the `gaps` the vendor
-leaves reachable regardless of policy. The status is **derived from the shipped
-enforcement model** (`EgressEnforcement`), not asserted per provider, so the
-settings surface and the decision layer can never disagree — if the model says a
-vendor's mechanism leaves a general-purpose destination reachable, the surface
-cannot present it as a full boundary.
+(`boundary`, `conditional_boundary`, `applied_with_gaps`, or `unconfirmed`),
+plus the `gaps` the vendor leaves reachable regardless of policy and an optional
+`requirement` when a boundary is gated on a precondition. The status is
+**derived from the shipped enforcement model** (`EgressEnforcement`), not
+asserted per provider, so the settings surface and the decision layer can never
+disagree — if the model says a vendor's mechanism leaves a general-purpose
+destination reachable, the surface cannot present it as a full boundary.
 
 - **E2B — `applied_with_gaps`.** A configured allowlist becomes E2B's
   per-sandbox `allowOut` rules with `allow_internet_access: false`, and this is
@@ -90,13 +91,20 @@ cannot present it as a full boundary.
   the sandbox can still reach arbitrary hosts on other ports or tunnel over DNS.
   The model's `is_credential_boundary()` returns false for exactly this reason,
   and the projection reads that value rather than a hardcoded flag.
-- **Daytona — `unconfirmed`.** A configured policy is sent at sandbox creation
-  (block-all switch or comma-separated allowlists), but whether an
-  empty-but-present allowlist denies that axis is not yet confirmed against the
-  live Daytona API, and Daytona keeps general-purpose services (package
-  registries, git hosting, container registries, AI APIs) reachable regardless
-  of policy. Daytona egress is therefore applied but must not be relied on as a
-  network boundary until confirmed.
+- **Daytona — `conditional_boundary`, requiring org tier 3+.** A configured
+  policy is sent at sandbox creation (block-all switch or comma-separated
+  allowlists). A live test against a real Daytona account confirmed that a
+  per-sandbox policy is a *strict*, externally enforced allowlist: only listed
+  domains are reachable, and raw IPs, unlisted domains, unlisted-domain DNS, and
+  the package registries / git hosting / container registries / AI APIs that
+  were once assumed always-reachable are **all blocked**. There is no
+  general-purpose carve-out, so `is_credential_boundary()` returns true and
+  Daytona is in fact a stronger boundary than E2B. The one caveat is a
+  precondition the host cannot read statically: the per-sandbox egress override
+  requires **Daytona org tier 3+**. On tier 1–2 the override is refused and the
+  org default applies, so the boundary is not guaranteed — the projection
+  therefore reports it as a *conditional* boundary with that requirement inline,
+  never an unconditional green one.
 
 The local sandbox is the only tier that denies all network outright — the actual
 boundary — and it does so unconditionally, independent of this policy.
@@ -237,5 +245,6 @@ tool arguments, logs, or renderer responses. Remote API endpoints are fixed by
 the build; Daytona toolbox URLs returned by the control plane are restricted to
 HTTPS Daytona origins. By default both managed providers allow internet access
 inside the sandbox, unlike the local native provider; a configured
-[egress policy](#egress-policy) restricts that access at sandbox creation, with
-E2B's enforcement confirmed and Daytona's pending live confirmation.
+[egress policy](#egress-policy) restricts that access at sandbox creation. E2B's
+enforcement is confirmed but applied-with-gaps; Daytona's per-sandbox policy is a
+strict, live-confirmed boundary conditional on org tier 3+.

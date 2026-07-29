@@ -230,9 +230,18 @@ pub struct CodeExecutionEgressInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum EgressEnforcementStatus {
-    /// External enforcement with no general-purpose holes: a full network
-    /// boundary. No managed provider reaches this today.
+    /// External enforcement with no general-purpose holes and no unmet
+    /// precondition: a full network boundary the host can rely on
+    /// unconditionally. No managed provider reaches this today — the only
+    /// unconditional boundary is the local sandbox, outside this list.
     Boundary,
+    /// A full boundary *when enforced*, gated on a precondition the host cannot
+    /// verify statically. Daytona's per-sandbox egress is a strict, externally
+    /// enforced allowlist, but the per-sandbox override requires Daytona org
+    /// tier 3+; on tier 1–2 the org default applies and the boundary is not
+    /// guaranteed. Disclosed with the requirement inline so it never reads as an
+    /// unconditional green boundary.
+    ConditionalBoundary,
     /// External enforcement is applied, but the vendor's mechanism leaves
     /// general-purpose destinations reachable, so a configured allowlist is
     /// not a full boundary and must not be presented as one.
@@ -253,7 +262,22 @@ pub struct CodeExecutionEgressEnforcement {
     /// enforcement model, so the settings surface can show the caveat inline
     /// instead of burying it in prose the user skims past.
     pub gaps: Vec<String>,
+    /// A precondition the boundary is gated on that the host cannot verify
+    /// statically ("Daytona org tier 3+"). Present only for a
+    /// [`EgressEnforcementStatus::ConditionalBoundary`], so the surface can
+    /// state the condition inline rather than implying an unconditional
+    /// boundary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub requirement: Option<String>,
 }
+
+/// The precondition Daytona's per-sandbox egress boundary is gated on. The
+/// per-sandbox network override requires Daytona org tier 3+; on tier 1–2 the
+/// override is refused and the org default applies, so the boundary is not
+/// guaranteed. The host cannot read the account's tier statically, so the
+/// requirement is surfaced inline rather than assumed met.
+const DAYTONA_TIER_REQUIREMENT: &str = "Daytona org tier 3+";
 
 /// The managed providers' egress-enforcement disclosure, derived from the
 /// shipped [`EgressEnforcement`] declarations.
@@ -261,20 +285,25 @@ pub struct CodeExecutionEgressEnforcement {
 /// E2B's enforcement is confirmed against the live API, so its status is
 /// whatever the model reports — and the model reports *not a boundary*, because
 /// its domain rules cover only HTTP/HTTPS ports and DNS stays open. Daytona's
-/// wiring is not yet confirmed against the live API (its empty-but-present
-/// "deny that axis" semantics are unverified), which dominates the display
-/// regardless of tier.
+/// per-sandbox enforcement is now confirmed live (issue #888): it is a strict,
+/// externally enforced allowlist with no general-purpose carve-out, so the
+/// model reports it as a credential boundary. The one thing the host cannot
+/// establish statically is the account tier the per-sandbox override needs, so
+/// Daytona is disclosed as a *conditional* boundary with that requirement
+/// inline, never an unconditional green one.
 fn egress_enforcement_status() -> Vec<CodeExecutionEgressEnforcement> {
     vec![
         enforcement_row(
             CodeExecutionProviderKind::E2b,
             &E2BExecutionProvider::egress_enforcement(),
             true,
+            None,
         ),
         enforcement_row(
             CodeExecutionProviderKind::Daytona,
             &DaytonaExecutionProvider::egress_enforcement(),
-            false,
+            true,
+            Some(DAYTONA_TIER_REQUIREMENT),
         ),
     ]
 }
@@ -283,18 +312,26 @@ fn egress_enforcement_status() -> Vec<CodeExecutionEgressEnforcement> {
 ///
 /// The status reads straight from the model: an unconfirmed vendor is
 /// `Unconfirmed`; otherwise `is_credential_boundary()` — external tier with no
-/// general-purpose holes — decides `Boundary` versus `AppliedWithGaps`. Every
-/// declared exception is surfaced as a gap so nothing the vendor leaves open is
-/// hidden from the user.
+/// general-purpose holes — decides boundary versus `AppliedWithGaps`. A
+/// `requirement` is a precondition the host cannot verify statically: when the
+/// model backs a boundary but such a precondition exists, the row is a
+/// `ConditionalBoundary` carrying the requirement, so the surface can never
+/// present it as an unconditional boundary. Every declared exception is
+/// surfaced as a gap so nothing the vendor leaves open is hidden from the user.
 fn enforcement_row(
     provider: CodeExecutionProviderKind,
     enforcement: &EgressEnforcement,
     confirmed: bool,
+    requirement: Option<&'static str>,
 ) -> CodeExecutionEgressEnforcement {
     let status = if !confirmed {
         EgressEnforcementStatus::Unconfirmed
     } else if enforcement.is_credential_boundary() {
-        EgressEnforcementStatus::Boundary
+        if requirement.is_some() {
+            EgressEnforcementStatus::ConditionalBoundary
+        } else {
+            EgressEnforcementStatus::Boundary
+        }
     } else {
         EgressEnforcementStatus::AppliedWithGaps
     };
@@ -307,6 +344,7 @@ fn enforcement_row(
         provider,
         status,
         gaps,
+        requirement: requirement.map(str::to_owned),
     }
 }
 
@@ -806,9 +844,35 @@ mod tests {
             "the ports/DNS holes that make E2B not-a-boundary must be surfaced"
         );
 
-        // Daytona's wiring is unconfirmed against the live API; that dominates.
-        assert_eq!(daytona.status, EgressEnforcementStatus::Unconfirmed);
-        assert!(!daytona.gaps.is_empty());
+        // Daytona's per-sandbox policy is a strict, externally enforced
+        // boundary — confirmed live in #888 — so the corrected model treats it
+        // as a credential boundary with no phantom curated-service exceptions.
+        assert!(
+            DaytonaExecutionProvider::egress_enforcement().is_credential_boundary(),
+            "the corrected Daytona model is a credential boundary"
+        );
+        assert!(
+            daytona.gaps.is_empty(),
+            "the phantom curated-service exceptions must be gone from the disclosure"
+        );
+        // But it stays honest about the one thing the host can't verify
+        // statically: the per-sandbox override needs Daytona org tier 3+. So it
+        // is a conditional boundary carrying that requirement inline, never an
+        // unconditional green boundary.
+        assert_eq!(
+            daytona.status,
+            EgressEnforcementStatus::ConditionalBoundary,
+            "Daytona over-claims as an unconditional boundary"
+        );
+        assert_eq!(
+            daytona.requirement.as_deref(),
+            Some(DAYTONA_TIER_REQUIREMENT)
+        );
+        assert_ne!(
+            daytona.status,
+            EgressEnforcementStatus::Boundary,
+            "the tier caveat must keep Daytona off the unconditional boundary status"
+        );
     }
 
     #[test]
