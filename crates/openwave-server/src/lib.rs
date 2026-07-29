@@ -40,6 +40,10 @@ mod providers;
 mod resolver;
 mod routes;
 mod sandbox_agent_run_worker;
+/// A [`SandboxBackend`](openwave_sandbox_protocol::SandboxBackend) over the Docker
+/// CLI: container provision, loopback addressing, idempotent teardown, and a
+/// correlation-tag orphan sweep.
+pub mod sandbox_docker;
 mod sandbox_web_search_worker;
 /// Rewriting stored credentials so the running binary owns their keychain items.
 pub mod secret_rehome;
