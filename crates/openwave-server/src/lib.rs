@@ -906,6 +906,12 @@ const EMBED_DIMS: usize = 1536;
 /// `byok_allowed` is false on a managed profile (or when its policy could not
 /// be read — fail closed): document text then never egresses through a BYOK
 /// key, regardless of the stored OpenAI row or an ambient `OPENAI_API_KEY`.
+///
+/// Because the embedder is boot-scoped (the vector index is dimension-bound
+/// to it), a profile provisioned managed at runtime keeps a live BYOK
+/// embedder until the next app start: the pairing flow must prompt or
+/// trigger a restart (or index rebuild) to complete enforcement — tracked
+/// in #763.
 async fn resolve_embedder(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
