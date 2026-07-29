@@ -62,7 +62,11 @@ function SettingsIndexRedirect() {
   useEffect(() => {
     void navigate({ to: defaultSettingsPathFor(managed), replace: true });
   }, [managed, navigate]);
-  return null;
+  // One frame, at most: a placeholder rather than nothing, so the settings
+  // frame is never momentarily empty.
+  return (
+    <p className="text-muted-foreground p-6 text-sm">Opening settings…</p>
+  );
 }
 
 const settingsIndexRoute = createRoute({

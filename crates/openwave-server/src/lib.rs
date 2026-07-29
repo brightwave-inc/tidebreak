@@ -87,7 +87,7 @@ use resolver::KeyedResolver;
 
 pub use durable_oplog::DurableOperationStore;
 pub use error::ServerError;
-pub use pairing::pair_with_gateway;
+pub use pairing::{pair_with_gateway, PairingHandle};
 pub use state::AppState;
 
 const MAX_RAW_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
@@ -463,6 +463,9 @@ pub struct Server {
     token: Arc<str>,
     client_executor_token: Arc<str>,
     store: Arc<dyn Store>,
+    /// The live MCP runtime, handed to pairing so a profile that becomes
+    /// managed mid-session takes its manual servers down immediately.
+    mcp: Arc<mcp_config::McpRuntime>,
     listener: TcpListener,
     router: Router,
     _document_auditor: AbortTask,
@@ -538,6 +541,14 @@ impl Server {
     /// to server-owned records before granting host capabilities.
     pub fn store(&self) -> Arc<dyn Store> {
         self.store.clone()
+    }
+
+    /// The handles the native deep-link pairing flow needs.
+    ///
+    /// Pairing is exported for native embedders only, and it has live effects
+    /// beyond the store — see [`pair_with_gateway`].
+    pub fn pairing_handle(&self) -> PairingHandle {
+        PairingHandle::new(self.store.clone(), self.mcp.clone())
     }
 
     /// Run the accept loop until the process exits.
@@ -797,13 +808,14 @@ async fn bind_inner(
     let sandbox_web_search_worker = tokio::spawn(sandbox_web_search_worker.run());
     let blob_retirement_worker = tokio::spawn(blob_retirement_worker.run());
     let blob_orphan_auditor = tokio::spawn(blob_orphan_auditor.run());
-    let mcp_supervisor = tokio::spawn(mcp_runtime.supervise());
+    let mcp_supervisor = tokio::spawn(mcp_runtime.clone().supervise());
 
     Ok(Server {
         local_addr,
         token,
         client_executor_token,
         store: server_store,
+        mcp: mcp_runtime,
         listener,
         router,
         _document_auditor: AbortTask(document_auditor),

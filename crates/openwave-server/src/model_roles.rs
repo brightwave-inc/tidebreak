@@ -185,25 +185,24 @@ pub async fn resolve(
 }
 
 /// A managed profile's ordered role defaults: the models the gateway has
-/// synced as entitled, in the order the gateway listed them.
+/// synced as entitled, smallest context window first.
 ///
-/// There is no cost or capability signal to rank them by — entitlement is the
-/// gateway's to describe — so the only defensible order is the one it gave,
-/// and the walk still takes the first that is actually usable.
+/// The curated lists these stand in for name each provider's *cheapest* row,
+/// because a role like `utility` runs work the user did not ask for and must
+/// not bill it to a flagship. The gateway describes entitlement, not price,
+/// so context window is the proxy available — it tracks model tier closely
+/// enough to keep that intent, and ties keep the gateway's own order.
 async fn gateway_defaults(store: &dyn Store) -> Result<Vec<String>> {
-    Ok(
-        providers::read_config(store, providers::ProviderKind::ModelGateway)
-            .await?
-            .models
-            .iter()
-            .map(|model| {
-                crate::model_registry::selection_key(
-                    providers::ProviderKind::ModelGateway,
-                    &model.id,
-                )
-            })
-            .collect(),
-    )
+    let mut models = providers::read_config(store, providers::ProviderKind::ModelGateway)
+        .await?
+        .models;
+    models.sort_by_key(|model| model.context_window);
+    Ok(models
+        .iter()
+        .map(|model| {
+            crate::model_registry::selection_key(providers::ProviderKind::ModelGateway, &model.id)
+        })
+        .collect())
 }
 
 /// Resolve `selection` only if its provider is usable under `managed`.
@@ -394,12 +393,23 @@ mod tests {
                 enabled: true,
                 base_url: Some("https://corp.gateway/".to_string()),
                 vertex_location: None,
-                models: vec![CustomModelConfig {
-                    id: "gateway-haiku".to_string(),
-                    display_name: Some("Gateway Haiku".to_string()),
-                    context_window: 200_000,
-                    max_output_tokens: 8_192,
-                }],
+                // Listed flagship-first, as a gateway well might: the walk
+                // must not bill background work to the biggest model it is
+                // entitled to.
+                models: vec![
+                    CustomModelConfig {
+                        id: "gateway-flagship".to_string(),
+                        display_name: Some("Gateway Flagship".to_string()),
+                        context_window: 1_000_000,
+                        max_output_tokens: 64_000,
+                    },
+                    CustomModelConfig {
+                        id: "gateway-haiku".to_string(),
+                        display_name: Some("Gateway Haiku".to_string()),
+                        context_window: 200_000,
+                        max_output_tokens: 8_192,
+                    },
+                ],
             },
         )
         .await
@@ -408,7 +418,10 @@ mod tests {
             .await
             .unwrap()
             .expect("a managed profile resolves the utility role to a gateway model");
-        assert_eq!(utility.model, "gateway-haiku");
+        assert_eq!(
+            utility.model, "gateway-haiku",
+            "the cheapest entitled model, not the first listed"
+        );
         assert_eq!(
             utility.provider,
             Some(ProviderId::new(ProviderKind::ModelGateway.as_str()))

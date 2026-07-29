@@ -76,26 +76,25 @@ pub async fn put_mcp_servers(
     Json(body): Json<McpServersConfig>,
 ) -> Result<Json<McpServersInfo>, ServerError> {
     let policy = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
-    if policy.managed {
-        let refused = state.mcp.manual_additions(&body).await;
-        if !refused.is_empty() {
-            return Err(providers::managed_profile_refusal(format!(
-                "this profile is managed by a model gateway; manual MCP servers are locked \
-                 ({}). Mount gateway-managed endpoints from the Model Gateway settings instead.",
-                refused.join(", ")
-            )));
-        }
-    }
     // Once validation/startup begins, finish the durable/live commit even if
     // the HTTP client disconnects and drops this handler future.
     let runtime = state.mcp.clone();
-    let mutation = tokio::spawn(async move { runtime.replace(body).await });
-    Ok(Json(
-        mutation
-            .await
-            .map_err(|_| ServerError::internal("MCP settings update task failed"))?
-            .map_err(mcp_request_error)?,
-    ))
+    let managed = policy.managed;
+    let mutation = tokio::spawn(async move { runtime.replace_under_policy(body, managed).await });
+    let outcome = mutation
+        .await
+        .map_err(|_| ServerError::internal("MCP settings update task failed"))?
+        .map_err(mcp_request_error)?;
+    match outcome {
+        crate::mcp_config::McpReplaceOutcome::Replaced(info) => Ok(Json(info)),
+        crate::mcp_config::McpReplaceOutcome::RefusedManual(refused) => {
+            Err(providers::managed_profile_refusal(format!(
+                "this profile is managed by a model gateway; manual MCP servers are locked \
+                 ({}). Mount gateway-managed endpoints from the Model Gateway settings instead.",
+                refused.join(", ")
+            )))
+        }
+    }
 }
 
 /// `GET /chats/{chat_id}/calls/{call_id}/mcp-app-payload` — the completed

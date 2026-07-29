@@ -120,6 +120,8 @@ impl GatewayRuntime {
     /// rendering "not configured" while everything works. A managed policy
     /// whose URL is missing (misconfigured) reads unconfigured, honestly.
     pub(crate) async fn status(&self) -> Result<GatewayStatus> {
+        // One policy read for the whole projection: the renderer polls this
+        // every couple of seconds while a sign-in is pending.
         let policy = crate::managed_policy::resolve(&*self.store, &*self.os_policy).await?;
         let config = providers::read_config(&*self.store, ProviderKind::ModelGateway).await?;
         let base_url = if policy.managed {
@@ -127,7 +129,7 @@ impl GatewayRuntime {
         } else {
             config.base_url.clone()
         };
-        let credentials = match self.connection().await? {
+        let credentials = match self.connection_for(&policy).await? {
             Some(connection) => connection.stored_credentials().await?,
             None => None,
         };
@@ -277,8 +279,17 @@ impl GatewayRuntime {
     /// to. Under managed policy the row is display/session-cache only.
     pub(crate) async fn connection(&self) -> Result<Option<Arc<GatewayConnection>>> {
         let policy = crate::managed_policy::resolve(&*self.store, &*self.os_policy).await?;
+        self.connection_for(&policy).await
+    }
+
+    /// [`connection`](Self::connection) against an already-resolved policy, for
+    /// callers that have one in hand.
+    async fn connection_for(
+        &self,
+        policy: &crate::managed_policy::ManagedPolicy,
+    ) -> Result<Option<Arc<GatewayConnection>>> {
         let base_url = if policy.managed {
-            policy.gateway_url
+            policy.gateway_url.clone()
         } else {
             providers::read_config(&*self.store, ProviderKind::ModelGateway)
                 .await?

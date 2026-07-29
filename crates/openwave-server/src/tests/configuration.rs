@@ -2215,19 +2215,24 @@ async fn a_managed_profile_refuses_manual_mcp_servers_and_accepts_gateway_mounts
         .await
         .unwrap();
 
-    for manual in [
-        serde_json::json!({"name": "added", "command": "/bin/docs", "enabled": false}),
-        serde_json::json!({"name": "added", "url": "http://127.0.0.1:1/mcp", "enabled": false}),
-        // Editing the pre-existing one is a change, so it is refused too.
-        serde_json::json!({"name": "legacy_docs", "command": "/bin/other", "enabled": false}),
+    for candidate in [
+        serde_json::json!([legacy, {"name": "added", "command": "/bin/docs", "enabled": false}]),
+        serde_json::json!([
+            legacy,
+            {"name": "added", "url": "http://127.0.0.1:1/mcp", "enabled": false}
+        ]),
+        // Every edit of the pre-existing one is a change, whole-definition:
+        // its command, its name, and — the one a coarser check would wave
+        // through — flipping it back on.
+        serde_json::json!([{"name": "legacy_docs", "command": "/bin/other", "enabled": false}]),
+        serde_json::json!([{"name": "renamed", "command": "/not/started/while/disabled",
+                            "enabled": false}]),
+        serde_json::json!([{"name": "legacy_docs", "command": "/not/started/while/disabled",
+                            "enabled": true}]),
     ] {
-        let refused = put_mcp_servers(
-            &router,
-            &bearer,
-            serde_json::json!({"servers": [legacy, manual]}),
-        )
-        .await;
-        assert_eq!(refused.status(), StatusCode::CONFLICT);
+        let refused =
+            put_mcp_servers(&router, &bearer, serde_json::json!({"servers": candidate})).await;
+        assert_eq!(refused.status(), StatusCode::CONFLICT, "{candidate}");
         let error: AgentErrorInfo = json_body(refused).await;
         assert_eq!(error.kind, "managed_profile");
     }

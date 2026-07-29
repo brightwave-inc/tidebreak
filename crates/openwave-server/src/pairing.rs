@@ -8,11 +8,14 @@
 //! only — pairing changes policy, and policy must never be reachable from a
 //! renderer-writable route.
 
+use std::sync::Arc;
+
 use openwave_connectors::{GatewayAuth, GatewayAuthConfig};
 use openwave_core::{AgentError, Result, Store};
 use tokio::sync::Mutex;
 
 use crate::managed_policy;
+use crate::mcp_config::McpRuntime;
 use crate::providers::{self, ProviderKind};
 
 /// Serializes pairing end to end. [`managed_policy::provision`] is a
@@ -24,6 +27,31 @@ use crate::providers::{self, ProviderKind};
 /// the check-then-write effectively atomic.
 static PAIRING: Mutex<()> = Mutex::const_new(());
 
+/// The process-local handles pairing needs.
+///
+/// Pairing writes policy, and policy has live effects — the manual MCP
+/// servers this process may already be running are locked the moment it
+/// commits. The shell's deep-link task therefore carries this rather than a
+/// bare store, so it cannot pair without also being able to apply what
+/// pairing decided. Obtained from
+/// [`Server::pairing_handle`](crate::Server::pairing_handle).
+#[derive(Clone)]
+pub struct PairingHandle {
+    store: Arc<dyn Store>,
+    mcp: Arc<McpRuntime>,
+}
+
+impl PairingHandle {
+    pub(crate) fn new(store: Arc<dyn Store>, mcp: Arc<McpRuntime>) -> Self {
+        Self { store, mcp }
+    }
+
+    /// The durable store this profile pairs against.
+    pub fn store(&self) -> Arc<dyn Store> {
+        self.store.clone()
+    }
+}
+
 /// Validate `gateway_url`, probe the gateway, and provision this profile.
 ///
 /// Returns the normalized gateway base URL on success. Nothing is written
@@ -33,7 +61,13 @@ static PAIRING: Mutex<()> = Mutex::const_new(());
 /// configuration untouched. Success also points the ModelGateway provider at
 /// the gateway and enables it, dropping any model snapshot synced from a
 /// previously configured base URL — sign-in resyncs the entitled set.
-pub async fn pair_with_gateway(store: &dyn Store, gateway_url: &str) -> Result<String> {
+///
+/// The new policy is applied to this process before returning: manual MCP
+/// servers running under the previously open profile are taken down here
+/// rather than at the supervisor's next sweep, so no locked child keeps
+/// serving tools across the window in between.
+pub async fn pair_with_gateway(handle: &PairingHandle, gateway_url: &str) -> Result<String> {
+    let store = &*handle.store;
     let config = GatewayAuthConfig::new(gateway_url)?;
     let base_url = config.base_url().to_string();
     GatewayAuth::new(config)?.meta().await?;
@@ -61,6 +95,7 @@ pub async fn pair_with_gateway(store: &dyn Store, gateway_url: &str) -> Result<S
     provider.enabled = true;
     providers::write_config(store, ProviderKind::ModelGateway, &provider).await?;
     managed_policy::provision(store, &base_url).await?;
+    handle.mcp.enforce_manual_lockdown().await;
     Ok(base_url)
 }
 
@@ -73,8 +108,33 @@ mod tests {
     use openwave_core::DbStore;
     use serde_json::json;
 
+    use openwave_core::ToolRegistry;
+
     use super::*;
     use crate::managed_policy::{resolve, NoOsPolicy};
+    use crate::mcp_config::{GatewayEndpointAccess, GatewayEndpoints};
+
+    /// The signed-out stand-in: pairing never resolves an endpoint.
+    struct NoGateway;
+
+    #[async_trait::async_trait]
+    impl GatewayEndpoints for NoGateway {
+        async fn endpoint(&self, _slug: &str) -> Result<GatewayEndpointAccess> {
+            Err(AgentError::config("no gateway session in tests"))
+        }
+    }
+
+    fn test_handle(store: &Arc<dyn Store>) -> PairingHandle {
+        PairingHandle::new(
+            store.clone(),
+            Arc::new(McpRuntime::new(
+                Arc::new(ToolRegistry::new()),
+                store.clone(),
+                Arc::new(NoGateway),
+                Arc::new(NoOsPolicy),
+            )),
+        )
+    }
 
     async fn test_store() -> (Arc<dyn Store>, tempfile::TempDir) {
         let directory = tempfile::tempdir().unwrap();
@@ -145,7 +205,9 @@ mod tests {
         .await
         .unwrap();
 
-        let normalized = pair_with_gateway(&*store, &base).await.unwrap();
+        let normalized = pair_with_gateway(&test_handle(&store), &base)
+            .await
+            .unwrap();
         assert_eq!(normalized, format!("{base}/"));
 
         let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
@@ -160,7 +222,9 @@ mod tests {
         assert!(provider.models.is_empty());
 
         // Re-pairing the same gateway is idempotent.
-        pair_with_gateway(&*store, &base).await.unwrap();
+        pair_with_gateway(&test_handle(&store), &base)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -169,7 +233,9 @@ mod tests {
 
         // Unreachable gateway: the probe fails before any write.
         let dead = unreachable_base().await;
-        assert!(pair_with_gateway(&*store, &dead).await.is_err());
+        assert!(pair_with_gateway(&test_handle(&store), &dead)
+            .await
+            .is_err());
         assert!(!resolve(&*store, &NoOsPolicy).await.unwrap().managed);
         let provider = providers::read_config(&*store, ProviderKind::ModelGateway)
             .await
@@ -181,8 +247,13 @@ mod tests {
         // the original pairing survives in both policy and provider config.
         let first = serve_meta().await;
         let second = serve_meta().await;
-        let normalized = pair_with_gateway(&*store, &first).await.unwrap();
-        let error = pair_with_gateway(&*store, &second).await.err().unwrap();
+        let normalized = pair_with_gateway(&test_handle(&store), &first)
+            .await
+            .unwrap();
+        let error = pair_with_gateway(&test_handle(&store), &second)
+            .await
+            .err()
+            .unwrap();
         assert!(error.to_string().contains("already provisioned"));
         let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
         assert_eq!(policy.gateway_url.as_deref(), Some(normalized.as_str()));

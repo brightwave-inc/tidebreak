@@ -305,6 +305,13 @@ const fn enabled_by_default() -> bool {
     true
 }
 
+/// What a policy-aware replacement did.
+pub(crate) enum McpReplaceOutcome {
+    Replaced(McpServersInfo),
+    /// Managed policy refused these manual servers. Nothing changed.
+    RefusedManual(Vec<String>),
+}
+
 /// Renderer-safe connection lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
@@ -428,7 +435,10 @@ impl McpRuntime {
     /// gateway panel — which saves the complete server list to mount an
     /// endpoint — is not blocked by their presence. Removing one is a
     /// candidate without it, so nothing is trapped in the configuration.
-    pub(crate) async fn manual_additions(&self, candidate: &McpServersConfig) -> Vec<String> {
+    ///
+    /// "Unchanged" is the whole definition, by equality: a flipped `enabled`,
+    /// a renamed server, a widened timeout are all edits.
+    async fn manual_additions(&self, candidate: &McpServersConfig) -> Vec<String> {
         let existing = &self.state.lock().await.definitions;
         candidate
             .servers
@@ -437,6 +447,62 @@ impl McpRuntime {
             .filter(|server| !existing.iter().any(|current| current == *server))
             .map(|server| server.name.clone())
             .collect()
+    }
+
+    /// Take down every manual server the managed lockdown now covers.
+    ///
+    /// Policy is resolved live, so a profile can become managed with manual
+    /// children already running — an MDM push, or the deep-link pairing flow
+    /// mid-session. Their connections are dropped and their tools leave the
+    /// registry here; without this the decision would change without the
+    /// effect, and a locked server would keep serving turns until the process
+    /// restarted. Idempotent, and a no-op on an unmanaged profile.
+    ///
+    /// Returns whether anything was taken down.
+    pub(crate) async fn enforce_manual_lockdown(&self) -> bool {
+        if !self.manual_transports_locked().await {
+            return false;
+        }
+        self.take_down_locked_manual_servers().await
+    }
+
+    async fn take_down_locked_manual_servers(&self) -> bool {
+        let mut state = self.state.lock().await;
+        let locked: Vec<String> = state
+            .definitions
+            .iter()
+            .filter(|definition| definition.gateway_endpoint.is_none())
+            .map(|definition| definition.name.clone())
+            .collect();
+        let mut torn_down = false;
+        for name in locked {
+            let Some(server) = state.servers.get_mut(&name) else {
+                continue;
+            };
+            if server.client.is_none()
+                && server.health == McpHealth::Disabled
+                && server.diagnostic.as_deref() == Some(MANAGED_DISABLED_DIAGNOSTIC)
+            {
+                continue;
+            }
+            server.client = None;
+            server.ui_views = HashMap::new();
+            server.health = McpHealth::Disabled;
+            server.diagnostic = Some(MANAGED_DISABLED_DIAGNOSTIC.to_string());
+            // A reconnect that started before the flip lands on a stale epoch
+            // and abandons its result instead of republishing what was just
+            // torn down.
+            server.epoch = self.fresh_epoch();
+            torn_down = true;
+        }
+        if torn_down {
+            let registry = self.registry_for(&state.servers);
+            *self
+                .tools
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(registry);
+        }
+        torn_down
     }
 
     /// Load persisted definitions when present, otherwise the legacy boot file.
@@ -546,14 +612,53 @@ impl McpRuntime {
         }
     }
 
-    /// Validate and connect a complete candidate before atomically replacing the
-    /// active connection set. A failed candidate leaves both persisted config
-    /// and the live tool registry unchanged.
+    /// The unmanaged shape of [`replace_under_policy`](Self::replace_under_policy),
+    /// whose refusal arm is unreachable. Production has one entry point; this
+    /// keeps the tests that predate the policy check reading as they did.
+    #[cfg(test)]
     pub(crate) async fn replace(&self, config: McpServersConfig) -> Result<McpServersInfo> {
-        // Keep durable settings and the live projection in one commit order.
-        // Candidate startup may be slow, but concurrent replacements must not
-        // overtake one another between persistence and publication.
+        match self.replace_under_policy(config, false).await? {
+            McpReplaceOutcome::Replaced(info) => Ok(info),
+            McpReplaceOutcome::RefusedManual(_) => {
+                unreachable!("an unmanaged replacement is never refused")
+            }
+        }
+    }
+
+    /// Validate and connect a complete candidate, then atomically replace the
+    /// active connection set — with the managed-lockdown admission check in
+    /// the same critical section as the commit.
+    ///
+    /// A failed candidate leaves both persisted config and the live tool
+    /// registry unchanged. Keeping durable settings and the live projection in
+    /// one commit order matters under concurrency: candidate startup may be
+    /// slow, but concurrent replacements must not overtake one another between
+    /// persistence and publication.
+    ///
+    /// The admission check reads the current definition set, so running it
+    /// outside the mutation lock would let a concurrent save move that set
+    /// between the verdict and the commit — admitting a manual definition the
+    /// policy refuses. Refusing changes nothing at all: it happens before
+    /// validation and before any child is started.
+    pub(crate) async fn replace_under_policy(
+        &self,
+        config: McpServersConfig,
+        managed: bool,
+    ) -> Result<McpReplaceOutcome> {
         let _mutation = self.mutation.lock().await;
+        if managed {
+            let refused = self.manual_additions(&config).await;
+            if !refused.is_empty() {
+                return Ok(McpReplaceOutcome::RefusedManual(refused));
+            }
+        }
+        Ok(McpReplaceOutcome::Replaced(
+            self.replace_committed(config).await?,
+        ))
+    }
+
+    /// The commit itself. Callers hold the mutation lock.
+    async fn replace_committed(&self, config: McpServersConfig) -> Result<McpServersInfo> {
         self.replace_strict(config.servers, true).await?;
         Ok(self.info().await)
     }
@@ -780,6 +885,12 @@ impl McpRuntime {
                 .find(|definition| definition.name == name)
                 .cloned()
                 .ok_or_else(|| AgentError::config("MCP server not found"))?;
+            // Re-checked against the definition as it stands now: a
+            // replacement may have swapped this name onto a manual transport
+            // while this caller waited for the per-server lock.
+            if manual_lockdown_applies(&definition, locked) {
+                return Err(AgentError::config(MANAGED_DISABLED_DIAGNOSTIC));
+            }
             if !definition.enabled {
                 return Err(AgentError::config("disabled MCP server cannot reconnect"));
             }
@@ -874,6 +985,12 @@ impl McpRuntime {
         loop {
             tokio::time::sleep(HEALTH_INTERVAL).await;
             let locked = self.manual_transports_locked().await;
+            // Policy may have flipped since the last sweep. Enforce the effect
+            // before probing: a server that is now locked must be taken down,
+            // not merely left out of the probe set.
+            if locked {
+                self.take_down_locked_manual_servers().await;
+            }
             let probes = {
                 let state = self.state.lock().await;
                 state
@@ -1895,6 +2012,47 @@ mod tests {
             .ui_view_document("unknown", "ui://fixture/app.html")
             .await
             .is_none());
+    }
+
+    /// The mid-process flip: a manual server that was healthy when the policy
+    /// was open must not keep serving tools for the rest of the process. The
+    /// decision is re-read live, and so is the effect — its client is dropped,
+    /// its tools leave the registry, and it reports the managed diagnostic.
+    #[tokio::test]
+    async fn a_running_manual_server_is_torn_down_when_policy_flips_managed() {
+        let address = serve_fake_http_mcp().await;
+        let (runtime, store, _directory) = test_runtime().await;
+        let mut definition = http_definition("gateway", &format!("http://{address}/mcp"));
+        definition.bearer_token_env = Some("PATH".to_string());
+        runtime
+            .replace(McpServersConfig {
+                servers: vec![definition],
+            })
+            .await
+            .unwrap();
+        assert_eq!(runtime.info().await.servers[0].health, McpHealth::Healthy);
+        assert!(runtime.snapshot().get("mcp__gateway__lookup").is_some());
+
+        // The profile becomes managed with the child already connected — an
+        // MDM push, or deep-link pairing mid-session.
+        crate::managed_policy::provision(&*store, "https://corp.gateway")
+            .await
+            .unwrap();
+        assert!(runtime.enforce_manual_lockdown().await);
+
+        assert!(
+            runtime.snapshot().get("mcp__gateway__lookup").is_none(),
+            "a locked server must stop serving tools to new turns"
+        );
+        let info = runtime.info().await;
+        assert_eq!(info.servers[0].health, McpHealth::Disabled);
+        assert_eq!(
+            info.servers[0].diagnostic.as_deref(),
+            Some(MANAGED_DISABLED_DIAGNOSTIC)
+        );
+        assert_eq!(info.servers[0].tool_count, 0);
+        // Idempotent: a second sweep has nothing left to take down.
+        assert!(!runtime.enforce_manual_lockdown().await);
     }
 
     /// Managed lockdown at the runtime boundary: persisted manual servers stay

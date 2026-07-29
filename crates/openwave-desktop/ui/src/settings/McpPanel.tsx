@@ -502,8 +502,13 @@ function ManagedServerList({ servers }: { servers: McpServerInfo[] }) {
           </p>
         </SettingsSection>
       )}
+      {/* Keyed by name, unlike the editable list: nothing renames a server
+          here, and the identity is what the reader sees. */}
       {servers.map((server, index) => (
-        <SettingsSection key={index} title={server.name || `Server ${index + 1}`}>
+        <SettingsSection
+          key={server.name || index}
+          title={server.name || `Server ${index + 1}`}
+        >
           <SettingsStatus
             tone={healthTone(server.health)}
             label={healthLabel(server.health)}
