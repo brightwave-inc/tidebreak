@@ -34,6 +34,7 @@ mod managed_policy;
 mod mcp_config;
 mod model_registry;
 mod model_roles;
+mod pairing;
 mod provider;
 mod providers;
 mod resolver;
@@ -86,6 +87,7 @@ use resolver::KeyedResolver;
 
 pub use durable_oplog::DurableOperationStore;
 pub use error::ServerError;
+pub use pairing::pair_with_gateway;
 pub use state::AppState;
 
 const MAX_RAW_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;

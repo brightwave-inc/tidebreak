@@ -118,22 +118,15 @@ fn validated_gateway_url(gateway_url: &str) -> Result<String> {
 /// same gateway is idempotent, a conflicting one is refused. If re-pairing
 /// ever becomes a product flow, it belongs behind an explicit user
 /// confirmation in the deep-link slice, not in this write path.
-// The deep-link pairing flow is the intended production caller; until that
-// slice lands, only tests exercise this write path.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn provision(store: &dyn Store, gateway_url: &str) -> Result<()> {
     let gateway_url = validated_gateway_url(gateway_url)?;
-    if let Some(value) = store.get_setting(SETTING_KEY).await? {
-        // Unreadable existing state is not honored as a conflict: this write
-        // path is its only repair.
-        if let Ok(existing) = serde_json::from_value::<ProvisionedPolicy>(value) {
-            if existing.gateway_url == gateway_url {
-                return Ok(());
-            }
-            return Err(AgentError::config(
-                "this profile is already provisioned to a different gateway",
-            ));
+    if let Some(existing) = provisioned_url(store).await? {
+        if existing == gateway_url {
+            return Ok(());
         }
+        return Err(AgentError::config(
+            "this profile is already provisioned to a different gateway",
+        ));
     }
     store
         .set_setting(
@@ -141,6 +134,19 @@ pub(crate) async fn provision(store: &dyn Store, gateway_url: &str) -> Result<()
             &serde_json::to_value(ProvisionedPolicy { gateway_url })?,
         )
         .await
+}
+
+/// The provisioned gateway URL currently on record, if readable.
+///
+/// Unreadable stored state reads as `None`, not as an error: [`provision`]
+/// treats it as repairable rather than honoring it as a conflict, and the
+/// pairing pre-check must agree with that judgment.
+pub(crate) async fn provisioned_url(store: &dyn Store) -> Result<Option<String>> {
+    Ok(store
+        .get_setting(SETTING_KEY)
+        .await?
+        .and_then(|value| serde_json::from_value::<ProvisionedPolicy>(value).ok())
+        .map(|saved| saved.gateway_url))
 }
 
 #[cfg(test)]
