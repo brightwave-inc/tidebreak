@@ -257,6 +257,7 @@ async fn store() -> (tempfile::TempDir, Arc<dyn Store>, Chat) {
         model: Some("host-model".into()),
         permission_mode: None,
         reasoning_effort: None,
+        citation_format: None,
         attachment_revision: 0,
         root_attachments: Vec::new(),
         created_at: chrono::Utc::now(),
