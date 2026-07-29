@@ -440,7 +440,8 @@ async fn publish_resolution(
     receipt: &OutputWritebackReceipt,
     resolution: &StoredResolution,
 ) -> Result<(), String> {
-    control_plane(state)?
+    let client = control_plane(state)?;
+    match client
         .resolve(
             receipt.chat_id,
             receipt.call_id,
@@ -448,7 +449,29 @@ async fn publish_resolution(
             resolution,
         )
         .await
-        .map_err(control_plane_error)
+    {
+        Ok(()) => state
+            .receipts
+            .remove_output_writeback(receipt.call_id)
+            .map_err(private_receipt_error),
+        Err(error) if error.is_conflict() => {
+            let pending = client
+                .pending(receipt.chat_id)
+                .await
+                .map_err(control_plane_error)?
+                .into_iter()
+                .any(|call| call.id == receipt.call_id);
+            if pending {
+                Err("output write-back result no longer owns the pending request".to_owned())
+            } else {
+                state
+                    .receipts
+                    .remove_output_writeback(receipt.call_id)
+                    .map_err(private_receipt_error)
+            }
+        }
+        Err(error) => Err(control_plane_error(error)),
+    }
 }
 
 fn canonical_arguments(

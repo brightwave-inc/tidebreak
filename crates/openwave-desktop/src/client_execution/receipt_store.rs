@@ -957,6 +957,14 @@ impl ReceiptStore {
         }
     }
 
+    pub(super) fn remove_output_writeback(&self, call_id: CallId) -> io::Result<()> {
+        match fs::remove_file(self.output_writeback_receipt_path(call_id)) {
+            Ok(()) => sync_directory(&self.directory),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     pub(super) fn remove_manual_connect(
         &self,
         change_id: RootAttachmentChangeId,
