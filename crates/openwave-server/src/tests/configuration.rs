@@ -1403,7 +1403,8 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
 /// ordered defaults skip providers that cannot serve a request, a pin overrides
 /// them, and enabling a provider changes the answer without a restart. When the
 /// profile flips to managed, both roles' reads re-route to entitled gateway
-/// models rather than reporting selections no turn could serve.
+/// models rather than reporting selections no turn could serve — and a message
+/// sent against the stale default runs on the re-routed model.
 #[tokio::test]
 async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
     let dir = tempfile::tempdir().unwrap();
@@ -1581,6 +1582,14 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         role_row(&role_rows().await, "utility")["resolved_key"],
         "gemini::gemini-3.5-flash-lite"
     );
+    // Unmanaged, the chat role reports even a dead default (OpenAI is now
+    // disabled) rather than re-routing it: the open experience refuses loudly
+    // at send instead of silently moving a foreground turn. This pins the
+    // unmanaged early return in `effective_chat_policy`.
+    assert_eq!(
+        role_row(&role_rows().await, "chat")["resolved_key"],
+        "openai::gpt-5.6-sol"
+    );
 
     // A managed flip with a BYOK chat pin carried in from before it: the pin
     // stays stored — a profile returned to the open experience gets it back —
@@ -1646,6 +1655,36 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
     assert_eq!(
         role_row(&roles, "utility")["resolved_key"],
         "model_gateway::gateway-haiku"
+    );
+
+    // The label is what the turn gets: a message sent against that stale BYOK
+    // default is accepted and frozen on the gateway model the roles read
+    // named, not refused with `model_provider_unavailable`. This is the
+    // field-reported failure — remove the re-route from the accept path and
+    // this send 409s.
+    let chat_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/chats")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(chat_response.status(), StatusCode::CREATED);
+    let chat: Chat = json_body(chat_response).await;
+    let turn_id = TurnId::new();
+    assert_eq!(
+        send_message_with_id(&router, &bearer, chat.id, turn_id, "hello").await,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        store.get_turn_run(turn_id).await.unwrap().unwrap().model,
+        "model_gateway::gateway-flagship"
     );
 }
 

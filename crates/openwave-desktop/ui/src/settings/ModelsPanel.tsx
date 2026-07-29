@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   ApiClient,
   ModelInfo,
@@ -35,10 +35,11 @@ const AUTOMATIC = "__automatic__";
  * How often a managed panel re-reads the catalog. Entitlements move under the
  * gateway's feet — an admin-triggered model sync changes both the list and
  * what automatic resolves to — so the page keeps itself current instead of
- * asking the reader to refresh. Matches the session-watch cadence in
- * `ManagedGate`.
+ * asking the reader to refresh. Slower than the gate's session watch on
+ * purpose: entitlement changes are rare, and each tick is a full catalog
+ * read.
  */
-const MANAGED_SYNC_WATCH_MS = 5_000;
+const MANAGED_SYNC_WATCH_MS = 15_000;
 
 /**
  * The roles a reader can choose a model for, in the order they matter to them:
@@ -52,14 +53,15 @@ const ROLES: {
   role: ModelRole;
   title: string;
   hint: string;
-  managedHint: string;
+  /** Managed rewording, for roles whose open-experience copy names things a
+   * managed reader cannot have. Roles whose story is the same either way
+   * omit it. */
+  managedHint?: string;
 }[] = [
   {
     role: "chat",
     title: "Chat",
     hint: "New conversations start on this model, and each one can still override it.",
-    managedHint:
-      "New conversations start on this model, and each one can still override it.",
   },
   {
     role: "utility",
@@ -116,18 +118,26 @@ export function ModelsPanel({
   }, [client, managed]);
 
   // The managed watch. A failed tick keeps the last answer — the next tick
-  // retries — and the poll only exists while the profile is managed, so the
-  // open experience keeps its read-once behavior untouched.
+  // retries — a tick that finds the previous read still in flight skips
+  // rather than stacking requests behind a slow server, and the poll only
+  // exists while the profile is managed, so the open experience keeps its
+  // read-once behavior untouched.
+  const watchInFlight = useRef(false);
   useEffect(() => {
     if (!managed) return;
     const timer = window.setInterval(() => {
+      if (watchInFlight.current) return;
+      watchInFlight.current = true;
       void client
         .listModels()
         .then((next) => {
           setRoles(next.roles);
           setCatalog(next.models);
         })
-        .catch(() => undefined);
+        .catch(() => undefined)
+        .finally(() => {
+          watchInFlight.current = false;
+        });
     }, MANAGED_SYNC_WATCH_MS);
     return () => window.clearInterval(timer);
   }, [client, managed]);
@@ -179,7 +189,7 @@ export function ModelsPanel({
               <ManagedModelRoleRow
                 key={entry.role}
                 title={entry.title}
-                hint={entry.managedHint}
+                hint={entry.managedHint ?? entry.hint}
                 models={catalogModels}
                 entitled={entitled}
                 info={info}
@@ -198,18 +208,15 @@ export function ModelsPanel({
               />
             );
           })}
-          {managed
-            ? entitled.length === 0 && (
-                <p className="text-sm text-muted-foreground">
-                  The gateway has not synced any models yet. They appear here
-                  as soon as a sync completes.
-                </p>
-              )
-            : models.length === 0 && (
-                <p className="text-sm text-muted-foreground">
-                  No models are registered yet. Configure a provider first.
-                </p>
-              )}
+          {managed ? (
+            <ManagedCatalogNotice entitled={entitled} />
+          ) : (
+            models.length === 0 && (
+              <p className="text-sm text-muted-foreground">
+                No models are registered yet. Configure a provider first.
+              </p>
+            )
+          )}
         </>
       )}
       {error && <SettingsError>{error}</SettingsError>}
@@ -218,13 +225,41 @@ export function ModelsPanel({
 }
 
 /**
+ * What a managed reader is told when the entitled list cannot be picked from:
+ * nothing synced yet, or a gateway session that has lapsed. Both are states
+ * only the gateway side can fix, so the copy names the fix rather than
+ * offering rows that cannot be chosen.
+ */
+function ManagedCatalogNotice({ entitled }: { entitled: ModelInfo[] }) {
+  if (entitled.length === 0) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        The gateway has not synced any models yet. They appear here as soon as
+        a sync completes.
+      </p>
+    );
+  }
+  if (!entitled.some((model) => model.available)) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        Sign in to your gateway to choose models.
+      </p>
+    );
+  }
+  return null;
+}
+
+/**
  * One role under managed policy: no provider dropdown — there is exactly one
  * provider — just the flat list of models the gateway is entitled to serve.
  *
  * A stored selection the gateway does not serve presents as the automatic
- * choice rather than a dead pin, mirroring how the server resolves it. The pin
- * itself stays stored, so a profile returned to the open experience gets its
- * selection back.
+ * choice rather than a dead pin, mirroring how the server resolves it. The
+ * pin itself stays stored — a profile returned to the open experience gets
+ * its selection back — which the row says out loud, and the automatic entry
+ * doubles as the way to clear it: with a dead pin the trigger carries no
+ * value of its own (it shows the automatic label as placeholder), so choosing
+ * the automatic entry is a real change that persists `null`.
  */
 function ManagedModelRoleRow({
   title,
@@ -248,24 +283,41 @@ function ManagedModelRoleRow({
     selected !== null &&
     selected.provider === "model_gateway" &&
     selected.available;
+  const deadPin = !gatewayServed && info.selection !== null;
+  const automatic = automaticLabel(models, info);
 
   return (
     <SettingsSection title={title}>
       <p className="text-sm text-muted-foreground">{hint}</p>
+      {deadPin && (
+        <p className="text-sm text-muted-foreground">
+          {`Your previous ${
+            selected ? `${providerLabel(selected.provider)} ` : ""
+          }selection is kept and restored if this device leaves managed mode — picking a model here replaces it.`}
+        </p>
+      )}
       <SettingsField label="Model">
         <Select
-          value={gatewayServed ? selected.key : AUTOMATIC}
-          disabled={saving || entitled.length === 0}
+          value={gatewayServed && selected ? selected.key : deadPin ? "" : AUTOMATIC}
+          disabled={
+            saving ||
+            entitled.length === 0 ||
+            !entitled.some((model) => model.available)
+          }
           onValueChange={(value) => {
             onSelect(value === AUTOMATIC ? null : (value as ModelSelectionKey));
           }}
         >
           <SelectTrigger aria-label={`${title} model`}>
-            <SelectValue />
+            <SelectValue placeholder={automatic} />
           </SelectTrigger>
           <SelectContent>
             <SelectItem value={AUTOMATIC}>
-              {automaticLabel(models, info)}
+              {deadPin
+                ? `${automatic} (clears your previous ${
+                    selected?.display_name ?? info.selection
+                  } pin)`
+                : automatic}
             </SelectItem>
             {entitled.map((model) => (
               <SelectItem

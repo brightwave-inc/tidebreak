@@ -179,11 +179,13 @@ describe("ModelsPanel under managed policy", () => {
     const listModels = vi
       .fn()
       .mockResolvedValue({ models: managedModels, roles: managedRoles });
-    const putModelRole = vi.fn().mockResolvedValue({
-      role: "utility",
-      selection: "model_gateway::gw-haiku",
-      resolved_key: "model_gateway::gw-haiku",
-    });
+    const putModelRole = vi
+      .fn()
+      .mockImplementation(async (role: string, selection: string | null) => ({
+        role,
+        selection,
+        resolved_key: selection ?? "model_gateway::gw-flagship",
+      }));
     const client = { listModels, putModelRole } as unknown as ApiClient;
     const user = userEvent.setup();
 
@@ -202,8 +204,14 @@ describe("ModelsPanel under managed policy", () => {
     ).toBeNull();
 
     // The stored BYOK pin is not gateway-served, so the role reads as the
-    // automatic pick the server resolved it to — not a dead selection.
+    // automatic pick the server resolved it to — not a dead selection — and
+    // says the pin is kept for a return to the open experience.
     expect(chatModel).toHaveTextContent("Automatic — Gateway Flagship");
+    expect(
+      screen.getByText(
+        /Your previous Anthropic selection is kept and restored/,
+      ),
+    ).toBeInTheDocument();
 
     // The list is the entitled models, nothing else: no BYOK row, not even a
     // disabled one, because the reader cannot fix its unavailability here.
@@ -225,6 +233,24 @@ describe("ModelsPanel under managed policy", () => {
         "model_gateway::gw-haiku",
       ),
     );
+
+    // The automatic entry is a real choice while a dead pin exists: picking
+    // it persists null, so automatic-by-reroute can become genuinely
+    // automatic instead of the trigger already claiming the state.
+    await user.click(chatModel);
+    await user.click(
+      screen.getByRole("option", {
+        name: "Automatic — Gateway Flagship (clears your previous Claude Opus 4.8 pin)",
+      }),
+    );
+    await waitFor(() =>
+      expect(putModelRole).toHaveBeenCalledWith("chat", null),
+    );
+    // Cleared, the pin notice goes and automatic is simply the value.
+    expect(
+      screen.queryByText(/Your previous Anthropic selection is kept/),
+    ).toBeNull();
+    expect(chatModel).toHaveTextContent("Automatic — Gateway Flagship");
   });
 
   it("shows a completed model sync without a manual refresh", async () => {
@@ -249,7 +275,7 @@ describe("ModelsPanel under managed policy", () => {
 
     // The watch picks up the completed sync on its next tick.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(5_100);
+      await vi.advanceTimersByTimeAsync(15_100);
     });
     expect(screen.queryByText(/has not synced any models/)).toBeNull();
     expect(
