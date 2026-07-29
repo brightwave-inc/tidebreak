@@ -42,6 +42,7 @@ import {
   type UserQuestionOption as WireUserQuestionOption,
   type ChatToolActivitySnapshot,
   type ChatToolActivityStatus,
+  type CitationPageBounds as WireCitationPageBounds,
   type RendererAgentEvent,
   type RendererChatFrame,
   type RendererChatMetadata,
@@ -212,6 +213,14 @@ export type ChatMessage = Omit<
  * deliberately skips `message_id` on the wire. Do not reintroduce it.
  */
 export type ChatMessageCitation = AssistantCitationSnapshot;
+
+/**
+ * One rectangle of a cited passage, on the page it falls on.
+ *
+ * The rectangle is normalized to the page box in ten-thousandths, so a viewer
+ * places it as a fraction of whatever size the page was rendered at.
+ */
+export type CitationPageBounds = WireCitationPageBounds;
 
 /** One durable image identity in a historical user message. */
 export type ChatMessageImageAttachment = WireTranscriptImageAttachment;

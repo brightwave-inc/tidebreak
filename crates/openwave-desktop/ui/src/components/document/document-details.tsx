@@ -11,7 +11,7 @@
 import { Loader2Icon } from "lucide-react";
 import { lazy, Suspense, useEffect, useMemo, useRef } from "react";
 
-import type { DocumentDetail } from "@/api";
+import type { CitationPageBounds, DocumentDetail } from "@/api";
 import { useApp } from "@/AppContext";
 import {
   DocumentViewer,
@@ -101,6 +101,12 @@ type DocumentDetailsProps = {
   citationSpan?: CitationSpan;
   /** Page of a paginated original to open on, when opened from a citation. */
   targetPage?: number;
+  /**
+   * Where the cited passage sits on those pages, for a source parsed that
+   * finely. Drawn over the rendered page; empty for a page-granular citation,
+   * which opens on its page with nothing marked on it.
+   */
+  citationBounds?: readonly CitationPageBounds[];
 };
 
 /**
@@ -121,6 +127,7 @@ export function DocumentDetails({
   highlightPath,
   citationSpan,
   targetPage,
+  citationBounds,
 }: DocumentDetailsProps) {
   const { client } = useApp();
   const type = baseMediaType(info.media_type);
@@ -137,6 +144,7 @@ export function DocumentDetails({
               documentId={info.document_id}
               mediaType={type}
               targetPage={targetPage}
+              citationBounds={citationBounds}
               className="bg-page-background grow p-4 pt-2"
             />
           ) : type.startsWith("image/") ? (

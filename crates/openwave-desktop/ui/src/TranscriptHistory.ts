@@ -62,7 +62,16 @@ export function hydrateTranscriptHistory(
       sources:
         message.role === "assistant"
           ? (message.citations ?? []).map(
-              ({ id, ordinal, document_id, span, excerpt, heading, pages }) => ({
+              ({
+                id,
+                ordinal,
+                document_id,
+                span,
+                excerpt,
+                heading,
+                pages,
+                bounds,
+              }) => ({
                 id,
                 ordinal,
                 documentId: document_id,
@@ -70,6 +79,7 @@ export function hydrateTranscriptHistory(
                 excerpt,
                 heading,
                 pages,
+                bounds,
               }),
             )
           : [],

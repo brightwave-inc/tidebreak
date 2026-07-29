@@ -107,6 +107,7 @@ describe("terminal transcript presentation", () => {
             excerpt: "Bounded source excerpt",
             heading: null,
             pages: [],
+            bounds: [],
           },
         ],
       },
@@ -221,6 +222,7 @@ describe("terminal transcript presentation", () => {
             excerpt: "Bounded source excerpt",
             heading: null,
             pages: [],
+            bounds: [],
           },
           {
             id: "citation-second",
@@ -230,6 +232,7 @@ describe("terminal transcript presentation", () => {
             excerpt: "Second bounded excerpt",
             heading: "Heading",
             pages: [4],
+            bounds: [],
           },
         ],
       },

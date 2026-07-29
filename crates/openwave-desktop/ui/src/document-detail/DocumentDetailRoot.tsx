@@ -80,9 +80,15 @@ export function DocumentDetailRoot({
   const [view, setView] = useState<DocumentView>("original_doc");
 
   const placement = useCitationPlacement(documentID, citationId);
+  const paginated = info != null && isPaginatedOriginalViewer(info.media_type);
   const citationPage =
-    placement?.page != null && info != null && isPaginatedOriginalViewer(info.media_type)
-      ? placement.page
+    placement?.page != null && paginated ? placement.page : undefined;
+  // Rectangles are only worth carrying where there is a page to draw them on;
+  // a citation into an unpaginated source has none, and most citations carry
+  // none at all.
+  const citationBounds =
+    citationPage != null && placement != null && placement.bounds.length > 0
+      ? placement.bounds
       : undefined;
 
   // Arriving from a citation, land on whichever view can show where it points:
@@ -161,6 +167,7 @@ export function DocumentDetailRoot({
           hasOriginalDocumentTab={hasOriginalDocumentTab}
           citationSpan={placement?.span}
           targetPage={citationPage}
+          citationBounds={citationBounds}
         />
       ) : (
         <p className="p-6 text-sm text-muted-foreground" role="status">
