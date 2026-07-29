@@ -151,25 +151,51 @@ fn reverse_request_and_result_wire_shapes() {
 
 #[test]
 fn reverse_envelopes_and_frames_wire_shapes() {
+    // `RequestId`/`OperationId` are `Copy` and serialize transparently as their
+    // UUID string, so capturing them lets us pin the enclosing field name
+    // exactly rather than merely round-tripping it.
+    let request_id = RequestId::new();
+    let operation_id = OperationId::new();
     let envelope = ReverseEnvelope {
         protocol_version: PROTOCOL_VERSION,
-        request_id: RequestId::new(),
-        operation_id: OperationId::new(),
+        request_id,
+        operation_id,
         request: ReverseRequest::ModelInference(ModelInferenceParams {
             prompt: "q".to_owned(),
         }),
     };
     roundtrip(&envelope);
+    golden(
+        &envelope,
+        &[
+            ("/protocol_version", json!(PROTOCOL_VERSION)),
+            ("/request_id", json!(request_id.to_string())),
+            ("/operation_id", json!(operation_id.to_string())),
+            ("/request/capability", json!("model_inference")),
+            ("/request/payload/prompt", json!("q")),
+        ],
+    );
 
     let response = ReverseResponseEnvelope {
         protocol_version: PROTOCOL_VERSION,
-        request_id: RequestId::new(),
-        operation_id: OperationId::new(),
+        request_id,
+        operation_id,
         response: Response::Ok(ReverseResult::ModelInference(ModelInferenceResult {
             completion: "a".to_owned(),
         })),
     };
     roundtrip(&response);
+    golden(
+        &response,
+        &[
+            ("/protocol_version", json!(PROTOCOL_VERSION)),
+            ("/request_id", json!(request_id.to_string())),
+            ("/operation_id", json!(operation_id.to_string())),
+            ("/response/status", json!("ok")),
+            ("/response/payload/capability", json!("model_inference")),
+            ("/response/payload/payload/completion", json!("a")),
+        ],
+    );
 
     let request_frame = RequestFrame::Request(envelope);
     roundtrip(&request_frame);

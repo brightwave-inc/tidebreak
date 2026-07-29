@@ -292,8 +292,11 @@ mod tests {
 
     use crate::{
         ids::{OperationId, RequestId, RunId},
-        oplog::{ClaimOutcome, OperationFingerprint, OperationState, OperationStore, StoreError},
-        protocol::PROTOCOL_VERSION,
+        oplog::{
+            ClaimOutcome, InMemoryOperationStore, OperationFingerprint, OperationState,
+            OperationStore, StoreError,
+        },
+        protocol::{MAX_MODEL_COMPLETION_BYTES, PROTOCOL_VERSION},
         reverse::{
             Capability, CapabilityResponder, GrantSet, ModelInferenceParams, ModelInferenceResult,
             ReverseEnvelope, ReverseRequest, ReverseResult, RunProvenance,
@@ -337,6 +340,72 @@ mod tests {
             Response::Ok(ReverseResult::ModelInference(ModelInferenceResult {
                 completion: "should never run".to_owned(),
             }))
+        }
+    }
+
+    /// A responder that runs and returns an over-bound completion — the result
+    /// bound must reject it after execution, on the record path.
+    struct OverBoundResponder {
+        executions: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CapabilityResponder for OverBoundResponder {
+        async fn respond(&self, _request: ReverseRequest) -> Response<ReverseResult> {
+            self.executions.fetch_add(1, Ordering::SeqCst);
+            Response::Ok(ReverseResult::ModelInference(ModelInferenceResult {
+                completion: "x".repeat(MAX_MODEL_COMPLETION_BYTES + 1),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn over_bound_completion_is_refused_and_never_recorded() {
+        let executions = Arc::new(AtomicUsize::new(0));
+        let provenance = RunProvenance {
+            run_id: RunId::new(),
+            provider: "test".to_owned(),
+        };
+        let store = InMemoryOperationStore::new();
+        let host = CapabilityHost::new(
+            GrantSet::new(provenance, [Capability::ModelInference]),
+            Arc::new(OverBoundResponder {
+                executions: Arc::clone(&executions),
+            }),
+            Arc::new(store.clone()),
+        );
+
+        // The request is within bounds, so it clears the pre-execution gate and
+        // reaches the responder; only the completion is over-bound.
+        let operation_id = OperationId::new();
+        let response = host
+            .dispatch(ReverseEnvelope {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: RequestId::new(),
+                operation_id,
+                request: ReverseRequest::ModelInference(ModelInferenceParams {
+                    prompt: "within bounds".to_owned(),
+                }),
+            })
+            .wait()
+            .await;
+
+        match response {
+            Response::Error(error) => assert_eq!(error.code, ErrorCode::TooLarge),
+            Response::Ok(_) => panic!("an over-bound completion must be refused"),
+        }
+        // The witness that this is the result path, not the request bound: the
+        // responder actually ran and produced the over-bound completion.
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            1,
+            "the responder executed before its over-bound result was rejected"
+        );
+        // The refusal is recorded as a terminal failure, never as a Recorded
+        // success — the over-bound completion is not persisted.
+        match store.state(operation_id) {
+            Some(OperationState::Failed(error)) => assert_eq!(error.code, ErrorCode::TooLarge),
+            other => panic!("an over-bound completion must be Failed, not Recorded, got {other:?}"),
         }
     }
 
