@@ -1,6 +1,7 @@
 import { Ban, CircleAlert, Clock } from "lucide-react";
 
 import { Spinner } from "@/components/ui/spinner";
+import { cn } from "@/lib/utils";
 
 export type ToolTone =
   | "running"
@@ -29,15 +30,15 @@ export function ToolStatusIcon({
     case "running":
       // Running takes the row's own colour; the other tones are deliberately
       // muted beside it.
-      return <Spinner className={`${className} text-current`} />;
+      return <Spinner className={cn(className, "text-current")} />;
     case "waiting_approval":
-      return <Clock className={`text-muted-foreground ${className}`} />;
+      return <Clock className={cn("text-muted-foreground", className)} />;
     case "completed":
       return null;
     case "cancelled":
-      return <Ban className={`text-muted-foreground ${className}`} />;
+      return <Ban className={cn("text-muted-foreground", className)} />;
     case "failed":
     case "unknown":
-      return <CircleAlert className={`text-muted-foreground ${className}`} />;
+      return <CircleAlert className={cn("text-muted-foreground", className)} />;
   }
 }

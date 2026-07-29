@@ -363,7 +363,6 @@ export function ReasoningEffortMenu({
           className="h-8 gap-1.5"
           disabled={disabled}
           aria-label={`Reasoning effort: ${label}`}
-          title={`Reasoning effort: ${label}`}
         >
           <Gauge className="size-4 text-muted-foreground" />
           <span className="truncate">{label}</span>

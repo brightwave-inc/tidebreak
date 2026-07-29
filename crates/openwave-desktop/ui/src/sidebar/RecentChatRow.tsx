@@ -11,6 +11,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { cn } from "@/lib/utils";
 
 /** One conversation in a rail list, with its rename field and row actions. */
 export function RecentChatRow({
@@ -77,9 +78,10 @@ export function RecentChatRow({
 
   return (
     <div
-      className={`group flex items-center rounded-md transition-colors hover:bg-muted ${
-        active ? "bg-muted" : ""
-      }`}
+      className={cn(
+        "group flex items-center rounded-md transition-colors hover:bg-muted",
+        active && "bg-muted",
+      )}
     >
       <button
         type="button"
