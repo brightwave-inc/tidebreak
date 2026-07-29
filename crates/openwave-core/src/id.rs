@@ -393,6 +393,17 @@ impl OutputId {
     pub fn for_call(call_id: CallId) -> Self {
         Self(Uuid::new_v5(&Self::NAMESPACE, call_id.as_uuid().as_bytes()))
     }
+
+    /// Derive the retry-stable output identity for one background agent run.
+    ///
+    /// A completed background run auto-merges its result into exactly one
+    /// conversation output. Deriving the identity from the run makes the merge
+    /// idempotent: an ambiguous submit retry lands on the same output rather than
+    /// forking a second record.
+    #[must_use]
+    pub fn for_run(run_id: AgentRunId) -> Self {
+        Self(Uuid::new_v5(&Self::NAMESPACE, run_id.as_uuid().as_bytes()))
+    }
 }
 
 id_type!(
@@ -407,6 +418,13 @@ impl OutputRevisionId {
     #[must_use]
     pub fn for_call(call_id: CallId) -> Self {
         Self(Uuid::new_v5(&Self::NAMESPACE, call_id.as_uuid().as_bytes()))
+    }
+
+    /// Derive the retry-stable first-revision identity for one background agent
+    /// run's auto-merged output.
+    #[must_use]
+    pub fn for_run(run_id: AgentRunId) -> Self {
+        Self(Uuid::new_v5(&Self::NAMESPACE, run_id.as_uuid().as_bytes()))
     }
 }
 

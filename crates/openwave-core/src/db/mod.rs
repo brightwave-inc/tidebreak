@@ -1874,6 +1874,23 @@ impl Store for DbStore {
         ops::output::delete_output(self, id, deleted_at).await
     }
 
+    async fn restore_output(
+        &self,
+        id: OutputId,
+        restored_at: chrono::DateTime<Utc>,
+    ) -> Result<bool> {
+        ops::output::restore_output(self, id, restored_at).await
+    }
+
+    async fn set_current_output_revision(
+        &self,
+        output_id: OutputId,
+        revision_id: OutputRevisionId,
+        updated_at: chrono::DateTime<Utc>,
+    ) -> Result<OutputRecord> {
+        ops::output::set_current_output_revision(self, output_id, revision_id, updated_at).await
+    }
+
     async fn save_context_checkpoint(
         &self,
         checkpoint: &ContextCheckpoint,

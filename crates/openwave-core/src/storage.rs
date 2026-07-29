@@ -1628,6 +1628,35 @@ pub trait Store: Send + Sync {
         output_storage_unavailable()
     }
 
+    /// Restore a soft-deleted output, returning it to the catalog. This is the
+    /// exact inverse of [`Store::delete_output`], so retracting an auto-merged
+    /// output is reversible. Returns `false` only when the output does not
+    /// exist; restoring a live output is the same durable outcome, not a
+    /// conflict. Nothing about the revision history changes.
+    async fn restore_output(
+        &self,
+        _id: OutputId,
+        _restored_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        output_storage_unavailable()
+    }
+
+    /// Republish an existing revision of an output as its current one.
+    ///
+    /// This is the revert primitive: it moves the current-revision pointer to
+    /// any revision already recorded for the output without appending or
+    /// destroying anything, so it is fully reversible. The revision must belong
+    /// to the output, and the output must be live. The revision count is
+    /// unchanged; only the current pointer and update time move.
+    async fn set_current_output_revision(
+        &self,
+        _output_id: OutputId,
+        _revision_id: OutputRevisionId,
+        _updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<OutputRecord> {
+        output_storage_unavailable()
+    }
+
     /// Persist the next versioned context checkpoint for one conversation.
     ///
     /// Implementations verify that the inclusive source-message boundary

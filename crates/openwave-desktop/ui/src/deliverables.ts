@@ -7,7 +7,15 @@ export type DeliverableSummary = {
   sizeBytes: number;
   revisionCount: number;
   updatedAt: string;
+  // The background run that produced the current revision, when this output was
+  // auto-merged from a background agent rather than written by a foreground
+  // turn. `null` for a foreground deliverable.
+  producingRunId: string | null;
 };
+
+export type OutputRevertResult =
+  | { status: "reverted"; outputId: string; revisionId: string }
+  | { status: "retracted"; outputId: string };
 
 export type DeliverablesCatalog = {
   deliverables: DeliverableSummary[];
@@ -67,6 +75,25 @@ export async function readDeliverable(
 ): Promise<DeliverablePreview> {
   return parseDeliverablePreview(
     await invoke("read_deliverable", { request: { chatId, outputId } }),
+  );
+}
+
+export async function revertOutput(
+  chatId: string,
+  outputId: string,
+): Promise<OutputRevertResult> {
+  return parseOutputRevertResult(
+    await invoke("revert_output", { request: { chatId, outputId } }),
+    outputId,
+  );
+}
+
+export async function restoreOutput(
+  chatId: string,
+  outputId: string,
+): Promise<DeliverableSummary> {
+  return parseDeliverableSummary(
+    await invoke("restore_output", { request: { chatId, outputId } }),
   );
 }
 
@@ -189,7 +216,7 @@ export function parseOutputExportResult(
   throw new Error("Invalid output export response");
 }
 
-function parseDeliverableSummary(value: unknown): DeliverableSummary {
+export function parseDeliverableSummary(value: unknown): DeliverableSummary {
   if (
     !isExactRecord(value, [
       "outputId",
@@ -198,6 +225,7 @@ function parseDeliverableSummary(value: unknown): DeliverableSummary {
       "sizeBytes",
       "revisionCount",
       "updatedAt",
+      "producingRunId",
     ]) ||
     !isOpaqueId(value.outputId) ||
     !isDeliverableFilename(value.filename) ||
@@ -211,7 +239,8 @@ function parseDeliverableSummary(value: unknown): DeliverableSummary {
     value.revisionCount < 1 ||
     value.revisionCount > MAX_OUTPUT_REVISIONS ||
     typeof value.updatedAt !== "string" ||
-    !Number.isFinite(Date.parse(value.updatedAt))
+    !Number.isFinite(Date.parse(value.updatedAt)) ||
+    (value.producingRunId !== null && !isOpaqueId(value.producingRunId))
   ) {
     throw new Error("Invalid output response");
   }
@@ -222,7 +251,39 @@ function parseDeliverableSummary(value: unknown): DeliverableSummary {
     sizeBytes: value.sizeBytes,
     revisionCount: value.revisionCount,
     updatedAt: value.updatedAt,
+    producingRunId: value.producingRunId,
   };
+}
+
+export function parseOutputRevertResult(
+  value: unknown,
+  expectedOutputId?: string,
+): OutputRevertResult {
+  if (
+    !isRecord(value) ||
+    !isOpaqueId(value.outputId) ||
+    (expectedOutputId !== undefined && value.outputId !== expectedOutputId)
+  ) {
+    throw new Error("Invalid output revert response");
+  }
+  if (
+    value.status === "reverted" &&
+    isExactRecord(value, ["status", "outputId", "revisionId"]) &&
+    isOpaqueId(value.revisionId)
+  ) {
+    return {
+      status: "reverted",
+      outputId: value.outputId,
+      revisionId: value.revisionId,
+    };
+  }
+  if (
+    value.status === "retracted" &&
+    isExactRecord(value, ["status", "outputId"])
+  ) {
+    return { status: "retracted", outputId: value.outputId };
+  }
+  throw new Error("Invalid output revert response");
 }
 
 function isDeliverableFilename(value: unknown): value is string {

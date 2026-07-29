@@ -202,6 +202,8 @@ pub fn run() {
             deliverables::list_deliverables,
             deliverables::read_deliverable,
             deliverables::export_deliverable,
+            deliverables::revert_output,
+            deliverables::restore_output,
             client_execution::resolve_folder_access_request,
             client_execution::output_writeback::resolve_output_writeback_request,
             host_access::connect_folder,
