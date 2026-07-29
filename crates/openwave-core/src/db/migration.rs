@@ -7084,6 +7084,10 @@ async fn rebuild_standing_grant_sqlite(
     let statements = vec![
         "PRAGMA foreign_keys=OFF".to_owned(),
         "BEGIN IMMEDIATE".to_owned(),
+        // A rebuild that failed partway would otherwise leave the scratch
+        // table behind and make the next attempt fail on "already exists".
+        // Cheaper to make the step idempotent than to test for the stranding.
+        format!("DROP TABLE IF EXISTS {STANDING_GRANT_REBUILD}"),
         standing_grant_rebuild_table(widened).to_string(SqliteQueryBuilder),
         copy,
         "DROP TABLE standing_tool_grant".to_owned(),
