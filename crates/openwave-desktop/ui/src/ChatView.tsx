@@ -304,39 +304,41 @@ export function ChatView({
         </button>
       </div>
 
-      <Composer
-        activeTurnId={activeTurnId}
-        busy={busy}
-        cancelError={turnControls.cancelError}
-        cancelPending={
-          activeTurnId !== null &&
-          turnControls.cancelPendingTurnId === activeTurnId
-        }
-        disabled={deletingChat}
-        draft={draft}
-        modelMenu={composerModelMenu}
-        images={composerImages}
-        attachedSourceName={attachedSourceName}
-        attachError={attachError}
-        onDismissAttachedSource={onDismissAttachedSource}
-        // Typing retires the verdict on the last piece of guidance. Accepted
-        // guidance clears the draft through the raw callback instead, so
-        // "Guidance sent" survives the clearing it caused.
-        onDraftChange={(value) => {
-          turnControls.clearSteerFeedback();
-          onDraftChange(value);
-        }}
-        onSend={handleSend}
-        onSteer={turnControls.steer}
-        onStop={turnControls.cancel}
-        resetKey={chat.id}
-        steerError={turnControls.steerError}
-        steerPending={
-          activeTurnId !== null &&
-          turnControls.steerPendingTurnId === activeTurnId
-        }
-        steerStatus={turnControls.steerStatus}
-      />
+      <div className="px-[clamp(0.5rem,4%,5rem)] pb-2">
+        <Composer
+          activeTurnId={activeTurnId}
+          busy={busy}
+          cancelError={turnControls.cancelError}
+          cancelPending={
+            activeTurnId !== null &&
+            turnControls.cancelPendingTurnId === activeTurnId
+          }
+          disabled={deletingChat}
+          draft={draft}
+          modelMenu={composerModelMenu}
+          images={composerImages}
+          attachedSourceName={attachedSourceName}
+          attachError={attachError}
+          onDismissAttachedSource={onDismissAttachedSource}
+          // Typing retires the verdict on the last piece of guidance. Accepted
+          // guidance clears the draft through the raw callback instead, so
+          // "Guidance sent" survives the clearing it caused.
+          onDraftChange={(value) => {
+            turnControls.clearSteerFeedback();
+            onDraftChange(value);
+          }}
+          onSend={handleSend}
+          onSteer={turnControls.steer}
+          onStop={turnControls.cancel}
+          resetKey={chat.id}
+          steerError={turnControls.steerError}
+          steerPending={
+            activeTurnId !== null &&
+            turnControls.steerPendingTurnId === activeTurnId
+          }
+          steerStatus={turnControls.steerStatus}
+        />
+      </div>
     </section>
   );
 }

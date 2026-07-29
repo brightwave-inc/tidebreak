@@ -149,7 +149,6 @@ describe("Composer", () => {
       />,
     );
 
-    expect(markup).toContain('class="composer-actions"');
     expect(markup).toContain("Redirect");
     expect(markup).toContain('aria-label="Stop response"');
     expect(markup).toContain('aria-label="Redirect active response"');
@@ -326,7 +325,7 @@ describe("Composer", () => {
     expect(markup).toContain('src="blob:a"');
     expect(markup).toContain("chart.png");
     expect(markup).toContain("Uploading 25%");
-    expect(markup).toContain('<progress class="composer-image-progress"');
+    expect(markup).toContain("<progress");
     expect(markup).toContain('max="100"');
     expect(markup).toContain('value="25"');
     expect(markup).toContain('aria-label="Uploading chart.png"');

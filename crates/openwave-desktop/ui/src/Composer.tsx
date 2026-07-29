@@ -24,7 +24,9 @@ import {
   transferCarriesFiles,
   type ImageAttachment,
 } from "./ImageAttachments";
+import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
+import { cn } from "@/lib/utils";
 
 const MIN_COMPOSER_LINES = 1;
 export const MAX_COMPOSER_LINES = 6;
@@ -251,174 +253,192 @@ export function Composer({
   }
 
   return (
-    <div className="composer-wrap">
-      <form
-        className={`composer${dragging ? " is-dropping" : ""}`}
-        onSubmit={(event) => {
+    <form
+      className={cn(
+        "relative mx-auto flex w-full max-w-3xl flex-col gap-1 overflow-hidden rounded-xl border border-border bg-background p-4 shadow-sm transition-colors focus-within:border-ring focus-within:shadow-lg",
+        dragging && "border-primary shadow-lg",
+      )}
+      onSubmit={(event) => {
+        event.preventDefault();
+        void submit();
+      }}
+      onDragEnter={(event) => {
+        if (!images || inputDisabled) return;
+        if (!transferCarriesFiles(event.dataTransfer)) return;
+        dragDepthRef.current += 1;
+        setDragging(true);
+      }}
+      onDragOver={(event) => {
+        if (dragDepthRef.current > 0) event.preventDefault();
+      }}
+      onDragLeave={() => {
+        dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+        if (dragDepthRef.current === 0) setDragging(false);
+      }}
+      onDrop={onDrop}
+    >
+      {attachedSourceName && (
+        <div
+          className="flex w-fit max-w-full items-center gap-2 rounded-lg border border-border bg-muted/50 px-3 py-2 text-sm text-muted-foreground"
+          role="status"
+        >
+          <FileText size={15} aria-hidden="true" />
+          <span className="grid min-w-0">
+            <strong className="truncate text-xs font-semibold text-foreground">
+              {attachedSourceName}
+            </strong>
+            <small className="text-[0.68rem]">Added to this conversation</small>
+          </span>
+          {onDismissAttachedSource && (
+            <button
+              type="button"
+              className="inline-flex items-center justify-center rounded-full border-0 bg-transparent p-0.5 text-inherit hover:bg-accent hover:text-foreground"
+              aria-label={`Dismiss ${attachedSourceName}`}
+              onClick={onDismissAttachedSource}
+            >
+              <X size={14} aria-hidden="true" />
+            </button>
+          )}
+        </div>
+      )}
+      {dragging && (
+        <div
+          className="flex items-center gap-2 rounded-lg border border-dashed border-border px-3 py-2 text-xs text-muted-foreground"
+          role="status"
+        >
+          <ImageIcon size={15} aria-hidden="true" />
+          Drop an image to attach it
+        </div>
+      )}
+      {images && images.items.length > 0 && (
+        <ul
+          className="m-0 flex list-none flex-wrap gap-2 p-0"
+          aria-label="Attached images"
+        >
+          {images.items.map((item) => (
+            <ImageAttachmentChip
+              key={item.id}
+              attachment={item}
+              onRemove={() => images.onRemove(item.id)}
+              onRetry={() => images.onRetry(item.id)}
+            />
+          ))}
+        </ul>
+      )}
+      <textarea
+        ref={textareaRef}
+        className="w-full resize-none border-none bg-transparent px-1 text-base placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-0"
+        value={draft}
+        placeholder={
+          active ? "Guide the active response…" : "Message OpenWave…"
+        }
+        aria-label="Message"
+        // A stable hook for the shell's focus-composer shortcut, which has to
+        // find the field without a ref threaded up through every route.
+        data-composer-input=""
+        disabled={inputDisabled}
+        onChange={onChange}
+        onPaste={onPaste}
+        onKeyDown={(event) => {
+          if (!shouldSubmitComposerKey(event.nativeEvent)) return;
           event.preventDefault();
           void submit();
         }}
-        onDragEnter={(event) => {
-          if (!images || inputDisabled) return;
-          if (!transferCarriesFiles(event.dataTransfer)) return;
-          dragDepthRef.current += 1;
-          setDragging(true);
-        }}
-        onDragOver={(event) => {
-          if (dragDepthRef.current > 0) event.preventDefault();
-        }}
-        onDragLeave={() => {
-          dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
-          if (dragDepthRef.current === 0) setDragging(false);
-        }}
-        onDrop={onDrop}
-      >
-        {attachedSourceName && (
-          <div className="composer-source" role="status">
-            <FileText size={15} aria-hidden="true" />
-            <span>
-              <strong>{attachedSourceName}</strong>
-              <small>Added to this conversation</small>
-            </span>
-            {onDismissAttachedSource && (
-              <button
-                type="button"
-                aria-label={`Dismiss ${attachedSourceName}`}
-                onClick={onDismissAttachedSource}
-              >
-                <X size={14} aria-hidden="true" />
-              </button>
-            )}
-          </div>
-        )}
-        {dragging && (
-          <div className="composer-drop-hint" role="status">
-            <ImageIcon size={15} aria-hidden="true" />
-            Drop an image to attach it
-          </div>
-        )}
-        {images && images.items.length > 0 && (
-          <ul className="composer-images" aria-label="Attached images">
-            {images.items.map((item) => (
-              <ImageAttachmentChip
-                key={item.id}
-                attachment={item}
-                onRemove={() => images.onRemove(item.id)}
-                onRetry={() => images.onRetry(item.id)}
-              />
-            ))}
-          </ul>
-        )}
-        <textarea
-          ref={textareaRef}
-          value={draft}
-          placeholder={
-            active ? "Guide the active response…" : "Message OpenWave…"
-          }
-          aria-label="Message"
-          // A stable hook for the shell's focus-composer shortcut, which has to
-          // find the field without a ref threaded up through every route.
-          data-composer-input=""
-          disabled={inputDisabled}
-          onChange={onChange}
-          onPaste={onPaste}
-          onKeyDown={(event) => {
-            if (!shouldSubmitComposerKey(event.nativeEvent)) return;
-            event.preventDefault();
-            void submit();
-          }}
-        />
-        <div className="composer-actions">
-          <div className="composer-actions-left">
-            {modelMenu}
-          </div>
-          <div className="composer-actions-right">
-            {active ? (
-              <>
-                {(hasDraft || steerPending) && (
-                  <button
-                    type="submit"
-                    className="btn btn-primary composer-redirect"
-                    aria-label="Redirect active response"
-                    disabled={!canSubmit}
-                  >
-                    {steerPending ? "Sending…" : "Redirect"}
-                  </button>
-                )}
-                <WithTooltip label={cancelPending ? "Stopping…" : "Stop"}>
-                  <button
-                    type="button"
-                    className="composer-icon-btn composer-stop"
-                    aria-label={
-                      cancelPending ? "Stopping response" : "Stop response"
-                    }
-                    disabled={disabled || cancelPending}
-                    onClick={() => void onStop()}
-                  >
-                    <Square size={14} fill="currentColor" strokeWidth={0} />
-                  </button>
-                </WithTooltip>
-              </>
-            ) : (
-              <WithTooltip label={imageBlocker ?? "Send · Enter"}>
-                <button
+      />
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex grow items-center gap-2">
+          {modelMenu}
+        </div>
+        <div className="flex items-center gap-2">
+          {active ? (
+            <>
+              {(hasDraft || steerPending) && (
+                <Button
                   type="submit"
-                  className="composer-icon-btn composer-send"
-                  aria-label="Send message"
+                  variant="default"
+                  size="sm"
+                  className="min-w-[5rem]"
+                  aria-label="Redirect active response"
                   disabled={!canSubmit}
                 >
-                  <ArrowUpRight size={16} />
-                </button>
+                  {steerPending ? "Sending…" : "Redirect"}
+                </Button>
+              )}
+              <WithTooltip label={cancelPending ? "Stopping…" : "Stop"}>
+                <Button
+                  type="button"
+                  variant="default"
+                  size="icon-8"
+                  aria-label={
+                    cancelPending ? "Stopping response" : "Stop response"
+                  }
+                  disabled={disabled || cancelPending}
+                  onClick={() => void onStop()}
+                >
+                  <Square size={14} fill="currentColor" strokeWidth={0} />
+                </Button>
               </WithTooltip>
-            )}
-          </div>
+            </>
+          ) : (
+            <WithTooltip label={imageBlocker ?? "Send · Enter"}>
+              <Button
+                type="submit"
+                variant="default"
+                size="icon-8"
+                aria-label="Send message"
+                disabled={!canSubmit}
+              >
+                <ArrowUpRight size={16} />
+              </Button>
+            </WithTooltip>
+          )}
         </div>
-        <span className="sr-only" role="status">
-          {busy ? "Agent is responding" : "Ready to send"}
+      </div>
+      <span className="sr-only" role="status">
+        {busy ? "Agent is responding" : "Ready to send"}
+      </span>
+      {cancelError && (
+        <span className="text-xs text-destructive" role="status">
+          {"Couldn’t stop turn: "}{cancelError}
         </span>
-        {cancelError && (
-          <span className="composer-turn-error" role="status">
-            Couldn’t stop turn: {cancelError}
-          </span>
-        )}
-        {steerError && (
-          <span className="composer-turn-error" role="alert">
-            Couldn’t redirect: {steerError}
-          </span>
-        )}
-        {steerStatus && !steerError && (
-          <span className="composer-turn-status" role="status">
-            {steerStatus}
-          </span>
-        )}
-        {steerTooLong && (
-          <span className="composer-turn-error" role="alert">
-            Guidance is too long.
-          </span>
-        )}
-        {steerHasUnsupportedCharacter && (
-          <span className="composer-turn-error" role="alert">
-            Guidance contains an unsupported character.
-          </span>
-        )}
-        {attachError && (
-          <span className="composer-turn-error" role="alert">
-            Couldn’t attach: {attachError}
-          </span>
-        )}
-        {images?.error && (
-          <span className="composer-turn-error" role="alert">
-            Couldn’t attach image: {images.error}
-          </span>
-        )}
-        {images?.unsupportedModel && images.items.length > 0 && (
-          <span className="composer-turn-error" role="alert">
-            {images.unsupportedModel} can’t read images. Choose a model that
-            accepts image input, or remove the attached image.
-          </span>
-        )}
-      </form>
-    </div>
+      )}
+      {steerError && (
+        <span className="text-xs text-destructive" role="alert">
+          {"Couldn’t redirect: "}{steerError}
+        </span>
+      )}
+      {steerStatus && !steerError && (
+        <span className="text-xs text-muted-foreground" role="status">
+          {steerStatus}
+        </span>
+      )}
+      {steerTooLong && (
+        <span className="text-xs text-destructive" role="alert">
+          Guidance is too long.
+        </span>
+      )}
+      {steerHasUnsupportedCharacter && (
+        <span className="text-xs text-destructive" role="alert">
+          Guidance contains an unsupported character.
+        </span>
+      )}
+      {attachError && (
+        <span className="text-xs text-destructive" role="alert">
+          {"Couldn’t attach: "}{attachError}
+        </span>
+      )}
+      {images?.error && (
+        <span className="text-xs text-destructive" role="alert">
+          {"Couldn’t attach image: "}{images.error}
+        </span>
+      )}
+      {images?.unsupportedModel && images.items.length > 0 && (
+        <span className="text-xs text-destructive" role="alert">
+          {images.unsupportedModel}
+          {" can’t read images. Choose a model that accepts image input, or remove the attached image."}
+        </span>
+      )}
+    </form>
   );
 }
 
@@ -442,26 +462,33 @@ function ImageAttachmentChip({
     attachment.status === "queued" || attachment.status === "uploading";
   const failed = attachment.status === "failed";
   return (
-    <li className={`composer-image is-${attachment.status}`}>
-      <span className="composer-image-thumb">
+    <li
+      className={cn(
+        "relative flex min-w-0 max-w-full items-center gap-2 rounded-lg border border-border bg-muted/50 py-1.5 pl-2 pr-7 text-muted-foreground",
+        failed && "border-destructive",
+      )}
+    >
+      <span className="inline-flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-md bg-background">
         {attachment.previewUrl ? (
           // Shown from the bytes already in hand rather than fetched back from
           // the server, so the reader sees what they attached immediately.
-          <img src={attachment.previewUrl} alt="" />
+          <img className="size-full object-cover" src={attachment.previewUrl} alt="" />
         ) : (
           <ImageIcon size={16} aria-hidden="true" />
         )}
       </span>
-      <span className="composer-image-body">
-        <strong title={attachment.name}>{attachment.name}</strong>
+      <span className="grid min-w-0 gap-px">
+        <strong className="max-w-[12rem] truncate text-xs font-semibold text-foreground" title={attachment.name}>
+          {attachment.name}
+        </strong>
         {/* Only the outcome is announced. A live region on the percentage
             would read every tick of a bar that is already on screen. */}
-        <small role={failed ? "alert" : uploading ? undefined : "status"}>
+        <small className={cn("text-[0.68rem]", failed && "text-destructive")} role={failed ? "alert" : uploading ? undefined : "status"}>
           {describeImageAttachment(attachment)}
         </small>
         {uploading && (
           <progress
-            className="composer-image-progress"
+            className="mt-0.5 h-[3px] w-full appearance-none rounded-full border-0 bg-border [&::-moz-progress-bar]:rounded-full [&::-moz-progress-bar]:bg-foreground [&::-webkit-progress-bar]:rounded-full [&::-webkit-progress-bar]:bg-border [&::-webkit-progress-value]:rounded-full [&::-webkit-progress-value]:bg-foreground [&::-webkit-progress-value]:transition-[width_120ms_linear]"
             max={100}
             value={imageUploadPercent(attachment)}
             aria-label={`Uploading ${attachment.name}`}
@@ -471,7 +498,7 @@ function ImageAttachmentChip({
       {failed && (
         <button
           type="button"
-          className="composer-image-retry"
+          className="shrink-0 rounded-full border border-border bg-background px-2 py-px text-[0.68rem] text-foreground"
           onClick={onRetry}
         >
           Try again
@@ -479,7 +506,7 @@ function ImageAttachmentChip({
       )}
       <button
         type="button"
-        className="composer-image-remove"
+        className="absolute right-0.5 top-0.5 inline-flex items-center justify-center rounded-full border-0 bg-transparent p-0.5 text-inherit hover:bg-accent hover:text-foreground"
         aria-label={`Remove ${attachment.name}`}
         onClick={onRemove}
       >
