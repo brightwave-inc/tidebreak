@@ -10,6 +10,7 @@ import type {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 import {
   ActiveProviderField,
   ProviderCredentialField,
@@ -262,7 +263,7 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
                   label="Allowed domains"
                   hint="One per line. An exact host (api.example.com) or a leading wildcard (*.pypi.org)."
                 >
-                  <textarea
+                  <Textarea
                     className={ENTRY_TEXTAREA_CLASS}
                     rows={4}
                     spellCheck={false}
@@ -277,7 +278,7 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
                   label="Allowed address blocks"
                   hint="One per line, in CIDR notation (140.82.112.0/20) or a bare address."
                 >
-                  <textarea
+                  <Textarea
                     className={ENTRY_TEXTAREA_CLASS}
                     rows={3}
                     spellCheck={false}
@@ -324,9 +325,8 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
   );
 }
 
-/** Textarea styled to match the shared `Input`, sized for a list of entries. */
-const ENTRY_TEXTAREA_CLASS =
-  "flex w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50";
+/** One grant per line reads as a list, so the entries are set in monospace. */
+const ENTRY_TEXTAREA_CLASS = "font-mono text-sm";
 
 /**
  * Split a textarea of grants into trimmed, non-empty entries. Newlines and

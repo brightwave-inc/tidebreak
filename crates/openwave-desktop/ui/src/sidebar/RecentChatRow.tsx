@@ -10,6 +10,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
 
 /** One conversation in a rail list, with its rename field and row actions. */
 export function RecentChatRow({
@@ -52,8 +53,8 @@ export function RecentChatRow({
 
   if (renaming) {
     return (
-      <input
-        className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      <Input
+        className="h-auto px-2 py-1.5 text-sm"
         autoFocus
         aria-label="Chat title"
         value={renameDraft}
