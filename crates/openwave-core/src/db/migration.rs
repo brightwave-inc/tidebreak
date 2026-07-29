@@ -41,6 +41,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddToolCallAutoJudgeStatus),
             Box::new(AddChatCitationFormat),
             Box::new(AddEvidenceLocation),
+            Box::new(AllowContainerExecutionLocation),
         ]
     }
 }
@@ -324,6 +325,143 @@ async fn rebuild_agent_run_sqlite(manager: &SchemaManager<'_>, split: bool) -> R
     Ok(())
 }
 
+/// Widens `agent_run.execution_location` from `in_process` only to
+/// `in_process | container`, so a background run can be admitted to run inside a
+/// sandbox-resident container (issue #874). Purely a domain widening: no row
+/// changes, and the in-process scheduler already selects only `in_process` runs,
+/// so nothing it advances is affected. The `down` narrows the domain back, which
+/// is safe only while no `container` rows exist.
+///
+/// SQLite cannot alter a CHECK constraint, so it rebuilds the table with the two
+/// post-split columns copied straight across (the split already retired the old
+/// `execution` column) under the widened location check; PostgreSQL drops and
+/// re-adds the named constraint in place.
+struct AllowContainerExecutionLocation;
+
+impl MigrationName for AllowContainerExecutionLocation {
+    fn name(&self) -> &str {
+        "m20260729_000027_allow_container_execution_location"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AllowContainerExecutionLocation {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if manager.get_database_backend() == DatabaseBackend::Sqlite {
+            return rebuild_agent_run_sqlite_relocate(manager, true).await;
+        }
+        let location = render_postgres_check(agent_run_location_check_container());
+        for statement in [
+            "ALTER TABLE agent_run DROP CONSTRAINT chk_agent_run_execution_location".to_owned(),
+            format!(
+                "ALTER TABLE agent_run ADD CONSTRAINT chk_agent_run_execution_location \
+                 CHECK ({location})"
+            ),
+        ] {
+            manager
+                .get_connection()
+                .execute_unprepared(&statement)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // Narrowing the domain is only meaningful with no `container` rows left.
+        // Refuse up front with a clear error rather than failing partway through
+        // — on SQLite a mid-rebuild failure would strand the scratch table and
+        // break the next `up`, and on PostgreSQL it would leave the location
+        // column with no constraint at all.
+        reject_down_with_container_rows(manager).await?;
+        if manager.get_database_backend() == DatabaseBackend::Sqlite {
+            return rebuild_agent_run_sqlite_relocate(manager, false).await;
+        }
+        // Re-add before dropping, under a distinct name, so no window exists in
+        // which the location column is unconstrained: if either statement fails,
+        // the migration's transaction rolls back with a constraint still in
+        // place. The narrow constraint then takes the canonical name.
+        let location = render_postgres_check(agent_run_location_check());
+        for statement in [
+            format!(
+                "ALTER TABLE agent_run ADD CONSTRAINT chk_agent_run_execution_location_narrow \
+                 CHECK ({location})"
+            ),
+            "ALTER TABLE agent_run DROP CONSTRAINT chk_agent_run_execution_location".to_owned(),
+            "ALTER TABLE agent_run RENAME CONSTRAINT chk_agent_run_execution_location_narrow \
+             TO chk_agent_run_execution_location"
+                .to_owned(),
+        ] {
+            manager
+                .get_connection()
+                .execute_unprepared(&statement)
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+/// Refuse a rollback of the container-location widening while any `container`
+/// row remains, on either backend.
+///
+/// Without this the narrowing fails deep inside the rebuild (SQLite) or the
+/// constraint validation (PostgreSQL), leaving a half-migrated schema. Failing
+/// here instead names the actual problem and leaves the schema untouched.
+async fn reject_down_with_container_rows(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    let conn = manager.get_connection();
+    let backend = manager.get_database_backend();
+    let remaining = conn
+        .query_one(sea_orm::Statement::from_string(
+            backend,
+            "SELECT COUNT(*) AS remaining FROM agent_run WHERE execution_location = 'container'",
+        ))
+        .await?;
+    let remaining = match remaining {
+        // The count comes back as i64 on both backends.
+        Some(row) => row.try_get::<i64>("", "remaining")?,
+        None => 0,
+    };
+    if remaining > 0 {
+        return Err(DbErr::Custom(format!(
+            "cannot narrow agent_run.execution_location: {remaining} container run(s) remain; \
+             terminalize or delete them before rolling this migration back"
+        )));
+    }
+    Ok(())
+}
+
+/// Rebuild the post-split `agent_run` table under a chosen execution-location
+/// domain, copying the two split columns straight across (unlike
+/// [`rebuild_agent_run_sqlite`], which maps the retired `execution` column).
+async fn rebuild_agent_run_sqlite_relocate(
+    manager: &SchemaManager<'_>,
+    allow_container: bool,
+) -> Result<(), DbErr> {
+    let columns = "id, chat_id, parent_id, parent_depth, spawn_call_id, tier, \
+         execution_location, depth, status, input, model, attempt_count, max_attempts, \
+         claim_count, available_at, deadline_at, lease_token, lease_expires_at, started_at, \
+         finished_at, last_error_code, last_error_detail, created_at, updated_at";
+    let mut statements = vec![
+        "PRAGMA foreign_keys=OFF".to_owned(),
+        "BEGIN IMMEDIATE".to_owned(),
+        agent_run_rebuild_table_with_location(true, allow_container).to_string(SqliteQueryBuilder),
+        format!("INSERT INTO {AGENT_RUN_REBUILD} ({columns}) SELECT {columns} FROM agent_run"),
+        "DROP TABLE agent_run".to_owned(),
+        format!("ALTER TABLE {AGENT_RUN_REBUILD} RENAME TO agent_run"),
+    ];
+    statements.extend(
+        agent_run_rebuild_indexes(true)
+            .iter()
+            .map(|index| index.to_string(SqliteQueryBuilder)),
+    );
+    statements.push("COMMIT".to_owned());
+    statements.push("PRAGMA foreign_keys=ON".to_owned());
+    manager
+        .get_connection()
+        .execute_unprepared(&format!("{};", statements.join(";\n")))
+        .await?;
+    Ok(())
+}
+
 fn agent_run_rebuild_copy_sql(split: bool) -> String {
     let (new_columns, mapped) = if split {
         (
@@ -351,6 +489,16 @@ fn agent_run_rebuild_copy_sql(split: bool) -> String {
 }
 
 fn agent_run_rebuild_table(split: bool) -> TableCreateStatement {
+    agent_run_rebuild_table_with_location(split, false)
+}
+
+/// [`agent_run_rebuild_table`] with an explicit choice of location-domain check,
+/// so the container-location migration can rebuild the table with the widened
+/// domain while every historical caller keeps the strict one.
+fn agent_run_rebuild_table_with_location(
+    split: bool,
+    allow_container: bool,
+) -> TableCreateStatement {
     let rebuild = Alias::new(AGENT_RUN_REBUILD);
     let mut statement = Table::create();
     statement
@@ -470,7 +618,11 @@ fn agent_run_rebuild_table(split: bool) -> TableCreateStatement {
         )
         .check(Expr::col(AgentRun::UpdatedAt).gte(Expr::col(AgentRun::CreatedAt)));
     if split {
-        statement.check(agent_run_location_check());
+        statement.check(if allow_container {
+            agent_run_location_check_container()
+        } else {
+            agent_run_location_check()
+        });
     }
     statement.to_owned()
 }
@@ -615,6 +767,12 @@ fn agent_run_shape_check(split: bool) -> SimpleExpr {
 
 fn agent_run_location_check() -> SimpleExpr {
     Expr::col(AgentRun::ExecutionLocation).eq("in_process")
+}
+
+/// The widened execution-location domain: in-process, or resident in a
+/// container the sandbox-resident driver provisions and drives.
+fn agent_run_location_check_container() -> SimpleExpr {
+    Expr::col(AgentRun::ExecutionLocation).is_in(["in_process", "container"])
 }
 
 fn agent_run_lease_check() -> SimpleExpr {

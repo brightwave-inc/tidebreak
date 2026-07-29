@@ -1961,6 +1961,39 @@ impl Store for DbStore {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn admit_sandbox_container_agent_run(
+        &self,
+        origin_turn_id: TurnId,
+        spawn_call_id: CallId,
+        input: &str,
+        lease_token: uuid::Uuid,
+        expected_steer_revision: i64,
+        max_outstanding_children: u32,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Option<AdmitSandboxAgentRunOutcome>> {
+        ops::agent_run::admit_sandbox_container_agent_run(
+            self,
+            origin_turn_id,
+            spawn_call_id,
+            input,
+            lease_token,
+            expected_steer_revision,
+            max_outstanding_children,
+            now,
+        )
+        .await
+    }
+
+    async fn claim_container_agent_run(
+        &self,
+        id: AgentRunId,
+        lease_token: uuid::Uuid,
+        lease_duration: chrono::Duration,
+    ) -> Result<Option<AgentRun>> {
+        ops::agent_run::claim_container_agent_run(self, id, lease_token, lease_duration).await
+    }
+
     async fn checkpoint_sandbox_spawn(
         &self,
         request: &crate::model::SandboxSpawnCheckpointRequest,

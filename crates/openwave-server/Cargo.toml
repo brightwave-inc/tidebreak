@@ -88,6 +88,10 @@ windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
 winreg = "=0.55.0"
 
 [dev-dependencies]
+# The real in-container agent (loop, supervisor, word_count tool) so the
+# sandbox-resident driver tests can drive the actual sandbox side over a
+# loopback socket, with only Docker and the host model mocked.
+openwave-sandbox-agent = { path = "../openwave-sandbox-agent" }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
 tower = { version = "=0.5.3", features = ["util"] }
 reqwest = { workspace = true }

@@ -42,6 +42,7 @@ mod providers;
 mod resolver;
 mod routes;
 mod sandbox_agent_run_worker;
+pub mod sandbox_container_run;
 /// A [`SandboxBackend`](openwave_sandbox_protocol::SandboxBackend) over the Docker
 /// CLI: container provision, loopback addressing, idempotent teardown, and a
 /// correlation-tag orphan sweep.
