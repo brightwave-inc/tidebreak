@@ -82,8 +82,34 @@ capability split (`supports_search` / `supports_extract`); extraction goes to
 the configured provider exactly when it implements the extract contract, and to
 the built-in native engine otherwise — including when the provider is
 search-only or when no provider is configured at all. Extraction therefore
-works with zero web-search configuration. Neither Exa nor Tavily implements
-the extract contract yet, so every extraction currently routes native.
+works with zero web-search configuration.
+
+Exa and Tavily both implement the extract contract, so a host with either
+selected extracts through the vendor and falls back to native. They reach
+`https://api.exa.ai/contents` and `https://api.tavily.com/extract`, on the same
+fixed authority their search calls use, with the key as a bearer token.
+
+| | Exa | Tavily |
+| --- | --- | --- |
+| Request | one URL, `text` always sent explicitly, bounded at the source with `text.maxCharacters` (10,000) | one URL, `extract_depth: basic`, `format: markdown` |
+| Freshness | `maxAgeHours: 24`, the supported replacement for the deprecated `livecrawl` selector | vendor default |
+| Title | taken from the response | none in the response; reported empty rather than invented |
+| Per-URL failure | HTTP 200 with the URL absent from `results` and an error in `statuses` | HTTP 200 with the URL in `failed_results` |
+
+Both endpoints answer HTTP 200 when the single requested URL failed, so the
+adapters read the per-URL outcome first and match results by URL key rather
+than array position. A missing, failed, or too-thin result is a typed
+`PageNotExtracted`, never an extraction with nothing in it. The vendor's own
+error tag or prose is not deserialized at all: it would only ever be forwarded,
+and no vendor string belongs in a model context.
+
+Request-level statuses are mapped to typed errors so the routing can act on
+them: `401` is a rejected credential, Exa's `402` and Tavily's nonstandard `432`
+(plan allowance) and `433` (pay-as-you-go balance) are an exhausted quota,
+`429` is a rate limit, and everything else stays a plain HTTP status. The
+timeout is the host's clamped `timeout_ms` for both search and extraction;
+neither adapter takes a timeout of its own and no extract call carries one in
+its payload.
 
 The native engine (the crate's `extract-native` feature) admits a URL through
 a strict fetch policy — https only, no userinfo, default port, and a denied
@@ -94,13 +120,19 @@ addresses. Fetches carry no cookies or ambient credentials, stream under a hard
 byte cap, gate on a textual content-type allowlist, and reduce the page with a
 readability pass to bounded markdown.
 
-Failure is layered and never silent. A vendor extract failure falls back to
-the native engine for that request. A native failure returns a closed,
-actionable reason ("the page returned HTTP 404", "no readable content could be
-extracted from the page") with no transport or vendor diagnostics attached.
-When no extraction path exists at all, the tool returns the same typed
-configuration-required failure web search uses, which the desktop renders as a
-settings card. Every successful extraction is stamped with its
+Failure is layered and never silent. A vendor extract failure — quota, rate
+limit, timeout, a page the vendor could not read — falls back to the native
+engine for that request, with no vendor diagnostic crossing either way. The one
+exception is a rejected API key: that is host configuration rather than a
+property of the page, it will reject every later call, and it is the same key
+web search uses, so falling back would hide a broken configuration behind
+quietly degraded extraction forever. It surfaces as the typed
+configuration-required failure instead, which the desktop renders as the
+settings card that repairs it. A native failure returns a closed, actionable
+reason ("the page returned HTTP 404", "no readable content could be extracted
+from the page") with no transport or vendor diagnostics attached. When no
+extraction path exists at all, the tool returns that same typed
+configuration-required failure. Every successful extraction is stamped with its
 `extraction_method` (`native` or the provider name) so degraded extraction
 stays visible downstream.
 

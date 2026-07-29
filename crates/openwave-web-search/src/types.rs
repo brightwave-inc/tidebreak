@@ -29,6 +29,12 @@ pub const MAX_OUTPUT_BYTES: usize = 16_000;
 /// content budget as single-byte text; a page dense in multi-byte script is
 /// trimmed to fit and says so through `truncated`.
 pub const MAX_EXTRACT_OUTPUT_BYTES: usize = 64_000;
+/// Below this many extracted words a page has no readable content.
+///
+/// The floor is engine-neutral on purpose: a vendor that answers with a cookie
+/// banner is exactly as unhelpful as a native fetch that lands on a script
+/// shell, and both should resolve "nothing there" rather than a thin success.
+pub const MIN_EXTRACT_WORDS: usize = 20;
 /// Legacy name for the serialized response output budget.
 pub const MAX_OUTPUT_CHARS: usize = MAX_OUTPUT_BYTES;
 const MAX_DOMAIN_CHARS: usize = 253;
@@ -67,6 +73,15 @@ impl WebSearchProviderKind {
         match self {
             Self::Exa => "https://api.exa.ai/search",
             Self::Tavily => "https://api.tavily.com/search",
+        }
+    }
+
+    /// Fixed page-extraction endpoint, on the same authority as
+    /// [`Self::search_url`] so one transport binding covers both calls.
+    pub(crate) const fn extract_url(self) -> &'static str {
+        match self {
+            Self::Exa => "https://api.exa.ai/contents",
+            Self::Tavily => "https://api.tavily.com/extract",
         }
     }
 
@@ -625,6 +640,22 @@ pub enum WebSearchError {
         provider: WebSearchProviderKind,
         status: u16,
     },
+    /// The provider refused the configured key. This is host configuration
+    /// rather than a property of the request, so it is worth distinguishing
+    /// from every other provider failure: it will recur on the next call.
+    #[error("web search provider {0} rejected the configured API key")]
+    CredentialRejected(WebSearchProviderKind),
+    /// The account's plan or prepaid balance is spent. Distinct from
+    /// [`Self::RateLimited`] because waiting does not clear it.
+    #[error("web search provider {0} has no remaining quota")]
+    QuotaExhausted(WebSearchProviderKind),
+    #[error("web search provider {0} rate limited the request")]
+    RateLimited(WebSearchProviderKind),
+    /// The provider accepted the request and reported that this one page could
+    /// not be extracted. Both vendors answer HTTP 200 in that case, so this is
+    /// what stops a per-URL failure becoming an empty-content success.
+    #[error("web search provider {provider} could not extract the page")]
+    PageNotExtracted { provider: WebSearchProviderKind },
     #[error("web search provider {provider} returned an invalid response")]
     InvalidResponse { provider: WebSearchProviderKind },
     #[error("web search provider returned an invalid result URL")]
@@ -646,6 +677,38 @@ fn canonical_http_url(value: &str) -> Result<String, WebSearchError> {
 
 pub(crate) fn truncate(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
+}
+
+/// Words carrying at least one alphanumeric character.
+///
+/// Punctuation-only tokens are not words, so a page of navigation glyphs
+/// cannot clear [`MIN_EXTRACT_WORDS`] on separators alone.
+pub(crate) fn count_words(value: &str) -> usize {
+    value
+        .split_whitespace()
+        .filter(|token| token.chars().any(char::is_alphanumeric))
+        .count()
+}
+
+/// Whether a URL a provider echoed back names the page that was requested.
+///
+/// Both extract endpoints answer HTTP 200 on a partial failure and report the
+/// per-URL outcome in a side array, so a response must be matched by URL key
+/// and never by array position. Providers may normalize what they echo — host
+/// case, an added root path — so parsed forms are compared, with exact bytes as
+/// the fallback for an identifier that is not a URL at all.
+pub(crate) fn same_page_url(candidate: &str, requested: &str) -> bool {
+    if candidate == requested {
+        return true;
+    }
+    match (Url::parse(candidate), Url::parse(requested)) {
+        (Ok(mut candidate), Ok(mut requested)) => {
+            candidate.set_fragment(None);
+            requested.set_fragment(None);
+            candidate == requested
+        }
+        _ => false,
+    }
 }
 
 fn contains_control(value: &str) -> bool {

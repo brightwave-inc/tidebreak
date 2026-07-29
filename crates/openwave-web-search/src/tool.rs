@@ -136,9 +136,10 @@ pub fn extract_request_from_tool_arguments(
 /// Routing is deterministic and derived from the configured provider: an
 /// extract-capable provider receives the request, and a search-only or absent
 /// provider routes to the native engine. A vendor failure falls back to the
-/// native engine for that request; a native failure returns a closed,
-/// actionable reason. Nothing degrades silently — every success is stamped
-/// with its extraction method.
+/// native engine for that request, except a rejected credential, which is host
+/// configuration and surfaces; a native failure returns a closed, actionable
+/// reason. Nothing degrades silently — every success is stamped with its
+/// extraction method.
 pub struct WebExtractTool {
     resolver: Arc<dyn WebSearchResolver>,
     native: Option<Arc<dyn PageExtractor>>,
@@ -186,11 +187,25 @@ impl Tool for WebExtractTool {
         };
         // Deterministic routing: the configured provider takes the request
         // exactly when it implements the extract contract. A vendor failure
-        // (quota, timeout, provider error) falls back to the native engine for
-        // this request; no vendor diagnostic crosses either way.
+        // (quota, rate limit, timeout, an unreadable page) falls back to the
+        // native engine for this request; no vendor diagnostic crosses either
+        // way.
         if let Some(provider) = provider.filter(|provider| provider.supports_extract()) {
-            if let Ok(response) = provider.extract(request.clone()).await {
-                return Ok(extraction_output(&response));
+            match provider.extract(request.clone()).await {
+                Ok(response) => return Ok(extraction_output(&response)),
+                // A rejected key is the one vendor failure that is about the
+                // host and not about this page. It will reject the next call
+                // and every call after it, and the same key is what web search
+                // uses, so falling back would hide a broken configuration
+                // behind quietly degraded extraction forever. Surface it as the
+                // typed configuration failure the settings card repairs.
+                Err(WebSearchError::CredentialRejected(_)) => {
+                    return Ok(ToolOutput::failed(
+                        ToolErrorCategory::ConfigurationRequired,
+                        "The configured web-search provider rejected its API key.",
+                    ))
+                }
+                Err(_) => {}
             }
         }
         let Some(native) = &self.native else {
@@ -453,6 +468,36 @@ mod tests {
         fail_extract: bool,
     }
 
+    /// A provider whose key the vendor rejects.
+    struct KeyRejectingProvider;
+
+    #[async_trait]
+    impl WebSearchProvider for KeyRejectingProvider {
+        fn kind(&self) -> WebSearchProviderKind {
+            WebSearchProviderKind::Tavily
+        }
+
+        fn supports_extract(&self) -> bool {
+            true
+        }
+
+        async fn search(
+            &self,
+            _request: WebSearchRequest,
+        ) -> Result<WebSearchResponse, WebSearchError> {
+            unreachable!("extraction must never call search")
+        }
+
+        async fn extract(
+            &self,
+            _request: WebExtractRequest,
+        ) -> Result<WebExtractResponse, WebSearchError> {
+            Err(WebSearchError::CredentialRejected(
+                WebSearchProviderKind::Tavily,
+            ))
+        }
+    }
+
     #[async_trait]
     impl WebSearchProvider for ExtractCapableProvider {
         fn kind(&self) -> WebSearchProviderKind {
@@ -553,6 +598,19 @@ mod tests {
         assert_eq!(body["extraction_method"], "native");
         assert_eq!(*native.calls.lock().unwrap(), 1);
         assert!(!output.content.contains("private vendor"));
+
+        // A rejected key is the exception: it is host configuration, so it
+        // surfaces for repair instead of degrading quietly on every future
+        // call. The native engine is not consulted.
+        let native = StubNative::new();
+        let tool = extract_tool(Some(Arc::new(KeyRejectingProvider)), Some(native.clone()));
+        let output = tool.execute(&context(), EXTRACT_ARGS()).await.unwrap();
+        assert!(output.is_error);
+        assert_eq!(
+            output.error_category,
+            Some(ToolErrorCategory::ConfigurationRequired)
+        );
+        assert_eq!(*native.calls.lock().unwrap(), 0);
     }
 
     #[tokio::test]

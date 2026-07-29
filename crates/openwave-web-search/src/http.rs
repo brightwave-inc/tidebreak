@@ -301,9 +301,12 @@ mod tests {
             crate::WebSearchProviderKind::Exa,
             crate::WebSearchProviderKind::Tavily,
         ] {
-            assert!(
-                validate_outbound_url(provider.search_url(), provider.outbound_domain()).is_ok()
-            );
+            for endpoint in [provider.search_url(), provider.extract_url()] {
+                assert!(
+                    validate_outbound_url(endpoint, provider.outbound_domain()).is_ok(),
+                    "{endpoint} is not on {provider}'s fixed outbound domain"
+                );
+            }
         }
     }
 

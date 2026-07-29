@@ -171,7 +171,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
 
           <SettingsSection
             title="Active provider"
-            description="Agents search through this one provider. The others stay configured and idle."
+            description="Agents search and open pages through this one provider. The others stay configured and idle."
           >
             <ActiveProviderField
               value={provider}
@@ -206,6 +206,12 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
             Foreground and background agents can request configured search.
             Foreground requests ask for approval before the query leaves
             OpenWave.
+          </p>
+
+          <p className="text-sm leading-relaxed text-muted-foreground">
+            {config.provider
+              ? `Agents also open single pages through ${providerLabel(config.provider)}. If a page comes back empty or ${providerLabel(config.provider)} is unavailable, OpenWave reads it directly instead.`
+              : "Agents can still open single pages without a provider: OpenWave reads them directly."}
           </p>
         </>
       )}

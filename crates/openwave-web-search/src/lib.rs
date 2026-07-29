@@ -10,7 +10,10 @@
 //! The Exa and Tavily adapters use their public HTTP APIs through the small
 //! [`HttpClient`] seam; no vendor SDK is required. `ReqwestHttpClient` is opt-in
 //! behind the `http` feature. Requests and normalized output are bounded before
-//! egress and before they can reach a model context.
+//! egress and before they can reach a model context. Both adapters implement
+//! page extraction as well as search, on the same fixed authority; a per-URL
+//! vendor failure is a typed error rather than an empty success, so extraction
+//! can fall back to the native engine instead of returning a blank page.
 //!
 //! The `extract-native` feature adds a self-contained extraction engine:
 //! [`NativeExtractor`] fetches one admitted URL — every redirect hop re-vetted
@@ -41,7 +44,7 @@ pub use http::{HttpClient, HttpRequest, HttpResponse, MAX_HTTP_RESPONSE_BYTES};
 pub use native::{
     HostAddressResolver, NativeExtractError, NativeExtraction, NativeExtractor, PageFetchResponse,
     PageFetchTransport, ReqwestPageFetcher, TokioHostResolver, MAX_EXTRACT_CONTENT_CHARS,
-    MAX_FETCH_REDIRECT_HOPS, MAX_FETCH_RESPONSE_BYTES, MIN_EXTRACT_WORDS, NATIVE_FETCH_USER_AGENT,
+    MAX_FETCH_REDIRECT_HOPS, MAX_FETCH_RESPONSE_BYTES, NATIVE_FETCH_USER_AGENT,
 };
 pub use tavily::TavilyProvider;
 pub use tool::{
@@ -53,5 +56,5 @@ pub use types::{
     WebSearchError, WebSearchProvider, WebSearchProviderKind, WebSearchRequest, WebSearchResponse,
     WebSearchResult, MAX_DOMAINS, MAX_EXTRACT_OUTPUT_BYTES, MAX_OUTPUT_BYTES, MAX_OUTPUT_CHARS,
     MAX_QUERY_CHARS, MAX_RESULTS, MAX_RESULT_CONTENT_CHARS, MAX_RESULT_SNIPPET_CHARS,
-    MAX_RESULT_TITLE_CHARS, MAX_RESULT_URL_BYTES,
+    MAX_RESULT_TITLE_CHARS, MAX_RESULT_URL_BYTES, MIN_EXTRACT_WORDS,
 };
