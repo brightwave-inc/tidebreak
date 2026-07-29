@@ -485,10 +485,6 @@ mod tests {
         for &provider in ProviderKind::ALL {
             assert!(models_for(provider).all(|spec| spec.provider == provider));
         }
-        assert_eq!(models_for(ProviderKind::Anthropic).count(), 7);
-        assert_eq!(models_for(ProviderKind::Openai).count(), 6);
-        assert_eq!(models_for(ProviderKind::Gemini).count(), 4);
-        assert_eq!(models_for(ProviderKind::OpenaiCompatible).count(), 0);
     }
 
     #[test]

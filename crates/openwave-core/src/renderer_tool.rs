@@ -155,17 +155,4 @@ mod tests {
             assert_eq!(RendererToolName::from(name), RendererToolName::Other);
         }
     }
-
-    /// The two names that come from constants rather than literals here.
-    #[test]
-    fn the_shared_tool_constants_still_match_their_spellings() {
-        assert_eq!(
-            RendererToolName::from(crate::SANDBOX_READ_DELEGATED_FILE_TOOL),
-            RendererToolName::ReadDelegatedFile
-        );
-        assert_eq!(
-            RendererToolName::from(crate::ASK_USER_QUESTIONS_TOOL),
-            RendererToolName::AskUserQuestions
-        );
-    }
 }

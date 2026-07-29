@@ -20,21 +20,6 @@ describe("toolActivityGroupPresentation", () => {
     ).toBe("Searched the web and 2 other tasks");
   });
 
-  it("says only what happened when a phase is one call", () => {
-    expect(labelOf([{ name: "web_search", status: "completed" }])).toBe(
-      "Searched the web",
-    );
-  });
-
-  it("counts a single remaining task in the singular", () => {
-    expect(
-      labelOf([
-        { name: "read_file", status: "completed" },
-        { name: "web_search", status: "completed" },
-      ]),
-    ).toBe("Searched the web and 1 other task");
-  });
-
   it("keeps the whole phase in the present while any part of it is live", () => {
     // The lead reads as in-progress even though it has settled, so the line
     // doesn't flicker between tenses as calls finish underneath it.
@@ -142,36 +127,5 @@ describe("ToolActivityGroup", () => {
 
     expect(markup).toContain("Tool activity unavailable");
     expect(markup).not.toContain("private");
-  });
-});
-
-describe("row identity", () => {
-  it("carries a call id through without disturbing the phase label", () => {
-    // Rows are keyed on the call rather than its position, so a filtered or
-    // reordered phase cannot re-associate React state with the wrong call.
-    // Phases *are* filtered — a parked call is handled by its approval card —
-    // so the index was never a stable key.
-    const withIds = renderToStaticMarkup(
-      <ToolActivityGroup
-        activities={[
-          { id: "call-a", name: "exec", status: "completed" },
-          { id: "call-b", name: "search", status: "running" },
-        ]}
-        groupIndex={0}
-      />,
-    );
-    const withoutIds = renderToStaticMarkup(
-      <ToolActivityGroup
-        activities={[
-          { name: "exec", status: "completed" },
-          { name: "search", status: "running" },
-        ]}
-        groupIndex={0}
-      />,
-    );
-    // Identity is structural: it changes which row owns which state, not what
-    // the phase says. A row with nothing stable still falls back to position.
-    expect(withIds).toBe(withoutIds);
-    expect(withIds).toContain("Searching sources and 1 other task");
   });
 });

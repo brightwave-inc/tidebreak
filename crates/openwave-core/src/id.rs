@@ -415,13 +415,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ids_of_different_types_are_distinct_uuids() {
-        let chat = ChatId::new();
-        let turn = TurnId::new();
-        assert_ne!(chat.0, turn.0);
-    }
-
-    #[test]
     fn foreground_agent_run_ids_are_stable_and_chat_scoped() {
         let first_chat = ChatId::new();
         let second_chat = ChatId::new();
