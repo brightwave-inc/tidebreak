@@ -13,8 +13,9 @@ use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
 use openwave_core::{
-    deliverable_media_type, ChatId, OutputId, OutputRecord, OutputRevision, OutputRevisionId,
-    Store, MAX_DELIVERABLE_BYTES, OUTPUTS_DIRECTORY,
+    deliverable_media_type, media_type_is_text, revision_byte_ceiling, ChatId, OutputId,
+    OutputRecord, OutputRevision, OutputRevisionId, Store, MAX_BINARY_DELIVERABLE_BYTES,
+    OUTPUTS_DIRECTORY,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -343,12 +344,16 @@ fn summary_from_record(
     output: &OutputRecord,
     revision: &OutputRevision,
 ) -> Result<DeliverableSummary, String> {
+    // Text outputs derive their media type from the filename; binary artifacts
+    // carry an explicit media type with an arbitrary extension, so only text is
+    // held to the filename-derived type. Each kind keeps its own size ceiling.
     if output.deleted_at.is_some()
         || output.current_revision != revision.id
         || output.id != revision.output_id
         || output.revision_count == 0
-        || revision.byte_len > MAX_DELIVERABLE_BYTES as u64
-        || deliverable_media_type(&output.filename) != Some(output.media_type.as_str())
+        || revision.byte_len > revision_byte_ceiling(&output.media_type) as u64
+        || (media_type_is_text(&output.media_type)
+            && deliverable_media_type(&output.filename) != Some(output.media_type.as_str()))
     {
         return Err("Could not load this conversation's outputs".to_owned());
     }
@@ -368,10 +373,11 @@ pub(crate) fn read_output_revision_bytes(
     output: &OutputRecord,
     revision: &OutputRevision,
 ) -> Result<Vec<u8>, String> {
+    let ceiling = revision_byte_ceiling(&output.media_type);
     if output.chat_id != chat_id
         || output.deleted_at.is_some()
         || revision.output_id != output.id
-        || revision.byte_len > MAX_DELIVERABLE_BYTES as u64
+        || revision.byte_len > ceiling as u64
     {
         return Err("Output not found in this conversation".to_owned());
     }
@@ -410,11 +416,11 @@ pub(crate) fn read_output_revision_bytes(
         return Err("Output content is unavailable".to_owned());
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take((MAX_DELIVERABLE_BYTES + 1) as u64)
+    file.take((ceiling + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|_| "Output content is unavailable".to_owned())?;
     if bytes.len() as u64 != revision.byte_len
-        || bytes.len() > MAX_DELIVERABLE_BYTES
+        || bytes.len() > ceiling
         || <[u8; 32]>::from(Sha256::digest(&bytes)) != revision.sha256
     {
         return Err("Output content is unavailable".to_owned());
@@ -505,7 +511,7 @@ fn destination_matches_revision(destination: &Path, revision: &OutputRevision) -
 }
 
 fn destination_matches(destination: &Path, byte_len: u64, sha256: [u8; 32]) -> bool {
-    if !destination.is_absolute() || byte_len > MAX_DELIVERABLE_BYTES as u64 {
+    if !destination.is_absolute() || byte_len > MAX_BINARY_DELIVERABLE_BYTES as u64 {
         return false;
     }
     let Some(parent) = destination.parent() else {
@@ -530,7 +536,7 @@ fn destination_matches(destination: &Path, byte_len: u64, sha256: [u8; 32]) -> b
     };
     let mut bytes = Vec::with_capacity(byte_len as usize);
     if file
-        .take((MAX_DELIVERABLE_BYTES + 1) as u64)
+        .take((MAX_BINARY_DELIVERABLE_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .is_err()
     {
@@ -595,7 +601,7 @@ async fn pick_export_path(app: &AppHandle, filename: &str) -> Result<Option<Path
 }
 
 fn write_exported_deliverable(destination: &Path, content: &[u8]) -> Result<(), String> {
-    if !destination.is_absolute() || content.len() > MAX_DELIVERABLE_BYTES {
+    if !destination.is_absolute() || content.len() > MAX_BINARY_DELIVERABLE_BYTES {
         return Err("The save destination is invalid".to_owned());
     }
     let parent = destination
@@ -681,6 +687,7 @@ mod tests {
                 byte_len: content.len() as u64,
                 sha256: Sha256::digest(content).into(),
                 turn_id: None,
+                producing_run_id: None,
                 created_at,
             },
         )
@@ -718,6 +725,72 @@ mod tests {
         for forbidden in ["path", "scratch", "chatId", "token", "sha256"] {
             assert!(!serialized.to_string().contains(forbidden));
         }
+    }
+
+    fn binary_output_record(
+        chat_id: ChatId,
+        filename: &str,
+        media_type: &str,
+        content: &[u8],
+    ) -> (OutputRecord, OutputRevision) {
+        let output_id = OutputId::new();
+        let revision_id = OutputRevisionId::new();
+        let created_at = Utc.timestamp_opt(1_800_000_000, 0).unwrap();
+        (
+            OutputRecord {
+                id: output_id,
+                chat_id,
+                filename: filename.to_owned(),
+                media_type: media_type.to_owned(),
+                current_revision: revision_id,
+                revision_count: 1,
+                created_at,
+                updated_at: created_at,
+                deleted_at: None,
+            },
+            OutputRevision {
+                id: revision_id,
+                output_id,
+                ordinal: 1,
+                byte_len: content.len() as u64,
+                sha256: Sha256::digest(content).into(),
+                turn_id: None,
+                producing_run_id: None,
+                created_at,
+            },
+        )
+    }
+
+    #[test]
+    fn binary_artifacts_beyond_the_text_cap_are_cataloged_read_and_exported() {
+        let scratch = tempfile::tempdir().unwrap();
+        // A binary artifact larger than the 512 KiB text cap.
+        let mut content = b"\x89PNG\r\n\x1a\n".to_vec();
+        content.resize(700 * 1024, 9);
+        let (output, revision) =
+            binary_output_record(ChatId::new(), "chart.png", "image/png", &content);
+
+        // It is a valid catalog entry despite its non-text media type and its
+        // size exceeding the text ceiling.
+        let summary = summary_from_record(&output, &revision).unwrap();
+        assert_eq!(summary.media_type, "image/png");
+        assert_eq!(summary.size_bytes, content.len() as u64);
+
+        // Its bytes round-trip out of private scratch unchanged.
+        let path = revision_path(scratch.path(), &output, &revision);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &content).unwrap();
+        assert_eq!(
+            read_output_revision_bytes(scratch.path(), output.chat_id, &output, &revision).unwrap(),
+            content
+        );
+
+        // And they export to a chosen destination as raw bytes.
+        let destination_root = tempfile::tempdir().unwrap();
+        let destination = destination_root.path().join("chart.png");
+        write_exported_deliverable(&destination, &content).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), content);
+        assert!(destination_matches_revision(&destination, &revision));
     }
 
     #[test]

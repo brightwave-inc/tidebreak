@@ -36,6 +36,11 @@ pub mod context;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub mod db;
 pub mod deliverable;
+// Host-side acceptance writes bytes into private scratch, so it depends on the
+// capability filesystem and async runtime that only the `tools` feature pulls
+// in. The persisted contract and migration below stay available without it.
+#[cfg(feature = "tools")]
+pub mod deliverable_acceptance;
 pub mod error;
 pub mod event;
 pub mod id;
@@ -104,11 +109,16 @@ pub use config::{Config, Profile};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use db::DbStore;
 pub use deliverable::{
-    deliverable_media_type, output_revision_relative_path, validate_deliverable_name, CreateOutput,
-    NewOutputRevision, OutputCitationSnapshot, OutputRecord, OutputRevision,
-    DELIVERABLES_DIRECTORY, MAX_DELIVERABLE_BYTES, MAX_DELIVERABLE_NAME_CHARS,
-    MAX_OUTPUT_CITATIONS, MAX_OUTPUT_REVISIONS, OUTPUTS_DIRECTORY,
+    deliverable_media_type, media_type_is_text, output_revision_relative_path,
+    revision_byte_ceiling, validate_binary_deliverable, validate_deliverable_media_type,
+    validate_deliverable_name, validate_portable_filename, CreateOutput, DeliverableKind,
+    NewOutputRevision, OutputCitationSnapshot, OutputRecord, OutputRevision, RevisionProducer,
+    DELIVERABLES_DIRECTORY, MAX_BINARY_DELIVERABLE_BYTES, MAX_DELIVERABLE_BYTES,
+    MAX_DELIVERABLE_MEDIA_TYPE_CHARS, MAX_DELIVERABLE_NAME_CHARS, MAX_OUTPUT_CITATIONS,
+    MAX_OUTPUT_REVISIONS, OUTPUTS_DIRECTORY,
 };
+#[cfg(feature = "tools")]
+pub use deliverable_acceptance::{accept_workspace_artifact, WorkspaceArtifactProposal};
 pub use error::{AgentError, AgentErrorInfo, Result};
 pub use event::{AgentEvent, SequencedEvent};
 pub use id::{

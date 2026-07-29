@@ -463,6 +463,20 @@ Three honesty rules keep this from becoming a label:
   against the honest declaration, exceptions included, never the feature
   name.
 
+Concretely, the two managed vendors land on different points of this model,
+and live measurement has refined it. E2B's per-sandbox allowlist is confirmed
+but *applied-with-gaps* — domain rules cover only ports 80/443 and DNS stays
+open — so its declaration carries those holes and it is not a boundary.
+Daytona's per-sandbox policy, by contrast, is a confirmed *strict* boundary: a
+live test against a real account showed it blocks raw IPs, unlisted domains,
+unlisted-domain DNS, and the package registries and public git hosting once
+assumed always-reachable, with no general-purpose carve-out — so it clears the
+external-tier bar and is in fact stronger than E2B. Its one caveat is plan-tier
+gating: the per-sandbox override requires Daytona org tier 3+, which the host
+cannot read statically, so settings disclose Daytona as a boundary *conditional*
+on that tier rather than an unconditional one. The local adapter stays the only
+unconditional boundary.
+
 For an unattached run, policy is the snapshot delivered at admission.
 Revoking a grant while its run is unattached takes effect at reattachment
 or next admission, not instantly — revocation semantics follow host

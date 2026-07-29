@@ -15,7 +15,10 @@ import type {
 } from "../api";
 import { CodeExecutionPanel } from "./CodeExecutionPanel";
 
-/** The default egress projection: open policy, E2B applied-with-gaps, Daytona unconfirmed. */
+/**
+ * The default egress projection: open policy, E2B applied-with-gaps, Daytona a
+ * strict per-sandbox boundary conditional on org tier 3+ (no phantom gaps).
+ */
 const OPEN_EGRESS: CodeExecutionConfigInfo["egress"] = {
   policy: { mode: "open" },
   enforcement: [
@@ -26,8 +29,9 @@ const OPEN_EGRESS: CodeExecutionConfigInfo["egress"] = {
     },
     {
       provider: "daytona",
-      status: "unconfirmed",
-      gaps: ["package registries", "git hosting"],
+      status: "conditional_boundary",
+      gaps: [],
+      requirement: "Daytona org tier 3+",
     },
   ],
 };
@@ -192,6 +196,26 @@ describe("CodeExecutionPanel", () => {
     expect(
       screen.getByText(/domain filtering covers HTTP and HTTPS ports only/i),
     ).toBeInTheDocument();
+  });
+
+  it("presents Daytona as a conditional boundary requiring org tier 3+, never an unconditional boundary", async () => {
+    const { client } = clientFor({
+      provider: "daytona",
+      timeout_ms: 20_000,
+      available: true,
+      has_credential: true,
+      egress: OPEN_EGRESS,
+    });
+
+    render(<CodeExecutionPanel client={client} />);
+
+    // The tier-3+ requirement is surfaced inline, and the badge reads
+    // conditional — never a plain green "Boundary".
+    await screen.findByText(/Requires Daytona org tier 3\+/i);
+    expect(screen.getByText(/Boundary — conditional/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^Boundary$/)).toBeNull();
+    // The phantom curated-service exceptions are gone from the disclosure.
+    expect(screen.queryByText(/git hosting/i)).toBeNull();
   });
 
   it("rejects a timeout outside the bounds before touching the server", async () => {

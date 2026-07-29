@@ -867,7 +867,8 @@ async fn code_execution_egress_policy_round_trips_and_rejects_secrets() {
     };
 
     // The default surface discloses open egress plus each managed provider's
-    // enforcement status: E2B confirmed, Daytona pending live confirmation.
+    // enforcement status: E2B applied-with-gaps, Daytona a boundary conditional
+    // on its org tier.
     let initial = router
         .clone()
         .oneshot(
@@ -889,14 +890,21 @@ async fn code_execution_egress_policy_round_trips_and_rejects_secrets() {
             .unwrap_or_else(|| panic!("{provider} enforcement is disclosed"))
             .clone()
     };
-    // E2B is applied but honestly not a full boundary; Daytona is unconfirmed.
-    // Neither is ever shown as a plain boundary, and the gaps are surfaced.
+    // E2B is applied but honestly not a full boundary. Daytona's per-sandbox
+    // policy is a strict, live-confirmed boundary, but gated on org tier 3+, so
+    // it surfaces as a conditional boundary with the requirement inline — never
+    // an unconditional boundary, and with no phantom curated-service gaps.
     assert_eq!(row("e2b")["status"], "applied_with_gaps");
     assert!(!row("e2b")["gaps"].as_array().unwrap().is_empty());
     assert_eq!(
         row("daytona")["status"],
-        "unconfirmed",
-        "Daytona egress is applied but not yet a confirmed boundary"
+        "conditional_boundary",
+        "Daytona is a strict per-sandbox boundary, conditional on org tier 3+"
+    );
+    assert_eq!(row("daytona")["requirement"], "Daytona org tier 3+");
+    assert!(
+        row("daytona")["gaps"].as_array().unwrap().is_empty(),
+        "the phantom curated-service exceptions must be gone"
     );
 
     // A configured allowlist round-trips through the store and back out.

@@ -3,9 +3,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use openwave_core::SecretProvider;
-use openwave_egress::{
-    EgressEnforcement, EgressPolicy, EnforcementException, ExceptionReach, ExceptionScope,
-};
+use openwave_egress::{EgressEnforcement, EgressPolicy};
 use reqwest::{Client, Response, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 
@@ -175,24 +173,31 @@ impl DaytonaExecutionProvider {
     }
 
     /// Host knowledge about Daytona's per-sandbox network enforcement,
-    /// declared as what it actually blocks. Daytona keeps a vendor-curated
-    /// "essential services" list reachable regardless of policy — package
-    /// registries, public git hosting, container registries, and AI APIs —
-    /// each a general-purpose destination, so this surface does not qualify
-    /// as a boundary for third-party-credential-bearing work.
+    /// declared as what it actually blocks.
+    ///
+    /// A live test against a real Daytona account (issue #888) established that
+    /// a per-sandbox policy is a *strict*, externally-enforced allowlist: only
+    /// listed domains are reachable, raw-IP egress and unlisted-domain DNS are
+    /// blocked, and there is no "essential services" carve-out — package
+    /// registries, public git hosting, container registries, and AI APIs are
+    /// all blocked under a per-sandbox policy, contrary to the earlier
+    /// assumption this code encoded. So the surface has the external tier with
+    /// no general-purpose holes and qualifies as a credential boundary; in fact
+    /// it is stronger than E2B, which limits domain rules to HTTP/HTTPS ports
+    /// and leaves DNS open.
+    ///
+    /// The one caveat left is a precondition the adapter cannot verify
+    /// statically, so it is *not* encoded here (this declares what the
+    /// mechanism blocks, not account state): the per-sandbox egress override
+    /// requires Daytona org tier 3+. On tier 1–2 the override is refused and the
+    /// org default applies, so the boundary is not guaranteed. The host
+    /// projection surfaces that requirement inline as a conditional boundary
+    /// rather than an unconditional one.
     #[must_use]
     pub fn egress_enforcement() -> EgressEnforcement {
-        let curated = |purpose: &'static str| EnforcementException {
-            scope: ExceptionScope::VendorCurated,
-            reach: ExceptionReach::GeneralPurpose,
-            purpose,
-        };
-        EgressEnforcement::external(vec![
-            curated("package registries"),
-            curated("git hosting"),
-            curated("container registries"),
-            curated("AI APIs"),
-        ])
+        // No general-purpose exceptions: a per-sandbox policy blocks every
+        // unlisted destination, confirmed live in #888.
+        EgressEnforcement::external(Vec::new())
     }
 
     async fn create_sandbox(
@@ -713,12 +718,15 @@ struct DaytonaNetworkSettings {
 /// one. This mirrors E2B's explicit `allow_internet_access: false` baseline:
 /// a domain-only policy must still deny raw-IP egress, and an omitted CIDR
 /// field could read as "no restriction on that axis" and leave IP egress
-/// fully open — defeating deny-by-default. Present-but-empty is intended to
-/// mean "allow nothing on this axis."
+/// fully open — defeating deny-by-default. Present-but-empty means "allow
+/// nothing on this axis."
 ///
-/// Vendor semantics of an empty-but-present allowlist need live confirmation
-/// against Daytona before this surface is trusted as an enforcement boundary;
-/// the default (no policy → open egress) is not changed here.
+/// A live test against a real Daytona account (issue #888) confirmed that
+/// empty-but-present *is* read as deny-all on that axis: under a domain-only
+/// policy (`domainAllowList` set, `networkAllowList` present but empty) raw-IP
+/// egress was blocked at connect and forbidden by the proxy. The
+/// present-but-empty deny-all shape is therefore relied on, not assumed. The
+/// default (no policy → open egress) is unchanged.
 fn daytona_network_settings(policy: Option<&EgressPolicy>) -> DaytonaNetworkSettings {
     let open = DaytonaNetworkSettings {
         network_block_all: false,

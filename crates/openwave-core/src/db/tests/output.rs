@@ -1,7 +1,8 @@
 use super::*;
 use crate::citation::AssistantCitationReference;
 use crate::deliverable::{
-    CreateOutput, NewOutputRevision, OutputRecord, MAX_DELIVERABLE_BYTES, MAX_OUTPUT_REVISIONS,
+    CreateOutput, DeliverableKind, NewOutputRevision, OutputRecord, MAX_DELIVERABLE_BYTES,
+    MAX_OUTPUT_REVISIONS,
 };
 use crate::id::{CallId, DocumentId, OutputId, OutputRevisionId};
 use crate::model::{
@@ -24,6 +25,7 @@ fn revision(seed: u8, second: i64) -> NewOutputRevision {
         byte_len: u64::from(seed) + 1,
         sha256: digest(seed),
         turn_id: None,
+        producing_run_id: None,
         citations: Vec::new(),
         created_at: at(second),
     }
@@ -34,6 +36,7 @@ fn create_request(chat_id: ChatId, filename: &str, seed: u8) -> CreateOutput {
         id: OutputId::new(),
         chat_id,
         filename: filename.to_owned(),
+        kind: DeliverableKind::Text,
         revision: revision(seed, 0),
     }
 }
@@ -513,4 +516,151 @@ async fn output_citations_cannot_cross_turn_or_conversation_boundaries() {
         .await
         .unwrap()
         .is_empty());
+}
+
+#[cfg(feature = "tools")]
+fn open_scratch(path: &std::path::Path) -> cap_std::fs::Dir {
+    cap_std::fs::Dir::open_ambient_dir(path, cap_std::ambient_authority()).unwrap()
+}
+
+#[tokio::test]
+async fn a_revision_records_a_producing_run_and_rejects_two_producers() {
+    use crate::id::AgentRunId;
+
+    let (_dir, store, chat) = store_with_chat().await;
+    let request = create_request(chat.id, "brief.md", 1);
+    let created = store.create_output(&request).await.unwrap();
+
+    // A later revision can be attributed to a producing background run.
+    let run_id = AgentRunId::new();
+    let mut run_revision = revision(2, 10);
+    run_revision.producing_run_id = Some(run_id);
+    let updated = store
+        .append_output_revision(created.id, &run_revision)
+        .await
+        .unwrap();
+    let stored = store
+        .get_output_revision(updated.current_revision)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.producing_run_id, Some(run_id));
+    assert_eq!(stored.turn_id, None);
+
+    // A revision may not name both a producing turn and a producing run.
+    let mut both = revision(3, 20);
+    both.turn_id = Some(TurnId::new());
+    both.producing_run_id = Some(AgentRunId::new());
+    assert!(store
+        .append_output_revision(created.id, &both)
+        .await
+        .is_err());
+}
+
+#[cfg(feature = "tools")]
+#[tokio::test]
+async fn a_binary_workspace_artifact_is_accepted_published_and_attributed_to_its_run() {
+    use crate::deliverable::{output_revision_relative_path, RevisionProducer};
+    use crate::deliverable_acceptance::{accept_workspace_artifact, WorkspaceArtifactProposal};
+    use crate::id::AgentRunId;
+
+    let (_dir, store, chat) = store_with_chat().await;
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = open_scratch(scratch.path());
+
+    // A binary artifact larger than the 512 KiB text cap, which the text path
+    // would reject, and carrying a real binary media type.
+    let mut content = b"\x89PNG\r\n\x1a\n".to_vec();
+    content.resize(700 * 1024, 7);
+    let run_id = AgentRunId::new();
+    let output_id = OutputId::new();
+    let revision_id = OutputRevisionId::new();
+
+    let record = accept_workspace_artifact(
+        &store,
+        &dir,
+        &WorkspaceArtifactProposal {
+            output_id,
+            chat_id: chat.id,
+            filename: "chart.png".into(),
+            media_type: "image/png".into(),
+            revision_id,
+            producer: RevisionProducer::Run(run_id),
+            revise: false,
+            content: content.clone(),
+            created_at: at(0),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(record.media_type, "image/png");
+    assert_eq!(record.revision_count, 1);
+
+    // The bytes landed at the exact write-once revision path the desktop export
+    // reads, unchanged and content-addressed.
+    let published = scratch
+        .path()
+        .join(output_revision_relative_path(output_id, revision_id));
+    assert_eq!(std::fs::read(&published).unwrap(), content);
+
+    // The revision records the producing run, not a turn.
+    let revision = store
+        .get_output_revision(revision_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(revision.producing_run_id, Some(run_id));
+    assert_eq!(revision.turn_id, None);
+    assert_eq!(revision.byte_len, content.len() as u64);
+    use sha2::Digest as _;
+    assert_eq!(
+        revision.sha256,
+        <[u8; 32]>::from(sha2::Sha256::digest(&content))
+    );
+}
+
+#[cfg(feature = "tools")]
+#[tokio::test]
+async fn acceptance_enforces_the_binary_cap_and_rejects_empty_artifacts() {
+    use crate::deliverable::{RevisionProducer, MAX_BINARY_DELIVERABLE_BYTES};
+    use crate::deliverable_acceptance::{accept_workspace_artifact, WorkspaceArtifactProposal};
+    use crate::id::AgentRunId;
+
+    let (_dir, store, chat) = store_with_chat().await;
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = open_scratch(scratch.path());
+
+    let proposal = |content: Vec<u8>| WorkspaceArtifactProposal {
+        output_id: OutputId::new(),
+        chat_id: chat.id,
+        filename: "blob.bin".into(),
+        media_type: "application/octet-stream".into(),
+        revision_id: OutputRevisionId::new(),
+        producer: RevisionProducer::Run(AgentRunId::new()),
+        revise: false,
+        content,
+        created_at: at(0),
+    };
+
+    assert!(
+        accept_workspace_artifact(&store, &dir, &proposal(Vec::new()))
+            .await
+            .is_err()
+    );
+    assert!(accept_workspace_artifact(
+        &store,
+        &dir,
+        &proposal(vec![0u8; MAX_BINARY_DELIVERABLE_BYTES + 1])
+    )
+    .await
+    .is_err());
+    // Exactly at the cap is accepted.
+    assert!(accept_workspace_artifact(
+        &store,
+        &dir,
+        &proposal(vec![0u8; MAX_BINARY_DELIVERABLE_BYTES])
+    )
+    .await
+    .is_ok());
 }

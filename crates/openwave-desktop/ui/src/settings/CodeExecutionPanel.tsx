@@ -351,12 +351,20 @@ type EgressEnforcementRow =
  */
 const EGRESS_STATUS_PRESENTATION: Record<
   EgressEnforcementRow["status"],
-  { badge: "success" | "warning" | "critical"; label: string; lead: string }
+  { badge: "success" | "info" | "warning" | "critical"; label: string; lead: string }
 > = {
   boundary: {
     badge: "success",
     label: "Boundary",
     lead: "Enforced as a full network boundary.",
+  },
+  // A real boundary, but gated on a precondition the host can't verify. Shown
+  // in the informational tone rather than plain green, with the requirement
+  // rendered inline below, so it never reads as an unconditional boundary.
+  conditional_boundary: {
+    badge: "info",
+    label: "Boundary — conditional",
+    lead: "A strict per-sandbox boundary when enforced: unlisted domains, raw IPs, and unlisted-domain DNS are all blocked — stronger than E2B. Not guaranteed on every account:",
   },
   applied_with_gaps: {
     badge: "warning",
@@ -395,6 +403,13 @@ function EgressEnforcementDisclosure({
               </span>{" "}
               — {presentation.lead}
               {row.gaps.length > 0 && ` ${row.gaps.join("; ")}.`}
+              {row.requirement && (
+                <span className="font-medium text-foreground">
+                  {" "}
+                  Requires {row.requirement}. On a lower tier the per-sandbox
+                  override is refused and the account default applies.
+                </span>
+              )}
             </span>
           </div>
         );

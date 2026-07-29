@@ -17,9 +17,10 @@ use crate::citation::{
     MAX_CITATION_HEADING_CHARS,
 };
 use crate::deliverable::{
-    deliverable_media_type, validate_deliverable_name, CreateOutput, NewOutputRevision,
-    OutputCitationSnapshot, OutputRecord, OutputRevision, MAX_DELIVERABLE_BYTES,
-    MAX_OUTPUT_CITATIONS, MAX_OUTPUT_REVISIONS,
+    deliverable_media_type, revision_byte_ceiling, validate_binary_deliverable,
+    validate_deliverable_name, CreateOutput, DeliverableKind, NewOutputRevision,
+    OutputCitationSnapshot, OutputRecord, OutputRevision, MAX_OUTPUT_CITATIONS,
+    MAX_OUTPUT_REVISIONS,
 };
 use crate::error::{AgentError, Result};
 use crate::id::{ChatId, OutputCitationId, OutputId, OutputRevisionId};
@@ -46,7 +47,7 @@ pub(in crate::db) async fn create_output(
         // An exact retry must return the original record rather than fail. A
         // reused id that describes different content is a caller bug.
         let exact =
-            exact_output_on(&transaction, &existing, request, media_type, created_at).await?;
+            exact_output_on(&transaction, &existing, request, &media_type, created_at).await?;
         transaction.rollback().await.map_err(store_err)?;
         return if exact {
             Ok(existing)
@@ -63,7 +64,7 @@ pub(in crate::db) async fn create_output(
         id: Set(request.id.0),
         chat_id: Set(request.chat_id.0),
         filename: Set(request.filename.clone()),
-        media_type: Set(media_type.to_owned()),
+        media_type: Set(media_type.clone()),
         current_revision_id: Set(request.revision.id.0),
         revision_count: Set(1),
         created_at: Set(created_at),
@@ -86,13 +87,18 @@ pub(in crate::db) async fn append_output_revision(
     output_id: OutputId,
     revision: &NewOutputRevision,
 ) -> Result<OutputRecord> {
-    validate_revision(revision)?;
     let created_at = canonical_db_timestamp(revision.created_at)?;
     let transaction = store.conn.begin().await.map_err(store_err)?;
     let Some(existing) = find_output_on(&transaction, output_id).await? else {
         transaction.rollback().await.map_err(store_err)?;
         return Err(AgentError::Store(format!("output {output_id} not found")));
     };
+    // The output's fixed media type fixes the revision size ceiling: a binary
+    // output accepts binary-sized revisions, a text output only text-sized ones.
+    if let Err(error) = validate_revision(revision, revision_byte_ceiling(&existing.media_type)) {
+        transaction.rollback().await.map_err(store_err)?;
+        return Err(error);
+    }
     // Take the owning chat's write lock so two concurrent revisions cannot
     // both read the same ordinal and race to publish a current revision.
     if !acquire_chat_write_lock(&transaction, existing.chat_id).await? {
@@ -290,20 +296,41 @@ pub(in crate::db) async fn delete_output(
     Ok(true)
 }
 
-fn validate_new_output(request: &CreateOutput) -> Result<&'static str> {
-    validate_deliverable_name(&request.filename)
-        .map_err(|message| AgentError::Store(format!("invalid output filename: {message}")))?;
-    let media_type = deliverable_media_type(&request.filename)
-        .ok_or_else(|| AgentError::Store("output filename has no supported media type".into()))?;
-    validate_revision(&request.revision)?;
+fn validate_new_output(request: &CreateOutput) -> Result<String> {
+    let media_type = match &request.kind {
+        DeliverableKind::Text => {
+            validate_deliverable_name(&request.filename).map_err(|message| {
+                AgentError::Store(format!("invalid output filename: {message}"))
+            })?;
+            deliverable_media_type(&request.filename)
+                .ok_or_else(|| {
+                    AgentError::Store("output filename has no supported media type".into())
+                })?
+                .to_owned()
+        }
+        DeliverableKind::Binary { media_type } => {
+            validate_binary_deliverable(&request.filename, media_type).map_err(|message| {
+                AgentError::Store(format!("invalid binary output: {message}"))
+            })?;
+            media_type.clone()
+        }
+    };
+    validate_revision(&request.revision, revision_byte_ceiling(&media_type))?;
     Ok(media_type)
 }
 
-fn validate_revision(revision: &NewOutputRevision) -> Result<()> {
-    if revision.byte_len > MAX_DELIVERABLE_BYTES as u64 {
+fn validate_revision(revision: &NewOutputRevision, byte_ceiling: usize) -> Result<()> {
+    if revision.byte_len > byte_ceiling as u64 {
         return Err(AgentError::Store(format!(
-            "output revision is too large (maximum {MAX_DELIVERABLE_BYTES} bytes)"
+            "output revision is too large (maximum {byte_ceiling} bytes)"
         )));
+    }
+    // A revision records the foreground turn or the background run that produced
+    // it, never both.
+    if revision.turn_id.is_some() && revision.producing_run_id.is_some() {
+        return Err(AgentError::Store(
+            "output revision names both a producing turn and a producing run".into(),
+        ));
     }
     if revision.citations.len() > MAX_OUTPUT_CITATIONS
         || revision
@@ -343,6 +370,7 @@ where
         })?),
         sha256: Set(revision.sha256.to_vec()),
         turn_id: Set(revision.turn_id.map(|turn_id| turn_id.0)),
+        producing_run_id: Set(revision.producing_run_id.map(|run_id| run_id.0)),
         created_at: Set(created_at),
     }
     .insert(conn)
@@ -494,6 +522,7 @@ fn revision_matches(
         && stored.byte_len == request.byte_len
         && stored.sha256 == request.sha256
         && stored.turn_id == request.turn_id
+        && stored.producing_run_id == request.producing_run_id
         && stored.created_at == created_at
 }
 
@@ -563,6 +592,7 @@ fn revision_from_model(model: entities::output_revision::Model) -> Result<Output
             .map_err(|_| AgentError::Store("stored output revision length is negative".into()))?,
         sha256,
         turn_id: model.turn_id.map(crate::id::TurnId),
+        producing_run_id: model.producing_run_id.map(crate::id::AgentRunId),
         created_at: model.created_at,
     })
 }
