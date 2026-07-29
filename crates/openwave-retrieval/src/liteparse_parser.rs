@@ -25,7 +25,7 @@ const PDF_MEDIA_TYPE: &str = "application/pdf";
 /// Stable identity of this parser's canonical-text behavior. Bump the trailing
 /// version tag whenever an implementation or configuration change can alter the
 /// extracted text, so the durable pipeline reparses affected documents.
-const LITEPARSE_FINGERPRINT: &str = "liteparse:v2.8:pdf:markdown:no-ocr:pages:v2";
+const LITEPARSE_FINGERPRINT: &str = "liteparse:v2.8:pdf:markdown:no-ocr:positioned:v3";
 
 /// Extracts Markdown canonical text from `application/pdf` bytes via `liteparse`.
 #[derive(Debug, Clone, Copy, Default)]

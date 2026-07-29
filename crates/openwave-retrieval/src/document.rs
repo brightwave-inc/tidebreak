@@ -6,8 +6,8 @@
 //! from the vector index (offsets in the store, text rehydrated from the source),
 //! and it gives every answer a precise, verifiable pointer back into the source.
 
-pub use openwave_core::{ByteSpan, SourceLocation, SourceRegion};
-use openwave_core::{ChatId, DocumentGeneration, ProjectId};
+pub use openwave_core::{ByteSpan, PageBounds, SourceLocation, SourceRegion, PAGE_BOUNDS_SCALE};
+use openwave_core::{ChatId, DocumentGeneration, ProjectId, RetrievalEvidenceInput};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
@@ -173,9 +173,19 @@ impl Document {
     }
 
     /// Return source regions intersecting `span`, clipped to its boundaries.
+    ///
+    /// Never returns more regions than a piece of evidence is allowed to carry.
+    /// A parser that resolves positions within a page emits many small regions,
+    /// and a span over dense text — a page of short table cells — can overlap
+    /// more of them than [`RetrievalEvidenceInput::MAX_SOURCE_REGIONS`] permits,
+    /// which would make the evidence invalid rather than merely coarse. When
+    /// that happens the regions are coalesced by page: the page a passage came
+    /// from is the part worth keeping, and the geometry within it is the part
+    /// worth losing.
     #[must_use]
     pub fn source_regions_for(&self, span: ByteSpan) -> Vec<SourceRegion> {
-        self.source_regions
+        let clipped: Vec<SourceRegion> = self
+            .source_regions
             .iter()
             .filter_map(|region| {
                 let start = region.span.start.max(span.start);
@@ -185,8 +195,57 @@ impl Document {
                     location: region.location.clone(),
                 })
             })
-            .collect()
+            .collect();
+        if clipped.len() <= RetrievalEvidenceInput::MAX_SOURCE_REGIONS {
+            return clipped;
+        }
+        coalesce_by_page(clipped)
     }
+}
+
+/// Merge consecutive regions that name the same page into one region for that
+/// page, dropping the geometry that distinguished them.
+///
+/// Regions arrive ordered and non-overlapping, so consecutive regions on a page
+/// are contiguous or separated only by text that region map already assigned to
+/// the same page — merging them spans exactly the text they covered between
+/// them.
+fn coalesce_by_page(regions: Vec<SourceRegion>) -> Vec<SourceRegion> {
+    /// The page a region names, when it names one. `SourceLocation` is
+    /// `#[non_exhaustive]`, so a location this crate does not recognize is
+    /// possible in principle; such a region is passed through untouched rather
+    /// than folded into a neighbour it may have nothing to do with.
+    fn page_number(location: &SourceLocation) -> Option<std::num::NonZeroU32> {
+        match location {
+            SourceLocation::Page { number, .. } => Some(*number),
+            _ => None,
+        }
+    }
+
+    let mut merged: Vec<SourceRegion> = Vec::new();
+    for region in regions {
+        let page = page_number(&region.location);
+        let extends_previous = page.is_some()
+            && merged
+                .last()
+                .is_some_and(|previous| page_number(&previous.location) == page);
+        if extends_previous {
+            // Safe: `extends_previous` is false for an empty `merged`.
+            let previous = merged.last_mut().expect("checked non-empty");
+            previous.span = ByteSpan::new(previous.span.start, region.span.end);
+        } else if let Some(number) = page {
+            merged.push(SourceRegion {
+                span: region.span,
+                location: SourceLocation::Page {
+                    number,
+                    bounds: None,
+                },
+            });
+        } else {
+            merged.push(region);
+        }
+    }
+    merged
 }
 
 /// One chunk of a document: a contiguous slice of its text, ready to embed.
@@ -397,6 +456,74 @@ mod tests {
     fn document_slice_is_bounds_safe() {
         let doc = Document::new(DocumentSource::Inline, "text/plain", "hi");
         assert_eq!(doc.slice(ByteSpan::new(0, 99)), None);
+    }
+
+    #[test]
+    fn clipping_never_returns_more_regions_than_evidence_may_carry() {
+        // A page of short cells, each positioned: far more regions than the
+        // evidence cap. Exceeding it does not truncate the evidence, it makes
+        // the evidence invalid — so the clip has to stay inside the cap itself.
+        let count = RetrievalEvidenceInput::MAX_SOURCE_REGIONS * 3;
+        let text = "x".repeat(count);
+        let regions: Vec<SourceRegion> = (0..count)
+            .map(|i| SourceRegion {
+                span: ByteSpan::new(i, i + 1),
+                location: SourceLocation::Page {
+                    number: std::num::NonZeroU32::new(if i < count / 2 { 1 } else { 2 }).unwrap(),
+                    bounds: Some(openwave_core::PageBounds {
+                        left: 0,
+                        top: 0,
+                        width: 10,
+                        height: 10,
+                    }),
+                },
+            })
+            .collect();
+        let document = Document::new(DocumentSource::Inline, "application/pdf", text.clone())
+            .with_source_regions(regions);
+
+        let clipped = document.source_regions_for(ByteSpan::new(0, count));
+        assert!(clipped.len() <= RetrievalEvidenceInput::MAX_SOURCE_REGIONS);
+        // The pages survive the coalescing; only the geometry is given up.
+        let pages: Vec<_> = clipped
+            .iter()
+            .map(|region| match region.location {
+                SourceLocation::Page { number, bounds } => (number.get(), bounds),
+                #[allow(unreachable_patterns)]
+                _ => panic!("expected a page location"),
+            })
+            .collect();
+        assert_eq!(pages, vec![(1, None), (2, None)]);
+        // And the merged regions still tile the span they were clipped from.
+        assert_eq!(clipped[0].span, ByteSpan::new(0, count / 2));
+        assert_eq!(clipped[1].span, ByteSpan::new(count / 2, count));
+    }
+
+    #[test]
+    fn clipping_keeps_geometry_when_it_fits() {
+        let document = Document::new(DocumentSource::Inline, "application/pdf", "alpha beta")
+            .with_source_regions(vec![SourceRegion {
+                span: ByteSpan::new(0, 5),
+                location: SourceLocation::Page {
+                    number: std::num::NonZeroU32::new(1).unwrap(),
+                    bounds: Some(openwave_core::PageBounds {
+                        left: 1,
+                        top: 2,
+                        width: 3,
+                        height: 4,
+                    }),
+                },
+            }]);
+
+        let clipped = document.source_regions_for(ByteSpan::new(0, 10));
+        assert_eq!(clipped.len(), 1);
+        assert!(matches!(
+            clipped[0].location,
+            SourceLocation::Page {
+                bounds: Some(_),
+                ..
+            }
+        ));
     }
 
     #[test]

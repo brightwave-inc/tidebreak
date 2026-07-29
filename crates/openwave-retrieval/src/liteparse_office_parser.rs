@@ -48,7 +48,7 @@ const OFFICE_MEDIA_TYPES: &[&str] = &[
 /// extracted text, so the durable pipeline reparses affected documents. The
 /// fingerprint describes the intended pipeline and is deliberately independent
 /// of whether LibreOffice happens to be installed at runtime.
-const OFFICE_FINGERPRINT: &str = "liteparse:v2.8:office:libreoffice:markdown:no-ocr:pages:v2";
+const OFFICE_FINGERPRINT: &str = "liteparse:v2.8:office:libreoffice:markdown:no-ocr:positioned:v3";
 
 /// Extracts Markdown canonical text from Office documents via LibreOffice +
 /// `liteparse`.

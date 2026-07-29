@@ -95,7 +95,8 @@ mod vector;
 
 pub use chunk::{Chunker, TextChunker};
 pub use document::{
-    ByteSpan, Chunk, Citation, Document, DocumentSource, ScoredChunk, SourceLocation, SourceRegion,
+    ByteSpan, Chunk, Citation, Document, DocumentSource, PageBounds, ScoredChunk, SourceLocation,
+    SourceRegion, PAGE_BOUNDS_SCALE,
 };
 pub use embed::{Embedder, Embedding, HashEmbedder};
 pub use error::{Result, RetrievalError};
