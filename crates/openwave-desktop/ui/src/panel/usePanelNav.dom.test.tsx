@@ -4,16 +4,25 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { renderWithRouter } from "../test/router";
+import { useStableSourceNav } from "./SourceNav";
 import { usePanelNav } from "./usePanelNav";
 
 afterEach(cleanup);
 
 function Harness() {
   const { openPanel, closePanel, toggleFullscreen } = usePanelNav();
+  const sourceNav = useStableSourceNav(openPanel);
   return (
     <div>
       <button onClick={() => openPanel({ type: "sources" })}>open sources</button>
       <button onClick={() => openPanel({ type: "outputs" })}>open outputs</button>
+      <button
+        onClick={() =>
+          sourceNav.openCitation({ documentId: "doc-2", citationId: "cite-1" })
+        }
+      >
+        open citation
+      </button>
       <button onClick={() => closePanel("left")}>close left</button>
       <button onClick={() => closePanel("right")}>close right</button>
       <button onClick={() => toggleFullscreen("left")}>fullscreen left</button>
@@ -45,6 +54,27 @@ describe("usePanelNav", () => {
 
     await waitFor(() =>
       expect(router.state.location.search).toEqual({ left: "outputs", right: "chat" }),
+    );
+  });
+
+  // A citation is clicked in the transcript, which in a split layout is one of
+  // the two slots. The document has to arrive beside it: replacing the
+  // conversation with the source it cites takes away the thing being read.
+  it("opens a citation beside the conversation rather than over it", async () => {
+    const user = userEvent.setup();
+    // Another source is already open, and the conversation is fullscreen — the
+    // reader is reading it, and the citation they clicked is in it.
+    const { router } = await mount(
+      "/c/chat-1?left=sources.doc-1&right=chat&fullscreen=right",
+    );
+
+    await user.click(screen.getByText("open citation"));
+
+    await waitFor(() =>
+      expect(router.state.location.search).toEqual({
+        left: "sources.doc-2.cite-1",
+        right: "chat",
+      }),
     );
   });
 
