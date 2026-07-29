@@ -26,6 +26,13 @@ overflow-checks = true
 # Shared dependency versions. Crates opt in with `dep.workspace = true` so the
 # whole workspace resolves one version of each.
 [workspace.dependencies]
+# Real bash grammar for the shell-policy analyzer. Pure Rust (no C toolchain)
+# and a typed AST, so the closed-world traversal is compiler-enforced: an
+# unhandled node kind fails to build rather than falling through to "allow".
+brush-parser = "=0.4.0"
+# Backreference regexes for the sed danger heuristics; `regex` has no
+# backreferences and cannot express them.
+fancy-regex = "=0.18.0"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 schemars = { version = "=1.2.2", features = ["uuid1"] }
