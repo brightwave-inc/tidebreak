@@ -165,6 +165,16 @@ model: string | null,
  */
 reasoning_effort: ReasoningEffort | null, 
 /**
+ * How much this chat lets the agent do between approvals; `None` means
+ * [`PermissionMode::Ask`].
+ */
+permission_mode: PermissionMode | null, 
+/**
+ * How turns in this chat ask the model to cite; `None` follows the global
+ * default.
+ */
+citation_format: CitationFormat | null, 
+/**
  * CAS revision of this conversation's exact root projection.
  */
 attachment_revision: number, 
@@ -269,6 +279,19 @@ export type ChatTranscript = { messages: Array<ChatMessageSnapshot>,
  * renderer-safe allowlist. Canonical tool records never cross this API.
  */
 tool_activity: Array<ChatToolActivitySnapshot>, last_event_seq: number, };
+
+/**
+ * How a turn asks the model to cite the sources it read.
+ *
+ * Only the authoring instruction changes. Both forms resolve through the same
+ * grammar and land in the same durable shape — an ordered reference list, with
+ * inline directives as an optional layer on top — so one conversation can hold
+ * messages authored under either, and each keeps rendering as it was written.
+ *
+ * Persisted per chat as the token from [`Self::as_str`], with an absent value
+ * meaning "follow the global default".
+ */
+export type CitationFormat = "inline" | "sources_attached";
 
 /**
  * Where a citation points, projected per evidence kind.
@@ -453,6 +476,16 @@ supported: boolean, apps: Array<GatewayAppInfo>, };
  * token material — only what the settings surface displays.
  */
 export type GatewayStatus = { configured: boolean, enabled: boolean, base_url?: string, signed_in: boolean, account_hint?: string, installation_id?: string, model_count: number, sign_in: SignInProgress, };
+
+/**
+ * How much a standing grant covers.
+ *
+ * A grant is easy to widen by accident and hard to notice afterwards, so the
+ * scope is stated in the grant itself rather than inferred from the tool. The
+ * narrower variants exist because "don't ask me about commands again" is a
+ * much larger thing to agree to than "don't ask me about `cargo` again".
+ */
+export type GrantScope = { "scope": "exact_action" } & ToolActionPreview | { "scope": "any_args_for", command: string, } | { "scope": "whole_tool" };
 
 /**
  * Opaque identifier for a folder registered with a host broker.
@@ -729,6 +762,20 @@ export type PendingOutputWritebackRequest = { call_id: CallId, turn_id: TurnId, 
 export type PendingUserQuestions = { call_id: CallId, turn_id: TurnId, questions: Array<UserQuestion>, asked_at: string, };
 
 /**
+ * How much a chat lets the agent do between approvals.
+ *
+ * The mode is the fallback, not the whole decision: a standing grant the
+ * reader has already made covers its calls in every mode, and `ReadOnly`
+ * tools never ask in any mode. The mode only decides what happens to a
+ * mutating call that no grant covers — ask the reader, or proceed.
+ *
+ * Persisted per chat as the token from [`Self::as_str`] and read at turn
+ * start, like the model selection: changing it mid-turn applies from the
+ * next turn, and a reopened chat runs the way it ran before.
+ */
+export type PermissionMode = "ask" | "auto" | "allow";
+
+/**
  * An optional grouping of chats that share project context and a document
  * corpus. A chat may belong to a project or stand alone — unlike some designs
  * that make a project mandatory, OpenWave keeps loose, projectless chats.
@@ -975,6 +1022,11 @@ export type Settings = {
  */
 model: string | null, 
 /**
+ * The citation format new chats follow unless they carry their own.
+ * Always resolved, so a client never has to know the product default.
+ */
+citation_format: CitationFormat, 
+/**
  * Whether a model API key is configured (never the key itself).
  */
 has_api_key: boolean, };
@@ -983,6 +1035,22 @@ has_api_key: boolean, };
  * Renderer-safe progress of the current sign-in attempt.
  */
 export type SignInProgress = { "state": "idle" } | { "state": "pending", authorization_url: string, } | { "state": "failed", message: string, };
+
+/**
+ * One durable "don't ask again" the reader has made, with enough provenance
+ * to recognize it later and withdraw it. Grant scopes are already closed
+ * renderer-safe projections, so the snapshot carries them verbatim.
+ */
+export type StandingGrantSnapshot = { 
+/**
+ * The approval decision that created the grant — also the handle a
+ * revocation names.
+ */
+source_call_id: CallId, chat_id: ChatId, 
+/**
+ * Chat title for provenance; `None` when the chat is untitled.
+ */
+chat_title: string | null, action: RendererToolName, approval: ToolApprovalKind, scope: GrantScope, granted_at: string, };
 
 /**
  * How the `path` of a structured-path evidence location is written.
@@ -1033,7 +1101,7 @@ end_published_at: string | null, };
  * summary or arguments. `Unsupported` is the fail-closed default: a Sensitive
  * action the server can only reject, never approve.
  */
-export type ToolApprovalKind = "search_may_share_query_and_excerpts" | "web_search_may_share_query" | "exec_may_run_networked_command" | "external_mcp_may_call_server" | "unsupported";
+export type ToolApprovalKind = "search_may_share_query_and_excerpts" | "web_search_may_share_query" | "exec_may_run_networked_command" | "external_mcp_may_call_server" | "workspace_may_modify_files" | "unsupported";
 
 /**
  * What a call produced, in a form a human can read.
