@@ -54,6 +54,7 @@ fn attach_handshake_wire_shapes() {
         protocol_version: PROTOCOL_VERSION,
         run_id: RunId::new(),
         resume_from: EventCursor::committed(Sequence::new(3)),
+        transport_secret: TransportSecret::new("per-run-secret"),
     };
     roundtrip(&request);
     golden(
@@ -61,8 +62,19 @@ fn attach_handshake_wire_shapes() {
         &[
             ("/protocol_version", json!(PROTOCOL_VERSION)),
             ("/resume_from", json!(3)),
+            // The secret is transparent on the wire (a bearer token), so a
+            // self-hoster's host presents it as a plain string field.
+            ("/transport_secret", json!("per-run-secret")),
         ],
     );
+
+    // An attach that omits the secret decodes to the empty token (serde default),
+    // which the sandbox refuses — a naive peer gets a clean auth refusal.
+    let omitted: AttachRequest = serde_json::from_value(
+        json!({"protocol_version": PROTOCOL_VERSION, "run_id": RunId::new(), "resume_from": 0}),
+    )
+    .expect("an attach without a secret still decodes");
+    assert_eq!(omitted.transport_secret, TransportSecret::default());
 
     let accepted = HandshakeResponse::Accepted(AttachAccepted {
         protocol_version: PROTOCOL_VERSION,

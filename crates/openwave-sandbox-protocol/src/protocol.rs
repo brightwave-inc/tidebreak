@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{EventCursor, RunId};
+use crate::provisioning::TransportSecret;
 
 /// Current sandbox-agent wire protocol.
 ///
@@ -17,7 +18,10 @@ use crate::ids::{EventCursor, RunId};
 /// equality and refuses a differing peer, exactly as the host broker does; the
 /// protocol is [UNSTABLE](crate) until a named release and offers no
 /// negotiation window across versions.
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// Version 2 added the authenticated attach: [`AttachRequest`] carries a per-run
+/// [`TransportSecret`] the sandbox verifies before it installs the connection.
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Largest single reverse-RPC or event frame a conforming transport accepts,
 /// so a peer cannot force unbounded buffering with one enormous frame.
@@ -53,7 +57,7 @@ pub const MAX_INFLIGHT_REQUESTS: usize = 16;
 /// `resume_from` is the host's last committed [`EventCursor`]; a fresh run
 /// attaches at [`EventCursor::START`]. The handshake is the first thing that
 /// crosses a new connection, before any event or reverse request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttachRequest {
     /// The version the host speaks. The sandbox refuses a value it does not
@@ -63,6 +67,18 @@ pub struct AttachRequest {
     pub run_id: RunId,
     /// Where to resume the event stream from.
     pub resume_from: EventCursor,
+    /// The per-run transport secret the host presents to authenticate the dial.
+    ///
+    /// The sandbox verifies it against the secret it was configured with —
+    /// [after](handshake) the version check and *before* it installs the
+    /// connection or serves any capability — and refuses a mismatch with
+    /// [`ErrorCode::Unauthenticated`]. It is an opaque bearer token carried within
+    /// the frame bound; it is never logged (its [`Debug`] is redacting). An
+    /// omitted token decodes, via `#[serde(default)]`, to the empty secret, which
+    /// authenticates against nothing and is refused — a naive or older peer that
+    /// sends no token gets a clean auth refusal rather than a frame-parse drop.
+    #[serde(default)]
+    pub transport_secret: TransportSecret,
 }
 
 /// The sandbox supervisor's answer to an [`AttachRequest`], as an on-wire frame.
@@ -104,37 +120,59 @@ pub struct AttachAccepted {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttachRefused {
-    /// The version the sandbox speaks, different from the host's.
+    /// The version the sandbox speaks (equal to the host's on an authentication
+    /// refusal, different on a version refusal).
     pub protocol_version: u32,
-    /// Always [`ErrorCode::ProtocolVersion`] today; carried for symmetry with
-    /// other refusals.
+    /// Why the attach was refused: [`ErrorCode::ProtocolVersion`] on a version
+    /// skew, or [`ErrorCode::Unauthenticated`] when the presented transport secret
+    /// did not match.
     pub code: ErrorCode,
 }
 
 /// Compute the sandbox's handshake answer for one attach — the canonical answer
 /// a backend returns, so a third-party implementation has an exact example.
 ///
-/// Exact-equality on the version, mirroring the host broker: equal versions
-/// accept; anything else refuses and returns the sandbox's version.
+/// Two gates, in this order:
+///
+/// 1. **Version**, exact-equality, mirroring the host broker: a skew refuses with
+///    [`ErrorCode::ProtocolVersion`] and returns the sandbox's version, before
+///    authentication is even considered — so neither gate leaks signal about the
+///    other.
+/// 2. **Authentication**: the presented [`AttachRequest::transport_secret`] is
+///    compared, in constant time, against `expected_secret`. A mismatch — or a
+///    sandbox with no configured secret (`expected_secret` is `None`), which
+///    authenticates nothing and so **fails closed** — refuses with
+///    [`ErrorCode::Unauthenticated`]. The refusal carries no secret.
+///
+/// Only when both gates pass is the connection accepted. A caller installs the
+/// connection or serves a capability *only* on [`HandshakeResponse::Accepted`].
 #[must_use]
 pub fn handshake(
     request: &AttachRequest,
     sandbox_version: u32,
+    expected_secret: Option<&TransportSecret>,
     granted_capabilities: Vec<crate::reverse::Capability>,
     latest_sequence: Option<crate::ids::Sequence>,
 ) -> HandshakeResponse {
-    if request.protocol_version == sandbox_version {
-        HandshakeResponse::Accepted(AttachAccepted {
-            protocol_version: sandbox_version,
-            granted_capabilities,
-            latest_sequence,
-        })
-    } else {
-        HandshakeResponse::Refused(AttachRefused {
+    if request.protocol_version != sandbox_version {
+        return HandshakeResponse::Refused(AttachRefused {
             protocol_version: sandbox_version,
             code: ErrorCode::ProtocolVersion,
-        })
+        });
     }
+    let authenticated =
+        expected_secret.is_some_and(|secret| secret.verify(&request.transport_secret));
+    if !authenticated {
+        return HandshakeResponse::Refused(AttachRefused {
+            protocol_version: sandbox_version,
+            code: ErrorCode::Unauthenticated,
+        });
+    }
+    HandshakeResponse::Accepted(AttachAccepted {
+        protocol_version: sandbox_version,
+        granted_capabilities,
+        latest_sequence,
+    })
 }
 
 /// Stable failure classes carried across the sandbox-agent boundary.
@@ -147,6 +185,10 @@ pub fn handshake(
 pub enum ErrorCode {
     /// The request did not match the host's exact [`PROTOCOL_VERSION`].
     ProtocolVersion,
+    /// The presented per-run transport secret did not match the sandbox's, or no
+    /// token was presented. The attach is refused before the connection is
+    /// installed or any capability is served.
+    Unauthenticated,
     /// The requested capability was not granted to this run.
     Denied,
     /// The operation identity was reused for a different request.
@@ -249,6 +291,7 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             run_id: RunId::new(),
             resume_from: EventCursor::committed(Sequence::new(7)),
+            transport_secret: TransportSecret::new("per-run-secret"),
         };
         let encoded = serde_json::to_string(&request).unwrap();
         assert_eq!(
@@ -278,14 +321,17 @@ mod tests {
 
     #[test]
     fn handshake_accepts_on_match_and_refuses_on_skew() {
+        let secret = TransportSecret::new("the-run-secret");
         let request = AttachRequest {
             protocol_version: PROTOCOL_VERSION,
             run_id: RunId::new(),
             resume_from: EventCursor::START,
+            transport_secret: secret.clone(),
         };
         match handshake(
             &request,
             PROTOCOL_VERSION,
+            Some(&secret),
             vec![Capability::ModelInference],
             None,
         ) {
@@ -296,12 +342,18 @@ mod tests {
                     vec![Capability::ModelInference]
                 );
             }
-            HandshakeResponse::Refused(_) => panic!("matching versions must accept"),
+            HandshakeResponse::Refused(_) => panic!("a matching version and secret must accept"),
         }
 
         // A skewed attach is answered with an on-wire refusal carrying the
         // sandbox's own version, not a blank error.
-        let skewed = handshake(&request, PROTOCOL_VERSION + 1, Vec::new(), None);
+        let skewed = handshake(
+            &request,
+            PROTOCOL_VERSION + 1,
+            Some(&secret),
+            Vec::new(),
+            None,
+        );
         match skewed {
             HandshakeResponse::Refused(refused) => {
                 assert_eq!(refused.protocol_version, PROTOCOL_VERSION + 1);
@@ -317,6 +369,63 @@ mod tests {
             serde_json::from_value::<HandshakeResponse>(encoded).unwrap(),
             skewed
         );
+    }
+
+    #[test]
+    fn handshake_refuses_a_bad_secret_after_the_version_gate() {
+        let expected = TransportSecret::new("the-run-secret");
+        let attach_with = |secret: TransportSecret| AttachRequest {
+            protocol_version: PROTOCOL_VERSION,
+            run_id: RunId::new(),
+            resume_from: EventCursor::START,
+            transport_secret: secret,
+        };
+
+        // Right version, wrong secret: refused as Unauthenticated (not accepted,
+        // and not a version refusal).
+        let wrong = handshake(
+            &attach_with(TransportSecret::new("not-the-secret")),
+            PROTOCOL_VERSION,
+            Some(&expected),
+            vec![Capability::ModelInference],
+            None,
+        );
+        match wrong {
+            HandshakeResponse::Refused(refused) => {
+                assert_eq!(refused.code, ErrorCode::Unauthenticated)
+            }
+            HandshakeResponse::Accepted(_) => panic!("a wrong secret must be refused"),
+        }
+
+        // The version gate comes first: a skew with a *correct* secret is still a
+        // version refusal, so auth never bypasses the version check.
+        let skewed_but_authed = handshake(
+            &attach_with(expected.clone()),
+            PROTOCOL_VERSION + 1,
+            Some(&expected),
+            Vec::new(),
+            None,
+        );
+        match skewed_but_authed {
+            HandshakeResponse::Refused(refused) => {
+                assert_eq!(refused.code, ErrorCode::ProtocolVersion)
+            }
+            HandshakeResponse::Accepted(_) => panic!("a version skew must refuse even when authed"),
+        }
+
+        // No configured secret fails closed: every attach is Unauthenticated even
+        // with a matching version.
+        let unconfigured = handshake(
+            &attach_with(expected.clone()),
+            PROTOCOL_VERSION,
+            None,
+            Vec::new(),
+            None,
+        );
+        assert!(matches!(
+            unconfigured,
+            HandshakeResponse::Refused(refused) if refused.code == ErrorCode::Unauthenticated
+        ));
     }
 
     #[test]

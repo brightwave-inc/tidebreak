@@ -34,6 +34,7 @@ use crate::{
         handshake, AttachAccepted, HandshakeResponse, Response, MAX_BUFFERED_EVENTS,
         MAX_INFLIGHT_REQUESTS, PROTOCOL_VERSION,
     },
+    provisioning::TransportSecret,
     reference::EmitError,
     reverse::{
         Capability, ControlFrame, RequestFrame, ReverseEnvelope, ReverseRequest, ReverseResult,
@@ -84,6 +85,11 @@ struct EventBuffer {
 
 struct RunInner {
     protocol_version: u32,
+    /// The per-run transport secret the supervisor was configured with. An attach
+    /// is authenticated against it before its connection is installed. `None`
+    /// means no secret was configured, and the run fails closed — every attach is
+    /// refused rather than served unauthenticated.
+    expected_secret: Option<TransportSecret>,
     granted: Vec<Capability>,
     request_lane_capacity: usize,
     events: Mutex<EventBuffer>,
@@ -99,14 +105,22 @@ pub struct SandboxRun {
 
 impl SandboxRun {
     /// A run speaking the current [`PROTOCOL_VERSION`], granting `capabilities`
-    /// deny-by-default, with the default event-buffer and request-lane bounds.
+    /// deny-by-default, authenticating attaches against `expected_secret`, with
+    /// the default event-buffer and request-lane bounds.
+    ///
+    /// `expected_secret` is `None` only when no per-run secret was configured, in
+    /// which case the run fails closed and refuses every attach.
     #[must_use]
-    pub fn new(capabilities: impl IntoIterator<Item = Capability>) -> Self {
+    pub fn new(
+        capabilities: impl IntoIterator<Item = Capability>,
+        expected_secret: Option<TransportSecret>,
+    ) -> Self {
         Self::with_config(
             PROTOCOL_VERSION,
             MAX_BUFFERED_EVENTS,
             MAX_INFLIGHT_REQUESTS,
             capabilities,
+            expected_secret,
         )
     }
 
@@ -119,11 +133,13 @@ impl SandboxRun {
         buffer_cap: usize,
         request_lane_capacity: usize,
         capabilities: impl IntoIterator<Item = Capability>,
+        expected_secret: Option<TransportSecret>,
     ) -> Self {
         let (conn, _) = watch::channel(None);
         Self {
             inner: Arc::new(RunInner {
                 protocol_version,
+                expected_secret,
                 granted: capabilities.into_iter().collect(),
                 request_lane_capacity: request_lane_capacity.max(1),
                 events: Mutex::new(EventBuffer {
@@ -317,9 +333,10 @@ impl SandboxRun {
 /// Serve one host connection against `run` until the host closes it.
 ///
 /// Reads the [`AttachRequest`](crate::protocol::AttachRequest), answers the
-/// handshake with the canonical [`handshake`] function (a version skew yields an
-/// on-wire refusal and the connection is not established), and on acceptance
-/// runs the connection: replays buffered events past the host's resume cursor,
+/// handshake with the canonical [`handshake`] function (a version skew or a
+/// failed transport-secret authentication yields an on-wire refusal and the
+/// connection is neither installed nor served), and on acceptance runs the
+/// connection: replays buffered events past the host's resume cursor,
 /// carries the agent's reverse requests and events out, and correlates the host's
 /// responses back. Returns when the connection drops; the `run` survives for the
 /// host to reattach to.
@@ -344,13 +361,18 @@ where
     let response = handshake(
         &attach,
         run.inner.protocol_version,
+        run.inner.expected_secret.as_ref(),
         run.inner.granted.clone(),
         run.latest_sequence(),
     );
     write_frame(&mut write_half, &WireFrame::Handshake(response.clone())).await?;
     let _accepted: AttachAccepted = match response {
         HandshakeResponse::Accepted(accepted) => accepted,
-        // The connection is refused and left unusable; the run stands.
+        // Refused — a version skew or a failed authentication. The connection is
+        // left unusable and is NOT installed as the run's live peer: the code
+        // below that publishes this connection via `send_replace` is never
+        // reached, so an unauthenticated dial cannot hijack the channel from the
+        // authenticated one. The run stands for a legitimate host to attach.
         HandshakeResponse::Refused(_) => return Ok(()),
     };
 

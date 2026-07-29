@@ -29,8 +29,11 @@ use openwave_sandbox_protocol::{
         Capability, CapabilityResponder, GrantSet, ModelInferenceResult, ReverseRequest,
         ReverseResult, RunProvenance,
     },
-    serve_connection, CapabilityHost, EventCursor, SandboxRun, WireClient,
+    serve_connection, CapabilityHost, EventCursor, SandboxRun, TransportSecret, WireClient,
 };
+
+/// The per-run transport secret the sandbox expects and the host presents.
+const SECRET: &str = "agent-run-transport-secret";
 
 /// A mock host model that scripts the loop: it asks for the word-count tool on
 /// the first step, then — once the transcript shows the tool's result — returns a
@@ -72,7 +75,10 @@ async fn attach_infer_tool_and_submit_result_runs_exactly_once() {
 
 async fn scenario() {
     // Sandbox side: the run and its transport server on a loopback port.
-    let run = SandboxRun::new([Capability::ModelInference]);
+    let run = SandboxRun::new(
+        [Capability::ModelInference],
+        Some(TransportSecret::new(SECRET)),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind loopback");
@@ -114,6 +120,7 @@ async fn scenario() {
             protocol_version: PROTOCOL_VERSION,
             run_id: RunId::new(),
             resume_from: EventCursor::START,
+            transport_secret: TransportSecret::new(SECRET),
         },
         host,
     )

@@ -311,7 +311,12 @@ async fn admit_container_run(store: &Arc<dyn Store>, chat_id: ChatId, task: &str
 async fn spawn_sandbox_agent(task: &str) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
-    let run = SandboxRun::new([Capability::ModelInference]);
+    // The supervisor expects the same per-run secret the MockBackend hands the
+    // driver from `address()`, so the driver's authenticated attach is accepted.
+    let run = SandboxRun::new(
+        [Capability::ModelInference],
+        Some(TransportSecret::new("test-secret")),
+    );
     let agent_run = run.clone();
     let task = task.to_owned();
     tokio::spawn(async move {

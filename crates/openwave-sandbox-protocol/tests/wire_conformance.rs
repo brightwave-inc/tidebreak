@@ -9,9 +9,15 @@
 //! the concrete-transport step: the reference suite pins semantics, this suite
 //! pins that the same semantics survive a real socket.
 //!
-//! The four contract areas required of the wire transport, and where:
+//! The contract areas required of the wire transport, and where:
 //!
 //! - version-mismatch refusal on the wire — [`version_mismatch_is_refused_on_the_wire`];
+//! - authenticated attach: the correct transport secret is accepted and serves a
+//!   capability ([`correct_secret_attaches_and_serves_a_capability`]), a wrong or
+//!   absent secret is refused and serves nothing
+//!   ([`wrong_or_absent_secret_is_refused_and_serves_nothing`]), and a refused
+//!   second connection cannot hijack the live one
+//!   ([`a_refused_second_connection_cannot_hijack_the_live_one`]);
 //! - a model-inference reverse call round-trip (with exactly-once replay) —
 //!   [`model_inference_round_trips_and_replays_exactly_once`];
 //! - event-stream delivery and resume-by-sequence — [`event_stream_delivers_then_resumes_by_sequence`];
@@ -47,8 +53,18 @@ use openwave_sandbox_protocol::{
         ReverseRequest, ReverseResult, RunProvenance,
     },
     serve_connection, CapabilityHost, ConnectError, HostConnection, ReverseOutcome, SandboxRun,
-    WireClient,
+    TransportSecret, WireClient,
 };
+
+/// The per-run transport secret both sides of these tests share. A run expects
+/// it; the [`attach`] helper presents it; the authentication tests present a
+/// wrong or empty token instead.
+const SECRET: &str = "wire-conformance-transport-secret";
+
+/// The expected secret a run authenticates attaches against.
+fn expected_secret() -> Option<TransportSecret> {
+    Some(TransportSecret::new(SECRET))
+}
 
 /// Run one scenario under a wall-clock bound so nothing can hang the suite.
 async fn bounded<F: Future<Output = ()>>(scenario: F) {
@@ -133,10 +149,17 @@ fn host_with(
 }
 
 fn attach(resume_from: EventCursor) -> AttachRequest {
+    attach_with(resume_from, SECRET)
+}
+
+/// An attach presenting an explicit transport secret, for the authentication
+/// tests that dial with a wrong or empty token.
+fn attach_with(resume_from: EventCursor, secret: &str) -> AttachRequest {
     AttachRequest {
         protocol_version: PROTOCOL_VERSION,
         run_id: RunId::new(),
         resume_from,
+        transport_secret: TransportSecret::new(secret),
     }
 }
 
@@ -167,16 +190,25 @@ async fn connect(
     WireClient::connect(stream, attach(resume_from), host).await
 }
 
-/// A version-skewed peer is refused on the wire, and no session is established.
+/// A version-skewed peer is refused on the wire, and no session is established —
+/// even though it presents the *correct* transport secret. This pins the ordering
+/// invariant: authentication never bypasses the version gate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn version_mismatch_is_refused_on_the_wire() {
     bounded(async {
-        // The sandbox speaks a version the host does not.
-        let run =
-            SandboxRun::with_config(PROTOCOL_VERSION + 1, 16, 4, [Capability::ModelInference]);
+        // The sandbox speaks a version the host does not, but shares the secret.
+        let run = SandboxRun::with_config(
+            PROTOCOL_VERSION + 1,
+            16,
+            4,
+            [Capability::ModelInference],
+            expected_secret(),
+        );
         let addr = spawn_sandbox(run).await;
         let (host, _store) = host_with(vec![Capability::ModelInference], echo().0);
 
+        // `connect` presents the correct secret via `attach`; the refusal is still
+        // a version refusal, so a matching secret does not slip past the skew.
         match connect(addr, host, EventCursor::START).await {
             Err(ConnectError::VersionRefused(refused)) => {
                 // The refusal frame carried the sandbox's own version over the socket.
@@ -190,12 +222,130 @@ async fn version_mismatch_is_refused_on_the_wire() {
     .await;
 }
 
+/// The correct transport secret is accepted and the connection serves a
+/// capability: an authenticated attach round-trips a model-inference reverse call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn correct_secret_attaches_and_serves_a_capability() {
+    bounded(async {
+        let run = SandboxRun::new([Capability::ModelInference], expected_secret());
+        let addr = spawn_sandbox(run.clone()).await;
+        let (responder, executions) = echo();
+        let (host, _store) = host_with(vec![Capability::ModelInference], responder);
+
+        // Keep the authenticated connection open for the call.
+        let _conn = connect(addr, host, EventCursor::START)
+            .await
+            .expect("the correct secret is accepted");
+        match run.call(OperationId::new(), infer("hi")).await {
+            ReverseOutcome::Settled(Response::Ok(result)) => {
+                assert_eq!(completion(&result), "echo:hi");
+            }
+            other => panic!("an authenticated attach must serve a capability, got {other:?}"),
+        }
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+    })
+    .await;
+}
+
+/// A wrong secret, and an absent (empty) one, are each refused as
+/// `Unauthenticated` after the version gate — and because the attach never
+/// completes, no capability is ever served over that connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wrong_or_absent_secret_is_refused_and_serves_nothing() {
+    bounded(async {
+        let run = SandboxRun::new([Capability::ModelInference], expected_secret());
+        let addr = spawn_sandbox(run).await;
+
+        for bad in ["a-totally-wrong-secret", ""] {
+            let (host, _store) = host_with(vec![Capability::ModelInference], echo().0);
+            let stream = TcpStream::connect(addr).await.expect("dial loopback");
+            let kind = if bad.is_empty() {
+                "an absent"
+            } else {
+                "a wrong"
+            };
+            match WireClient::connect(stream, attach_with(EventCursor::START, bad), host).await {
+                Err(ConnectError::Unauthenticated(refused)) => {
+                    // Versions matched — the refusal is authentication, not skew.
+                    assert_eq!(refused.protocol_version, PROTOCOL_VERSION);
+                    assert_eq!(refused.code, ErrorCode::Unauthenticated);
+                }
+                Err(other) => {
+                    panic!("{kind} secret must be refused as Unauthenticated, got {other:?}");
+                }
+                Ok(_) => panic!("{kind} secret must be refused, but a session was established"),
+            }
+            // The `Err` is the whole point: there is no `HostConnection`, so the
+            // attacker holds nothing it could serve or drive a reverse call over.
+        }
+    })
+    .await;
+}
+
+/// The hijack scenario: a first, authenticated connection is live and is the
+/// run's reverse-RPC peer; a second connection presenting a wrong (then absent)
+/// secret is refused and must NOT displace the live one. The sandbox installs the
+/// newest *accepted* connection via `send_replace`, so a refused attach that never
+/// reaches that install cannot steal the channel.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_second_connection_cannot_hijack_the_live_one() {
+    bounded(async {
+        let run = SandboxRun::new([Capability::ModelInference], expected_secret());
+        let addr = spawn_sandbox(run.clone()).await;
+
+        // Host 1 attaches with the correct secret and becomes the live peer.
+        let (responder, executions) = echo();
+        let (host1, _store) = host_with(vec![Capability::ModelInference], responder);
+        let _conn1 = connect(addr, host1, EventCursor::START)
+            .await
+            .expect("the authenticated attach is accepted");
+        match run.call(OperationId::new(), infer("one")).await {
+            ReverseOutcome::Settled(Response::Ok(result)) => {
+                assert_eq!(completion(&result), "echo:one");
+            }
+            other => panic!("the authenticated peer must answer, got {other:?}"),
+        }
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+
+        // An attacker dials the same port with a wrong secret, then with none.
+        for bad in ["stolen-guess", ""] {
+            let (attacker, _s) = host_with(vec![Capability::ModelInference], echo().0);
+            let stream = TcpStream::connect(addr).await.expect("dial loopback");
+            match WireClient::connect(stream, attach_with(EventCursor::START, bad), attacker).await
+            {
+                Err(ConnectError::Unauthenticated(_)) => {}
+                Err(other) => panic!("a {bad:?} secret must be refused, got {other:?}"),
+                Ok(_) => panic!("a {bad:?} secret must not establish a session"),
+            }
+
+            // The live peer is unchanged: a fresh reverse call still routes to
+            // host 1, whose responder count advances — the attacker never became
+            // the run's connection, so it could not answer, read events, or drive
+            // the agent.
+            match run.call(OperationId::new(), infer("again")).await {
+                ReverseOutcome::Settled(Response::Ok(result)) => {
+                    assert_eq!(completion(&result), "echo:again");
+                }
+                other => {
+                    panic!("the live connection must survive the refused hijack, got {other:?}")
+                }
+            }
+        }
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            3,
+            "every call was served by the authenticated peer, never the attacker"
+        );
+    })
+    .await;
+}
+
 /// A model-inference reverse call round-trips over the socket, and re-issuing the
 /// same operation identity replays the recorded answer without re-executing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn model_inference_round_trips_and_replays_exactly_once() {
     bounded(async {
-        let run = SandboxRun::new([Capability::ModelInference]);
+        let run = SandboxRun::new([Capability::ModelInference], expected_secret());
         let addr = spawn_sandbox(run.clone()).await;
         let (responder, executions) = echo();
         let (host, store) = host_with(vec![Capability::ModelInference], responder);
@@ -237,7 +387,7 @@ async fn model_inference_round_trips_and_replays_exactly_once() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn event_stream_delivers_then_resumes_by_sequence() {
     bounded(async {
-        let run = SandboxRun::new([]);
+        let run = SandboxRun::new([], expected_secret());
         // Emit before any host attaches: the events buffer for replay.
         for letter in ["a", "b", "c", "d", "e"] {
             run.emit_progress(letter).await.expect("emit");
@@ -284,7 +434,13 @@ async fn event_stream_delivers_then_resumes_by_sequence() {
 async fn control_lane_cancel_preempts_a_saturated_request_lane() {
     bounded(async {
         // A request lane with exactly two in-flight permits.
-        let run = SandboxRun::with_config(PROTOCOL_VERSION, 16, 2, [Capability::ModelInference]);
+        let run = SandboxRun::with_config(
+            PROTOCOL_VERSION,
+            16,
+            2,
+            [Capability::ModelInference],
+            expected_secret(),
+        );
         let addr = spawn_sandbox(run.clone()).await;
 
         let gate = Arc::new(Semaphore::new(0));
@@ -355,7 +511,7 @@ async fn control_lane_cancel_preempts_a_saturated_request_lane() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resume_replays_more_events_than_the_request_lane_depth() {
     bounded(async {
-        let run = SandboxRun::new([]);
+        let run = SandboxRun::new([], expected_secret());
         // Buffer far more events than the outbound `data` queue depth
         // (MAX_INFLIGHT_REQUESTS = 16), the earlier deadlock's trigger.
         const COUNT: u64 = 40;
@@ -391,7 +547,7 @@ async fn resume_replays_more_events_than_the_request_lane_depth() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reverse_call_survives_a_disconnect_and_reissue_replays_exactly_once() {
     bounded(async {
-        let run = SandboxRun::new([Capability::ModelInference]);
+        let run = SandboxRun::new([Capability::ModelInference], expected_secret());
         let addr = spawn_sandbox(run.clone()).await;
 
         // A gated host model, shared run-scoped across both connections.

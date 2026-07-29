@@ -244,6 +244,7 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             run_id: RunId::new(),
             resume_from: EventCursor::START,
+            transport_secret: crate::provisioning::TransportSecret::new("frame-split-test"),
         });
         let request = WireFrame::Request(RequestFrame::Request(ReverseEnvelope {
             protocol_version: PROTOCOL_VERSION,
