@@ -1,8 +1,8 @@
 //! Tests for the sandbox-resident container driver.
 //!
 //! The non-Docker tests drive the **real** in-container agent loop
-//! (`openwave_sandbox_agent::run_agent` plus its `word_count` tool and the
-//! sandbox transport server) over a real loopback TCP socket, with only Docker
+//! (`openwave_sandbox_agent::run_agent` plus its sandbox-resident tool registry
+//! and the sandbox transport server) over a real loopback TCP socket, with only Docker
 //! (the [`SandboxBackend`]) and the host model (the [`ProviderResolver`]) mocked.
 //! That exercises the whole stack — provision, attach, reverse-RPC model
 //! inference answered by the host proxy through the durable op-log, event drain,
@@ -50,8 +50,8 @@ use crate::resolver::ProviderResolver;
 
 /// A provider that scripts one directive step then a final answer, counting how
 /// many completions it is asked for. Drives the real in-container loop: the first
-/// completion tells the sandbox to run `word_count`, the second is the final
-/// result the sandbox submits.
+/// completion tells the sandbox to run a filesystem tool, the second is the
+/// final result the sandbox submits.
 struct ScriptedProvider {
     completions: Mutex<Vec<String>>,
     calls: AtomicUsize,
@@ -319,8 +319,13 @@ async fn spawn_sandbox_agent(task: &str) -> String {
     );
     let agent_run = run.clone();
     let task = task.to_owned();
+    // The in-container tool surface is rooted at a workspace directory; give the
+    // loop a private temp one that lives as long as the run.
+    let workspace = tempfile::tempdir().unwrap();
+    let workspace_path = workspace.path().to_path_buf();
     tokio::spawn(async move {
-        let _ = run_agent(agent_run, task).await;
+        let _workspace = workspace;
+        let _ = run_agent(agent_run, task, workspace_path).await;
     });
     tokio::spawn(async move {
         while let Ok((stream, _peer)) = listener.accept().await {
@@ -346,10 +351,10 @@ fn fast_config() -> SandboxContainerRunConfig {
 // --- Tests --------------------------------------------------------------------
 
 /// The whole stack over loopback: admit a container run, drive it with the real
-/// in-container agent loop answering `word_count` and dialing the host for model
-/// inference, and assert the host committed the result exactly once, proxied
-/// each model step through the resolver, delivered the run's ACTUAL task, and
-/// tore the container down.
+/// in-container agent loop running a sandbox filesystem tool and dialing the host
+/// for model inference, and assert the host committed the result exactly once,
+/// proxied each model step through the resolver, delivered the run's ACTUAL task,
+/// and tore the container down.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn drives_a_container_run_end_to_end_over_loopback() {
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -360,9 +365,9 @@ async fn drives_a_container_run_end_to_end_over_loopback() {
         // The backend starts the sandbox on whatever task the driver delivered,
         // exactly as Docker starts the container from its environment.
         let backend = MockBackend::spawning();
-        // Step 1: run word_count on three words. Step 2: the final answer.
+        // Step 1: write a workspace file. Step 2: the final answer.
         let provider = Arc::new(ScriptedProvider::new(vec![
-            "use-tool:word_count:{\"text\":\"one two three\"}".to_owned(),
+            "use-tool:write_file:{\"path\":\"note.txt\",\"content\":\"delegated\"}".to_owned(),
             "the text has three words".to_owned(),
         ]));
         let resolver = Arc::new(FixedResolver(provider.clone()));
@@ -424,7 +429,7 @@ async fn terminalizes_and_tears_down_when_the_agent_loop_ends_without_a_result()
         // Every completion is another tool directive, so the loop never submits a
         // final answer and exhausts MAX_STEPS.
         let provider = Arc::new(ScriptedProvider::new(vec![
-            "use-tool:word_count:{\"text\":\"a\"}".to_owned();
+            "use-tool:write_file:{\"path\":\"note.txt\",\"content\":\"a\"}".to_owned();
             16
         ]));
         let resolver = Arc::new(FixedResolver(provider.clone()));
@@ -469,7 +474,7 @@ async fn heartbeats_the_lease_so_a_long_run_is_not_reaped() {
         // the drive stays open across several lease periods.
         let provider = Arc::new(ScriptedProvider::slow(
             vec![
-                "use-tool:word_count:{\"text\":\"a b\"}".to_owned(),
+                "use-tool:write_file:{\"path\":\"note.txt\",\"content\":\"a b\"}".to_owned(),
                 "done".to_owned(),
             ],
             Duration::from_millis(700),
@@ -721,8 +726,9 @@ async fn admission_routes_to_the_container_location_not_the_in_process_scheduler
 /// The full stack on a real Docker container: build the `openwave-sandbox-agent`
 /// image, admit a container run, and drive it end to end — provision a container
 /// from the image, attach over its published loopback port, answer its
-/// `word_count`-then-final model steps from a mock host model, and assert the
-/// result committed exactly once and the container was torn down.
+/// `exec`-then-final model steps from a mock host model (so the container really
+/// runs a shell command in its own boundary), and assert the result committed
+/// exactly once and the container was torn down.
 ///
 /// Skipped cleanly when no container runtime or daemon is present (there is none
 /// in the unit-test sandbox); CI runners have Docker. Building the image is heavy
@@ -785,7 +791,9 @@ async fn docker_end_to_end_drives_a_real_container() {
         ..DockerConfig::default()
     }));
     let provider = Arc::new(ScriptedProvider::new(vec![
-        "use-tool:word_count:{\"text\":\"count these four words\"}".to_owned(),
+        // Runs a real shell command inside the real container (in-container
+        // execution is the containment).
+        "use-tool:exec:{\"command\":\"echo count these four words\"}".to_owned(),
         "the count is four".to_owned(),
     ]));
     let resolver = Arc::new(FixedResolver(provider.clone()));

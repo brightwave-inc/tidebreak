@@ -19,6 +19,9 @@
 //! - `OPENWAVE_SANDBOX_TASK` — the delegated task. In the full design the host
 //!   delivers the task in the run-init payload after the handle commits; until
 //!   that init frame is wired, the entrypoint reads it from the environment.
+//! - `OPENWAVE_SANDBOX_WORKSPACE` — the agent's in-container workspace directory,
+//!   the root the `exec` and filesystem tools are scoped to (default
+//!   `/workspace`, provisioned in the container image).
 
 use std::env;
 
@@ -32,6 +35,9 @@ const DEFAULT_LISTEN: &str = "0.0.0.0:8080";
 /// `TRANSPORT_SECRET_ENV`).
 const TRANSPORT_SECRET_ENV: &str = "OPENWAVE_TRANSPORT_SECRET";
 
+/// Default in-container workspace root for the sandbox-resident tool surface.
+const DEFAULT_WORKSPACE: &str = "/workspace";
+
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
@@ -44,6 +50,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let listen = env::var("OPENWAVE_SANDBOX_LISTEN").unwrap_or_else(|_| DEFAULT_LISTEN.to_owned());
     let task = env::var("OPENWAVE_SANDBOX_TASK")
         .unwrap_or_else(|_| "Summarize what this sandbox agent can do.".to_owned());
+    let workspace =
+        env::var("OPENWAVE_SANDBOX_WORKSPACE").unwrap_or_else(|_| DEFAULT_WORKSPACE.to_owned());
 
     // The per-run secret the host must present to attach. Fail closed: with none
     // configured the run holds `None`, so every attach is refused rather than
@@ -71,7 +79,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // The agent loop is a separate future from the supervisor's listener: it
     // waits for the host to attach, then runs to a submitted result.
     tokio::spawn(async move {
-        match run_agent(run, task).await {
+        match run_agent(run, task, workspace).await {
             Ok(answer) => eprintln!("openwave-sandbox-agent: submitted result: {answer}"),
             Err(error) => eprintln!("openwave-sandbox-agent: run failed: {error}"),
         }
