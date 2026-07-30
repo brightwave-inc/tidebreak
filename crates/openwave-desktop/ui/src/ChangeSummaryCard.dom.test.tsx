@@ -6,7 +6,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient, ExecFileChangeSummary } from "./api";
 import { ChangeSummaryCard } from "./ChangeSummaryCard";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 const files: ExecFileChangeSummary[] = [
   {
@@ -18,6 +21,7 @@ const files: ExecFileChangeSummary[] = [
     rejection_reason: null,
     undo: "available",
     diff: "--- before\n+++ after\n@@ -1 +1 @@\n-old\n+new\n",
+    binary_preview: null,
   },
   {
     snapshot_id: "rejected:1",
@@ -28,6 +32,7 @@ const files: ExecFileChangeSummary[] = [
     rejection_reason: "stale",
     undo: "not_available",
     diff: null,
+    binary_preview: null,
   },
   {
     snapshot_id: "rejected:2",
@@ -38,6 +43,7 @@ const files: ExecFileChangeSummary[] = [
     rejection_reason: "trash_unavailable",
     undo: "not_available",
     diff: null,
+    binary_preview: null,
   },
 ];
 
@@ -45,6 +51,7 @@ describe("ChangeSummaryCard", () => {
   it("separates rejected writes and updates one file after undo", async () => {
     const user = userEvent.setup();
     const client = {
+      getFileChangePreview: vi.fn(),
       undoFileChange: vi.fn().mockResolvedValue({
         snapshot_id: "snapshot-1",
         folder_name: "Project",
@@ -54,7 +61,7 @@ describe("ChangeSummaryCard", () => {
       undoTurnFileChanges: vi.fn(),
     } satisfies Pick<
       ApiClient,
-      "undoFileChange" | "undoTurnFileChanges"
+      "getFileChangePreview" | "undoFileChange" | "undoTurnFileChanges"
     >;
 
     render(
@@ -87,5 +94,63 @@ describe("ChangeSummaryCard", () => {
       ),
     );
     expect(screen.getByRole("button", { name: "Undone" })).toBeDisabled();
+  });
+
+  it("loads server-selected document revisions only when the preview opens", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("URL", {
+      createObjectURL: vi.fn(() => "blob:document-preview"),
+      revokeObjectURL: vi.fn(),
+    });
+    const client = {
+      getFileChangePreview: vi
+        .fn()
+        .mockResolvedValue(new Blob(["png"], { type: "image/png" })),
+      undoFileChange: vi.fn(),
+      undoTurnFileChanges: vi.fn(),
+    } satisfies Pick<
+      ApiClient,
+      "getFileChangePreview" | "undoFileChange" | "undoTurnFileChanges"
+    >;
+    const workbook: ExecFileChangeSummary = {
+      snapshot_id: "snapshot-workbook",
+      folder_name: "Project",
+      relative_path: "forecast.xlsx",
+      classification: "applied",
+      change: "overwritten",
+      rejection_reason: null,
+      undo: "available",
+      diff: null,
+      binary_preview: {
+        format: "xlsx",
+        before: "available",
+        after: "available",
+      },
+    };
+
+    render(
+      <ChangeSummaryCard
+        client={client}
+        chatId="chat-1"
+        turnId="turn-1"
+        files={[workbook]}
+      />,
+    );
+
+    expect(client.getFileChangePreview).not.toHaveBeenCalled();
+    await user.click(screen.getByText("Before and after preview"));
+    await waitFor(() =>
+      expect(client.getFileChangePreview).toHaveBeenCalledTimes(2),
+    );
+    expect(client.getFileChangePreview).toHaveBeenCalledWith(
+      "chat-1",
+      "turn-1",
+      "snapshot-workbook",
+      "before",
+      expect.any(AbortSignal),
+    );
+    expect(
+      await screen.findByAltText("After preview of forecast.xlsx"),
+    ).toHaveAttribute("src", "blob:document-preview");
   });
 });

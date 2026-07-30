@@ -1144,6 +1144,19 @@ export class ApiClient {
     );
   }
 
+  getFileChangePreview(
+    chatId: string,
+    turnId: string,
+    snapshotId: string,
+    revision: "before" | "after",
+    signal?: AbortSignal,
+  ): Promise<Blob> {
+    return this.blob(
+      `/chats/${encodeURIComponent(chatId)}/turns/${encodeURIComponent(turnId)}/file-changes/${encodeURIComponent(snapshotId)}/preview/${revision}`,
+      signal,
+    );
+  }
+
   private async blob(path: string, signal?: AbortSignal): Promise<Blob> {
     const response = await fetch(`${this.baseUrl}${path}`, {
       headers: this.headers(),

@@ -1,15 +1,23 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Check, FileText, RotateCcw } from "lucide-react";
+import {
+  AlertTriangle,
+  Check,
+  FileImage,
+  FileText,
+  Loader2,
+  RotateCcw,
+} from "lucide-react";
 import type {
   ApiClient,
   ExecFileChangeSummary,
   ExecFileUndoOutcome,
 } from "./api";
+import type { ExecFilePreviewAvailability } from "./generated/wire";
 import { cn } from "./lib/utils";
 
 type ChangeClient = Pick<
   ApiClient,
-  "undoFileChange" | "undoTurnFileChanges"
+  "getFileChangePreview" | "undoFileChange" | "undoTurnFileChanges"
 >;
 
 type Props = {
@@ -53,6 +61,19 @@ export function ChangeSummaryCard({ client, chatId, turnId, files }: Props) {
               : status === "stale"
                 ? "stale"
                 : "not_available",
+          binary_preview: file.binary_preview
+            ? {
+                ...file.binary_preview,
+                after:
+                  status === "stale"
+                    ? "stale"
+                    : status === "restored" ||
+                        status === "deleted" ||
+                        status === "already_undone"
+                      ? "unavailable"
+                      : file.binary_preview.after,
+              }
+            : null,
         };
       }),
     );
@@ -130,6 +151,9 @@ export function ChangeSummaryCard({ client, chatId, turnId, files }: Props) {
             file={file}
             working={working.has(file.snapshot_id)}
             onUndo={() => void undoOne(file)}
+            client={client}
+            chatId={chatId}
+            turnId={turnId}
           />
         ))}
       </div>
@@ -146,10 +170,16 @@ function FileChangeRow({
   file,
   working,
   onUndo,
+  client,
+  chatId,
+  turnId,
 }: {
   file: ExecFileChangeSummary;
   working: boolean;
   onUndo: () => void;
+  client: ChangeClient;
+  chatId: string;
+  turnId: string;
 }) {
   const rejected = file.classification === "rejected";
   return (
@@ -188,6 +218,20 @@ function FileChangeRow({
         )}
       </div>
       {file.diff && <TextDiff diff={file.diff} />}
+      {file.binary_preview && (
+        <BinaryPreview
+          client={client}
+          chatId={chatId}
+          turnId={turnId}
+          file={file}
+          preview={file.binary_preview}
+        />
+      )}
+      {!rejected && !file.diff && !file.binary_preview && (
+        <p className="ml-6 mt-2 text-xs text-muted-foreground">
+          No change preview is available for this file type or revision.
+        </p>
+      )}
     </div>
   );
 }
@@ -220,6 +264,168 @@ function TextDiff({ diff }: { diff: string }) {
         ))}
       </pre>
     </details>
+  );
+}
+
+function BinaryPreview({
+  client,
+  chatId,
+  turnId,
+  file,
+  preview,
+}: {
+  client: ChangeClient;
+  chatId: string;
+  turnId: string;
+  file: ExecFileChangeSummary;
+  preview: NonNullable<ExecFileChangeSummary["binary_preview"]>;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <details
+      className="ml-6 mt-2"
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary className="flex cursor-pointer select-none items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground">
+        <FileImage size={13} aria-hidden="true" />
+        Before and after preview
+      </summary>
+      <div className="mt-2 grid gap-2 md:grid-cols-2">
+        <RevisionPreview
+          client={client}
+          chatId={chatId}
+          turnId={turnId}
+          snapshotId={file.snapshot_id}
+          revision="before"
+          availability={preview.before}
+          active={open}
+          fileName={file.relative_path}
+        />
+        <RevisionPreview
+          client={client}
+          chatId={chatId}
+          turnId={turnId}
+          snapshotId={file.snapshot_id}
+          revision="after"
+          availability={preview.after}
+          active={open}
+          fileName={file.relative_path}
+        />
+      </div>
+    </details>
+  );
+}
+
+type LoadedRevision =
+  | { status: "idle" | "loading" }
+  | { status: "loaded"; url: string }
+  | { status: "error"; message: string };
+
+function RevisionPreview({
+  client,
+  chatId,
+  turnId,
+  snapshotId,
+  revision,
+  availability,
+  active,
+  fileName,
+}: {
+  client: ChangeClient;
+  chatId: string;
+  turnId: string;
+  snapshotId: string;
+  revision: "before" | "after";
+  availability: ExecFilePreviewAvailability;
+  active: boolean;
+  fileName: string;
+}) {
+  const [loaded, setLoaded] = useState<LoadedRevision>({ status: "idle" });
+
+  useEffect(() => {
+    if (!active || availability !== "available") {
+      setLoaded({ status: "idle" });
+      return;
+    }
+    const controller = new AbortController();
+    let objectUrl: string | null = null;
+    setLoaded({ status: "loading" });
+    void client
+      .getFileChangePreview(
+        chatId,
+        turnId,
+        snapshotId,
+        revision,
+        controller.signal,
+      )
+      .then((blob) => {
+        objectUrl = URL.createObjectURL(blob);
+        setLoaded({ status: "loaded", url: objectUrl });
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        const message =
+          error instanceof Error
+            ? error.message.replace(/^\d+:\s*/, "")
+            : "Preview unavailable.";
+        setLoaded({ status: "error", message });
+      });
+    return () => {
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [
+    active,
+    availability,
+    chatId,
+    client,
+    revision,
+    snapshotId,
+    turnId,
+  ]);
+
+  const label = revision === "before" ? "Before" : "After";
+  return (
+    <figure className="overflow-hidden rounded-md border border-border bg-muted/20">
+      <figcaption className="border-b border-border px-2 py-1.5 text-[11px] font-medium text-muted-foreground">
+        {label}
+      </figcaption>
+      <div className="flex min-h-36 items-center justify-center p-2">
+        {availability === "empty" ? (
+          <p className="text-xs text-muted-foreground">
+            {revision === "before" ? "No previous file" : "File deleted"}
+          </p>
+        ) : availability === "stale" ? (
+          <PreviewNotice>Changed again; preview unavailable</PreviewNotice>
+        ) : availability === "too_large" ? (
+          <PreviewNotice>Too large to preview</PreviewNotice>
+        ) : availability === "unavailable" ? (
+          <PreviewNotice>Preview unavailable</PreviewNotice>
+        ) : loaded.status === "loaded" ? (
+          <img
+            className="max-h-80 w-full object-contain"
+            src={loaded.url}
+            alt={`${label} preview of ${fileName}`}
+          />
+        ) : loaded.status === "error" ? (
+          <PreviewNotice>{loaded.message}</PreviewNotice>
+        ) : (
+          <Loader2
+            className="animate-spin text-muted-foreground"
+            size={18}
+            aria-label={`Loading ${revision} preview`}
+          />
+        )}
+      </div>
+    </figure>
+  );
+}
+
+function PreviewNotice({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="max-w-48 text-center text-xs text-muted-foreground">
+      {children}
+    </p>
   );
 }
 

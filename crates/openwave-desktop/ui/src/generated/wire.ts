@@ -593,6 +593,11 @@ export type EgressConfig = { "mode": "open" } | { "mode": "allowlist", domains: 
 export type EgressEnforcementStatus = "boundary" | "conditional_boundary" | "applied_with_gaps" | "unconfirmed";
 
 /**
+ * Renderer-safe selection metadata; bytes remain behind the scoped endpoint.
+ */
+export type ExecFileBinaryPreview = { format: ExecFilePreviewFormat, before: ExecFilePreviewAvailability, after: ExecFilePreviewAvailability, };
+
+/**
  * Renderer-owned classification of one journal row.
  */
 export type ExecFileChangeClassification = "applied" | "rejected";
@@ -604,9 +609,20 @@ export type ExecFileChangeKind = "created" | "overwritten" | "deleted";
 
 /**
  * One renderer-safe row in a terminal turn's file-change summary, including a
- * bounded unified diff when both revisions are text.
+ * bounded unified diff when both revisions are text or a binary preview
+ * selector whose bytes remain behind the scoped preview endpoint.
  */
-export type ExecFileChangeSummary = { snapshot_id: string, folder_name: string, relative_path: string, classification: ExecFileChangeClassification, change: ExecFileChangeKind | null, rejection_reason: ExecFileRejectionReason | null, undo: ExecFileUndoAvailability, diff: string | null, };
+export type ExecFileChangeSummary = { snapshot_id: string, folder_name: string, relative_path: string, classification: ExecFileChangeClassification, change: ExecFileChangeKind | null, rejection_reason: ExecFileRejectionReason | null, undo: ExecFileUndoAvailability, diff: string | null, binary_preview: ExecFileBinaryPreview | null, };
+
+/**
+ * Whether one side of a binary before/after comparison can be requested.
+ */
+export type ExecFilePreviewAvailability = "available" | "empty" | "stale" | "too_large" | "unavailable";
+
+/**
+ * A binary format handled by the bundled #1056 document renderer.
+ */
+export type ExecFilePreviewFormat = "pdf" | "docx" | "xlsx";
 
 /**
  * Why one staged file was left out of the user's folder.

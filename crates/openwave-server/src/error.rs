@@ -101,6 +101,42 @@ impl ServerError {
         }
     }
 
+    /// A `415 Unsupported Media Type` with a route-specific stable kind.
+    pub(crate) fn unsupported_media_type_kind(
+        kind: &'static str,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            info: AgentErrorInfo {
+                kind: kind.to_owned(),
+                message: message.into(),
+            },
+        }
+    }
+
+    /// A `422 Unprocessable Entity` with a route-specific stable kind.
+    pub(crate) fn unprocessable_kind(kind: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            info: AgentErrorInfo {
+                kind: kind.to_owned(),
+                message: message.into(),
+            },
+        }
+    }
+
+    /// A `429 Too Many Requests` with a route-specific stable kind.
+    pub(crate) fn too_many_requests_kind(kind: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            info: AgentErrorInfo {
+                kind: kind.to_owned(),
+                message: message.into(),
+            },
+        }
+    }
+
     /// A `500 Internal Server Error` for an unexpected server-side failure that
     /// isn't an [`AgentError`] (for example, another subsystem fault). Carries a stable
     /// `kind` so a client sees the same `{ kind, message }` shape as any error.

@@ -18,6 +18,7 @@
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use openwave_code_execution::{
     try_resolve_scratch_directory, FilePrecondition, PreparedWriteSnapshot, PriorContents,
@@ -25,7 +26,8 @@ use openwave_code_execution::{
 };
 use openwave_core::{
     BlobStore, ChatId, DocumentSourceBlob, ExecFileChange, ExecFileRejectionReason,
-    ExecFileSnapshot, ExecFileSnapshotRecord, ExecUndoState, Store, TurnId,
+    ExecFileSnapshot, ExecFileSnapshotRecord, ExecUndoState, ImageMediaType, Store, TurnId,
+    MAX_EXEC_WORKSPACE_FILE_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -268,8 +270,69 @@ pub(crate) enum ExecFileUndoAvailability {
     NotAvailable,
 }
 
+/// A binary format handled by the bundled #1056 document renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ExecFilePreviewFormat {
+    Pdf,
+    Docx,
+    Xlsx,
+}
+
+impl ExecFilePreviewFormat {
+    fn for_path(path: &str) -> Option<Self> {
+        match Path::new(path)
+            .extension()
+            .and_then(|extension| extension.to_str())?
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "pdf" => Some(Self::Pdf),
+            "docx" => Some(Self::Docx),
+            "xlsx" => Some(Self::Xlsx),
+            _ => None,
+        }
+    }
+
+    fn helper(self) -> &'static str {
+        match self {
+            Self::Pdf => "render_pdf.py",
+            Self::Docx => "render_office.py",
+            Self::Xlsx => "analyze_xlsx.py",
+        }
+    }
+
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Pdf => "pdf",
+            Self::Docx => "docx",
+            Self::Xlsx => "xlsx",
+        }
+    }
+}
+
+/// Whether one side of a binary before/after comparison can be requested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ExecFilePreviewAvailability {
+    Available,
+    Empty,
+    Stale,
+    TooLarge,
+    Unavailable,
+}
+
+/// Renderer-safe selection metadata; bytes remain behind the scoped endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+pub(crate) struct ExecFileBinaryPreview {
+    pub format: ExecFilePreviewFormat,
+    pub before: ExecFilePreviewAvailability,
+    pub after: ExecFilePreviewAvailability,
+}
+
 /// One renderer-safe row in a terminal turn's file-change summary, including a
-/// bounded unified diff when both revisions are text.
+/// bounded unified diff when both revisions are text or a binary preview
+/// selector whose bytes remain behind the scoped preview endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 pub(crate) struct ExecFileChangeSummary {
     pub snapshot_id: String,
@@ -280,9 +343,12 @@ pub(crate) struct ExecFileChangeSummary {
     pub rejection_reason: Option<ExecFileRejectionReason>,
     pub undo: ExecFileUndoAvailability,
     pub diff: Option<String>,
+    pub binary_preview: Option<ExecFileBinaryPreview>,
 }
 
 const MAX_TEXT_DIFF_BYTES: u64 = 512 * 1_024;
+const MAX_FILE_PREVIEW_INPUT_BYTES: u64 = MAX_EXEC_WORKSPACE_FILE_BYTES as u64;
+const FILE_PREVIEW_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Build durable change summaries grouped by turn without exposing host paths.
 pub(crate) async fn list_file_change_summaries(
@@ -311,6 +377,7 @@ pub(crate) async fn list_file_change_summaries(
                 rejection_reason: Some(rejection.file.reason),
                 undo: ExecFileUndoAvailability::NotAvailable,
                 diff: None,
+                binary_preview: None,
             });
     }
     for files in by_turn.values_mut() {
@@ -332,7 +399,8 @@ async fn summarize_applied_change(
         ExecFileChange::Deleted => ExecFileChangeKind::Deleted,
     };
     let (undo, current) = inspect_current_change(blobs, &snapshot).await;
-    let diff = if undo == ExecFileUndoAvailability::Available {
+    let binary_preview = binary_preview_for(&snapshot, undo);
+    let diff = if binary_preview.is_none() && undo == ExecFileUndoAvailability::Available {
         text_diff(blobs, &snapshot, current.as_deref()).await
     } else {
         None
@@ -346,7 +414,46 @@ async fn summarize_applied_change(
         rejection_reason: None,
         undo,
         diff,
+        binary_preview,
     }
+}
+
+fn binary_preview_for(
+    snapshot: &ExecFileSnapshot,
+    undo: ExecFileUndoAvailability,
+) -> Option<ExecFileBinaryPreview> {
+    let format = ExecFilePreviewFormat::for_path(&snapshot.file.relative_path)?;
+    let before = match snapshot.file.change {
+        ExecFileChange::Created => ExecFilePreviewAvailability::Empty,
+        ExecFileChange::Overwritten | ExecFileChange::Deleted => {
+            if snapshot.file.prior_blob_id.is_none() {
+                ExecFilePreviewAvailability::Unavailable
+            } else if snapshot
+                .file
+                .prior_byte_len
+                .is_some_and(|byte_len| byte_len > MAX_FILE_PREVIEW_INPUT_BYTES)
+            {
+                ExecFilePreviewAvailability::TooLarge
+            } else {
+                ExecFilePreviewAvailability::Available
+            }
+        }
+    };
+    let after = match snapshot.file.change {
+        ExecFileChange::Deleted => ExecFilePreviewAvailability::Empty,
+        ExecFileChange::Created | ExecFileChange::Overwritten => match undo {
+            ExecFileUndoAvailability::Available | ExecFileUndoAvailability::NotAvailable => {
+                ExecFilePreviewAvailability::Available
+            }
+            ExecFileUndoAvailability::Stale => ExecFilePreviewAvailability::Stale,
+            ExecFileUndoAvailability::AlreadyUndone => ExecFilePreviewAvailability::Unavailable,
+        },
+    };
+    Some(ExecFileBinaryPreview {
+        format,
+        before,
+        after,
+    })
 }
 
 async fn inspect_current_change(
@@ -454,6 +561,215 @@ async fn text_diff(
             .header("before", "after")
             .to_string(),
     )
+}
+
+/// Which immutable side of a journaled change the renderer requested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ExecFilePreviewRevision {
+    Before,
+    After,
+}
+
+/// One ephemeral, already-bounded raster result from the bundled renderer.
+pub(crate) struct RenderedExecFilePreview {
+    pub media_type: ImageMediaType,
+    pub width: u32,
+    pub height: u32,
+    pub bytes: Vec<u8>,
+}
+
+/// Safe failure vocabulary for the renderer-facing preview endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExecFilePreviewError {
+    NotFound,
+    Unsupported,
+    Empty,
+    Stale,
+    TooLarge,
+    Unavailable,
+    RenderFailed,
+}
+
+pub(crate) struct ExecFilePreviewRequest<'a> {
+    pub chat_id: ChatId,
+    pub turn_id: TurnId,
+    pub snapshot_id: uuid::Uuid,
+    pub revision: ExecFilePreviewRevision,
+    pub scripts_dir: Option<&'a Path>,
+    pub temp_root: &'a Path,
+}
+
+/// Authorize, select, and render one revision without publishing a reusable
+/// file or image identity. All filesystem paths remain server-side.
+pub(crate) async fn render_file_change_preview(
+    store: &dyn Store,
+    blobs: &dyn BlobStore,
+    request: ExecFilePreviewRequest<'_>,
+) -> Result<RenderedExecFilePreview, ExecFilePreviewError> {
+    let snapshot = store
+        .list_exec_file_snapshots(request.chat_id)
+        .await
+        .map_err(|_| ExecFilePreviewError::Unavailable)?
+        .into_iter()
+        .find(|snapshot| snapshot.turn_id == request.turn_id && snapshot.id == request.snapshot_id)
+        .ok_or(ExecFilePreviewError::NotFound)?;
+    let format = ExecFilePreviewFormat::for_path(&snapshot.file.relative_path)
+        .ok_or(ExecFilePreviewError::Unsupported)?;
+    let bytes = match request.revision {
+        ExecFilePreviewRevision::Before => preview_before_bytes(blobs, &snapshot).await?,
+        ExecFilePreviewRevision::After => preview_after_bytes(&snapshot).await?,
+    };
+    let scripts_dir = request
+        .scripts_dir
+        .ok_or(ExecFilePreviewError::Unavailable)?;
+    render_document_bytes(format, bytes, scripts_dir, request.temp_root).await
+}
+
+async fn preview_before_bytes(
+    blobs: &dyn BlobStore,
+    snapshot: &ExecFileSnapshot,
+) -> Result<Vec<u8>, ExecFilePreviewError> {
+    if snapshot.file.change == ExecFileChange::Created {
+        return Err(ExecFilePreviewError::Empty);
+    }
+    if snapshot
+        .file
+        .prior_byte_len
+        .is_some_and(|byte_len| byte_len > MAX_FILE_PREVIEW_INPUT_BYTES)
+    {
+        return Err(ExecFilePreviewError::TooLarge);
+    }
+    load_prior_bytes(blobs, snapshot)
+        .await
+        .ok_or(ExecFilePreviewError::Unavailable)
+}
+
+async fn preview_after_bytes(snapshot: &ExecFileSnapshot) -> Result<Vec<u8>, ExecFilePreviewError> {
+    if snapshot.file.change == ExecFileChange::Deleted {
+        return Err(ExecFilePreviewError::Empty);
+    }
+    let expected = snapshot
+        .file
+        .new_sha256
+        .as_deref()
+        .and_then(parse_sha256)
+        .ok_or(ExecFilePreviewError::Unavailable)?;
+    let Some((prefix, name)) = split_journal_path(&snapshot.file.relative_path) else {
+        return Err(ExecFilePreviewError::Unavailable);
+    };
+    let folder = Path::new(&snapshot.file.folder_path);
+    if !folder.is_absolute() {
+        return Err(ExecFilePreviewError::Unavailable);
+    }
+    let parent = try_resolve_scratch_directory(folder, prefix, false)
+        .await
+        .map_err(|_| ExecFilePreviewError::Stale)?;
+    match current_digest(&parent, name).await {
+        Ok(Some(digest)) if digest == expected => {}
+        Ok(_) => return Err(ExecFilePreviewError::Stale),
+        Err(()) => return Err(ExecFilePreviewError::Unavailable),
+    }
+    let mut file = parent.open_file(name).await.map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            ExecFilePreviewError::Stale
+        } else {
+            ExecFilePreviewError::Unavailable
+        }
+    })?;
+    let byte_len = file
+        .metadata()
+        .map_err(|_| ExecFilePreviewError::Unavailable)?
+        .len();
+    if byte_len > MAX_FILE_PREVIEW_INPUT_BYTES {
+        return Err(ExecFilePreviewError::TooLarge);
+    }
+    let bytes = tokio::task::spawn_blocking(move || {
+        use std::io::Read as _;
+        let mut bytes = Vec::with_capacity(usize::try_from(byte_len).unwrap_or_default());
+        file.read_to_end(&mut bytes).map(|_| bytes)
+    })
+    .await
+    .map_err(|_| ExecFilePreviewError::Unavailable)?
+    .map_err(|_| ExecFilePreviewError::Unavailable)?;
+    if sha256(&bytes) != expected {
+        return Err(ExecFilePreviewError::Stale);
+    }
+    Ok(bytes)
+}
+
+async fn render_document_bytes(
+    format: ExecFilePreviewFormat,
+    bytes: Vec<u8>,
+    scripts_dir: &Path,
+    temp_root: &Path,
+) -> Result<RenderedExecFilePreview, ExecFilePreviewError> {
+    tokio::fs::create_dir_all(temp_root)
+        .await
+        .map_err(|_| ExecFilePreviewError::Unavailable)?;
+    let temporary = tempfile::Builder::new()
+        .prefix("file-preview-")
+        .tempdir_in(temp_root)
+        .map_err(|_| ExecFilePreviewError::Unavailable)?;
+    let input = temporary
+        .path()
+        .join(format!("revision.{}", format.extension()));
+    let output = temporary.path().join("preview");
+    tokio::fs::create_dir(&output)
+        .await
+        .map_err(|_| ExecFilePreviewError::Unavailable)?;
+    tokio::fs::write(&input, bytes)
+        .await
+        .map_err(|_| ExecFilePreviewError::Unavailable)?;
+
+    let helper = scripts_dir.join(format.helper());
+    if !helper.is_file() {
+        return Err(ExecFilePreviewError::Unavailable);
+    }
+    run_document_helper(&helper, &input, &output, temporary.path()).await?;
+
+    let scan = tokio::task::spawn_blocking(move || {
+        openwave_code_execution::scan_preview_directory(&output)
+    })
+    .await
+    .map_err(|_| ExecFilePreviewError::RenderFailed)?;
+    let (image, data) = scan
+        .images
+        .into_iter()
+        .next()
+        .ok_or(ExecFilePreviewError::RenderFailed)?;
+    Ok(RenderedExecFilePreview {
+        media_type: image.media_type,
+        width: image.width,
+        height: image.height,
+        bytes: data.bytes().to_vec(),
+    })
+}
+
+async fn run_document_helper(
+    helper: &Path,
+    input: &Path,
+    output: &Path,
+    working_directory: &Path,
+) -> Result<(), ExecFilePreviewError> {
+    for python in ["python3", "python"] {
+        let mut command = tokio::process::Command::new(python);
+        command
+            .arg(helper)
+            .arg(input)
+            .arg("--preview-dir")
+            .arg(output)
+            .current_dir(working_directory)
+            .kill_on_drop(true);
+        match tokio::time::timeout(FILE_PREVIEW_TIMEOUT, command.output()).await {
+            Ok(Ok(completed)) if completed.status.success() => return Ok(()),
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {
+                return Err(ExecFilePreviewError::RenderFailed);
+            }
+        }
+    }
+    Err(ExecFilePreviewError::Unavailable)
 }
 
 fn display_folder_name(folder_path: &str) -> String {
@@ -629,8 +945,11 @@ mod tests {
     use std::collections::BTreeMap;
 
     use chrono::Utc;
+    use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
     use openwave_code_execution::{TrashSink, WriteOverlay};
-    use openwave_core::{Chat, DbStore, ExecFileRejectionRecord, FsBlobStore};
+    use openwave_core::{
+        Chat, DbStore, ExecFileRejectionRecord, ExecFileSnapshotRecord, FsBlobStore,
+    };
 
     use crate::state::BlobWriteGuard;
 
@@ -791,5 +1110,140 @@ mod tests {
             .files
             .iter()
             .all(|file| file.status == ExecFileUndoStatus::AlreadyUndone));
+    }
+
+    /// The binary-preview contract crosses the durable journal, retained blob,
+    /// digest-guarded granted-root file, bundled helper, and bounded image scan.
+    #[tokio::test]
+    async fn a_workbook_change_renders_distinct_before_and_after_previews() {
+        if !["python3", "python"].iter().any(|python| {
+            std::process::Command::new(python)
+                .arg("--version")
+                .output()
+                .is_ok_and(|output| output.status.success())
+        }) {
+            return;
+        }
+
+        let home = tempfile::tempdir().unwrap();
+        let database = home.path().join("openwave.db");
+        let database_url = format!("sqlite://{}?mode=rwc", database.display());
+        let granted = home.path().join("granted");
+        let scripts = home.path().join("scripts");
+        std::fs::create_dir_all(&granted).unwrap();
+        std::fs::create_dir_all(&scripts).unwrap();
+
+        let store = DbStore::connect(&database_url).await.unwrap();
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            reasoning_effort: None,
+            permission_mode: None,
+            network_policy: Default::default(),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let blobs = FsBlobStore::new(home.path().join("blobs"));
+        let before = b"old workbook bytes";
+        let after = b"new workbook bytes";
+        let prior = DocumentSourceBlob::from_bytes(before);
+        blobs.put(prior.id, before.to_vec()).await.unwrap();
+        std::fs::write(granted.join("forecast.xlsx"), after).unwrap();
+        let turn_id = TurnId::new();
+        store
+            .record_exec_file_snapshots(
+                chat.id,
+                turn_id,
+                &[ExecFileSnapshotRecord {
+                    folder_path: granted.display().to_string(),
+                    relative_path: "forecast.xlsx".into(),
+                    change: ExecFileChange::Overwritten,
+                    prior_blob_id: Some(prior.id),
+                    prior_byte_len: Some(prior.byte_len),
+                    new_sha256: Some(sha256_hex(after)),
+                    undo: ExecUndoState::Available,
+                }],
+            )
+            .await
+            .unwrap();
+        let snapshot = store
+            .list_exec_file_snapshots(chat.id)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        let summary = list_file_change_summaries(&store, &blobs, chat.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            summary[&turn_id][0].binary_preview,
+            Some(ExecFileBinaryPreview {
+                format: ExecFilePreviewFormat::Xlsx,
+                before: ExecFilePreviewAvailability::Available,
+                after: ExecFilePreviewAvailability::Available,
+            })
+        );
+        assert!(summary[&turn_id][0].diff.is_none());
+
+        write_preview_fixture(&scripts.join("old.png"), [180, 20, 20]);
+        write_preview_fixture(&scripts.join("new.png"), [20, 20, 180]);
+        std::fs::write(
+            scripts.join("analyze_xlsx.py"),
+            r#"import shutil
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_bytes()
+output = Path(sys.argv[sys.argv.index("--preview-dir") + 1])
+output.mkdir(parents=True, exist_ok=True)
+fixture = "old.png" if source == b"old workbook bytes" else "new.png"
+shutil.copyfile(Path(__file__).with_name(fixture), output / "overview-grid.png")
+"#,
+        )
+        .unwrap();
+
+        let before_preview = render_file_change_preview(
+            &store,
+            &blobs,
+            ExecFilePreviewRequest {
+                chat_id: chat.id,
+                turn_id,
+                snapshot_id: snapshot.id,
+                revision: ExecFilePreviewRevision::Before,
+                scripts_dir: Some(&scripts),
+                temp_root: &home.path().join("preview-temp"),
+            },
+        )
+        .await
+        .unwrap();
+        let after_preview = render_file_change_preview(
+            &store,
+            &blobs,
+            ExecFilePreviewRequest {
+                chat_id: chat.id,
+                turn_id,
+                snapshot_id: snapshot.id,
+                revision: ExecFilePreviewRevision::After,
+                scripts_dir: Some(&scripts),
+                temp_root: &home.path().join("preview-temp"),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(before_preview.media_type, ImageMediaType::Png);
+        assert_eq!(after_preview.media_type, ImageMediaType::Png);
+        assert_ne!(before_preview.bytes, after_preview.bytes);
+    }
+
+    fn write_preview_fixture(path: &Path, color: [u8; 3]) {
+        DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 2, Rgb(color)))
+            .save_with_format(path, ImageFormat::Png)
+            .unwrap();
     }
 }

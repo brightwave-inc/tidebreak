@@ -232,7 +232,7 @@ type MessageListProps = {
   imageClient?: Pick<ApiClient, "getChatImageAttachment">;
   changeClient?: Pick<
     ApiClient,
-    "undoFileChange" | "undoTurnFileChanges"
+    "getFileChangePreview" | "undoFileChange" | "undoTurnFileChanges"
   >;
 };
 
@@ -521,7 +521,7 @@ export function groupMessageItems(
   chatId?: string,
   changeClient?: Pick<
     ApiClient,
-    "undoFileChange" | "undoTurnFileChanges"
+    "getFileChangePreview" | "undoFileChange" | "undoTurnFileChanges"
   >,
   backgroundAgents: {
     runs: AgentRun[];
@@ -890,7 +890,7 @@ function MessageBubbleImpl({
   chatId?: string;
   changeClient?: Pick<
     ApiClient,
-    "undoFileChange" | "undoTurnFileChanges"
+    "getFileChangePreview" | "undoFileChange" | "undoTurnFileChanges"
   >;
   /** Present only on the transcript's newest retryable failure. */
   onRetry?: () => void;
