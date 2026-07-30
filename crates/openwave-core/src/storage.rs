@@ -1574,12 +1574,16 @@ pub trait Store: Send + Sync {
     /// only transitions a fresh `queued` `container` run to `running`. Reusing
     /// `lease_token` recovers its original still-live claim and never claims
     /// different work. The returned lease fences the run's result commit exactly
-    /// as an in-process claim does.
+    /// as an in-process claim does. Refuses — leaving the run queued — while
+    /// `max_running_containers` container runs are already running; container
+    /// runs bypass the in-process scheduler's limits, so this claim is where
+    /// their own bound is enforced.
     async fn claim_container_agent_run(
         &self,
         _id: AgentRunId,
         _lease_token: uuid::Uuid,
         _lease_duration: chrono::Duration,
+        _max_running_containers: u32,
     ) -> Result<Option<AgentRun>> {
         agent_run_storage_unavailable()
     }

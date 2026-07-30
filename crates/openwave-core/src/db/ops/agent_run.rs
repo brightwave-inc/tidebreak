@@ -1,7 +1,7 @@
 use chrono::Utc;
 use sea_orm::{
     sea_query::ExprTrait, ActiveModelTrait, ColumnTrait, Condition, DatabaseBackend, EntityTrait,
-    NotSet, QueryFilter, QueryOrder, QuerySelect, Set, Statement, TransactionTrait,
+    NotSet, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, Statement, TransactionTrait,
 };
 
 use crate::agent_tools::SandboxAgentFileResource;
@@ -1070,11 +1070,20 @@ pub(in crate::db) async fn claim_agent_run(
 /// work. A container run has exactly one execution attempt, so this only
 /// transitions a fresh `queued` run to `running`; it never reclaims an expired
 /// lease into a second attempt.
+///
+/// `max_running_containers` bounds concurrency: container runs bypass the
+/// in-process scheduler's global and per-chat limits, so this claim refuses —
+/// leaving the run `queued` for a later pass — while that many container runs
+/// are already `running`. The count is taken inside the claim transaction under
+/// the scheduler lock, so racing drivers cannot admit past the cap. Recovery
+/// (`reclaim_container_agent_run`) is exempt: a reclaimed run is already
+/// `running` and adds nothing to the count.
 pub(in crate::db) async fn claim_container_agent_run(
     store: &DbStore,
     id: AgentRunId,
     lease_token: uuid::Uuid,
     lease_duration: chrono::Duration,
+    max_running_containers: u32,
 ) -> Result<Option<AgentRun>> {
     if lease_token.is_nil() || lease_duration <= chrono::Duration::zero() {
         return Err(AgentError::Store(
@@ -1134,6 +1143,24 @@ pub(in crate::db) async fn claim_container_agent_run(
         && candidate.deadline_at.is_some_and(|deadline| deadline > now)
         && candidate.updated_at <= now;
     if !claimable {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    // Every `running` container run counts against the cap, live lease or not:
+    // an expired-lease run may still have a working container, and counting it
+    // keeps the bound on real containers conservative until recovery or the
+    // deadline scan settles it.
+    let running_containers = entities::agent_run::Entity::find()
+        .filter(entities::agent_run::Column::Tier.eq(AgentRunTier::Background.as_str()))
+        .filter(
+            entities::agent_run::Column::ExecutionLocation
+                .eq(AgentRunExecutionLocation::Container.as_str()),
+        )
+        .filter(entities::agent_run::Column::Status.eq(AgentRunStatus::Running.as_str()))
+        .count(&transaction)
+        .await
+        .map_err(store_err)?;
+    if running_containers >= u64::from(max_running_containers) {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
