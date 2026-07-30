@@ -23,25 +23,35 @@ React/TypeScript under `crates/openwave-desktop/ui`.
   claim on contested scope. Work the user is directing interactively in this
   session doesn't need an issue; filing one adds tracking overhead without
   coordinating anyone. If you do pick up substantial parallel-track work, claim
-  its issue on the board **before you start editing** — see below.
+  its issue **before you start editing** — see below.
 - **Only commit or push when asked.** Don't merge your own PRs unless the request
   was explicitly to merge; default to opening the PR for review.
 
-## Project board
+## Issue tracking
 
-Work is tracked on a repo-scoped GitHub **Project** so the team and separate
-agent sessions can see where things stand without reading commit logs. The
-board matters where sessions can collide or work outlives a session; it is not
-a ledger of everything an agent happens to be doing right now.
+Work is tracked with plain GitHub **issues** — no project board. Issue state
+(open/closed), assignee, and a small set of workflow labels carry everything the
+team and separate agent sessions need to see where things stand without reading
+commit logs. This matters where sessions can collide or work outlives a session;
+it is not a ledger of everything an agent happens to be doing right now.
 
-- **Claim before you build, not after.** Assign yourself and move the issue to
-  *In progress* **before the first edit**. Sessions run in parallel and cannot
-  see each other's working trees, so the board is the only place a claim is
-  visible. Claiming at the end of the work is worth nothing: the failure it
+The workflow labels:
+
+- `in-progress` — claimed; a session is actively working the issue.
+- `blocked` — cannot proceed until a dependency or decision lands.
+- `deferred` — consciously parked; not on any session's active slate.
+
+The conventions:
+
+- **Claim before you build, not after.** Assign yourself and add the
+  `in-progress` label **before the first edit**. Sessions run in parallel and
+  cannot see each other's working trees, so the issue is the only place a claim
+  is visible. Claiming at the end of the work is worth nothing: the failure it
   prevents is a second session starting the same issue an hour ago.
-- **Check for existing work before you start.** Read the issue's board status and
-  `gh pr list` together. Either can be stale on its own — an unclaimed issue with
-  an open PR against it is taken.
+- **Check for existing work before you start.** Read the issue's labels/assignee
+  and `gh pr list` together. Either can be stale on its own — an unclaimed issue
+  with an open PR against it is taken. `gh issue list --label in-progress` shows
+  every active claim.
 - **A closed issue is not proof the work is done.** Check whether the merged PR
   covered the whole scope, and open a follow-up issue for whatever it left.
 - **If you find your slice already merged by someone else, don't force yours
@@ -49,11 +59,17 @@ a ledger of everything an agent happens to be doing right now.
   design over it reverts reviewed work. Salvage the difference — extra coverage,
   bugs you found — into follow-up issues, and say so when you close yours.
 - **One issue per slice.** Reference it from the PR with `Closes #N` so the merge
-  auto-closes the issue and advances its board status.
-- **Keep status current.** A stale board misleads the team — treat updating it as
-  part of the change, not an afterthought.
-- Managing the board (not issues) needs the `project` OAuth scope on the `gh`
-  token; `gh auth refresh -s project` grants it.
+  auto-closes the issue.
+- **Keep labels current.** Stale state misleads the team — drop `in-progress`
+  when you park work (and add `deferred` or `blocked` with a comment saying
+  where it stands); treat this as part of the change, not an afterthought.
+- **Avoid the GitHub GraphQL API — REST covers this workflow entirely.** All
+  agent sessions share one `gh` account, and the GraphQL quota (5000 points/hr)
+  is routinely exhausted when sessions run in parallel — REST keeps working
+  when GraphQL is rate-limited. Everything above is plain `gh` issue/PR
+  commands or `gh api <rest-path>`; don't reach for `gh api graphql`, and note
+  a few `gh` subcommands (e.g. `gh project *`, which nothing here needs) use
+  GraphQL under the hood.
 
 ## Dependencies
 
