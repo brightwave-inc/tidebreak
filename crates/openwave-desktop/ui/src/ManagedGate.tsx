@@ -356,15 +356,13 @@ export function ManagedGate({
           <>
             <h2>Connect to your model gateway</h2>
             <p>
-              Signing in connects OpenWave to the gateway below. It will
-              manage this device — it controls which models are available —
-              and the connection cannot be undone from within OpenWave.
+              Sign in to connect OpenWave to the gateway below, which will
+              manage this device.
             </p>
             {managed && lockedUrl && (
               <p>
                 This replaces <code className="font-medium">{lockedUrl}</code>,
-                which currently manages this device; OpenWave will sign out of
-                it when the new sign-in completes.
+                which currently manages this device.
               </p>
             )}
           </>
@@ -372,8 +370,8 @@ export function ManagedGate({
           <>
             <h2>Sign in to continue</h2>
             <p>
-              This OpenWave install is managed by your organization. Sign in
-              to your model gateway to get started.
+              This device is managed by your organization. Sign in to get
+              started.
             </p>
           </>
         )}
@@ -444,8 +442,7 @@ export function ManagedGate({
       {actionError && <p className="boot-error-detail">{actionError}</p>}
       {statusError && <p className="boot-error-detail">{statusError}</p>}
       <p className="text-muted-foreground max-w-md text-xs leading-relaxed">
-        Sign-in happens in your browser against the gateway itself; OpenWave
-        never sees your identity provider credentials.
+        Sign-in opens in your browser. OpenWave never sees your password.
       </p>
     </div>
   );
