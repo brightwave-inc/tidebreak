@@ -72,24 +72,6 @@ pub(crate) struct DeliverableSummary {
     producing_run_id: Option<Uuid>,
 }
 
-/// Outcome of reverting a merged output.
-///
-/// Reverting an output with earlier revisions republishes the previous one;
-/// reverting one that has only its initial merge retracts it. Both are durable
-/// and reversible — a retract is undone by `restore_output`, and a revert can be
-/// followed forward again.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "status", rename_all = "camelCase")]
-pub(crate) enum OutputRevertResult {
-    Reverted {
-        output_id: OutputId,
-        revision_id: OutputRevisionId,
-    },
-    Retracted {
-        output_id: OutputId,
-    },
-}
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DeliverablesCatalog {
@@ -490,49 +472,6 @@ pub(crate) async fn export_deliverable(
         },
     };
     terminalize_output_export(&host_access.receipts, &mut receipt, terminal)
-}
-
-#[tauri::command]
-pub(crate) async fn revert_output(
-    host_access: State<'_, HostAccess>,
-    request: DeliverableRequest,
-) -> Result<OutputRevertResult, String> {
-    let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
-    let store = host_access
-        .store()
-        .ok_or_else(|| "OpenWave is still starting".to_owned())?;
-    let (output, current) =
-        require_live_output(host_access.store(), chat_id, request.output_id).await?;
-    // Reverting is a host action, never the model's. An output that has only its
-    // initial merge cannot step back to an earlier version, so reverting it
-    // retracts the merge entirely — a soft delete that `restore_output` undoes.
-    if current.ordinal <= 1 {
-        store
-            .delete_output(output.id, Utc::now())
-            .await
-            .map_err(|_| "Could not revert that output".to_owned())?;
-        return Ok(OutputRevertResult::Retracted {
-            output_id: output.id,
-        });
-    }
-    // Otherwise step the current pointer back to the immediately previous
-    // revision. The superseded revision is retained and addressable, so a revert
-    // destroys nothing and can be followed forward again.
-    let previous = store
-        .list_output_revisions(output.id)
-        .await
-        .map_err(|_| "Could not revert that output".to_owned())?
-        .into_iter()
-        .find(|revision| revision.ordinal == current.ordinal - 1)
-        .ok_or_else(|| "That output has no earlier revision to revert to".to_owned())?;
-    let record = store
-        .set_current_output_revision(output.id, previous.id, Utc::now())
-        .await
-        .map_err(|_| "Could not revert that output".to_owned())?;
-    Ok(OutputRevertResult::Reverted {
-        output_id: record.id,
-        revision_id: previous.id,
-    })
 }
 
 #[tauri::command]

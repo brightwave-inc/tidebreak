@@ -191,7 +191,6 @@ pub fn run() {
             deliverables::list_deliverables,
             deliverables::read_deliverable,
             deliverables::export_deliverable,
-            deliverables::revert_output,
             deliverables::restore_output,
             deliverables::list_output_revisions,
             deliverables::read_output_revision,
