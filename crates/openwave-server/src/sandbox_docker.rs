@@ -17,6 +17,23 @@
 //! The sandbox-agent wire transport that dials that URL — framing, the attach
 //! handshake, the event stream — is a separate slice; nothing here speaks it.
 //!
+//! # The lifetime cap
+//!
+//! Docker has no TTL of its own, and a cap enforced by a host-side timer is worth
+//! nothing in the case that matters: the host process dying is exactly what strands
+//! a container, and a timer dies with it. So the cap is delivered *into* the
+//! container — [`LIFETIME_CAP_ENV`] — and the sandbox agent, which is the
+//! container's PID 1, exits when it elapses. The container then stops on its own
+//! whether or not any host is still alive to ask.
+//!
+//! This is an *absolute* cap, not an idle timeout: it bounds how long a container
+//! may exist, not how long it may be quiet. The two are different guarantees and
+//! only the absolute one is enforceable without the host participating — an idle
+//! watchdog needs a keepalive from the attached host to distinguish a slow exec
+//! from an abandoned run, and that keepalive does not exist on the transport yet.
+//! The orphan sweep remains the reclaimer for a *live* host that lost track of a
+//! container; the cap is what covers a host that is gone.
+//!
 //! # Detected capability
 //!
 //! The container runtime is a detected capability, exactly as Seatbelt is for local
@@ -61,6 +78,10 @@ const TRANSPORT_SECRET_ENV: &str = "OPENWAVE_TRANSPORT_SECRET";
 /// agent image reads its task from here; see [`ProvisionRequest::task`] for why
 /// this rides provisioning rather than a run-init frame today.
 const TASK_ENV: &str = "OPENWAVE_SANDBOX_TASK";
+/// Environment variable carrying the absolute lifetime cap, in seconds, into the
+/// container. The sandbox agent's entrypoint reads it and exits when it elapses.
+/// Kept in sync with the agent's own constant of the same name.
+pub const LIFETIME_CAP_ENV: &str = "OPENWAVE_SANDBOX_LIFETIME_CAP_SECS";
 /// Go-template that lists a tagged container's id and correlation tag, tab-separated.
 /// Kept in sync with [`RUN_TAG_LABEL`] by a unit test.
 const TAG_LIST_FORMAT: &str = "{{.ID}}\t{{.Label \"openwave.run-tag\"}}";
@@ -72,6 +93,11 @@ const DEFAULT_BINARY: &str = "docker";
 const DEFAULT_IMAGE: &str = "ghcr.io/openwave/sandbox-agent:placeholder";
 /// The in-container port the sandbox supervisor listens on by default.
 const DEFAULT_LISTENER_PORT: u16 = 8080;
+/// The lifetime cap applied when a provisioning request names none: four hours.
+/// It is a leak backstop, not a scheduling policy — comfortably longer than any
+/// legitimate run, short enough that a container stranded by a dead host does not
+/// outlive the day.
+const DEFAULT_LIFETIME_CAP_SECS: u64 = 4 * 60 * 60;
 
 const RUNTIME_UNAVAILABLE: &str = "container runtime is unavailable";
 const RUNTIME_SPAWN_FAILED: &str = "could not invoke the container runtime";
@@ -96,6 +122,11 @@ pub struct DockerConfig {
     /// entrypoint. Empty means the image's default is used — the real agent image
     /// needs no override; tests pass a trivial port-holding command.
     pub command: Vec<String>,
+    /// The absolute lifetime cap, in seconds, applied to a provisioning request
+    /// that names none of its own. `None` disables the fallback, leaving a
+    /// capless request uncapped; a request's own
+    /// [`lifetime_cap_secs`](ProvisionRequest::lifetime_cap_secs) always wins.
+    pub lifetime_cap_secs: Option<u64>,
 }
 
 impl Default for DockerConfig {
@@ -105,6 +136,7 @@ impl Default for DockerConfig {
             image: DEFAULT_IMAGE.to_owned(),
             listener_port: DEFAULT_LISTENER_PORT,
             command: Vec::new(),
+            lifetime_cap_secs: Some(DEFAULT_LIFETIME_CAP_SECS),
         }
     }
 }
@@ -249,9 +281,11 @@ impl SandboxBackend for DockerSandboxBackend {
         if !self.is_available() {
             return Err(BackendError::Provision(RUNTIME_UNAVAILABLE.to_owned()));
         }
-        // The design admits a local container attached-only precisely because Docker
-        // has no lifetime cap it can enforce from outside the container, so
-        // `lifetime_cap_secs` is not enforceable here and is intentionally ignored.
+        // Docker enforces no lifetime cap from outside the container, and neither
+        // can this process: a host-side timer dies with the host, which is the very
+        // failure that strands a container. The cap therefore rides into the
+        // container and the agent inside enforces it against itself. See the module
+        // docs for why that is an absolute cap and not an idle timeout.
         let secret = Uuid::new_v4().to_string();
         let mut command = self.command();
         command.args(run_args(
@@ -259,6 +293,7 @@ impl SandboxBackend for DockerSandboxBackend {
             request.tag,
             request.run_id,
             request.task.is_some(),
+            effective_lifetime_cap(&self.config, &request),
         ));
         // Set the secret on the runtime CLI's own environment and pass it through with
         // a valueless `--env`, so it never appears in this process's argv.
@@ -327,9 +362,26 @@ impl SandboxBackend for DockerSandboxBackend {
     }
 }
 
+/// The cap this provisioning runs under: the request's own if it names one, else
+/// the backend's configured fallback. A zero cap is treated as no cap rather than
+/// as "expire immediately", so a misconfigured zero cannot make every sandbox die
+/// on arrival.
+fn effective_lifetime_cap(config: &DockerConfig, request: &ProvisionRequest) -> Option<u64> {
+    request
+        .lifetime_cap_secs
+        .or(config.lifetime_cap_secs)
+        .filter(|secs| *secs > 0)
+}
+
 /// The `docker run` argument vector for one provisioning. Factored out so the
 /// label, publish, and env-passthrough composition is testable without a runtime.
-fn run_args(config: &DockerConfig, tag: SandboxTag, run_id: RunId, with_task: bool) -> Vec<String> {
+fn run_args(
+    config: &DockerConfig,
+    tag: SandboxTag,
+    run_id: RunId,
+    with_task: bool,
+    lifetime_cap_secs: Option<u64>,
+) -> Vec<String> {
     let mut args = vec![
         "run".to_owned(),
         "-d".to_owned(),
@@ -343,6 +395,13 @@ fn run_args(config: &DockerConfig, tag: SandboxTag, run_id: RunId, with_task: bo
     if with_task {
         args.push("--env".to_owned());
         args.push(TASK_ENV.to_owned());
+    }
+    // Unlike the secret and the task, the cap is not sensitive, so it travels as
+    // an ordinary `--env NAME=value` rather than by name through this process's
+    // own environment.
+    if let Some(secs) = lifetime_cap_secs {
+        args.push("--env".to_owned());
+        args.push(format!("{LIFETIME_CAP_ENV}={secs}"));
     }
     args.extend([
         "--publish".to_owned(),
@@ -531,7 +590,7 @@ mod tests {
             command: vec!["sleep".to_owned(), "infinity".to_owned()],
             ..DockerConfig::default()
         };
-        let args = run_args(&config, tag, run_id, true);
+        let args = run_args(&config, tag, run_id, true, Some(900));
 
         assert_eq!(args[0], "run");
         assert!(args.contains(&"-d".to_owned()));
@@ -559,10 +618,49 @@ mod tests {
         assert!(image_at < command_at);
         assert_eq!(args.last().unwrap(), "infinity");
 
+        // The cap reaches the container as a value, since the agent inside is what
+        // enforces it.
+        assert!(args.contains(&format!("{LIFETIME_CAP_ENV}=900")));
+
         // With no task to deliver the passthrough is omitted entirely, leaving
         // the image on its own default.
-        let taskless = run_args(&config, tag, run_id, false);
+        let taskless = run_args(&config, tag, run_id, false, None);
         assert!(!taskless.contains(&TASK_ENV.to_owned()));
+        // An uncapped provisioning names no cap at all rather than passing a zero
+        // the container would read as "expire now".
+        assert!(taskless.iter().all(|arg| !arg.contains(LIFETIME_CAP_ENV)));
+    }
+
+    #[test]
+    fn the_request_cap_wins_over_the_configured_fallback() {
+        let request = |lifetime_cap_secs| ProvisionRequest {
+            run_id: RunId::new(),
+            tag: SandboxTag::new(),
+            lifetime_cap_secs,
+            task: None,
+        };
+        let config = DockerConfig::default();
+        assert_eq!(config.lifetime_cap_secs, Some(DEFAULT_LIFETIME_CAP_SECS));
+
+        // A request that names a cap gets exactly that one; one that does not
+        // still gets capped, so nothing provisions with an unbounded lifetime by
+        // omission.
+        assert_eq!(
+            effective_lifetime_cap(&config, &request(Some(60))),
+            Some(60)
+        );
+        assert_eq!(
+            effective_lifetime_cap(&config, &request(None)),
+            Some(DEFAULT_LIFETIME_CAP_SECS)
+        );
+
+        // Zero from either side means uncapped, never expire-on-arrival.
+        assert_eq!(effective_lifetime_cap(&config, &request(Some(0))), None);
+        let uncapped = DockerConfig {
+            lifetime_cap_secs: None,
+            ..DockerConfig::default()
+        };
+        assert_eq!(effective_lifetime_cap(&uncapped, &request(None)), None);
     }
 
     #[test]
