@@ -116,36 +116,49 @@ pub async fn get_chat_image_attachment(
     if state.store.get_chat(chat_id).await?.is_none() {
         return Err(ServerError::not_found(format!("chat {chat_id} not found")));
     }
-    let attachment = state
+    let message_image = state
         .store
         .list_message_attachments(chat_id)
         .await?
         .into_iter()
         .find(|attachment| attachment.image.blob_id == attachment_id)
-        .ok_or_else(|| {
-            ServerError::not_found(format!(
-                "image attachment {attachment_id} not found in chat {chat_id}"
-            ))
-        })?;
-    let bytes = state
-        .blobs
-        .get(attachment.image.blob_id)
-        .await?
-        .ok_or_else(|| {
-            ServerError::internal(format!(
-                "image attachment {attachment_id} is missing from blob storage"
-            ))
-        })?;
+        .map(|attachment| attachment.image);
+    let tool_image = if message_image.is_none() {
+        state
+            .store
+            .list_tool_calls(chat_id)
+            .await?
+            .into_iter()
+            .filter_map(|call| call.result_preview)
+            .find_map(|preview| match preview {
+                openwave_core::ToolResultPreview::Exec { images, .. } => images
+                    .into_iter()
+                    .find(|image| image.blob_id == attachment_id),
+                _ => None,
+            })
+    } else {
+        None
+    };
+    let image = message_image.or(tool_image).ok_or_else(|| {
+        ServerError::not_found(format!(
+            "image attachment {attachment_id} not found in chat {chat_id}"
+        ))
+    })?;
+    let bytes = state.blobs.get(image.blob_id).await?.ok_or_else(|| {
+        ServerError::internal(format!(
+            "image attachment {attachment_id} is missing from blob storage"
+        ))
+    })?;
     let actual_len = u64::try_from(bytes.len())
         .map_err(|_| ServerError::internal("image attachment byte length exceeds u64"))?;
-    if actual_len != attachment.image.byte_len {
+    if actual_len != image.byte_len {
         return Err(ServerError::internal(format!(
             "image attachment {attachment_id} does not match its descriptor"
         )));
     }
     Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, attachment.image.media_type.as_str())
+        .header(header::CONTENT_TYPE, image.media_type.as_str())
         .header(header::CONTENT_LENGTH, actual_len.to_string())
         // The bearer is never put in a URL. Do not let the resulting pixels
         // persist in an HTTP cache either; the renderer owns the object URL's

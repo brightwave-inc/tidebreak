@@ -468,7 +468,14 @@ export function groupMessageItems(
       (entry): entry is ToolMessage =>
         entry.role === "tool" && !parked.has(entry.callId),
     );
-    const cards = surfacedCards(phase, parked, onApproval, approvalState, chatId);
+    const cards = surfacedCards(
+      phase,
+      parked,
+      onApproval,
+      approvalState,
+      chatId,
+      imageClient,
+    );
     const spawns = activities.flatMap((entry) =>
       entry.name === "spawn_sandbox_agent"
         ? [
@@ -541,6 +548,7 @@ function surfacedCards(
     grantScope?: GrantScopeName;
   },
   chatId?: string,
+  imageClient?: Pick<ApiClient, "getChatImageAttachment">,
 ): ReactNode[] {
   const cards: ReactNode[] = [];
   // In the order the calls happened, so the cards read as a sequence rather
@@ -608,6 +616,8 @@ function surfacedCards(
         status={entry.status}
         preview={entry.preview}
         result={entry.result?.tool === "exec" ? entry.result : null}
+        imageClient={imageClient}
+        chatId={chatId}
       />,
     );
   }

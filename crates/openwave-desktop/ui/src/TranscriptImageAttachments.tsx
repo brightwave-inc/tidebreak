@@ -17,32 +17,43 @@ export function TranscriptImageAttachments({
   return (
     <div className="message-image-grid" aria-label="Attached images">
       {images.map((image, index) => (
-        <TranscriptImage
+        <ChatImage
           key={image.attachmentId}
           client={client}
           chatId={chatId}
-          image={image}
-          index={index}
+          attachmentId={image.attachmentId}
+          mediaType={image.mediaType}
+          width={image.width}
+          height={image.height}
+          label={`Attached image ${index + 1}: ${image.width} by ${image.height} pixels`}
+          unavailableLabel="Attached image unavailable"
         />
       ))}
     </div>
   );
 }
 
-function TranscriptImage({
+export function ChatImage({
   client,
   chatId,
-  image,
-  index,
+  attachmentId,
+  mediaType,
+  width,
+  height,
+  label,
+  unavailableLabel,
 }: {
   client: Pick<ApiClient, "getChatImageAttachment">;
   chatId: string;
-  image: TranscriptImageAttachment;
-  index: number;
+  attachmentId: string;
+  mediaType: string;
+  width: number;
+  height: number;
+  label: string;
+  unavailableLabel: string;
 }) {
   const [url, setUrl] = useState<string | null>(null);
   const [unavailable, setUnavailable] = useState(false);
-  const label = `Attached image ${index + 1}: ${image.width} by ${image.height} pixels`;
 
   useEffect(() => {
     const abort = new AbortController();
@@ -51,10 +62,10 @@ function TranscriptImage({
     setUnavailable(false);
 
     void client
-      .getChatImageAttachment(chatId, image.attachmentId, abort.signal)
+      .getChatImageAttachment(chatId, attachmentId, abort.signal)
       .then((blob) => {
         if (abort.signal.aborted) return;
-        if (blob.type !== image.mediaType) {
+        if (blob.type !== mediaType) {
           setUnavailable(true);
           return;
         }
@@ -69,7 +80,7 @@ function TranscriptImage({
       abort.abort();
       if (objectUrl !== null) URL.revokeObjectURL(objectUrl);
     };
-  }, [client, chatId, image.attachmentId, image.mediaType]);
+  }, [client, chatId, attachmentId, mediaType]);
 
   if (url !== null) {
     return (
@@ -77,15 +88,15 @@ function TranscriptImage({
         className="message-image"
         src={url}
         alt={label}
-        width={image.width}
-        height={image.height}
+        width={width}
+        height={height}
       />
     );
   }
 
   return (
     <div className="message-image-pending" role="status" aria-label={label}>
-      {unavailable ? "Attached image unavailable" : "Loading attached image…"}
+      {unavailable ? unavailableLabel : "Loading image…"}
     </div>
   );
 }

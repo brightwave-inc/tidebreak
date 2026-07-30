@@ -816,6 +816,43 @@ describe("sandbox agent cancellation", () => {
 });
 
 describe("parseToolResultPreview closed results", () => {
+  it("validates and remaps exec preview image references", () => {
+    expect(
+      parseToolResultPreview({
+        tool: "exec",
+        exit_code: 0,
+        timed_out: false,
+        output_truncated: false,
+        stdout: "ok",
+        stderr: "",
+        images: [
+          {
+            blob_id: "preview-1",
+            media_type: "jpeg",
+            width: 1200,
+            height: 800,
+            byte_len: 100,
+          },
+        ],
+      }),
+    ).toEqual({
+      tool: "exec",
+      exitCode: 0,
+      timedOut: false,
+      outputTruncated: false,
+      stdout: "ok",
+      stderr: "",
+      images: [
+        {
+          attachmentId: "preview-1",
+          mediaType: "image/jpeg",
+          width: 1200,
+          height: 800,
+        },
+      ],
+    });
+  });
+
   it("accepts only the closed web-search setup signal", () => {
     expect(
       parseToolResultPreview({ tool: "web_search_provider_required" }),

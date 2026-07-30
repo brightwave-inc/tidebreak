@@ -307,6 +307,12 @@ export type ToolResultPreview =
       outputTruncated: boolean;
       stdout: string;
       stderr: string;
+      images?: {
+        attachmentId: string;
+        mediaType: string;
+        width: number;
+        height: number;
+      }[];
     }
   | {
       /** Web search is available after the reader configures a provider. */
@@ -1887,16 +1893,42 @@ export function parseToolResultPreview(
     };
   }
   if (value.tool !== "exec") return null;
-  const { exit_code, timed_out, output_truncated, stdout, stderr }: UncheckedExecResult = value;
+  const { exit_code, timed_out, output_truncated, stdout, stderr, images }: UncheckedExecResult =
+    value;
+  const imageValues = images ?? [];
   if (
     (exit_code !== null && typeof exit_code !== "number") ||
     typeof timed_out !== "boolean" ||
     typeof output_truncated !== "boolean" ||
     typeof stdout !== "string" ||
-    typeof stderr !== "string"
+    typeof stderr !== "string" ||
+    !Array.isArray(imageValues)
   ) {
     return null;
   }
+  const parsedImages = imageValues
+    .map((image) => {
+      if (!isRecord(image)) return null;
+      const { blob_id, media_type, width, height } = image;
+      if (
+        typeof blob_id !== "string" ||
+        !["png", "jpeg", "webp"].includes(String(media_type)) ||
+        !Number.isInteger(width) ||
+        Number(width) <= 0 ||
+        !Number.isInteger(height) ||
+        Number(height) <= 0
+      ) {
+        return null;
+      }
+      return {
+        attachmentId: blob_id,
+        mediaType: media_type === "jpeg" ? "image/jpeg" : `image/${media_type}`,
+        width: Number(width),
+        height: Number(height),
+      };
+    })
+    .filter((image): image is NonNullable<typeof image> => image !== null);
+  if (parsedImages.length !== imageValues.length) return null;
   return {
     tool: "exec",
     exitCode: exit_code,
@@ -1904,6 +1936,7 @@ export function parseToolResultPreview(
     outputTruncated: output_truncated,
     stdout,
     stderr,
+    images: parsedImages,
   };
 }
 

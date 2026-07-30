@@ -254,6 +254,7 @@ mod tests {
             execution: ToolCallExecution::Client,
             status: ToolCallStatus::Pending,
             result: None,
+            result_preview: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,

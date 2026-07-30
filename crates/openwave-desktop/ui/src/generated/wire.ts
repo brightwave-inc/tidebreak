@@ -473,6 +473,47 @@ export type GrantScope = { "scope": "exact_action" } & ToolActionPreview | { "sc
 export type HostRootId = string;
 
 /**
+ * Image formats OpenWave will send to a provider.
+ *
+ * Deliberately closed. Every variant here is accepted by both the Anthropic
+ * and OpenAI image APIs, so a value of this type can always be shaped for the
+ * selected provider — adapters never have to reject a media type at send time.
+ * Vector and exotic raster formats are excluded rather than passed through:
+ * an unsupported type must fail at the trusted ingest boundary, where the user
+ * can still act on it, not deep inside a turn.
+ */
+export type ImageMediaType = "png" | "jpeg" | "webp" | "gif";
+
+/**
+ * Durable identity of one image attachment.
+ *
+ * Everything here is safe to persist, log, and expose to a renderer. The blob
+ * id is an opaque content-derived UUID, never a filesystem path, so it reveals
+ * nothing about where the bytes live on disk.
+ */
+export type ImageRef = { 
+/**
+ * Content-addressed blob holding the pixels.
+ */
+blob_id: string, 
+/**
+ * Format the bytes were sniffed as at ingest.
+ */
+media_type: ImageMediaType, 
+/**
+ * Pixel width, read from the image header.
+ */
+width: number, 
+/**
+ * Pixel height, read from the image header.
+ */
+height: number, 
+/**
+ * Size of the stored bytes.
+ */
+byte_len: number, };
+
+/**
  * An input modality a model accepts.
  *
  * `snake_case` matches the strings `as_str` has always produced, so the enum
@@ -1082,7 +1123,11 @@ timed_out: boolean,
 /**
  * Whether the provider dropped output past its capture limit.
  */
-output_truncated: boolean, stdout: string, stderr: string, } | { "tool": "web_search_provider_required" } | { "tool": "mcp_app", 
+output_truncated: boolean, stdout: string, stderr: string, 
+/**
+ * Preview images emitted by the command, in model-facing priority order.
+ */
+images?: Array<ImageRef>, } | { "tool": "web_search_provider_required" } | { "tool": "mcp_app", 
 /**
  * The configured MCP server namespace that serves the view.
  */

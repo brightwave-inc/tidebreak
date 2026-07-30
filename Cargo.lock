@@ -3845,6 +3845,7 @@ dependencies = [
  "axum",
  "base64 0.23.0",
  "futures",
+ "image",
  "libc",
  "openwave-core",
  "openwave-egress",

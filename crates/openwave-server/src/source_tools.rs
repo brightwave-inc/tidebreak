@@ -566,6 +566,7 @@ mod tests {
                 execution: openwave_core::ToolCallExecution::Server,
                 status: openwave_core::ToolCallStatus::Pending,
                 result: None,
+                result_preview: None,
                 error_code: None,
                 error_detail: None,
                 client_executor_id: None,

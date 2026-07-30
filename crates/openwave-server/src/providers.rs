@@ -545,6 +545,7 @@ pub fn apply_model_policy(
     config.provider = Some(ProviderId::new(policy.provider.as_str()));
     config.model = policy.id.clone();
     config.reasoning_model = policy.supports_reasoning;
+    config.image_input = policy.input_modalities.contains(&InputModality::Image);
     config.context_window = usize::try_from(policy.context_window)
         .map_err(|_| openwave_core::AgentError::config("model context window is unsupported"))?;
     config.max_tokens = Some(policy.max_output_tokens);
@@ -1516,6 +1517,7 @@ mod tests {
         assert_eq!(config.max_tokens, Some(128_000));
         assert_eq!(config.reasoning_effort, Some(ReasoningEffort::XHigh));
         assert_eq!(config.temperature, None);
+        assert!(config.image_input);
 
         // Haiku 4.5 reasons but rejects the effort control, so the request is
         // shaped without it rather than with something the model would refuse.
@@ -1537,6 +1539,7 @@ mod tests {
         assert_eq!(config.max_tokens, Some(128_000));
         assert!(config.reasoning_model);
         assert_eq!(config.reasoning_effort, Some(ReasoningEffort::Low));
+        assert!(config.image_input);
 
         // A custom endpoint keeps the conservative shape: no reasoning, and the
         // requested effort is dropped rather than sent to something that would
@@ -1552,6 +1555,7 @@ mod tests {
             },
         );
         apply_model_policy(&mut config, &custom, Some(ReasoningEffort::High)).unwrap();
+        assert!(!config.image_input);
         assert_eq!(config.provider, Some(ProviderId::new("openai_compatible")));
         assert_eq!(config.context_window, 32_768);
         assert_eq!(config.max_tokens, Some(4_096));
