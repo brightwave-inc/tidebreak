@@ -324,28 +324,9 @@ fn provisioning_wire_shapes() {
         run_id: RunId::new(),
         tag: SandboxTag::new(),
         lifetime_cap_secs: Some(3600),
-        task: Some("summarize the corpus".to_owned()),
     };
     roundtrip(&request);
-    golden(
-        &request,
-        &[
-            ("/lifetime_cap_secs", json!(3600)),
-            ("/task", json!("summarize the corpus")),
-        ],
-    );
-
-    // An absent task is omitted entirely, so a backend that carries no task and
-    // an older encoding both decode.
-    let taskless = ProvisionRequest {
-        task: None,
-        ..request
-    };
-    roundtrip(&taskless);
-    assert!(serde_json::to_value(&taskless)
-        .unwrap()
-        .get("task")
-        .is_none());
+    golden(&request, &[("/lifetime_cap_secs", json!(3600))]);
 
     let handle = SandboxHandle {
         reference: "container-abc".to_owned(),

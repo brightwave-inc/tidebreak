@@ -21,7 +21,7 @@ use crate::provisioning::TransportSecret;
 ///
 /// Version 2 added the authenticated attach: [`AttachRequest`] carries a per-run
 /// [`TransportSecret`] the sandbox verifies before it installs the connection.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Largest single reverse-RPC or event frame a conforming transport accepts,
 /// so a peer cannot force unbounded buffering with one enormous frame.

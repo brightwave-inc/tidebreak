@@ -48,6 +48,7 @@ use openwave_core::{
 use openwave_sandbox_protocol::{
     events::EventPayload,
     ids::{EventCursor, RunId},
+    init::{AdmissionMode, PolicySnapshot, RunInit},
     protocol::{ErrorCode, ErrorResponse, Response, PROTOCOL_VERSION},
     reverse::{
         Capability, CapabilityResponder, GrantSet, ModelInferenceResult, ReverseRequest,
@@ -389,9 +390,6 @@ impl SandboxContainerRunner {
                         // A local container has no external lifetime cap, which
                         // is why the run is attached-only.
                         lifetime_cap_secs: None,
-                        // The delegated task. Interim delivery: see
-                        // `ProvisionRequest::task`.
-                        task: Some(task),
                     })
                     .await;
                 match provisioned {
@@ -462,7 +460,7 @@ impl SandboxContainerRunner {
         // From here on a container exists, so every terminal path must drive its
         // teardown obligation.
         let outcome = self
-            .attach_and_drive(&run, lease_token, protocol_run_id, config, &handle)
+            .attach_and_drive(&run, lease_token, protocol_run_id, config, task, &handle)
             .await;
         self.teardown(run_uuid, &handle).await;
         outcome
@@ -509,6 +507,7 @@ impl SandboxContainerRunner {
         lease_token: Uuid,
         protocol_run_id: RunId,
         config: AgentConfig,
+        task: String,
         handle: &SandboxHandle,
     ) -> Result<SandboxContainerRunOutcome> {
         let run_id = run.id;
@@ -534,13 +533,38 @@ impl SandboxContainerRunner {
             )),
         );
 
+        // The run init the host delivers after each attach: the task and the
+        // policy snapshot, only ever over the authenticated connection — the
+        // task no longer rides the container's environment, so a sandbox
+        // reclaimed before its handle committed never executed anything. An
+        // attached-only run carries no scoped token; the host is the model
+        // proxy.
+        let init = RunInit {
+            run_id: protocol_run_id,
+            provenance: RunProvenance {
+                run_id: protocol_run_id,
+                provider: CONTAINER_PROVENANCE_PROVIDER.to_owned(),
+            },
+            task,
+            deadline_unix_secs: run
+                .deadline_at
+                .map(|deadline| deadline.timestamp().max(0).unsigned_abs())
+                .unwrap_or_default(),
+            admission: AdmissionMode::AttachedOnly,
+            policy: PolicySnapshot {
+                egress_allowlist: Vec::new(),
+                granted_capabilities: vec![Capability::ModelInference],
+            },
+            scoped_token: None,
+        };
+
         // Drive the container while holding the lease live. A container run
         // routinely outlives one lease period, and the in-process reaper
         // terminalizes a background run whose lease expires — so without this
         // heartbeat the run is failed out from under a container that is still
         // working and still spending. The whole drive is additionally bounded by
         // the run's absolute deadline, so no path can wait forever.
-        let drive = self.drive_events(protocol_run_id, handle, &host);
+        let drive = self.drive_events(protocol_run_id, handle, &host, &init);
         tokio::pin!(drive);
         let mut heartbeat = tokio::time::interval(self.config.heartbeat);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -644,12 +668,13 @@ impl SandboxContainerRunner {
         protocol_run_id: RunId,
         handle: &SandboxHandle,
         host: &CapabilityHost,
+        init: &RunInit,
     ) -> DriveEnd {
         let mut cursor = EventCursor::START;
         let mut attempt = 0u32;
         loop {
             match self
-                .drain_connection(protocol_run_id, handle, host, &mut cursor)
+                .drain_connection(protocol_run_id, handle, host, init, &mut cursor)
                 .await
             {
                 DrainOutcome::Result(text) => return DriveEnd::Result(text),
@@ -677,6 +702,7 @@ impl SandboxContainerRunner {
         protocol_run_id: RunId,
         handle: &SandboxHandle,
         host: &CapabilityHost,
+        init: &RunInit,
         cursor: &mut EventCursor,
     ) -> DrainOutcome {
         let address = match self.backend.address(handle).await {
@@ -720,6 +746,9 @@ impl SandboxContainerRunner {
                 };
             }
         };
+        // Deliver the run init on every attach; the sandbox keeps the first
+        // and ignores redeliveries, so a reattach is idempotent.
+        conn.send_init(init.clone()).await;
         // Drain events, committing the cursor by acknowledging each, until a
         // terminal event arrives or the connection closes. Both terminal events
         // end the drive: the supervisor keeps serving after its agent loop

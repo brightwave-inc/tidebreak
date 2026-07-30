@@ -16,9 +16,6 @@
 //!   it installs the connection. If it is absent the sandbox fails closed: it
 //!   still binds and answers, but refuses every attach rather than serving one
 //!   unauthenticated.
-//! - `OPENWAVE_SANDBOX_TASK` — the delegated task. In the full design the host
-//!   delivers the task in the run-init payload after the handle commits; until
-//!   that init frame is wired, the entrypoint reads it from the environment.
 //! - `OPENWAVE_SANDBOX_WORKSPACE` — the agent's in-container workspace directory,
 //!   the root the `exec` and filesystem tools are scoped to (default
 //!   `/workspace`, provisioned in the container image).
@@ -71,8 +68,6 @@ async fn main() {
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let listen = env::var("OPENWAVE_SANDBOX_LISTEN").unwrap_or_else(|_| DEFAULT_LISTEN.to_owned());
-    let task = env::var("OPENWAVE_SANDBOX_TASK")
-        .unwrap_or_else(|_| "Summarize what this sandbox agent can do.".to_owned());
     let workspace =
         env::var("OPENWAVE_SANDBOX_WORKSPACE").unwrap_or_else(|_| DEFAULT_WORKSPACE.to_owned());
 
@@ -100,9 +95,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // The agent loop is a separate future from the supervisor's listener: it
-    // waits for the host to attach, then runs to a submitted result.
+    // waits for the host to attach and deliver the run init — the task never
+    // rides the environment, so a sandbox reclaimed before its handle committed
+    // never executed anything — then runs to a submitted result.
     tokio::spawn(async move {
-        match run_agent(run, task, workspace).await {
+        let init = run.init().await;
+        match run_agent(run, init.task, workspace).await {
             Ok(answer) => eprintln!("openwave-sandbox-agent: submitted result: {answer}"),
             Err(error) => eprintln!("openwave-sandbox-agent: run failed: {error}"),
         }
