@@ -1248,6 +1248,42 @@ pub(in crate::db) async fn claim_container_agent_run(
     Ok(Some(claimed))
 }
 
+/// List bounded oldest-first candidates for a fresh container-run claim.
+///
+/// This deliberately does not reserve work. The worker passes each id through
+/// [`claim_container_agent_run`], whose scheduler lock and predicates remain
+/// the authority for admission and the global container concurrency cap.
+pub(in crate::db) async fn list_container_agent_run_candidates(
+    store: &DbStore,
+    limit: u64,
+) -> Result<Vec<AgentRunId>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let now = database_now(&store.conn).await?;
+    Ok(entities::agent_run::Entity::find()
+        .filter(entities::agent_run::Column::Tier.eq(AgentRunTier::Background.as_str()))
+        .filter(
+            entities::agent_run::Column::ExecutionLocation
+                .eq(AgentRunExecutionLocation::Container.as_str()),
+        )
+        .filter(entities::agent_run::Column::Id.in_subquery(admitted_child_id_subquery()))
+        .filter(entities::agent_run::Column::Status.eq(AgentRunStatus::Queued.as_str()))
+        .filter(entities::agent_run::Column::AvailableAt.lte(now))
+        .filter(entities::agent_run::Column::DeadlineAt.gt(now))
+        .filter(entities::agent_run::Column::UpdatedAt.lte(now))
+        .order_by_asc(entities::agent_run::Column::AvailableAt)
+        .order_by_asc(entities::agent_run::Column::CreatedAt)
+        .order_by_asc(entities::agent_run::Column::Id)
+        .limit(limit)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(|run| AgentRunId(run.id))
+        .collect())
+}
+
 /// List container-located runs whose driver died: `running` under an expired
 /// lease with the deadline still open. The in-process lease reaper deliberately
 /// exempts container runs (lease expiry there means "the driving host died",

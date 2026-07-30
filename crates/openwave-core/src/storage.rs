@@ -1608,6 +1608,16 @@ pub trait Store: Send + Sync {
         agent_run_storage_unavailable()
     }
 
+    /// List bounded oldest-first candidates for the container-run worker.
+    ///
+    /// This scan is only latency and recovery plumbing: every returned id must
+    /// still pass [`Store::claim_container_agent_run`]'s transactional status,
+    /// deadline, admission, and concurrency checks before any container is
+    /// provisioned.
+    async fn list_container_agent_run_candidates(&self, _limit: u64) -> Result<Vec<AgentRunId>> {
+        agent_run_storage_unavailable()
+    }
+
     /// List container-located runs whose driver died: `running` under an
     /// expired lease with the deadline still open. The in-process lease reaper
     /// deliberately exempts container runs, so this scan feeds the recovery
