@@ -1,7 +1,8 @@
 # Reverse-RPC callback channel — spike findings
 
 Spike for [sandbox-providers.md](../sandbox-providers.md) step 5, issue #821. The
-prototype lives in `crates/openwave-reverse-rpc-spike` and is **not wired into
+prototype lived in `crates/openwave-reverse-rpc-spike` (removed once its
+findings were absorbed; recover it from git history) and was **not wired into
 the server**. This document is the deliverable; the code exists to back its
 claims with runnable tests.
 
@@ -29,8 +30,8 @@ which is why the recommendation is GO rather than "GO if."
 
 ## What the prototype exercises
 
-All tests are in `crates/openwave-reverse-rpc-spike/tests/reverse_rpc.rs` and run
-under `cargo test -p openwave-reverse-rpc-spike`.
+Its tests lived in `crates/openwave-reverse-rpc-spike/tests/reverse_rpc.rs`,
+recoverable with the crate from git history.
 
 | Property | Test | What it proves |
 | --- | --- | --- |

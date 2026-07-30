@@ -7,7 +7,7 @@ one rule that keeps it clean: **dependencies only flow downward toward
 libraries.
 
 ```
-      clients            openwave-desktop   openwave-cli   openwave-slack (stub)
+      clients            openwave-desktop   openwave-cli
                                │                 │
                                └────── openwave-server
                                             │
@@ -252,9 +252,3 @@ command-line client workflows remain in development.
 
 **Depends on:** `openwave-core`, `openwave-mcp`, `openwave-server`.
 
-## `openwave-slack` — the Slack adapter ⚪
-
-A scaffold for a Socket Mode adapter (outbound WebSocket, no inbound ports) that
-will drive the agent from a Slack workspace.
-
-**Depends on:** nothing in the workspace yet.

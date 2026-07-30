@@ -198,7 +198,6 @@ foreground/background execution model is described in
 | [`openwave-mcp`](crates/openwave-mcp) | lifecycle-gated MCP server plus external stdio client tool mounting |
 | [`openwave-desktop`](crates/openwave-desktop) | desktop app (Tauri) |
 | [`openwave-cli`](crates/openwave-cli) | headless `openwave serve` + `openwave mcp` commands |
-| [`openwave-slack`](crates/openwave-slack) | Slack adapter |
 
 ## License
 
