@@ -23,6 +23,10 @@ scripts/dev.sh
 # Build everything
 cargo build --workspace
 
+# Reclaim generated artifacts from inactive worktrees (reports first)
+scripts/clean-worktree-artifacts.sh
+scripts/clean-worktree-artifacts.sh --worktree ../finished-task --yes
+
 # Formatting, lints, and tests (what CI runs)
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
