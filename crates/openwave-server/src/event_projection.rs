@@ -1,9 +1,19 @@
 //! Renderer-safe projection of the internal agent journal.
 //!
 //! The durable [`AgentEvent`] is an internal coordination record. It can contain
-//! model-generated tool arguments, tool results, host paths, reasoning, and
-//! provider diagnostics. WebSocket clients receive this deliberately closed
-//! projection instead.
+//! model-generated tool arguments, tool results, host paths, and provider
+//! diagnostics. WebSocket clients receive this deliberately closed projection
+//! instead.
+//!
+//! Reasoning is the one payload that used to be withheld and no longer is. What
+//! reaches [`AgentEvent::ReasoningDelta`] is not raw chain-of-thought: every
+//! adapter that emits it emits what the provider chose to expose for display.
+//! The Anthropic path asks for `display: "summarized"` explicitly, and would
+//! otherwise stream thinking blocks with empty text; Gemini's `thought` parts
+//! are thought summaries; the OpenAI-compatible path forwards
+//! `reasoning_content`/`reasoning`, which a gateway sets for exactly this
+//! purpose. Withholding it cost the transcript the account of how an answer was
+//! reached without protecting anything the provider was not already publishing.
 
 use openwave_core::{
     AgentEvent, ApprovalClass, CallId, MessageId, RendererToolName, SequencedEvent,
@@ -78,8 +88,10 @@ pub(crate) enum RendererAgentEvent {
     TextDelta {
         text: String,
     },
-    /// Signals progress without exposing provider reasoning.
-    ReasoningDelta,
+    /// A fragment of the provider's presentable reasoning summary.
+    ReasoningDelta {
+        text: String,
+    },
     StreamInterrupted,
     ToolCallStarted {
         call_id: CallId,
@@ -225,7 +237,9 @@ impl From<&SequencedEvent> for RendererSequencedEvent {
                 RendererAgentEvent::TurnStarted { turn_id: *turn_id }
             }
             AgentEvent::TextDelta { text } => RendererAgentEvent::TextDelta { text: text.clone() },
-            AgentEvent::ReasoningDelta { .. } => RendererAgentEvent::ReasoningDelta,
+            AgentEvent::ReasoningDelta { text } => {
+                RendererAgentEvent::ReasoningDelta { text: text.clone() }
+            }
             AgentEvent::StreamInterrupted => RendererAgentEvent::StreamInterrupted,
             AgentEvent::ToolCallStarted { call_id, name } => RendererAgentEvent::ToolCallStarted {
                 call_id: *call_id,
@@ -354,10 +368,10 @@ mod tests {
     #[test]
     fn projection_redacts_internal_payloads_and_unknown_tool_names() {
         let call_id = CallId::new();
+        // `ReasoningDelta` is deliberately absent: reasoning is a presentable
+        // provider summary rather than an internal payload, and it now crosses
+        // in full. `reasoning_summary_crosses_to_the_renderer` pins that.
         let cases = [
-            AgentEvent::ReasoningDelta {
-                text: "private reasoning".into(),
-            },
             AgentEvent::ToolCallStarted {
                 call_id,
                 name: "provider_tool_with_secret".into(),
@@ -406,7 +420,6 @@ mod tests {
             .join("\n");
 
         for forbidden in [
-            "private reasoning",
             "provider_tool_with_secret",
             "/Users/private",
             "document.txt",
@@ -425,6 +438,27 @@ mod tests {
         assert!(serialized.contains(r#""action":"other""#));
         assert!(serialized.contains(r#""status":"failed""#));
         assert!(serialized.contains(r#""text":"visible steer text""#));
+    }
+
+    /// Reasoning used to be projected as a bare spinner signal, which left the
+    /// renderer no way to show the account of how an answer was reached even
+    /// though the journal held it in full. Carrying the text is the contract the
+    /// thinking accordion is built on, so a projection that quietly went back to
+    /// a unit variant would silently empty it.
+    #[test]
+    fn reasoning_summary_crosses_to_the_renderer() {
+        let projected = RendererSequencedEvent::from(&SequencedEvent {
+            seq: 7,
+            event: AgentEvent::ReasoningDelta {
+                text: "weighing two approaches".into(),
+            },
+        });
+        assert_eq!(
+            projected.event,
+            RendererAgentEvent::ReasoningDelta {
+                text: "weighing two approaches".into(),
+            }
+        );
     }
 
     /// The category is the one thing a failure is allowed to tell a client, and

@@ -23,6 +23,8 @@ export type HydratedTranscriptEntry =
       sources: AssistantSource[];
       createdAt: string;
       refusal?: RendererRefusal;
+      /** The turn's presentable reasoning summary, on assistant entries. */
+      reasoning?: string;
     }
   | {
       id: string;
@@ -93,6 +95,7 @@ export function hydrateTranscriptHistory(
           : [],
       createdAt: message.created_at,
       refusal: message.refusal,
+      reasoning: message.role === "assistant" ? message.reasoning : undefined,
     })),
     ...toolActivity.map((activity, index) => ({
       // The server deliberately withholds a canonical call id. This identity

@@ -75,6 +75,9 @@ pub struct ChatTranscriptSnapshot {
     pub refusals: Vec<ChatRefusalSnapshot>,
     /// Ordered renderer-safe sources keyed to their assistant message.
     pub citations: Vec<ChatCitationSnapshot>,
+    /// The presentable reasoning summary each completed turn produced, keyed to
+    /// the assistant message that turn committed.
+    pub reasoning: Vec<ChatReasoningSnapshot>,
     /// A renderer-safe historical projection. It contains fixed tool identity,
     /// closed previews and lifecycle timestamps only; canonical tool records
     /// never leave storage.
@@ -106,6 +109,19 @@ pub struct ChatCitationSnapshot {
 pub struct ChatCancellationSnapshot {
     pub turn_id: TurnId,
     pub cancelled_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// One turn's reasoning summary attached to the assistant message it produced.
+///
+/// Reasoning is journaled as a stream of deltas and has no durable home of its
+/// own, so the transcript rebuilds it from the journal and hangs it off the
+/// message the turn committed — the same join refusals use. A turn that
+/// committed no assistant output (cancelled, failed) contributes nothing: there
+/// is no transcript entry to attach it to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatReasoningSnapshot {
+    pub message_id: MessageId,
+    pub text: String,
 }
 
 /// One refused terminal outcome attached to its durable assistant output.

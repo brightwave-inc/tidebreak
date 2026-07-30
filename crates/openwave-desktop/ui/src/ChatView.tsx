@@ -91,9 +91,6 @@ export function ChatView({
   const messages = useChatSessionStore((session) => session.messages);
   const busy = useChatSessionStore((session) => session.busy);
   const activeTurnId = useChatSessionStore((session) => session.activeTurnId);
-  const reasoningActive = useChatSessionStore(
-    (session) => session.reasoningActive,
-  );
   const backgroundAgentSpawnKeys = useMemo(
     () =>
       messages.flatMap((message) =>
@@ -291,7 +288,6 @@ export function ChatView({
           onLoadBackgroundAgentActivity={agentRuns.loadActivity}
           onViewBackgroundAgentOutput={onViewOutput}
           busy={busy}
-          reasoningActive={reasoningActive}
           scrollRef={attachScrollRef}
           contentRef={attachContentRef}
           maskClass={maskClass}
