@@ -65,7 +65,6 @@ export function ClipboardCopyButton({
           <span aria-hidden="true" className="clipboard-copy-icon">
             {copyState === "copied" ? <Check size={13} /> : <Copy size={13} />}
           </span>
-          <span>{visibleLabel}</span>
         </button>
       </WithTooltip>
       <span className="sr-only" role="status" aria-live="polite">

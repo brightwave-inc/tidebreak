@@ -577,9 +577,9 @@ body {
 }
 
 .message-assistant:hover .message-footer time,
-.message-assistant:focus-within .message-footer time,
+.message-assistant:has(:focus-visible) .message-footer time,
 .message-user-frame:hover .message-footer time,
-.message-user-frame:focus-within .message-footer time {
+.message-user-frame:has(:focus-visible) .message-footer time {
   opacity: 1;
 }
 
@@ -590,10 +590,9 @@ body {
 .message-copy {
   display: inline-flex;
   align-items: center;
-  gap: 0.28rem;
   border: 0;
   border-radius: 5px;
-  padding: 0.18rem 0.32rem;
+  padding: 0.22rem;
   color: var(--muted-foreground);
   background: transparent;
   font-size: 0.72rem;
