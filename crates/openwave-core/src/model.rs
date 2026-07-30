@@ -1197,8 +1197,11 @@ impl AgentRun {
     pub const MAX_INPUT_LEN: usize = 65_536;
     /// Maximum persisted model identifier length.
     pub const MAX_MODEL_LEN: usize = TurnRun::MAX_MODEL_LEN;
-    /// Default failure-attempt budget for sandboxed work.
-    pub const DEFAULT_MAX_ATTEMPTS: i32 = 3;
+    /// Default failure-attempt budget for sandboxed work. Five attempts give
+    /// the worker's exponential schedule and the provider's `Retry-After`
+    /// room to stretch waits toward the run's wall-clock envelope; at three
+    /// the budget was gone before either could bind.
+    pub const DEFAULT_MAX_ATTEMPTS: i32 = 5;
     /// Default wall-clock budget for one sandbox run.
     pub const DEFAULT_MAX_DURATION: chrono::Duration = chrono::Duration::hours(1);
     /// Largest accepted scheduler concurrency bound.
@@ -1737,8 +1740,12 @@ pub struct TurnRun {
 
 impl TurnRun {
     /// New turns retry transient failures while per-attempt effect provenance
-    /// prevents ambiguous tool work from being replayed.
-    pub const DEFAULT_MAX_ATTEMPTS: i32 = 3;
+    /// prevents ambiguous tool work from being replayed. Five attempts give
+    /// the turn worker's exponential schedule and the provider's
+    /// `Retry-After` room to stretch waits toward the ten-minute envelope; at
+    /// three the budget was gone in about a second of backoff unless a hint
+    /// stretched a wait.
+    pub const DEFAULT_MAX_ATTEMPTS: i32 = 5;
     /// Maximum persisted model identifier length.
     pub const MAX_MODEL_LEN: usize = 512;
     /// Maximum persisted machine-readable error code length.
