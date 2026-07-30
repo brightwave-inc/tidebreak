@@ -22,9 +22,9 @@
 //! Docker has no TTL of its own, and a cap enforced by a host-side timer is worth
 //! nothing in the case that matters: the host process dying is exactly what strands
 //! a container, and a timer dies with it. So the cap is delivered *into* the
-//! container — [`LIFETIME_CAP_ENV`] — and the sandbox agent, which is the
-//! container's PID 1, exits when it elapses. The container then stops on its own
-//! whether or not any host is still alive to ask.
+//! container — [`LIFETIME_CAP_ENV`] — and the sandbox agent exits when it elapses.
+//! The agent is the init's only child, so its exit is the container's exit: the
+//! container stops on its own whether or not any host is still alive to ask.
 //!
 //! This is an *absolute* cap, not an idle timeout: it bounds how long a container
 //! may exist, not how long it may be quiet. The two are different guarantees and
@@ -43,6 +43,27 @@
 //! rather than panicking — the runtime is never a hard dependency. A Docker-CLI
 //! compatible runtime such as `podman` works through the same code path by pointing
 //! [`DockerConfig::binary`] at it.
+//!
+//! # Container hardening
+//!
+//! In-container execution is the containment, so the container's own confinement
+//! is the security control and not a detail of packaging. Every provisioning runs
+//! the image as an unprivileged user, with every Linux capability dropped,
+//! privilege escalation refused, a read-only root filesystem, and ceilings on
+//! memory and process count. See [`SandboxHardening`] for what each of those buys
+//! and where the writable surface is.
+//!
+//! What is *not* enforced here: egress. A command inside the container can still
+//! reach the network, and no proxy or network policy constrains it on this
+//! backend. That gap is disclosed on the in-container exec tool itself and is a
+//! separate piece of work.
+//!
+//! # The image is not verified
+//!
+//! [`DockerConfig::image`] is used verbatim. It accepts a digest-pinned ref, but
+//! nothing requires or checks one, so a mutable tag is resolved by the daemon at
+//! provisioning time with no host-side integrity check. The local backend's trust
+//! in the image is therefore the operator's trust in whatever ref they configured.
 //!
 //! # The transport secret
 //!
@@ -99,6 +120,31 @@ const DEFAULT_LISTENER_PORT: u16 = 8080;
 /// outlive the day.
 const DEFAULT_LIFETIME_CAP_SECS: u64 = 4 * 60 * 60;
 
+/// The unprivileged `uid:gid` the container runs as. Kept in sync with the
+/// `USER` directive and the workspace ownership in the sandbox-agent image's
+/// Dockerfile: the host forces the identity so an image that lost its own
+/// `USER` still cannot run the agent as root, and the numbers have to match or
+/// the running user would not own the workspace the image provisioned.
+const SANDBOX_USER: &str = "10001:10001";
+/// The in-container workspace root, mounted writable over the read-only root
+/// filesystem. Kept in sync with the image's `OPENWAVE_SANDBOX_WORKSPACE`.
+const DEFAULT_WORKSPACE_DIR: &str = "/workspace";
+/// Default memory ceiling for one container. Generous on purpose: a legitimate
+/// data-analysis exec can hold a whole spreadsheet or rendered document set in
+/// memory, and a limit tight enough to kill that turns a working feature into an
+/// unexplained OOM. It exists to stop one runaway container from taking the
+/// host's memory, not to schedule work.
+const DEFAULT_MEMORY_LIMIT: &str = "4g";
+/// Default process-count ceiling. Comfortably above what a shell pipeline, a
+/// Python helper, or a headless LibreOffice conversion needs, and far below what
+/// a fork bomb needs to wedge the host.
+const DEFAULT_PIDS_LIMIT: u32 = 512;
+/// Default size of the writable `/tmp` the read-only root filesystem needs.
+/// Docker's own `--tmpfs` default is 64 MiB, which is too small for document
+/// conversion scratch, so the size is always named explicitly. `exec` is granted
+/// because helper tooling legitimately writes and runs scratch programs.
+const DEFAULT_TMPFS_OPTIONS: &str = "rw,exec,nosuid,nodev,size=1g";
+
 const RUNTIME_UNAVAILABLE: &str = "container runtime is unavailable";
 const RUNTIME_SPAWN_FAILED: &str = "could not invoke the container runtime";
 const RUN_FAILED: &str = "could not start the sandbox container";
@@ -127,6 +173,9 @@ pub struct DockerConfig {
     /// capless request uncapped; a request's own
     /// [`lifetime_cap_secs`](ProvisionRequest::lifetime_cap_secs) always wins.
     pub lifetime_cap_secs: Option<u64>,
+    /// How tightly the container is confined. Defaults to the hardened profile;
+    /// see [`SandboxHardening`].
+    pub hardening: SandboxHardening,
 }
 
 impl Default for DockerConfig {
@@ -137,6 +186,67 @@ impl Default for DockerConfig {
             listener_port: DEFAULT_LISTENER_PORT,
             command: Vec::new(),
             lifetime_cap_secs: Some(DEFAULT_LIFETIME_CAP_SECS),
+            hardening: SandboxHardening::default(),
+        }
+    }
+}
+
+/// The confinement applied to a provisioned container.
+///
+/// The defaults are the profile the sandbox is meant to run under; the fields
+/// exist so an operator can raise a ceiling for a workload that needs it, not so
+/// the confinement is optional. Each `None` or `false` gives up a control, and
+/// the container is the only thing standing between model-authored commands and
+/// the host.
+#[derive(Debug, Clone)]
+pub struct SandboxHardening {
+    /// The `uid:gid` the container runs as, forced from the host so an image
+    /// without its own `USER` still cannot run as root. `None` leaves the
+    /// image's user in effect.
+    pub user: Option<String>,
+    /// Drop every Linux capability. Nothing in the agent needs one: it binds an
+    /// unprivileged port, runs shell children as itself, and changes no
+    /// ownership.
+    pub drop_capabilities: bool,
+    /// Refuse privilege escalation, so a setuid binary inside the image cannot
+    /// hand a model-authored command more than the sandbox user has.
+    pub no_new_privileges: bool,
+    /// Mount the root filesystem read-only, so a command cannot modify the image
+    /// it runs from — the agent binary and the document helpers included. The
+    /// writable surface is then exactly [`workspace_dir`](Self::workspace_dir)
+    /// and the tmpfs mounts.
+    pub read_only_rootfs: bool,
+    /// The workspace path to back with a writable anonymous volume. Required
+    /// once the root filesystem is read-only, since the agent's tools are rooted
+    /// there. A volume rather than a tmpfs so workspace files live on disk and do
+    /// not spend the container's memory budget; it is removed with the container.
+    pub workspace_dir: Option<String>,
+    /// Paths to mount as writable tmpfs, with their mount options. Needed for
+    /// anything that writes outside the workspace under a read-only root.
+    pub tmpfs: Vec<(String, String)>,
+    /// Memory ceiling, in Docker's own size syntax.
+    pub memory_limit: Option<String>,
+    /// Process-count ceiling.
+    pub pids_limit: Option<u32>,
+    /// Run the container under an init process that reaps orphaned children, so
+    /// a command that backgrounds work does not leave zombies behind the agent.
+    /// The agent stays the init's only child, so the lifetime cap it enforces
+    /// against itself still ends the container.
+    pub init: bool,
+}
+
+impl Default for SandboxHardening {
+    fn default() -> Self {
+        Self {
+            user: Some(SANDBOX_USER.to_owned()),
+            drop_capabilities: true,
+            no_new_privileges: true,
+            read_only_rootfs: true,
+            workspace_dir: Some(DEFAULT_WORKSPACE_DIR.to_owned()),
+            tmpfs: vec![("/tmp".to_owned(), DEFAULT_TMPFS_OPTIONS.to_owned())],
+            memory_limit: Some(DEFAULT_MEMORY_LIMIT.to_owned()),
+            pids_limit: Some(DEFAULT_PIDS_LIMIT),
+            init: true,
         }
     }
 }
@@ -180,10 +290,14 @@ impl DockerSandboxBackend {
         command
     }
 
-    /// `docker rm -f`, treating a missing container as success.
+    /// `docker rm -f -v`, treating a missing container as success. `-v` removes
+    /// the anonymous workspace volume the provisioning created; without it every
+    /// torn-down sandbox would leave its workspace dangling on the host's disk.
+    /// Only anonymous volumes are affected, so nothing an operator named is
+    /// touched.
     async fn remove(&self, reference: &str) -> Result<(), BackendError> {
         let mut command = self.command();
-        command.args(["rm", "-f", reference]);
+        command.args(["rm", "-f", "-v", reference]);
         let output = command
             .output()
             .await
@@ -393,6 +507,7 @@ fn run_args(
         "--env".to_owned(),
         TRANSPORT_SECRET_ENV.to_owned(),
     ];
+    args.extend(hardening_args(&config.hardening));
     if with_task {
         args.push("--env".to_owned());
         args.push(TASK_ENV.to_owned());
@@ -410,6 +525,49 @@ fn run_args(
         config.image.clone(),
     ]);
     args.extend(config.command.iter().cloned());
+    args
+}
+
+/// The confinement flags for one provisioning. Separate from [`run_args`] so the
+/// security-relevant part of the argv is one readable list: a control silently
+/// dropped here is invisible at runtime, since a container missing them starts
+/// and serves exactly like a hardened one.
+fn hardening_args(hardening: &SandboxHardening) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(user) = &hardening.user {
+        args.extend(["--user".to_owned(), user.clone()]);
+    }
+    if hardening.drop_capabilities {
+        args.extend(["--cap-drop".to_owned(), "ALL".to_owned()]);
+    }
+    if hardening.no_new_privileges {
+        args.extend([
+            "--security-opt".to_owned(),
+            "no-new-privileges:true".to_owned(),
+        ]);
+    }
+    if hardening.read_only_rootfs {
+        args.push("--read-only".to_owned());
+    }
+    // The workspace is mounted whether or not the root filesystem is read-only:
+    // the agent's tools write there either way, and an anonymous volume keeps
+    // that writing off the container's writable layer. `remove` passes `-v`, so
+    // the volume dies with the container rather than accumulating.
+    if let Some(workspace) = &hardening.workspace_dir {
+        args.extend(["--volume".to_owned(), workspace.clone()]);
+    }
+    for (path, options) in &hardening.tmpfs {
+        args.extend(["--tmpfs".to_owned(), format!("{path}:{options}")]);
+    }
+    if let Some(memory) = &hardening.memory_limit {
+        args.extend(["--memory".to_owned(), memory.clone()]);
+    }
+    if let Some(pids) = hardening.pids_limit {
+        args.extend(["--pids-limit".to_owned(), pids.to_string()]);
+    }
+    if hardening.init {
+        args.push("--init".to_owned());
+    }
     args
 }
 
@@ -627,6 +785,52 @@ mod tests {
         // An uncapped provisioning names no cap at all rather than passing a zero
         // the container would read as "expire now".
         assert!(taskless.iter().all(|arg| !arg.contains(LIFETIME_CAP_ENV)));
+    }
+
+    /// Every confinement control reaches the argv. A container missing them
+    /// starts, serves, and passes every other test in this file identically, so
+    /// dropping one is invisible without an assertion that names it.
+    #[test]
+    fn run_args_carry_the_container_confinement() {
+        let config = DockerConfig::default();
+        let args = run_args(&config, SandboxTag::new(), RunId::new(), false, None);
+        let pair = |flag: &str| {
+            args.iter()
+                .position(|arg| arg == flag)
+                .and_then(|at| args.get(at + 1))
+                .cloned()
+        };
+
+        // Non-root, with no capabilities and no path to acquiring more.
+        assert_eq!(pair("--user").as_deref(), Some(SANDBOX_USER));
+        assert_eq!(pair("--cap-drop").as_deref(), Some("ALL"));
+        assert_eq!(
+            pair("--security-opt").as_deref(),
+            Some("no-new-privileges:true")
+        );
+
+        // A read-only image, with the workspace and /tmp as the only writable
+        // surface — a read-only root with no writable workspace would break the
+        // agent's tools outright.
+        assert!(args.contains(&"--read-only".to_owned()));
+        assert_eq!(pair("--volume").as_deref(), Some(DEFAULT_WORKSPACE_DIR));
+        assert_eq!(
+            pair("--tmpfs").as_deref(),
+            Some(format!("/tmp:{DEFAULT_TMPFS_OPTIONS}").as_str())
+        );
+
+        // Ceilings, and an init to reap what a model-authored command orphans.
+        assert_eq!(pair("--memory").as_deref(), Some(DEFAULT_MEMORY_LIMIT));
+        assert_eq!(
+            pair("--pids-limit").as_deref(),
+            Some(DEFAULT_PIDS_LIMIT.to_string().as_str())
+        );
+        assert!(args.contains(&"--init".to_owned()));
+
+        // Every flag precedes the image, or Docker would read it as an argument
+        // to the container command instead of applying it.
+        let image_at = args.iter().position(|arg| arg == &config.image).unwrap();
+        assert_eq!(image_at, args.len() - 1);
     }
 
     #[test]

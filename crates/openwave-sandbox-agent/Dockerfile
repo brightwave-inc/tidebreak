@@ -10,9 +10,10 @@
 #
 #   docker build -f crates/openwave-sandbox-agent/Dockerfile -t openwave-sandbox-agent .
 #
-# The host verifies this image by digest before provisioning (a constraint from
-# issue #873); pinning-by-digest and host verification live on the host side in
-# #874, not in the image itself.
+# Nothing verifies this image by digest today. The host runs whatever ref it is
+# configured with (`DockerConfig::image`), which accepts a digest-pinned ref but
+# does not require or check one. Treat the image's integrity as unverified on the
+# local backend.
 #
 # The scoped post-merge sandbox-resident lane builds and drives this image on a
 # real container boundary.
@@ -60,6 +61,18 @@ COPY scripts/exec-documents/ /opt/openwave/exec-scripts/
 RUN python3 /opt/openwave/exec-scripts/render_pdf.py --help >/dev/null \
     && python3 /opt/openwave/exec-scripts/analyze_xlsx.py --help >/dev/null
 
+# The agent — and therefore every command the model runs through `exec` — runs as
+# an unprivileged user, so a container escape starts from an account that owns
+# nothing but the workspace. The uid is fixed rather than assigned by adduser so
+# the host can force the same identity with `--user` (see `sandbox_docker`'s
+# `SANDBOX_USER`) even against an image that forgot this directive, and so a
+# workspace volume initialized from this layer carries an ownership the running
+# user actually matches.
+RUN groupadd --gid 10001 openwave \
+    && useradd --uid 10001 --gid 10001 --home-dir /home/openwave --create-home \
+       --shell /usr/sbin/nologin openwave \
+    && chown -R openwave:openwave /workspace /home/openwave
+
 # The listener address the supervisor binds; the host dials this port.
 ENV OPENWAVE_SANDBOX_LISTEN=0.0.0.0:8080
 # The in-container workspace root the exec and filesystem tools are scoped to.
@@ -67,5 +80,7 @@ ENV OPENWAVE_SANDBOX_WORKSPACE=/workspace
 # The helper library path shown to the model-facing exec tool.
 ENV OPENWAVE_EXEC_SCRIPTS=/opt/openwave/exec-scripts
 EXPOSE 8080
+
+USER openwave:openwave
 
 ENTRYPOINT ["/usr/local/bin/openwave-sandbox-agent"]
