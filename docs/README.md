@@ -27,6 +27,9 @@ Project documentation, versioned alongside the code.
 - [Execution providers and sandbox-resident agent runs](sandbox-providers.md) —
   the run-tier/execution-provider split, reachability and credential
   invariants, and the phased route to detached background agent runs.
+- [The OpenWave ↔ model gateway boundary](gateway-boundary.md) — how a profile
+  becomes gateway-managed (pairing, policy tiers, sessions) and what crosses
+  the wire once it is.
 - [OS-managed policy (MDM)](managed-policy.md) — the per-platform artifacts an
   administrator deploys to point OpenWave at a managed model gateway.
 - [Releases and versioning](releases.md) — semantic PR titles, native release
