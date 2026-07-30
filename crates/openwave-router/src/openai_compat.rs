@@ -158,16 +158,10 @@ impl ModelProvider for OpenAiCompatProvider {
                     }
                 }
             }
-            // Emit a Stop if the stream ended without a finish_reason (some
-            // local servers omit it on clean close).
+            // The stream ended without a finish_reason (some local servers
+            // omit it on clean close).
             if !state.stopped && !state.terminal {
-                yield ProviderEvent::Stop {
-                    reason: if state.saw_tool_call {
-                        StopReason::ToolUse
-                    } else {
-                        StopReason::EndTurn
-                    },
-                };
+                yield state.end_of_stream();
             }
         };
         Ok(Box::pin(stream))
@@ -419,10 +413,31 @@ struct StreamState {
     tool_calls: std::collections::BTreeMap<u32, ToolCallBuf>,
     usage: Usage,
     stopped: bool,
-    saw_tool_call: bool,
     /// Set once the stream has terminalized on an in-band error. It suppresses
-    /// both later frames and the synthetic end-of-stream `Stop` below.
+    /// both later frames and the synthetic end-of-stream event below.
     terminal: bool,
+}
+
+impl StreamState {
+    /// What the end of the byte stream means when no `finish_reason` arrived.
+    ///
+    /// Some local servers omit `finish_reason` on a clean close, so text alone
+    /// still gets the synthetic `Stop`. An *announced* tool call is different:
+    /// a silently dropped connection is indistinguishable from an omitted
+    /// `finish_reason` on the wire, and the call's argument JSON may be
+    /// truncated mid-value, so the conservative reading fails the step rather
+    /// than committing the fragment as a finished call.
+    fn end_of_stream(&self) -> ProviderEvent {
+        if self.tool_calls.values().any(|call| call.started) {
+            ProviderEvent::Failed {
+                error: ProviderErrorInfo::provider("openai-compat stream ended mid-tool-call"),
+            }
+        } else {
+            ProviderEvent::Stop {
+                reason: StopReason::EndTurn,
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -534,7 +549,6 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                 // never invent a synthetic id. Flush any buffered args after.
                 if !buf.started && !buf.id.is_empty() && !buf.name.is_empty() {
                     buf.started = true;
-                    state.saw_tool_call = true;
                     events.push(ProviderEvent::ToolCallStarted {
                         index,
                         id: buf.id.clone(),
@@ -805,6 +819,47 @@ mod tests {
         // truncated tool call would be handed on under a clean `Stop`.
         assert!(state.terminal);
         assert!(!state.stopped);
+    }
+
+    #[test]
+    fn a_silent_close_mid_tool_call_fails_instead_of_stopping_cleanly() {
+        // A clean TCP close mid-response carries no transport error and no
+        // finish_reason. An announced tool call whose argument stream never
+        // closed is truncation evidence, so the end-of-stream fallback fails
+        // the step rather than committing the fragment. This changes behavior
+        // on streams that reported success before: a complete call whose
+        // server dropped only `finish_reason` now fails too — the two are
+        // indistinguishable on the wire.
+        let mut state = StreamState::default();
+        let out: Vec<ProviderEvent> = [
+            json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{\"pa"}}]}}]}),
+        ]
+        .iter()
+        .flat_map(|chunk| normalize(chunk, &mut state))
+        .collect();
+        assert!(matches!(
+            out.last(),
+            Some(ProviderEvent::ToolCallArgsDelta { .. })
+        ));
+        let ending = state.end_of_stream();
+        assert!(
+            matches!(
+                &ending,
+                ProviderEvent::Failed { error } if error.kind == "provider"
+            ),
+            "expected a failure, got {ending:?}"
+        );
+
+        // Text alone keeps the synthetic `Stop`: some local servers omit
+        // `finish_reason` on every clean close.
+        let mut state = StreamState::default();
+        let _ = normalize(&json!({"choices":[{"delta":{"content":"hi"}}]}), &mut state);
+        assert_eq!(
+            state.end_of_stream(),
+            ProviderEvent::Stop {
+                reason: StopReason::EndTurn
+            }
+        );
     }
 
     #[test]
