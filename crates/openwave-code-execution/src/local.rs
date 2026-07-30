@@ -19,6 +19,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 #[cfg(target_os = "macos")]
 use tokio::process::Command;
 
+use crate::host_paths::resolve_scratch_directory;
 #[cfg(target_os = "macos")]
 use crate::output::{Capture, StreamKind};
 use crate::receipt::{request_fingerprint, BeginExecution, ExecutionReceipt};
@@ -193,38 +194,27 @@ impl LocalExecutionProvider {
             .ok_or_else(|| CodeExecutionError::Sandbox("private workspace is unavailable".into()))
     }
 
-    /// Resolve `path`'s canonical parent inside `workspace` and rejoin the
-    /// final component, so a symlinked intermediate directory cannot escape
-    /// the workspace. The final component's own type is checked separately.
-    fn resolve_file(
+    /// Resolve `path`'s parent inside `workspace` and rejoin the final
+    /// component, so a symlinked intermediate directory cannot escape the
+    /// workspace. The final component's own type is checked separately.
+    ///
+    /// Resolution walks one component at a time and establishes containment
+    /// before creating anything, so a write through a planted symlinked parent
+    /// refuses without having made directories outside the workspace first.
+    /// `None` means the parent did not resolve inside the workspace — a missing
+    /// directory, a planted symlink, or a component that is not a directory.
+    async fn resolve_file(
         workspace: &Path,
         path: &WorkspaceFilePath,
         create_parents: bool,
-    ) -> Result<Option<PathBuf>, CodeExecutionError> {
-        let target = workspace.join(path.as_str());
-        let parent = target
-            .parent()
-            .ok_or_else(|| CodeExecutionError::Sandbox("workspace path has no parent".into()))?;
-        if create_parents {
-            fs::create_dir_all(parent).map_err(|_| {
-                CodeExecutionError::Sandbox("workspace directories are unavailable".into())
-            })?;
-        }
-        let parent = match fs::canonicalize(parent) {
-            Ok(parent) => parent,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => {
-                return Err(CodeExecutionError::Sandbox(
-                    "workspace directories are unavailable".into(),
-                ));
-            }
-        };
-        if !parent.starts_with(workspace) {
-            return Err(CodeExecutionError::Sandbox(
-                "workspace path escaped the private workspace".into(),
-            ));
-        }
-        Ok(Some(parent.join(path.file_name())))
+    ) -> Option<PathBuf> {
+        let relative = path.as_str();
+        let parent = relative
+            .rsplit_once('/')
+            .map(|(parent, _)| parent)
+            .unwrap_or("");
+        let parent = resolve_scratch_directory(workspace, parent, create_parents).await?;
+        Some(parent.join(path.file_name()))
     }
 }
 
@@ -349,9 +339,11 @@ impl WorkspaceLifecycle for LocalExecutionProvider {
             return Err(CodeExecutionError::WorkspaceFileTooLarge);
         }
         let workspace = self.ensured_workspace(workspace)?;
-        let target = Self::resolve_file(&workspace, path, true)?.ok_or_else(|| {
-            CodeExecutionError::Sandbox("workspace directories are unavailable".into())
-        })?;
+        let target = Self::resolve_file(&workspace, path, true)
+            .await
+            .ok_or_else(|| {
+                CodeExecutionError::Sandbox("workspace directories are unavailable".into())
+            })?;
         // The final `target` is written by an atomic rename, so its own type is
         // not load-bearing for containment — the temp file below is what we
         // actually write into, and it must not be a pre-planted symlink. A
@@ -395,7 +387,7 @@ impl WorkspaceLifecycle for LocalExecutionProvider {
         let Some(workspace) = Self::workspace_in(&root, workspace, false)? else {
             return Err(CodeExecutionError::WorkspaceFileNotFound);
         };
-        let Some(target) = Self::resolve_file(&workspace, path, false)? else {
+        let Some(target) = Self::resolve_file(&workspace, path, false).await else {
             return Err(CodeExecutionError::WorkspaceFileNotFound);
         };
         // Open without following the final component, then judge the opened
@@ -1361,6 +1353,32 @@ mod tests {
         assert_eq!(
             fs::read_to_string(workspace_dir.join("second.txt")).unwrap(),
             "second"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_refused_write_creates_nothing_outside_the_workspace() {
+        let outside = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let provider = LocalExecutionProvider::new(root.path(), Duration::from_secs(1)).unwrap();
+        let workspace = ExecutionWorkspaceId::parse("chat-parents").unwrap();
+        provider.create_workspace(&workspace).await.unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("chat-parents/planted"))
+            .unwrap();
+
+        let write = provider
+            .put_workspace_file(
+                &workspace,
+                &WorkspaceFilePath::parse("planted/deep/report.txt").unwrap(),
+                b"payload",
+            )
+            .await;
+
+        assert!(write.is_err(), "write through a planted parent must refuse");
+        assert!(
+            !outside.path().join("deep").exists(),
+            "a refused write must not have created directories outside the workspace",
         );
     }
 
