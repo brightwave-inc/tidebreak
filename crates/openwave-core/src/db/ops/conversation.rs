@@ -952,6 +952,7 @@ fn tool_activity_from_call(
         ),
     };
     ChatToolActivitySnapshot {
+        call_id: call.id,
         tool: crate::RendererToolName::from(call.name.as_str()),
         action: crate::preview::ToolActionPreview::build(&call.name, &call.arguments),
         result,

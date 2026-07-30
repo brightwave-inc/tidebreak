@@ -1041,7 +1041,6 @@ async fn transcript_tool_activity_is_allowlisted_and_redacts_canonical_tool_data
             .to_vec(),
     )
     .unwrap();
-    let call_id_text = call_id.to_string();
     for hidden in [
         secret_path,
         secret_result,
@@ -1053,7 +1052,6 @@ async fn transcript_tool_activity_is_allowlisted_and_redacts_canonical_tool_data
         "configuration_required",
         "private_error_code",
         "private diagnostic detail",
-        call_id_text.as_str(),
         "mcp__private_server__read_sensitive_path",
         "arguments",
         "provider_id",
@@ -1071,9 +1069,14 @@ async fn transcript_tool_activity_is_allowlisted_and_redacts_canonical_tool_data
     let transcript: serde_json::Value = serde_json::from_str(&body).unwrap();
     let activity = transcript["tool_activity"].as_array().unwrap();
     assert_eq!(activity.len(), 4);
+    // The canonical call id is the one deliberate exception to redaction: the
+    // MCP App payload route keys renderer-readable data on exactly this id, so
+    // a rehydrated app view must be able to present it. Everything else about
+    // the call — name, arguments, results, provider identity — stays hidden.
     assert!(activity.iter().any(|card| {
         card["tool"] == "other"
             && card["status"] == "failed"
+            && card["call_id"] == serde_json::json!(call_id)
             && card["started_at"].is_string()
             && card["finished_at"].is_string()
     }));

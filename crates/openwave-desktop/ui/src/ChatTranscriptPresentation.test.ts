@@ -61,6 +61,7 @@ describe("terminal transcript presentation", () => {
       messages: [],
       tool_activity: [
         {
+          call_id: "call-1",
           tool: "spawn_sandbox_agent",
           result_unreadable: false,
           status: "completed",
@@ -78,6 +79,9 @@ describe("terminal transcript presentation", () => {
         role: "tool",
         name: "spawn_sandbox_agent",
         backgroundAgentRunId: "child-run",
+        // The canonical id, not an invented one: an MCP App card resolves
+        // its payload by this id after rehydration.
+        callId: "call-1",
       }),
     ]);
   });
@@ -87,6 +91,7 @@ describe("terminal transcript presentation", () => {
       messages: [],
       tool_activity: [
         {
+          call_id: "call-2",
           tool: "web_search",
           result: { tool: "web_search_provider_required" },
           result_unreadable: false,
@@ -114,6 +119,7 @@ describe("terminal transcript presentation", () => {
       messages: [],
       tool_activity: [
         {
+          call_id: "call-3",
           tool: "web_search",
           result_unreadable: true,
           status: "completed",

@@ -251,6 +251,18 @@ origin: RootAttachmentOrigin, };
  */
 export type ChatToolActivitySnapshot = { 
 /**
+ * Canonical call id, the same [`crate::id::CallId`] the live event stream
+ * carried for this call.
+ *
+ * History withholds arbitrary call detail, but not this identity: the MCP
+ * App payload route already keys renderer-readable data on exactly this id
+ * for the same authenticated client, and a rehydrated app view must present
+ * it to resolve its payload. Without it, history cards invented a local id
+ * and every replayed app view fetched a payload the server could only
+ * reject.
+ */
+call_id: CallId, 
+/**
  * Allowlisted renderer tool name, never a provider-supplied one.
  *
  * A name rather than display copy: the renderer already derives a live
