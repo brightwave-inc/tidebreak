@@ -34,10 +34,10 @@ pub use tool::{ExecTool, EXEC_TOOL_NAME};
 pub use types::{
     CodeExecutionError, CodeExecutionProvider, CodeExecutionProviderKind, CodeExecutionRequest,
     CodeExecutionResponse, ExecFolderAccess, ExecFolderGrant, ExecutionId, ExecutionWorkspaceId,
-    WorkspaceFileEntry, WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing, MAX_ARGUMENTS,
-    MAX_ARGUMENT_BYTES, MAX_CAPTURE_BYTES, MAX_COMMAND_BYTES, MAX_CWD_BYTES,
-    MAX_EXEC_FOLDER_GRANTS, MAX_WORKSPACE_FILE_BYTES, MAX_WORKSPACE_LIST_ENTRIES,
-    MAX_WORKSPACE_PATH_BYTES,
+    OutputArtifactEntry, OutputArtifactScan, OutputArtifactStatus, WorkspaceFileEntry,
+    WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing, MAX_ARGUMENTS, MAX_ARGUMENT_BYTES,
+    MAX_CAPTURE_BYTES, MAX_COMMAND_BYTES, MAX_CWD_BYTES, MAX_EXEC_FOLDER_GRANTS,
+    MAX_WORKSPACE_FILE_BYTES, MAX_WORKSPACE_LIST_ENTRIES, MAX_WORKSPACE_PATH_BYTES,
 };
 
 /// Stable workspace-relative location populated by hosts that ship the

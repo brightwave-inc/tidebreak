@@ -12,17 +12,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use openwave_code_execution::{
     resolve_scratch_directory, sync, write_without_following, CodeExecutionError,
     CodeExecutionProvider, CodeExecutionProviderKind, CodeExecutionRequest, CodeExecutionResponse,
     DaytonaCredential, DaytonaExecutionProvider, E2BCredential, E2BExecutionProvider,
-    ExecFolderAccess, ExecFolderGrant, ExecutionWorkspaceId, LocalExecutionProvider, PreviewScan,
-    RemoteSessionPool, WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing,
-    DAYTONA_CREDENTIAL_KEY, DOCUMENT_SCRIPTS_DIR, DOCUMENT_SCRIPT_FILES, E2B_CREDENTIAL_KEY,
+    ExecFolderAccess, ExecFolderGrant, ExecutionId, ExecutionWorkspaceId, LocalExecutionProvider,
+    OutputArtifactEntry, OutputArtifactScan, OutputArtifactStatus, PreviewScan, RemoteSessionPool,
+    WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing, DAYTONA_CREDENTIAL_KEY,
+    DOCUMENT_SCRIPTS_DIR, DOCUMENT_SCRIPT_FILES, E2B_CREDENTIAL_KEY,
 };
 use openwave_core::{
-    exec_attachment_file_name, BlobStore, Chat, ChatId, HostRootId, MessageDocumentAttachment,
-    ProjectId, Result, SecretProvider, Store, MAX_EXEC_WORKSPACE_FILE_BYTES,
+    exec_attachment_file_name, BlobStore, CallId, Chat, ChatId, HostRootId,
+    MessageDocumentAttachment, ProjectId, Result, RevisionProducer, SecretProvider, Store,
+    MAX_EXEC_WORKSPACE_FILE_BYTES,
 };
 use openwave_egress::{
     CidrBlock, DomainPattern, EgressAllowlist, EgressEnforcement, EgressError, EgressPolicy,
@@ -887,6 +890,76 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
         .map_err(|_| CodeExecutionError::Sandbox("preview scan task failed".into()))
     }
 
+    async fn collect_output_artifacts(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+        execution: &ExecutionId,
+    ) -> std::result::Result<OutputArtifactScan, CodeExecutionError> {
+        let chat_id = workspace.as_str().parse::<ChatId>().map_err(|_| {
+            CodeExecutionError::InvalidRequest(
+                "execution workspace does not identify a conversation".into(),
+            )
+        })?;
+        let call_id = execution.as_str().parse::<CallId>().map_err(|_| {
+            CodeExecutionError::InvalidRequest(
+                "execution does not carry a canonical tool-call identity".into(),
+            )
+        })?;
+        // The revision's producer is the turn that owns this exec call, read
+        // from the durable call record rather than anything the model asserts.
+        let calls = self.store.list_tool_calls(chat_id).await.map_err(|_| {
+            CodeExecutionError::Unavailable("tool-call storage is unavailable".into())
+        })?;
+        let turn_id = calls
+            .into_iter()
+            .find(|call| call.id == call_id)
+            .map(|call| call.turn_id)
+            .ok_or_else(|| {
+                CodeExecutionError::InvalidRequest(
+                    "execution identity is not owned by this conversation".into(),
+                )
+            })?;
+
+        let scratch_path = self.scratch_root.join(workspace.as_str());
+        let scratch = tokio::task::spawn_blocking(move || {
+            cap_std::fs::Dir::open_ambient_dir(&scratch_path, cap_std::ambient_authority())
+        })
+        .await
+        .map_err(|_| CodeExecutionError::Sandbox("output scan task failed".into()))?
+        .map_err(|_| CodeExecutionError::Sandbox("the private workspace is unavailable".into()))?;
+
+        let sync = openwave_core::sync_output_directory(
+            &*self.store,
+            &scratch,
+            chat_id,
+            call_id,
+            RevisionProducer::Turn(turn_id),
+            Utc::now(),
+        )
+        .await
+        .map_err(|error| {
+            CodeExecutionError::Unavailable(format!("outputs could not be recorded: {error}"))
+        })?;
+        Ok(OutputArtifactScan {
+            entries: sync
+                .entries
+                .into_iter()
+                .map(|entry| OutputArtifactEntry {
+                    filename: entry.filename,
+                    ordinal: entry.ordinal,
+                    status: match entry.status {
+                        openwave_core::OutputSyncStatus::Created => OutputArtifactStatus::Created,
+                        openwave_core::OutputSyncStatus::Updated => OutputArtifactStatus::Updated,
+                        openwave_core::OutputSyncStatus::Unchanged => {
+                            OutputArtifactStatus::Unchanged
+                        }
+                    },
+                })
+                .collect(),
+            notes: sync.notes,
+        })
+    }
+
     // `workspace_lifecycle` stays `None` here on purpose: the capability of
     // this late-binding wrapper depends on the configuration read at call
     // time, which the synchronous trait flag cannot express. Host callers use
@@ -1244,6 +1317,119 @@ mod tests {
         .with_folder_grant_resolver(Some(bad_resolver));
         assert!(bad_provider
             .resolve_chat_folder_grants(&chat)
+            .await
+            .is_err());
+    }
+
+    /// The files-first creation path end to end at the provider seam: a file
+    /// written to `output/` becomes a turn-attributed output, an identical
+    /// rerun mints nothing, and changed bytes append a revision.
+    #[tokio::test]
+    async fn output_files_publish_as_turn_attributed_outputs() {
+        use openwave_core::model::{ToolCallExecution, ToolCallRecord, ToolCallStatus};
+        use openwave_core::{CallId, TurnId};
+
+        let (store, _database) = test_store().await;
+        let store = Arc::new(store);
+        let scratch_root = tempfile::tempdir().unwrap();
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            reasoning_effort: None,
+            permission_mode: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let turn_id = TurnId::new();
+        let accept_exec_call = |store: Arc<DbStore>| async move {
+            let call_id = CallId::new();
+            store
+                .accept_tool_call(&ToolCallRecord {
+                    id: call_id,
+                    chat_id: chat.id,
+                    turn_id,
+                    provider_id: format!("provider-{call_id}"),
+                    name: "exec".into(),
+                    arguments: serde_json::json!({}),
+                    execution: ToolCallExecution::Server,
+                    status: ToolCallStatus::Pending,
+                    result: None,
+                    result_preview: None,
+                    error_code: None,
+                    error_detail: None,
+                    client_executor_id: None,
+                    client_lease_expires_at: None,
+                    created_at: Utc::now(),
+                    resolved_at: None,
+                })
+                .await
+                .unwrap();
+            call_id
+        };
+        let call_id = accept_exec_call(store.clone()).await;
+
+        let output_dir = scratch_root.path().join(chat.id.to_string()).join("output");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        std::fs::write(output_dir.join("report.md"), b"# Draft").unwrap();
+
+        let provider = ConfiguredCodeExecutionProvider::new(
+            store.clone(),
+            Arc::new(NoSecrets),
+            scratch_root.path(),
+        );
+        let workspace = ExecutionWorkspaceId::parse(chat.id.to_string()).unwrap();
+        let execution = ExecutionId::parse(call_id.to_string()).unwrap();
+
+        let scan = provider
+            .collect_output_artifacts(&workspace, &execution)
+            .await
+            .unwrap();
+        assert_eq!(scan.entries.len(), 1);
+        assert_eq!(scan.entries[0].status, OutputArtifactStatus::Created);
+        let outputs = store.list_outputs(chat.id, 10).await.unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].filename, "report.md");
+        let revision = store
+            .get_output_revision(outputs[0].current_revision)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(revision.turn_id, Some(turn_id));
+
+        // Identical rerun: nothing minted.
+        let rerun = provider
+            .collect_output_artifacts(&workspace, &execution)
+            .await
+            .unwrap();
+        assert_eq!(rerun.entries[0].status, OutputArtifactStatus::Unchanged);
+        assert_eq!(
+            store.list_outputs(chat.id, 10).await.unwrap()[0].revision_count,
+            1
+        );
+
+        // Changed bytes from a later call: a revision on the same output. (The
+        // same call identity republishing different bytes is refused by the
+        // write-once path, so each update rides its own call.)
+        std::fs::write(output_dir.join("report.md"), b"# Final").unwrap();
+        let later_call = accept_exec_call(store.clone()).await;
+        let later_execution = ExecutionId::parse(later_call.to_string()).unwrap();
+        let changed = provider
+            .collect_output_artifacts(&workspace, &later_execution)
+            .await
+            .unwrap();
+        assert_eq!(changed.entries[0].status, OutputArtifactStatus::Updated);
+        let updated = store.list_outputs(chat.id, 10).await.unwrap();
+        assert_eq!(updated[0].id, outputs[0].id);
+        assert_eq!(updated[0].revision_count, 2);
+
+        // A call identity the conversation does not own publishes nothing.
+        let foreign = ExecutionId::parse(CallId::new().to_string()).unwrap();
+        assert!(provider
+            .collect_output_artifacts(&workspace, &foreign)
             .await
             .is_err());
     }
