@@ -867,9 +867,17 @@ impl Store for PauseTerminalStore {
         model: Option<Option<String>>,
         reasoning_effort: Option<Option<openwave_core::ReasoningEffort>>,
         permission_mode: Option<Option<openwave_core::PermissionMode>>,
+        network_policy: Option<openwave_core::NetworkPolicy>,
     ) -> Result<bool> {
         self.inner
-            .update_chat_metadata(id, title, model, reasoning_effort, permission_mode)
+            .update_chat_metadata(
+                id,
+                title,
+                model,
+                reasoning_effort,
+                permission_mode,
+                network_policy,
+            )
             .await
     }
     async fn get_turn_run(&self, id: TurnId) -> Result<Option<openwave_core::TurnRun>> {

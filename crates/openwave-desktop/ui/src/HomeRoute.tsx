@@ -30,6 +30,7 @@ import { AppsPanel } from "./apps/AppsPanel";
 import { PanelLayout } from "./panel/PanelLayout";
 import type { LayoutState, PanelContent } from "./panel/panelTypes";
 import { useLayoutState } from "./panel/usePanelNav";
+import { NetworkPolicyMenu } from "./NetworkPolicyMenu";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import { RouteFrame } from "./RouteFrame";
 import { HomeSidebar } from "./sidebar/HomeSidebar";
@@ -106,6 +107,7 @@ export function HomeRoute() {
     const created = await client.createChat(newChat.model ?? undefined, null, {
       reasoningEffort: newChat.reasoningEffort,
       permissionMode: newChat.permissionMode,
+      networkPolicy: newChat.networkPolicy,
     });
     chatListActions.prependChat(created);
     chatListActions.setChatsError(null);
@@ -199,6 +201,7 @@ export function HomeRoute() {
           {
             reasoningEffort: newChat.reasoningEffort,
             permissionMode: newChat.permissionMode,
+            networkPolicy: newChat.networkPolicy,
           },
         );
         chatListActions.prependChat(created);
@@ -321,6 +324,11 @@ export function HomeRoute() {
                   value={newChat.permissionMode}
                   disabled={creatingChat}
                   onChange={newChat.setPermissionMode}
+                />
+                <NetworkPolicyMenu
+                  value={newChat.networkPolicy}
+                  disabled={creatingChat}
+                  onChange={newChat.setNetworkPolicy}
                 />
               </>
             }

@@ -1365,14 +1365,15 @@ async fn sandbox_claims_are_exact_reclaimable_and_heartbeatable() {
         .await
         .unwrap());
 
-    force_expired_agent_lease(&store, child_id).await;
-    let third_token = uuid::Uuid::new_v4();
-    let third = store
-        .claim_agent_run(third_token, Duration::minutes(1), 2, 1)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(third.attempt_count, 3);
+    for expected_attempt in 3..=AgentRun::DEFAULT_MAX_ATTEMPTS {
+        force_expired_agent_lease(&store, child_id).await;
+        let next = store
+            .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(1), 2, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.attempt_count, expected_attempt);
+    }
 
     force_expired_agent_lease(&store, child_id).await;
     let exhausted_scan = uuid::Uuid::new_v4();

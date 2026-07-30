@@ -137,12 +137,15 @@ adapter address private chat scratch and gives future E2B-style adapters a
 stable remote-session key. Results normalize exit status, bounded stdout/stderr,
 timeout, truncation, provider kind, and duration.
 
-The first provider is local and macOS-native. Seatbelt denies network and
-outside-workspace writes, the child inherits no ambient environment or stdin,
-and time, output, file size, and open files are bounded. A private durable
-running/terminal receipt prevents an ambiguous command from being silently
-replayed. Unsupported hosts fail closed with no unconfined fallback. See
-[Code execution](code-execution.md).
+The first provider is local and macOS-native. Seatbelt confines writes and
+denies direct network access; when the chat grants egress it exposes only one
+execution-scoped loopback CONNECT-broker port. The broker admits the chat's
+package-registry class, exact hosts, or public internet policy while always
+rejecting loopback, private, and link-local targets. The child inherits no
+ambient environment or stdin, and time, output, file size, and open files are
+bounded. A private durable running/terminal receipt prevents an ambiguous
+command from being silently replayed. Unsupported hosts fail closed with no
+unconfined fallback. See [Code execution](code-execution.md).
 
 External MCP servers follow the same rule through `openwave-mcp`. A connected
 server — a local stdio child or a remote Streamable HTTP endpoint — completes

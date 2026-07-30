@@ -35,11 +35,11 @@ use crate::model::{
     AgentRunWaitSetCandidate, BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus,
     Chat, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceBlob,
     DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, MessageAttachment,
-    MessageDocumentAttachment, PermissionMode, Project, ReasoningEffort, RootAttachmentChange,
-    RootAttachmentChangeTerminal, SandboxToolCall, SandboxToolCallReceipt, SandboxToolCallRequest,
-    ToolCallRecord, ToolCallResolution, TurnAgentRunWaitStatus, TurnCheckpointProgress,
-    TurnClientWaitStatus, TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteerStatus,
-    MAX_ROOT_ATTACHMENTS,
+    MessageDocumentAttachment, NetworkPolicy, PermissionMode, Project, ReasoningEffort,
+    RootAttachmentChange, RootAttachmentChangeTerminal, SandboxToolCall, SandboxToolCallReceipt,
+    SandboxToolCallRequest, ToolCallRecord, ToolCallResolution, TurnAgentRunWaitStatus,
+    TurnCheckpointProgress, TurnClientWaitStatus, TurnFailureRetry, TurnRun, TurnRunStatus,
+    TurnSteerStatus, MAX_ROOT_ATTACHMENTS,
 };
 use crate::provider::{StopReason, Usage};
 use crate::semantic_checkpoint::{ContextCheckpoint, SaveContextCheckpointOutcome};
@@ -528,6 +528,7 @@ impl Store for DbStore {
         model: Option<Option<String>>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
         permission_mode: Option<Option<PermissionMode>>,
+        network_policy: Option<NetworkPolicy>,
     ) -> Result<bool> {
         ops::conversation::update_chat_metadata(
             self,
@@ -536,6 +537,7 @@ impl Store for DbStore {
             model,
             reasoning_effort,
             permission_mode,
+            network_policy,
         )
         .await
     }

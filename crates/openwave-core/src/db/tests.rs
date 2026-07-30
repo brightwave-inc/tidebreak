@@ -78,17 +78,18 @@ async fn temp_store() -> (tempfile::TempDir, DbStore) {
 /// go through the retired single `execution` column that the split migration
 /// later maps onto `(tier, execution_location)`.
 async fn create_chat_before_agent_run_split(store: &DbStore, chat: &Chat) {
-    entities::chat::ActiveModel {
+    entities::chat::Entity::insert(entities::chat::ActiveModel {
         id: Set(chat.id.0),
         project_id: Set(chat.project_id.map(|p| p.0)),
         title: Set(chat.title.clone()),
         model: Set(chat.model.clone()),
         reasoning_effort: sea_orm::ActiveValue::NotSet,
         permission_mode: sea_orm::ActiveValue::NotSet,
+        network_policy: sea_orm::ActiveValue::NotSet,
         attachment_revision: Set(chat.attachment_revision),
         created_at: Set(chat.created_at),
-    }
-    .insert(&store.conn)
+    })
+    .exec_without_returning(&store.conn)
     .await
     .unwrap();
     store
@@ -155,6 +156,7 @@ fn sample_chat() -> Chat {
         model: None,
         reasoning_effort: None,
         permission_mode: None,
+        network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
         created_at: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
@@ -455,6 +457,7 @@ async fn project_membership_fk_and_attachment_insertions_are_atomic() {
         model: Set(None),
         reasoning_effort: Set(None),
         permission_mode: Set(None),
+        network_policy: Set(r#"{"mode":"off"}"#.into()),
         attachment_revision: Set(0),
         created_at: Set(Utc::now()),
     };
@@ -575,6 +578,7 @@ async fn chats_stored_before_the_effort_scale_widened_still_load() {
             model: Set(None),
             reasoning_effort: Set(Some(stored.to_owned())),
             permission_mode: Set(None),
+            network_policy: Set(r#"{"mode":"off"}"#.into()),
             attachment_revision: Set(0),
             created_at: Set(chat.created_at),
         }

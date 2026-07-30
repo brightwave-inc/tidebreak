@@ -4,6 +4,7 @@ import { useNavigate } from "@tanstack/react-router";
 import type {
   ModelInfo,
   ModelSelectionKey,
+  NetworkPolicy,
   PermissionMode,
   ReasoningEffort,
   SequencedEvent,
@@ -53,6 +54,7 @@ import {
 import { useImageAttachments } from "./useImageAttachments";
 import { modelForSelection } from "./ModelSelection";
 import { ModelMenu, ReasoningEffortMenu } from "./ModelMenu";
+import { NetworkPolicyMenu } from "./NetworkPolicyMenu";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import {
   PICKER_BUSY_MESSAGE,
@@ -492,6 +494,11 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     chatListActions.replaceChat(await client.patchChatPermissionMode(chatId, mode));
   }
 
+  async function onNetworkPolicyChange(policy: NetworkPolicy) {
+    if (deletingChatId !== null) return;
+    chatListActions.replaceChat(await client.patchChatNetworkPolicy(chatId, policy));
+  }
+
   // Shown while the list fetch or the redirect above settles — a blank frame
   // still needs a name so it is not silent to a screen reader.
   if (!chat) {
@@ -580,6 +587,11 @@ export function ChatRoute({ chatId }: { chatId: string }) {
                   value={chat!.permission_mode}
                   disabled={deletingChatId !== null}
                   onChange={onPermissionModeChange}
+                />
+                <NetworkPolicyMenu
+                  value={chat!.network_policy}
+                  disabled={deletingChatId !== null}
+                  onChange={onNetworkPolicyChange}
                 />
               </>
             }

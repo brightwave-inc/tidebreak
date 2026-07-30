@@ -115,7 +115,8 @@ impl Tool for ExecTool {
 
     fn approval_class(&self) -> ApprovalClass {
         // Command execution remains an explicit consent boundary even though
-        // the local provider denies network and outside-workspace writes.
+        // the provider confines writes and independently enforces the chat's
+        // network policy.
         ApprovalClass::Sensitive
     }
 

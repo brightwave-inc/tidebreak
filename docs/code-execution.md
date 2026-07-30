@@ -15,8 +15,8 @@ The authenticated local API owns provider selection and timeout policy:
 
 | Route | Purpose |
 | --- | --- |
-| `GET /code-execution` | Return the selected provider, timeout, egress policy, and host readiness |
-| `PUT /code-execution` | Select a fixed provider or disable execution, update the bounded timeout, and set the managed-sandbox egress policy |
+| `GET /code-execution` | Return the selected provider, timeout, provider-enforcement disclosure, and host readiness |
+| `PUT /code-execution` | Select a fixed provider or disable execution and update the bounded timeout |
 | `GET /code-execution/credentials` | Read readiness for the fixed E2B and Daytona key slots |
 | `PUT /code-execution/credentials/{e2b\|daytona}` | Store that provider's API key in its fixed host-secret slot |
 | `DELETE /code-execution/credentials/{e2b\|daytona}` | Remove only that provider's saved API key |
@@ -45,35 +45,44 @@ value, or secret reference is accepted by the non-secret settings surface.
 while `GET /code-execution/credentials` reports readiness for both managed slots
 independently. Local execution needs no credential and has no slot to report.
 
-### Egress policy
+### Per-chat network policy
 
-`GET`/`PUT /code-execution` also carry a host-owned, non-secret egress policy for
-the managed sandboxes, under the `egress` field. It is a store setting, not a
-keychain secret: it holds only an allowlist of domain patterns and CIDR blocks,
-or `open`, and the surface accepts no endpoint or secret. The model never sets
-it — it is host configuration, like provider selection and timeout.
-
-The `policy` is one of:
+Every chat persists one provider-neutral code-execution policy. It defaults to
+`off`, is selected beside the composer, and is read again immediately before
+each command:
 
 ```json
+{ "mode": "off" }
+{ "mode": "package_managers" }
+{
+  "mode": "allowed_hosts",
+  "allowed_hosts": ["api.example.com"],
+  "package_managers": true
+}
 { "mode": "open" }
-{ "mode": "allowlist", "domains": ["*.pypi.org"], "cidrs": ["140.82.112.0/20"] }
 ```
 
-Egress restriction is **opt-in, and the default is `open`**. Managed sandboxes
-have always been created with open internet access, and flipping the default to
-deny would break package installs and network fetches inside code execution, so
-`open` stays the out-of-the-box behavior and is disclosed as such in settings.
-Configuring an allowlist switches every managed sandbox created afterwards to
-deny-by-default: only the listed domains and address blocks are reachable, and
-an empty allowlist denies all egress. Domain and address rules are independent —
-a domain grant never opens a raw IP and an address block never opens a
-hostname — matching the decision layer in
-[sandbox providers](sandbox-providers.md). Each pattern is validated to that
-layer's grammar at `PUT` time, so a malformed grant is a bad request rather than
-a silent widening; a malformed *stored* policy fails closed by refusing
-execution, never by reverting to open egress. The local provider already denies
-all network and is unaffected.
+Custom hosts are exact DNS names: wildcard patterns and address literals are
+rejected, entries are lowercased and deduplicated before persistence, and the
+list is bounded. `package_managers` expands to a fixed, reviewable registry
+class (PyPI, npm, crates.io, Maven, Go, NuGet, RubyGems, and Packagist
+endpoints). The model cannot author or widen the policy.
+
+The local adapter starts an execution-scoped HTTP CONNECT broker on
+`127.0.0.1` for every non-`off` command. Seatbelt admits outbound TCP to that
+one exact port and nothing else; the child receives upper- and lower-case proxy
+environment variables. The broker accepts CONNECT only, checks the requested
+host against the chat policy, resolves it outside the sandbox, and rejects the
+whole name if any answer is loopback, RFC1918/unique-local, link-local,
+multicast, or otherwise non-routable. A denial returns an HTTP error
+immediately rather than dropping packets and triggering package-manager retry
+backoff. TLS remains end to end: the broker does not intercept or rewrite
+requests. Dropping the command-scoped broker closes its listener and tunnels.
+
+E2B and Daytona compile the same chat policy into their per-sandbox controls.
+The older host-level `egress` value remains readable for stored-config
+compatibility and provider disclosure, but chat execution always uses the
+per-chat policy.
 
 The `enforcement` field discloses, per managed provider, an honest `status`
 (`boundary`, `conditional_boundary`, `applied_with_gaps`, or `unconfirmed`),
@@ -106,8 +115,9 @@ destination reachable, the surface cannot present it as a full boundary.
   therefore reports it as a *conditional* boundary with that requirement inline,
   never an unconditional green one.
 
-The local sandbox is the only tier that denies all network outright — the actual
-boundary — and it does so unconditionally, independent of this policy.
+The local adapter is an unconditional external boundary: direct networking
+stays denied and the only pinhole reaches the policy broker. Managed fidelity
+is disclosed honestly as described above.
 
 The `exec` tool remains registered with a stable schema while settings change.
 The host resolves the selected provider immediately before execution, so a
@@ -121,7 +131,9 @@ switching between them needs no retyping, and a separate choice of which
 provider agents execute in — the local sandbox, one of the managed ones, or
 disabled. Saving writes every key the user typed before it writes selection, so
 a provider cannot become active in a pass that failed to store its key. Saved
-keys are never displayed or read into the renderer.
+keys are never displayed or read into the renderer. Network policy is not a
+provider setting; the conversation composer owns it so switching providers does
+not silently change a chat's authority.
 
 ## Provider contract
 

@@ -1019,6 +1019,32 @@ impl PermissionMode {
     }
 }
 
+/// Network access granted to commands in one conversation workspace.
+///
+/// The policy is provider-neutral and deny-by-default. Providers compile it to
+/// their strongest available enforcement mechanism; the local native adapter
+/// exposes only one loopback broker port and applies the destination decision
+/// outside the sandbox.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, ts_rs::TS)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum NetworkPolicy {
+    /// Deny every outbound connection.
+    #[default]
+    Off,
+    /// Permit only the fixed package-registry destination class.
+    PackageManagers,
+    /// Permit an explicit host list and, optionally, the package-registry
+    /// destination class. Hosts are exact DNS names, never wildcard patterns.
+    AllowedHosts {
+        allowed_hosts: Vec<String>,
+        #[serde(default)]
+        package_managers: bool,
+    },
+    /// Permit public-internet destinations. Local, private, and link-local
+    /// addresses remain unreachable through the local broker.
+    Open,
+}
+
 /// A persistent conversation with an exact, ordered host-root projection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 pub struct Chat {
@@ -1036,6 +1062,9 @@ pub struct Chat {
     /// How much this chat lets the agent do between approvals; `None` means
     /// [`PermissionMode::Ask`].
     pub permission_mode: Option<PermissionMode>,
+    /// Outbound network access for code execution in this chat.
+    #[serde(default)]
+    pub network_policy: NetworkPolicy,
     /// CAS revision of this conversation's exact root projection.
     pub attachment_revision: i64,
     /// Ordered opaque roots available for future broker-backed operations.

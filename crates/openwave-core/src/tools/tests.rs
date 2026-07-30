@@ -31,6 +31,7 @@ async fn output_fixture() -> (tempfile::TempDir, Arc<DbStore>, ChatId) {
         model: None,
         reasoning_effort: None,
         permission_mode: None,
+        network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
         created_at: chrono::Utc::now(),

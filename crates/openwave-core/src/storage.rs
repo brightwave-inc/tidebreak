@@ -39,10 +39,10 @@ use crate::model::{
     BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus, Chat, ClientToolCallRequest,
     DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert,
     DocumentSummaryRecord, DocumentUpsert, ExecFileSnapshot, ExecFileSnapshotRecord, Message,
-    MessageAttachment, MessageDocumentAttachment, PermissionMode, Project, ReasoningEffort,
-    RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord, ToolCallResolution,
-    TurnAgentRunWait, TurnAgentRunWaitSet, TurnCheckpointProgress, TurnClientWait,
-    TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnSteer,
+    MessageAttachment, MessageDocumentAttachment, NetworkPolicy, PermissionMode, Project,
+    ReasoningEffort, RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord,
+    ToolCallResolution, TurnAgentRunWait, TurnAgentRunWaitSet, TurnCheckpointProgress,
+    TurnClientWait, TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnSteer,
 };
 use crate::provider::{RefusalOutcome, StopReason, Usage};
 use crate::semantic_checkpoint::{ContextCheckpoint, SaveContextCheckpointOutcome};
@@ -1407,6 +1407,7 @@ pub trait Store: Send + Sync {
         model: Option<Option<String>>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
         permission_mode: Option<Option<PermissionMode>>,
+        network_policy: Option<NetworkPolicy>,
     ) -> Result<bool>;
 
     /// Create a conversation output together with its first revision.

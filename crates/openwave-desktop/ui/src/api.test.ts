@@ -629,6 +629,7 @@ describe("project-scoped conversation API", () => {
           model: "anthropic::model-1",
           reasoning_effort: "high",
           permission_mode: "auto",
+          network_policy: { mode: "package_managers" },
           attachment_revision: 0,
           root_attachments: [],
           created_at: "2026-07-29T12:00:00Z",
@@ -642,6 +643,7 @@ describe("project-scoped conversation API", () => {
     await client.createChat("anthropic::model-1", null, {
       reasoningEffort: "high",
       permissionMode: "auto",
+      networkPolicy: { mode: "package_managers" },
     });
 
     expect(fetchMock).toHaveBeenCalledWith(
@@ -652,6 +654,7 @@ describe("project-scoped conversation API", () => {
           model: "anthropic::model-1",
           reasoning_effort: "high",
           permission_mode: "auto",
+          network_policy: { mode: "package_managers" },
         }),
       }),
     );

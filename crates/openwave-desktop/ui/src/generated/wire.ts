@@ -326,6 +326,10 @@ reasoning_effort: ReasoningEffort | null,
  */
 permission_mode: PermissionMode | null, 
 /**
+ * Outbound network access for code execution in this chat.
+ */
+network_policy: NetworkPolicy, 
+/**
  * CAS revision of this conversation's exact root projection.
  */
 attachment_revision: number, 
@@ -888,6 +892,16 @@ selection: string | null,
  * the work that depends on it is skipped.
  */
 resolved_key: string | null, };
+
+/**
+ * Network access granted to commands in one conversation workspace.
+ *
+ * The policy is provider-neutral and deny-by-default. Providers compile it to
+ * their strongest available enforcement mechanism; the local native adapter
+ * exposes only one loopback broker port and applies the destination decision
+ * outside the sandbox.
+ */
+export type NetworkPolicy = { "mode": "off" } | { "mode": "package_managers" } | { "mode": "allowed_hosts", allowed_hosts: Array<string>, package_managers: boolean, } | { "mode": "open" };
 
 /**
  * Closed renderer-safe pending approval projection. Canonical arguments,

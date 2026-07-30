@@ -46,6 +46,7 @@ import {
   type ProviderInfo as WireProviderInfo,
   type ProviderKind as WireProviderKind,
   type PermissionMode as WirePermissionMode,
+  type NetworkPolicy as WireNetworkPolicy,
   type ReasoningEffort as WireReasoningEffort,
   type Settings,
   type WebSearchConfigInfo as WireWebSearchConfigInfo,
@@ -147,6 +148,9 @@ export type ReasoningEffort = WireReasoningEffort;
 
 /** How much a chat lets the agent do between approvals. */
 export type PermissionMode = WirePermissionMode;
+
+/** Network access granted to code execution in one conversation workspace. */
+export type NetworkPolicy = WireNetworkPolicy;
 
 export type ProviderInfo = WireProviderInfo;
 
@@ -1044,6 +1048,7 @@ export class ApiClient {
     settings?: {
       reasoningEffort?: ReasoningEffort | null;
       permissionMode?: PermissionMode | null;
+      networkPolicy?: NetworkPolicy;
     },
   ): Promise<Chat> {
     return this.json("/chats", {
@@ -1054,6 +1059,7 @@ export class ApiClient {
         project_id: projectId || undefined,
         reasoning_effort: settings?.reasoningEffort ?? undefined,
         permission_mode: settings?.permissionMode ?? undefined,
+        network_policy: settings?.networkPolicy,
       }),
     });
   }
@@ -1249,6 +1255,17 @@ export class ApiClient {
       method: "PATCH",
       headers: this.headers(true),
       body: JSON.stringify({ permission_mode: permissionMode }),
+    });
+  }
+
+  patchChatNetworkPolicy(
+    chatId: string,
+    networkPolicy: NetworkPolicy,
+  ): Promise<Chat> {
+    return this.json(`/chats/${chatId}`, {
+      method: "PATCH",
+      headers: this.headers(true),
+      body: JSON.stringify({ network_policy: networkPolicy }),
     });
   }
 

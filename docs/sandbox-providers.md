@@ -426,7 +426,7 @@ held by the supervisor, never the agent.
 
 A small, dependency-free decision layer answers one question — may this
 workload open a connection to this destination? — and every enforcement
-point consults it: the local adapter (which denies network outright today),
+point consults it: the local adapter (which exposes only its policy broker),
 the sandbox supervisor, and provider-level controls where a vendor exposes
 them. Allowlists are user-granted, auditable, and revocable; the grant and
 consent surface follows the broker capability model in
