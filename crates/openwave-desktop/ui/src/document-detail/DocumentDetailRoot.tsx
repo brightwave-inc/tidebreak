@@ -79,7 +79,6 @@ export function DocumentDetailRoot({
 
   const hasOriginalDocumentTab =
     info != null &&
-    info.processing_status !== "failed" &&
     info.has_original_bytes &&
     isDocumentRenderable(info.media_type);
 
@@ -120,10 +119,7 @@ export function DocumentDetailRoot({
   // transcript cannot resolve opens the document the same way the source list
   // does.
   //
-  // The original view is only worth landing on where there is one: a source
-  // whose processing failed has no viewer behind that tab, however precisely
-  // the citation addresses it, and sending the reader there left the panel
-  // showing nothing at all rather than saying what went wrong.
+  // The original view is only worth landing on where there is one.
   const citationView: DocumentView | null = !placement
     ? null
     : (citationPage != null || citationCellRange != null) &&

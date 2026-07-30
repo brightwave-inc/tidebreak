@@ -12,9 +12,6 @@ afterEach(cleanup);
 const ids = {
   alpha: "6c3df6af-bc62-4a66-a34e-29f327eaef41",
   zeta: "dcf9cc51-465d-438a-bac4-8005c6c980d9",
-  queued: "295b4e3d-092e-48ab-9121-1a50c721d676",
-  retryable: "096c0f5a-e5f7-46c7-8e6a-d534793a585b",
-  permanent: "f079210a-f870-4030-b0b2-c628af729bb6",
 };
 
 describe("SourcesView catalog", () => {
@@ -70,75 +67,6 @@ describe("SourcesView catalog", () => {
       expect(screen.queryByRole("button", { name: "Open Notes.md" })).not.toBeInTheDocument(),
     );
     expect(screen.getByText("showing 1 of 2")).toBeVisible();
-  });
-
-  it("shows lifecycle states and offers retry only where the server allows it", async () => {
-    const retryable = source({
-      documentId: ids.retryable,
-      title: "Retry me.pdf",
-      processingStatus: "failed",
-      readable: false,
-      failure: {
-        message: "The local search index was unavailable. Retry preparing this source.",
-        retriable: true,
-      },
-    });
-    const permanent = source({
-      documentId: ids.permanent,
-      title: "Broken.pdf",
-      processingStatus: "failed",
-      readable: false,
-      failure: {
-        message:
-          "OpenWave could not read this file. Delete it and add a supported, uncorrupted version.",
-        retriable: false,
-      },
-    });
-    const queued = source({
-      documentId: ids.queued,
-      title: "Preparing.md",
-      processingStatus: "processing",
-      readable: false,
-    });
-    const unreadable = source({ documentId: ids.zeta, title: "Scan.pdf", readable: false });
-    const ready = source({ documentId: ids.alpha, title: "Ready.md" });
-    const apis = sourceApis([retryable, permanent, queued, unreadable, ready]);
-    vi.mocked(apis.list)
-      .mockResolvedValueOnce({
-        documents: [retryable, permanent, queued, unreadable, ready],
-        truncated: false,
-      })
-      .mockResolvedValue({
-        documents: [
-          { ...retryable, processingStatus: "queued", failure: null },
-          permanent,
-          queued,
-          unreadable,
-          ready,
-        ],
-        truncated: false,
-      });
-    const user = userEvent.setup();
-
-    render(<SourcesView chatId="chat-1" apis={apis} />);
-    await screen.findByRole("button", { name: "Open Ready.md" });
-
-    // A ready, readable source is the quiet case and wears no pill at all.
-    expect(screen.getAllByText("Failed")).toHaveLength(2);
-    expect(screen.getByText("Preparing")).toBeVisible();
-    expect(screen.getByText("No text")).toBeVisible();
-    // Only the retriable failure offers the action.
-    expect(screen.getAllByRole("button", { name: "Retry" })).toHaveLength(1);
-
-    await user.click(screen.getAllByText("Failed")[0]!);
-    expect(
-      await screen.findByText(/The local search index was unavailable|could not read this file/),
-    ).toBeVisible();
-    await user.keyboard("{Escape}");
-
-    await user.click(screen.getByRole("button", { name: "Retry" }));
-    await waitFor(() => expect(apis.retry).toHaveBeenCalledWith("chat-1", ids.retryable));
-    await waitFor(() => expect(screen.getAllByText("Failed")).toHaveLength(1));
   });
 
   it("confirms a delete and lets Escape cancel it", async () => {
@@ -226,9 +154,7 @@ function source(overrides: Partial<LibraryDocument> = {}): LibraryDocument {
     title: "Source.md",
     mediaType: "text/markdown",
     sizeBytes: 512,
-    processingStatus: "ready",
     readable: true,
-    failure: null,
     updatedAt: "2026-07-22T00:00:00Z",
     ...overrides,
   };
@@ -239,7 +165,6 @@ function sourceApis(documents: LibraryDocument[]): SourcesApis {
     list: vi.fn().mockResolvedValue({ documents, truncated: false }),
     import: vi.fn().mockResolvedValue(null),
     delete: vi.fn().mockResolvedValue(undefined),
-    retry: vi.fn().mockResolvedValue(undefined),
     export: vi.fn().mockResolvedValue(true),
   };
 }

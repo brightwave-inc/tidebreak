@@ -804,16 +804,7 @@ impl Store for PauseTerminalStore {
             .list_document_summaries(scope, after, limit)
             .await
     }
-    async fn get_document_generation(
-        &self,
-        id: openwave_core::DocumentId,
-    ) -> Result<Option<openwave_core::DocumentGeneration>> {
-        self.inner.get_document_generation(id).await
-    }
-    async fn delete_document(
-        &self,
-        id: openwave_core::DocumentId,
-    ) -> Result<openwave_core::DocumentGeneration> {
+    async fn delete_document(&self, id: openwave_core::DocumentId) -> Result<()> {
         if self.fail_document_delete.swap(false, Ordering::SeqCst) {
             return Err(AgentError::Store(
                 "injected document catalog delete failure".into(),
@@ -827,65 +818,11 @@ impl Store for PauseTerminalStore {
     ) -> Result<openwave_core::DocumentRecord> {
         self.inner.upsert_document(document).await
     }
-    async fn accept_document_source_and_enqueue_parse(
+    async fn accept_document_source(
         &self,
         source: &openwave_core::DocumentSourceUpsert,
-        parser_fingerprint: &str,
-        max_attempts: i32,
-    ) -> Result<(openwave_core::DocumentRecord, openwave_core::DocumentJob)> {
-        self.inner
-            .accept_document_source_and_enqueue_parse(source, parser_fingerprint, max_attempts)
-            .await
-    }
-    async fn get_document_job(
-        &self,
-        id: openwave_core::DocumentJobId,
-    ) -> Result<Option<openwave_core::DocumentJob>> {
-        self.inner.get_document_job(id).await
-    }
-    async fn list_document_jobs(
-        &self,
-        document_id: openwave_core::DocumentId,
-    ) -> Result<Vec<openwave_core::DocumentJob>> {
-        self.inner.list_document_jobs(document_id).await
-    }
-    async fn claim_document_job(
-        &self,
-        now: chrono::DateTime<chrono::Utc>,
-        lease_expires_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<Option<openwave_core::DocumentJob>> {
-        self.inner.claim_document_job(now, lease_expires_at).await
-    }
-    async fn heartbeat_document_job(
-        &self,
-        id: openwave_core::DocumentJobId,
-        lease_token: uuid::Uuid,
-        now: chrono::DateTime<chrono::Utc>,
-        lease_expires_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<bool> {
-        self.inner
-            .heartbeat_document_job(id, lease_token, now, lease_expires_at)
-            .await
-    }
-    async fn record_document_job_failure(
-        &self,
-        id: openwave_core::DocumentJobId,
-        lease_token: uuid::Uuid,
-        failed_at: chrono::DateTime<chrono::Utc>,
-        retry_at: Option<chrono::DateTime<chrono::Utc>>,
-        error_code: &str,
-        error_detail: Option<&str>,
-    ) -> Result<Option<openwave_core::DocumentJobStatus>> {
-        self.inner
-            .record_document_job_failure(
-                id,
-                lease_token,
-                failed_at,
-                retry_at,
-                error_code,
-                error_detail,
-            )
-            .await
+    ) -> Result<openwave_core::DocumentRecord> {
+        self.inner.accept_document_source(source).await
     }
     async fn create_chat(&self, chat: &Chat) -> Result<()> {
         self.inner.create_chat(chat).await
@@ -1515,60 +1452,6 @@ async fn test_app_with_retrieval(
     let (dir, store) = temp_db_store("t.db").await;
     let store: Arc<dyn Store> = Arc::new(store);
     test_app_from_parts(provider, retrieval, store, dir)
-}
-
-async fn test_app_with_worker() -> (
-    Router,
-    Arc<str>,
-    Arc<dyn Store>,
-    tempfile::TempDir,
-    document_worker::DocumentWorker,
-) {
-    let retrieval = build_retrieval();
-    test_app_with_retrieval_and_worker(Arc::new(FakeProvider), retrieval).await
-}
-
-async fn test_app_with_retrieval_and_worker(
-    provider: Arc<dyn ModelProvider>,
-    retrieval: Arc<Retriever>,
-) -> (
-    Router,
-    Arc<str>,
-    Arc<dyn Store>,
-    tempfile::TempDir,
-    document_worker::DocumentWorker,
-) {
-    let (dir, store) = temp_db_store("t.db").await;
-    let store: Arc<dyn Store> = Arc::new(store);
-    let state = AppState::new(
-        Config::desktop(dir.path()),
-        store.clone(),
-        Arc::new(FixedResolver(provider)),
-        Arc::new(MemSecrets::default()),
-        Arc::new(ToolRegistry::new()),
-        retrieval.clone(),
-        AgentConfig {
-            model: "fake".into(),
-            ..AgentConfig::default()
-        },
-    );
-    let token = state.token.clone();
-    let worker = document_worker::DocumentWorker::new(
-        store.clone(),
-        state.blobs.clone(),
-        retrieval,
-        state.document_job_wake.clone(),
-        document_worker::DocumentWorkerConfig::default(),
-    );
-    spawn_turn_worker(&state);
-    (app(state), token, store, dir, worker)
-}
-
-async fn run_parse(worker: &document_worker::DocumentWorker) {
-    assert!(matches!(
-        worker.run_once().await.unwrap(),
-        document_worker::WorkerOutcome::Completed(_)
-    ));
 }
 
 fn test_app_from_parts(

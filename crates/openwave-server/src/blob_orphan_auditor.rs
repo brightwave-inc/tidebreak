@@ -324,6 +324,7 @@ mod tests {
             media_type: "application/octet-stream".into(),
             title: None,
             source_blob: blob,
+            canonical_text: String::new(),
             updated_at: chrono::Utc::now(),
         }
     }
@@ -377,10 +378,7 @@ mod tests {
         age_blob(&root, old_orphan.id, Duration::from_secs(2 * 60 * 60));
         age_blob(&root, referenced.id, Duration::from_secs(2 * 60 * 60));
         let live_source = source(referenced.clone());
-        store
-            .accept_document_source_and_enqueue_parse(&live_source, "parser-v1", 3)
-            .await
-            .unwrap();
+        store.accept_document_source(&live_source).await.unwrap();
         std::fs::write(root.join("not-a-blob.txt"), b"ignored").unwrap();
         std::fs::write(root.join("not-a-uuid.blob"), b"ignored").unwrap();
         let wake = Arc::new(Notify::new());

@@ -35,7 +35,6 @@ type Props = {
   onDownload: (document: LibraryDocument) => void;
   onDelete: (document: LibraryDocument) => void;
   onDeleteMany: (documents: LibraryDocument[]) => Promise<void>;
-  onRetry: (document: LibraryDocument) => void;
   /** Publishes "12" or "showing 3 of 12" for the panel header to draw. */
   onCountChange: (suffix: string) => void;
 };
@@ -44,8 +43,7 @@ type Props = {
  * The source catalog: search and facets above a virtualised grid.
  *
  * The grid is virtualised because a conversation can hold the newest thousand
- * sources and every row draws a popover-capable status pill — rendering all of
- * them to scroll through a dozen is what the old table did.
+ * sources without rendering every row at once.
  */
 export function SourceTable({
   documents,
@@ -55,7 +53,6 @@ export function SourceTable({
   onDownload,
   onDelete,
   onDeleteMany,
-  onRetry,
   onCountChange,
 }: Props) {
   const filters = useSourceTableFilters(documents);
@@ -67,8 +64,8 @@ export function SourceTable({
   const [deleting, setDeleting] = useState(false);
 
   const gridContext = useMemo<SourceGridContext>(
-    () => ({ onOpen, onDownload, onDelete, onRetry, canDownload, busyDocumentId }),
-    [onOpen, onDownload, onDelete, onRetry, canDownload, busyDocumentId],
+    () => ({ onOpen, onDownload, onDelete, canDownload, busyDocumentId }),
+    [onOpen, onDownload, onDelete, canDownload, busyDocumentId],
   );
 
   // Cell renderers read the actions off `context`, which the grid snapshots
@@ -196,10 +193,6 @@ export function SourceTable({
     }
   }
 
-  const retriableSelected = selectedDocuments.filter(
-    (document) => document.failure?.retriable,
-  );
-
   return (
     <div className="flex h-full min-h-0 flex-col gap-4 px-4 pb-4">
       <div className="flex shrink-0 flex-wrap items-center justify-between gap-3">
@@ -223,7 +216,6 @@ export function SourceTable({
             </Button>
           )}
           <FacetFilter label="Type" facet={filters.types} />
-          <FacetFilter label="Status" facet={filters.statuses} />
         </div>
       </div>
 
@@ -240,15 +232,6 @@ export function SourceTable({
               )}
             </span>
             <div className="flex items-center gap-2">
-              {retriableSelected.length > 0 && (
-                <Button
-                  variant="outline"
-                  size="xs"
-                  onClick={() => retriableSelected.forEach(onRetry)}
-                >
-                  Retry {retriableSelected.length === 1 ? "" : retriableSelected.length}
-                </Button>
-              )}
               <Button variant="outline" size="xs" onClick={clearSelection}>
                 Clear
               </Button>

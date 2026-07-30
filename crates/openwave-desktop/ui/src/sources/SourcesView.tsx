@@ -18,7 +18,6 @@ import {
   exportLibraryDocument,
   importLibraryDocuments,
   listLibraryDocuments,
-  retryLibraryDocument,
   type ImportedDocument,
   type LibraryCatalog,
   type LibraryDocument,
@@ -38,7 +37,6 @@ export type SourcesApis = {
   list: (chatId: string) => Promise<LibraryCatalog>;
   import: (chatId: string) => Promise<LibraryImportBatch | null>;
   delete: (chatId: string, documentId: string) => Promise<void>;
-  retry: (chatId: string, documentId: string) => Promise<void>;
   export: (chatId: string, documentId: string) => Promise<boolean>;
 };
 
@@ -46,17 +44,10 @@ const defaultApis: SourcesApis = {
   list: listLibraryDocuments,
   import: importLibraryDocuments,
   delete: deleteLibraryDocument,
-  retry: retryLibraryDocument,
   export: exportLibraryDocument,
 };
 
-/**
- * A conversation's sources, as the panel addressed `sources`.
- *
- * The catalog is polled while anything in it is still being prepared, which is
- * the only reason this component holds the documents rather than the grid: a
- * refresh has to survive the reader sorting, filtering and selecting rows.
- */
+/** A conversation's sources, as the panel addressed `sources`. */
 export function SourcesView({
   chatId,
   onOpen = () => {},
@@ -121,16 +112,6 @@ export function SourcesView({
       catalogRequestRef.current += 1;
     };
   }, [chatId, apis]);
-
-  const processing = documents.some((document) =>
-    ["queued", "processing"].includes(document.processingStatus),
-  );
-
-  useEffect(() => {
-    if (!processing) return;
-    const interval = window.setInterval(() => void refreshCatalog(), 2_000);
-    return () => window.clearInterval(interval);
-  }, [processing, chatId, apis]);
 
   async function onImport() {
     if (importing) return;
@@ -237,40 +218,6 @@ export function SourcesView({
       }
     },
     [apis, chatId, confirm],
-  );
-
-  const onRetry = useCallback(
-    async (document: LibraryDocument) => {
-      if (!document.failure?.retriable) return;
-      const scope = scopeRef.current;
-      catalogRequestRef.current += 1;
-      setBusyDocumentId(document.documentId);
-      setError(null);
-      try {
-        await apis.retry(chatId, document.documentId);
-        if (!isCurrentScope(scope)) return;
-        setDocuments((current) =>
-          current.map((candidate) =>
-            candidate.documentId === document.documentId
-              ? {
-                  ...candidate,
-                  processingStatus: "queued",
-                  readable: false,
-                  failure: null,
-                }
-              : candidate,
-          ),
-        );
-        void refreshCatalog();
-      } catch (err) {
-        if (isCurrentScope(scope)) {
-          setError(friendlyError(err, "Could not retry that source."));
-        }
-      } finally {
-        if (isCurrentScope(scope)) setBusyDocumentId(null);
-      }
-    },
-    [apis, chatId],
   );
 
   const onDownload = useCallback(
@@ -384,7 +331,6 @@ export function SourcesView({
             onDownload={(document) => void onDownload(document)}
             onDelete={(document) => void onDelete(document)}
             onDeleteMany={onDeleteMany}
-            onRetry={(document) => void onRetry(document)}
             onCountChange={setCountSuffix}
           />
         )}

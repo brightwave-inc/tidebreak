@@ -87,7 +87,6 @@ function detail(overrides: Partial<DocumentDetail> = {}): DocumentDetail {
     document_id: "doc-1",
     media_type: "image/png",
     title: "Floor plan.png",
-    processing_status: "ready",
     readable: false,
     has_original_bytes: true,
     updated_at: "2026-07-24T00:00:00Z",
@@ -543,27 +542,6 @@ describe("DocumentDetailRoot", () => {
     expect(await screen.findByText("Page 7")).toBeVisible();
   });
 
-  // A citation can outlive the reading of the source it points into — the file
-  // is re-read on import and the parse fails the second time. There is no
-  // original view behind the tab then, and sending the reader to it left the
-  // panel drawing nothing at all.
-  it("says a source failed rather than opening a citation on an empty panel", async () => {
-    seedTranscript({ id: "cite-8", locator: { kind: "page", page: 3 } });
-    await openCitation(
-      detail({
-        media_type: "application/pdf",
-        title: "Report.pdf",
-        processing_status: "failed",
-        content: "",
-      }),
-      "cite-8",
-    );
-
-    expect(await screen.findByText("Failed to process document")).toBeVisible();
-  });
-
-  // The panel unmounts the viewer whenever the reader switches views, so
-  // without the byte cache every flip back pulls the whole file over again.
   it("draws the original from cache when the reader flips views and back", async () => {
     const user = userEvent.setup();
     const { client } = await openPanel(

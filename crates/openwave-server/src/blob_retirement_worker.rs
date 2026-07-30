@@ -357,6 +357,7 @@ mod tests {
             media_type: "application/octet-stream".into(),
             title: None,
             source_blob: blob,
+            canonical_text: String::new(),
             updated_at: Utc::now(),
         }
     }
@@ -380,10 +381,7 @@ mod tests {
         let descriptor = DocumentSourceBlob::from_bytes(&bytes);
         blobs.put(descriptor.id, bytes).await.unwrap();
         let source = source(DocumentId::new(), descriptor.clone());
-        store
-            .accept_document_source_and_enqueue_parse(&source, "parser-v1", 3)
-            .await
-            .unwrap();
+        store.accept_document_source(&source).await.unwrap();
         store.delete_document(source.id).await.unwrap();
 
         assert_eq!(
@@ -413,10 +411,7 @@ mod tests {
         let descriptor = DocumentSourceBlob::from_bytes(&bytes);
         blobs.put(descriptor.id, bytes.clone()).await.unwrap();
         let retired_source = source(DocumentId::new(), descriptor.clone());
-        store
-            .accept_document_source_and_enqueue_parse(&retired_source, "parser-v1", 3)
-            .await
-            .unwrap();
+        store.accept_document_source(&retired_source).await.unwrap();
         store.delete_document(retired_source.id).await.unwrap();
 
         // A publisher holds this lock from immutable put through catalog
@@ -444,10 +439,7 @@ mod tests {
         .expect("worker did not claim the retirement");
         blobs.put(descriptor.id, bytes.clone()).await.unwrap();
         let live_source = source(DocumentId::new(), descriptor.clone());
-        store
-            .accept_document_source_and_enqueue_parse(&live_source, "parser-v1", 3)
-            .await
-            .unwrap();
+        store.accept_document_source(&live_source).await.unwrap();
         drop(publisher);
 
         assert_eq!(
@@ -507,10 +499,7 @@ mod tests {
         let descriptor = DocumentSourceBlob::from_bytes(&bytes);
         blobs.put(descriptor.id, bytes).await.unwrap();
         let source = source(DocumentId::new(), descriptor.clone());
-        store
-            .accept_document_source_and_enqueue_parse(&source, "parser-v1", 3)
-            .await
-            .unwrap();
+        store.accept_document_source(&source).await.unwrap();
         store.delete_document(source.id).await.unwrap();
 
         assert_eq!(
@@ -576,10 +565,7 @@ mod tests {
         let descriptor = DocumentSourceBlob::from_bytes(&bytes);
         blobs.put(descriptor.id, bytes).await.unwrap();
         let source = source(DocumentId::new(), descriptor.clone());
-        store
-            .accept_document_source_and_enqueue_parse(&source, "parser-v1", 3)
-            .await
-            .unwrap();
+        store.accept_document_source(&source).await.unwrap();
         store.delete_document(source.id).await.unwrap();
 
         let task = tokio::spawn({

@@ -493,27 +493,11 @@ const MAX_EXTRACTED_PAGE_TITLE_CHARS: usize = 255;
 
 /// Keep each fetched page as a conversation source.
 ///
-/// The source is written through the canonical-text path rather than the staged
-/// blob workflow, because a page arrives already parsed: extraction *is* the
-/// parse, and there is no original document to re-derive text from. That has a
-/// consequence worth stating — the stored text is the only record of the page,
-/// so it is written byte for byte as extracted, and everything that cannot be
-/// recovered later travels with it.
+/// A page arrives as canonical text and has no original document to retain.
+/// The stored text is therefore the only record of the page, so it is written
+/// byte for byte as extracted.
 struct HostExtractedPageSink {
     store: Arc<dyn Store>,
-}
-
-/// Identity of the engine that produced a stored page's text.
-///
-/// Recorded as the source's canonical fingerprint, which is the column that
-/// already answers "what produced this text" for parsed sources. It matters
-/// more here than there: a parsed source keeps its original bytes, so its
-/// provenance can be recomputed, while a fetched page cannot be fetched again
-/// and get the same answer. Whether a cited passage came from a vendor's
-/// rendering of the page or from the host's own parse is knowable only if it
-/// was written down at the time.
-fn extraction_fingerprint(page: &WebExtractResponse) -> String {
-    format!("web-extract={}", page.extraction_method)
 }
 
 #[async_trait]
@@ -542,9 +526,6 @@ impl ExtractedPageSink for HostExtractedPageSink {
             // Keep exactly what the model read so its human-scale locators and
             // quoted prose remain meaningful when the document is reopened.
             canonical_text: page.content.clone(),
-            canonical_fingerprint: Some(extraction_fingerprint(page)),
-            // A fetched page has no retained page or tree map.
-            source_regions: Vec::new(),
             updated_at: fetched_at,
         };
         let record = self

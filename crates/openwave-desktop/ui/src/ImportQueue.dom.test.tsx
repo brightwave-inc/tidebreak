@@ -17,7 +17,6 @@ function entry(overrides: Partial<ImportQueueEntry> = {}): ImportQueueEntry {
     displayName: "Report.pdf",
     status: "imported",
     documentId: null,
-    processingStatus: null,
     message: null,
     updatedAt: 1,
     ...overrides,

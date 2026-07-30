@@ -10,7 +10,6 @@ const queued = {
   displayName: "notes.md",
   status: "queued" as const,
   documentId: null,
-  processingStatus: null,
   message: null,
 };
 
@@ -22,7 +21,6 @@ describe("ImportQueueStore", () => {
       ...queued,
       status: "imported",
       documentId: "22222222-2222-4222-8222-222222222222",
-      processingStatus: "queued",
     });
 
     expect(store.getState().entries).toEqual([
@@ -53,7 +51,6 @@ describe("ImportQueueStore", () => {
       ...queued,
       status: "imported",
       documentId: "22222222-2222-4222-8222-222222222222",
-      processingStatus: "queued",
     });
     clean.getState().dismissCleanRun();
     expect(clean.getState().entries).toEqual([]);
@@ -106,7 +103,6 @@ describe("ImportQueueStore", () => {
       ...queued,
       status: "imported",
       documentId: "22222222-2222-4222-8222-222222222222",
-      processingStatus: "queued",
     });
     store.getState().receive({
       ...queued,

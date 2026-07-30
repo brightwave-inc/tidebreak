@@ -290,8 +290,7 @@ pub enum ImportConnectedFileResult {
         media_type: String,
         /// Decoded size of the imported source.
         bytes: u64,
-        /// What can be done with the source now. Import always begins
-        /// asynchronously, so this normally starts as `processing`.
+        /// What can be done with the source now.
         readiness: crate::SourceReadiness,
     },
     /// Nothing was imported, and no host detail explains why.
@@ -393,7 +392,7 @@ pub fn read_connected_file_tool_spec() -> ToolSpec {
 pub fn import_connected_file_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<ImportConnectedFileArgs>(
         IMPORT_CONNECTED_FILE_TOOL,
-        "Add one file below an already connected folder to this conversation as a source, so it can be read and cited. Use this for a PDF, Office document, or any other file that read_connected_file cannot return as text. Use only an opaque root_id and a nonempty root-relative path; never use an absolute path or parent traversal. Importing the same file again recovers the same single source rather than adding a duplicate. The result is normally still processing: check list_sources for whether it became readable.",
+        "Add one file below an already connected folder to this conversation as a source, so it can be read and cited. Use this for a PDF, Office document, or any other file that read_connected_file cannot return as text. Use only an opaque root_id and a nonempty root-relative path; never use an absolute path or parent traversal. Importing the same file again recovers the same single source rather than adding a duplicate. The completed result reports whether the source contains readable text.",
     )
 }
 
@@ -615,11 +614,11 @@ mod tests {
             title: "q3.pdf".into(),
             media_type: "application/pdf".into(),
             bytes: 2_048,
-            readiness: crate::SourceReadiness::Processing,
+            readiness: crate::SourceReadiness::StoredNoText,
         };
         let encoded = serde_json::to_value(&result).unwrap();
         assert_eq!(encoded["status"], "imported");
-        assert_eq!(encoded["readiness"], "processing");
+        assert_eq!(encoded["readiness"], "stored_no_text");
         assert!(encoded.get("path").is_none());
         assert!(encoded.get("root_id").is_none());
         assert_eq!(

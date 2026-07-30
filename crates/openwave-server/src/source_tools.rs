@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use openwave_core::{
-    citation_authoring_instruction, ApprovalClass, CallId, DocumentId, DocumentProcessingStatus,
-    DocumentScope, Result, Store, Tool, ToolCtx, ToolOutput, ToolSpec,
+    citation_authoring_instruction, ApprovalClass, CallId, DocumentId, DocumentScope, Result,
+    Store, Tool, ToolCtx, ToolOutput, ToolSpec,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -92,9 +92,8 @@ impl Tool for ListSourcesTool {
                           Use this when the user refers to an added or attached file without an \
                           exact document id; then use read_source for direct text. Each source \
                           reports one status: `readable` means read_source can return its text; \
-                          `processing` means checking again shortly may change that; `stored_no_text` means the file \
-                          is kept and can be named but holds no text to find, so do not claim to \
-                          have read it; `failed` means it could not be prepared."
+                          `stored_no_text` means the file is kept and can be named but holds no \
+                          text to find, so do not claim to have read it."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -142,8 +141,8 @@ impl Tool for ListSourcesTool {
 
         let truncated = records.len() > MAX_LISTED_SOURCES as usize;
         // The readiness word is the one thing a reader has to see here: a
-        // source that is still processing, or that holds no readable text,
-        // is a source the next answer will quietly fail to use.
+        // source that holds no readable text is a source the next answer will
+        // quietly fail to use.
         let entries = records
             .iter()
             .take(MAX_LISTED_SOURCES as usize)
@@ -246,14 +245,6 @@ impl Tool for ReadSourceTool {
             Err(_) => return Ok(ToolOutput::error("could not read the source")),
         };
 
-        // Direct reads become useful as soon as canonical parser output exists.
-        if document.source_blob.is_some() && document.canonical_fingerprint.is_none() {
-            let status = match document.processing_status {
-                DocumentProcessingStatus::Failed => "could not be prepared",
-                _ => "is still being prepared",
-            };
-            return Ok(ToolOutput::error(format!("source {status}")));
-        }
         if document.canonical_text.is_empty() {
             return Ok(ToolOutput::error(
                 "this source has no readable text; use a connected folder for opaque files",
@@ -320,9 +311,7 @@ impl Tool for ReadSourceTool {
 fn readiness_label(readiness: &str) -> &'static str {
     match readiness {
         "readable" => "Readable",
-        "processing" => "Processing",
         "stored_no_text" => "No text",
-        "failed" => "Failed",
         _ => "Unknown",
     }
 }
@@ -489,11 +478,9 @@ fn historical_safe_name(name: &str) -> &'static str {
 mod tests {
     use chrono::Utc;
     use openwave_core::{
-        ByteSpan, Chat, ChatId, DbStore, DocumentUpsert, ReasoningEffort, SourceLocation,
-        SourceRegion, Store, ToolCallRecord, TurnId,
+        Chat, ChatId, DbStore, DocumentUpsert, ReasoningEffort, Store, ToolCallRecord, TurnId,
     };
     use serde_json::json;
-    use std::num::NonZeroU32;
 
     use super::*;
 
@@ -519,22 +506,14 @@ mod tests {
             created_at: Utc::now(),
         };
         store.create_chat(&chat).await.unwrap();
-        let canonical_text = "Aé🌊\nGrounded fact";
         let source = DocumentUpsert {
-            canonical_fingerprint: None,
             id: DocumentId::new(),
             chat_id: Some(chat.id),
             project_id: None,
             source_uri: None,
             media_type: "text/plain".into(),
             title: Some("brief.txt".into()),
-            canonical_text: canonical_text.into(),
-            source_regions: vec![SourceRegion {
-                span: ByteSpan::new(0, canonical_text.len()),
-                location: SourceLocation::Page {
-                    number: NonZeroU32::new(2).unwrap(),
-                },
-            }],
+            canonical_text: "Aé🌊\nGrounded fact".into(),
             updated_at: Utc::now(),
         };
         let document = store.upsert_document(&source).await.unwrap();
@@ -660,29 +639,10 @@ mod tests {
 
     #[test]
     fn readiness_never_reports_an_unreadable_source_as_usable() {
-        use openwave_core::{DocumentProcessingStatus, SourceReadiness};
+        use openwave_core::SourceReadiness;
 
-        // The case this exists for: the pipeline finished and found nothing.
-        assert_eq!(
-            SourceReadiness::of(DocumentProcessingStatus::Ready, false).as_str(),
-            "stored_no_text"
-        );
-        assert_eq!(
-            SourceReadiness::of(DocumentProcessingStatus::Ready, true).as_str(),
-            "readable"
-        );
-        // Not-yet-readable while queued must stay distinguishable from
-        // finished-and-empty, because only one of them is worth waiting on.
-        for pending in [
-            DocumentProcessingStatus::Queued,
-            DocumentProcessingStatus::Processing,
-        ] {
-            assert_eq!(SourceReadiness::of(pending, false).as_str(), "processing");
-        }
-        assert_eq!(
-            SourceReadiness::of(DocumentProcessingStatus::Failed, false).as_str(),
-            "failed"
-        );
+        assert_eq!(SourceReadiness::of(false).as_str(), "stored_no_text");
+        assert_eq!(SourceReadiness::of(true).as_str(), "readable");
     }
 
     #[tokio::test]
@@ -695,9 +655,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!listed.is_error);
-        // Canonical text is readable the moment it is upserted, and the
-        // agent-facing vocabulary says so without exposing the durable job
-        // lifecycle.
+        // Canonical text is readable the moment it is upserted.
         assert!(listed.content.contains("\"status\": \"readable\""));
         assert!(!listed.content.contains("queued"));
         assert!(!listed.content.contains("\"ready\""));

@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 
 import type { LibraryDocument } from "@/documents";
 import { useFacet } from "@/lib/facets";
-import { documentTitle, mediaTypeLabel, statusLabel } from "./sourceFormat";
+import { documentTitle, mediaTypeLabel } from "./sourceFormat";
 
 /**
  * Search and faceting over a conversation's sources.
@@ -15,7 +15,6 @@ import { documentTitle, mediaTypeLabel, statusLabel } from "./sourceFormat";
 export function useSourceTableFilters(documents: readonly LibraryDocument[]) {
   const [searchQuery, setSearchQuery] = useState("");
   const types = useFacet(documents, mediaTypeLabelOf);
-  const statuses = useFacet(documents, statusLabel);
 
   const filteredDocuments = useMemo(() => {
     let result = [...documents];
@@ -33,27 +32,20 @@ export function useSourceTableFilters(documents: readonly LibraryDocument[]) {
     if (types.selected.size > 0) {
       result = result.filter((document) => types.selected.has(mediaTypeLabelOf(document)));
     }
-    if (statuses.selected.size > 0) {
-      result = result.filter((document) => statuses.selected.has(statusLabel(document)));
-    }
-
     return result;
-  }, [documents, searchQuery, types.selected, statuses.selected]);
+  }, [documents, searchQuery, types.selected]);
 
-  const hasActiveFilters =
-    searchQuery.length > 0 || types.selected.size > 0 || statuses.selected.size > 0;
+  const hasActiveFilters = searchQuery.length > 0 || types.selected.size > 0;
 
   function clearAllFilters() {
     setSearchQuery("");
     types.setSelected(new Set());
-    statuses.setSelected(new Set());
   }
 
   return {
     searchQuery,
     setSearchQuery,
     types,
-    statuses,
     filteredDocuments,
     hasActiveFilters,
     clearAllFilters,
