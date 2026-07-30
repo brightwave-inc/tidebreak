@@ -1336,6 +1336,10 @@ pub struct ChatTranscript {
 pub enum TranscriptRole {
     User,
     Assistant,
+    /// A durable host-authored note — e.g. "User restored output 'report.md'…"
+    /// — written between turns so the model's next turn learns what happened.
+    /// Shown as a subtle inline notice, never as a user or assistant bubble.
+    System,
 }
 
 impl TranscriptRole {
@@ -1344,7 +1348,8 @@ impl TranscriptRole {
         match role {
             Role::User => Some(Self::User),
             Role::Assistant => Some(Self::Assistant),
-            Role::System | Role::Tool => None,
+            Role::System => Some(Self::System),
+            Role::Tool => None,
         }
     }
 }

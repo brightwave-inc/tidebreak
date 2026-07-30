@@ -1223,7 +1223,7 @@ width: number, height: number, };
  * makes a new [`Role`] variant a decision in [`Self::for_transcript`] instead of
  * something that silently appears in the transcript.
  */
-export type TranscriptRole = "user" | "assistant";
+export type TranscriptRole = "user" | "assistant" | "system";
 
 /**
  * Why a turn failed, closed and coarse enough to be stable.
