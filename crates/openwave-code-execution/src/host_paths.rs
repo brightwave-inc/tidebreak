@@ -25,7 +25,7 @@
 //! caller reaching for `join`.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
@@ -286,6 +286,17 @@ impl ScratchDir {
         })
         .await
         .unwrap_or(false)
+    }
+
+    /// Read a symlink target without following it.
+    ///
+    /// Used only to compare inert overlay entries before and after an exec
+    /// command. The containing directory stays descriptor-pinned, so a renamed
+    /// parent cannot redirect the observation elsewhere.
+    pub async fn read_link(&self, name: &str) -> io::Result<PathBuf> {
+        let name = single_component(name)?;
+        self.blocking(move |directory| directory.read_link(&name))
+            .await
     }
 
     /// Open `name` as a child directory, refusing a symlink at that component.

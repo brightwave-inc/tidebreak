@@ -182,6 +182,7 @@ impl openwave_server::code_execution::ExecFolderGrantResolver for DesktopExecFol
                     // once it knows which folders it will stage. The broker
                     // answers about authority and nothing else.
                     overlay: None,
+                    staging_unavailable: false,
                 })
             })
             .collect()

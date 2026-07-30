@@ -134,6 +134,12 @@ pub struct ResolvedExecFolderGrant {
     /// Set by the server after the broker answers, never by the broker: it is
     /// a property of the turn, not of the attachment.
     pub overlay: Option<PathBuf>,
+    /// The broker granted writes, but this turn could not stage them safely.
+    ///
+    /// Such a folder is deliberately downgraded to read-only. Keeping the
+    /// reason distinct lets the operating prompt explain the restriction
+    /// instead of presenting it as ordinary read-only authority.
+    pub staging_unavailable: bool,
 }
 
 /// Native-only bridge from product root attachments to live broker authority.
@@ -805,8 +811,9 @@ impl ConfiguredCodeExecutionProvider {
     /// Stage this turn's writes for every writable granted folder.
     ///
     /// Called once, when the turn resolves the grants it will show the model.
-    /// A folder that cannot be staged keeps direct write access, which is the
-    /// behavior it had before staging existed.
+    /// A folder that cannot be staged is downgraded to read-only for this turn:
+    /// silently restoring direct writes would remove the overlay precisely for
+    /// the largest or most unusual folders.
     async fn open_write_overlay(
         &self,
         chat: ChatId,
@@ -822,6 +829,10 @@ impl ConfiguredCodeExecutionProvider {
         let scope = chat.to_string();
         let Some(overlay) = WriteOverlay::prepare(&self.scratch_root, &scope, &writable).await
         else {
+            for grant in grants.iter_mut().filter(|grant| grant.writable) {
+                grant.writable = false;
+                grant.staging_unavailable = true;
+            }
             return;
         };
         let mut staged_roots = HashMap::new();
@@ -833,6 +844,13 @@ impl ConfiguredCodeExecutionProvider {
                 grant.overlay = Some(slot.overlay().to_path_buf());
                 staged_roots.insert(grant.root_id, slot.overlay().to_path_buf());
             }
+        }
+        for grant in grants
+            .iter_mut()
+            .filter(|grant| grant.writable && grant.overlay.is_none())
+        {
+            grant.writable = false;
+            grant.staging_unavailable = true;
         }
         self.write_overlays
             .lock()
@@ -930,6 +948,14 @@ impl ConfiguredCodeExecutionProvider {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    fn overlay_inspector(&self, chat: ChatId) -> Option<openwave_code_execution::OverlayInspector> {
+        self.write_overlays
+            .lock()
+            .expect("write overlay registry is not poisoned")
+            .get(&chat)
+            .map(|staged| staged.overlay.inspector())
     }
 
     async fn resolve_chat_folder_grants(
@@ -1067,6 +1093,33 @@ impl ConfiguredCodeExecutionProvider {
     }
 }
 
+fn exec_folder_grant_for_turn(
+    grant: ResolvedExecFolderGrant,
+    staged: &HashMap<PathBuf, PathBuf>,
+) -> std::result::Result<ExecFolderGrant, CodeExecutionError> {
+    let overlay = grant
+        .writable
+        .then(|| staged.get(&grant.path))
+        .flatten()
+        .cloned();
+    // A live broker write grant is necessary but no longer sufficient: this
+    // turn must also have staged the folder. Missing staging fails closed
+    // instead of quietly restoring unrestricted writes to the real root.
+    let writable = grant.writable && overlay.is_some();
+    let resolved = ExecFolderGrant::new(
+        grant.path,
+        if writable {
+            ExecFolderAccess::ReadWrite
+        } else {
+            ExecFolderAccess::ReadOnly
+        },
+    )?;
+    match overlay {
+        Some(overlay) => resolved.staged_at(overlay),
+        None => Ok(resolved),
+    }
+}
+
 #[async_trait]
 impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
     async fn execute(
@@ -1109,22 +1162,7 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
                 .resolve_chat_folder_grants(&chat)
                 .await?
                 .into_iter()
-                .map(|grant| {
-                    let writable = grant.writable;
-                    let overlay = writable.then(|| staged.get(&grant.path)).flatten().cloned();
-                    let resolved = ExecFolderGrant::new(
-                        grant.path,
-                        if writable {
-                            ExecFolderAccess::ReadWrite
-                        } else {
-                            ExecFolderAccess::ReadOnly
-                        },
-                    )?;
-                    match overlay {
-                        Some(overlay) => resolved.staged_at(overlay),
-                        None => Ok(resolved),
-                    }
-                })
+                .map(|grant| exec_folder_grant_for_turn(grant, &staged))
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             request = request.with_folder_grants(grants)?;
         }
@@ -1161,7 +1199,17 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
         };
         let Some(lifecycle) = lifecycle else {
             sync::validate_staged_paths(&host_dir, &request.files).await?;
-            return provider.execute(request).await;
+            let inspector = request
+                .workspace_id
+                .as_str()
+                .parse::<ChatId>()
+                .ok()
+                .and_then(|chat| self.overlay_inspector(chat));
+            let mut response = provider.execute(request).await?;
+            if let Some(inspector) = inspector {
+                response.sync_notes.extend(inspector.notes().await);
+            }
+            return Ok(response);
         };
         // A staging that fails outright fails the execution: a listed path
         // that does not exist, an over-bound expansion, or an unreachable
@@ -1644,6 +1692,7 @@ mod tests {
                 path: folder.path().to_path_buf(),
                 writable: false,
                 overlay: None,
+                staging_unavailable: false,
             }],
         });
         let provider = ConfiguredCodeExecutionProvider::new(
@@ -1679,6 +1728,7 @@ mod tests {
                 path: folder.path().to_path_buf(),
                 writable: true,
                 overlay: None,
+                staging_unavailable: false,
             }],
         });
         let (store, _database) = test_store().await;
@@ -1692,6 +1742,44 @@ mod tests {
             .resolve_chat_folder_grants(&chat)
             .await
             .is_err());
+    }
+
+    /// A tree outside the overlay's bounded contract must lose exec write
+    /// access rather than regaining direct access to the user's real folder.
+    #[tokio::test]
+    async fn a_folder_that_cannot_be_staged_fails_closed_and_stays_visible() {
+        let (store, _database) = test_store().await;
+        let scratch = tempfile::tempdir().unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        let mut nested = folder.path().to_path_buf();
+        for depth in 0..30 {
+            nested.push(format!("level-{depth}"));
+            std::fs::create_dir(&nested).unwrap();
+        }
+        let root_id = HostRootId::from_uuid(Uuid::new_v4()).unwrap();
+        let provider = ConfiguredCodeExecutionProvider::new(
+            Arc::new(store),
+            Arc::new(NoSecrets),
+            scratch.path(),
+        );
+        let mut grants = vec![ResolvedExecFolderGrant {
+            root_id,
+            path: folder.path().to_path_buf(),
+            writable: true,
+            overlay: None,
+            staging_unavailable: false,
+        }];
+
+        provider
+            .open_write_overlay(ChatId::new(), TurnId::new(), &mut grants)
+            .await;
+
+        assert!(!grants[0].writable);
+        assert!(grants[0].staging_unavailable);
+        assert!(grants[0].overlay.is_none());
+        let effective = exec_folder_grant_for_turn(grants.remove(0), &HashMap::new()).unwrap();
+        assert_eq!(effective.access, ExecFolderAccess::ReadOnly);
+        assert!(effective.writable_path().is_none());
     }
 
     /// The files-first creation path end to end at the provider seam: a file
