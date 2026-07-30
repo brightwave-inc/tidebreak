@@ -30,7 +30,7 @@ use crate::bus::EventBus;
 use crate::chat_titling::ChatTitler;
 use crate::mcp_config::McpRuntime;
 use crate::resolver::ProviderResolver;
-use crate::retry::{RetryAttempt, RetrySchedule};
+use crate::retry::{LaneBackoff, RetryAttempt, RetrySchedule};
 use crate::state::TurnGuard;
 
 #[derive(Debug, Clone, Copy)]
@@ -41,6 +41,9 @@ pub(crate) struct TurnWorkerConfig {
     pub(crate) idle_min: Duration,
     pub(crate) idle_cap: Duration,
     pub(crate) failure_delay: Duration,
+    /// Ceiling on the lane's own backoff after consecutive iteration errors,
+    /// so a store outage is not polled at a fixed rate forever.
+    pub(crate) failure_delay_cap: Duration,
     pub(crate) retry: RetrySchedule,
     pub(crate) max_concurrency: usize,
     /// Startup-resolved location for every background child admitted by this
@@ -57,6 +60,7 @@ impl Default for TurnWorkerConfig {
             idle_min: Duration::from_millis(250),
             idle_cap: Duration::from_secs(5),
             failure_delay: Duration::from_secs(1),
+            failure_delay_cap: Duration::from_secs(30),
             // A user is watching this turn: start retrying in well under a
             // second, and give up after ten minutes rather than hold a chat
             // open longer than anyone waits.
@@ -378,6 +382,8 @@ impl TurnWorker {
     pub(crate) async fn run(self) {
         let mut turns = tokio::task::JoinSet::new();
         let mut idle_delay = self.config.idle_min;
+        let mut failure_backoff =
+            LaneBackoff::new(self.config.failure_delay, self.config.failure_delay_cap);
         let mut pending_claim_token = None;
         loop {
             let mut scan_failed = false;
@@ -415,8 +421,9 @@ impl TurnWorker {
             }
 
             let delay = if scan_failed {
-                self.config.failure_delay
+                failure_backoff.next_delay()
             } else {
+                failure_backoff.reset();
                 idle_delay
             };
             tokio::select! {

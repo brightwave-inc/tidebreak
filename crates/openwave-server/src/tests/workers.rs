@@ -644,6 +644,7 @@ async fn worker_recovers_ambiguous_claim_and_completion_with_exact_receipts() {
             // lease even when a loaded test host delays the retry task.
             lease: Duration::from_secs(5 * 60),
             failure_delay: Duration::from_millis(10),
+            failure_delay_cap: Duration::from_millis(40),
             retry: fast_retry_schedule(),
             max_concurrency: 1,
             ..turn_worker::TurnWorkerConfig::default()
@@ -945,6 +946,7 @@ async fn worker_renews_a_near_expiry_ambiguous_claim_before_execution() {
             idle_min: Duration::from_millis(10),
             idle_cap: Duration::from_millis(20),
             failure_delay: Duration::from_millis(10),
+            failure_delay_cap: Duration::from_millis(40),
             retry: fast_retry_schedule(),
             max_concurrency: 1,
             sandbox_spawn_execution_location: openwave_core::AgentRunExecutionLocation::InProcess,
@@ -1039,6 +1041,7 @@ async fn worker_heartbeats_while_event_journaling_is_blocked() {
             idle_min: Duration::from_millis(10),
             idle_cap: Duration::from_millis(20),
             failure_delay: Duration::from_millis(10),
+            failure_delay_cap: Duration::from_millis(40),
             retry: fast_retry_schedule(),
             max_concurrency: 1,
             sandbox_spawn_execution_location: openwave_core::AgentRunExecutionLocation::InProcess,

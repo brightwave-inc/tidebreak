@@ -112,11 +112,68 @@ impl RetrySchedule {
     /// Exponential wait for the attempt that just failed, capped at
     /// `max_delay`. Attempt one waits `initial`.
     fn backoff(self, attempt_count: i32) -> Duration {
-        let doublings = u32::try_from(attempt_count.saturating_sub(1)).unwrap_or(0);
-        self.initial
-            .checked_mul(1_u32.checked_shl(doublings.min(31)).unwrap_or(u32::MAX))
-            .unwrap_or(self.max_delay)
-            .min(self.max_delay)
+        backoff(
+            self.initial,
+            self.max_delay,
+            u32::try_from(attempt_count.max(1)).unwrap_or(1),
+        )
+    }
+}
+
+/// Exponential wait capped at `max_delay`; the first failure waits `initial`.
+fn backoff(initial: Duration, max_delay: Duration, consecutive_failures: u32) -> Duration {
+    let doublings = consecutive_failures.saturating_sub(1).min(31);
+    initial
+        .checked_mul(1_u32 << doublings)
+        .unwrap_or(max_delay)
+        .min(max_delay)
+}
+
+/// Consecutive-failure backoff for a worker lane's own iteration errors.
+///
+/// A lane error — the store refusing a claim or a scan, for instance — has no
+/// work item behind it: no row id to seed jitter from and no attempt budget,
+/// because the lane loop is infinite by design. All it needs is to stop
+/// polling a struggling store at a fixed rate forever. The failure count
+/// therefore lives in the lane loop rather than the database: each failure
+/// doubles the wait up to a ceiling, one successful iteration resets it, and
+/// the jitter seed is drawn once per lane so lanes that failed together do
+/// not recover in lockstep.
+#[derive(Debug, Clone)]
+pub(crate) struct LaneBackoff {
+    seed: uuid::Uuid,
+    consecutive_failures: u32,
+    initial: Duration,
+    max_delay: Duration,
+}
+
+impl LaneBackoff {
+    pub(crate) fn new(initial: Duration, max_delay: Duration) -> Self {
+        assert!(!initial.is_zero());
+        assert!(initial <= max_delay);
+        Self {
+            seed: uuid::Uuid::new_v4(),
+            consecutive_failures: 0,
+            initial,
+            max_delay,
+        }
+    }
+
+    /// One successful iteration ends the failure episode.
+    pub(crate) fn reset(&mut self) {
+        self.consecutive_failures = 0;
+    }
+
+    /// The wait before the lane iterates again after another failure:
+    /// `initial` doubled per consecutive failure, capped at `max_delay`, and
+    /// jittered into the top half.
+    pub(crate) fn next_delay(&mut self) -> Duration {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        jitter(
+            backoff(self.initial, self.max_delay, self.consecutive_failures),
+            self.seed,
+            i32::try_from(self.consecutive_failures).unwrap_or(i32::MAX),
+        )
     }
 }
 
@@ -200,5 +257,30 @@ mod tests {
         assert!(schedule
             .next_attempt_at(failed(4, start), None, start)
             .is_none());
+    }
+
+    /// A lane error has no row id and no attempt budget, so its backoff is
+    /// the loop-held counter: waits must still grow past the old flat delay,
+    /// never exceed the ceiling no matter how long the store stays down, and
+    /// one success must return the lane to its initial wait.
+    #[test]
+    fn lane_backoff_grows_caps_and_resets() {
+        let mut lane = LaneBackoff::new(Duration::from_millis(100), Duration::from_millis(800));
+
+        for base in [100, 200, 400, 800, 800, 800] {
+            let waited = lane.next_delay().as_millis();
+            assert!(
+                (base / 2..=base).contains(&waited),
+                "waited {waited}ms, expected {}..={base}ms",
+                base / 2
+            );
+        }
+
+        lane.reset();
+        let waited = lane.next_delay().as_millis();
+        assert!(
+            (50..=100).contains(&waited),
+            "after reset waited {waited}ms, expected 50..=100ms"
+        );
     }
 }
