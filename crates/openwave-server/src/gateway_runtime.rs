@@ -27,16 +27,15 @@ use crate::providers::{self, CustomModelConfig};
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// How often the background loop refreshes the entitled-model snapshot while
-/// a session is connected. Entitlement changes are admin-driven and rare, and
-/// the gateway stays the live authority at inference time, so the snapshot
-/// only has to keep the picker and model policy from drifting for long; the
-/// settings page keeps the immediate manual refresh.
-const MODEL_SYNC_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// a session is connected. A sync is one small GET against the org's own
+/// gateway, so a tight cadence is cheap — this is what bounds how quickly an
+/// admin's entitlement change reaches the picker without a manual refresh.
+const MODEL_SYNC_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// Retry cadence after a failed background sync — short enough that a boot
 /// racing the network coming up doesn't stay stale for a whole interval,
 /// long enough not to hammer an unreachable gateway.
-const MODEL_SYNC_RETRY: Duration = Duration::from_secs(5 * 60);
+const MODEL_SYNC_RETRY: Duration = Duration::from_secs(60);
 
 pub(crate) struct GatewayRuntime {
     store: Arc<dyn Store>,
