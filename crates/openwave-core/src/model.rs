@@ -1015,6 +1015,7 @@ pub struct AgentRun {
     /// scheduler.
     pub tier: AgentRunTier,
     /// Where the run's loop executes.
+    #[serde(default)]
     pub execution_location: AgentRunExecutionLocation,
     /// Explicit bounded hierarchy depth. OpenWave v1 permits only zero or one.
     pub depth: u8,
@@ -1155,6 +1156,9 @@ pub struct SandboxSpawnCheckpointRequest {
     pub result: String,
     pub event_ordinal: i32,
     pub progress: TurnCheckpointProgress,
+    /// Host-resolved execution location for the child admitted by this atomic
+    /// checkpoint. Existing callers use the in-process default.
+    pub execution_location: AgentRunExecutionLocation,
 }
 
 /// Immutable final text submitted by one exact sandbox worker lease.
@@ -1351,11 +1355,12 @@ impl AgentRunTier {
 /// Every run executes inside the OpenWave server process today. A run
 /// executing inside an execution provider's boundary adds a variant here
 /// rather than a second meaning to [`AgentRunTier`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AgentRunExecutionLocation {
     /// The loop runs inside the OpenWave server process.
+    #[default]
     InProcess,
     /// The loop runs inside a sandbox-resident container, host-driven over the
     /// versioned sandbox-agent wire protocol. The in-process scheduler does not

@@ -493,6 +493,128 @@ async fn concurrent_message_retry_converges_across_a_model_setting_race() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn sandbox_container_routing_preserves_in_process_task_and_deadline_shape() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("container.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let provider = Arc::new(SandboxRoundTripProvider::default());
+    let mut tools = ToolRegistry::new();
+    tools.register_foreground_agent_orchestration();
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(provider)),
+        Arc::new(MemSecrets::default()),
+        Arc::new(tools),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let token = state.token.clone();
+    spawn_turn_worker_with_config(
+        &state,
+        turn_worker::TurnWorkerConfig {
+            sandbox_spawn_execution_location: openwave_core::AgentRunExecutionLocation::Container,
+            ..turn_worker::TurnWorkerConfig::default()
+        },
+    );
+    let router = app(state);
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    assert_eq!(
+        send_message(&router, &bearer, chat.id, "delegate this").await,
+        StatusCode::ACCEPTED
+    );
+    let container_child = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(child) = store
+                .list_agent_runs(chat.id)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|run| run.parent_id.is_some())
+            {
+                break child;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("foreground spawn should admit a container child");
+    assert_eq!(
+        container_child.execution_location,
+        openwave_core::AgentRunExecutionLocation::Container
+    );
+    assert_eq!(
+        container_child.input.as_deref(),
+        Some("Return the first child result.")
+    );
+
+    let (_reference_dir, reference_store) = temp_db_store("in-process-reference.db").await;
+    let reference_store: Arc<dyn Store> = Arc::new(reference_store);
+    let reference_chat = Chat {
+        id: ChatId::new(),
+        project_id: None,
+        title: Some("in-process reference".into()),
+        model: Some("fake".into()),
+        reasoning_effort: None,
+        permission_mode: None,
+        attachment_revision: 0,
+        root_attachments: Vec::new(),
+        created_at: chrono::Utc::now(),
+    };
+    reference_store.create_chat(&reference_chat).await.unwrap();
+    let reference_turn_id = TurnId::new();
+    reference_store
+        .accept_turn(
+            reference_turn_id,
+            reference_chat.id,
+            "fake",
+            "reference admission",
+        )
+        .await
+        .unwrap();
+    let reference_lease = uuid::Uuid::new_v4();
+    let now = chrono::Utc::now();
+    let reference_turn = reference_store
+        .claim_turn_run(reference_lease, now, now + chrono::Duration::minutes(5))
+        .await
+        .unwrap()
+        .turn
+        .unwrap();
+    let in_process_child = match reference_store
+        .admit_sandbox_agent_run(
+            reference_turn.id,
+            CallId::new(),
+            "Return the first child result.",
+            reference_lease,
+            reference_turn.steer_revision,
+            openwave_core::AgentRun::MAX_CONCURRENCY_LIMIT,
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        openwave_core::AdmitSandboxAgentRunOutcome::Accepted { child, .. } => child,
+        outcome => panic!("unexpected in-process reference admission: {outcome:?}"),
+    };
+
+    assert_eq!(container_child.input, in_process_child.input);
+    assert_eq!(
+        container_child.deadline_at.unwrap() - container_child.created_at,
+        in_process_child.deadline_at.unwrap() - in_process_child.created_at
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn worker_recovers_ambiguous_claim_and_completion_with_exact_receipts() {
     let dir = tempfile::tempdir().unwrap();
     let inner: Arc<dyn Store> = Arc::new(
@@ -825,6 +947,7 @@ async fn worker_renews_a_near_expiry_ambiguous_claim_before_execution() {
             failure_delay: Duration::from_millis(10),
             retry: fast_retry_schedule(),
             max_concurrency: 1,
+            sandbox_spawn_execution_location: openwave_core::AgentRunExecutionLocation::InProcess,
         },
     );
     let token = state.token.clone();
@@ -918,6 +1041,7 @@ async fn worker_heartbeats_while_event_journaling_is_blocked() {
             failure_delay: Duration::from_millis(10),
             retry: fast_retry_schedule(),
             max_concurrency: 1,
+            sandbox_spawn_execution_location: openwave_core::AgentRunExecutionLocation::InProcess,
         },
     );
     let token = state.token.clone();

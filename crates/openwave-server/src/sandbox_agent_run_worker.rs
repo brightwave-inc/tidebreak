@@ -3066,6 +3066,7 @@ mod tests {
                         model_steps: 1,
                         usage: Usage::default(),
                     },
+                    execution_location: openwave_core::AgentRunExecutionLocation::InProcess,
                 },
                 Utc::now(),
             )

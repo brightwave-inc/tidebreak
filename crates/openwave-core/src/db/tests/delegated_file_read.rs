@@ -73,6 +73,7 @@ async fn delegated_sandbox(
             model_steps: 1,
             usage: Usage::default(),
         },
+        execution_location: crate::AgentRunExecutionLocation::InProcess,
     };
     let child = match store
         .checkpoint_sandbox_spawn(&request, Utc::now())

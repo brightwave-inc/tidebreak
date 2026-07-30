@@ -11,9 +11,8 @@ use crate::agent_tools::{
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::model::{
-    AgentRun, AgentRunExecutionLocation, SandboxSpawnCheckpoint, SandboxSpawnCheckpointRequest,
-    ToolCallExecution, ToolCallRecord, ToolCallStatus, TurnCheckpointProgress, TurnRunStatus,
-    TurnSteerStatus,
+    AgentRun, SandboxSpawnCheckpoint, SandboxSpawnCheckpointRequest, ToolCallExecution,
+    ToolCallRecord, ToolCallStatus, TurnCheckpointProgress, TurnRunStatus, TurnSteerStatus,
 };
 use crate::storage::{AdmitSandboxAgentRunOutcome, CheckpointSandboxSpawnOutcome};
 use crate::{AgentRunId, ChatId, ToolOutput};
@@ -176,7 +175,7 @@ where
         request.call_id,
         &arguments.task,
         arguments.resource.as_ref(),
-        AgentRunExecutionLocation::InProcess,
+        request.execution_location,
         request.lease_token,
         request.expected_steer_revision,
         AgentRun::DEFAULT_MAX_OUTSTANDING_CHILDREN,

@@ -437,6 +437,7 @@ fn postgres_spawn_checkpoint_request(
                 cache_creation_input_tokens: 1,
             },
         },
+        execution_location: openwave_core::AgentRunExecutionLocation::InProcess,
     }
 }
 

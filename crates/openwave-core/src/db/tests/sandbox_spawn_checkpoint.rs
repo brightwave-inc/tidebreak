@@ -69,6 +69,7 @@ fn request(
         .unwrap(),
         event_ordinal: ordinal,
         progress,
+        execution_location: crate::AgentRunExecutionLocation::InProcess,
     }
 }
 
@@ -265,6 +266,78 @@ async fn nonblocking_spawn_commits_one_atomic_yield_and_exact_retry_survives_rec
             .unwrap()
             .resource,
         None
+    );
+}
+
+#[tokio::test]
+async fn container_checkpoint_matches_standalone_container_admission_shape() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (turn, lease) = running_turn(&store, chat.id).await;
+    let mut checkpoint_request = request(
+        &turn,
+        lease,
+        CallId::new(),
+        "research one container fact",
+        2,
+        progress(),
+    );
+    checkpoint_request.execution_location = crate::AgentRunExecutionLocation::Container;
+    let checkpoint_child = match store
+        .checkpoint_sandbox_spawn(&checkpoint_request, Utc::now())
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        CheckpointSandboxSpawnOutcome::Checkpointed { child, .. } => child,
+        outcome => panic!("unexpected container checkpoint outcome: {outcome:?}"),
+    };
+
+    let (_standalone_dir, standalone_store) = temp_store().await;
+    let standalone_chat = sample_chat();
+    standalone_store
+        .create_chat(&standalone_chat)
+        .await
+        .unwrap();
+    let (standalone_turn, standalone_lease) =
+        running_turn(&standalone_store, standalone_chat.id).await;
+    let standalone_child = match standalone_store
+        .admit_sandbox_container_agent_run(
+            standalone_turn.id,
+            CallId::new(),
+            "research one container fact",
+            standalone_lease,
+            standalone_turn.steer_revision,
+            AgentRun::MAX_CONCURRENCY_LIMIT,
+            Utc::now(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        crate::AdmitSandboxAgentRunOutcome::Accepted { child, .. } => child,
+        outcome => panic!("unexpected standalone container admission: {outcome:?}"),
+    };
+
+    assert_eq!(
+        checkpoint_child.execution_location,
+        crate::AgentRunExecutionLocation::Container
+    );
+    assert_eq!(checkpoint_child.max_attempts, 1);
+    assert_eq!(
+        checkpoint_child.execution_location,
+        standalone_child.execution_location
+    );
+    assert_eq!(checkpoint_child.input, standalone_child.input);
+    assert_eq!(
+        checkpoint_child.attempt_count,
+        standalone_child.attempt_count
+    );
+    assert_eq!(checkpoint_child.max_attempts, standalone_child.max_attempts);
+    assert_eq!(
+        checkpoint_child.deadline_at.unwrap() - checkpoint_child.created_at,
+        standalone_child.deadline_at.unwrap() - standalone_child.created_at
     );
 }
 
