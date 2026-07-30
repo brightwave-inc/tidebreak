@@ -166,14 +166,7 @@ describe("hydrateTranscriptHistory", () => {
               id: "citation-1",
               ordinal: 1,
               document_id: "document-1",
-              span: { start: 0, end: 12 },
-              excerpt: "safe excerpt",
-              heading: "Safe heading",
-              location: {
-                kind: "document_content",
-                pages: [2],
-                bounds: [],
-              },
+              locator: { kind: "page", page: 2 },
             },
           ],
         },
@@ -190,7 +183,13 @@ describe("hydrateTranscriptHistory", () => {
 
     expect(entries[0]).toMatchObject({
       id: "assistant-1",
-      sources: [{ id: "citation-1", excerpt: "safe excerpt" }],
+      sources: [
+        {
+          id: "citation-1",
+          documentId: "document-1",
+          locator: { kind: "page", page: 2 },
+        },
+      ],
     });
     expect(entries[1]).toMatchObject({ id: "assistant-2", sources: [] });
   });

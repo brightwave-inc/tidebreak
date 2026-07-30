@@ -185,7 +185,6 @@ impl Tool for CreateDeliverable {
             sha256: Sha256::digest(&published).into(),
             turn_id: Some(call.turn_id),
             producing_run_id: None,
-            citations: Vec::new(),
             created_at: call.created_at,
         };
         let listed = filename.clone();

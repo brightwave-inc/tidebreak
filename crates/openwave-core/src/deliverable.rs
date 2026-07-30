@@ -9,8 +9,7 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 
-use crate::citation::{AssistantCitationReference, CitationLocation};
-use crate::id::{AgentRunId, ChatId, OutputCitationId, OutputId, OutputRevisionId, TurnId};
+use crate::id::{AgentRunId, ChatId, OutputId, OutputRevisionId, TurnId};
 
 /// Private-scratch directory holding legacy filename-addressed output files.
 ///
@@ -51,12 +50,6 @@ pub const MAX_DELIVERABLE_MEDIA_TYPE_CHARS: usize = 127;
 /// Reaching the bound is a product decision rather than a storage failure: the
 /// store refuses a further revision so no caller can silently lose history.
 pub const MAX_OUTPUT_REVISIONS: u32 = 100;
-/// Most distinct source-evidence rows one output revision may cite.
-///
-/// An output can only cite evidence shown to the turn that produced it, so the
-/// same retrieval-result bound used for assistant messages is sufficient.
-pub const MAX_OUTPUT_CITATIONS: usize = crate::citation::MAX_ASSISTANT_CITATIONS;
-
 /// Private-scratch location of one immutable revision's bytes.
 ///
 /// Revision files are written once and never replaced, so the path is derived
@@ -135,8 +128,7 @@ pub struct OutputRevision {
 /// columns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RevisionProducer {
-    /// A foreground turn produced the revision. Only a turn producer may carry
-    /// retrieval citations, which resolve against the turn's evidence.
+    /// A foreground turn produced the revision.
     Turn(TurnId),
     /// A background run produced the revision.
     Run(AgentRunId),
@@ -162,20 +154,6 @@ impl RevisionProducer {
     }
 }
 
-/// Renderer-safe historical citation projected from immutable output evidence.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
-pub struct OutputCitationSnapshot {
-    pub id: OutputCitationId,
-    #[serde(skip)]
-    pub output_revision_id: OutputRevisionId,
-    pub ordinal: u16,
-    pub excerpt: String,
-    pub heading: Option<String>,
-    /// Where the passage sits in its source, in the terms that source is
-    /// addressed by.
-    pub location: CitationLocation,
-}
-
 /// Content-identifying fields of a revision the caller has already written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewOutputRevision {
@@ -192,11 +170,6 @@ pub struct NewOutputRevision {
     /// Background run that produced the revision, when one did. Mutually
     /// exclusive with `turn_id`.
     pub producing_run_id: Option<AgentRunId>,
-    /// Ordered evidence references selected while producing this revision.
-    ///
-    /// References only resolve against the revision's chat and producing turn;
-    /// a cited revision therefore always has a producing turn.
-    pub citations: Vec<AssistantCitationReference>,
     /// Host-stamped creation time.
     pub created_at: DateTime<Utc>,
 }

@@ -7,33 +7,28 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   HttpError,
   type ApiClient,
-  type CitationPageBounds,
   type DocumentDetail,
 } from "@/api";
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import type { AssistantSource } from "@/AssistantSources";
 import { useChatSessionStore } from "@/ChatSessionStore";
-import { CITATION_MARK_CLASS } from "@/components/document/citationMark";
 import type { SheetHighlightRange } from "@/document/UniverSpreadsheetViewer";
 import { clearFileDownloadCache } from "@/document/useFileDownload";
 import { renderWithRouter } from "../test/router";
 import { DocumentDetailRoot } from "./DocumentDetailRoot";
 
 // pdf.js draws to a canvas and runs a worker, neither of which jsdom has, so
-// the page targeting is observed through a stand-in that keeps the real page
-// state hook and the real highlight overlay — the parts the panel drives.
+// page targeting is observed through a stand-in that keeps the real page state
+// hook, which is the part the panel drives.
 vi.mock("@/document/PdfViewer", async () => {
   const { usePdfPageState } = await import("@/document/usePdfPageState");
-  const { PdfPageHighlights } = await import("@/document/PdfPageHighlights");
   return {
     PdfViewer: ({
       documentId,
       targetPage,
-      highlights,
     }: {
       documentId: string;
       targetPage?: number;
-      highlights?: readonly CitationPageBounds[];
     }) => {
       const { currentPage, setCurrentPage } = usePdfPageState(documentId, {
         numPages: 20,
@@ -45,11 +40,6 @@ vi.mock("@/document/PdfViewer", async () => {
           <button type="button" onClick={() => setCurrentPage(currentPage + 1)}>
             Next page
           </button>
-          <PdfPageHighlights
-            page={currentPage}
-            highlights={highlights ?? []}
-            onNavigate={setCurrentPage}
-          />
         </div>
       );
     },
@@ -69,11 +59,6 @@ vi.mock("@/document/UniverSpreadsheetViewer", () => ({
     </div>
   ),
 }));
-
-/** The boxes drawn over the page on screen, however many pages carry them. */
-function drawnHighlights(): Element[] {
-  return [...document.querySelectorAll(`.${CITATION_MARK_CLASS}`)];
-}
 
 const scrolledTo: Element[] = [];
 
@@ -167,11 +152,7 @@ function seedTranscript(...sources: (Partial<AssistantSource> & { id: string })[
         sources: sources.map((source, index) => ({
           ordinal: index + 1,
           documentId: "doc-1",
-          span: { start: 0, end: 0 },
-          excerpt: "",
-          heading: null,
-          pages: [],
-          bounds: [],
+          locator: { kind: "document" },
           ...source,
         })),
       },
@@ -240,18 +221,6 @@ async function openCitationThenAnother(
   return renderWithRouter(<Harness />, {
     initialUrl: `/c/chat-1?left=sources.doc-1.${first}&right=chat`,
   });
-}
-
-/** One rectangle of a citation, in the ten-thousandths the wire carries. */
-function rect(page: number, bounds: CitationPageBounds["bounds"]): CitationPageBounds {
-  return { page, bounds };
-}
-
-/** Byte offsets of a passage, which is how a citation reports its span. */
-function byteSpan(text: string, passage: string) {
-  const encoder = new TextEncoder();
-  const start = encoder.encode(text.slice(0, text.indexOf(passage))).length;
-  return { start, end: start + encoder.encode(passage).length };
 }
 
 describe("DocumentDetailRoot", () => {
@@ -335,54 +304,19 @@ describe("DocumentDetailRoot", () => {
     expect(screen.queryByText(body)).toBeNull();
   });
 
-  // A tree is navigated by node, so a citation into one carries the path of the
-  // node it quoted beside its span. Everything below the root opens collapsed,
-  // which is why the quoted value is only on screen when the path arrived: it
-  // is what expands the record holding it.
   const INVOICES_JSON = '{"invoices":[{"number":"A-1"},{"number":"B-2"}]}';
-  const INVOICES_XML =
-    "<invoices><invoice><number>A-1</number></invoice><invoice><number>B-2</number></invoice></invoices>";
-
-  it.each([
-    [
-      "application/json",
-      INVOICES_JSON,
-      { path: "invoices.1.number", pathType: "json_dot_notation" as const },
-    ],
-    [
-      "application/xml",
-      INVOICES_XML,
-      { path: "/invoices[1]/invoice[2]/number[1]", pathType: "xml_xpath" as const },
-    ],
-  ])(
-    "opens a citation into a %s tree at the node it quoted",
-    async (mediaType, body, structuredPath) => {
-      seedTranscript({ id: "cite-tree", structuredPath });
-      await openCitation(
-        detail({ media_type: mediaType, title: "Invoices", content: body }),
-        "cite-tree",
-        body,
-      );
-
-      const cited = await screen.findByText(/B-2/);
-      expect(scrolledTo).toContain(cited.closest("div"));
-    },
-  );
 
   // A workbook is opened at a range on a sheet, which is what a citation into
   // one records. A workbook format the panel has no grid viewer for keeps the
   // range on the citation and lands on the extracted text, where the rows it
   // quoted are highlighted instead.
-  const CELL_RANGE = {
-    startCell: "B2",
-    endCell: "D10",
-    sheetIndex: 0,
-    sheetName: "Q4 Results",
-  } as const;
   const SHEET_TEXT = "## Q4 Results\n\n| North | 1204.5 |\n";
 
   it("opens a citation into a workbook at the range it quoted", async () => {
-    seedTranscript({ id: "cite-cells", cellRange: CELL_RANGE });
+    seedTranscript({
+      id: "cite-cells",
+      locator: { kind: "sheet", sheet: "Q4 Results", cells: "B2:D10" },
+    });
     await openCitation(
       detail({
         media_type:
@@ -401,8 +335,7 @@ describe("DocumentDetailRoot", () => {
   it("falls back to the extracted text for a workbook it cannot draw", async () => {
     seedTranscript({
       id: "cite-ods",
-      cellRange: CELL_RANGE,
-      span: { start: 3, end: 13 },
+      locator: { kind: "sheet", sheet: "Q4 Results", cells: "B2:D10" },
     });
     await openCitation(
       detail({
@@ -413,7 +346,9 @@ describe("DocumentDetailRoot", () => {
       "cite-ods",
     );
 
-    expect(await screen.findByText("Q4 Results")).toBeVisible();
+    await waitFor(() =>
+      expect(document.querySelector("pre")?.textContent).toContain("Q4 Results"),
+    );
     expect(screen.queryByText(/^Sheet /)).toBeNull();
   });
 
@@ -464,14 +399,14 @@ describe("DocumentDetailRoot", () => {
     expect(screen.queryByRole("button", { name: "Document outline" })).toBeNull();
   });
 
-  // The passage sits behind an accented character, so the byte offsets a
-  // citation carries no longer line up with JavaScript's string indices. An
-  // off-by-one conversion highlights the wrong words and this is what catches it.
   const CITED_CONTENT = "Café notes\n\nRevenue rose 12% in the second quarter.\n";
   const CITED_PASSAGE = "Revenue rose 12%";
 
-  it("opens a citation on the passage it quoted, highlighted and scrolled to", async () => {
-    seedTranscript({ id: "cite-1", span: byteSpan(CITED_CONTENT, CITED_PASSAGE) });
+  it("opens a citation on the line the model named", async () => {
+    seedTranscript({
+      id: "cite-1",
+      locator: { kind: "lines", start: 3, end: 3 },
+    });
     await openCitation(
       // A source whose original view could be drawn, but cannot show a span:
       // the citation lands on the extracted text, where the passage is.
@@ -479,8 +414,9 @@ describe("DocumentDetailRoot", () => {
       "cite-1",
     );
 
-    const cited = await screen.findByText(CITED_PASSAGE);
-    expect(cited.tagName).toBe("MARK");
+    await waitFor(() => expect(document.querySelector("mark")).not.toBeNull());
+    const cited = document.querySelector("mark")!;
+    expect(cited.textContent).toContain(CITED_PASSAGE);
     expect(scrolledTo).toContain(cited);
     // Split around the passage rather than reduced to it: the text of record
     // still reads as one run, which is what the offsets index into.
@@ -498,23 +434,14 @@ describe("DocumentDetailRoot", () => {
     expect(document.querySelector("mark")).toBeNull();
   });
 
-  // A text source is its own text of record — nothing is read out of it — so the
-  // citation's offsets address the original as well as the extracted text, and
-  // the mark follows the reader from one view to the other.
-  //
-  // The passage sits behind an accent and behind a single newline the renderer
-  // turns into a hard break, which are the two ways a source offset stops
-  // agreeing with the position it is drawn at: the first shifts the byte
-  // conversion, the second shifts the offsets the parser recorded.
   const MARKDOWN_CONTENT =
     "# Café notes\n\nQuarter one was flat.\nRevenue rose **12%** in the second quarter.\n";
-  const MARKDOWN_PASSAGE = "Revenue rose **12%** in the second";
 
-  it("marks the cited passage in a rendered markdown original", async () => {
+  it("marks the cited line in a rendered markdown original", async () => {
     const user = userEvent.setup();
     seedTranscript({
       id: "cite-3",
-      span: byteSpan(MARKDOWN_CONTENT, MARKDOWN_PASSAGE),
+      locator: { kind: "lines", start: 4, end: 4 },
     });
     await openCitation(
       detail({
@@ -532,17 +459,21 @@ describe("DocumentDetailRoot", () => {
     // The passage spans an emphasized word, which is three places in the
     // rendered tree rather than one run: the words between them are not
     // adjacent there, so each is marked where it stands.
+    await waitFor(() => expect(document.querySelectorAll("mark").length).toBeGreaterThan(0));
     const marks = Array.from(document.querySelectorAll("mark"));
-    expect(marks.map((mark) => mark.textContent).join("")).toBe(
+    expect(marks.map((mark) => mark.textContent).join("")).toContain(
       "Revenue rose 12% in the second",
     );
     expect(document.querySelector("strong mark")?.textContent).toBe("12%");
     expect(scrolledTo).toContain(marks[0]);
   });
 
-  it("marks the cited passage in an original drawn as plain text", async () => {
+  it("marks the cited line in an original drawn as plain text", async () => {
     const user = userEvent.setup();
-    seedTranscript({ id: "cite-4", span: byteSpan(CITED_CONTENT, CITED_PASSAGE) });
+    seedTranscript({
+      id: "cite-4",
+      locator: { kind: "lines", start: 3, end: 3 },
+    });
     await openCitation(
       detail({ media_type: "text/plain", title: "Notes.txt", content: CITED_CONTENT }),
       "cite-4",
@@ -551,15 +482,19 @@ describe("DocumentDetailRoot", () => {
 
     await user.click(await screen.findByRole("tab", { name: "Original document" }));
 
-    const marks = await screen.findAllByText(CITED_PASSAGE);
-    expect(marks.every((mark) => mark.tagName === "MARK")).toBe(true);
+    await waitFor(() => expect(document.querySelector("mark")).not.toBeNull());
+    const marks = Array.from(document.querySelectorAll("mark"));
+    expect(marks.every((mark) => mark.textContent?.includes(CITED_PASSAGE))).toBe(true);
     // Drawn as written, the file still reads as one run around the mark.
     expect(document.querySelector("pre")?.textContent).toBe(CITED_CONTENT);
   });
 
   it("opens a paginated citation on its recorded page, then lets the reader leave", async () => {
     const user = userEvent.setup();
-    seedTranscript({ id: "cite-2", pages: [4, 5], span: { start: 10, end: 20 } });
+    seedTranscript({
+      id: "cite-2",
+      locator: { kind: "pages", start: 4, end: 5 },
+    });
     await openCitation(
       detail({ media_type: "application/pdf", title: "Report.pdf", content: "text" }),
       "cite-2",
@@ -573,39 +508,11 @@ describe("DocumentDetailRoot", () => {
 
     // The transcript keeps arriving while the panel is open, and the citation is
     // re-resolved with it. The page it asked for must not be applied twice.
-    seedTranscript({ id: "cite-2", pages: [4, 5], span: { start: 10, end: 20 } });
-    expect(await screen.findByText("Page 5")).toBeVisible();
-
-    // A citation that knows only which pages it came from marks none of them,
-    // which is every source imported before regions were recorded.
-    expect(drawnHighlights()).toHaveLength(0);
-  });
-
-  it("marks where a citation sits on the page it is open at, and only there", async () => {
-    const user = userEvent.setup();
     seedTranscript({
-      id: "cite-5",
-      pages: [4, 5],
-      bounds: [
-        rect(4, { left: 1_000, top: 2_000, width: 8_000, height: 400 }),
-        rect(4, { left: 1_000, top: 2_500, width: 6_000, height: 400 }),
-        rect(5, { left: 1_000, top: 500, width: 3_000, height: 400 }),
-      ],
+      id: "cite-2",
+      locator: { kind: "pages", start: 4, end: 5 },
     });
-    await openCitation(
-      detail({ media_type: "application/pdf", title: "Report.pdf", content: "text" }),
-      "cite-5",
-    );
-
-    expect(await screen.findByText("Page 4")).toBeVisible();
-    await waitFor(() => expect(drawnHighlights()).toHaveLength(2));
-    // Placed as a fraction of the page rather than in pixels, so the boxes
-    // survive zooming and resizing without being recomputed.
-    expect(drawnHighlights()[0]).toHaveStyle({ top: "calc(20% - 2px)" });
-
-    await user.click(screen.getByRole("button", { name: "Next page" }));
     expect(await screen.findByText("Page 5")).toBeVisible();
-    await waitFor(() => expect(drawnHighlights()).toHaveLength(1));
   });
 
   // The panel is already open at a citation when the next one is clicked, and
@@ -616,8 +523,8 @@ describe("DocumentDetailRoot", () => {
   it("lands a second citation into a source the reader had switched views on", async () => {
     const user = userEvent.setup();
     seedTranscript(
-      { id: "cite-6", pages: [2], span: { start: 0, end: 4 } },
-      { id: "cite-7", pages: [7], span: { start: 5, end: 9 } },
+      { id: "cite-6", locator: { kind: "page", page: 2 } },
+      { id: "cite-7", locator: { kind: "page", page: 7 } },
     );
     await openCitationThenAnother(
       detail({ media_type: "application/pdf", title: "Report.pdf", content: "text" }),
@@ -641,7 +548,7 @@ describe("DocumentDetailRoot", () => {
   // original view behind the tab then, and sending the reader to it left the
   // panel drawing nothing at all.
   it("says a source failed rather than opening a citation on an empty panel", async () => {
-    seedTranscript({ id: "cite-8", pages: [3], span: { start: 0, end: 4 } });
+    seedTranscript({ id: "cite-8", locator: { kind: "page", page: 3 } });
     await openCitation(
       detail({
         media_type: "application/pdf",

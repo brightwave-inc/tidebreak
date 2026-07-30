@@ -17,7 +17,7 @@ mod parse;
 mod retriever;
 mod structure;
 
-pub use document::{ByteSpan, PageBounds, SourceLocation, SourceRegion, PAGE_BOUNDS_SCALE};
+pub use document::{ByteSpan, SourceLocation, SourceRegion};
 pub use error::{Result, RetrievalError};
 pub use id::DocumentId;
 pub use parse::{

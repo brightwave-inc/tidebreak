@@ -5,25 +5,18 @@
 //! revision. Revisions are insert-only: an update appends, and the previous
 //! bytes stay addressable by their own revision id.
 
-use std::collections::HashSet;
-
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder,
     QuerySelect, Set, TransactionTrait,
 };
 
-use crate::citation::{
-    project_citation_location, AssistantCitationReference, MAX_CITATION_EXCERPT_CHARS,
-    MAX_CITATION_HEADING_CHARS,
-};
 use crate::deliverable::{
     deliverable_media_type, revision_byte_ceiling, validate_binary_deliverable,
-    validate_deliverable_name, CreateOutput, DeliverableKind, NewOutputRevision,
-    OutputCitationSnapshot, OutputRecord, OutputRevision, MAX_OUTPUT_CITATIONS,
-    MAX_OUTPUT_REVISIONS,
+    validate_deliverable_name, CreateOutput, DeliverableKind, NewOutputRevision, OutputRecord,
+    OutputRevision, MAX_OUTPUT_REVISIONS,
 };
 use crate::error::{AgentError, Result};
-use crate::id::{ChatId, OutputCitationId, OutputId, OutputRevisionId};
+use crate::id::{ChatId, OutputId, OutputRevisionId};
 
 use super::super::{entities, store_err, DbStore};
 use super::acquire_chat_write_lock;
@@ -58,8 +51,6 @@ pub(in crate::db) async fn create_output(
             )))
         };
     }
-    let evidence =
-        resolve_revision_citations_on(&transaction, request.chat_id, &request.revision).await?;
     entities::output::ActiveModel {
         id: Set(request.id.0),
         chat_id: Set(request.chat_id.0),
@@ -75,8 +66,6 @@ pub(in crate::db) async fn create_output(
     .await
     .map_err(store_err)?;
     insert_revision_on(&transaction, request.id, 1, &request.revision, created_at).await?;
-    insert_revision_citations_on(&transaction, request.chat_id, &request.revision, &evidence)
-        .await?;
     let record = require_output_on(&transaction, request.id).await?;
     transaction.commit().await.map_err(store_err)?;
     Ok(record)
@@ -113,9 +102,8 @@ pub(in crate::db) async fn append_output_revision(
         return Err(AgentError::Store(format!("output {output_id} is deleted")));
     }
     if let Some(recorded) = find_revision_on(&transaction, revision.id).await? {
-        let exact = recorded.output_id == output_id
-            && revision_matches(&recorded, revision, created_at)
-            && exact_revision_citations_on(&transaction, existing.chat_id, revision).await?;
+        let exact =
+            recorded.output_id == output_id && revision_matches(&recorded, revision, created_at);
         transaction.rollback().await.map_err(store_err)?;
         return if exact {
             require_output(store, output_id).await
@@ -134,9 +122,7 @@ pub(in crate::db) async fn append_output_revision(
             "output {output_id} has reached its {MAX_OUTPUT_REVISIONS}-revision limit"
         )));
     }
-    let evidence = resolve_revision_citations_on(&transaction, existing.chat_id, revision).await?;
     insert_revision_on(&transaction, output_id, ordinal, revision, created_at).await?;
-    insert_revision_citations_on(&transaction, existing.chat_id, revision, &evidence).await?;
     entities::output::ActiveModel {
         id: Set(output_id.0),
         current_revision_id: Set(revision.id.0),
@@ -200,71 +186,6 @@ pub(in crate::db) async fn get_output_revision(
     id: OutputRevisionId,
 ) -> Result<Option<OutputRevision>> {
     find_revision_on(&store.conn, id).await
-}
-
-pub(in crate::db) async fn list_output_revision_citations(
-    store: &DbStore,
-    revision_id: OutputRevisionId,
-) -> Result<Vec<OutputCitationSnapshot>> {
-    let rows = entities::output_revision_citation::Entity::find()
-        .find_also_related(entities::retrieval_evidence::Entity)
-        .filter(entities::output_revision_citation::Column::OutputRevisionId.eq(revision_id.0))
-        .order_by_asc(entities::output_revision_citation::Column::Ordinal)
-        .all(&store.conn)
-        .await
-        .map_err(store_err)?;
-    let mut snapshots = Vec::with_capacity(rows.len());
-    for (index, (row, evidence)) in rows.into_iter().enumerate() {
-        let ordinal = u16::try_from(row.ordinal)
-            .map_err(|_| AgentError::Store("invalid output citation ordinal".into()))?;
-        if row.ordinal != i32::try_from(index + 1).expect("citation limit fits i32")
-            || !(1..=MAX_OUTPUT_CITATIONS as i32).contains(&row.ordinal)
-            || row.id != OutputCitationId::derive(revision_id, ordinal).0
-        {
-            return Err(AgentError::Store(
-                "output citation ordering or identity is corrupt".into(),
-            ));
-        }
-        let evidence = evidence
-            .ok_or_else(|| AgentError::Store("output citation evidence disappeared".into()))?;
-        if evidence.chat_id != row.chat_id || evidence.turn_id != row.turn_id {
-            return Err(AgentError::Store(
-                "output citation evidence owner is corrupt".into(),
-            ));
-        }
-        let evidence = super::client_execution::evidence_from_model(evidence)?;
-        if evidence.turn_id.0 != row.turn_id
-            || evidence.call_id.0 != row.evidence_call_id
-            || i32::from(evidence.evidence.rank) != row.evidence_rank
-        {
-            return Err(AgentError::Store(
-                "output citation projection owner is corrupt".into(),
-            ));
-        }
-        let location = project_citation_location(&evidence.evidence.location);
-        let headings = evidence.evidence.location.heading_path();
-        let heading = (!headings.is_empty()).then(|| {
-            headings
-                .join(" > ")
-                .chars()
-                .take(MAX_CITATION_HEADING_CHARS)
-                .collect()
-        });
-        snapshots.push(OutputCitationSnapshot {
-            id: OutputCitationId(row.id),
-            output_revision_id: revision_id,
-            ordinal,
-            excerpt: evidence
-                .evidence
-                .snippet
-                .chars()
-                .take(MAX_CITATION_EXCERPT_CHARS)
-                .collect(),
-            heading,
-            location,
-        });
-    }
-    Ok(snapshots)
 }
 
 pub(in crate::db) async fn delete_output(
@@ -417,20 +338,6 @@ fn validate_revision(revision: &NewOutputRevision, byte_ceiling: usize) -> Resul
             "output revision names both a producing turn and a producing run".into(),
         ));
     }
-    if revision.citations.len() > MAX_OUTPUT_CITATIONS
-        || revision
-            .citations
-            .iter()
-            .copied()
-            .collect::<HashSet<_>>()
-            .len()
-            != revision.citations.len()
-        || (!revision.citations.is_empty() && revision.turn_id.is_none())
-    {
-        return Err(AgentError::Store(
-            "output revision citation references are invalid".into(),
-        ));
-    }
     Ok(())
 }
 
@@ -464,109 +371,6 @@ where
     Ok(())
 }
 
-async fn insert_revision_citations_on<C>(
-    conn: &C,
-    chat_id: ChatId,
-    revision: &NewOutputRevision,
-    evidence: &[entities::retrieval_evidence::Model],
-) -> Result<()>
-where
-    C: ConnectionTrait,
-{
-    if evidence.is_empty() {
-        return Ok(());
-    }
-    let turn_id = revision.turn_id.ok_or_else(|| {
-        AgentError::Store("output revision citations require a producing turn".into())
-    })?;
-    let rows = evidence
-        .iter()
-        .enumerate()
-        .map(
-            |(index, row)| entities::output_revision_citation::ActiveModel {
-                id: Set(OutputCitationId::derive(
-                    revision.id,
-                    u16::try_from(index + 1).expect("citation limit fits u16"),
-                )
-                .0),
-                output_revision_id: Set(revision.id.0),
-                ordinal: Set(i32::try_from(index + 1).expect("citation limit fits i32")),
-                chat_id: Set(chat_id.0),
-                turn_id: Set(turn_id.0),
-                evidence_call_id: Set(row.call_id),
-                evidence_rank: Set(row.rank),
-            },
-        )
-        .collect::<Vec<_>>();
-    entities::output_revision_citation::Entity::insert_many(rows)
-        .exec(conn)
-        .await
-        .map_err(store_err)?;
-    Ok(())
-}
-
-async fn resolve_revision_citations_on<C>(
-    conn: &C,
-    chat_id: ChatId,
-    revision: &NewOutputRevision,
-) -> Result<Vec<entities::retrieval_evidence::Model>>
-where
-    C: ConnectionTrait,
-{
-    let Some(turn_id) = revision.turn_id else {
-        return Ok(Vec::new());
-    };
-    super::citation::resolve_references_on(conn, chat_id, turn_id, &revision.citations).await
-}
-
-async fn exact_revision_citations_on<C>(
-    conn: &C,
-    chat_id: ChatId,
-    revision: &NewOutputRevision,
-) -> Result<bool>
-where
-    C: ConnectionTrait,
-{
-    let expected = resolve_revision_citations_on(conn, chat_id, revision)
-        .await?
-        .into_iter()
-        .map(|evidence| AssistantCitationReference {
-            source_token: evidence.source_token,
-        })
-        .collect::<Vec<_>>();
-    Ok(exact_references_for_revision_on(conn, revision.id).await? == expected)
-}
-
-async fn exact_references_for_revision_on<C>(
-    conn: &C,
-    revision_id: OutputRevisionId,
-) -> Result<Vec<AssistantCitationReference>>
-where
-    C: ConnectionTrait,
-{
-    let rows = entities::output_revision_citation::Entity::find()
-        .find_also_related(entities::retrieval_evidence::Entity)
-        .filter(entities::output_revision_citation::Column::OutputRevisionId.eq(revision_id.0))
-        .order_by_asc(entities::output_revision_citation::Column::Ordinal)
-        .all(conn)
-        .await
-        .map_err(store_err)?;
-    let mut references = Vec::with_capacity(rows.len());
-    for (row, evidence) in rows {
-        let evidence = evidence
-            .ok_or_else(|| AgentError::Store("output citation evidence disappeared".into()))?;
-        if evidence.chat_id != row.chat_id || evidence.turn_id != row.turn_id {
-            return Err(AgentError::Store(
-                "output citation evidence owner is corrupt".into(),
-            ));
-        }
-        references.push(AssistantCitationReference {
-            source_token: evidence.source_token,
-        });
-    }
-    Ok(references)
-}
-
 async fn exact_output_on<C>(
     conn: &C,
     stored: &OutputRecord,
@@ -594,8 +398,7 @@ where
         ));
     };
     Ok(revision.output_id == request.id
-        && revision_matches(&revision, &request.revision, created_at)
-        && exact_revision_citations_on(conn, request.chat_id, &request.revision).await?)
+        && revision_matches(&revision, &request.revision, created_at))
 }
 
 fn revision_matches(

@@ -1,15 +1,11 @@
 use chrono::{DateTime, Utc};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set,
-    TransactionTrait,
+    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
 };
 
 use crate::error::{AgentError, Result};
 use crate::id::{CallId, ChatId};
-use crate::model::{
-    EvidenceLocation, RetrievalEvidence, RetrievalEvidenceInput, RetrievalEvidenceSource,
-    ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus,
-};
+use crate::model::{ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus};
 use crate::storage::{
     AcceptClaimedToolCallOutcome, AcceptToolCallOutcome, ClaimClientToolCallOutcome,
     ClientToolCallClaim, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
@@ -299,18 +295,16 @@ pub(in crate::db) async fn resolve_server_tool_call(
         resolution,
         None,
         None,
-        None,
     )
     .await?
     .outcome)
 }
 
-pub(in crate::db) async fn resolve_server_tool_call_with_evidence(
+pub(in crate::db) async fn resolve_server_tool_call_with_preview(
     store: &DbStore,
     id: CallId,
     resolution: &ToolCallResolution,
     resolved_at: DateTime<Utc>,
-    evidence: &[RetrievalEvidenceInput],
     preview: Option<&crate::ToolResultPreview>,
 ) -> Result<ResolveToolCallOutcome> {
     Ok(resolve_tool_call(
@@ -319,7 +313,6 @@ pub(in crate::db) async fn resolve_server_tool_call_with_evidence(
         ResolutionAuthority::Server,
         resolved_at,
         resolution,
-        Some(evidence),
         preview,
         None,
     )
@@ -328,7 +321,7 @@ pub(in crate::db) async fn resolve_server_tool_call_with_evidence(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(in crate::db) async fn resolve_claimed_server_tool_call_with_evidence(
+pub(in crate::db) async fn resolve_claimed_server_tool_call(
     store: &DbStore,
     id: CallId,
     chat_id: ChatId,
@@ -337,7 +330,6 @@ pub(in crate::db) async fn resolve_claimed_server_tool_call_with_evidence(
     now: DateTime<Utc>,
     resolution: &ToolCallResolution,
     resolved_at: DateTime<Utc>,
-    evidence: &[RetrievalEvidenceInput],
     preview: Option<&crate::ToolResultPreview>,
 ) -> Result<ResolveToolCallOutcome> {
     Ok(resolve_tool_call(
@@ -352,7 +344,6 @@ pub(in crate::db) async fn resolve_claimed_server_tool_call_with_evidence(
         },
         resolved_at,
         resolution,
-        Some(evidence),
         preview,
         None,
     )
@@ -385,21 +376,9 @@ pub(in crate::db) async fn abandon_inherited_server_tool_call(
         resolution,
         None,
         None,
-        None,
     )
     .await?
     .outcome)
-}
-
-pub(in crate::db) async fn list_retrieval_evidence(
-    store: &DbStore,
-    id: CallId,
-) -> Result<Vec<RetrievalEvidence>> {
-    evidence_models(&store.conn, id)
-        .await?
-        .into_iter()
-        .map(evidence_from_model)
-        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -428,7 +407,6 @@ pub(in crate::db) async fn resolve_client_tool_call_and_append_event(
         },
         resolved_at,
         resolution,
-        None,
         None,
         rows,
     )
@@ -462,7 +440,6 @@ pub(in crate::db) async fn resolve_expired_client_tool_call_and_append_event(
         resolved_at,
         resolution,
         None,
-        None,
         rows,
     )
     .await
@@ -490,7 +467,6 @@ async fn resolve_tool_call(
     authority: ResolutionAuthority,
     resolved_at: DateTime<Utc>,
     resolution: &ToolCallResolution,
-    evidence: Option<&[RetrievalEvidenceInput]>,
     preview: Option<&crate::ToolResultPreview>,
     rows: Option<&serde_json::Value>,
 ) -> Result<JournaledClientToolCallOutcome> {
@@ -519,9 +495,6 @@ async fn resolve_tool_call(
         .await
         .map_err(store_err)?
         .expect("locked tool call exists");
-    if let Some(evidence) = evidence {
-        validate_evidence_request(&existing, resolution, evidence)?;
-    }
     if resolved_at < existing.created_at {
         transaction.commit().await.map_err(store_err)?;
         return Err(AgentError::Store(
@@ -529,21 +502,13 @@ async fn resolve_tool_call(
         ));
     }
     if existing.status != ToolCallStatus::Pending.as_str() {
-        let mut outcome = if !terminal_authority_matches(&existing, authority) {
+        let outcome = if !terminal_authority_matches(&existing, authority) {
             ResolveToolCallOutcome::LeaseLost
         } else if terminal_payload_matches(&existing, resolution) {
             ResolveToolCallOutcome::Existing
         } else {
             ResolveToolCallOutcome::AlreadyTerminal
         };
-        if outcome == ResolveToolCallOutcome::Existing {
-            if let Some(expected) = evidence {
-                let stored = evidence_models(&transaction, id).await?;
-                if !evidence_models_match(&stored, &existing, expected)? {
-                    outcome = ResolveToolCallOutcome::AlreadyTerminal;
-                }
-            }
-        }
         let transition = if outcome == ResolveToolCallOutcome::Existing && authority.is_client() {
             super::turn::recover_turn_after_client_resolution_on(&transaction, &existing).await?
         } else {
@@ -613,10 +578,6 @@ async fn resolve_tool_call(
         return Ok(journaled_call_outcome(ResolveToolCallOutcome::LeaseLost));
     }
 
-    if let Some(evidence) = evidence {
-        insert_evidence(&transaction, &existing, evidence).await?;
-    }
-
     let (error_code, error_detail) = resolution_error(resolution);
     let resolved_name = existing.name.clone();
     let approval_status = existing.approval_status.clone();
@@ -641,7 +602,6 @@ async fn resolve_tool_call(
                 is_error: resolution.status() != ToolCallStatus::Completed,
                 error_category: None,
                 ui_view: None,
-                private_evidence: Vec::new(),
             },
         )
     });
@@ -727,7 +687,6 @@ fn client_completion_event(
             // guess about a category the resolution never named.
             error_category: None,
             ui_view: None,
-            private_evidence: Vec::new(),
         },
         action: crate::ToolActionPreview::build(&resolved.name, &resolved.arguments),
         result: preview.cloned(),
@@ -740,229 +699,6 @@ fn journaled_call_outcome(outcome: ResolveToolCallOutcome) -> JournaledClientToo
         turn: None,
         terminal_event: None,
     }
-}
-
-fn validate_evidence_request(
-    call: &entities::tool_call::Model,
-    resolution: &ToolCallResolution,
-    evidence: &[RetrievalEvidenceInput],
-) -> Result<()> {
-    if evidence.is_empty() {
-        return Ok(());
-    }
-    // The closed set of calls that may leave evidence behind. It is a name
-    // list rather than a capability because a tool name is what the durable
-    // record keeps: whatever else changes, a citation must be traceable to a
-    // call that was allowed to make one. `web_extract` is here because a page
-    // it fetched is stored as a source of the conversation, so it produces
-    // spans of durable text exactly as the other two do.
-    if call.execution != ToolCallExecution::Server.as_str()
-        || !matches!(call.name.as_str(), "search" | "read_source" | "web_extract")
-        || !matches!(resolution, ToolCallResolution::Completed { .. })
-        || evidence.len() > RetrievalEvidenceInput::MAX_RESULTS
-    {
-        return Err(AgentError::Store("invalid retrieval evidence owner".into()));
-    }
-    let mut source_tokens = std::collections::HashSet::with_capacity(evidence.len());
-    for (index, item) in evidence.iter().enumerate() {
-        let expected_rank = u16::try_from(index + 1)
-            .map_err(|_| AgentError::Store("retrieval evidence rank exhausted".into()))?;
-        validate_evidence_item(item, expected_rank)?;
-        if !source_tokens.insert(item.source_token) {
-            return Err(AgentError::Store(
-                "retrieval evidence source tokens must be unique".into(),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn validate_evidence_item(item: &RetrievalEvidenceInput, expected_rank: u16) -> Result<()> {
-    let source_uri_valid = match &item.source {
-        RetrievalEvidenceSource::Uri { uri } => {
-            !uri.is_empty()
-                && uri.len() <= RetrievalEvidenceInput::MAX_SOURCE_URI_BYTES
-                && !uri.contains('\0')
-        }
-        RetrievalEvidenceSource::Inline => true,
-    };
-    if item.rank != expected_rank
-        || item.rank == 0
-        || usize::from(item.rank) > RetrievalEvidenceInput::MAX_RESULTS
-        || item.source_token.is_nil()
-        || item.generation.content_revision < 1
-        || item.generation.revision_token.is_nil()
-        || item.span.is_empty()
-        || i64::try_from(item.span.start).is_err()
-        || i64::try_from(item.span.end).is_err()
-        || item.span.len() != item.snippet.len()
-        || item.snippet.contains('\0')
-        || item.snippet.len() > RetrievalEvidenceInput::MAX_SNIPPET_BYTES
-        || !item.location.is_well_formed()
-        || item.chunk_id != crate::ChunkId::derive(item.document_id, item.span.start, item.span.end)
-        || !source_uri_valid
-    {
-        return Err(AgentError::Store("invalid retrieval evidence".into()));
-    }
-    let mut previous_end = item.span.start;
-    for region in item.location.source_regions() {
-        if region.span.is_empty()
-            || region.span.start < item.span.start
-            || region.span.end > item.span.end
-            || region.span.start < previous_end
-            || !item
-                .snippet
-                .is_char_boundary(region.span.start - item.span.start)
-            || !item
-                .snippet
-                .is_char_boundary(region.span.end - item.span.start)
-        {
-            return Err(AgentError::Store(
-                "invalid retrieval evidence source regions".into(),
-            ));
-        }
-        previous_end = region.span.end;
-    }
-    Ok(())
-}
-
-async fn evidence_models<C>(
-    conn: &C,
-    id: CallId,
-) -> Result<Vec<entities::retrieval_evidence::Model>>
-where
-    C: ConnectionTrait,
-{
-    entities::retrieval_evidence::Entity::find()
-        .filter(entities::retrieval_evidence::Column::CallId.eq(id.0))
-        .order_by_asc(entities::retrieval_evidence::Column::Rank)
-        .all(conn)
-        .await
-        .map_err(store_err)
-}
-
-async fn insert_evidence<C>(
-    conn: &C,
-    call: &entities::tool_call::Model,
-    evidence: &[RetrievalEvidenceInput],
-) -> Result<()>
-where
-    C: ConnectionTrait,
-{
-    if evidence.is_empty() {
-        return Ok(());
-    }
-    let models = evidence
-        .iter()
-        .map(|item| {
-            let (source_kind, source_uri) = match &item.source {
-                RetrievalEvidenceSource::Uri { uri } => ("uri", Some(uri.clone())),
-                RetrievalEvidenceSource::Inline => ("inline", None),
-            };
-            // Document content writes exactly the columns it always has, so a
-            // row written now is indistinguishable from one written before the
-            // taxonomy existed. Only the kinds those columns cannot express
-            // carry a location payload.
-            let location = match &item.location {
-                EvidenceLocation::DocumentContent { .. } => None,
-                other => Some(serde_json::to_value(other)?),
-            };
-            Ok(entities::retrieval_evidence::ActiveModel {
-                call_id: Set(call.id),
-                rank: Set(i32::from(item.rank)),
-                source_token: Set(item.source_token),
-                chat_id: Set(call.chat_id),
-                turn_id: Set(call.turn_id),
-                document_id: Set(item.document_id.0),
-                content_revision: Set(item.generation.content_revision),
-                revision_token: Set(item.generation.revision_token),
-                chunk_id: Set(item.chunk_id.0),
-                span_start: Set(i64::try_from(item.span.start).map_err(|_| {
-                    AgentError::Store("retrieval evidence span exceeds storage range".into())
-                })?),
-                span_end: Set(i64::try_from(item.span.end).map_err(|_| {
-                    AgentError::Store("retrieval evidence span exceeds storage range".into())
-                })?),
-                snippet: Set(item.snippet.clone()),
-                heading_path: Set(serde_json::to_value(item.location.heading_path())?),
-                source_regions: Set(serde_json::to_value(item.location.source_regions())?),
-                source_kind: Set(source_kind.into()),
-                source_uri: Set(source_uri),
-                location: Set(location),
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    entities::retrieval_evidence::Entity::insert_many(models)
-        .exec(conn)
-        .await
-        .map_err(store_err)?;
-    Ok(())
-}
-
-pub(in crate::db) fn evidence_from_model(
-    model: entities::retrieval_evidence::Model,
-) -> Result<RetrievalEvidence> {
-    let span_start = usize::try_from(model.span_start)
-        .map_err(|_| AgentError::Store("invalid stored evidence span".into()))?;
-    let span_end = usize::try_from(model.span_end)
-        .map_err(|_| AgentError::Store("invalid stored evidence span".into()))?;
-    if span_start >= span_end {
-        return Err(AgentError::Store("invalid stored evidence span".into()));
-    }
-    let evidence = RetrievalEvidenceInput {
-        rank: u16::try_from(model.rank)
-            .map_err(|_| AgentError::Store("invalid stored evidence rank".into()))?,
-        source_token: model.source_token,
-        document_id: model.document_id.into(),
-        generation: crate::DocumentGeneration {
-            content_revision: model.content_revision,
-            revision_token: model.revision_token,
-        },
-        chunk_id: model.chunk_id.into(),
-        span: crate::ByteSpan::new(span_start, span_end),
-        snippet: model.snippet,
-        // No payload means document content, which is what every row written
-        // before evidence had kinds holds and where its headings and regions
-        // still live. That is what lets those rows read back unchanged.
-        location: match model.location {
-            None => EvidenceLocation::DocumentContent {
-                heading_path: serde_json::from_value(model.heading_path)?,
-                source_regions: serde_json::from_value(model.source_regions)?,
-            },
-            Some(location) => serde_json::from_value(location)?,
-        },
-        source: match (model.source_kind.as_str(), model.source_uri) {
-            ("uri", Some(uri)) => RetrievalEvidenceSource::Uri { uri },
-            ("inline", None) => RetrievalEvidenceSource::Inline,
-            _ => return Err(AgentError::Store("invalid stored evidence source".into())),
-        },
-    };
-    validate_evidence_item(&evidence, evidence.rank)?;
-    Ok(RetrievalEvidence {
-        call_id: model.call_id.into(),
-        chat_id: model.chat_id.into(),
-        turn_id: model.turn_id.into(),
-        evidence,
-    })
-}
-
-fn evidence_models_match(
-    stored: &[entities::retrieval_evidence::Model],
-    call: &entities::tool_call::Model,
-    expected: &[RetrievalEvidenceInput],
-) -> Result<bool> {
-    let stored = stored
-        .iter()
-        .cloned()
-        .map(evidence_from_model)
-        .collect::<Result<Vec<_>>>()?;
-    Ok(stored.len() == expected.len()
-        && stored.iter().zip(expected).all(|(stored, expected)| {
-            stored.call_id.0 == call.id
-                && stored.chat_id.0 == call.chat_id
-                && stored.turn_id.0 == call.turn_id
-                && &stored.evidence == expected
-        }))
 }
 
 #[derive(Clone, Copy)]

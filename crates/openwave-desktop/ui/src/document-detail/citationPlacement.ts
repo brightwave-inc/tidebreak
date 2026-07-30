@@ -1,95 +1,36 @@
 import { useMemo } from "react";
 
-import type { CitationPageBounds, StructuredPathType } from "@/api";
-import type { SheetCellRange } from "@/AssistantSources";
+import type { CitationLocator } from "@/api";
 import { useChatSessionStore } from "@/ChatSessionStore";
-import type { CitationSpan } from "@/components/document/citationSpan";
 import type { ChatMessage } from "@/MessageList";
 
-/** Where in one source a citation points, as the panel needs to open it. */
-export type CitationPlacement = {
-  /** Half-open byte range of the passage in the document's canonical text. */
-  span: CitationSpan;
-  /** The page the passage was recorded on, for a paginated source. */
-  page?: number;
-  /**
-   * Where on the pages the passage sits, for a source parsed that finely.
-   * Empty for a page-granular source, which opens on its page with nothing
-   * drawn on it.
-   */
-  bounds: readonly CitationPageBounds[];
-  /**
-   * The node the passage came from, for a source read as a tree. It is carried
-   * beside the span rather than instead of it: the span still addresses the
-   * extracted text, and the path is what the original view opens at.
-   */
-  structuredPath?: Readonly<{ path: string; pathType: StructuredPathType }>;
-  /**
-   * The cells the passage came from, for a source read as a grid. Carried
-   * beside the span for the same reason a node path is: the span addresses the
-   * extracted text, and the range is what the workbook view opens at.
-   */
-  cellRange?: SheetCellRange;
-};
-
-/**
- * Resolve a citation against the transcript loaded beside the panel.
- *
- * Everything the panel needs is already in the open conversation — the reader
- * clicked the citation there — so this reads the session rather than asking the
- * server to look up evidence it just sent. A citation the transcript does not
- * have resolves to nothing, which is the case for a restored or shared URL
- * pointing into a conversation whose history is not on screen; the panel then
- * opens the document as though it had been reached from the source list.
- */
+/** Resolve a citation id to the model-authored locator already in the transcript. */
 export function findCitationPlacement(
   messages: readonly ChatMessage[],
   documentId: string,
   citationId: string,
-): CitationPlacement | null {
+): CitationLocator | null {
   for (const message of messages) {
     if (message.role !== "assistant") continue;
     for (const source of message.sources) {
-      if (source.id !== citationId || source.documentId !== documentId) continue;
-      return {
-        span: { start: source.span.start, end: source.span.end },
-        page: earliestPage(source.pages, source.bounds),
-        bounds: source.bounds,
-        structuredPath: source.structuredPath,
-        cellRange: source.cellRange,
-      };
+      if (source.id === citationId && source.documentId === documentId) {
+        return source.locator;
+      }
     }
   }
   return null;
 }
 
-/**
- * The first page the passage was recorded on, where any was.
- *
- * A span can cross a page break, and the place to open is where it starts.
- * A page carrying a rectangle wins over one that only appears in `pages`:
- * that is the page where the reader will actually see the passage marked.
- */
-function earliestPage(
-  pages: readonly number[],
-  bounds: readonly CitationPageBounds[],
-): number | undefined {
-  return lowestPage(bounds.map((rect) => rect.page)) ?? lowestPage(pages);
-}
-
-function lowestPage(pages: readonly number[]): number | undefined {
-  const numbered = pages.filter((page) => Number.isSafeInteger(page) && page > 0);
-  return numbered.length > 0 ? Math.min(...numbered) : undefined;
-}
-
-/** {@link findCitationPlacement} against the live session. */
 export function useCitationPlacement(
   documentId: string,
   citationId: string | undefined,
-): CitationPlacement | null {
+): CitationLocator | null {
   const messages = useChatSessionStore((session) => session.messages);
   return useMemo(
-    () => (citationId ? findCitationPlacement(messages, documentId, citationId) : null),
+    () =>
+      citationId
+        ? findCitationPlacement(messages, documentId, citationId)
+        : null,
     [messages, documentId, citationId],
   );
 }

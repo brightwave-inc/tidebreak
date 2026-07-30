@@ -1543,7 +1543,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: chrono::Utc::now(),

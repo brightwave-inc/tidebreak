@@ -1,75 +1,22 @@
 import { ChevronRight } from "lucide-react";
 
-import type { CitationPageBounds, StructuredPathType } from "@/api";
+import type { CitationLocator } from "@/api";
 
 export type AssistantSource = Readonly<{
   id: string;
   ordinal: number;
-  /** The cited source, which is the document panel this row opens. */
   documentId: string;
-  /**
-   * Half-open byte range of the cited passage in the document's canonical
-   * text — the position the source panel highlights and scrolls to.
-   */
-  span: Readonly<{ start: number; end: number }>;
-  excerpt: string;
-  heading: string | null;
-  pages: number[];
-  /**
-   * Where on those pages the passage sits, for a source whose parser resolved
-   * it that finely. Empty for page-granular sources, which is every source
-   * imported before regions were recorded; `pages` is the complete answer
-   * either way.
-   */
-  bounds: readonly CitationPageBounds[];
-  /**
-   * The node of a structured source the passage came from, for a source that
-   * is a tree rather than a run of pages: a dot path into JSON, an XPath into
-   * XML or HTML. Absent for every other kind of source, which is addressed by
-   * its span and its pages.
-   */
-  structuredPath?: Readonly<{ path: string; pathType: StructuredPathType }>;
-  /**
-   * The cells the passage came from, for a source that is a grid rather than a
-   * run of pages. Absent for every other kind of source.
-   */
-  cellRange?: SheetCellRange;
-}>;
-
-/** A rectangle of one sheet of a workbook, as a citation records it. */
-export type SheetCellRange = Readonly<{
-  startCell: string;
-  endCell: string | null;
-  sheetIndex: number;
-  sheetName: string;
+  locator: CitationLocator;
 }>;
 
 type AssistantSourcesProps = {
   sources: readonly AssistantSource[];
-  /**
-   * Open the cited place in the source panel. Omitted where there is no panel
-   * to open into, which leaves the list exactly as it reads today.
-   */
   onOpenSource?: (source: AssistantSource) => void;
 };
 
-// Matches the server's MAX_ASSISTANT_CITATIONS contract. Keeping the guard in
-// the renderer prevents an unexpectedly large payload from growing the DOM.
 const MAX_SOURCES = 20;
-const MAX_HEADING_CHARACTERS = 160;
-const MAX_EXCERPT_CHARACTERS = 600;
-const MAX_PAGE_REFERENCES = 8;
 
-/**
- * Evidence attached to an assistant response, as a list of places rather than a
- * list of quotations: a row opens the document it came from at the passage it
- * quoted.
- *
- * What a row carries is still closed. Storage paths, retrieval tokens, and the
- * call the evidence came from stay outside the rendered surface; the document
- * id and the cited span are here because they are the address, and neither is
- * useful without the source panel that already resolves them.
- */
+/** The compact list of model-authored document locators below a response. */
 export function AssistantSources({
   sources,
   onOpenSource,
@@ -83,19 +30,16 @@ export function AssistantSources({
     )
     .slice(0, MAX_SOURCES);
 
-  if (visibleSources.length === 0) {
-    return null;
-  }
-
-  const sourceLabel =
-    visibleSources.length === 1
-      ? "1 source"
-      : `${visibleSources.length} sources`;
+  if (visibleSources.length === 0) return null;
 
   return (
     <details className="assistant-sources">
       <summary className="assistant-sources-toggle">
-        <span className="assistant-sources-label">{sourceLabel}</span>
+        <span className="assistant-sources-label">
+          {visibleSources.length === 1
+            ? "1 source"
+            : `${visibleSources.length} sources`}
+        </span>
         <span className="assistant-source-pills" aria-hidden="true">
           {visibleSources.map(({ source, inputIndex }) => (
             <span
@@ -128,13 +72,6 @@ export function AssistantSources({
   );
 }
 
-/**
- * The row's text, as a button wherever it can be opened.
- *
- * A citation whose document id did not survive the round trip is still worth
- * reading, so it degrades to the plain excerpt rather than to a control that
- * goes nowhere.
- */
 function SourceCopy({
   source,
   onOpen,
@@ -142,11 +79,8 @@ function SourceCopy({
   source: AssistantSource;
   onOpen?: (source: AssistantSource) => void;
 }) {
-  const body = <CitationEvidence source={source} />;
-
-  if (!onOpen || !source.documentId) {
-    return <div className="assistant-source-copy">{body}</div>;
-  }
+  const body = <CitationLocatorLabel locator={source.locator} />;
+  if (!onOpen) return <div className="assistant-source-copy">{body}</div>;
 
   return (
     <button
@@ -160,49 +94,26 @@ function SourceCopy({
   );
 }
 
-/**
- * What one citation says for itself: where it came from and what it quoted,
- * bounded so an unexpected payload cannot grow the DOM. Shared with the popover
- * an inline citation opens, so the summary row and the phrase in the prose read
- * the same evidence the same way.
- */
-export function CitationEvidence({ source }: { source: AssistantSource }) {
-  const heading = boundedText(source.heading, MAX_HEADING_CHARACTERS);
-  return (
-    <>
-      {heading ? <strong>{heading}</strong> : null}
-      <p>{boundedText(source.excerpt, MAX_EXCERPT_CHARACTERS)}</p>
-      <PageReferences pages={source.pages} />
-    </>
-  );
-}
-
-function PageReferences({ pages }: { pages: readonly number[] }) {
-  const visiblePages = [...new Set(pages)]
-    .filter((page) => Number.isSafeInteger(page) && page > 0)
-    .sort((left, right) => left - right)
-    .slice(0, MAX_PAGE_REFERENCES);
-
-  if (visiblePages.length === 0) {
-    return null;
+export function CitationLocatorLabel({
+  locator,
+}: {
+  locator: CitationLocator;
+}) {
+  switch (locator.kind) {
+    case "page":
+      return <span>Page {locator.page}</span>;
+    case "pages":
+      return <span>Pages {locator.start}–{locator.end}</span>;
+    case "lines":
+      return <span>Lines {locator.start}–{locator.end}</span>;
+    case "sheet":
+      return (
+        <span>
+          Sheet {locator.sheet}
+          {locator.cells ? ` · ${locator.cells}` : ""}
+        </span>
+      );
+    case "document":
+      return <span>Document</span>;
   }
-
-  const label = visiblePages.length === 1 ? "Page" : "Pages";
-  return (
-    <span className="assistant-source-pages">
-      {label} {visiblePages.join(", ")}
-    </span>
-  );
-}
-
-function boundedText(value: string | null, maximum: number) {
-  if (value === null) {
-    return "";
-  }
-
-  const characters = Array.from(value.trim());
-  if (characters.length <= maximum) {
-    return characters.join("");
-  }
-  return `${characters.slice(0, maximum).join("")}…`;
 }

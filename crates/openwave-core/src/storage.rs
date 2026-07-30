@@ -25,9 +25,7 @@ use serde_json::Value;
 use std::ops::Range;
 
 use crate::approval::{ApprovalDecision, ApprovalRequest, StandingGrant, ToolApproval};
-use crate::deliverable::{
-    CreateOutput, NewOutputRevision, OutputCitationSnapshot, OutputRecord, OutputRevision,
-};
+use crate::deliverable::{CreateOutput, NewOutputRevision, OutputRecord, OutputRevision};
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{
@@ -73,12 +71,22 @@ pub struct ChatTranscriptSnapshot {
     /// Refusal outcomes keyed to their durably completed assistant message.
     pub refusals: Vec<ChatRefusalSnapshot>,
     /// Ordered renderer-safe sources keyed to their assistant message.
-    pub citations: Vec<crate::AssistantCitationSnapshot>,
+    pub citations: Vec<ChatCitationSnapshot>,
     /// A renderer-safe historical projection. It contains fixed tool identity,
     /// closed previews and lifecycle timestamps only; canonical tool records
     /// never leave storage.
     pub tool_activity: Vec<ChatToolActivitySnapshot>,
     pub last_event_seq: i64,
+}
+
+/// One renderer-safe citation paired with its transcript message.
+///
+/// Message identity is transcript assembly metadata, not part of the citation
+/// shape exposed to renderer clients.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatCitationSnapshot {
+    pub message_id: MessageId,
+    pub citation: crate::AssistantCitationSnapshot,
 }
 
 /// One refused terminal outcome attached to its durable assistant output.
@@ -1407,7 +1415,6 @@ pub trait Store: Send + Sync {
         model: Option<Option<String>>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
         permission_mode: Option<Option<PermissionMode>>,
-        citation_format: Option<Option<crate::citation::CitationFormat>>,
     ) -> Result<bool>;
 
     /// Create a conversation output together with its first revision.
@@ -1451,14 +1458,6 @@ pub trait Store: Send + Sync {
 
     /// Fetch one revision by opaque id.
     async fn get_output_revision(&self, _id: OutputRevisionId) -> Result<Option<OutputRevision>> {
-        output_storage_unavailable()
-    }
-
-    /// List renderer-safe source citations for one immutable output revision.
-    async fn list_output_revision_citations(
-        &self,
-        _revision_id: OutputRevisionId,
-    ) -> Result<Vec<OutputCitationSnapshot>> {
         output_storage_unavailable()
     }
 
@@ -2186,7 +2185,7 @@ pub trait Store: Send + Sync {
         _steer_id: TurnSteerId,
         _attempt_event_ordinal: i32,
         _preceding_assistant: Option<&Message>,
-        _preceding_citations: &[crate::AssistantCitationReference],
+        _preceding_citations: &[crate::AssistantCitationInput],
         _now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<JournaledTurnSteerOutcome>> {
         turn_storage_unavailable()
@@ -2247,7 +2246,7 @@ pub trait Store: Send + Sync {
         expected_steer_revision: i64,
         now: chrono::DateTime<chrono::Utc>,
         output: &Message,
-        citations: &[crate::AssistantCitationReference],
+        citations: &[crate::AssistantCitationInput],
         usage: Usage,
         stop_reason: StopReason,
     ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
@@ -2277,7 +2276,7 @@ pub trait Store: Send + Sync {
         _expected_steer_revision: i64,
         _now: chrono::DateTime<chrono::Utc>,
         _output: &Message,
-        _citations: &[crate::AssistantCitationReference],
+        _citations: &[crate::AssistantCitationInput],
         _usage: Usage,
         _refusal: RefusalOutcome,
     ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
@@ -2456,7 +2455,7 @@ pub trait Store: Send + Sync {
     async fn append_assistant_message_with_citations(
         &self,
         message: &Message,
-        references: &[crate::AssistantCitationReference],
+        references: &[crate::AssistantCitationInput],
     ) -> Result<()> {
         if references.is_empty() {
             self.append_message(message).await
@@ -2472,7 +2471,7 @@ pub trait Store: Send + Sync {
     async fn append_claimed_assistant_message_with_citations(
         &self,
         _message: &Message,
-        _references: &[crate::AssistantCitationReference],
+        _references: &[crate::AssistantCitationInput],
         _lease_token: uuid::Uuid,
         _now: chrono::DateTime<chrono::Utc>,
     ) -> Result<AppendClaimedMessageOutcome> {
@@ -2650,48 +2649,22 @@ pub trait Store: Send + Sync {
         resolved_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<ResolveToolCallOutcome>;
 
-    /// Resolve one server search call and atomically retain its private evidence.
-    async fn resolve_server_tool_call_with_evidence(
-        &self,
-        id: CallId,
-        resolution: &ToolCallResolution,
-        resolved_at: chrono::DateTime<chrono::Utc>,
-        evidence: &[crate::RetrievalEvidenceInput],
-    ) -> Result<ResolveToolCallOutcome> {
-        if !evidence.is_empty() {
-            return Err(AgentError::Store(
-                "retrieval evidence persistence is unavailable".into(),
-            ));
-        }
-        self.resolve_server_tool_call(id, resolution, resolved_at)
-            .await
-    }
-
-    /// Resolve a server call, retaining its evidence and the renderer
-    /// projection of what it produced.
-    ///
-    /// Separate from [`Self::resolve_server_tool_call_with_evidence`] rather
-    /// than replacing it: most callers resolve a call that projects nothing,
-    /// and a store that cannot retain a projection should still resolve. The
-    /// default drops the projection, which costs the card on reload and
-    /// nothing else.
+    /// Resolve a server call and retain the renderer projection it produced.
     async fn resolve_server_tool_call_with_artifacts(
         &self,
         id: CallId,
         resolution: &ToolCallResolution,
         resolved_at: chrono::DateTime<chrono::Utc>,
-        evidence: &[crate::RetrievalEvidenceInput],
         _preview: Option<&crate::ToolResultPreview>,
     ) -> Result<ResolveToolCallOutcome> {
-        self.resolve_server_tool_call_with_evidence(id, resolution, resolved_at, evidence)
+        self.resolve_server_tool_call(id, resolution, resolved_at)
             .await
     }
 
-    /// Resolve a server tool result and retain its evidence only if the same
-    /// live turn lease that accepted the call still owns the turn. The result,
-    /// evidence, and lease comparison commit atomically.
+    /// Resolve a server tool result only if the same live turn lease that
+    /// accepted the call still owns the turn.
     #[allow(clippy::too_many_arguments)]
-    async fn resolve_claimed_server_tool_call_with_evidence(
+    async fn resolve_claimed_server_tool_call(
         &self,
         _id: CallId,
         _chat_id: ChatId,
@@ -2700,7 +2673,6 @@ pub trait Store: Send + Sync {
         _now: chrono::DateTime<chrono::Utc>,
         _resolution: &ToolCallResolution,
         _resolved_at: chrono::DateTime<chrono::Utc>,
-        _evidence: &[crate::RetrievalEvidenceInput],
     ) -> Result<ResolveToolCallOutcome> {
         turn_storage_unavailable()
     }
@@ -2717,10 +2689,9 @@ pub trait Store: Send + Sync {
         now: chrono::DateTime<chrono::Utc>,
         resolution: &ToolCallResolution,
         resolved_at: chrono::DateTime<chrono::Utc>,
-        evidence: &[crate::RetrievalEvidenceInput],
         _preview: Option<&crate::ToolResultPreview>,
     ) -> Result<ResolveToolCallOutcome> {
-        self.resolve_claimed_server_tool_call_with_evidence(
+        self.resolve_claimed_server_tool_call(
             id,
             chat_id,
             turn_id,
@@ -2728,7 +2699,6 @@ pub trait Store: Send + Sync {
             now,
             resolution,
             resolved_at,
-            evidence,
         )
         .await
     }
@@ -2749,13 +2719,6 @@ pub trait Store: Send + Sync {
         _resolved_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<ResolveToolCallOutcome> {
         turn_storage_unavailable()
-    }
-
-    /// Read private evidence for trusted server-side citation assembly.
-    async fn list_retrieval_evidence(&self, _id: CallId) -> Result<Vec<crate::RetrievalEvidence>> {
-        Err(AgentError::Store(
-            "retrieval evidence persistence is unavailable".into(),
-        ))
     }
 
     /// Resolve a pending client call under its exact unexpired executor lease.
@@ -2981,7 +2944,7 @@ pub trait Store: Send + Sync {
         turn_id: TurnId,
         lease_token: uuid::Uuid,
         _output: &Message,
-        citations: &[crate::AssistantCitationReference],
+        citations: &[crate::AssistantCitationInput],
         event: &AgentEvent,
     ) -> Result<Option<SequencedEvent>> {
         if citations.is_empty() {

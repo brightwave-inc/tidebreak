@@ -1,12 +1,10 @@
 import { useEffect, useState } from "react";
 
-import { HttpError, type DocumentDetail, type StructuredPathType } from "@/api";
+import { HttpError, type DocumentDetail } from "@/api";
 import { useApp } from "@/AppContext";
 import {
-  baseMediaType,
   DocumentDetails,
   isDocumentRenderable,
-  structuredKind,
   type DocumentView,
 } from "@/components/document/document-details";
 import { DocumentError } from "@/components/document/error";
@@ -90,27 +88,14 @@ export function DocumentDetailRoot({
   const placement = useCitationPlacement(documentID, citationId);
   const paginated = info != null && isPaginatedOriginalViewer(info.media_type);
   const citationPage =
-    placement?.page != null && paginated ? placement.page : undefined;
-  // Rectangles are only worth carrying where there is a page to draw them on;
-  // a citation into an unpaginated source has none, and most citations carry
-  // none at all.
-  const citationBounds =
-    citationPage != null && placement != null && placement.bounds.length > 0
-      ? placement.bounds
-      : undefined;
-
-  // A node path only opens a source the panel draws as a tree, and only in the
-  // notation that tree is addressed by. A JSON path handed to the XML viewer
-  // resolves to nothing, so a mismatch is treated as no path at all rather than
-  // as a highlight that silently never appears.
-  const treeKind = info ? structuredKind(baseMediaType(info.media_type)) : null;
-  const pathKind = treeViewerForPath(placement?.structuredPath?.pathType);
-  const citationPath =
-    placement?.structuredPath != null &&
-    hasOriginalDocumentTab &&
-    pathKind != null &&
-    pathKind === treeKind
-      ? placement.structuredPath.path
+    paginated && placement?.kind === "page"
+      ? placement.page
+      : paginated && placement?.kind === "pages"
+        ? placement.start
+        : undefined;
+  const citationLines =
+    placement?.kind === "lines"
+      ? { start: placement.start, end: placement.end }
       : undefined;
 
   // A cell range only opens a source the panel draws as a grid. A workbook
@@ -118,11 +103,15 @@ export function DocumentDetailRoot({
   // its citation, and lands on the extracted text where the rows it quoted are
   // highlighted instead.
   const citationCellRange =
-    placement?.cellRange != null &&
+    placement?.kind === "sheet" &&
     hasOriginalDocumentTab &&
     info != null &&
     isGridOriginalViewer(info.media_type)
-      ? placement.cellRange
+      ? {
+          sheetName: placement.sheet,
+          sheetIndex: null,
+          ...splitCells(placement.cells),
+        }
       : undefined;
 
   // Arriving from a citation, land on whichever view can show where it points:
@@ -137,12 +126,12 @@ export function DocumentDetailRoot({
   // showing nothing at all rather than saying what went wrong.
   const citationView: DocumentView | null = !placement
     ? null
-    : (citationPage != null ||
-          citationPath != null ||
-          citationCellRange != null) &&
+    : (citationPage != null || citationCellRange != null) &&
         hasOriginalDocumentTab
       ? "original_doc"
-      : "extracted_text";
+      : citationLines
+        ? "extracted_text"
+        : null;
 
   // Reset the view when the document changes. A format with no viewer has only
   // the extracted text to land on.
@@ -216,10 +205,8 @@ export function DocumentDetailRoot({
           info={info}
           view={view}
           hasOriginalDocumentTab={hasOriginalDocumentTab}
-          citationSpan={placement?.span}
-          highlightPath={citationPath}
+          targetLines={citationLines}
           targetPage={citationPage}
-          citationBounds={citationBounds}
           citationCellRange={citationCellRange}
         />
       ) : (
@@ -236,24 +223,9 @@ export function DocumentDetailRoot({
   );
 }
 
-/**
- * Which tree viewer reads a path of this notation, where one does.
- *
- * A notation this build does not know resolves to nothing rather than to a
- * guess, so a citation written by a newer server opens the source normally
- * instead of highlighting the wrong node.
- */
-function treeViewerForPath(
-  pathType: StructuredPathType | undefined,
-): "json" | "xml" | null {
-  switch (pathType) {
-    case "json_dot_notation":
-      return "json";
-    case "xml_xpath":
-      return "xml";
-    default:
-      return null;
-  }
+function splitCells(cells: string | null) {
+  const [startCell, endCell] = cells?.split(":", 2) ?? [null, null];
+  return { startCell, endCell: endCell ?? startCell };
 }
 
 /** Why the source did not load, and whether asking again could help. */

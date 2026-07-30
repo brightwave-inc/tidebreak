@@ -62,48 +62,11 @@ export function hydrateTranscriptHistory(
       sources:
         message.role === "assistant"
           ? (message.citations ?? []).map(
-              ({
-                id,
-                ordinal,
-                document_id,
-                span,
-                excerpt,
-                heading,
-                location,
-              }) => ({
+              ({ id, ordinal, document_id, locator }) => ({
                 id,
                 ordinal,
                 documentId: document_id,
-                span: { start: span.start, end: span.end },
-                excerpt,
-                heading,
-                // A row is placed by pages and rectangles, which is what a
-                // document-content citation carries. The other evidence kinds
-                // address their source in their own terms and have no page to
-                // open at, so they render as an unpaginated source does.
-                pages:
-                  location.kind === "document_content" ? location.pages : [],
-                bounds:
-                  location.kind === "document_content" ? location.bounds : [],
-                // A structured source is opened at a node instead: the tree
-                // viewers navigate by path, and the span alone names nothing
-                // they can expand or scroll to.
-                structuredPath:
-                  location.kind === "structured_path"
-                    ? { path: location.path, pathType: location.path_type }
-                    : undefined,
-                // A workbook is opened at a range: the sheet selects the grid
-                // and the cells select the block on it, neither of which a byte
-                // offset into the extracted text can express.
-                cellRange:
-                  location.kind === "spreadsheet_cell_range"
-                    ? {
-                        startCell: location.start_cell,
-                        endCell: location.end_cell,
-                        sheetIndex: location.sheet_index,
-                        sheetName: location.sheet_name,
-                      }
-                    : undefined,
+                locator,
               }),
             )
           : [],

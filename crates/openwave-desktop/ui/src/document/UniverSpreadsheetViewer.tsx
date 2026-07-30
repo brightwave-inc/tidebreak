@@ -442,16 +442,6 @@ function applyHighlight(
   instance: UniverInstance,
   highlightRange: SheetHighlightRange,
 ) {
-  if (!highlightRange.startCell) return;
-
-  const start = parseCellAddress(highlightRange.startCell);
-  if (!start) return;
-
-  const end = highlightRange.endCell
-    ? parseCellAddress(highlightRange.endCell)
-    : start;
-  if (!end) return;
-
   const { api: univerAPI, workbookData } = instance;
   const activeWorkbook = univerAPI.getActiveWorkbook();
   if (!activeWorkbook) return;
@@ -469,6 +459,14 @@ function applyHighlight(
   if (targetSheetName) {
     activeWorkbook.getSheetByName(targetSheetName)?.activate();
   }
+
+  if (!highlightRange.startCell) return;
+  const start = parseCellAddress(highlightRange.startCell);
+  if (!start) return;
+  const end = highlightRange.endCell
+    ? parseCellAddress(highlightRange.endCell)
+    : start;
+  if (!end) return;
 
   const activeSheet = activeWorkbook.getActiveSheet();
   if (!activeSheet) return;

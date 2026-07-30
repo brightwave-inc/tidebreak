@@ -2,6 +2,7 @@ import {
   RENDERER_TOOL_NAMES,
   type ApprovalClass,
   type AssistantCitationSnapshot,
+  type CitationLocator as WireCitationLocator,
   type ChatMessageSnapshot,
   type PendingApprovalSnapshot,
   type AgentActivitySnapshot,
@@ -50,9 +51,6 @@ import {
   type UserQuestionOption as WireUserQuestionOption,
   type ChatToolActivitySnapshot,
   type ChatToolActivityStatus,
-  type CitationFormat as WireCitationFormat,
-  type CitationPageBounds as WireCitationPageBounds,
-  type StructuredPathType as WireStructuredPathType,
   type RendererAgentEvent,
   type RendererChatFrame,
   type RendererChatMetadata,
@@ -141,9 +139,6 @@ export type ReasoningEffort = WireReasoningEffort;
 
 /** How much a chat lets the agent do between approvals. */
 export type PermissionMode = WirePermissionMode;
-
-/** How a turn asks the model to cite: anchored inline, or listed at the foot. */
-export type CitationFormat = WireCitationFormat;
 
 export type ProviderInfo = WireProviderInfo;
 
@@ -245,20 +240,7 @@ export type ChatMessage = Omit<
  * deliberately skips `message_id` on the wire. Do not reintroduce it.
  */
 export type ChatMessageCitation = AssistantCitationSnapshot;
-
-/**
- * One rectangle of a cited passage, on the page it falls on.
- *
- * The rectangle is normalized to the page box in ten-thousandths, so a viewer
- * places it as a fraction of whatever size the page was rendered at.
- */
-export type CitationPageBounds = WireCitationPageBounds;
-
-/**
- * How a citation's node path is written: dotted keys and indices for JSON, an
- * XPath expression for XML and HTML.
- */
-export type StructuredPathType = WireStructuredPathType;
+export type CitationLocator = WireCitationLocator;
 
 /** One durable image identity in a historical user message. */
 export type ChatMessageImageAttachment = WireTranscriptImageAttachment;
@@ -683,7 +665,6 @@ export class ApiClient {
    */
   putSettings(body: {
     model?: ModelSelectionKey | null;
-    citation_format?: CitationFormat | null;
   }): Promise<RuntimeSettings> {
     return this.json("/settings", {
       method: "PUT",
@@ -888,7 +869,6 @@ export class ApiClient {
     settings?: {
       reasoningEffort?: ReasoningEffort | null;
       permissionMode?: PermissionMode | null;
-      citationFormat?: CitationFormat | null;
     },
   ): Promise<Chat> {
     return this.json("/chats", {
@@ -899,7 +879,6 @@ export class ApiClient {
         project_id: projectId || undefined,
         reasoning_effort: settings?.reasoningEffort ?? undefined,
         permission_mode: settings?.permissionMode ?? undefined,
-        citation_format: settings?.citationFormat ?? undefined,
       }),
     });
   }
@@ -1095,17 +1074,6 @@ export class ApiClient {
       method: "PATCH",
       headers: this.headers(true),
       body: JSON.stringify({ permission_mode: permissionMode }),
-    });
-  }
-
-  patchChatCitationFormat(
-    chatId: string,
-    citationFormat: CitationFormat | null,
-  ): Promise<Chat> {
-    return this.json(`/chats/${chatId}`, {
-      method: "PATCH",
-      headers: this.headers(true),
-      body: JSON.stringify({ citation_format: citationFormat }),
     });
   }
 

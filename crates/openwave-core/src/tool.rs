@@ -407,9 +407,6 @@ pub struct ToolOutput {
     /// still surface its view; never part of the model-facing content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_view: Option<Box<ToolUiView>>,
-    /// Server-private durable sidecar committed with the canonical tool result.
-    #[serde(skip)]
-    pub private_evidence: Vec<crate::RetrievalEvidenceInput>,
 }
 
 /// A tool's declared MCP Apps view: which configured server can serve it and
@@ -436,7 +433,6 @@ impl ToolOutput {
             is_error: false,
             error_category: None,
             ui_view: None,
-            private_evidence: Vec::new(),
         }
     }
 
@@ -457,7 +453,6 @@ impl ToolOutput {
             is_error: true,
             error_category: Some(category),
             ui_view: None,
-            private_evidence: Vec::new(),
         }
     }
 
@@ -508,13 +503,6 @@ impl ToolOutput {
         }
         self
     }
-
-    /// Attach bounded evidence that never serializes into events or renderer DTOs.
-    #[must_use]
-    pub fn with_private_evidence(mut self, evidence: Vec<crate::RetrievalEvidenceInput>) -> Self {
-        self.private_evidence = evidence;
-        self
-    }
 }
 
 /// Execution context handed to a tool for one invocation.
@@ -530,9 +518,6 @@ pub struct ToolCtx {
     /// Stable identity of the canonical tool call, when execution came from an
     /// agent turn. Legacy direct/MCP contexts leave this absent.
     pub call_id: Option<CallId>,
-    /// The citation grammar a source-bearing tool teaches this turn. Already
-    /// resolved against the chat's choice and the global default.
-    pub citation_format: crate::citation::CitationFormat,
     #[cfg(feature = "tools")]
     workspace: WorkspaceAccess,
 }
@@ -551,7 +536,6 @@ impl std::fmt::Debug for ToolCtx {
             .field("chat_id", &self.chat_id)
             .field("project_id", &self.project_id)
             .field("call_id", &self.call_id)
-            .field("citation_format", &self.citation_format)
             .field("private_scratch_available", &self.scratch_available())
             .finish_non_exhaustive()
     }
@@ -572,7 +556,6 @@ impl ToolCtx {
                 chat_id,
                 project_id,
                 call_id: None,
-                citation_format: crate::citation::CitationFormat::default(),
                 #[cfg(feature = "tools")]
                 workspace: WorkspaceAccess::Unavailable(_error.to_string().into()),
             },
@@ -591,7 +574,6 @@ impl ToolCtx {
             chat_id,
             project_id,
             call_id: None,
-            citation_format: crate::citation::CitationFormat::default(),
             #[cfg(feature = "tools")]
             workspace: WorkspaceAccess::Open(Arc::new(workspace)),
         })
@@ -608,7 +590,6 @@ impl ToolCtx {
             chat_id,
             project_id,
             call_id: None,
-            citation_format: crate::citation::CitationFormat::default(),
             #[cfg(feature = "tools")]
             workspace: WorkspaceAccess::Open(scratch.workspace),
         }
@@ -624,7 +605,6 @@ impl ToolCtx {
             chat_id,
             project_id,
             call_id: None,
-            citation_format: crate::citation::CitationFormat::default(),
             #[cfg(feature = "tools")]
             workspace: WorkspaceAccess::Unavailable("private scratch is unavailable".into()),
         }
@@ -634,13 +614,6 @@ impl ToolCtx {
     #[must_use]
     pub fn with_call_id(mut self, call_id: CallId) -> Self {
         self.call_id = Some(call_id);
-        self
-    }
-
-    /// Set the citation grammar source-bearing tools teach this turn.
-    #[must_use]
-    pub fn with_citation_format(mut self, format: crate::citation::CitationFormat) -> Self {
-        self.citation_format = format;
         self
     }
 
@@ -840,33 +813,6 @@ mod tests {
 
         let with = ToolOutput::text("ok").with_data(serde_json::json!({"k": 1}));
         assert_eq!(with.data, Some(serde_json::json!({"k": 1})));
-    }
-
-    #[test]
-    fn private_evidence_never_serializes() {
-        let document_id = crate::DocumentId::new();
-        let output =
-            ToolOutput::text("ok").with_private_evidence(vec![crate::RetrievalEvidenceInput {
-                rank: 1,
-                source_token: uuid::Uuid::new_v4(),
-                document_id,
-                generation: crate::DocumentGeneration {
-                    content_revision: 1,
-                    revision_token: uuid::Uuid::new_v4(),
-                },
-                chunk_id: crate::ChunkId::derive(document_id, 0, 6),
-                span: crate::ByteSpan::new(0, 6),
-                snippet: "secret".into(),
-                location: crate::EvidenceLocation::DocumentContent {
-                    heading_path: Vec::new(),
-                    source_regions: Vec::new(),
-                },
-                source: crate::RetrievalEvidenceSource::Inline,
-            }]);
-        let json = serde_json::to_string(&output).unwrap();
-        assert!(!json.contains("secret"));
-        assert!(!json.contains("private_evidence"));
-        assert_eq!(output.private_evidence.len(), 1);
     }
 
     #[test]

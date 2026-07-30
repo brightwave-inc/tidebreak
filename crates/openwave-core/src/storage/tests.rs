@@ -952,7 +952,6 @@ impl Store for MemStore {
         model: Option<Option<String>>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
         permission_mode: Option<Option<PermissionMode>>,
-        citation_format: Option<Option<crate::citation::CitationFormat>>,
     ) -> Result<bool> {
         let mut chats = self.chats.lock().unwrap();
         let Some(chat) = chats.get_mut(&id) else {
@@ -969,9 +968,6 @@ impl Store for MemStore {
         }
         if let Some(permission_mode) = permission_mode {
             chat.permission_mode = permission_mode;
-        }
-        if let Some(citation_format) = citation_format {
-            chat.citation_format = citation_format;
         }
         Ok(true)
     }
@@ -1591,7 +1587,6 @@ fn store_is_object_safe_and_roundtrips() {
         model: None,
         reasoning_effort: None,
         permission_mode: None,
-        citation_format: None,
         attachment_revision: 0,
         root_attachments: Vec::new(),
         created_at: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap(),

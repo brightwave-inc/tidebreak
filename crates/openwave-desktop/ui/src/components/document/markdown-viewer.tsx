@@ -14,7 +14,6 @@ import {
   pieceStartOffsets,
   rangeWithinPiece,
 } from "./citationMark";
-import { charRangeForByteSpan, type CitationSpan } from "./citationSpan";
 import { FileDownloadProgressIndicator } from "./FileDownloadProgress";
 import { MarkdownOutline } from "./MarkdownOutline";
 
@@ -62,15 +61,8 @@ interface Props extends HTMLAttributes<HTMLDivElement> {
   client: Pick<ApiClient, "getChatDocumentFile">;
   chatId: string;
   documentID: string;
-  /**
-   * Byte range of the cited passage, when a citation led here.
-   *
-   * A citation reports its span in the text of record, which for a text-shaped
-   * source is the file itself: nothing is extracted out of it, so the offsets
-   * address the very characters this viewer draws. That is what lets the mark
-   * follow the reader from the extracted text onto the original.
-   */
-  citationSpan?: CitationSpan;
+  /** Model-authored line range to reveal when a citation led here. */
+  targetLines?: Readonly<{ start: number; end: number }>;
   /** Render the file as markdown rather than as the text it literally is. */
   markdown?: boolean;
 }
@@ -80,7 +72,7 @@ export function MarkdownViewer({
   client,
   chatId,
   documentID,
-  citationSpan,
+  targetLines,
   markdown = false,
   className,
   ...props
@@ -110,16 +102,12 @@ export function MarkdownViewer({
       ?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, []);
 
-  // The span is re-derived from the transcript on every update it makes, so what
-  // this depends on is the offsets rather than the object carrying them.
-  const spanStart = citationSpan?.start;
-  const spanEnd = citationSpan?.end;
   const cited = useMemo(
     () =>
-      spanStart != null && spanEnd != null && fullContent
-        ? charRangeForByteSpan(fullContent, { start: spanStart, end: spanEnd })
+      targetLines && fullContent
+        ? characterRangeForLines(fullContent, targetLines)
         : null,
-    [fullContent, spanStart, spanEnd],
+    [fullContent, targetLines],
   );
 
   const chunkStarts = useMemo(() => pieceStartOffsets(chunks), [chunks]);
@@ -277,4 +265,18 @@ export function MarkdownViewer({
       </div>
     </div>
   );
+}
+
+function characterRangeForLines(
+  content: string,
+  lines: Readonly<{ start: number; end: number }>,
+) {
+  const starts = [0];
+  for (let index = 0; index < content.length; index += 1) {
+    if (content[index] === "\n") starts.push(index + 1);
+  }
+  if (lines.start > starts.length) return null;
+  const start = starts[Math.max(0, lines.start - 1)] ?? 0;
+  const end = starts[Math.min(lines.end, starts.length)] ?? content.length;
+  return { start, end };
 }

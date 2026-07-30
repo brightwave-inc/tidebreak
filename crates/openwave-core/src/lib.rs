@@ -86,11 +86,9 @@ pub use approval::{
 pub use blob::FsBlobStore;
 pub use cancel::{CancelToken, Cancelled};
 pub use citation::{
-    citation_authoring_instruction, format_citation_directive, format_citation_reference,
-    format_source_reference, parse_assistant_citations, AssistantCitationReference,
-    AssistantCitationSnapshot, CitationFormat, CitationLocation, CitationPageBounds, CitationSpan,
-    ParsedAssistantCitations, MAX_ASSISTANT_CITATIONS, MAX_CITATION_BOUNDS,
-    MAX_CITATION_EXCERPT_CHARS, MAX_CITATION_HEADING_CHARS, MAX_CITATION_PAGES,
+    citation_authoring_instruction, format_citation_directive, parse_assistant_citations,
+    AssistantCitationInput, AssistantCitationSnapshot, CitationLocator, ParsedAssistantCitations,
+    MAX_ASSISTANT_CITATIONS,
 };
 pub use client_tools::{
     import_connected_file_tool_spec, list_connected_folders_tool_spec, list_folder_tool_spec,
@@ -114,10 +112,9 @@ pub use deliverable::{
     deliverable_media_type, media_type_is_text, output_revision_relative_path,
     revision_byte_ceiling, validate_binary_deliverable, validate_deliverable_media_type,
     validate_deliverable_name, validate_portable_filename, CreateOutput, DeliverableKind,
-    NewOutputRevision, OutputCitationSnapshot, OutputRecord, OutputRevision, RevisionProducer,
-    DELIVERABLES_DIRECTORY, MAX_BINARY_DELIVERABLE_BYTES, MAX_DELIVERABLE_BYTES,
-    MAX_DELIVERABLE_MEDIA_TYPE_CHARS, MAX_DELIVERABLE_NAME_CHARS, MAX_OUTPUT_CITATIONS,
-    MAX_OUTPUT_REVISIONS, OUTPUTS_DIRECTORY,
+    NewOutputRevision, OutputRecord, OutputRevision, RevisionProducer, DELIVERABLES_DIRECTORY,
+    MAX_BINARY_DELIVERABLE_BYTES, MAX_DELIVERABLE_BYTES, MAX_DELIVERABLE_MEDIA_TYPE_CHARS,
+    MAX_DELIVERABLE_NAME_CHARS, MAX_OUTPUT_REVISIONS, OUTPUTS_DIRECTORY,
 };
 #[cfg(feature = "tools")]
 pub use deliverable_acceptance::{
@@ -145,9 +142,8 @@ pub use model::{
     ClientToolCallRequest, DelegatedFileReadClaim, DocumentGeneration, DocumentJob,
     DocumentJobKind, DocumentJobStatus, DocumentListCursor, DocumentParseOutput,
     DocumentProcessingStatus, DocumentRecord, DocumentScope, DocumentSourceBlob,
-    DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, EvidenceLocation, Message,
-    MessageAttachment, PageBounds, PermissionMode, Project, ReasoningEffort, RetrievalEvidence,
-    RetrievalEvidenceInput, RetrievalEvidenceSource, Role, RootAttachmentChange,
+    DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, MessageAttachment,
+    PermissionMode, Project, ReasoningEffort, Role, RootAttachmentChange,
     RootAttachmentChangeAction, RootAttachmentChangeFailure, RootAttachmentChangePhase,
     RootAttachmentChangeTerminal, RootAttachmentOrigin, RootAttachmentSubjectKind,
     SandboxAgentAdmission, SandboxSpawnCheckpoint, SandboxSpawnCheckpointRequest, SandboxToolCall,
@@ -156,7 +152,7 @@ pub use model::{
     ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnAgentRunWait, TurnAgentRunWaitSet,
     TurnAgentRunWaitStatus, TurnCheckpointProgress, TurnClientWait, TurnClientWaitStatus,
     TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer, TurnSteerStatus,
-    MAX_ATTACHMENT_REVISION, MAX_MESSAGE_ATTACHMENTS, MAX_ROOT_ATTACHMENTS, PAGE_BOUNDS_SCALE,
+    MAX_ATTACHMENT_REVISION, MAX_MESSAGE_ATTACHMENTS, MAX_ROOT_ATTACHMENTS,
 };
 pub use preview::{
     format_bytes, ResultEntry, ResultEntryKind, ResultFailure, ToolActionPreview,
@@ -178,8 +174,8 @@ pub use storage::{
     AcceptAgentRunOutcome, AcceptClaimedToolCallOutcome, AcceptSandboxAgentRunAndParkTurnOutcome,
     AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome, AdmitSandboxAgentRunOutcome,
     AnswerUserQuestionsOutcome, AppendClaimedMessageOutcome, ApplyTurnSteerOutcome,
-    BeginRootAttachmentChangeOutcome, BlobMetadata, BlobStore, BlobStream, ChatRefusalSnapshot,
-    ChatToolActivitySnapshot, ChatToolActivityStatus, ChatTranscriptSnapshot,
+    BeginRootAttachmentChangeOutcome, BlobMetadata, BlobStore, BlobStream, ChatCitationSnapshot,
+    ChatRefusalSnapshot, ChatToolActivitySnapshot, ChatToolActivityStatus, ChatTranscriptSnapshot,
     CheckpointSandboxSpawnOutcome, ClaimAgentRunInboxOutcome, ClaimClientToolCallOutcome,
     ClaimDelegatedFileReadOutcome, ClaimSandboxToolCallOutcome, ClaimScanTerminalEvent,
     ClaimTurnRunOutcome, ClientToolCallClaim, CompleteTurnRunOutcome,

@@ -244,11 +244,7 @@ describe("MessageBubble", () => {
             id: "private-citation-id",
             ordinal: 1,
             documentId: "document-1",
-            span: { start: 0, end: 20 },
-            excerpt: "First source excerpt",
-            heading: "First source",
-            pages: [4],
-            bounds: [],
+            locator: { kind: "page", page: 4 },
           },
         ],
       },
@@ -279,13 +275,12 @@ describe("MessageBubble", () => {
     );
 
     expect(markup.indexOf("First answer")).toBeLessThan(
-      markup.indexOf("First source excerpt"),
+      markup.indexOf("Page 4"),
     );
-    expect(markup.indexOf("First source excerpt")).toBeLessThan(
+    expect(markup.indexOf("Page 4")).toBeLessThan(
       markup.indexOf("Second answer"),
     );
     expect(markup).not.toContain("private-citation-id");
-    expect(markup).not.toContain("ow-source");
   });
 
   it("shows settled message actions without treating the active response as finished", () => {

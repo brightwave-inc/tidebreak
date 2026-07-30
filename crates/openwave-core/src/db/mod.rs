@@ -17,9 +17,7 @@ use sea_orm_migration::MigratorTrait;
 use serde_json::Value;
 
 use crate::approval::{ApprovalDecision, ApprovalRequest, ToolApproval};
-use crate::deliverable::{
-    CreateOutput, NewOutputRevision, OutputCitationSnapshot, OutputRecord, OutputRevision,
-};
+use crate::deliverable::{CreateOutput, NewOutputRevision, OutputRecord, OutputRevision};
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 #[cfg(test)]
@@ -1111,7 +1109,6 @@ impl Store for DbStore {
         model: Option<Option<String>>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
         permission_mode: Option<Option<PermissionMode>>,
-        citation_format: Option<Option<crate::citation::CitationFormat>>,
     ) -> Result<bool> {
         ops::conversation::update_chat_metadata(
             self,
@@ -1120,7 +1117,6 @@ impl Store for DbStore {
             model,
             reasoning_effort,
             permission_mode,
-            citation_format,
         )
         .await
     }
@@ -1170,13 +1166,6 @@ impl Store for DbStore {
 
     async fn get_output_revision(&self, id: OutputRevisionId) -> Result<Option<OutputRevision>> {
         ops::output::get_output_revision(self, id).await
-    }
-
-    async fn list_output_revision_citations(
-        &self,
-        revision_id: OutputRevisionId,
-    ) -> Result<Vec<OutputCitationSnapshot>> {
-        ops::output::list_output_revision_citations(self, revision_id).await
     }
 
     async fn delete_output(&self, id: OutputId, deleted_at: chrono::DateTime<Utc>) -> Result<bool> {
@@ -1714,7 +1703,7 @@ impl Store for DbStore {
         steer_id: TurnSteerId,
         attempt_event_ordinal: i32,
         preceding_assistant: Option<&Message>,
-        preceding_citations: &[crate::AssistantCitationReference],
+        preceding_citations: &[crate::AssistantCitationInput],
         now: chrono::DateTime<Utc>,
     ) -> Result<Option<JournaledTurnSteerOutcome>> {
         ops::turn::apply_turn_steer(
@@ -1772,7 +1761,7 @@ impl Store for DbStore {
         expected_steer_revision: i64,
         now: chrono::DateTime<Utc>,
         output: &Message,
-        citations: &[crate::AssistantCitationReference],
+        citations: &[crate::AssistantCitationInput],
         usage: Usage,
         stop_reason: StopReason,
     ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
@@ -1797,7 +1786,7 @@ impl Store for DbStore {
         expected_steer_revision: i64,
         now: chrono::DateTime<Utc>,
         output: &Message,
-        citations: &[crate::AssistantCitationReference],
+        citations: &[crate::AssistantCitationInput],
         usage: Usage,
         refusal: crate::RefusalOutcome,
     ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
@@ -1966,7 +1955,7 @@ impl Store for DbStore {
     async fn append_assistant_message_with_citations(
         &self,
         message: &Message,
-        references: &[crate::AssistantCitationReference],
+        references: &[crate::AssistantCitationInput],
     ) -> Result<()> {
         ops::citation::append_assistant_message(self, message, references).await
     }
@@ -1974,7 +1963,7 @@ impl Store for DbStore {
     async fn append_claimed_assistant_message_with_citations(
         &self,
         message: &Message,
-        references: &[crate::AssistantCitationReference],
+        references: &[crate::AssistantCitationInput],
         lease_token: uuid::Uuid,
         now: chrono::DateTime<Utc>,
     ) -> Result<AppendClaimedMessageOutcome> {
@@ -2131,38 +2120,18 @@ impl Store for DbStore {
         ops::client_execution::resolve_server_tool_call(self, id, resolution, resolved_at).await
     }
 
-    async fn resolve_server_tool_call_with_evidence(
-        &self,
-        id: CallId,
-        resolution: &ToolCallResolution,
-        resolved_at: chrono::DateTime<Utc>,
-        evidence: &[crate::RetrievalEvidenceInput],
-    ) -> Result<ResolveToolCallOutcome> {
-        ops::client_execution::resolve_server_tool_call_with_evidence(
-            self,
-            id,
-            resolution,
-            resolved_at,
-            evidence,
-            None,
-        )
-        .await
-    }
-
     async fn resolve_server_tool_call_with_artifacts(
         &self,
         id: CallId,
         resolution: &ToolCallResolution,
         resolved_at: chrono::DateTime<Utc>,
-        evidence: &[crate::RetrievalEvidenceInput],
         preview: Option<&crate::ToolResultPreview>,
     ) -> Result<ResolveToolCallOutcome> {
-        ops::client_execution::resolve_server_tool_call_with_evidence(
+        ops::client_execution::resolve_server_tool_call_with_preview(
             self,
             id,
             resolution,
             resolved_at,
-            evidence,
             preview,
         )
         .await
@@ -2178,10 +2147,9 @@ impl Store for DbStore {
         now: chrono::DateTime<Utc>,
         resolution: &ToolCallResolution,
         resolved_at: chrono::DateTime<Utc>,
-        evidence: &[crate::RetrievalEvidenceInput],
         preview: Option<&crate::ToolResultPreview>,
     ) -> Result<ResolveToolCallOutcome> {
-        ops::client_execution::resolve_claimed_server_tool_call_with_evidence(
+        ops::client_execution::resolve_claimed_server_tool_call(
             self,
             id,
             chat_id,
@@ -2190,14 +2158,13 @@ impl Store for DbStore {
             now,
             resolution,
             resolved_at,
-            evidence,
             preview,
         )
         .await
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn resolve_claimed_server_tool_call_with_evidence(
+    async fn resolve_claimed_server_tool_call(
         &self,
         id: CallId,
         chat_id: ChatId,
@@ -2206,9 +2173,8 @@ impl Store for DbStore {
         now: chrono::DateTime<Utc>,
         resolution: &ToolCallResolution,
         resolved_at: chrono::DateTime<Utc>,
-        evidence: &[crate::RetrievalEvidenceInput],
     ) -> Result<ResolveToolCallOutcome> {
-        ops::client_execution::resolve_claimed_server_tool_call_with_evidence(
+        ops::client_execution::resolve_claimed_server_tool_call(
             self,
             id,
             chat_id,
@@ -2217,7 +2183,6 @@ impl Store for DbStore {
             now,
             resolution,
             resolved_at,
-            evidence,
             None,
         )
         .await
@@ -2245,10 +2210,6 @@ impl Store for DbStore {
             resolved_at,
         )
         .await
-    }
-
-    async fn list_retrieval_evidence(&self, id: CallId) -> Result<Vec<crate::RetrievalEvidence>> {
-        ops::client_execution::list_retrieval_evidence(self, id).await
     }
 
     async fn resolve_client_tool_call_and_append_event(
@@ -2434,7 +2395,7 @@ impl Store for DbStore {
         turn_id: TurnId,
         lease_token: uuid::Uuid,
         output: &Message,
-        citations: &[crate::AssistantCitationReference],
+        citations: &[crate::AssistantCitationInput],
         event: &AgentEvent,
     ) -> Result<Option<SequencedEvent>> {
         ops::turn::recover_exact_completed_turn_event(

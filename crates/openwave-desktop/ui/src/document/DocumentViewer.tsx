@@ -12,7 +12,7 @@
 import { lazy, Suspense } from "react";
 import { Loader2Icon } from "lucide-react";
 
-import type { ApiClient, CitationPageBounds } from "@/api";
+import type { ApiClient } from "@/api";
 import type { SheetHighlightRange } from "@/document/UniverSpreadsheetViewer";
 
 // pdf.js is a large dependency and most sessions never open a PDF, so it is
@@ -94,11 +94,6 @@ interface DocumentViewerProps {
   /** Open on this page the first time it is requested for this document. */
   targetPage?: number;
   /**
-   * Rectangles of a cited passage to mark on the page it was recorded on.
-   * Only a paginated viewer has anywhere to draw them.
-   */
-  citationBounds?: readonly CitationPageBounds[];
-  /**
    * Cells of a cited range to select and scroll to. Only a grid viewer has
    * anywhere to put them.
    */
@@ -112,7 +107,6 @@ export function DocumentViewer({
   documentId,
   mediaType,
   targetPage,
-  citationBounds,
   citationCellRange,
   className,
 }: DocumentViewerProps) {
@@ -126,7 +120,6 @@ export function DocumentViewer({
           chatId={chatId}
           documentId={documentId}
           targetPage={targetPage}
-          highlights={citationBounds}
           className={className}
         />
       </ViewerBoundary>

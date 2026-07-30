@@ -11,7 +11,7 @@
 import { Loader2Icon } from "lucide-react";
 import { lazy, Suspense, useEffect, useMemo, useRef } from "react";
 
-import type { CitationPageBounds, DocumentDetail } from "@/api";
+import type { DocumentDetail } from "@/api";
 import { useApp } from "@/AppContext";
 import {
   DocumentViewer,
@@ -24,7 +24,6 @@ import {
   CITATION_MARK_LABEL,
   CITATION_MARK_STYLE,
 } from "./citationMark";
-import { charRangeForByteSpan, type CitationSpan } from "./citationSpan";
 import { DocumentError } from "./error";
 import { ImageViewer } from "./image-viewer";
 import { MarkdownViewer } from "./markdown-viewer";
@@ -84,30 +83,10 @@ type DocumentDetailsProps = {
   info: DocumentDetail;
   view: DocumentView;
   hasOriginalDocumentTab?: boolean;
-  /**
-   * Node to reveal in a tree viewer, when opened from a citation: a
-   * dot-notation path for JSON, an XPath expression for XML.
-   *
-   * Recorded when the source was parsed and carried on the citation beside its
-   * span, so a citation into a tree opens at the node it quoted rather than at
-   * the top of the file. Absent for a citation into a source with no tree, and
-   * for one made before its source's paths were recorded.
-   */
-  highlightPath?: string;
-  /**
-   * Byte range of the cited passage in the text of record, when opened from a
-   * citation. Highlighted in the extracted text, and in a text-shaped original,
-   * whose text of record is the file verbatim.
-   */
-  citationSpan?: CitationSpan;
+  /** Model-authored line range to reveal in a text view. */
+  targetLines?: Readonly<{ start: number; end: number }>;
   /** Page of a paginated original to open on, when opened from a citation. */
   targetPage?: number;
-  /**
-   * Where the cited passage sits on those pages, for a source parsed that
-   * finely. Drawn over the rendered page; empty for a page-granular citation,
-   * which opens on its page with nothing marked on it.
-   */
-  citationBounds?: readonly CitationPageBounds[];
   /**
    * Cells of a grid original to select and scroll to, when opened from a
    * citation into a workbook. Recorded when the workbook was read, so the range
@@ -131,10 +110,8 @@ export function DocumentDetails({
   info,
   view,
   hasOriginalDocumentTab,
-  highlightPath,
-  citationSpan,
+  targetLines,
   targetPage,
-  citationBounds,
   citationCellRange,
 }: DocumentDetailsProps) {
   const { client } = useApp();
@@ -152,7 +129,6 @@ export function DocumentDetails({
               documentId={info.document_id}
               mediaType={type}
               targetPage={targetPage}
-              citationBounds={citationBounds}
               citationCellRange={citationCellRange}
               className="bg-page-background grow p-4 pt-2"
             />
@@ -170,7 +146,6 @@ export function DocumentDetails({
                   client={client}
                   chatId={chatId}
                   documentID={info.document_id}
-                  highlightPath={highlightPath}
                   className="grow"
                 />
               ) : (
@@ -178,7 +153,6 @@ export function DocumentDetails({
                   client={client}
                   chatId={chatId}
                   documentID={info.document_id}
-                  highlightPath={highlightPath}
                   className="grow"
                 />
               )}
@@ -191,7 +165,7 @@ export function DocumentDetails({
               client={client}
               chatId={chatId}
               documentID={info.document_id}
-              citationSpan={citationSpan}
+              targetLines={targetLines}
               markdown={type === "text/markdown"}
               className="bg-page-background grow"
             />
@@ -199,7 +173,7 @@ export function DocumentDetails({
         </>
       )}
       {view === "extracted_text" && (
-        <ExtractedText info={info} citationSpan={citationSpan} />
+        <ExtractedText info={info} targetLines={targetLines} />
       )}
 
     </div>
@@ -224,21 +198,14 @@ function ViewerLoading() {
  */
 function ExtractedText({
   info,
-  citationSpan,
+  targetLines,
 }: {
   info: DocumentDetail;
-  citationSpan?: CitationSpan;
+  targetLines?: Readonly<{ start: number; end: number }>;
 }) {
-  // The span is derived afresh from the transcript on every update it makes, so
-  // the offsets are what this depends on rather than the object holding them.
-  const spanStart = citationSpan?.start;
-  const spanEnd = citationSpan?.end;
   const cited = useMemo(
-    () =>
-      spanStart != null && spanEnd != null
-        ? charRangeForByteSpan(info.content, { start: spanStart, end: spanEnd })
-        : null,
-    [info.content, spanStart, spanEnd],
+    () => (targetLines ? characterRangeForLines(info.content, targetLines) : null),
+    [info.content, targetLines],
   );
 
   const citedRef = useRef<HTMLElement | null>(null);
@@ -283,4 +250,18 @@ function ExtractedText({
       </pre>
     </div>
   );
+}
+
+function characterRangeForLines(
+  content: string,
+  lines: Readonly<{ start: number; end: number }>,
+) {
+  const starts = [0];
+  for (let index = 0; index < content.length; index += 1) {
+    if (content[index] === "\n") starts.push(index + 1);
+  }
+  if (lines.start > starts.length) return null;
+  const start = starts[Math.max(0, lines.start - 1)] ?? 0;
+  const end = starts[Math.min(lines.end, starts.length)] ?? content.length;
+  return { start, end };
 }

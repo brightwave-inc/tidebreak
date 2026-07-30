@@ -19,7 +19,6 @@ mod blob_orphan_auditor;
 mod blob_retirement_worker;
 mod bus;
 mod chat_titling;
-mod citation_format;
 /// Host-owned code-execution provider selection and policy.
 pub mod code_execution;
 mod desktop_schema;

@@ -37,10 +37,7 @@ use crate::approval::{
     ApprovalRequiredPublication, RefuseGate, StandingGrants, ToolApprovalKind,
 };
 use crate::cancel::CancelToken;
-use crate::citation::{
-    classify_source_reference_candidate, parse_assistant_citations, rebind_citation_ids,
-    AssistantCitationReference, SourceReferenceCandidate,
-};
+use crate::citation::{parse_assistant_citations, AssistantCitationInput};
 use crate::context;
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
@@ -384,9 +381,6 @@ pub struct AgentConfig {
     /// Reasoning-effort hint for models that expose the control; ignored by the
     /// rest. `None` leaves the provider default in force.
     pub reasoning_effort: Option<crate::model::ReasoningEffort>,
-    /// The citation grammar source-bearing tools teach this turn, already
-    /// resolved by the host from the chat's choice and the global default.
-    pub citation_format: crate::citation::CitationFormat,
     /// System prompt, if any.
     pub system_prompt: Option<String>,
     /// Upper bound on tokens to generate per model call.
@@ -420,7 +414,6 @@ impl Default for AgentConfig {
             model: String::new(),
             reasoning_model: false,
             reasoning_effort: None,
-            citation_format: crate::citation::CitationFormat::default(),
             system_prompt: None,
             max_tokens: None,
             temperature: None,
@@ -444,8 +437,8 @@ pub enum AgentTurnOutcome {
     Completed {
         /// The final message to publish with the terminal state transition.
         output: Message,
-        /// Ordered opaque evidence references stripped from the final text.
-        citations: Vec<AssistantCitationReference>,
+        /// Ordered lightweight citations authored in the final text.
+        citations: Vec<AssistantCitationInput>,
         /// Aggregate provider usage for the eventual terminal event.
         usage: Usage,
         /// Provider stop reason for the eventual terminal event.
@@ -703,110 +696,32 @@ impl EventSink<'_> {
     }
 }
 
-/// Holds only a suffix that could still become an exact source reference.
-/// Non-text provider events that arrive inside that suffix wait with it so an
-/// eventual malformed reference can be replayed in its original order.
+/// Forwards provider events without server-side citation rewriting.
 struct AssistantStreamEventFilter<'a, 'b> {
     sink: &'a EventSink<'b>,
-    candidate: String,
-    pending: Vec<AgentEvent>,
 }
 
 impl<'a, 'b> AssistantStreamEventFilter<'a, 'b> {
     fn new(sink: &'a EventSink<'b>) -> Self {
-        Self {
-            sink,
-            candidate: String::new(),
-            pending: Vec::new(),
-        }
+        Self { sink }
     }
 
     fn send(&mut self, event: AgentEvent) {
-        if self.candidate.is_empty() {
-            self.sink.send(event);
-        } else {
-            self.pending.push(event);
-        }
+        self.sink.send(event);
     }
 
     fn send_text(&mut self, delta: &str) {
-        let mut safe = String::new();
-        for character in delta.chars() {
-            if self.candidate.is_empty() && character != '[' {
-                safe.push(character);
-                continue;
-            }
-            if !safe.is_empty() {
-                self.sink.send(AgentEvent::TextDelta {
-                    text: std::mem::take(&mut safe),
-                });
-            }
-            self.candidate.push(character);
-            self.pending.push(AgentEvent::TextDelta {
-                text: character.to_string(),
-            });
-            self.resolve_candidate();
-        }
-        if !safe.is_empty() {
-            self.sink.send(AgentEvent::TextDelta { text: safe });
-        }
-    }
-
-    fn resolve_candidate(&mut self) {
-        loop {
-            match classify_source_reference_candidate(&self.candidate) {
-                SourceReferenceCandidate::Possible => return,
-                SourceReferenceCandidate::Complete => {
-                    self.candidate.clear();
-                    for event in self.pending.drain(..) {
-                        if !matches!(event, AgentEvent::TextDelta { .. }) {
-                            self.sink.send(event);
-                        }
-                    }
-                    return;
-                }
-                SourceReferenceCandidate::Invalid => {
-                    let first_len = self
-                        .candidate
-                        .chars()
-                        .next()
-                        .expect("an invalid candidate is nonempty")
-                        .len_utf8();
-                    self.candidate.drain(..first_len);
-                    let first_text = self
-                        .pending
-                        .iter()
-                        .position(|event| matches!(event, AgentEvent::TextDelta { .. }))
-                        .expect("each candidate character has a pending text event");
-                    for event in self.pending.drain(..=first_text) {
-                        self.sink.send(event);
-                    }
-                    while self
-                        .pending
-                        .first()
-                        .is_some_and(|event| !matches!(event, AgentEvent::TextDelta { .. }))
-                    {
-                        self.sink.send(self.pending.remove(0));
-                    }
-                    if self.candidate.is_empty() {
-                        debug_assert!(self.pending.is_empty());
-                        return;
-                    }
-                }
-            }
-        }
+        self.sink.send(AgentEvent::TextDelta {
+            text: delta.to_owned(),
+        });
     }
 
     fn finish(&mut self) {
-        self.candidate.clear();
-        for event in self.pending.drain(..) {
-            self.sink.send(event);
-        }
+        // Nothing is buffered.
     }
 
     fn discard(&mut self) {
-        self.candidate.clear();
-        self.pending.clear();
+        // Nothing is buffered.
     }
 }
 
@@ -901,31 +816,21 @@ fn call_action_preview(call: &PendingCall) -> Option<ToolActionPreview> {
 }
 
 struct AssistantCandidate {
-    /// The message identity the content's citation ids were derived from.
     message_id: MessageId,
     content: String,
-    citations: Vec<AssistantCitationReference>,
+    citations: Vec<AssistantCitationInput>,
 }
 
 impl AssistantCandidate {
     /// This candidate as a durable message under `message_id`.
     ///
-    /// A citation is identified by its message and its ordinal, so a candidate
-    /// persisted under an identity other than the one it was parsed for has its
-    /// embedded ids re-derived rather than left pointing at citations the stored
-    /// message does not own.
     fn message(&self, message_id: MessageId, chat_id: ChatId, turn_id: TurnId) -> Message {
         Message {
             id: message_id,
             chat_id,
             turn_id,
             role: Role::Assistant,
-            content: rebind_citation_ids(
-                &self.content,
-                self.message_id,
-                message_id,
-                self.citations.len(),
-            ),
+            content: self.content.clone(),
             created_at: Utc::now(),
         }
     }
@@ -1401,21 +1306,16 @@ impl Agent {
                 calls.clear();
             }
 
-            // Citation identities are derived from the message a citation
-            // belongs to, so the candidate's identity is settled before its text
-            // is parsed. A boundary steer can still turn a claimed turn's final
-            // candidate into an intermediate message; that path re-derives the
-            // ids for the identity it persists under.
             let candidate_message_id = if calls.is_empty() && !publish_terminal {
                 output_message_id
             } else {
                 MessageId::new()
             };
-            let parsed = parse_assistant_citations(&text, candidate_message_id);
+            let parsed = parse_assistant_citations(&text);
             let candidate = AssistantCandidate {
                 message_id: candidate_message_id,
                 content: parsed.content,
-                citations: parsed.references,
+                citations: parsed.citations,
             };
             let text = &candidate.content;
             let refusal = refused.then(|| {
@@ -1891,7 +1791,6 @@ impl Agent {
                     // recorded there; re-deriving one here would be a guess.
                     error_category: None,
                     ui_view: None,
-                    private_evidence: Vec::new(),
                 }))
             }
             AcceptedServerCall::Existing(_) => Ok(None),
@@ -1958,7 +1857,6 @@ impl Agent {
                     turn_id,
                     call.call_id,
                     &resolution,
-                    &output.private_evidence,
                     preview.as_ref(),
                 )
                 .await?;
@@ -2265,20 +2163,13 @@ impl Agent {
         turn_id: TurnId,
         call_id: CallId,
         resolution: &ToolCallResolution,
-        evidence: &[crate::RetrievalEvidenceInput],
         preview: Option<&ToolResultPreview>,
     ) -> Result<ResolveToolCallOutcome> {
         let resolved_at = Utc::now();
         let Some(lease_token) = self.durable_steer_lease else {
             return self
                 .store
-                .resolve_server_tool_call_with_artifacts(
-                    call_id,
-                    resolution,
-                    resolved_at,
-                    evidence,
-                    preview,
-                )
+                .resolve_server_tool_call_with_artifacts(call_id, resolution, resolved_at, preview)
                 .await;
         };
         loop {
@@ -2292,7 +2183,6 @@ impl Agent {
                     Utc::now(),
                     resolution,
                     resolved_at,
-                    evidence,
                     preview,
                 )
                 .await
@@ -2409,7 +2299,7 @@ impl Agent {
         steer_id: crate::id::TurnSteerId,
         attempt_event_ordinal: i32,
         preceding_assistant: Option<&Message>,
-        preceding_citations: &[AssistantCitationReference],
+        preceding_citations: &[AssistantCitationInput],
     ) -> Result<JournaledTurnSteerOutcome> {
         let mut exact_retry_attempted = false;
         loop {
@@ -2678,8 +2568,7 @@ impl Agent {
                 || ToolCtx::without_private_scratch(chat.id, chat.project_id),
                 |scratch| ToolCtx::with_private_scratch(chat.id, chat.project_id, scratch.clone()),
             )
-            .with_call_id(call.call_id)
-            .with_citation_format(self.config.citation_format);
+            .with_call_id(call.call_id);
         // `future::select` polls cancellation first. If it wins, dropping the
         // unselected execution future propagates cancellation into async tools
         // such as reqwest instead of leaving egress alive after the turn ends.
@@ -2875,12 +2764,7 @@ impl Agent {
             };
             let outcome = self
                 .store
-                .resolve_server_tool_call_with_evidence(
-                    call.call_id,
-                    &resolution,
-                    Utc::now(),
-                    &output.private_evidence,
-                )
+                .resolve_server_tool_call(call.call_id, &resolution, Utc::now())
                 .await?;
             if !matches!(
                 outcome,
@@ -2960,7 +2844,7 @@ impl Agent {
     async fn append_assistant_exact_retry(
         &self,
         message: &Message,
-        citations: &[AssistantCitationReference],
+        citations: &[AssistantCitationInput],
     ) -> Result<()> {
         if let Some(lease_token) = self.durable_steer_lease {
             loop {
@@ -3753,70 +3637,6 @@ mod tests {
             .collect()
     }
 
-    fn streamed_text(events: &[AgentEvent]) -> String {
-        events
-            .iter()
-            .filter_map(|event| match event {
-                AgentEvent::TextDelta { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    #[tokio::test]
-    async fn stream_filter_preserves_normal_and_cancel_tails_but_discards_steered_tail() {
-        let incomplete = "normal [[ow-source:abcdef";
-        let (normal_tx, normal_rx) = unbounded();
-        let normal_sink = EventSink::Legacy(&normal_tx);
-        let mut normal = AssistantStreamEventFilter::new(&normal_sink);
-        for character in incomplete.chars() {
-            normal.send_text(&character.to_string());
-        }
-        normal.finish();
-        drop(normal);
-        drop(normal_tx);
-        let normal_events = normal_rx.collect::<Vec<_>>().await;
-        assert_eq!(streamed_text(&normal_events), incomplete);
-
-        let malformed = "cancel [[ow-source:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA]]";
-        let (cancel_tx, cancel_rx) = unbounded();
-        let cancel_sink = EventSink::Legacy(&cancel_tx);
-        let mut cancelled = AssistantStreamEventFilter::new(&cancel_sink);
-        for character in malformed.chars() {
-            cancelled.send_text(&character.to_string());
-        }
-        // Cancellation uses the same literal flush as a normal stream end
-        // before the terminal cancellation event is published.
-        cancelled.finish();
-        cancelled.send(AgentEvent::TurnCancelled {
-            usage: Usage::default(),
-        });
-        drop(cancelled);
-        drop(cancel_tx);
-        let cancel_events = cancel_rx.collect::<Vec<_>>().await;
-        assert_eq!(streamed_text(&cancel_events), malformed);
-        assert!(matches!(
-            cancel_events.last(),
-            Some(AgentEvent::TurnCancelled { .. })
-        ));
-
-        let (steer_tx, steer_rx) = unbounded();
-        let steer_sink = EventSink::Legacy(&steer_tx);
-        let mut steered = AssistantStreamEventFilter::new(&steer_sink);
-        steered.send_text("steer ");
-        steered.send_text("[[ow-source:abcdef");
-        steered.discard();
-        steered.send(AgentEvent::StreamInterrupted);
-        drop(steered);
-        drop(steer_tx);
-        let steer_events = steer_rx.collect::<Vec<_>>().await;
-        assert_eq!(streamed_text(&steer_events), "steer ");
-        assert!(matches!(
-            steer_events.last(),
-            Some(AgentEvent::StreamInterrupted)
-        ));
-    }
-
     #[test]
     fn client_tool_arguments_are_parsed_without_forgiving_malformed_json() {
         assert_eq!(
@@ -3852,178 +3672,6 @@ mod tests {
     struct ContextRecordingTool {
         observed_project: Arc<Mutex<Option<Option<ProjectId>>>>,
         observed_call: Arc<Mutex<Option<CallId>>>,
-    }
-
-    struct CitationSearchTool {
-        source_token: uuid::Uuid,
-    }
-
-    #[async_trait]
-    impl Tool for CitationSearchTool {
-        fn spec(&self) -> ToolSpec {
-            ToolSpec {
-                name: "search".into(),
-                description: "test search".into(),
-                input_schema: serde_json::json!({"type": "object"}),
-            }
-        }
-
-        fn approval_class(&self) -> ApprovalClass {
-            ApprovalClass::ReadOnly
-        }
-
-        async fn execute(&self, _ctx: &ToolCtx, _args: Value) -> Result<ToolOutput> {
-            let document_id = crate::DocumentId::new();
-            let span = crate::ByteSpan::new(0, 8);
-            Ok(
-                ToolOutput::text("search result").with_private_evidence(vec![
-                    crate::RetrievalEvidenceInput {
-                        rank: 1,
-                        source_token: self.source_token,
-                        document_id,
-                        generation: crate::DocumentGeneration {
-                            content_revision: 1,
-                            revision_token: uuid::Uuid::new_v4(),
-                        },
-                        chunk_id: crate::ChunkId::derive(document_id, span.start, span.end),
-                        span,
-                        snippet: "evidence".into(),
-                        location: crate::EvidenceLocation::DocumentContent {
-                            heading_path: vec!["Facts".into()],
-                            source_regions: Vec::new(),
-                        },
-                        source: crate::RetrievalEvidenceSource::Inline,
-                    },
-                ]),
-            )
-        }
-    }
-
-    struct IntermediateCitationProvider {
-        calls: AtomicUsize,
-        marker: String,
-    }
-
-    #[async_trait]
-    impl ModelProvider for IntermediateCitationProvider {
-        fn id(&self) -> ProviderId {
-            ProviderId::new("citation-test")
-        }
-
-        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
-            let step = self.calls.fetch_add(1, Ordering::SeqCst);
-            let events = match step {
-                0 => vec![
-                    ProviderEvent::ToolCallStarted {
-                        index: 0,
-                        id: "search_1".into(),
-                        name: "search".into(),
-                    },
-                    ProviderEvent::ToolCallArgsDelta {
-                        index: 0,
-                        fragment: "{}".into(),
-                    },
-                    ProviderEvent::Stop {
-                        reason: StopReason::ToolUse,
-                    },
-                ],
-                1 => {
-                    let candidate = format!("intermediate {}", self.marker);
-                    let mut events = candidate
-                        .chars()
-                        .map(|character| ProviderEvent::TextDelta {
-                            text: character.to_string(),
-                        })
-                        .collect::<Vec<_>>();
-                    events.extend([
-                        ProviderEvent::ToolCallStarted {
-                            index: 0,
-                            id: "read_1".into(),
-                            name: "read_file".into(),
-                        },
-                        ProviderEvent::ToolCallArgsDelta {
-                            index: 0,
-                            fragment: r#"{"path":"note.txt"}"#.into(),
-                        },
-                        ProviderEvent::Stop {
-                            reason: StopReason::ToolUse,
-                        },
-                    ]);
-                    events
-                }
-                _ => vec![
-                    ProviderEvent::TextDelta {
-                        text: "final".into(),
-                    },
-                    ProviderEvent::Stop {
-                        reason: StopReason::EndTurn,
-                    },
-                ],
-            };
-            Ok(stream::iter(events).boxed())
-        }
-    }
-
-    #[tokio::test]
-    async fn intermediate_assistant_source_marker_is_stripped_and_attached_atomically() {
-        let db = tempfile::tempdir().unwrap();
-        let store = Arc::new(
-            DbStore::connect(&format!(
-                "sqlite://{}?mode=rwc",
-                db.path().join("citations.db").display()
-            ))
-            .await
-            .unwrap(),
-        );
-        let chat = Chat {
-            id: ChatId::new(),
-            project_id: None,
-            title: None,
-            model: None,
-            reasoning_effort: None,
-            permission_mode: None,
-            citation_format: None,
-            attachment_revision: 0,
-            root_attachments: Vec::new(),
-            created_at: Utc::now(),
-        };
-        store.create_chat(&chat).await.unwrap();
-        let source_token = uuid::Uuid::new_v4();
-        let marker =
-            crate::format_source_reference(crate::AssistantCitationReference { source_token });
-        let workspace = tempfile::tempdir().unwrap();
-        std::fs::write(workspace.path().join("note.txt"), "note").unwrap();
-        let agent = Agent::new(
-            Arc::new(IntermediateCitationProvider {
-                calls: AtomicUsize::new(0),
-                marker,
-            }),
-            Arc::new(
-                ToolRegistry::new()
-                    .with(Box::new(CitationSearchTool { source_token }))
-                    .with(Box::new(ReadFile)),
-            ),
-            store.clone(),
-            AgentConfig {
-                model: "test".into(),
-                tool_scratch: Some(tool_scratch(workspace.path())),
-                ..Default::default()
-            },
-        );
-        let (tx, _rx) = unbounded();
-        agent.run_turn(&chat, "question", &tx).await.unwrap();
-        let transcript = store.get_chat_transcript(chat.id).await.unwrap().unwrap();
-        assert!(transcript
-            .messages
-            .iter()
-            .all(|message| !message.content.contains("[[ow-source:")));
-        let intermediate = transcript
-            .messages
-            .iter()
-            .find(|message| message.content == "intermediate ")
-            .expect("clean intermediate assistant message");
-        assert_eq!(transcript.citations.len(), 1);
-        assert_eq!(transcript.citations[0].message_id, intermediate.id);
     }
 
     #[async_trait]
@@ -4204,7 +3852,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -4379,7 +4026,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -4431,7 +4077,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -4589,7 +4234,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -4681,7 +4325,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -4790,7 +4433,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -4956,7 +4598,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -5049,7 +4690,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -5136,7 +4776,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -5539,7 +5178,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -5592,7 +5230,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -5659,7 +5296,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -5736,7 +5372,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -5855,7 +5490,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -5962,7 +5596,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -6079,7 +5712,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -6263,7 +5895,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -6386,7 +6017,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -6513,7 +6143,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: mode,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -6948,7 +6577,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -7071,7 +6699,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -7150,7 +6777,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -7336,7 +6962,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -8785,7 +8410,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -8972,7 +8596,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -9424,7 +9047,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -9845,7 +9467,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -10024,7 +9645,6 @@ mod image_hydration_tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
