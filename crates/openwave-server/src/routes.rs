@@ -1251,15 +1251,6 @@ pub struct ChatMessageSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub file_attachments: Option<Vec<TranscriptFileAttachment>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub refusal: Option<crate::event_projection::RendererRefusal>,
-    /// The presentable reasoning summary the turn behind this assistant message
-    /// produced, rebuilt from the journal. Absent when the turn reasoned in a
-    /// mode that exposes nothing, or when the model does not reason at all.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub reasoning: Option<String>,
 }
 
 /// One renderer-safe image identity attached to a historical user message.
@@ -1303,6 +1294,64 @@ impl From<openwave_core::MessageDocumentAttachment> for TranscriptFileAttachment
     }
 }
 
+/// One terminal turn's renderer-safe status and visible streamed content.
+///
+/// A completed turn points at its authoritative assistant message. Failed and
+/// cancelled turns have no message, but remain first-class transcript entries
+/// carrying the partial prose and reasoning the reader already saw live.
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub struct ChatTerminalTurnSnapshot {
+    pub turn_id: TurnId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub message_id: Option<MessageId>,
+    pub status: ChatTerminalTurnStatus,
+    pub partial_content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reasoning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub refusal: Option<crate::event_projection::RendererRefusal>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub failure_category: Option<crate::event_projection::TurnFailureCategory>,
+    pub finished_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatTerminalTurnStatus {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl From<openwave_core::ChatTerminalTurnSnapshot> for ChatTerminalTurnSnapshot {
+    fn from(snapshot: openwave_core::ChatTerminalTurnSnapshot) -> Self {
+        let status = match snapshot.status {
+            openwave_core::ChatTerminalTurnStatus::Completed => ChatTerminalTurnStatus::Completed,
+            openwave_core::ChatTerminalTurnStatus::Failed => ChatTerminalTurnStatus::Failed,
+            openwave_core::ChatTerminalTurnStatus::Cancelled => ChatTerminalTurnStatus::Cancelled,
+        };
+        let failure_category = matches!(status, ChatTerminalTurnStatus::Failed).then(|| {
+            crate::event_projection::TurnFailureCategory::from_kind(
+                snapshot.failure_kind.as_deref().unwrap_or_default(),
+            )
+        });
+        Self {
+            turn_id: snapshot.turn_id,
+            message_id: snapshot.message_id,
+            status,
+            partial_content: snapshot.partial_content,
+            reasoning: (!snapshot.reasoning.trim().is_empty()).then_some(snapshot.reasoning),
+            refusal: snapshot.refusal.as_ref().map(Into::into),
+            failure_category,
+            finished_at: snapshot.finished_at,
+        }
+    }
+}
+
 /// One visible transcript plus the durable journal watermark that produced it.
 /// The renderer uses the watermark to subscribe only to future events, avoiding
 /// duplicate text when reopening a completed conversation.
@@ -1312,10 +1361,9 @@ pub struct ChatTranscript {
     /// Finished tool activity from terminal turns, projected through a fixed
     /// renderer-safe allowlist. Canonical tool records never cross this API.
     pub tool_activity: Vec<openwave_core::ChatToolActivitySnapshot>,
-    /// Turns the user stopped. A cancelled turn writes no assistant message, so
-    /// this is the only durable trace of it the transcript can carry — without
-    /// it a reopened conversation reads as though the response had finished.
-    pub cancellations: Vec<openwave_core::ChatCancellationSnapshot>,
+    /// Status and streamed presentation for every terminal turn. This owns
+    /// terminal metadata even when no assistant message was committed.
+    pub terminal_turns: Vec<ChatTerminalTurnSnapshot>,
     pub last_event_seq: i64,
 }
 
@@ -1369,8 +1417,6 @@ impl ChatMessageSnapshot {
             citations: Vec::new(),
             image_attachments: None,
             file_attachments: None,
-            refusal: None,
-            reasoning: None,
         })
     }
 }
@@ -1408,21 +1454,6 @@ pub async fn list_chat_messages(
             .or_insert_with(Vec::new)
             .push(TranscriptFileAttachment::from(attachment));
     }
-    let mut reasoning_by_message = transcript
-        .reasoning
-        .into_iter()
-        .map(|snapshot| (snapshot.message_id, snapshot.text))
-        .collect::<std::collections::HashMap<_, _>>();
-    let mut refusals_by_message = transcript
-        .refusals
-        .into_iter()
-        .map(|snapshot| {
-            (
-                snapshot.message_id,
-                crate::event_projection::RendererRefusal::from(&snapshot.refusal),
-            )
-        })
-        .collect::<std::collections::HashMap<_, _>>();
     let messages = transcript
         .messages
         .into_iter()
@@ -1443,15 +1474,17 @@ pub async fn list_chat_messages(
                 snapshot.file_attachments =
                     (!file_attachments.is_empty()).then_some(file_attachments);
             }
-            snapshot.refusal = refusals_by_message.remove(&snapshot.id);
-            snapshot.reasoning = reasoning_by_message.remove(&snapshot.id);
             Some(snapshot)
         })
         .collect();
     Ok(Json(ChatTranscript {
         messages,
         tool_activity: transcript.tool_activity,
-        cancellations: transcript.cancellations,
+        terminal_turns: transcript
+            .terminal_turns
+            .into_iter()
+            .map(ChatTerminalTurnSnapshot::from)
+            .collect(),
         last_event_seq: transcript.last_event_seq,
     }))
 }

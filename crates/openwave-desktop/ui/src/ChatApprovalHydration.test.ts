@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { loadChatApprovalHydration } from "./ChatApprovalHydration";
 
-const transcript = { messages: [], tool_activity: [], cancellations: [], last_event_seq: 7 };
+const transcript = { messages: [], tool_activity: [], terminal_turns: [], last_event_seq: 7 };
 
 describe("loadChatApprovalHydration", () => {
   it("loads pending approvals after the transcript cursor boundary", async () => {

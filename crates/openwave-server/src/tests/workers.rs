@@ -145,8 +145,15 @@ async fn worker_commits_a_mid_stream_refusal_with_its_partial_output() {
         .iter()
         .find(|message| message["content"] == "Visible partial answer")
         .expect("the partial output remains a durable assistant message");
-    assert_eq!(output["refusal"]["category"], "general_harms");
-    assert_eq!(output["refusal"]["partial_output"], true);
+    let terminal_turn = transcript["terminal_turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|terminal_turn| terminal_turn["message_id"] == output["id"])
+        .expect("the durable assistant message retains its terminal outcome");
+    assert_eq!(terminal_turn["status"], "completed");
+    assert_eq!(terminal_turn["refusal"]["category"], "general_harms");
+    assert_eq!(terminal_turn["refusal"]["partial_output"], true);
 }
 
 #[tokio::test(flavor = "multi_thread")]

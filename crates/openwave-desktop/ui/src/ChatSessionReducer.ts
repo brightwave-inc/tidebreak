@@ -402,7 +402,7 @@ export function reduceChatSessionEvent(
     case "turn_cancelled": {
       state = flushMarkerTail(state, deps);
       effects.push(
-        { type: "invalidate_terminal_hydration" },
+        { type: "hydrate_terminal_transcript" },
         { type: "turn_resolved" },
         { type: "refresh_user_questions" },
         { type: "refresh_plan_approvals" },
@@ -429,7 +429,7 @@ export function reduceChatSessionEvent(
     case "turn_failed": {
       state = flushMarkerTail(state, deps);
       effects.push(
-        { type: "invalidate_terminal_hydration" },
+        { type: "hydrate_terminal_transcript" },
         { type: "turn_resolved" },
         { type: "refresh_user_questions" },
         { type: "refresh_plan_approvals" },
