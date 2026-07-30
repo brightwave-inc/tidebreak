@@ -18,6 +18,7 @@ use crate::approvals::ApprovalBroker;
 use crate::bus::EventBus;
 use crate::mcp_config::McpRuntime;
 use crate::resolver::ProviderResolver;
+use crate::view_frames::ViewFrameTokens;
 
 /// The state cloned into each handler: the boot config, the durable store, the
 /// agent's dependencies (provider + tools + tuning), the per-launch bearer token,
@@ -40,6 +41,9 @@ pub struct AppState {
     pub tools: Arc<ToolRegistry>,
     /// Runtime-managed MCP connections and immutable per-turn tool snapshots.
     pub(crate) mcp: Arc<McpRuntime>,
+    /// Outstanding single-use tokens redeemed by the sandboxed view frames —
+    /// prefetched MCP views and stored local-app revisions alike.
+    pub(crate) view_frames: Arc<ViewFrameTokens>,
     /// The signed-in model-gateway session handle (sign-in, model sync,
     /// per-request tokens). The production assembly in `bind_inner` replaces
     /// this with the resolver's instance — refresh rotation is serialized
@@ -149,6 +153,7 @@ impl AppState {
             secrets,
             tools,
             mcp,
+            view_frames: Arc::default(),
             gateway,
             os_policy,
             turn_job_wake: Arc::new(Notify::new()),

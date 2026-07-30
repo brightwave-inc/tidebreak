@@ -116,6 +116,11 @@ export type AgentRunStatus = "active" | "queued" | "running" | "cancelling" | "w
 export type AgentRunTier = "foreground" | "background";
 
 /**
+ * Where the sandboxed iframe should load one app revision from, valid once.
+ */
+export type AppViewSession = { frame_path: string, };
+
+/**
  * The approval policy class a tool declares for itself.
  *
  * Policy maps class → auto-approve / ask / deny. In v1: `ReadOnly` and

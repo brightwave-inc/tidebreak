@@ -39,10 +39,6 @@ const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const INITIALIZATION_TIMEOUT: Duration = Duration::from_secs(10);
 const INITIAL_RECONNECT_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(30);
-/// How long a minted view-frame token stays redeemable. One iframe load
-/// consumes it; a remount mints a fresh one.
-const VIEW_FRAME_TOKEN_TTL: Duration = Duration::from_secs(60);
-const MAX_VIEW_FRAME_TOKENS: usize = 64;
 
 /// The diagnostic every manual (command/url) server carries while managed
 /// policy holds. The definitions stay persisted — inert, not deleted — so an
@@ -381,8 +377,6 @@ pub(crate) struct McpRuntime {
     /// path and stays open.
     os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     next_epoch: AtomicU64,
-    /// Outstanding single-use view-frame tokens: token → (server, uri, minted).
-    view_frame_tokens: Mutex<HashMap<uuid::Uuid, (String, String, std::time::Instant)>>,
 }
 
 impl McpRuntime {
@@ -404,7 +398,6 @@ impl McpRuntime {
             gateway,
             os_policy,
             next_epoch: AtomicU64::new(1),
-            view_frame_tokens: Mutex::new(HashMap::new()),
         }
     }
 
@@ -542,38 +535,6 @@ impl McpRuntime {
     pub(crate) async fn ui_view_document(&self, server: &str, uri: &str) -> Option<UiViewDocument> {
         let state = self.state.lock().await;
         state.servers.get(server)?.ui_views.get(uri).cloned()
-    }
-
-    /// Mint a single-use, short-lived token addressing one prefetched view.
-    ///
-    /// An iframe cannot carry the API bearer, so the frame route is reached
-    /// by capability instead: the authenticated renderer trades its bearer
-    /// for a token here, and the unauthenticated frame route redeems it
-    /// exactly once within [`VIEW_FRAME_TOKEN_TTL`].
-    pub(crate) async fn mint_view_frame(&self, server: &str, uri: &str) -> Option<uuid::Uuid> {
-        self.ui_view_document(server, uri).await?;
-        let token = uuid::Uuid::new_v4();
-        let mut tokens = self.view_frame_tokens.lock().await;
-        let now = std::time::Instant::now();
-        tokens.retain(|_, (_, _, minted)| now.duration_since(*minted) < VIEW_FRAME_TOKEN_TTL);
-        if tokens.len() >= MAX_VIEW_FRAME_TOKENS {
-            return None;
-        }
-        tokens.insert(token, (server.to_string(), uri.to_string(), now));
-        Some(token)
-    }
-
-    /// Redeem a frame token, consuming it.
-    pub(crate) async fn take_view_frame(&self, token: uuid::Uuid) -> Option<UiViewDocument> {
-        let (server, uri) = {
-            let mut tokens = self.view_frame_tokens.lock().await;
-            let (server, uri, minted) = tokens.remove(&token)?;
-            if minted.elapsed() >= VIEW_FRAME_TOKEN_TTL {
-                return None;
-            }
-            (server, uri)
-        };
-        self.ui_view_document(&server, &uri).await
     }
 
     /// One immutable tool surface for a live turn.
@@ -1996,21 +1957,6 @@ mod tests {
         assert_eq!(view.html, "<html>fixture view</html>");
         assert_eq!(view.mime_type.as_deref(), Some("text/html;profile=mcp-app"));
 
-        // Frame tokens are single-use capabilities over the prefetched view.
-        let token = runtime
-            .mint_view_frame("gateway", "ui://fixture/app.html")
-            .await
-            .expect("declared view mints a frame token");
-        let redeemed = runtime
-            .take_view_frame(token)
-            .await
-            .expect("first redemption serves the document");
-        assert_eq!(redeemed.html, "<html>fixture view</html>");
-        assert!(runtime.take_view_frame(token).await.is_none());
-        assert!(runtime
-            .mint_view_frame("gateway", "ui://fixture/other.html")
-            .await
-            .is_none());
         assert!(runtime
             .ui_view_document("gateway", "ui://fixture/other.html")
             .await
