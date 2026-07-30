@@ -39,6 +39,7 @@ describe("terminal transcript presentation", () => {
           role: "system",
           content: "User restored output 'report.md' to the content of version 1.",
           created_at: "2026-07-30T12:00:00Z",
+          citations: [],
         },
       ],
       tool_activity: [],
