@@ -57,6 +57,7 @@ pub struct LocalExecutionProvider {
 struct CanonicalExecFolderGrant {
     path: PathBuf,
     access: ExecFolderAccess,
+    overlay: Option<PathBuf>,
 }
 
 impl LocalExecutionProvider {
@@ -895,20 +896,27 @@ fn macos_profile(
     // `folder_grants` is the canonical, host-resolved list prepared above.
     // Command, arguments, cwd, and every other model-authored field are
     // deliberately absent from these profile clauses.
+    //
+    // A staged grant keeps its read allowance at the folder's own path and
+    // moves its write allowance to the overlay. That pairing is the whole
+    // containment story for staging: the only writable location is the copy,
+    // so a command cannot reach the user's files even by naming them exactly.
     let granted_reads = folder_grants
         .iter()
-        .map(|grant| sandbox_subpath(&grant.path))
+        .flat_map(|grant| std::iter::once(&grant.path).chain(grant.overlay.as_ref()))
+        .map(|path| sandbox_subpath(path))
         .collect::<Result<Vec<_>, _>>()?
         .join("\n  ");
     let granted_writes = folder_grants
         .iter()
         .filter(|grant| grant.access == ExecFolderAccess::ReadWrite)
-        .map(|grant| sandbox_subpath(&grant.path))
+        .map(|grant| sandbox_subpath(grant.overlay.as_ref().unwrap_or(&grant.path)))
         .collect::<Result<Vec<_>, _>>()?
         .join("\n  ");
     let mut grant_ancestors = folder_grants
         .iter()
-        .flat_map(|grant| grant.path.ancestors().skip(1))
+        .flat_map(|grant| std::iter::once(&grant.path).chain(grant.overlay.as_ref()))
+        .flat_map(|path| path.ancestors().skip(1))
         .collect::<Vec<_>>();
     grant_ancestors.sort_unstable();
     grant_ancestors.dedup();
@@ -938,32 +946,52 @@ fn canonicalize_folder_grants(
 ) -> Result<Vec<CanonicalExecFolderGrant>, CodeExecutionError> {
     let mut canonical = Vec::<CanonicalExecFolderGrant>::new();
     for grant in grants {
-        let metadata = fs::symlink_metadata(&grant.path)
-            .map_err(|_| CodeExecutionError::Sandbox("granted folder is unavailable".into()))?;
-        if metadata.file_type().is_symlink() {
-            return Err(CodeExecutionError::Sandbox(
-                "granted folder must not be a symbolic link".into(),
-            ));
-        }
-        if !metadata.is_dir() {
-            return Err(CodeExecutionError::Sandbox(
-                "granted folder is not a directory".into(),
-            ));
-        }
-        let path = fs::canonicalize(&grant.path)
-            .map_err(|_| CodeExecutionError::Sandbox("granted folder is unavailable".into()))?;
+        let path = canonicalize_grant_directory(&grant.path)?;
+        let overlay = grant
+            .overlay
+            .as_deref()
+            .map(canonicalize_grant_directory)
+            .transpose()?;
         if let Some(existing) = canonical.iter_mut().find(|existing| existing.path == path) {
             if grant.access == ExecFolderAccess::ReadWrite {
-                existing.access = ExecFolderAccess::ReadWrite;
+                if existing.access == ExecFolderAccess::ReadWrite {
+                    // Two write grants for one folder: staging holds only if
+                    // both are staged, because one unstaged grant would make
+                    // the folder directly writable and the other's overlay
+                    // would be decorative.
+                    existing.overlay = existing.overlay.take().and(overlay);
+                } else {
+                    existing.access = ExecFolderAccess::ReadWrite;
+                    existing.overlay = overlay;
+                }
             }
             continue;
         }
         canonical.push(CanonicalExecFolderGrant {
             path,
             access: grant.access,
+            overlay,
         });
     }
     Ok(canonical)
+}
+
+#[cfg(target_os = "macos")]
+fn canonicalize_grant_directory(path: &Path) -> Result<PathBuf, CodeExecutionError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| CodeExecutionError::Sandbox("granted folder is unavailable".into()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(CodeExecutionError::Sandbox(
+            "granted folder must not be a symbolic link".into(),
+        ));
+    }
+    if !metadata.is_dir() {
+        return Err(CodeExecutionError::Sandbox(
+            "granted folder is not a directory".into(),
+        ));
+    }
+    fs::canonicalize(path)
+        .map_err(|_| CodeExecutionError::Sandbox("granted folder is unavailable".into()))
 }
 
 #[cfg(target_os = "macos")]
@@ -1467,5 +1495,60 @@ mod tests {
         let response = provider.execute(request).await.unwrap();
         assert_eq!(response.exit_code, Some(0), "stderr: {}", response.stderr);
         assert_eq!(response.stdout, "visibleungranted-blocked");
+    }
+
+    /// The invariant staging rests on: a staged grant is writable only at the
+    /// overlay. A command that names the user's folder directly — which is the
+    /// path the model has always been given — is refused rather than silently
+    /// staged, so nothing reaches the real files mid-turn.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_staged_grant_is_writable_only_at_its_overlay() {
+        let scratch = tempfile::tempdir().unwrap();
+        let workspace = "chat-staged";
+        fs::create_dir(scratch.path().join(workspace)).unwrap();
+        let host = tempfile::tempdir().unwrap();
+        let granted = host.path().join("granted");
+        let overlay = host.path().join("overlay");
+        fs::create_dir(&granted).unwrap();
+        fs::create_dir(&overlay).unwrap();
+        fs::write(granted.join("report.md"), "original").unwrap();
+        let granted_path = fs::canonicalize(&granted).unwrap();
+        let overlay_path = fs::canonicalize(&overlay).unwrap();
+
+        let provider = LocalExecutionProvider::new(scratch.path(), Duration::from_secs(3)).unwrap();
+        let script = format!(
+            "cat '{}'; \
+             if printf staged > '{}' 2>/dev/null; then printf ' overlay-written'; else printf ' overlay-blocked'; fi; \
+             if printf direct > '{}' 2>/dev/null; then printf ' root-written'; else printf ' root-blocked'; fi",
+            granted_path.join("report.md").display(),
+            overlay_path.join("report.md").display(),
+            granted_path.join("report.md").display(),
+        );
+        let request = request(workspace, "call-staged-grant", &script)
+            .with_folder_grants(vec![ExecFolderGrant::new(
+                &granted_path,
+                ExecFolderAccess::ReadWrite,
+            )
+            .unwrap()
+            .staged_at(&overlay_path)
+            .unwrap()])
+            .unwrap();
+
+        let response = provider.execute(request).await.unwrap();
+        assert_eq!(response.exit_code, Some(0), "stderr: {}", response.stderr);
+        assert_eq!(
+            response.stdout, "original overlay-written root-blocked",
+            "stderr: {}",
+            response.stderr
+        );
+        assert_eq!(
+            fs::read_to_string(granted_path.join("report.md")).unwrap(),
+            "original"
+        );
+        assert_eq!(
+            fs::read_to_string(overlay_path.join("report.md")).unwrap(),
+            "staged"
+        );
     }
 }

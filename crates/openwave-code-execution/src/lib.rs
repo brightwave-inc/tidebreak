@@ -17,6 +17,7 @@ pub mod host_paths;
 mod http;
 mod local;
 mod output;
+pub mod overlay;
 mod preview;
 mod receipt;
 mod remote;
@@ -27,9 +28,13 @@ mod types;
 pub use daytona::{DaytonaCredential, DaytonaExecutionProvider, DAYTONA_CREDENTIAL_KEY};
 pub use e2b::{E2BCredential, E2BExecutionProvider, E2B_CREDENTIAL_KEY};
 pub use host_paths::{
-    resolve_scratch_directory, try_resolve_scratch_directory, ScratchDir, ScratchRefusal,
+    resolve_scratch_directory, try_resolve_scratch_directory, FileStamp, ScratchDir, ScratchEntry,
+    ScratchEntryKind, ScratchRefusal,
 };
 pub use local::LocalExecutionProvider;
+pub use overlay::{
+    sweep_abandoned_overlays, OverlayOutcome, OverlaySlot, WriteOverlay, OVERLAY_DIR,
+};
 pub use preview::{scan_preview_directory, PreviewScan};
 pub use remote::RemoteSessionPool;
 pub use tool::{ExecTool, EXEC_TOOL_NAME};

@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -19,7 +19,7 @@ use openwave_code_execution::{
     DaytonaExecutionProvider, E2BCredential, E2BExecutionProvider, ExecFolderAccess,
     ExecFolderGrant, ExecutionId, ExecutionWorkspaceId, LocalExecutionProvider,
     OutputArtifactEntry, OutputArtifactScan, OutputArtifactStatus, PreviewScan, RemoteSessionPool,
-    WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing, DAYTONA_CREDENTIAL_KEY,
+    WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing, WriteOverlay, DAYTONA_CREDENTIAL_KEY,
     DOCUMENT_SCRIPTS_DIR, DOCUMENT_SCRIPT_FILES, E2B_CREDENTIAL_KEY,
 };
 use openwave_core::{
@@ -53,6 +53,11 @@ pub struct ResolvedExecFolderGrant {
     pub root_id: HostRootId,
     pub path: PathBuf,
     pub writable: bool,
+    /// Where this turn stages writes for the folder, when it stages them.
+    ///
+    /// Set by the server after the broker answers, never by the broker: it is
+    /// a property of the turn, not of the attachment.
+    pub overlay: Option<PathBuf>,
 }
 
 /// Native-only bridge from product root attachments to live broker authority.
@@ -587,6 +592,12 @@ pub struct ConfiguredCodeExecutionProvider {
     document_scripts_source: Option<PathBuf>,
     folder_grant_resolver: Option<Arc<dyn ExecFolderGrantResolver>>,
     remote_sessions: RemoteSessionPool,
+    /// The write overlay each chat's current turn is staging into.
+    ///
+    /// A turn opens one entry when it resolves its folder grants and closes it
+    /// when the turn ends; every `exec` in between finds it here and points the
+    /// sandbox at the staged copy instead of the user's folder.
+    write_overlays: Mutex<HashMap<ChatId, WriteOverlay>>,
 }
 
 impl ConfiguredCodeExecutionProvider {
@@ -604,6 +615,7 @@ impl ConfiguredCodeExecutionProvider {
             document_scripts_source: None,
             folder_grant_resolver: None,
             remote_sessions: RemoteSessionPool::default(),
+            write_overlays: Mutex::new(HashMap::new()),
         }
     }
 
@@ -647,7 +659,88 @@ impl ConfiguredCodeExecutionProvider {
         if config.provider != Some(CodeExecutionProviderKind::Local) || !cfg!(target_os = "macos") {
             return Ok(Vec::new());
         }
-        self.resolve_chat_folder_grants(chat).await
+        let mut grants = self.resolve_chat_folder_grants(chat).await?;
+        self.open_write_overlay(chat.id, &mut grants).await;
+        Ok(grants)
+    }
+
+    /// Stage this turn's writes for every writable granted folder.
+    ///
+    /// Called once, when the turn resolves the grants it will show the model.
+    /// A folder that cannot be staged keeps direct write access, which is the
+    /// behavior it had before staging existed.
+    async fn open_write_overlay(&self, chat: ChatId, grants: &mut [ResolvedExecFolderGrant]) {
+        self.close_write_overlay(chat).await;
+        let writable = grants
+            .iter()
+            .filter(|grant| grant.writable)
+            .map(|grant| grant.path.clone())
+            .collect::<Vec<_>>();
+        let scope = chat.to_string();
+        let Some(overlay) = WriteOverlay::prepare(&self.scratch_root, &scope, &writable).await
+        else {
+            return;
+        };
+        for slot in overlay.slots() {
+            for grant in grants
+                .iter_mut()
+                .filter(|grant| grant.path == slot.source())
+            {
+                grant.overlay = Some(slot.overlay().to_path_buf());
+            }
+        }
+        self.write_overlays
+            .lock()
+            .expect("write overlay registry is not poisoned")
+            .insert(chat, overlay);
+    }
+
+    /// Apply this turn's staged writes to the user's folders and end staging.
+    ///
+    /// A turn that never staged anything finds nothing to do. A turn that is
+    /// abandoned rather than finished never reaches here, and its staged writes
+    /// are discarded when the next turn sweeps them: applying them later would
+    /// write a folder that has since moved on.
+    pub(crate) async fn close_write_overlay(&self, chat: ChatId) {
+        let overlay = self
+            .write_overlays
+            .lock()
+            .expect("write overlay registry is not poisoned")
+            .remove(&chat);
+        let Some(overlay) = overlay else {
+            return;
+        };
+        let outcome = overlay.materialize().await;
+        if outcome.written > 0 || outcome.deleted > 0 || outcome.refused > 0 {
+            tracing::info!(
+                chat = %chat,
+                written = outcome.written,
+                deleted = outcome.deleted,
+                refused = outcome.refused,
+                "applied staged exec writes to granted folders"
+            );
+        }
+    }
+
+    /// The folder-to-overlay pairs this chat's current turn is staging.
+    ///
+    /// Only the paths leave the lock. The overlay itself is owned by the
+    /// registry for exactly the length of the turn, so nothing an in-flight
+    /// execution holds can keep it alive past the point where its writes are
+    /// applied.
+    fn staged_folders(&self, chat: ChatId) -> HashMap<PathBuf, PathBuf> {
+        self.write_overlays
+            .lock()
+            .expect("write overlay registry is not poisoned")
+            .get(&chat)
+            .map(|overlay| {
+                overlay
+                    .slots()
+                    .iter()
+                    .map(|slot| (slot.source().to_path_buf(), slot.overlay().to_path_buf()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     async fn resolve_chat_folder_grants(
@@ -811,19 +904,31 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
                         "execution conversation does not exist".into(),
                     )
                 })?;
+            // Authority is resolved again here rather than reused from the
+            // turn's prompt snapshot, so a revocation mid-turn fails closed.
+            // Staging is looked up rather than re-established: the overlay
+            // belongs to the turn, and every command in it writes to the same
+            // staged tree.
+            let staged = self.staged_folders(chat_id);
             let grants = self
                 .resolve_chat_folder_grants(&chat)
                 .await?
                 .into_iter()
                 .map(|grant| {
-                    ExecFolderGrant::new(
+                    let writable = grant.writable;
+                    let overlay = writable.then(|| staged.get(&grant.path)).flatten().cloned();
+                    let resolved = ExecFolderGrant::new(
                         grant.path,
-                        if grant.writable {
+                        if writable {
                             ExecFolderAccess::ReadWrite
                         } else {
                             ExecFolderAccess::ReadOnly
                         },
-                    )
+                    )?;
+                    match overlay {
+                        Some(overlay) => resolved.staged_at(overlay),
+                        None => Ok(resolved),
+                    }
                 })
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             request = request.with_folder_grants(grants)?;
@@ -1278,6 +1383,7 @@ mod tests {
                 root_id: granted,
                 path: folder.path().to_path_buf(),
                 writable: false,
+                overlay: None,
             }],
         });
         let provider = ConfiguredCodeExecutionProvider::new(
@@ -1311,6 +1417,7 @@ mod tests {
                 root_id: injected,
                 path: folder.path().to_path_buf(),
                 writable: true,
+                overlay: None,
             }],
         });
         let (store, _database) = test_store().await;

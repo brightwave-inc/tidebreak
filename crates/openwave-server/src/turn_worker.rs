@@ -543,7 +543,22 @@ impl TurnWorker {
         Ok(ClaimAction::Claimed(Box::new(turn), lease_token))
     }
 
+    /// Run one claimed turn and close out whatever the turn staged.
+    ///
+    /// Exec writes into a granted folder land in a per-turn overlay, and the
+    /// end of the turn is the only place that can apply them. Every way the run
+    /// below returns has to pass through here, which is why the run itself is a
+    /// separate function rather than an early return in this one.
     async fn process(&self, turn: TurnRun, lease_token: uuid::Uuid) -> Result<TurnWorkerOutcome> {
+        let chat_id = turn.chat_id;
+        let outcome = self.run_turn(turn, lease_token).await;
+        if let Some(provider) = self.exec_folder_context.as_ref() {
+            provider.close_write_overlay(chat_id).await;
+        }
+        outcome
+    }
+
+    async fn run_turn(&self, turn: TurnRun, lease_token: uuid::Uuid) -> Result<TurnWorkerOutcome> {
         if turn.status != TurnRunStatus::Running || turn.lease_token != Some(lease_token) {
             return Err(AgentError::msg(format!(
                 "claimed turn {} has an invalid execution identity",
