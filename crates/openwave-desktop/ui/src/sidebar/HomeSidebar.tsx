@@ -26,7 +26,7 @@ const RECENT_CHAT_LIMIT = 8;
  */
 export function HomeSidebar() {
   const navigate = useNavigate();
-  const { newChat, deleteChat, startRename, commitRename, cancelRename } = useApp();
+  const { newChat, deleteChat, startRename, commitRename, cancelRename, refreshChats } = useApp();
   const chats = useChatListStore((state) => state.chats);
   const chatsError = useChatListStore((state) => state.chatsError);
   const creatingChat = useChatListStore((state) => state.creatingChat);
@@ -96,7 +96,18 @@ export function HomeSidebar() {
           <MessagesSquare />
           <span>All chats</span>
         </SidebarButton>
-        {chatsError && <p className="px-2 py-1 text-xs text-critical">{chatsError}</p>}
+        {chatsError && (
+          <div className="flex flex-col gap-1 px-2 py-1">
+            <p className="text-xs text-critical">{chatsError}</p>
+            <button
+              type="button"
+              className="self-start text-xs text-muted-foreground underline-offset-2 hover:underline"
+              onClick={() => void refreshChats()}
+            >
+              Retry
+            </button>
+          </div>
+        )}
       </div>
     </SidebarFrame>
   );

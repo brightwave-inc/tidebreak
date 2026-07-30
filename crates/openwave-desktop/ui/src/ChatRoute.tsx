@@ -479,7 +479,13 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     chatListActions.replaceChat(await client.patchChatPermissionMode(chatId, mode));
   }
 
-  if (!chat) return <div className="routed-surface-loading" />;
+  // Shown while the list fetch or the redirect above settles — a blank frame
+  // still needs a name so it is not silent to a screen reader.
+  if (!chat) {
+    return (
+      <div className="routed-surface-loading" role="status" aria-label="Loading chat" />
+    );
+  }
 
   function renderPanel(panel: PanelContent, position: "left" | "right" | "chat", visible: boolean) {
     if (panel.type === "chat") {
