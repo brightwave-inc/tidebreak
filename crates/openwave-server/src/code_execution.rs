@@ -19,8 +19,9 @@ use openwave_code_execution::{
     DaytonaExecutionProvider, E2BCredential, E2BExecutionProvider, ExecFolderAccess,
     ExecFolderGrant, ExecutionId, ExecutionWorkspaceId, LocalExecutionProvider,
     OutputArtifactEntry, OutputArtifactScan, OutputArtifactStatus, PreviewScan, RemoteSessionPool,
-    WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing, WriteOverlay, WriteSnapshotSink,
-    DAYTONA_CREDENTIAL_KEY, DOCUMENT_SCRIPTS_DIR, DOCUMENT_SCRIPT_FILES, E2B_CREDENTIAL_KEY,
+    StagedUpload, WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing, WriteOverlay,
+    WriteSnapshotSink, DAYTONA_CREDENTIAL_KEY, DOCUMENT_SCRIPTS_DIR, DOCUMENT_SCRIPT_FILES,
+    E2B_CREDENTIAL_KEY,
 };
 use openwave_core::{
     exec_attachment_file_name, BlobStore, CallId, Chat, ChatId, HostRootId,
@@ -1060,34 +1061,45 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
             materialize_chat_attachments(&*self.store, blobs, chat_id, &host_dir).await?;
         }
         // A remote sandbox has its own filesystem, but the model is shown one
-        // path vocabulary across the file tools and exec. Mirror the chat's
-        // private scratch into the workspace before the command and back out
-        // after it, so a file written by either side is visible to the other.
-        // The local provider already runs inside scratch; mirroring there
-        // would only copy the directory onto itself.
+        // path vocabulary across the file tools and exec. Stage exactly the
+        // paths the model listed on this call into the workspace before the
+        // command, and pull only output/ and preview/ back out afterwards —
+        // the two directories the host output and preview scans read. The
+        // local provider already runs inside scratch, so nothing is staged
+        // there, but the listed paths are validated identically so a bad path
+        // fails the same way on every provider.
         let lifecycle = match kind {
             CodeExecutionProviderKind::Local => None,
             _ => provider.workspace_lifecycle(),
         };
         let Some(lifecycle) = lifecycle else {
+            sync::validate_staged_paths(&host_dir, &request.files).await?;
             return provider.execute(request).await;
         };
-        // A push that fails outright fails the execution: if the workspace is
-        // unreachable, running against files the model believes are present
-        // would answer with misleading not-found errors. Files the push had to
-        // leave behind individually ride along as notes instead, so the model
-        // learns its workspace is incomplete rather than starting with nothing.
-        let mut notes = sync::push_host_dir(lifecycle, &request.workspace_id, &host_dir)
-            .await?
-            .notes;
+        // A staging that fails outright fails the execution: a listed path
+        // that does not exist, an over-bound expansion, or an unreachable
+        // workspace would otherwise surface as a baffling not-found inside the
+        // sandbox. Entries a listed directory had to leave behind individually
+        // ride along as notes instead.
+        let mut staged_paths = implicit_staged_paths(self.document_scripts_source.is_some());
+        staged_paths.extend(request.files.iter().cloned());
+        let mut notes =
+            sync::stage_listed_paths(lifecycle, &request.workspace_id, &host_dir, &staged_paths)
+                .await?
+                .notes;
         let mut response = provider.execute(request.clone()).await?;
         // A failed pull keeps the execution's output — the command did run —
         // and says the host copies are stale instead of failing the call.
-        match sync::pull_into_host_dir(lifecycle, &request.workspace_id, &host_dir).await {
+        match sync::pull_result_dirs(lifecycle, &request.workspace_id, &host_dir).await {
             Ok(pulled) => notes.extend(pulled.notes),
             Err(error) => notes.push(format!(
-                "workspace files were not copied back to private scratch: {error}"
+                "output files were not copied back to private scratch: {error}"
             )),
+        }
+        // A failed command plus an empty or thin staged set usually means the
+        // command's inputs were never listed; one bounded line points there.
+        if response.timed_out || response.exit_code != Some(0) {
+            notes.push(staged_set_note(&request.files));
         }
         response.sync_notes.extend(notes);
         Ok(response)
@@ -1179,6 +1191,47 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
     // this late-binding wrapper depends on the configuration read at call
     // time, which the synchronous trait flag cannot express. Host callers use
     // [`ConfiguredCodeExecutionProvider::workspace`] instead.
+}
+
+/// Host infrastructure staged into every managed workspace regardless of the
+/// model's listed set: the conventional-directory markers that make `output/`
+/// and `preview/` exist remotely so commands can write into them, and the
+/// bundled document helpers the tool description tells the model to invoke
+/// without listing. All of it is host-authored, bounded, and digest-skipped on
+/// a reused session.
+fn implicit_staged_paths(with_document_scripts: bool) -> Vec<WorkspaceFilePath> {
+    let mut paths = vec![
+        "output/.openwave-directory".to_owned(),
+        "preview/.openwave-directory".to_owned(),
+    ];
+    if with_document_scripts {
+        paths.push(DOCUMENT_SCRIPTS_DIR.to_owned());
+    }
+    paths
+        .into_iter()
+        .filter_map(|path| WorkspaceFilePath::parse(path).ok())
+        .collect()
+}
+
+/// One bounded line naming what this call staged, appended to a failed managed
+/// command so a missing-input failure points at the `files` argument.
+fn staged_set_note(files: &[WorkspaceFilePath]) -> String {
+    const SHOWN: usize = 8;
+    if files.is_empty() {
+        return "staged: none — list the files the command needs in the exec 'files' argument"
+            .into();
+    }
+    let shown: Vec<&str> = files
+        .iter()
+        .take(SHOWN)
+        .map(WorkspaceFilePath::as_str)
+        .collect();
+    let mut note = format!("staged: {}", shown.join(", "));
+    let omitted = files.len().saturating_sub(SHOWN);
+    if omitted > 0 {
+        note.push_str(&format!(" (+{omitted} more)"));
+    }
+    note
 }
 
 async fn materialize_chat_attachments(
@@ -1293,9 +1346,9 @@ async fn prepare_execution_directories(
             .await
             .ok_or_else(unavailable)?;
         if mirrored {
-            // The sync protocol mirrors files rather than empty directories.
-            // A hidden zero-byte marker makes the conventional directories
-            // exist in managed workspaces without becoming a user artifact.
+            // Staging transfers files rather than empty directories. A hidden
+            // zero-byte marker makes the conventional directories exist in
+            // managed workspaces without becoming a user artifact.
             directory
                 .write_file(".openwave-directory", &[])
                 .await
@@ -1401,6 +1454,19 @@ impl WorkspaceLifecycle for ConfiguredWorkspace {
     ) -> std::result::Result<(), CodeExecutionError> {
         self.lifecycle()?
             .put_workspace_file(workspace, path, content)
+            .await
+    }
+
+    async fn stage_workspace_file(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+        path: &WorkspaceFilePath,
+        content: &[u8],
+    ) -> std::result::Result<StagedUpload, CodeExecutionError> {
+        // Delegated rather than left to the trait default so the selected
+        // backend's session memory is not bypassed by the wrapper.
+        self.lifecycle()?
+            .stage_workspace_file(workspace, path, content)
             .await
     }
 

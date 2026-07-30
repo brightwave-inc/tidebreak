@@ -20,6 +20,8 @@ pub const MAX_WORKSPACE_FILE_BYTES: usize = openwave_core::MAX_EXEC_WORKSPACE_FI
 pub const MAX_WORKSPACE_PATH_BYTES: usize = 1_024;
 /// Maximum entries returned by one workspace listing.
 pub const MAX_WORKSPACE_LIST_ENTRIES: usize = 256;
+/// Maximum scratch-relative paths one `exec` call may list for staging.
+pub const MAX_STAGED_PATHS: usize = 64;
 /// Maximum host-resolved folder grants carried by one local execution.
 pub const MAX_EXEC_FOLDER_GRANTS: usize = 32;
 const MAX_EXEC_FOLDER_PATH_BYTES: usize = 4_096;
@@ -158,6 +160,16 @@ pub struct WorkspaceListing {
     pub truncated: bool,
 }
 
+/// Whether staging one file moved bytes or found the live session current.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StagedUpload {
+    /// The bytes were transferred into the workspace.
+    Uploaded,
+    /// The backend's live session already held identical content; nothing was
+    /// transferred.
+    AlreadyCurrent,
+}
+
 /// Optional durable-workspace capability beside [`CodeExecutionProvider::execute`].
 ///
 /// This is a host-internal surface: nothing here is model-facing, and no
@@ -192,6 +204,22 @@ pub trait WorkspaceLifecycle: Send + Sync {
         path: &WorkspaceFilePath,
         content: &[u8],
     ) -> Result<(), CodeExecutionError>;
+
+    /// Stage one bounded file for the next command.
+    ///
+    /// Backends that reuse a live session may skip the transfer when that
+    /// session already holds identical content from a previous staging. The
+    /// default always uploads, which is correct for backends with no session
+    /// memory.
+    async fn stage_workspace_file(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+        path: &WorkspaceFilePath,
+        content: &[u8],
+    ) -> Result<StagedUpload, CodeExecutionError> {
+        self.put_workspace_file(workspace, path, content).await?;
+        Ok(StagedUpload::Uploaded)
+    }
 
     /// Read one bounded file.
     async fn get_workspace_file(
@@ -236,6 +264,15 @@ pub struct CodeExecutionRequest {
     pub arguments: Vec<String>,
     #[serde(default = "default_cwd")]
     pub cwd: String,
+    /// Scratch-relative files or directories the model asked to stage into a
+    /// managed sandbox before the command runs. Directories stage recursively.
+    ///
+    /// Model-facing, unlike `folder_grants`: it rides the canonical tool call,
+    /// so a replay with a different staged set is an identity conflict. The
+    /// local provider stages nothing — scratch is its filesystem — but the
+    /// listed paths are validated identically on every provider.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<WorkspaceFilePath>,
     /// Host-resolved folder authority for the local adapter.
     ///
     /// The model-facing tool always constructs this empty. The configured host
@@ -313,10 +350,28 @@ impl CodeExecutionRequest {
             command: command.into(),
             arguments,
             cwd: cwd.into(),
+            files: Vec::new(),
             folder_grants: Vec::new(),
         };
         request.validate()?;
         Ok(request)
+    }
+
+    /// Install the model-listed staged paths, validating each and naming the
+    /// first offender rather than reporting a bare "invalid".
+    pub fn with_staged_files(mut self, files: Vec<String>) -> Result<Self, CodeExecutionError> {
+        self.files = files
+            .into_iter()
+            .map(|path| {
+                WorkspaceFilePath::parse(&path).map_err(|_| {
+                    CodeExecutionError::InvalidRequest(format!(
+                        "invalid staged path '{path}': paths must be scratch-relative with no traversal"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.validate()?;
+        Ok(self)
     }
 
     /// Revalidate public/deserialized fields at the provider boundary.
@@ -354,6 +409,22 @@ impl CodeExecutionRequest {
             return Err(CodeExecutionError::InvalidRequest(
                 "invalid working directory".into(),
             ));
+        }
+        if self.files.len() > MAX_STAGED_PATHS {
+            return Err(CodeExecutionError::InvalidRequest(format!(
+                "too many staged paths: {} listed, at most {MAX_STAGED_PATHS} allowed",
+                self.files.len()
+            )));
+        }
+        for file in &self.files {
+            // Transparent deserialization bypasses the parse-time checks, so
+            // the boundary re-proves each path is its own normalized form.
+            if !WorkspaceFilePath::parse(file.as_str()).is_ok_and(|parsed| &parsed == file) {
+                return Err(CodeExecutionError::InvalidRequest(format!(
+                    "invalid staged path '{}'",
+                    file.as_str()
+                )));
+            }
         }
         if self.folder_grants.len() > MAX_EXEC_FOLDER_GRANTS {
             return Err(CodeExecutionError::InvalidRequest(

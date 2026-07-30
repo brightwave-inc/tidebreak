@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use crate::{
     CodeExecutionProvider, CodeExecutionRequest, ExecutionId, ExecutionWorkspaceId, MAX_ARGUMENTS,
-    MAX_COMMAND_BYTES, MAX_CWD_BYTES,
+    MAX_COMMAND_BYTES, MAX_CWD_BYTES, MAX_STAGED_PATHS,
 };
 
 pub const EXEC_TOOL_NAME: &str = "exec";
@@ -32,6 +32,8 @@ struct ExecArguments {
     args: Vec<String>,
     #[serde(default = "default_cwd")]
     cwd: String,
+    #[serde(default)]
+    files: Vec<String>,
 }
 
 fn default_cwd() -> String {
@@ -45,31 +47,37 @@ impl Tool for ExecTool {
             name: EXEC_TOOL_NAME.into(),
             description: "Run one executable with an argument vector in the configured isolated \
                           execution provider. No shell parses the arguments unless you explicitly \
-                          invoke a shell. The local provider blocks network and user-data access \
-                          outside private chat scratch plus any current host-resolved folder \
-                          grants listed in the operating context; folder paths are host state, \
-                          never tool arguments. Managed cloud sandboxes (E2B, Daytona) \
-                          have the chat's private scratch mirrored in before the command runs and \
-                          mirrored back after, so files from write_file are visible here and \
-                          files this command writes are visible to read_file. Every provider \
-                          returns bounded stdout/stderr. Files you save in output/ are published \
-                          to the user automatically as durable outputs. To update an output you \
-                          already published, save to the same filename in output/ — it becomes a \
-                          new version of the same output in place; you never track output ids. \
-                          For visual review, save up to three \
-                          PNG, JPEG, or WebP images in preview/; overview, grid, thumbnail, page, \
-                          and slide filenames are prioritized; preview images are for your own \
-                          review and never become outputs. \
-                          When bundled document helpers are present, invoke them directly from \
-                          .openwave/exec-scripts. Examples: command python3 with args \
+                          invoke a shell. The local provider runs directly in the chat's private \
+                          scratch and blocks network and user-data access outside it plus any \
+                          current host-resolved folder grants listed in the operating context; \
+                          folder paths are host state, never tool arguments. Managed cloud \
+                          sandboxes (E2B, Daytona) see ONLY the scratch paths you list in the \
+                          'files' argument, plus whatever earlier commands in the same sandbox \
+                          session created. List every file or directory the command reads — \
+                          including files you just wrote with write_file and attached documents \
+                          under documents/ — or the command will not find them there. A listed \
+                          directory stages recursively; a listed path that does not exist fails \
+                          the call on every provider. Every provider returns bounded \
+                          stdout/stderr. Files you save in output/ are published to the user \
+                          automatically as durable outputs; output/ and preview/ are copied back \
+                          for you and need never be listed. To update an output you already \
+                          published, save to the same filename in output/ — it becomes a new \
+                          version of the same output in place; you never track output ids. For \
+                          visual review, save up to three PNG, JPEG, or WebP images in preview/; \
+                          overview, grid, thumbnail, page, and slide filenames are prioritized; \
+                          preview images are for your own review and never become outputs. When \
+                          bundled document helpers are present, invoke them directly from \
+                          .openwave/exec-scripts (always available without listing them). \
+                          Examples: command python3 with args \
                           [\".openwave/exec-scripts/render_pdf.py\", \"documents/report.pdf\", \
-                          \"--pages\", \"1-2\"]; command python3 with args \
-                          [\".openwave/exec-scripts/extract_pdf_figures.py\", \
-                          \"documents/report.pdf\"]; or command python3 with args \
-                          [\".openwave/exec-scripts/analyze_xlsx.py\", \
-                          \"documents/model.xlsx\"]. Each helper writes visual review files to \
-                          preview/ and prints a concise summary; a missing Python or document \
-                          dependency is reported as a command error."
+                          \"--pages\", \"1-2\"] and files [\"documents/report.pdf\"]; command \
+                          python3 with args [\".openwave/exec-scripts/extract_pdf_figures.py\", \
+                          \"documents/report.pdf\"] and files [\"documents/report.pdf\"]; or \
+                          command python3 with args [\".openwave/exec-scripts/analyze_xlsx.py\", \
+                          \"documents/model.xlsx\"] and files [\"documents/model.xlsx\"]. Each \
+                          helper writes visual review files to preview/ and prints a concise \
+                          summary; a missing Python or document dependency is reported as a \
+                          command error."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -92,6 +100,12 @@ impl Tool for ExecTool {
                         "minLength": 1,
                         "maxLength": MAX_CWD_BYTES,
                         "description": "Private-scratch-relative working directory (defaults to '.')."
+                    },
+                    "files": {
+                        "type": "array",
+                        "maxItems": MAX_STAGED_PATHS,
+                        "items": { "type": "string" },
+                        "description": "Scratch-relative files or directories staged into a managed sandbox before the command runs; directories stage recursively. Managed sandboxes see only these paths (plus what earlier commands in the session created); a path that does not exist fails the call on every provider."
                     }
                 },
                 "required": ["command"]
@@ -131,7 +145,9 @@ impl Tool for ExecTool {
             arguments.command,
             arguments.args,
             arguments.cwd,
-        ) {
+        )
+        .and_then(|request| request.with_staged_files(arguments.files))
+        {
             Ok(request) => request,
             Err(error) => return Ok(ToolOutput::error(error.to_string())),
         };
@@ -305,7 +321,7 @@ mod tests {
         let output = tool
             .execute(
                 &ctx,
-                json!({"command": "/bin/echo", "args": ["ok"], "cwd": "."}),
+                json!({"command": "/bin/echo", "args": ["ok"], "cwd": ".", "files": ["data/in.csv"]}),
             )
             .await
             .unwrap();
@@ -316,6 +332,20 @@ mod tests {
         assert_eq!(request.execution_id.as_str(), call_id.to_string());
         assert_eq!(request.workspace_id.as_str(), chat_id.to_string());
         assert_eq!(request.command, "/bin/echo");
+        assert_eq!(request.files.len(), 1);
+        assert_eq!(request.files[0].as_str(), "data/in.csv");
+
+        // A traversal in the model-listed staged set is refused before any
+        // provider sees the request, and the error names the path.
+        let refused = tool
+            .execute(
+                &ctx,
+                json!({"command": "/bin/echo", "files": ["../escape"]}),
+            )
+            .await
+            .unwrap();
+        assert!(refused.is_error);
+        assert!(refused.content.contains("../escape"), "{}", refused.content);
     }
 
     #[test]
@@ -325,6 +355,8 @@ mod tests {
         let spec = tool.spec();
         assert_eq!(spec.name, EXEC_TOOL_NAME);
         assert_eq!(spec.input_schema["additionalProperties"], false);
+        assert!(spec.input_schema["properties"]["files"].is_object());
+        assert!(spec.description.contains("'files'"));
         assert!(spec.description.contains("preview/"));
         assert!(spec.description.contains(".openwave/exec-scripts"));
         assert!(spec.description.contains("render_pdf.py"));

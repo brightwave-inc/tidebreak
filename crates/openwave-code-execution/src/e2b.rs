@@ -17,13 +17,14 @@ use crate::http::{decode_bounded_json, download_bounded_file, multipart_file};
 use crate::output::{Capture, StreamKind};
 use crate::remote::{
     connect_remote_workspace, create_remote_workspace, destroy_remote_workspace, execute_remote,
-    with_remote_session, RemoteSandboxAdapter, RemoteSession, RemoteSessionError,
-    RemoteSessionPool, RemoteWorkspaceAdapter,
+    stage_remote_file, with_remote_session, RemoteSandboxAdapter, RemoteSession,
+    RemoteSessionError, RemoteSessionPool, RemoteWorkspaceAdapter,
 };
 use crate::{
     CodeExecutionError, CodeExecutionProvider, CodeExecutionProviderKind, CodeExecutionRequest,
-    CodeExecutionResponse, ExecutionWorkspaceId, WorkspaceFileEntry, WorkspaceFilePath,
-    WorkspaceLifecycle, WorkspaceListing, MAX_WORKSPACE_FILE_BYTES, MAX_WORKSPACE_LIST_ENTRIES,
+    CodeExecutionResponse, ExecutionWorkspaceId, StagedUpload, WorkspaceFileEntry,
+    WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing, MAX_WORKSPACE_FILE_BYTES,
+    MAX_WORKSPACE_LIST_ENTRIES,
 };
 
 const E2B_API_BASE: &str = "https://api.e2b.app";
@@ -547,6 +548,18 @@ impl WorkspaceLifecycle for E2BExecutionProvider {
         .await
     }
 
+    async fn stage_workspace_file(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+        path: &WorkspaceFilePath,
+        content: &[u8],
+    ) -> Result<StagedUpload, CodeExecutionError> {
+        if content.len() > MAX_WORKSPACE_FILE_BYTES {
+            return Err(CodeExecutionError::WorkspaceFileTooLarge);
+        }
+        stage_remote_file(self, &self.pool, workspace.as_str(), path, content).await
+    }
+
     async fn get_workspace_file(
         &self,
         workspace: &ExecutionWorkspaceId,
@@ -1021,6 +1034,7 @@ mod tests {
         connects: AtomicUsize,
         starts: AtomicUsize,
         deletes: AtomicUsize,
+        uploads: AtomicUsize,
         create_body: StdMutex<Option<Value>>,
         start_bodies: StdMutex<Vec<Vec<u8>>>,
         api_keys: StdMutex<Vec<String>>,
@@ -1036,6 +1050,7 @@ mod tests {
                 connects: AtomicUsize::new(0),
                 starts: AtomicUsize::new(0),
                 deletes: AtomicUsize::new(0),
+                uploads: AtomicUsize::new(0),
                 create_body: StdMutex::new(None),
                 start_bodies: StdMutex::new(Vec::new()),
                 api_keys: StdMutex::new(Vec::new()),
@@ -1205,6 +1220,7 @@ mod tests {
     ) -> axum::http::StatusCode {
         assert_eq!(query["username"], "user");
         assert_eq!(header_value(&headers, "x-access-token"), "access-123");
+        state.uploads.fetch_add(1, Ordering::SeqCst);
         let content = multipart_content(&headers, &body);
         state
             .files
@@ -1406,6 +1422,40 @@ mod tests {
         assert!(!provider.connect_workspace(&workspace).await.unwrap());
         provider.destroy_workspace(&workspace).await.unwrap();
         assert_eq!(state.deletes.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    /// A reused sandbox session skips re-uploading content it already holds,
+    /// re-uploads changed content, and forgets everything once the sandbox is
+    /// destroyed — a successor sandbox must be staged from scratch.
+    #[tokio::test]
+    async fn e2b_staging_skips_content_the_live_sandbox_already_has() {
+        let (provider, state, server) = mock_provider(ProcessMode::Complete, None).await;
+        let workspace = ExecutionWorkspaceId::parse("workspace-stage").unwrap();
+        let path = WorkspaceFilePath::parse("build_deck.py").unwrap();
+
+        let staged = |content: &'static [u8]| {
+            let provider = &provider;
+            let workspace = &workspace;
+            let path = &path;
+            async move {
+                provider
+                    .stage_workspace_file(workspace, path, content)
+                    .await
+                    .unwrap()
+            }
+        };
+
+        assert_eq!(staged(b"v1").await, crate::StagedUpload::Uploaded);
+        assert_eq!(staged(b"v1").await, crate::StagedUpload::AlreadyCurrent);
+        assert_eq!(state.uploads.load(Ordering::SeqCst), 1);
+
+        assert_eq!(staged(b"v2").await, crate::StagedUpload::Uploaded);
+        assert_eq!(state.uploads.load(Ordering::SeqCst), 2);
+
+        provider.destroy_workspace(&workspace).await.unwrap();
+        assert_eq!(staged(b"v2").await, crate::StagedUpload::Uploaded);
+        assert_eq!(state.uploads.load(Ordering::SeqCst), 3);
         server.abort();
     }
 

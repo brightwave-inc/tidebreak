@@ -12,13 +12,14 @@ use crate::http::{decode_bounded_json, download_bounded_file, multipart_file};
 use crate::output::{Capture, StreamKind};
 use crate::remote::{
     connect_remote_workspace, create_remote_workspace, destroy_remote_workspace, execute_remote,
-    with_remote_session, RemoteSandboxAdapter, RemoteSession, RemoteSessionError,
-    RemoteSessionPool, RemoteWorkspaceAdapter,
+    stage_remote_file, with_remote_session, RemoteSandboxAdapter, RemoteSession,
+    RemoteSessionError, RemoteSessionPool, RemoteWorkspaceAdapter,
 };
 use crate::{
     CodeExecutionError, CodeExecutionProvider, CodeExecutionProviderKind, CodeExecutionRequest,
-    CodeExecutionResponse, ExecutionWorkspaceId, WorkspaceFileEntry, WorkspaceFilePath,
-    WorkspaceLifecycle, WorkspaceListing, MAX_WORKSPACE_FILE_BYTES, MAX_WORKSPACE_LIST_ENTRIES,
+    CodeExecutionResponse, ExecutionWorkspaceId, StagedUpload, WorkspaceFileEntry,
+    WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing, MAX_WORKSPACE_FILE_BYTES,
+    MAX_WORKSPACE_LIST_ENTRIES,
 };
 
 const DAYTONA_API_BASE: &str = "https://app.daytona.io/api";
@@ -642,6 +643,18 @@ impl WorkspaceLifecycle for DaytonaExecutionProvider {
             |adapter, session| async move { adapter.upload_file(&session, path, content).await },
         )
         .await
+    }
+
+    async fn stage_workspace_file(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+        path: &WorkspaceFilePath,
+        content: &[u8],
+    ) -> Result<StagedUpload, CodeExecutionError> {
+        if content.len() > MAX_WORKSPACE_FILE_BYTES {
+            return Err(CodeExecutionError::WorkspaceFileTooLarge);
+        }
+        stage_remote_file(self, &self.pool, workspace.as_str(), path, content).await
     }
 
     async fn get_workspace_file(

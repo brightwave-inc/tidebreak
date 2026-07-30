@@ -2,12 +2,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use sha2::{Digest as _, Sha256};
 use tokio::sync::Mutex;
 
 use crate::receipt::{request_fingerprint, BeginExecution, ExecutionReceipt};
 use crate::{
     CodeExecutionError, CodeExecutionProviderKind, CodeExecutionRequest, CodeExecutionResponse,
-    WorkspaceFilePath, WorkspaceListing,
+    StagedUpload, WorkspaceFilePath, WorkspaceListing,
 };
 
 /// Shared process-local sessions and idempotency receipts for managed sandboxes.
@@ -20,6 +21,15 @@ pub struct RemoteSessionPool {
 struct PoolState {
     sessions: HashMap<SessionKey, Arc<Mutex<Option<RemoteSession>>>>,
     receipts: HashMap<ReceiptKey, ExecutionReceipt>,
+    /// Content digests of files already staged into each workspace's live
+    /// sandbox, bound to the exact sandbox instance they were uploaded to. A
+    /// recreated sandbox never inherits digests from its predecessor.
+    staged: HashMap<SessionKey, StagedDigests>,
+}
+
+struct StagedDigests {
+    sandbox_id: String,
+    digests: HashMap<String, [u8; 32]>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -155,6 +165,52 @@ impl RemoteSessionPool {
             .or_insert_with(|| Arc::new(Mutex::new(None)))
             .clone()
     }
+
+    /// Whether the live sandbox `sandbox_id` already holds `path` with exactly
+    /// this content, according to what previous stagings recorded.
+    async fn staged_is_current(
+        &self,
+        key: &SessionKey,
+        sandbox_id: &str,
+        path: &str,
+        digest: &[u8; 32],
+    ) -> bool {
+        let state = self.state.lock().await;
+        state.staged.get(key).is_some_and(|staged| {
+            staged.sandbox_id == sandbox_id && staged.digests.get(path) == Some(digest)
+        })
+    }
+
+    /// Record that `path` with `digest` was just uploaded to `sandbox_id`.
+    /// Digests recorded against a different sandbox instance are discarded:
+    /// their staged state belongs to a sandbox that no longer serves this key.
+    async fn record_staged(
+        &self,
+        key: &SessionKey,
+        sandbox_id: &str,
+        path: String,
+        digest: [u8; 32],
+    ) {
+        let mut state = self.state.lock().await;
+        let staged = state
+            .staged
+            .entry(key.clone())
+            .or_insert_with(|| StagedDigests {
+                sandbox_id: sandbox_id.to_owned(),
+                digests: HashMap::new(),
+            });
+        if staged.sandbox_id != sandbox_id {
+            staged.sandbox_id = sandbox_id.to_owned();
+            staged.digests.clear();
+        }
+        staged.digests.insert(path, digest);
+    }
+
+    /// Forget everything staged for this key. Called when the sandbox is
+    /// destroyed, so a successor sandbox starts from an empty ledger.
+    async fn clear_staged(&self, key: &SessionKey) {
+        self.state.lock().await.staged.remove(key);
+    }
 }
 
 pub(crate) async fn execute_remote(
@@ -222,6 +278,43 @@ where
         }
         Err(RemoteSessionError::Provider(error)) => Err(error),
     }
+}
+
+/// Stage one file into the chat's remote sandbox, skipping the upload when
+/// the pool remembers the live sandbox already holds identical content.
+///
+/// The digest check and the record both happen inside the per-chat session
+/// lock, so the sandbox instance the ledger is bound to is exactly the one the
+/// upload targeted.
+pub(crate) async fn stage_remote_file<A>(
+    adapter: &A,
+    pool: &RemoteSessionPool,
+    workspace_id: &str,
+    path: &WorkspaceFilePath,
+    content: &[u8],
+) -> Result<StagedUpload, CodeExecutionError>
+where
+    A: RemoteWorkspaceAdapter + ?Sized,
+{
+    let key = SessionKey {
+        provider: adapter.kind(),
+        credential: adapter.credential_fingerprint(),
+        workspace_id: workspace_id.to_owned(),
+    };
+    let digest: [u8; 32] = Sha256::digest(content).into();
+    with_remote_session(adapter, pool, workspace_id, |adapter, session| async move {
+        if pool
+            .staged_is_current(&key, &session.sandbox_id, path.as_str(), &digest)
+            .await
+        {
+            return Ok(StagedUpload::AlreadyCurrent);
+        }
+        adapter.upload_file(&session, path, content).await?;
+        pool.record_staged(&key, &session.sandbox_id, path.as_str().to_owned(), digest)
+            .await;
+        Ok(StagedUpload::Uploaded)
+    })
+    .await
 }
 
 async fn connected_session<A>(
@@ -310,6 +403,11 @@ pub(crate) async fn destroy_remote_workspace<A>(
 where
     A: RemoteWorkspaceAdapter + ?Sized,
 {
+    let key = SessionKey {
+        provider: adapter.kind(),
+        credential: adapter.credential_fingerprint(),
+        workspace_id: workspace_id.to_owned(),
+    };
     let slot = pool
         .session(
             adapter.kind(),
@@ -322,7 +420,10 @@ where
         return Ok(());
     };
     match adapter.destroy_sandbox(&session).await {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            pool.clear_staged(&key).await;
+            Ok(())
+        }
         Err(error) => {
             *slot = Some(session);
             Err(error)
