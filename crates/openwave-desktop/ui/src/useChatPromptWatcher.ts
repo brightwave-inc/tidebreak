@@ -58,6 +58,7 @@ export function useChatPromptWatcher(client: ApiClient | null, chatId: string | 
         const pendingPromptIds = new Set(
           pending.flatMap((prompt) => [
             ...prompt.questionCallIds,
+            ...prompt.planCallIds,
             ...prompt.folderAccessCallIds,
             ...prompt.outputWritebackCallIds,
           ]),

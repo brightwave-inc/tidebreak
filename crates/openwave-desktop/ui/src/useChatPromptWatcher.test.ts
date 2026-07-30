@@ -36,6 +36,7 @@ function prompt(
   return {
     chatId,
     questionCallIds: questions,
+    planCallIds: [],
     folderAccessCallIds: folderAccess,
     outputWritebackCallIds: outputWritebacks,
   };

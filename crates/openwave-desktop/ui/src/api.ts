@@ -460,6 +460,7 @@ export type PendingOutputWritebackRequest = {
 export type PendingChatPrompt = {
   chatId: string;
   questionCallIds: string[];
+  planCallIds: string[];
   folderAccessCallIds: string[];
   outputWritebackCallIds: string[];
 };
@@ -1408,11 +1409,13 @@ export function parsePendingChatPrompt(value: unknown): PendingChatPrompt | null
     !onlyKeys<{
       chat_id: string;
       question_call_ids: string[];
+      plan_call_ids: string[];
       folder_access_call_ids: string[];
       output_writeback_call_ids: string[];
     }>(value, [
       "chat_id",
       "question_call_ids",
+      "plan_call_ids",
       "folder_access_call_ids",
       "output_writeback_call_ids",
     ]) ||
@@ -1421,32 +1424,39 @@ export function parsePendingChatPrompt(value: unknown): PendingChatPrompt | null
     return null;
   }
   const questionCallIds = parseOpaqueCallIds(value.question_call_ids);
+  const planCallIds = parseOpaqueCallIds(value.plan_call_ids);
   const folderAccessCallIds = parseOpaqueCallIds(value.folder_access_call_ids);
   const outputWritebackCallIds = parseOpaqueCallIds(
     value.output_writeback_call_ids,
   );
   if (
     !questionCallIds ||
+    !planCallIds ||
     !folderAccessCallIds ||
-    !outputWritebackCallIds ||
+    !outputWritebackCallIds
+  ) {
+    return null;
+  }
+  const total =
     questionCallIds.length +
-        folderAccessCallIds.length +
-        outputWritebackCallIds.length ===
-      0 ||
+    planCallIds.length +
+    folderAccessCallIds.length +
+    outputWritebackCallIds.length;
+  if (
+    total === 0 ||
     new Set([
       ...questionCallIds,
+      ...planCallIds,
       ...folderAccessCallIds,
       ...outputWritebackCallIds,
-    ]).size !==
-      questionCallIds.length +
-        folderAccessCallIds.length +
-        outputWritebackCallIds.length
+    ]).size !== total
   ) {
     return null;
   }
   return {
     chatId: value.chat_id,
     questionCallIds,
+    planCallIds,
     folderAccessCallIds,
     outputWritebackCallIds,
   };
