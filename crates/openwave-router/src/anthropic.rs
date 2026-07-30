@@ -342,34 +342,62 @@ fn mark_last_tool_cacheable(body: &mut Value) {
     }
 }
 
-/// Put a breakpoint on the last content block of the transcript.
+/// Put breakpoints on the tail of the transcript and on a block lagging it.
 ///
-/// The breakpoint moves to the tail on every call rather than being anchored to
-/// a fixed early message. An agentic turn appends an assistant message and its
-/// tool results per step and re-sends the whole transcript, so the tail is
-/// exactly the boundary between what the previous call already wrote and what
-/// this call adds: each step writes only its own delta and reads everything
-/// before it. Anchoring instead — at the head of the conversation, say — would
-/// cache a fixed prefix and pay full price for the growth, and the head is the
-/// worst place to anchor here besides: context fitting rewrites it when it
-/// truncates, checkpoints it, or evicts an old image, while leaving the tail
-/// untouched.
+/// The tail breakpoint moves to the last block on every call rather than being
+/// anchored to a fixed early message. An agentic turn appends an assistant
+/// message and its tool results per step and re-sends the whole transcript, so
+/// the tail is exactly the boundary between what the previous call already
+/// wrote and what this call adds: each step writes only its own delta and
+/// reads everything before it. Anchoring instead — at the head of the
+/// conversation, say — would cache a fixed prefix and pay full price for the
+/// growth, and the head is the worst place to anchor here besides: context
+/// fitting rewrites it when it truncates, checkpoints it, or evicts an old
+/// image, while leaving the tail untouched.
+///
+/// Anthropic's cache lookup walks back at most
+/// [`CACHE_LOOKUP_LOOKBACK_BLOCKS`] content blocks from a breakpoint to find a
+/// matching prior prefix, so a lone tail breakpoint misses when one step
+/// appends more blocks than that — a wide parallel tool-call fan-out does
+/// exactly this, and the next call silently pays a full-price read. The
+/// lagging breakpoint sits one lookback window behind the tail, so consecutive
+/// calls always have a breakpoint within the window of one the previous call
+/// wrote: a step of up to two windows of new blocks still hits, at the lagging
+/// breakpoint. Both breakpoints sit inside the same prefix, so the tokens are
+/// written once either way, and a transcript shorter than the window simply
+/// gets no lagging breakpoint.
 ///
 /// A write costs more than uncached input and a read costs far less, so a
 /// breakpoint only pays if the prefix under it is byte-identical next call.
-/// Two things above this one must therefore stay stable: the tool
-/// advertisement order (see #1088) and the system prompt, which is fixed for a
-/// chat's configuration. A prefix that is under the model's minimum cacheable
-/// length is not a loss — the breakpoint is ignored rather than charged.
+/// Two things above these must therefore stay stable: the tool advertisement
+/// order (see #1088) and the system prompt, which is fixed for a chat's
+/// configuration. A prefix that is under the model's minimum cacheable length
+/// is not a loss — the breakpoint is ignored rather than charged.
 fn mark_cacheable_transcript_tail(messages: &mut [Value]) {
-    if let Some(last) = messages
-        .last_mut()
-        .and_then(|message| message.get_mut("content"))
-        .and_then(Value::as_array_mut)
-        .and_then(|tools| tools.last_mut())
-        .and_then(Value::as_object_mut)
-    {
-        last.insert("cache_control".into(), ephemeral_cache_control());
+    /// How far Anthropic's cache lookup walks back from a breakpoint, in
+    /// content blocks. The lagging breakpoint trails the tail by exactly one
+    /// window, so consecutive calls keep a breakpoint within reach of one the
+    /// previous call cached.
+    const CACHE_LOOKUP_LOOKBACK_BLOCKS: usize = 20;
+
+    let mut blocks_from_tail = 0usize;
+    let mut marked = 0;
+    'messages: for message in messages.iter_mut().rev() {
+        let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for block in content.iter_mut().rev() {
+            if blocks_from_tail == 0 || blocks_from_tail == CACHE_LOOKUP_LOOKBACK_BLOCKS {
+                if let Some(block) = block.as_object_mut() {
+                    block.insert("cache_control".into(), ephemeral_cache_control());
+                    marked += 1;
+                    if marked == 2 {
+                        break 'messages;
+                    }
+                }
+            }
+            blocks_from_tail += 1;
+        }
     }
 }
 
@@ -794,6 +822,86 @@ mod tests {
             .matches("cache_control")
             .count();
         assert_eq!(breakpoints, 3, "{body}");
+    }
+
+    #[test]
+    fn a_lagging_breakpoint_keeps_a_wide_tool_fan_out_inside_the_lookup_window() {
+        // One model step appends an assistant message with 15 tool calls and a
+        // user message with their 15 results: 30 blocks at once, beyond the
+        // 20-block cache-lookup window. A lone tail breakpoint would then sit
+        // further than 20 blocks from everything the previous call cached, and
+        // the next call would silently pay a full-price read. This pins the
+        // lagging breakpoint that keeps the previous tail inside a window.
+        let mut messages = vec![
+            ChatMessage::text(Role::User, "hi"),
+            ChatMessage::text(Role::Assistant, "on it"),
+        ];
+        // Flattened block index of the previous call's tail breakpoint.
+        let previous_tail = 1usize;
+        messages.push(ChatMessage {
+            role: Role::Assistant,
+            content: (0..15)
+                .map(|i| ContentBlock::ToolUse {
+                    id: format!("call_{i}"),
+                    name: "read_file".into(),
+                    input: json!({"path": format!("f{i}.rs")}),
+                })
+                .collect(),
+        });
+        messages.push(ChatMessage {
+            role: Role::User,
+            content: (0..15)
+                .map(|i| ContentBlock::ToolResult {
+                    tool_use_id: format!("call_{i}"),
+                    content: "ok".into(),
+                    is_error: false,
+                })
+                .collect(),
+        });
+        let req = ChatRequest {
+            provider: Some(ProviderId::new("anthropic")),
+            model: "claude-opus-4-8".into(),
+            system: Some("be brief".into()),
+            messages,
+            tools: vec![ToolSpec {
+                name: "read_file".into(),
+                description: "read a file".into(),
+                input_schema: json!({"type": "object"}),
+            }],
+            images: ImageAttachments::new(),
+            ..Default::default()
+        };
+        let body = build_request_json(&req).unwrap();
+
+        // Flatten the transcript's content blocks in wire order and locate the
+        // breakpoints.
+        let mut breakpoints = Vec::new();
+        let mut index = 0usize;
+        for message in body["messages"].as_array().unwrap() {
+            for block in message["content"].as_array().unwrap() {
+                if block.get("cache_control").is_some() {
+                    breakpoints.push(index);
+                }
+                index += 1;
+            }
+        }
+        assert_eq!(index, 32);
+        let [lagging, tail] = breakpoints.as_slice() else {
+            panic!("expected exactly two transcript breakpoints: {body}");
+        };
+        assert_eq!(*tail, index - 1);
+        // The lagging breakpoint trails the tail by exactly one window, and
+        // the previous call's tail — 30 blocks back from the new tail, out of
+        // reach of it — sits inside the lagging breakpoint's window.
+        assert_eq!(tail - lagging, 20);
+        assert!(*lagging > previous_tail);
+        assert!(*lagging - previous_tail <= 20);
+        // Four is the hard cap; going over rejects the request outright.
+        let all_breakpoints = serde_json::to_string(&body)
+            .unwrap()
+            .matches("cache_control")
+            .count();
+        assert_eq!(all_breakpoints, 4, "{body}");
     }
 
     fn reasoning_request(model: &str, effort: Option<ReasoningEffort>) -> ChatRequest {
