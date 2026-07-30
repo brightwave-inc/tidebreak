@@ -34,6 +34,7 @@
 //! multi-thread runtime. The host runs on one; every test here uses the
 //! multi-thread flavor.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -85,6 +86,16 @@ pub struct SandboxContainerRunConfig {
     pub reattach_attempts: u32,
     /// Backoff between re-dials.
     pub reattach_backoff: Duration,
+    /// How many model-inference operations the host will answer for one run.
+    ///
+    /// The sandbox's own step limit runs inside the untrusted container, so it
+    /// bounds nothing; this cap is what actually stops a compromised or buggy
+    /// sandbox from spending the user's model credentials indefinitely. Every
+    /// call that reaches the host's provider spends one unit — including a call
+    /// that then fails retryably — while a re-issue answered from the recorded
+    /// operation log spends nothing. Exhaustion is refused non-retryably, which
+    /// fails the sandbox's model step and terminalizes the run.
+    pub max_inference_operations: u32,
 }
 
 impl Default for SandboxContainerRunConfig {
@@ -95,6 +106,11 @@ impl Default for SandboxContainerRunConfig {
             dial_timeout: Duration::from_secs(10),
             reattach_attempts: 5,
             reattach_backoff: Duration::from_millis(250),
+            // Three times the in-container loop's own step limit: a well-behaved
+            // run never approaches it even with retried provider failures, and a
+            // hostile one is cut off within one order of magnitude of legitimate
+            // spend.
+            max_inference_operations: 24,
         }
     }
 }
@@ -131,6 +147,13 @@ struct HostModelProxy {
     /// run would. Resolved once at attach and failed closed there, never
     /// re-derived per request from an untrusted prompt.
     config: AgentConfig,
+    /// Model-inference operations answered so far, against
+    /// [`SandboxContainerRunConfig::max_inference_operations`]. One proxy lives
+    /// for the whole drive, so the count survives reattaches; replays from the
+    /// operation log never reach this responder and spend nothing.
+    spent: AtomicU32,
+    /// The per-run cap the count is checked against.
+    budget: u32,
 }
 
 #[async_trait]
@@ -146,6 +169,16 @@ impl CapabilityResponder for HostModelProxy {
                 false,
             ));
         };
+        // Spend before resolving: a call that fails retryably still consumed a
+        // provider attempt, and counting refused calls keeps a sandbox that
+        // ignores the refusal from probing forever at zero cost accounting.
+        if self.spent.fetch_add(1, Ordering::SeqCst) >= self.budget {
+            return Response::Error(ErrorResponse::new(
+                ErrorCode::Denied,
+                "the run's model-inference budget is exhausted",
+                false,
+            ));
+        }
         let provider = self.resolver.resolve().await;
         // The sandbox names no model, provider, or endpoint: it supplies only a
         // prompt, and the host's policy-resolved config decides where it goes.
@@ -399,6 +432,8 @@ impl SandboxContainerRunner {
             Arc::new(HostModelProxy {
                 resolver: Arc::clone(&self.resolver),
                 config,
+                spent: AtomicU32::new(0),
+                budget: self.config.max_inference_operations,
             }),
             Arc::new(DurableOperationStore::new(
                 Arc::clone(&self.store),
