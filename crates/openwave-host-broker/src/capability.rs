@@ -26,6 +26,15 @@ pub enum Capability {
     ReadFiles,
     /// Create or explicitly approved replacement of files in a connected root.
     WriteFiles,
+    /// Expose a connected root to model-authored commands.
+    ///
+    /// This is deliberately separate from [`Capability::ReadFiles`]: reading a
+    /// named file on the user's behalf and handing a whole folder to commands
+    /// the model wrote are different amounts of trust, even though the second
+    /// cannot see more than the first. It is only ever additional — exec reach
+    /// is authorized on top of read, never instead of it — so revoking it
+    /// leaves the folder readable, and revoking read takes exec with it.
+    ExecuteCommands,
 }
 
 /// Resource scope covered by one grant.
@@ -55,6 +64,13 @@ pub enum ConsentMethod {
     PermissionDialog,
     /// A local operator deliberately provisioned a headless installation.
     OperatorConfig,
+    /// A state migration named reach an existing grant already conveyed.
+    ///
+    /// No user interaction produced this record. It exists so a grant that was
+    /// split out of a broader one keeps an honest provenance instead of
+    /// borrowing the trusted interaction behind its source, and carries that
+    /// source's timestamp rather than claiming a fresh approval.
+    CarriedForward,
 }
 
 /// Auditable evidence attached to a grant.
@@ -225,7 +241,15 @@ pub enum GrantError {
 fn validate_capability_scope(capability: Capability, scope: &Scope) -> Result<(), GrantError> {
     match (capability, scope) {
         (Capability::ListRoots, Scope::Subject)
-        | (Capability::ReadFiles | Capability::WriteFiles, Scope::Root { .. }) => Ok(()),
+        | (
+            Capability::ReadFiles | Capability::WriteFiles | Capability::ExecuteCommands,
+            Scope::Root { .. },
+        ) => Ok(()),
+        // A command is handed a folder, not a subtree of one. Accepting a
+        // subtree scope here would record a confinement nothing enforces.
+        (Capability::ExecuteCommands, Scope::PathSubtree { .. }) => {
+            Err(GrantError::InvalidCapabilityScope)
+        }
         (Capability::ReadFiles | Capability::WriteFiles, Scope::PathSubtree { relative, .. })
             if !relative.is_root() =>
         {

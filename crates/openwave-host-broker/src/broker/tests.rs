@@ -93,13 +93,17 @@ fn register(
     result
 }
 
-/// The listing shape a folder gets from a plain registration, which grants both
-/// reading and writing.
-fn read_write(root: RootSummary) -> RootAccess {
+/// The listing shape a folder gets from a plain registration, which grants
+/// reading, writing, and exec reach together.
+fn picker_access(root: RootSummary) -> RootAccess {
     RootAccess {
         root_id: root.root_id,
         display_name: root.display_name,
-        capabilities: vec![Capability::ReadFiles, Capability::WriteFiles],
+        capabilities: vec![
+            Capability::ReadFiles,
+            Capability::WriteFiles,
+            Capability::ExecuteCommands,
+        ],
     }
 }
 
@@ -455,7 +459,7 @@ fn approved_roots_can_be_explicitly_attached_to_another_standalone_conversation(
         )
         .unwrap(),
         OperationResult::ListRoots {
-            roots: vec![read_write(registered.root)]
+            roots: vec![picker_access(registered.root)]
         }
     );
     assert!(matches!(
@@ -524,7 +528,7 @@ fn reused_standalone_approval_and_chat_attachment_survive_restart() {
         )
         .unwrap(),
         OperationResult::ListRoots {
-            roots: vec![read_write(registered.root)]
+            roots: vec![picker_access(registered.root)]
         }
     );
 }
@@ -562,7 +566,7 @@ fn choosing_the_same_approved_folder_again_reuses_its_host_identity() {
         )
         .unwrap(),
         OperationResult::ListRoots {
-            roots: vec![read_write(first.root)]
+            roots: vec![picker_access(first.root)]
         }
     );
 }
@@ -738,7 +742,7 @@ fn basename_collisions_are_not_offered_as_approved_roots() {
         )
         .unwrap(),
         OperationResult::ListRoots {
-            roots: vec![read_write(first.root)],
+            roots: vec![picker_access(first.root)],
         }
     );
 }
@@ -761,7 +765,7 @@ fn register_list_read_and_revoke_are_one_live_authority_boundary() {
     assert_eq!(
         roots,
         OperationResult::ListRoots {
-            roots: vec![read_write(registered.root.clone())]
+            roots: vec![picker_access(registered.root.clone())]
         }
     );
     let listing = operate(
@@ -1025,7 +1029,7 @@ fn repeated_registration_reuses_the_same_root_and_attaches_new_project_chat() {
         assert_eq!(
             roots,
             OperationResult::ListRoots {
-                roots: vec![read_write(first.root.clone())]
+                roots: vec![picker_access(first.root.clone())]
             }
         );
     }
@@ -1434,7 +1438,7 @@ fn attach_and_detach_are_exact_conversation_mutations() {
     let second_context = ExecutionContext::project_chat(second_conversation, project_id).unwrap();
     assert!(matches!(
         operate(&broker.operator(), second_context, OperationRequest::ListRoots).unwrap(),
-        OperationResult::ListRoots { roots } if roots == vec![read_write(registered.root.clone())]
+        OperationResult::ListRoots { roots } if roots == vec![picker_access(registered.root.clone())]
     ));
 
     let detach_id = OperationId::new();
@@ -1455,7 +1459,7 @@ fn attach_and_detach_are_exact_conversation_mutations() {
     ));
     assert!(matches!(
         operate(&broker.operator(), second_context, OperationRequest::ListRoots).unwrap(),
-        OperationResult::ListRoots { roots } if roots == vec![read_write(registered.root)]
+        OperationResult::ListRoots { roots } if roots == vec![picker_access(registered.root)]
     ));
     assert!(
         !mutate_attachment(
@@ -2344,7 +2348,7 @@ fn an_unreachable_root_is_set_aside_rather_than_blocking_the_others() {
     assert_eq!(
         operate(&broker.operator(), context, OperationRequest::ListRoots).unwrap(),
         OperationResult::ListRoots {
-            roots: vec![read_write(reachable.root)]
+            roots: vec![picker_access(reachable.root)]
         }
     );
     assert!(
@@ -2602,6 +2606,67 @@ fn version_two_read_grants_migrate_without_gaining_write() {
         .any(|grant| grant.capability() == Capability::WriteFiles));
 }
 
+/// Folders attached before exec had its own capability keep working, and say
+/// how they got it.
+///
+/// Under version 3 a folder was resolved for commands off its read grant, so
+/// every attached folder was already exec-reachable. Dropping that on upgrade
+/// would break folders people are working in, and the record the migration
+/// writes must not pretend they approved a prompt they never saw.
+#[test]
+fn version_three_read_grants_carry_their_exec_reach_forward() {
+    let (temp, broker, path, state_dir) = durable_setup();
+    let conversation = Uuid::new_v4();
+    let subject = GrantSubject::conversation(conversation).unwrap();
+    let registered = register(
+        &broker.controller(),
+        subject,
+        conversation,
+        path,
+        OperationId::new(),
+    );
+    let root_id = registered.root.root_id;
+    drop(broker);
+
+    // Reshape the persisted file into what a version 3 install left behind:
+    // list, read, and write grants, before exec had a capability of its own.
+    let state_path = state_dir.join("host-broker-state.json");
+    let mut persisted: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    persisted["version"] = serde_json::json!(3);
+    let grants = persisted["grants"].as_array_mut().unwrap();
+    grants.retain(|grant| grant["capability"] != serde_json::json!("execute_commands"));
+    let read_granted_at = grants
+        .iter()
+        .find(|grant| grant["capability"] == serde_json::json!("read_files"))
+        .map(|grant| grant["consent"]["granted_at"].clone())
+        .unwrap();
+    std::fs::write(&state_path, serde_json::to_vec(&persisted).unwrap()).unwrap();
+
+    let broker = Broker::open(test_policy(&temp), &state_dir).unwrap();
+    let context = ExecutionContext::standalone(conversation).unwrap();
+    assert_eq!(
+        resolve_exec(&broker.controller(), context, vec![root_id])
+            .unwrap()
+            .len(),
+        1,
+        "a folder that commands could already reach still reaches them"
+    );
+
+    let state = broker.shared.state.lock().unwrap();
+    let carried = state
+        .grants
+        .iter()
+        .find(|grant| grant.capability() == Capability::ExecuteCommands)
+        .expect("the migration named the reach the read grant already carried");
+    assert_eq!(carried.consent().method(), ConsentMethod::CarriedForward);
+    assert_eq!(
+        serde_json::to_value(carried.consent().granted_at()).unwrap(),
+        read_granted_at,
+        "the carried grant keeps the source consent's moment instead of claiming a new one"
+    );
+}
+
 #[test]
 fn binary_reads_return_bytes_that_text_reads_refuse() {
     let (_temp, broker, path, audit) = audited_setup();
@@ -2808,7 +2873,7 @@ fn a_listing_reports_the_capabilities_the_broker_would_authorize() {
     assert_eq!(
         operate(&broker.operator(), context, OperationRequest::ListRoots).unwrap(),
         OperationResult::ListRoots {
-            roots: vec![read_write(registered.root)]
+            roots: vec![picker_access(registered.root)]
         },
         "a folder connected through the picker allows reading and writing"
     );
@@ -2828,7 +2893,7 @@ fn a_listing_reports_the_capabilities_the_broker_would_authorize() {
     };
     assert_eq!(
         roots.first().map(|root| root.capabilities.as_slice()),
-        Some([Capability::ReadFiles].as_slice()),
+        Some([Capability::ReadFiles, Capability::ExecuteCommands].as_slice()),
         "write is not reported once the grant behind it is gone"
     );
     assert!(matches!(
@@ -2891,6 +2956,36 @@ fn exec_root_resolution_intersects_product_ids_with_live_grants() {
         .lock()
         .unwrap()
         .grants
+        .retain(|grant| grant.capability() != Capability::ExecuteCommands);
+    assert!(
+        resolve_exec(&broker.controller(), context, vec![root_id])
+            .unwrap()
+            .is_empty(),
+        "a readable folder is not reachable by commands on its own"
+    );
+
+    // Restore exec reach alone: revoking read has to take the shell with it,
+    // because a command in the folder can read everything the read grant
+    // covered.
+    broker
+        .shared
+        .state
+        .lock()
+        .unwrap()
+        .grants
+        .push(exec_grant(subject, root_id));
+    assert_eq!(
+        resolve_exec(&broker.controller(), context, vec![root_id])
+            .unwrap()
+            .len(),
+        1
+    );
+    broker
+        .shared
+        .state
+        .lock()
+        .unwrap()
+        .grants
         .retain(|grant| grant.capability() != Capability::ReadFiles);
     assert!(
         resolve_exec(&broker.controller(), context, vec![root_id])
@@ -2898,6 +2993,17 @@ fn exec_root_resolution_intersects_product_ids_with_live_grants() {
             .is_empty(),
         "a product root id is not authority after its live read grant is gone"
     );
+}
+
+fn exec_grant(subject: GrantSubject, root_id: RootId) -> Grant {
+    Grant::from_consent(
+        GrantId::new(),
+        subject,
+        Capability::ExecuteCommands,
+        Scope::Root { root_id },
+        ConsentRecord::new(ConsentMethod::PermissionDialog, Utc::now()),
+    )
+    .unwrap()
 }
 
 #[test]

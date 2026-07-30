@@ -1,7 +1,7 @@
 //! Durable broker registry and mutation receipts.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, File, OpenOptions, TryLockError},
     io::{self, Read, Write},
     path::{Path, PathBuf},
@@ -18,11 +18,11 @@ use super::{
     RegisteredRoot, State, UnavailableRoot, UnavailableRootReason,
 };
 use crate::{
-    path_policy::RootIdentity, Grant, GrantSubject, OperationId, RootAttachment, RootId,
-    RootPolicy, Scope,
+    path_policy::RootIdentity, Capability, ConsentMethod, ConsentRecord, Grant, GrantId,
+    GrantSubject, OperationId, RootAttachment, RootId, RootPolicy, Scope,
 };
 
-const STATE_VERSION: u32 = 3;
+const STATE_VERSION: u32 = 4;
 const STATE_FILE_NAME: &str = "host-broker-state.json";
 pub(super) const MAX_STATE_FILE_BYTES: usize = 16 * 1024 * 1024;
 
@@ -112,7 +112,7 @@ impl StateFile {
             return Err(BrokerError::StateTooLarge);
         }
         let persisted: PersistedState = serde_json::from_slice(&bytes).map_err(invalid_data)?;
-        if !matches!(persisted.version, 2 | STATE_VERSION) {
+        if !matches!(persisted.version, 2 | 3 | STATE_VERSION) {
             return Err(invalid_data(format!(
                 "unsupported broker state version {}",
                 persisted.version
@@ -153,6 +153,9 @@ impl StateFile {
         }
 
         let mut grants = persisted.grants;
+        if persisted.version < 4 {
+            carry_forward_exec_grants(&mut grants)?;
+        }
         let mut attachments = persisted.attachments;
         for root in &mut unavailable {
             let root_id = root.id;
@@ -331,6 +334,59 @@ impl AtomicWriteError {
             published: true,
         }
     }
+}
+
+/// Name the exec reach a pre-version-4 root-scoped read grant already carried.
+///
+/// Before version 4 the broker resolved a folder for commands off its read
+/// grant, so every folder attached under those versions has been exec-reachable
+/// for as long as it has been attached. Splitting the capability out therefore
+/// has to choose between changing what those folders allow and recording a
+/// grant the user never saw a prompt for.
+///
+/// It records the grant, because the alternative is worse in both directions:
+/// dropping exec would silently break folders people are working in, and the
+/// re-consent affordance that would let them restore it does not exist yet. The
+/// reason this is not the forged-consent shape that mirroring read into write
+/// would have been is that no reach is created here — a command could already
+/// see everything in these folders, and still can see no more. The migration
+/// only makes an existing authority nameable, so it says so: the record is
+/// [`ConsentMethod::CarriedForward`], carrying the source grant's own timestamp
+/// rather than claiming the user approved anything today.
+///
+/// Read grants scoped to a subtree are left alone. Exec resolution has always
+/// asked about a whole root, so a subtree grant never reached a command, and
+/// widening one now would create authority instead of naming it.
+fn carry_forward_exec_grants(grants: &mut Vec<Grant>) -> Result<(), BrokerError> {
+    let mut covered = grants
+        .iter()
+        .filter_map(|grant| match (grant.capability(), grant.scope()) {
+            (Capability::ExecuteCommands, Scope::Root { root_id }) => {
+                Some((grant.subject(), *root_id))
+            }
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    let carried = grants
+        .iter()
+        .filter_map(|grant| match (grant.capability(), grant.scope()) {
+            (Capability::ReadFiles, Scope::Root { root_id }) => {
+                Some((grant.subject(), *root_id, grant.consent().granted_at()))
+            }
+            _ => None,
+        })
+        .filter(|(subject, root_id, _)| covered.insert((*subject, *root_id)))
+        .collect::<Vec<_>>();
+    for (subject, root_id, granted_at) in carried {
+        grants.push(Grant::from_consent(
+            GrantId::new(),
+            subject,
+            Capability::ExecuteCommands,
+            Scope::Root { root_id },
+            ConsentRecord::new(ConsentMethod::CarriedForward, granted_at),
+        )?);
+    }
+    Ok(())
 }
 
 pub(super) fn validate_loaded_state(state: &State) -> Result<(), BrokerError> {
