@@ -1585,11 +1585,22 @@ impl Agent {
                     self.append_assistant_exact_retry(&output, &candidate.citations)
                         .await?;
                 }
+                // The in-process driver mirrors the worker's emptiness
+                // detection (#1208): a final response with neither text nor a
+                // tool call is not an answer, and completing on it reports a
+                // successful turn that produced nothing. The disposition stays
+                // where the worker owns it — there is no attempt budget here,
+                // so instead of rescheduling the turn simply fails. Refusals
+                // are exempt for the same reason the worker gives: the refusal
+                // is the outcome and stays meaningful with no prose behind it.
+                let empty_final = publish_terminal && refusal.is_none() && text.trim().is_empty();
                 // Drain steers until the inbox is quiet, then complete. A steer
                 // that arrives as the stream finished must continue the turn
                 // rather than race a TurnCompleted. `try_complete` holds the
                 // queue lock across the empty-check and terminal emit so a
-                // concurrent push cannot 202 and then be orphaned.
+                // concurrent push cannot 202 and then be orphaned — the
+                // emptiness failure rides the same fence, so a steer that
+                // arrives before sealing still continues the turn.
                 loop {
                     if self.cancel.is_cancelled() {
                         return Ok(self.finish_cancelled(
@@ -1629,14 +1640,21 @@ impl Agent {
                                     usage: total_usage,
                                     refusal,
                                 });
-                            } else {
+                            } else if !empty_final {
                                 events.send(AgentEvent::TurnCompleted {
                                     usage: total_usage,
                                     stop_reason,
                                 });
                             }
+                            // An empty final response emits nothing here; the
+                            // error below surfaces as TurnFailed.
                         }
                     }) {
+                        if empty_final {
+                            return Err(AgentError::msg(
+                                "the model returned neither text nor a tool call",
+                            ));
+                        }
                         return Ok(AgentTurnOutcome::Completed {
                             output,
                             citations: candidate.citations.clone(),
@@ -7535,6 +7553,81 @@ mod tests {
         assert!(
             matches!((started, interrupted), (Some(a), Some(b)) if a < b),
             "the started call is marked discarded by the refusal"
+        );
+    }
+
+    /// The in-process driver must not report success for a turn whose final
+    /// model response has neither text nor a tool call: the caller gets a
+    /// blank turn with nothing to act on and no error to explain it. The
+    /// worker refuses the same response (its disposition is to retry while
+    /// budgets allow); the in-process driver has no attempt accounting, so
+    /// the turn fails instead of completing.
+    #[tokio::test]
+    async fn an_empty_model_response_does_not_complete_an_in_process_turn() {
+        struct EmptyProvider;
+
+        #[async_trait]
+        impl ModelProvider for EmptyProvider {
+            fn id(&self) -> ProviderId {
+                ProviderId::new("empty")
+            }
+
+            async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+                Ok(stream::iter(vec![ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                }])
+                .boxed())
+            }
+        }
+
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            reasoning_effort: None,
+            permission_mode: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let agent = Agent::new(
+            Arc::new(EmptyProvider),
+            Arc::new(ToolRegistry::new()),
+            store,
+            AgentConfig {
+                model: "fake".into(),
+                ..Default::default()
+            },
+        );
+
+        let (tx, rx) = unbounded();
+        let result = agent.run_turn(&chat, "say something", &tx).await;
+        drop(tx);
+        let events: Vec<AgentEvent> = rx.collect().await;
+
+        assert!(result.is_err());
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::TurnCompleted { .. })),
+            "an empty response must not complete the turn"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::TurnFailed { .. })),
+            "the failure surfaces as TurnFailed"
         );
     }
 
