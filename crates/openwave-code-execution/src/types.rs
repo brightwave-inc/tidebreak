@@ -15,7 +15,7 @@ pub const MAX_CWD_BYTES: usize = 1_024;
 /// Maximum bytes captured from stdout and stderr together.
 pub const MAX_CAPTURE_BYTES: usize = 40_000;
 /// Maximum bytes transferred for one workspace file in either direction.
-pub const MAX_WORKSPACE_FILE_BYTES: usize = 16 * 1_024 * 1_024;
+pub const MAX_WORKSPACE_FILE_BYTES: usize = openwave_core::MAX_EXEC_WORKSPACE_FILE_BYTES;
 /// Maximum UTF-8 bytes in a workspace-relative file path.
 pub const MAX_WORKSPACE_PATH_BYTES: usize = 1_024;
 /// Maximum entries returned by one workspace listing.

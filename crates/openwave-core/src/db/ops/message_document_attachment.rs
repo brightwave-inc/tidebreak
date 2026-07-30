@@ -7,7 +7,7 @@ use crate::error::{AgentError, Result};
 use crate::id::{ChatId, DocumentId, MessageId};
 use crate::model::{MessageDocumentAttachment, MAX_MESSAGE_ATTACHMENTS};
 
-use super::super::{entities, store_err, DbStore};
+use super::super::{entities, source_blob_from_model, store_err, DbStore};
 
 pub(in crate::db) fn validate_count(images: usize, documents: &[DocumentId]) -> Result<()> {
     if images.saturating_add(documents.len()) > MAX_MESSAGE_ATTACHMENTS {
@@ -140,6 +140,12 @@ fn from_models(
     row: entities::message_document_attachment::Model,
     document: entities::document::Model,
 ) -> Result<MessageDocumentAttachment> {
+    let source_blob = source_blob_from_model(
+        document.source_blob_id,
+        document.source_sha256,
+        document.source_byte_len,
+    )?;
+    let readable = !document.canonical_text.is_empty();
     let attachment = MessageDocumentAttachment {
         message_id: MessageId(row.message_id),
         chat_id: ChatId(row.chat_id),
@@ -147,6 +153,8 @@ fn from_models(
         document_id: DocumentId(row.document_id),
         title: document.title,
         media_type: document.media_type,
+        source_blob,
+        readable,
         created_at: row.created_at,
     };
     attachment

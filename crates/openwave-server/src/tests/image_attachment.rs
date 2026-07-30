@@ -829,7 +829,11 @@ async fn a_curated_openai_model_answers_after_receiving_png_and_jpeg_attachments
         .and_then(|message| message["content"].as_array())
         .expect("the provider request has the user message parts");
     assert_eq!(content[0]["type"], "text");
-    assert_eq!(content[0]["text"], "Describe these attachments.");
+    let text = content[0]["text"].as_str().unwrap();
+    assert!(text.starts_with("Describe these attachments.\n\n<attachments>"));
+    assert!(text.contains(&format!("image_1: id={png};")));
+    assert!(text.contains(&format!("image_2: id={jpeg};")));
+    assert!(text.ends_with("</attachments>"));
     for (part, media_type) in content[1..].iter().zip(["image/png", "image/jpeg"]) {
         assert_eq!(part["type"], "image_url");
         assert!(

@@ -2057,6 +2057,59 @@ pub struct Message {
 /// bounds the ordinal columns, which the schema range-checks.
 pub const MAX_MESSAGE_ATTACHMENTS: usize = 16;
 
+/// Maximum size of one attachment copied into an exec workspace.
+///
+/// This is also the provider-neutral per-file workspace transfer limit. Keeping
+/// the value beside attachment context ensures the route announced to the model
+/// cannot disagree with the execution boundary.
+pub const MAX_EXEC_WORKSPACE_FILE_BYTES: usize = 16 * 1_024 * 1_024;
+
+/// Stable, collision-safe filename for one attachment in `documents/`.
+///
+/// The document id suffix makes the path independently derivable from a single
+/// attachment record, so transcript reconstruction and lazy workspace
+/// materialization cannot assign different names.
+#[must_use]
+pub fn exec_attachment_file_name(title: Option<&str>, document_id: DocumentId) -> String {
+    const MAX_TITLE_BYTES: usize = 120;
+
+    let leaf = title
+        .unwrap_or("attachment")
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("attachment");
+    let mut safe = String::new();
+    for character in leaf.chars() {
+        let character = if character.is_alphanumeric() || matches!(character, '-' | '_' | '.') {
+            character
+        } else if character.is_whitespace() {
+            '-'
+        } else {
+            '_'
+        };
+        if safe.len() + character.len_utf8() > MAX_TITLE_BYTES {
+            break;
+        }
+        safe.push(character);
+    }
+    let safe = safe.trim_matches(['.', '-', '_']);
+    let safe = if safe.is_empty() { "attachment" } else { safe };
+    let suffix = document_id.to_string();
+    match safe.rsplit_once('.') {
+        Some((stem, extension))
+            if !stem.is_empty()
+                && !extension.is_empty()
+                && extension.len() <= 16
+                && extension
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric()) =>
+        {
+            format!("{stem}--{suffix}.{extension}")
+        }
+        _ => format!("{safe}--{suffix}"),
+    }
+}
+
 /// One image attached to a persisted message.
 ///
 /// This is the durable half of an attachment: identity only, never bytes and
@@ -2099,9 +2152,9 @@ impl MessageAttachment {
 
 /// One source document attached to a persisted message.
 ///
-/// The document remains the authoritative owner of its bytes and decoded text;
-/// this row only preserves which user message introduced it and its display
-/// order.
+/// The document remains the authoritative owner of its bytes and decoded text.
+/// Stores project enough of the current document record here to rebuild truthful
+/// model context and an exec workspace without a second lookup per attachment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageDocumentAttachment {
     /// The message this document is attached to.
@@ -2116,6 +2169,10 @@ pub struct MessageDocumentAttachment {
     pub title: Option<String>,
     /// Media type captured from the document record.
     pub media_type: String,
+    /// Retained original bytes, when the document has them.
+    pub source_blob: Option<DocumentSourceBlob>,
+    /// Whether `read_source` can return decoded canonical text.
+    pub readable: bool,
     /// When the attachment was recorded.
     pub created_at: DateTime<Utc>,
 }
@@ -2136,6 +2193,13 @@ impl MessageDocumentAttachment {
         }
         if self.media_type.is_empty() {
             return Err("message document attachment media type must not be empty");
+        }
+        if self
+            .source_blob
+            .as_ref()
+            .is_some_and(|blob| !blob.has_content_addressed_id())
+        {
+            return Err("message document attachment source blob is invalid");
         }
         Ok(())
     }
@@ -2497,5 +2561,17 @@ mod tests {
         invalid.id = Uuid::new_v4();
         assert!(!invalid.has_content_addressed_id());
         assert_ne!(first.id, DocumentSourceBlob::from_bytes(b"other").id);
+    }
+
+    #[test]
+    fn exec_attachment_names_are_pathless_and_collision_safe() {
+        let first_id = DocumentId(Uuid::from_u128(1));
+        let second_id = DocumentId(Uuid::from_u128(2));
+        let first = exec_attachment_file_name(Some("../reports/quarter 1.pdf"), first_id);
+        let second = exec_attachment_file_name(Some("../reports/quarter 1.pdf"), second_id);
+
+        assert_eq!(first, "quarter-1--00000000-0000-0000-0000-000000000001.pdf");
+        assert_ne!(first, second);
+        assert!(!first.contains(['/', '\\']));
     }
 }

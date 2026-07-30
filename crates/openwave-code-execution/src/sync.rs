@@ -446,6 +446,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn attached_documents_are_pushed_with_the_per_file_cap() {
+        let host = tempfile::tempdir().unwrap();
+        let documents = host.path().join("documents");
+        std::fs::create_dir_all(&documents).unwrap();
+        std::fs::write(documents.join("brief.pdf"), b"pdf bytes").unwrap();
+        let oversized = std::fs::File::create(documents.join("oversized.pdf")).unwrap();
+        oversized
+            .set_len(MAX_WORKSPACE_FILE_BYTES as u64 + 1)
+            .unwrap();
+        let fake = FakeWorkspace::default();
+
+        let pushed = push_host_dir(&fake, &workspace_id(), host.path())
+            .await
+            .unwrap();
+
+        assert_eq!(fake.get("documents/brief.pdf").unwrap(), b"pdf bytes");
+        assert!(fake.get("documents/oversized.pdf").is_none());
+        assert_eq!(pushed.transferred, 1);
+        assert!(pushed.notes.iter().any(|note| {
+            note.contains("documents/oversized.pdf") && note.contains("file limit")
+        }));
+    }
+
+    #[tokio::test]
     async fn bundled_document_helpers_are_not_on_the_sync_skip_list() {
         let host = tempfile::tempdir().unwrap();
         let helper = host

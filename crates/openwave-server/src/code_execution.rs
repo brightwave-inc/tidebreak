@@ -20,7 +20,10 @@ use openwave_code_execution::{
     WorkspaceListing, DAYTONA_CREDENTIAL_KEY, DOCUMENT_SCRIPTS_DIR, DOCUMENT_SCRIPT_FILES,
     E2B_CREDENTIAL_KEY,
 };
-use openwave_core::{Chat, ChatId, HostRootId, ProjectId, Result, SecretProvider, Store};
+use openwave_core::{
+    exec_attachment_file_name, BlobStore, Chat, ChatId, HostRootId, MessageDocumentAttachment,
+    ProjectId, Result, SecretProvider, Store, MAX_EXEC_WORKSPACE_FILE_BYTES,
+};
 use openwave_egress::{
     CidrBlock, DomainPattern, EgressAllowlist, EgressEnforcement, EgressError, EgressPolicy,
 };
@@ -576,6 +579,7 @@ fn credential_spec(
 pub struct ConfiguredCodeExecutionProvider {
     store: Arc<dyn Store>,
     secrets: Arc<dyn SecretProvider>,
+    blobs: Option<Arc<dyn BlobStore>>,
     scratch_root: PathBuf,
     document_scripts_source: Option<PathBuf>,
     folder_grant_resolver: Option<Arc<dyn ExecFolderGrantResolver>>,
@@ -592,11 +596,19 @@ impl ConfiguredCodeExecutionProvider {
         Self {
             store,
             secrets,
+            blobs: None,
             scratch_root: scratch_root.into(),
             document_scripts_source: None,
             folder_grant_resolver: None,
             remote_sessions: RemoteSessionPool::default(),
         }
+    }
+
+    /// Install the blob store used to backfill attached documents before exec.
+    #[must_use]
+    pub fn with_blobs(mut self, blobs: Arc<dyn BlobStore>) -> Self {
+        self.blobs = Some(blobs);
+        self
     }
 
     /// Install a trusted bundled helper directory into every exec workspace.
@@ -820,6 +832,18 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
             self.document_scripts_source.as_deref(),
         )
         .await?;
+        if let Some(blobs) = self.blobs.as_deref() {
+            let chat_id = request
+                .workspace_id
+                .as_str()
+                .parse::<ChatId>()
+                .map_err(|_| {
+                    CodeExecutionError::InvalidRequest(
+                        "execution workspace does not identify a conversation".into(),
+                    )
+                })?;
+            materialize_chat_attachments(&*self.store, blobs, chat_id, &host_dir).await?;
+        }
         // A remote sandbox has its own filesystem, but the model is shown one
         // path vocabulary across the file tools and exec. Mirror the chat's
         // private scratch into the workspace before the command and back out
@@ -867,6 +891,93 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
     // this late-binding wrapper depends on the configuration read at call
     // time, which the synchronous trait flag cannot express. Host callers use
     // [`ConfiguredCodeExecutionProvider::workspace`] instead.
+}
+
+async fn materialize_chat_attachments(
+    store: &dyn Store,
+    blobs: &dyn BlobStore,
+    chat_id: ChatId,
+    host_dir: &std::path::Path,
+) -> std::result::Result<(), CodeExecutionError> {
+    let attachments = store
+        .list_message_document_attachments(chat_id)
+        .await
+        .map_err(|_| CodeExecutionError::Unavailable("attachment storage is unavailable".into()))?;
+    materialize_attachments(&attachments, blobs, host_dir).await
+}
+
+async fn materialize_attachments(
+    attachments: &[MessageDocumentAttachment],
+    blobs: &dyn BlobStore,
+    host_dir: &std::path::Path,
+) -> std::result::Result<(), CodeExecutionError> {
+    let documents_dir = host_dir.join("documents");
+    let metadata = tokio::fs::symlink_metadata(&documents_dir)
+        .await
+        .map_err(|_| CodeExecutionError::Sandbox("documents/ is unavailable".into()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(CodeExecutionError::Sandbox(
+            "documents/ is not a private workspace directory".into(),
+        ));
+    }
+
+    let mut materialized = HashSet::new();
+    for attachment in attachments {
+        let Some(source_blob) = attachment.source_blob.as_ref() else {
+            continue;
+        };
+        if source_blob.byte_len > MAX_EXEC_WORKSPACE_FILE_BYTES as u64 {
+            continue;
+        }
+        let file_name =
+            exec_attachment_file_name(attachment.title.as_deref(), attachment.document_id);
+        if !materialized.insert(file_name.clone()) {
+            continue;
+        }
+        let bytes = blobs.get(source_blob.id).await.map_err(|_| {
+            CodeExecutionError::Unavailable("attached document bytes are unavailable".into())
+        })?;
+        let Some(bytes) = bytes else {
+            return Err(CodeExecutionError::Unavailable(
+                "attached document bytes are unavailable".into(),
+            ));
+        };
+        if bytes.len() > MAX_EXEC_WORKSPACE_FILE_BYTES
+            || openwave_core::DocumentSourceBlob::from_bytes(&bytes) != *source_blob
+        {
+            return Err(CodeExecutionError::Unavailable(
+                "attached document bytes do not match their stored descriptor".into(),
+            ));
+        }
+        let destination = documents_dir.join(&file_name);
+        match tokio::fs::symlink_metadata(&destination).await {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                return Err(CodeExecutionError::Sandbox(format!(
+                    "documents/{file_name} is not a regular workspace file"
+                )));
+            }
+            Ok(_) => {
+                if tokio::fs::read(&destination)
+                    .await
+                    .is_ok_and(|existing| existing == bytes)
+                {
+                    continue;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(CodeExecutionError::Sandbox(format!(
+                    "documents/{file_name} is unavailable"
+                )));
+            }
+        }
+        tokio::fs::write(&destination, bytes).await.map_err(|_| {
+            CodeExecutionError::Sandbox(format!(
+                "attached document documents/{file_name} could not be materialized"
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 async fn prepare_execution_directories(
@@ -1016,7 +1127,8 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use openwave_core::{
-        AgentError, ChatRootAttachment, DbStore, PermissionMode, RootAttachmentOrigin,
+        AgentError, ChatRootAttachment, DbStore, DocumentId, DocumentSourceBlob,
+        DocumentSourceUpsert, FsBlobStore, PermissionMode, RootAttachmentOrigin, TurnId,
     };
     use std::sync::Mutex;
     use uuid::Uuid;
@@ -1136,6 +1248,121 @@ mod tests {
             assert!(dir.path().join(name).is_dir());
             assert!(dir.path().join(name).join(".openwave-directory").is_file());
         }
+    }
+
+    #[tokio::test]
+    async fn attached_documents_backfill_lazily_with_collision_and_size_limits() {
+        let (store, database) = test_store().await;
+        let blobs = FsBlobStore::new(database.path().join("blobs"));
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            reasoning_effort: None,
+            permission_mode: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+
+        let first_bytes = b"first opaque attachment";
+        let first_blob = DocumentSourceBlob::from_bytes(first_bytes);
+        blobs
+            .put(first_blob.id, first_bytes.to_vec())
+            .await
+            .unwrap();
+        let second_bytes = b"second opaque attachment";
+        let second_blob = DocumentSourceBlob::from_bytes(second_bytes);
+        blobs
+            .put(second_blob.id, second_bytes.to_vec())
+            .await
+            .unwrap();
+        let oversized_blob =
+            DocumentSourceBlob::from_digest([7; 32], MAX_EXEC_WORKSPACE_FILE_BYTES as u64 + 1);
+        let first_id = DocumentId::new();
+        let second_id = DocumentId::new();
+        let oversized_id = DocumentId::new();
+        for source in [
+            DocumentSourceUpsert {
+                id: first_id,
+                chat_id: Some(chat.id),
+                project_id: None,
+                source_uri: None,
+                media_type: "application/pdf".into(),
+                title: Some("report.pdf".into()),
+                source_blob: first_blob,
+                canonical_text: String::new(),
+                updated_at: Utc::now(),
+            },
+            DocumentSourceUpsert {
+                id: second_id,
+                chat_id: Some(chat.id),
+                project_id: None,
+                source_uri: None,
+                media_type: "application/pdf".into(),
+                title: Some("report.pdf".into()),
+                source_blob: second_blob,
+                canonical_text: String::new(),
+                updated_at: Utc::now(),
+            },
+            DocumentSourceUpsert {
+                id: oversized_id,
+                chat_id: Some(chat.id),
+                project_id: None,
+                source_uri: None,
+                media_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    .into(),
+                title: Some("large.xlsx".into()),
+                source_blob: oversized_blob,
+                canonical_text: String::new(),
+                updated_at: Utc::now(),
+            },
+        ] {
+            store.accept_document_source(&source).await.unwrap();
+        }
+        store
+            .accept_turn_with_attachments(
+                TurnId::new(),
+                chat.id,
+                "gpt-5",
+                "inspect these",
+                &[],
+                &[first_id, second_id, oversized_id],
+            )
+            .await
+            .unwrap();
+
+        let workspace = database.path().join("scratch").join(chat.id.to_string());
+        prepare_execution_directories(&workspace, false, None)
+            .await
+            .unwrap();
+        materialize_chat_attachments(&store, &blobs, chat.id, &workspace)
+            .await
+            .unwrap();
+
+        let first_path = workspace
+            .join("documents")
+            .join(exec_attachment_file_name(Some("report.pdf"), first_id));
+        let second_path = workspace
+            .join("documents")
+            .join(exec_attachment_file_name(Some("report.pdf"), second_id));
+        let oversized_path = workspace
+            .join("documents")
+            .join(exec_attachment_file_name(Some("large.xlsx"), oversized_id));
+        assert_ne!(first_path, second_path);
+        assert_eq!(std::fs::read(&first_path).unwrap(), first_bytes);
+        assert_eq!(std::fs::read(&second_path).unwrap(), second_bytes);
+        assert!(!oversized_path.exists());
+
+        // Materialization runs at each invocation, so a later first exec or a
+        // modified workspace still sees the immutable original attachment.
+        std::fs::write(&first_path, b"workspace edit").unwrap();
+        materialize_chat_attachments(&store, &blobs, chat.id, &workspace)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(first_path).unwrap(), first_bytes);
     }
 
     #[tokio::test]

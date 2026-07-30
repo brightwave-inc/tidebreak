@@ -44,8 +44,9 @@ use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{AgentRunId, CallId, ChatId, MessageId, TurnId};
 use crate::image::{ImageAttachments, ImageData, ImageRef};
 use crate::model::{
-    Chat, Message, MessageAttachment, MessageDocumentAttachment, PermissionMode, Role,
-    ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnRunStatus,
+    exec_attachment_file_name, Chat, Message, MessageAttachment, MessageDocumentAttachment,
+    PermissionMode, Role, ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus,
+    TurnRunStatus, MAX_EXEC_WORKSPACE_FILE_BYTES,
 };
 use crate::preview::{ToolActionPreview, ToolResultPreview};
 use crate::provider::{
@@ -69,6 +70,8 @@ use crate::tool::{
 /// Keep a model-produced read batch from overwhelming the local runtime or a
 /// remote read service. Results still retain the provider's requested order.
 const MAX_PARALLEL_READ_ONLY_CALLS: usize = 8;
+const MAX_ANNOUNCED_FILES: usize = 8;
+const MAX_ANNOUNCED_IMAGES: usize = 8;
 
 /// A name-keyed registry of the tools available to the agent.
 #[derive(Clone, Default)]
@@ -3311,9 +3314,9 @@ impl Agent {
 /// The block transcript is never stored, only reconstructed here, so this is
 /// also the single place history regains the attachments a message was
 /// submitted with: images become [`ContentBlock::Image`] blocks in their
-/// recorded order, while files become a compact manifest that teaches the
-/// model which document ids it can pass to `read_source`. A message with no
-/// attachments rebuilds exactly as before.
+/// recorded order, while a compact appended section names every available
+/// read or exec route. A message with no attachments rebuilds exactly as
+/// before.
 #[cfg(test)]
 fn rebuild_transcript(
     messages: &[Message],
@@ -3537,29 +3540,97 @@ fn user_message_with_attachments(
         .iter()
         .map(|image| ContentBlock::Image { image: *image })
         .collect();
-    let text = if documents.is_empty() {
-        message.content.clone()
+    let context = attachment_context(images, documents);
+    let text = if message.content.is_empty() {
+        context
     } else {
-        let manifest = documents
-            .iter()
-            .map(|document| {
-                serde_json::json!({
-                    "document_id": document.document_id,
-                    "name": document.title.as_deref().unwrap_or("Attachment"),
-                    "media_type": document.media_type,
-                })
-            })
-            .collect::<Vec<_>>();
-        format!(
-            "Files attached to this message (use read_source with document_id to read them):\n{}\n\n{}",
-            serde_json::to_string(&manifest).expect("attachment manifest is serializable"),
-            message.content
-        )
+        format!("{}\n\n{context}", message.content)
     };
     content.push(ContentBlock::Text { text });
     ChatMessage {
         role: message.role,
         content,
+    }
+}
+
+fn attachment_context(images: &[ImageRef], documents: &[MessageDocumentAttachment]) -> String {
+    let mut lines = vec!["<attachments>".to_owned()];
+    for (index, image) in images.iter().take(MAX_ANNOUNCED_IMAGES).enumerate() {
+        lines.push(format!(
+            "image_{}: id={}; media_type={}; byte_size={}; this is image content block {}",
+            index + 1,
+            image.blob_id,
+            image.media_type.as_str(),
+            image.byte_len,
+            index + 1
+        ));
+    }
+    for document in documents.iter().take(MAX_ANNOUNCED_FILES) {
+        let metadata = serde_json::json!({
+            "document_id": document.document_id,
+            "title": document.title.as_deref().unwrap_or("Attachment"),
+            "media_type": document.media_type,
+            "byte_size": document.source_blob.as_ref().map(|blob| blob.byte_len),
+        });
+        lines.push(format!(
+            "file: {}",
+            serde_json::to_string(&metadata).expect("attachment metadata is serializable")
+        ));
+        lines.push(format!("  route: {}", attachment_route(document)));
+    }
+    let omitted = images.len().saturating_sub(MAX_ANNOUNCED_IMAGES)
+        + documents.len().saturating_sub(MAX_ANNOUNCED_FILES);
+    if omitted > 0 {
+        lines.push(format!("{omitted} more attachment(s) omitted."));
+    }
+    lines.push("</attachments>".to_owned());
+    lines.join("\n")
+}
+
+fn attachment_route(document: &MessageDocumentAttachment) -> String {
+    if document.readable {
+        return format!(
+            "readable via read_source(document_id=\"{}\")",
+            document.document_id
+        );
+    }
+    let Some(source_blob) = document.source_blob.as_ref() else {
+        return "raw bytes unavailable because no source blob is retained".to_owned();
+    };
+    if source_blob.byte_len > MAX_EXEC_WORKSPACE_FILE_BYTES as u64 {
+        return format!(
+            "raw bytes not materialized because the file exceeds the \
+             {MAX_EXEC_WORKSPACE_FILE_BYTES}-byte exec workspace limit"
+        );
+    }
+    let path = format!(
+        "documents/{}",
+        exec_attachment_file_name(document.title.as_deref(), document.document_id)
+    );
+    let hint = attachment_script_hint(&document.media_type).map_or_else(String::new, |script| {
+        format!("; helper: python3 .openwave/exec-scripts/{script} {path}")
+    });
+    format!("raw bytes at {path} in the exec workspace{hint}")
+}
+
+fn attachment_script_hint(media_type: &str) -> Option<&'static str> {
+    let media_type = media_type
+        .split(';')
+        .next()
+        .unwrap_or(media_type)
+        .trim()
+        .to_ascii_lowercase();
+    match media_type.as_str() {
+        "application/pdf" => Some("render_pdf.py"),
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        | "application/msword"
+        | "application/vnd.ms-powerpoint"
+        | "application/vnd.oasis.opendocument.text"
+        | "application/vnd.oasis.opendocument.presentation" => Some("render_office.py"),
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        | "application/vnd.ms-excel" => Some("analyze_xlsx.py"),
+        _ => None,
     }
 }
 
@@ -9392,7 +9463,13 @@ mod tests {
                 ContentBlock::Image { image: first },
                 ContentBlock::Image { image: second },
                 ContentBlock::Text {
-                    text: "compare these".into()
+                    text: format!(
+                        "compare these\n\n<attachments>\n\
+                         image_1: id={}; media_type=image/png; byte_size=4096; this is image content block 1\n\
+                         image_2: id={}; media_type=image/jpeg; byte_size=4096; this is image content block 2\n\
+                         </attachments>",
+                        first.blob_id, second.blob_id
+                    )
                 },
             ]
         );
@@ -9411,11 +9488,10 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_identifies_attached_files_for_read_source() {
+    fn rebuild_announces_file_routes_and_bounds_attachment_context() {
         let turn = TurnId::new();
         let chat = ChatId::new();
         let message_id = MessageId::new();
-        let document_id = crate::id::DocumentId::new();
         let created_at = DateTime::<Utc>::from_timestamp(1_000, 0).unwrap();
         let message = Message {
             id: message_id,
@@ -9425,21 +9501,69 @@ mod tests {
             content: "summarize this file".into(),
             created_at,
         };
-        let document = MessageDocumentAttachment {
+        let text_id = crate::id::DocumentId::new();
+        let text_blob = crate::model::DocumentSourceBlob::from_bytes(b"decoded notes");
+        let text = MessageDocumentAttachment {
             message_id,
             chat_id: chat,
             ordinal: 0,
-            document_id,
-            title: Some("brief.pdf".into()),
-            media_type: "application/pdf".into(),
+            document_id: text_id,
+            title: Some("notes.txt".into()),
+            media_type: "text/plain".into(),
+            source_blob: Some(text_blob),
+            readable: true,
             created_at,
         };
+        let pdf_id = crate::id::DocumentId::new();
+        let pdf_blob = crate::model::DocumentSourceBlob::from_bytes(b"%PDF opaque");
+        let pdf = MessageDocumentAttachment {
+            message_id,
+            chat_id: chat,
+            ordinal: 1,
+            document_id: pdf_id,
+            title: Some("brief.pdf".into()),
+            media_type: "application/pdf".into(),
+            source_blob: Some(pdf_blob),
+            readable: false,
+            created_at,
+        };
+        let mut documents = vec![text, pdf];
+        let oversized_id = crate::id::DocumentId::new();
+        documents.push(MessageDocumentAttachment {
+            message_id,
+            chat_id: chat,
+            ordinal: 2,
+            document_id: oversized_id,
+            title: Some("large.xlsx".into()),
+            media_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".into(),
+            source_blob: Some(crate::model::DocumentSourceBlob::from_digest(
+                [9; 32],
+                MAX_EXEC_WORKSPACE_FILE_BYTES as u64 + 1,
+            )),
+            readable: false,
+            created_at,
+        });
+        for ordinal in 3..=8 {
+            documents.push(MessageDocumentAttachment {
+                message_id,
+                chat_id: chat,
+                ordinal,
+                document_id: crate::id::DocumentId::new(),
+                title: Some(format!("extra-{ordinal}.bin")),
+                media_type: "application/octet-stream".into(),
+                source_blob: Some(crate::model::DocumentSourceBlob::from_bytes(
+                    format!("extra-{ordinal}").as_bytes(),
+                )),
+                readable: false,
+                created_at,
+            });
+        }
 
         let rebuilt = rebuild_transcript_with_boundary(
             &[message],
             &[],
             &[],
-            &[document],
+            &documents,
             DEFAULT_MAX_TOOL_RESULT_BYTES,
             false,
             None,
@@ -9448,10 +9572,30 @@ mod tests {
         let ContentBlock::Text { text } = &rebuilt[0].content[0] else {
             panic!("file attachment should annotate the user text");
         };
-        assert!(text.contains(&document_id.to_string()));
-        assert!(text.contains("\"name\":\"brief.pdf\""));
+        assert!(text.starts_with("summarize this file\n\n<attachments>"));
+        assert!(text.contains(&text_id.to_string()));
+        assert!(text.contains("\"title\":\"notes.txt\""));
+        assert!(text.contains(&format!(
+            "route: readable via read_source(document_id=\"{text_id}\")"
+        )));
+        let pdf_path = format!(
+            "documents/{}",
+            crate::model::exec_attachment_file_name(Some("brief.pdf"), pdf_id)
+        );
+        assert!(text.contains(&pdf_id.to_string()));
+        assert!(text.contains("\"title\":\"brief.pdf\""));
         assert!(text.contains("\"media_type\":\"application/pdf\""));
-        assert!(text.ends_with("\n\nsummarize this file"));
+        assert!(text.contains(&format!(
+            "route: raw bytes at {pdf_path} in the exec workspace; helper: python3 \
+             .openwave/exec-scripts/render_pdf.py {pdf_path}"
+        )));
+        assert!(text.contains(&oversized_id.to_string()));
+        assert!(text.contains(&format!(
+            "route: raw bytes not materialized because the file exceeds the \
+             {MAX_EXEC_WORKSPACE_FILE_BYTES}-byte exec workspace limit"
+        )));
+        assert!(text.contains("1 more attachment(s) omitted."));
+        assert!(text.ends_with("</attachments>"));
     }
 
     #[test]

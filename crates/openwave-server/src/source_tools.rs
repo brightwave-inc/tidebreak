@@ -247,7 +247,8 @@ impl Tool for ReadSourceTool {
 
         if document.canonical_text.is_empty() {
             return Ok(ToolOutput::error(
-                "this source has no readable text; use a connected folder for opaque files",
+                "this source has no readable text; attached raw bytes are available under \
+                 documents/ in the exec workspace when they fit the workspace file limit",
             ));
         }
 
@@ -529,6 +530,35 @@ mod tests {
         assert_eq!(window.start_byte, 1);
         assert_eq!(window.total_characters, 4);
         assert!(source_window("short", 5, 1, 8).is_none());
+    }
+
+    #[tokio::test]
+    async fn an_opaque_attachment_points_read_source_at_exec_documents() {
+        let (_directory, store, chat, _document_id) = source_fixture().await;
+        let opaque = store
+            .upsert_document(&DocumentUpsert {
+                id: DocumentId::new(),
+                chat_id: Some(chat.id),
+                project_id: None,
+                source_uri: None,
+                media_type: "application/pdf".into(),
+                title: Some("opaque.pdf".into()),
+                canonical_text: String::new(),
+                updated_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        let output = ReadSourceTool::new(store)
+            .execute(
+                &ToolCtx::without_private_scratch(chat.id, None),
+                json!({ "document_id": opaque.id }),
+            )
+            .await
+            .unwrap();
+
+        assert!(output.is_error);
+        assert!(output.content.contains("documents/"));
+        assert!(!output.content.contains("connected folder"));
     }
 
     #[tokio::test]
