@@ -1351,6 +1351,9 @@ impl Agent {
             };
             let mut text = String::new();
             let mut calls: Vec<PendingCall> = Vec::new();
+            // Reasoning blocks captured from this step's stream, replayed on
+            // the later steps of this turn and dropped when the turn ends.
+            let mut reasoning: Vec<Value> = Vec::new();
             let mut by_index: HashMap<u32, usize> = HashMap::new();
             let mut stop_reason = StopReason::EndTurn;
             let mut refusal_details: Option<RefusalDetails> = None;
@@ -1384,6 +1387,9 @@ impl Agent {
                     }
                     ProviderEvent::ReasoningDelta { text: delta } => {
                         streamed_events.send(AgentEvent::ReasoningDelta { text: delta });
+                    }
+                    ProviderEvent::ReasoningBlock { data } => {
+                        reasoning.push(data);
                     }
                     ProviderEvent::ToolCallStarted { index, id, name } => {
                         let call_id = CallId::new();
@@ -1566,6 +1572,11 @@ impl Agent {
                 transcript.push(ChatMessage {
                     role: Role::Assistant,
                     content: blocks,
+                    // The step's reasoning rides its assistant message for the
+                    // rest of the turn. A steer, cancel, or broken stream
+                    // discarded `reasoning` along with the step before here,
+                    // so nothing partial ever reaches the transcript.
+                    reasoning: std::mem::take(&mut reasoning),
                 });
             }
 
@@ -1897,6 +1908,7 @@ impl Agent {
             // next step never sees a request it cannot account for.
             transcript.push(ChatMessage {
                 role: Role::User,
+                reasoning: Vec::new(),
                 content: calls
                     .iter()
                     .zip(outputs)
@@ -2334,6 +2346,7 @@ impl Agent {
                 content: vec![ContentBlock::Text {
                     text: msg.content.clone(),
                 }],
+                reasoning: Vec::new(),
             });
             events.send(AgentEvent::UserSteered {
                 message_id,
@@ -2376,6 +2389,7 @@ impl Agent {
                 content: vec![ContentBlock::Text {
                     text: steer.content.clone(),
                 }],
+                reasoning: Vec::new(),
             });
             events.send_committed(event_ordinal, event)?;
         }
@@ -3061,6 +3075,7 @@ impl Agent {
                         content: output.content,
                         is_error: true,
                     }],
+                    reasoning: Vec::new(),
                 });
                 continue;
             }
@@ -3133,6 +3148,7 @@ impl Agent {
             });
             transcript.push(ChatMessage {
                 role: Role::User,
+                reasoning: Vec::new(),
                 content: tool_result_blocks(
                     call.provider_id,
                     self.tool_result_for_model(&output.content, call.call_id),
@@ -3398,7 +3414,7 @@ impl Agent {
                         return None;
                     }
                 }
-                ProviderEvent::ReasoningDelta { .. } => {}
+                ProviderEvent::ReasoningDelta { .. } | ProviderEvent::ReasoningBlock { .. } => {}
                 ProviderEvent::Usage(reported) => {
                     usage = usage.checked_add(reported)?;
                 }
@@ -3816,6 +3832,7 @@ fn user_message_with_attachments(
     ChatMessage {
         role: message.role,
         content,
+        reasoning: Vec::new(),
     }
 }
 
@@ -4025,6 +4042,9 @@ fn push_tool_batch(
         out.push(ChatMessage {
             role: Role::Assistant,
             content: blocks,
+            // Rebuilt from the store, which holds no reasoning: replaying
+            // nothing is the valid degradation.
+            reasoning: Vec::new(),
         });
     }
     let results: Vec<ContentBlock> = batch
@@ -4052,6 +4072,7 @@ fn push_tool_batch(
         out.push(ChatMessage {
             role: Role::User,
             content: results,
+            reasoning: Vec::new(),
         });
     }
 }
@@ -4258,6 +4279,62 @@ mod tests {
                 .push(req.tools.iter().map(|tool| tool.name.clone()).collect());
             let events = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 vec![
+                    ProviderEvent::ToolCallStarted {
+                        index: 0,
+                        id: "call_1".into(),
+                        name: "read_file".into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 0,
+                        fragment: r#"{"path":"note.txt"}"#.into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::ToolUse,
+                    },
+                ]
+            } else {
+                vec![
+                    ProviderEvent::TextDelta {
+                        text: "done".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ]
+            };
+            Ok(stream::iter(events).boxed())
+        }
+    }
+
+    /// Streams a reasoning block beside its tool call, then answers,
+    /// recording the reasoning each request carried.
+    struct ReasoningRecordingProvider {
+        calls: AtomicUsize,
+        seen: Arc<Mutex<Vec<Vec<Value>>>>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for ReasoningRecordingProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("fake")
+        }
+
+        async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            self.seen.lock().unwrap().push(
+                req.messages
+                    .iter()
+                    .flat_map(|message| message.reasoning.iter().cloned())
+                    .collect(),
+            );
+            let events = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                vec![
+                    ProviderEvent::ReasoningBlock {
+                        data: serde_json::json!({
+                            "type": "thinking",
+                            "thinking": "plan: read the note first",
+                            "signature": "sig-1",
+                        }),
+                    },
                     ProviderEvent::ToolCallStarted {
                         index: 0,
                         id: "call_1".into(),
@@ -5949,6 +6026,75 @@ mod tests {
         assert_eq!(advertised.len(), 2, "one tool step, then the wrap-up");
         assert!(!advertised[0].is_empty());
         assert!(advertised[1].is_empty());
+    }
+
+    /// A reasoning block streamed on one step must ride the step's assistant
+    /// message — verbatim and whole — into the next step's request, and must
+    /// stay in-memory: nothing about it reaches the durable record, so a turn
+    /// rebuilt from the store degrades to sending no reasoning.
+    #[tokio::test]
+    async fn reasoning_blocks_ride_later_steps_of_the_same_turn() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("note.txt"), "secret").unwrap();
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            reasoning_effort: None,
+            permission_mode: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let agent = Agent::new(
+            Arc::new(ReasoningRecordingProvider {
+                calls: AtomicUsize::new(0),
+                seen: seen.clone(),
+            }),
+            Arc::new(ToolRegistry::new().with(Box::new(ReadFile))),
+            store.clone(),
+            AgentConfig {
+                model: "fake".into(),
+                tool_scratch: Some(tool_scratch(workspace.path())),
+                ..Default::default()
+            },
+        );
+
+        let (tx, rx) = unbounded();
+        agent.run_turn(&chat, "read note.txt", &tx).await.unwrap();
+        drop(tx);
+        let events: Vec<AgentEvent> = rx.collect().await;
+        assert!(
+            matches!(events.last(), Some(AgentEvent::TurnCompleted { .. })),
+            "{events:?}"
+        );
+
+        let block = serde_json::json!({
+            "type": "thinking",
+            "thinking": "plan: read the note first",
+            "signature": "sig-1",
+        });
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2, "one tool step, then the answer step");
+        assert!(seen[0].is_empty(), "nothing to replay on the first call");
+        assert_eq!(
+            seen[1],
+            vec![block],
+            "the block reaches the next step exactly as streamed"
+        );
     }
 
     #[tokio::test]
@@ -9070,6 +9216,7 @@ mod tests {
                     name: "read_file".into(),
                     input: serde_json::json!({"path": "decision.md"}),
                 }],
+                reasoning: Vec::new(),
             },
             ChatMessage {
                 role: Role::User,
@@ -9078,6 +9225,7 @@ mod tests {
                     content: "the durable decision".into(),
                     is_error: false,
                 }],
+                reasoning: Vec::new(),
             },
             ChatMessage::text(Role::User, "Continue from the decision."),
         ];
@@ -10609,6 +10757,7 @@ mod tests {
             ChatMessage {
                 role: Role::Assistant,
                 content: assistant,
+                ..
             } if matches!(
                 &assistant[..],
                 [ContentBlock::ToolUse { id, name, .. }]

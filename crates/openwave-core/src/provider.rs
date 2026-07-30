@@ -82,6 +82,20 @@ pub struct ChatMessage {
     pub role: Role,
     /// The ordered content blocks.
     pub content: Vec<ContentBlock>,
+    /// Reasoning blocks the model produced in the step this message came
+    /// from, captured from the live stream for verbatim replay on the later
+    /// steps of the same turn.
+    ///
+    /// A side channel, not content: serde never reads or writes it, so no
+    /// stored transcript or wire request changes shape. The blocks are opaque
+    /// provider values kept in emission order and kept whole — a message
+    /// replays either all of them or none, because a provider that validates
+    /// replay (Anthropic) rejects rearranged, edited, or partially dropped
+    /// reasoning. Only an assistant message built from a live provider stream
+    /// carries any; a message rebuilt from the store has none and degrades to
+    /// sending no reasoning, which is always a valid shape.
+    #[serde(default, skip)]
+    pub reasoning: Vec<Value>,
 }
 
 impl ChatMessage {
@@ -90,6 +104,7 @@ impl ChatMessage {
         Self {
             role,
             content: vec![ContentBlock::Text { text: text.into() }],
+            reasoning: Vec::new(),
         }
     }
 }
@@ -368,6 +383,19 @@ pub enum ProviderEvent {
     ReasoningDelta {
         /// The reasoning fragment.
         text: String,
+    },
+    /// One reasoning block, complete and opaque, as the provider emitted it.
+    ///
+    /// Where `ReasoningDelta` is display text, this is the replayable
+    /// artifact (an Anthropic `thinking` or `redacted_thinking` block,
+    /// signature included). `data` is the block exactly as the provider
+    /// accepts it back; consumers must not parse, filter, or reorder it,
+    /// because replay validity depends on the blocks matching what the model
+    /// generated. Carried in-memory for one turn at most — it is never
+    /// journaled or persisted.
+    ReasoningBlock {
+        /// The provider-native block, replayed verbatim.
+        data: Value,
     },
     /// A tool call has begun; name and id are known.
     ToolCallStarted {

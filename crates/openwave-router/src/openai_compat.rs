@@ -748,6 +748,7 @@ mod tests {
                     input: json!({"path": "a"}),
                 },
             ],
+            reasoning: Vec::new(),
         };
         let mut out = Vec::new();
         extend_openai_messages(&mut out, &msg, &ImageAttachments::new()).unwrap();
@@ -767,6 +768,7 @@ mod tests {
                 content: "ok".into(),
                 is_error: false,
             }],
+            reasoning: Vec::new(),
         };
         let mut out = Vec::new();
         extend_openai_messages(&mut out, &msg, &ImageAttachments::new()).unwrap();
@@ -994,6 +996,7 @@ mod tests {
                 },
                 ContentBlock::Image { image },
             ],
+            reasoning: Vec::new(),
         };
 
         let mut out = Vec::new();
@@ -1014,6 +1017,7 @@ mod tests {
         let msg = ChatMessage {
             role: Role::User,
             content: vec![ContentBlock::Image { image: png_ref(9) }],
+            reasoning: Vec::new(),
         };
         let mut out = Vec::new();
         let err = extend_openai_messages(&mut out, &msg, &ImageAttachments::new()).unwrap_err();
@@ -1038,6 +1042,7 @@ mod tests {
                 },
                 ContentBlock::Image { image },
             ],
+            reasoning: Vec::new(),
         };
 
         let mut out = Vec::new();

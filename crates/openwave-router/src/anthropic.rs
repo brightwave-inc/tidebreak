@@ -298,28 +298,57 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         // as a long silent pause before the answer. `summarized` is what makes
         // the reasoning stream the renderer already draws worth drawing.
         //
-        // Rebuilt history deliberately replays no thinking blocks at all.
-        // Adaptive mode relaxes turn validation for exactly this case: no
-        // assistant turn has to begin with a thinking block, and history
-        // assembled from mixed sources needs none reinserted, so sending zero
-        // of them consistently is a valid shape. The 400 lives in *partial*
-        // replay — within the latest assistant message the consecutive
-        // thinking blocks must match what the model generated verbatim,
-        // `redacted_thinking` included, so a future fix that stores and
-        // filters on `type == "thinking"` would introduce errors we do not
-        // have today. What omission costs is reasoning continuity across tool
-        // steps, worst on Opus 4.7 and later where inter-tool reasoning lands
-        // entirely in thinking blocks. It also keeps history portable: blocks
-        // are bound to the model that produced them and a chat can switch
-        // models mid-conversation, where a foreign block is ignored rather
-        // than rejected and so only wastes input tokens. See #1200 for the
-        // in-turn-only recovery of the lost quality.
+        // Reasoning captured from this turn's own stream rides back on the
+        // assistant messages that produced it (see `attach_reasoning_blocks`),
+        // restoring the model's inter-tool plan continuity. Anything rebuilt
+        // from the store — a retry, a resumed turn, an older chat — still
+        // replays no thinking blocks at all. Adaptive mode relaxes turn
+        // validation for exactly that case: no assistant turn has to begin
+        // with a thinking block, and history assembled from mixed sources
+        // needs none reinserted, so sending zero of them is always a valid
+        // shape. The 400 lives in *partial* replay — within the latest
+        // assistant message the consecutive thinking blocks must match what
+        // the model generated verbatim, `redacted_thinking` included, which
+        // is why capture and replay below keep the raw blocks whole rather
+        // than filtering on `type == "thinking"`. Omission also keeps history
+        // portable: blocks are bound to the model that produced them and a
+        // chat can switch models mid-conversation, where a foreign block is
+        // ignored rather than rejected and so only wastes input tokens.
         body["thinking"] = json!({ "type": "adaptive", "display": "summarized" });
         if let Some(effort) = req.reasoning_effort {
             body["output_config"] = json!({ "effort": effort.as_str() });
         }
+        attach_reasoning_blocks(&mut body, req);
     }
     Ok(body)
+}
+
+/// Replay the turn's captured reasoning blocks ahead of the content of the
+/// assistant messages that produced them.
+///
+/// Anthropic validates the consecutive thinking prefix of an assistant
+/// message against what the model generated, so the blocks go back exactly
+/// as captured: whole, in stream order, and block-type-agnostic. A
+/// `redacted_thinking` block rides along untouched — filtering on
+/// `type == "thinking"` would split the prefix and fail the request. This
+/// runs only on a request that actually thinks (see the caller): replaying
+/// reasoning into a request with thinking off buys nothing and risks a
+/// shape the API rejects, while omission is always valid.
+fn attach_reasoning_blocks(body: &mut Value, req: &ChatRequest) {
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for (message, wire) in req.messages.iter().zip(messages.iter_mut()) {
+        if message.reasoning.is_empty() {
+            continue;
+        }
+        let Some(content) = wire.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let mut combined = message.reasoning.clone();
+        combined.append(content);
+        *content = combined;
+    }
 }
 
 /// The breakpoint marker. Five-minute TTL: an agentic turn's model calls land
@@ -552,6 +581,15 @@ struct StreamState {
     output_block: Option<u32>,
     /// Whether any *other* tool call was announced this stream.
     saw_other_tool_call: bool,
+    /// Reasoning blocks in flight, keyed by content-block index.
+    ///
+    /// A `thinking` block opens empty at `content_block_start` and accumulates
+    /// `thinking_delta` text and the terminal `signature_delta` until
+    /// `content_block_stop` closes it; a `redacted_thinking` block arrives
+    /// whole at the start. The raw JSON is the state — never a parsed struct
+    /// — so a block goes back out byte-identical to what the model produced,
+    /// whatever fields a future API revision adds.
+    pending_reasoning: std::collections::HashMap<u32, Value>,
     /// Set once the stream has terminalized on an in-band error, so no later
     /// frame can append events after the failure.
     terminal: bool,
@@ -615,30 +653,37 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
         Some("content_block_start") => {
             let index = u32_at(data, "index");
             let block = data.get("content_block");
-            if block.and_then(|b| b.get("type")).and_then(Value::as_str) == Some("tool_use") {
-                let block = block.unwrap();
-                let name = str_at(block, "name");
-                state.open_tool_blocks.insert(index);
-                // The synthetic output tool is the request's own scaffolding.
-                // Announcing it as a tool call would hand consumers a call they
-                // never advertised and cannot answer.
-                if state.output_tool.as_deref() == Some(name.as_str()) {
-                    state.output_block = Some(index);
-                    return Vec::new();
+            match block.and_then(|b| b.get("type")).and_then(Value::as_str) {
+                Some("tool_use") => {
+                    let block = block.unwrap();
+                    let name = str_at(block, "name");
+                    state.open_tool_blocks.insert(index);
+                    // The synthetic output tool is the request's own scaffolding.
+                    // Announcing it as a tool call would hand consumers a call they
+                    // never advertised and cannot answer.
+                    if state.output_tool.as_deref() == Some(name.as_str()) {
+                        state.output_block = Some(index);
+                        return Vec::new();
+                    }
+                    state.saw_other_tool_call = true;
+                    vec![ProviderEvent::ToolCallStarted {
+                        index,
+                        id: str_at(block, "id"),
+                        name,
+                    }]
                 }
-                state.saw_other_tool_call = true;
-                vec![ProviderEvent::ToolCallStarted {
-                    index,
-                    id: str_at(block, "id"),
-                    name,
-                }]
-            } else {
-                Vec::new()
+                // A thinking block opens (usually empty) and is filled by
+                // deltas; a redacted one arrives complete. Both are captured
+                // raw and emitted once they close — capturing is whole-block
+                // or nothing, so a partial block can never be replayed.
+                Some("thinking" | "redacted_thinking") => {
+                    state
+                        .pending_reasoning
+                        .insert(index, block.unwrap().clone());
+                    Vec::new()
+                }
+                _ => Vec::new(),
             }
-        }
-        Some("content_block_stop") => {
-            state.open_tool_blocks.remove(&u32_at(data, "index"));
-            Vec::new()
         }
         Some("content_block_delta") => {
             let index = u32_at(data, "index");
@@ -650,9 +695,22 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                 Some("text_delta") => vec![ProviderEvent::TextDelta {
                     text: str_at(delta, "text"),
                 }],
-                Some("thinking_delta") => vec![ProviderEvent::ReasoningDelta {
-                    text: str_at(delta, "thinking"),
-                }],
+                Some("thinking_delta") => {
+                    if let Some(block) = state.pending_reasoning.get_mut(&index) {
+                        append_str_field(block, "thinking", &str_at(delta, "thinking"));
+                    }
+                    vec![ProviderEvent::ReasoningDelta {
+                        text: str_at(delta, "thinking"),
+                    }]
+                }
+                // The signature is what makes the block replayable; without
+                // it the thinking text is display-only.
+                Some("signature_delta") => {
+                    if let Some(block) = state.pending_reasoning.get_mut(&index) {
+                        block["signature"] = json!(str_at(delta, "signature"));
+                    }
+                    Vec::new()
+                }
                 // A constrained response is JSON in a tool call's arguments;
                 // every other provider streams it as text, so it becomes text
                 // here too and consumers stay provider-blind.
@@ -665,12 +723,15 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                     index,
                     fragment: str_at(delta, "partial_json"),
                 }],
-                // `signature_delta` and `redacted_thinking` fall through here
-                // on purpose: they are only useful for replaying thinking
-                // blocks, which the request built above deliberately does not
-                // do. Capturing them here alone would not enable replay and
-                // would tempt the partial-replay bug described there.
                 _ => Vec::new(),
+            }
+        }
+        Some("content_block_stop") => {
+            let index = u32_at(data, "index");
+            state.open_tool_blocks.remove(&index);
+            match state.pending_reasoning.remove(&index) {
+                Some(block) => vec![ProviderEvent::ReasoningBlock { data: block }],
+                None => Vec::new(),
             }
         }
         Some("message_delta") => {
@@ -739,6 +800,17 @@ fn str_at(value: &Value, key: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string()
+}
+
+/// Append `fragment` to the string at `key` in a raw JSON block.
+fn append_str_field(block: &mut Value, key: &str, fragment: &str) {
+    let mut text = block
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    text.push_str(fragment);
+    block[key] = json!(text);
 }
 
 /// What a provider `stop_reason` means for the step that was streaming.
@@ -890,6 +962,7 @@ mod tests {
                     input: json!({"path": format!("f{i}.rs")}),
                 })
                 .collect(),
+            reasoning: Vec::new(),
         });
         messages.push(ChatMessage {
             role: Role::User,
@@ -900,6 +973,7 @@ mod tests {
                     is_error: false,
                 })
                 .collect(),
+            reasoning: Vec::new(),
         });
         let req = ChatRequest {
             provider: Some(ProviderId::new("anthropic")),
@@ -1268,6 +1342,126 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_blocks_are_captured_whole_and_opaque() {
+        let out = run(&[
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "plan: "}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "read first"}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig-1"}}),
+            json!({"type": "content_block_stop", "index": 0}),
+            // A redacted block arrives complete and must round-trip untouched:
+            // filtering capture on `type == "thinking"` would drop it and
+            // split the message's reasoning prefix on replay.
+            json!({"type": "content_block_start", "index": 1, "content_block": {"type": "redacted_thinking", "data": "opaque-blob"}}),
+            json!({"type": "content_block_stop", "index": 1}),
+        ]);
+        assert_eq!(
+            out,
+            vec![
+                ProviderEvent::ReasoningDelta {
+                    text: "plan: ".into()
+                },
+                ProviderEvent::ReasoningDelta {
+                    text: "read first".into()
+                },
+                ProviderEvent::ReasoningBlock {
+                    data: json!({
+                        "type": "thinking",
+                        "thinking": "plan: read first",
+                        "signature": "sig-1",
+                    }),
+                },
+                ProviderEvent::ReasoningBlock {
+                    data: json!({
+                        "type": "redacted_thinking",
+                        "data": "opaque-blob",
+                    }),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn captured_reasoning_is_replayed_verbatim_ahead_of_its_content() {
+        let reasoning = vec![
+            json!({"type": "thinking", "thinking": "plan: read first", "signature": "sig-1"}),
+            json!({"type": "redacted_thinking", "data": "opaque-blob"}),
+        ];
+        let mut req = reasoning_request("claude-opus-5", None);
+        req.messages = vec![
+            ChatMessage::text(Role::User, "hi"),
+            ChatMessage {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "checking".into(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "toolu_1".into(),
+                        name: "read_file".into(),
+                        input: json!({"path": "a"}),
+                    },
+                ],
+                reasoning: reasoning.clone(),
+            },
+            ChatMessage {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "toolu_1".into(),
+                    content: "ok".into(),
+                    is_error: false,
+                }],
+                reasoning: Vec::new(),
+            },
+        ];
+        let body = build_request_json(&req).unwrap();
+        let content = body["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(
+            content[..2],
+            reasoning[..],
+            "the blocks go back byte-identical, redacted included"
+        );
+        assert_eq!(content[2]["type"], "text");
+        assert_eq!(content[3]["type"], "tool_use");
+        // The transcript-tail breakpoint still lands on the true tail.
+        assert_eq!(
+            body["messages"][2]["content"][0]["cache_control"],
+            ephemeral_cache_control()
+        );
+    }
+
+    #[test]
+    fn reasoning_is_omitted_when_the_request_does_not_think() {
+        // A constrained request cannot think (forced tool), so the replay
+        // stays off entirely: omission is always valid, and blocks sent to a
+        // non-thinking request would be a shape the API has not promised.
+        let mut req = reasoning_request("claude-opus-5", None);
+        req.response_format = Some(ResponseFormat::JsonSchema {
+            name: "note".into(),
+            schema: json!({
+                "type": "object",
+                "properties": { "body": { "type": "string" } },
+                "required": ["body"],
+            }),
+        });
+        req.messages.push(ChatMessage {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "checking".into(),
+            }],
+            reasoning: vec![json!({"type": "thinking", "thinking": "t", "signature": "s"})],
+        });
+        req.messages.push(ChatMessage::text(Role::User, "go on"));
+        let body = build_request_json(&req).unwrap();
+        assert!(body.get("thinking").is_none());
+        assert_eq!(
+            body["messages"][1]["content"].as_array().unwrap().len(),
+            1,
+            "no reasoning block is attached: {body}"
+        );
+    }
+
+    #[test]
     fn maps_stop_reasons() {
         use StopOutcome::{Interrupted, Reason};
         assert_eq!(map_stop_reason("tool_use"), Reason(StopReason::ToolUse));
@@ -1380,6 +1574,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: Role::User,
                 content,
+                reasoning: Vec::new(),
             }],
             tools: vec![],
             max_tokens: None,

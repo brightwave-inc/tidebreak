@@ -307,7 +307,9 @@ async fn request_title(
                     return Err(AgentError::msg("titling completion exceeded its bound"));
                 }
             }
-            ProviderEvent::ReasoningDelta { .. } | ProviderEvent::Usage(_) => {}
+            ProviderEvent::ReasoningDelta { .. }
+            | ProviderEvent::ReasoningBlock { .. }
+            | ProviderEvent::Usage(_) => {}
             ProviderEvent::Stop {
                 reason: StopReason::EndTurn | StopReason::MaxTokens | StopReason::StopSequence,
             } => completed = true,

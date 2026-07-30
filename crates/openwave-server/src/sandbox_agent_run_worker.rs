@@ -1089,6 +1089,7 @@ async fn sandbox_request(
                 name: call.name.clone(),
                 input: call.arguments.clone(),
             }],
+            reasoning: Vec::new(),
         });
         messages.push(ChatMessage {
             role: Role::User,
@@ -1097,6 +1098,7 @@ async fn sandbox_request(
                 content: receipt.result,
                 is_error: receipt.status != SandboxToolCallStatus::Completed,
             }],
+            reasoning: Vec::new(),
         });
     }
     Ok(ChatRequest {
@@ -1297,7 +1299,11 @@ async fn complete_sandbox_task(
                     "sandbox agent model declined the request (category: {category})"
                 )));
             }
-            ProviderEvent::ReasoningDelta { .. } | ProviderEvent::Usage(_) => {}
+            // Reasoning blocks exist for in-turn replay, which this minimal
+            // loop does not do; dropping them degrades to pre-replay behavior.
+            ProviderEvent::ReasoningDelta { .. }
+            | ProviderEvent::ReasoningBlock { .. }
+            | ProviderEvent::Usage(_) => {}
             // The stream broke mid-flight, so `text` and `arguments` are both
             // possibly truncated. Fail under the classified provider error
             // instead of treating the fragment as a result.

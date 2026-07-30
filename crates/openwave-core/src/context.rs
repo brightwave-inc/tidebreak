@@ -180,9 +180,23 @@ const fn is_compressible(block: &ContentBlock) -> bool {
     !matches!(block, ContentBlock::Image { .. })
 }
 
-/// Estimate tokens for a full message (role overhead + blocks).
+/// Estimate tokens for a message's opaque reasoning side channel.
+///
+/// Reasoning accumulates as ordinary history on keep-all models, so it must
+/// be counted wherever the content is. The blocks are provider JSON, so the
+/// estimate runs over their serialized form.
+fn estimate_reasoning_tokens(msg: &ChatMessage) -> usize {
+    msg.reasoning
+        .iter()
+        .map(|block| estimate_tokens(&block.to_string()))
+        .sum()
+}
+
+/// Estimate tokens for a full message (role overhead + reasoning + blocks).
 pub fn estimate_message_tokens(msg: &ChatMessage) -> usize {
-    ROLE_OVERHEAD + msg.content.iter().map(estimate_block_tokens).sum::<usize>()
+    ROLE_OVERHEAD
+        + estimate_reasoning_tokens(msg)
+        + msg.content.iter().map(estimate_block_tokens).sum::<usize>()
 }
 
 /// Estimate tokens for an entire transcript.
@@ -294,10 +308,15 @@ struct Entry {
     kept: bool,
 }
 
-/// Minimum viable token size for a message: role overhead + each block at the
-/// floor.
+/// Minimum viable token size for a message: role overhead + reasoning in full
+/// + each block at the floor.
+///
+/// Reasoning is charged like an image: replay validity is all-or-nothing per
+/// message, so a floor that promised to shrink it would be one the serializer
+/// cannot keep.
 fn message_floor(msg: &ChatMessage, content_floor: usize) -> usize {
     ROLE_OVERHEAD
+        + estimate_reasoning_tokens(msg)
         + msg
             .content
             .iter()
@@ -446,7 +465,12 @@ fn mark_pair_kept(
 // ── Truncation ─────────────────────────────────────────────────────
 
 fn truncate_message(msg: &ChatMessage, target_tokens: usize) -> ChatMessage {
-    let available = target_tokens.saturating_sub(ROLE_OVERHEAD);
+    // Reasoning is never truncated or partially dropped — a shrunken thinking
+    // block would fail the provider's replay validation, so the side channel
+    // keeps its full cost and only the content blocks split what remains.
+    let available = target_tokens
+        .saturating_sub(ROLE_OVERHEAD)
+        .saturating_sub(estimate_reasoning_tokens(msg));
     if msg.content.is_empty() {
         return msg.clone();
     }
@@ -487,6 +511,9 @@ fn truncate_message(msg: &ChatMessage, target_tokens: usize) -> ChatMessage {
     ChatMessage {
         role: msg.role,
         content: blocks,
+        // The signed reasoning prefix is untouched by content truncation, so
+        // it survives whole with the message.
+        reasoning: msg.reasoning.clone(),
     }
 }
 
@@ -605,6 +632,11 @@ fn merge_adjacent_roles(messages: &mut Vec<ChatMessage>) {
     while i + 1 < messages.len() {
         if messages[i].role == messages[i + 1].role {
             let next = messages.remove(i + 1);
+            // The absorbed message's reasoning cannot ride along: appending
+            // its content after the surviving message's blocks would move its
+            // thinking prefix away from the front, and partial or reordered
+            // replay is worse than none. The surviving message keeps its own
+            // reasoning, which still prefixes its own content.
             messages[i].content.extend(next.content);
         } else {
             i += 1;
@@ -691,6 +723,7 @@ mod tests {
                 name: name.into(),
                 input: json!({ "arg": args }),
             }],
+            reasoning: Vec::new(),
         }
     }
 
@@ -702,6 +735,7 @@ mod tests {
                 content: content.into(),
                 is_error: false,
             }],
+            reasoning: Vec::new(),
         }
     }
 
@@ -714,6 +748,61 @@ mod tests {
         let (result, reduced) = fit_to_budget(&msgs, budget, 500);
         assert!(!reduced);
         assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn reasoning_rides_its_message_whole_through_reduction() {
+        // Reasoning accumulates as ordinary history on keep-all models, so it
+        // is counted — and reduction either keeps the message with every
+        // block intact or drops the message entirely. Shrinking or partially
+        // dropping blocks would break the provider's replay validation.
+        let reasoning = vec![
+            json!({"type": "thinking", "thinking": "p".repeat(300), "signature": "sig"}),
+            json!({"type": "redacted_thinking", "data": "blob"}),
+        ];
+        let mut thinking_step = assistant_msg(&"calling a tool ".repeat(50));
+        thinking_step.reasoning = reasoning.clone();
+
+        let mut silent_step = thinking_step.clone();
+        silent_step.reasoning = Vec::new();
+        assert!(
+            estimate_message_tokens(&thinking_step) > estimate_message_tokens(&silent_step),
+            "reasoning tokens must be counted"
+        );
+
+        // A budget that keeps the message but shrinks its text leaves every
+        // reasoning block byte-identical.
+        let messages = vec![user_msg("start"), thinking_step.clone()];
+        let full = estimate_transcript_tokens(&messages);
+        let floor_with_user =
+            estimate_message_tokens(&messages[0]) + message_floor(&thinking_step, 100);
+        let (fitted, reduced) = fit_to_budget(&messages, (full + floor_with_user) / 2, 100);
+        assert!(reduced);
+        let fitted_step = fitted
+            .iter()
+            .find(|message| message.role == Role::Assistant)
+            .expect("the step fits under this budget");
+        assert_eq!(
+            fitted_step.reasoning, reasoning,
+            "truncation never touches the blocks"
+        );
+        assert!(
+            estimate_message_tokens(fitted_step) < estimate_message_tokens(&thinking_step),
+            "the text took the shrink"
+        );
+
+        // A budget that cannot pay the floor — reasoning is charged in full,
+        // like an image — drops the whole message rather than some blocks.
+        let drop_budget = estimate_message_tokens(&messages[0]) + 10;
+        let (fitted, _) = fit_to_budget(&messages, drop_budget, 100);
+        assert!(
+            fitted.iter().all(|message| message.reasoning.is_empty()),
+            "no partial reasoning survives: {fitted:?}"
+        );
+        assert!(
+            fitted.iter().all(|message| message.role != Role::Assistant),
+            "the step went with its reasoning: {fitted:?}"
+        );
     }
 
     #[test]
@@ -746,6 +835,7 @@ mod tests {
         let msg = ChatMessage {
             role: Role::User,
             content: blocks,
+            reasoning: Vec::new(),
         };
         // Callers never allocate below the message's irreducible overhead floor
         // (role + each block's fixed envelope); test at and above it.
@@ -773,6 +863,7 @@ mod tests {
                     text: format!("chunk {i} ").repeat(30),
                 })
                 .collect(),
+            reasoning: Vec::new(),
         };
         let msgs = vec![
             user_msg("kick off the conversation here"),
@@ -980,6 +1071,7 @@ mod tests {
         ChatMessage {
             role: Role::User,
             content: vec![image_block(width, height)],
+            reasoning: Vec::new(),
         }
     }
 
@@ -1081,6 +1173,7 @@ mod tests {
                 },
                 image_block(400, 300),
             ],
+            reasoning: Vec::new(),
         }];
         messages.extend((0..10).map(|index| assistant_msg(&format!("message {index}"))));
         messages.push(ChatMessage {
@@ -1093,6 +1186,7 @@ mod tests {
                 },
                 image_block(800, 600),
             ],
+            reasoning: Vec::new(),
         });
 
         evict_old_tool_result_images(&mut messages, TOOL_RESULT_IMAGE_MESSAGE_WINDOW);
