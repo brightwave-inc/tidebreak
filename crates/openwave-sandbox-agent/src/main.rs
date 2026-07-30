@@ -27,8 +27,9 @@
 //!
 //! # Why the cap is enforced here
 //!
-//! This process is the container's PID 1, so its exit is the container's exit.
-//! That is the only place an absolute cap can be enforced and still hold when the
+//! This process is the container's only top-level process — PID 1, or the sole
+//! child of the runtime's init when the host provisions with one — so its exit is
+//! the container's exit. That is the only place an absolute cap can be enforced and still hold when the
 //! host is what failed: a host-side timer dies with the host, and the host dying
 //! mid-run is exactly the case that strands a container. The host's orphan sweep
 //! reclaims containers a *living* host has lost track of; this cap covers the
