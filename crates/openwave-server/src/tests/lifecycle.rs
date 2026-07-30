@@ -847,6 +847,7 @@ async fn committed_steer_event_recovers_when_cancellation_wins_ambiguous_respons
             idle_min: Duration::from_millis(5),
             idle_cap: Duration::from_millis(20),
             failure_delay: Duration::from_millis(5),
+            failure_delay_cap: Duration::from_millis(20),
             retry: fast_retry_schedule(),
             max_concurrency: 1,
             sandbox_spawn_execution_location: openwave_core::AgentRunExecutionLocation::InProcess,

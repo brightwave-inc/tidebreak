@@ -9,7 +9,7 @@ use openwave_core::{AgentError, BlobRetirement, BlobRetirementStatus, BlobStore,
 use tokio::sync::Notify;
 use uuid::Uuid;
 
-use crate::retry::{RetryAttempt, RetrySchedule};
+use crate::retry::{LaneBackoff, RetryAttempt, RetrySchedule};
 use crate::state::BlobWriteGuard;
 
 #[derive(Debug, Clone, Copy)]
@@ -20,6 +20,9 @@ pub(crate) struct BlobRetirementWorkerConfig {
     idle_min: Duration,
     idle_cap: Duration,
     failure_delay: Duration,
+    /// Ceiling on the lane's own backoff after consecutive iteration errors,
+    /// so a store outage is not polled at a fixed rate forever.
+    failure_delay_cap: Duration,
 }
 
 impl Default for BlobRetirementWorkerConfig {
@@ -42,6 +45,7 @@ impl Default for BlobRetirementWorkerConfig {
             idle_min: Duration::from_millis(250),
             idle_cap: Duration::from_secs(5),
             failure_delay: Duration::from_secs(1),
+            failure_delay_cap: Duration::from_secs(30),
         }
     }
 }
@@ -91,20 +95,27 @@ impl BlobRetirementWorker {
 
     pub(crate) async fn run(self) {
         let mut idle_delay = self.config.idle_min;
+        let mut failure_backoff =
+            LaneBackoff::new(self.config.failure_delay, self.config.failure_delay_cap);
         loop {
             match self.run_once().await {
                 Ok(BlobRetirementWorkerOutcome::Idle) => {
+                    failure_backoff.reset();
                     tokio::select! {
                         _ = tokio::time::sleep(idle_delay) => {}
                         _ = self.wake.notified() => {}
                     }
                     idle_delay = idle_delay.saturating_mul(2).min(self.config.idle_cap);
                 }
-                Ok(_) => idle_delay = self.config.idle_min,
+                Ok(_) => {
+                    failure_backoff.reset();
+                    idle_delay = self.config.idle_min;
+                }
                 Err(error) => {
                     eprintln!("openwave: blob retirement worker iteration failed: {error}");
+                    let delay = failure_backoff.next_delay();
                     tokio::select! {
-                        _ = tokio::time::sleep(self.config.failure_delay) => {}
+                        _ = tokio::time::sleep(delay) => {}
                         _ = self.wake.notified() => {}
                     }
                 }
@@ -344,6 +355,7 @@ mod tests {
             idle_min: Duration::from_millis(1),
             idle_cap: Duration::from_millis(5),
             failure_delay: Duration::from_millis(1),
+            failure_delay_cap: Duration::from_millis(5),
         }
     }
 

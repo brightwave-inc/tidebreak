@@ -29,7 +29,7 @@ use tokio::sync::Notify;
 
 use crate::bus::EventBus;
 use crate::resolver::ProviderResolver;
-use crate::retry::{RetryAttempt, RetrySchedule};
+use crate::retry::{LaneBackoff, RetryAttempt, RetrySchedule};
 use crate::state::SandboxAttemptGuard;
 
 /// Fixed instruction set for the initial isolated executor.
@@ -48,6 +48,9 @@ pub(crate) struct SandboxAgentRunWorkerConfig {
     idle_min: Duration,
     idle_cap: Duration,
     failure_delay: Duration,
+    /// Ceiling on the lane's own backoff after consecutive iteration errors,
+    /// so a store outage is not polled at a fixed rate forever.
+    failure_delay_cap: Duration,
     retry: RetrySchedule,
     max_concurrency: usize,
     max_running_global: u32,
@@ -65,6 +68,7 @@ impl Default for SandboxAgentRunWorkerConfig {
             idle_min: Duration::from_millis(250),
             idle_cap: Duration::from_secs(5),
             failure_delay: Duration::from_secs(1),
+            failure_delay_cap: Duration::from_secs(30),
             // A parent turn may be waiting on this run, but nothing it retries
             // recovers in milliseconds: a sandbox that is still provisioning,
             // a provider that just refused, a delegated resource that has not
@@ -198,10 +202,12 @@ impl SandboxAgentRunWorker {
         for _ in 0..self.config.max_concurrency {
             lanes.spawn(self.clone().run_lane());
         }
+        let mut restart_backoff =
+            LaneBackoff::new(self.config.failure_delay, self.config.failure_delay_cap);
         while let Some(result) = lanes.join_next().await {
             if let Err(error) = result {
                 eprintln!("openwave: sandbox agent worker lane stopped: {error}");
-                tokio::time::sleep(self.config.failure_delay).await;
+                tokio::time::sleep(restart_backoff.next_delay()).await;
             }
             lanes.spawn(self.clone().run_lane());
         }
@@ -209,20 +215,27 @@ impl SandboxAgentRunWorker {
 
     async fn run_lane(self) {
         let mut idle_delay = self.config.idle_min;
+        let mut failure_backoff =
+            LaneBackoff::new(self.config.failure_delay, self.config.failure_delay_cap);
         loop {
             match self.run_once().await {
                 Ok(SandboxAgentRunWorkerOutcome::Idle) => {
+                    failure_backoff.reset();
                     tokio::select! {
                         _ = tokio::time::sleep(idle_delay) => {}
                         _ = self.wake.notified() => {}
                     }
                     idle_delay = idle_delay.saturating_mul(2).min(self.config.idle_cap);
                 }
-                Ok(_) => idle_delay = self.config.idle_min,
+                Ok(_) => {
+                    failure_backoff.reset();
+                    idle_delay = self.config.idle_min;
+                }
                 Err(error) => {
                     eprintln!("openwave: sandbox agent worker iteration failed: {error}");
+                    let delay = failure_backoff.next_delay();
                     tokio::select! {
-                        _ = tokio::time::sleep(self.config.failure_delay) => {}
+                        _ = tokio::time::sleep(delay) => {}
                         _ = self.wake.notified() => {}
                     }
                 }
