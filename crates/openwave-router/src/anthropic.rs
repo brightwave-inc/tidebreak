@@ -184,7 +184,7 @@ impl ModelProvider for AnthropicProvider {
 /// becomes a top-level field, and only `user`/`assistant` roles are valid on
 /// messages.
 fn build_request_json(req: &ChatRequest) -> Result<Value> {
-    let messages = req
+    let mut messages = req
         .messages
         .iter()
         .map(|message| {
@@ -194,6 +194,7 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
             }))
         })
         .collect::<Result<Vec<_>>>()?;
+    mark_cacheable_transcript_tail(&mut messages);
 
     let mut body = json!({
         "model": req.model,
@@ -207,7 +208,13 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
     // policy and make durable model attribution ambiguous.
 
     if let Some(system) = &req.system {
-        body["system"] = json!(system);
+        // Block form, not a bare string, so the prefix through the system
+        // prompt carries a cache breakpoint.
+        body["system"] = json!([{
+            "type": "text",
+            "text": system,
+            "cache_control": ephemeral_cache_control(),
+        }]);
     }
     if !req.tools.is_empty() {
         body["tools"] = Value::Array(
@@ -264,6 +271,9 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
             )))
         }
     }
+    // After the whole tool array is settled, including a structured-output tool
+    // appended above.
+    mark_last_tool_cacheable(&mut body);
     if let Some(temperature) = req.temperature {
         body["temperature"] = json!(temperature);
     }
@@ -285,6 +295,65 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         }
     }
     Ok(body)
+}
+
+/// The breakpoint marker. Five-minute TTL: an agentic turn's model calls land
+/// seconds apart, so the longer TTL would only double the write price for reads
+/// that already happen well inside the default window.
+fn ephemeral_cache_control() -> Value {
+    json!({ "type": "ephemeral" })
+}
+
+/// Put a breakpoint on the last tool definition.
+///
+/// Tools render before `system`, so the system breakpoint already covers them.
+/// This second one buys the segment on its own: it is the only breakpoint when
+/// a request carries no system prompt, and it survives a system prompt that
+/// differs between two chats sharing one tool set. Both breakpoints sit inside
+/// the same prefix, so the tokens are written once either way.
+///
+/// Requires deterministic tool order to hit at all — see the note on
+/// `mark_cacheable_transcript_tail`.
+fn mark_last_tool_cacheable(body: &mut Value) {
+    if let Some(last) = body
+        .get_mut("tools")
+        .and_then(Value::as_array_mut)
+        .and_then(|tools| tools.last_mut())
+        .and_then(Value::as_object_mut)
+    {
+        last.insert("cache_control".into(), ephemeral_cache_control());
+    }
+}
+
+/// Put a breakpoint on the last content block of the transcript.
+///
+/// The breakpoint moves to the tail on every call rather than being anchored to
+/// a fixed early message. An agentic turn appends an assistant message and its
+/// tool results per step and re-sends the whole transcript, so the tail is
+/// exactly the boundary between what the previous call already wrote and what
+/// this call adds: each step writes only its own delta and reads everything
+/// before it. Anchoring instead — at the head of the conversation, say — would
+/// cache a fixed prefix and pay full price for the growth, and the head is the
+/// worst place to anchor here besides: context fitting rewrites it when it
+/// truncates, checkpoints it, or evicts an old image, while leaving the tail
+/// untouched.
+///
+/// A write costs more than uncached input and a read costs far less, so a
+/// breakpoint only pays if the prefix under it is byte-identical next call.
+/// Two things above this one must therefore stay stable: the tool
+/// advertisement order (see #1088) and the system prompt, which is fixed for a
+/// chat's configuration. A prefix that is under the model's minimum cacheable
+/// length is not a loss — the breakpoint is ignored rather than charged.
+fn mark_cacheable_transcript_tail(messages: &mut [Value]) {
+    if let Some(last) = messages
+        .last_mut()
+        .and_then(|message| message.get_mut("content"))
+        .and_then(Value::as_array_mut)
+        .and_then(|tools| tools.last_mut())
+        .and_then(Value::as_object_mut)
+    {
+        last.insert("cache_control".into(), ephemeral_cache_control());
+    }
 }
 
 /// Whether the request obliges the model to call a specific tool or any tool.
@@ -608,7 +677,7 @@ mod tests {
         assert_eq!(body["model"], "claude-opus-4-8");
         assert_eq!(body["max_tokens"], DEFAULT_MAX_TOKENS);
         assert_eq!(body["stream"], true);
-        assert_eq!(body["system"], "be brief");
+        assert_eq!(body["system"][0]["text"], "be brief");
         assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(body["messages"][0]["content"][0]["type"], "text");
         assert_eq!(body["tools"][0]["name"], "read_file");
@@ -617,6 +686,55 @@ mod tests {
             body.get("fallbacks").is_none(),
             "fallback models require an explicit registry contract"
         );
+    }
+
+    #[test]
+    fn cache_breakpoints_sit_on_the_last_tool_system_block_and_transcript_tail() {
+        let req = ChatRequest {
+            provider: Some(ProviderId::new("anthropic")),
+            model: "claude-opus-4-8".into(),
+            system: Some("be brief".into()),
+            messages: vec![
+                ChatMessage::text(Role::User, "hi"),
+                ChatMessage::text(Role::Assistant, "hello"),
+            ],
+            tools: vec![
+                ToolSpec {
+                    name: "read_file".into(),
+                    description: "read a file".into(),
+                    input_schema: json!({"type": "object"}),
+                },
+                ToolSpec {
+                    name: "write_file".into(),
+                    description: "write a file".into(),
+                    input_schema: json!({"type": "object"}),
+                },
+            ],
+            images: ImageAttachments::new(),
+            ..Default::default()
+        };
+        let body = build_request_json(&req).unwrap();
+
+        let ephemeral = json!({ "type": "ephemeral" });
+        // Tools render before the system prompt, which renders before the
+        // messages, so these three breakpoints are the ends of the three
+        // segments — in ascending prefix order.
+        assert!(body["tools"][0].get("cache_control").is_none());
+        assert_eq!(body["tools"][1]["cache_control"], ephemeral);
+        assert_eq!(body["system"][0]["cache_control"], ephemeral);
+        assert!(body["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none());
+        assert_eq!(
+            body["messages"][1]["content"][0]["cache_control"],
+            ephemeral
+        );
+        // Four is the hard cap; going over rejects the request outright.
+        let breakpoints = serde_json::to_string(&body)
+            .unwrap()
+            .matches("cache_control")
+            .count();
+        assert_eq!(breakpoints, 3, "{body}");
     }
 
     fn reasoning_request(model: &str, effort: Option<ReasoningEffort>) -> ChatRequest {
