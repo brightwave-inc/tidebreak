@@ -73,6 +73,11 @@ impl ServerError {
         &self.info.kind
     }
 
+    /// The human-readable message, for surfaces that log rather than respond.
+    pub(crate) fn message(&self) -> &str {
+        &self.info.message
+    }
+
     /// A `409 Conflict` for a request that clashes with current state (e.g. a
     /// turn is already running for the chat).
     pub fn conflict(message: impl Into<String>) -> Self {
