@@ -2165,6 +2165,7 @@ mod activity_tests {
                 "path": "taxes/2026/private-return.txt",
                 "grant": "private-grant"
             }),
+            raw_arguments: None,
             execution: ToolCallExecution::Client,
             status: ToolCallStatus::Pending,
             result: None,

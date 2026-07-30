@@ -251,6 +251,7 @@ mod tests {
             provider_id: "tool-1".into(),
             name: openwave_core::IMPORT_CONNECTED_FILE_TOOL.into(),
             arguments: serde_json::json!({ "root_id": root_id, "path": path }),
+            raw_arguments: None,
             execution: ToolCallExecution::Client,
             status: ToolCallStatus::Pending,
             result: None,

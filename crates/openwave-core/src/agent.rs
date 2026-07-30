@@ -1562,10 +1562,13 @@ impl Agent {
                 }
             }
             for call in &calls {
+                // The transcript block stays the coerced value: it goes back
+                // to the provider, whose tool-use input must be valid JSON.
+                // The garbled fragment is kept on the durable record instead.
                 blocks.push(ContentBlock::ToolUse {
                     id: call.provider_id.clone(),
                     name: call.name.clone(),
-                    input: parse_args(&call.args),
+                    input: parse_args(&call.args).0,
                 });
             }
             if !blocks.is_empty() {
@@ -2002,13 +2005,15 @@ impl Agent {
         turn_id: TurnId,
         call: &PendingCall,
     ) -> Result<Option<ToolOutput>> {
+        let (arguments, raw_arguments) = parse_args(&call.args);
         let record = ToolCallRecord {
             id: call.call_id,
             chat_id,
             turn_id,
             provider_id: call.provider_id.clone(),
             name: call.name.clone(),
-            arguments: parse_args(&call.args),
+            arguments,
+            raw_arguments,
             execution: ToolCallExecution::Server,
             status: ToolCallStatus::Pending,
             result: None,
@@ -4156,11 +4161,34 @@ fn truncate_to_bytes(content: &str, max_bytes: usize, call_id: Option<CallId>) -
 /// Parse accumulated tool-call args for the durable record and the transcript,
 /// where a malformed call still has to be written down. Dispatch does not go
 /// through here: it uses [`parse_tool_args`] and refuses what will not parse.
-fn parse_args(raw: &str) -> Value {
+///
+/// The second half of the pair keeps the exact bytes the provider streamed
+/// when — and only when — they would not parse: the coerced empty object is
+/// what tool-facing surfaces see, but a garbled stream is exactly what
+/// post-hoc debugging goes looking for in the journal, and the fragment was
+/// previously kept nowhere. It is bounded and stays untrusted text — nothing
+/// may re-parse it.
+fn parse_args(raw: &str) -> (Value, Option<String>) {
     if raw.trim().is_empty() {
-        return Value::Object(Default::default());
+        return (Value::Object(Default::default()), None);
     }
-    serde_json::from_str(raw).unwrap_or(Value::Object(Default::default()))
+    match serde_json::from_str(raw) {
+        Ok(value) => (value, None),
+        Err(_) => (
+            Value::Object(Default::default()),
+            Some(bound_raw_fragment(raw)),
+        ),
+    }
+}
+
+/// Clamp a garbled argument fragment to the record's argument bound without
+/// splitting a multi-byte character.
+fn bound_raw_fragment(raw: &str) -> String {
+    let mut end = raw.len().min(ToolCallRecord::MAX_ARGUMENT_BYTES);
+    while end > 0 && !raw.is_char_boundary(end) {
+        end -= 1;
+    }
+    raw[..end].to_owned()
 }
 
 /// Parse tool-call args for dispatch. A call crosses into execution, so
@@ -4238,6 +4266,24 @@ mod tests {
             Some(serde_json::json!({"hint": "Documents"}))
         );
         assert_eq!(parse_tool_args(r#"{"hint":"Documents""#), None);
+    }
+
+    #[test]
+    fn malformed_arguments_keep_the_streamed_fragment_beside_the_coerced_object() {
+        assert_eq!(parse_args(""), (Value::Object(Default::default()), None));
+        assert_eq!(
+            parse_args(r#"{"hint":"Documents"}"#),
+            (serde_json::json!({"hint": "Documents"}), None)
+        );
+        let (value, fragment) = parse_args(r#"{"hint":"Documents""#);
+        assert_eq!(value, Value::Object(Default::default()));
+        assert_eq!(fragment.as_deref(), Some(r#"{"hint":"Documents""#));
+        // The fragment is bounded, and the bound lands on a char boundary.
+        let mut huge = String::from(r#"{"hint":""#);
+        huge.push_str(&"é".repeat(ToolCallRecord::MAX_ARGUMENT_BYTES));
+        let (_, fragment) = parse_args(&huge);
+        let fragment = fragment.expect("a garbled stream keeps its fragment");
+        assert!(fragment.len() <= ToolCallRecord::MAX_ARGUMENT_BYTES);
     }
 
     /// A scripted provider: step 0 calls `read_file`, step 1 gives a final answer.
@@ -5262,6 +5308,7 @@ mod tests {
             provider_id: "call-1".into(),
             name: "read_file".into(),
             arguments: serde_json::json!({}),
+            raw_arguments: None,
             execution: ToolCallExecution::Server,
             status: ToolCallStatus::Completed,
             result: Some(oversized.clone()),
@@ -6248,7 +6295,7 @@ mod tests {
                 calls: AtomicUsize::new(0),
             }),
             Arc::new(ToolRegistry::new().with(Box::new(CountingTool { ran: ran.clone() }))),
-            store,
+            store.clone(),
             AgentConfig {
                 model: "fake".into(),
                 ..Default::default()
@@ -6275,6 +6322,17 @@ mod tests {
         );
         // The schema rides along so the model can re-emit the call.
         assert!(output.content.contains("\"path\""), "{}", output.content);
+
+        // The garbled fragment survives to the journal: the durable record
+        // shows what the provider actually streamed, not only the coerced
+        // empty object a post-hoc debugging session cannot learn from.
+        let recorded = store.list_tool_calls(chat.id).await.unwrap();
+        let call = recorded
+            .iter()
+            .find(|call| call.name == "counter")
+            .expect("the refused call was still recorded");
+        assert_eq!(call.arguments, serde_json::json!({}));
+        assert_eq!(call.raw_arguments.as_deref(), Some(r#"{"path": "note"#));
     }
 
     /// A Sensitive tool that records whether it ran.
@@ -7993,6 +8051,7 @@ mod tests {
             provider_id: "call_spy".into(),
             name: "spy".into(),
             arguments: serde_json::json!({}),
+            raw_arguments: None,
             execution: ToolCallExecution::Server,
             status: ToolCallStatus::Pending,
             result: None,
@@ -9744,6 +9803,7 @@ mod tests {
             provider_id: "persisted-search".into(),
             name: "search".into(),
             arguments: serde_json::json!({"query": "restart"}),
+            raw_arguments: None,
             execution: ToolCallExecution::Server,
             status: ToolCallStatus::Pending,
             result: None,
@@ -9933,6 +9993,7 @@ mod tests {
             provider_id: "persisted-workspace-call".into(),
             name: name.into(),
             arguments,
+            raw_arguments: None,
             execution: ToolCallExecution::Server,
             status: ToolCallStatus::Pending,
             result: None,
@@ -10622,6 +10683,7 @@ mod tests {
             provider_id: "tu_1".into(),
             name: "read_file".into(),
             arguments: serde_json::json!({"path": "a"}),
+            raw_arguments: None,
             execution: ToolCallExecution::Server,
             status: ToolCallStatus::Completed,
             result: Some("ok".into()),
@@ -10674,6 +10736,7 @@ mod tests {
                 "read_file".into()
             },
             arguments: serde_json::json!({}),
+            raw_arguments: None,
             execution,
             status: ToolCallStatus::Completed,
             result: Some("ok".into()),
@@ -10738,6 +10801,7 @@ mod tests {
                     }]
                 }]
             }),
+            raw_arguments: None,
             execution: ToolCallExecution::Orchestration,
             status: ToolCallStatus::Completed,
             result: Some(serde_json::to_string(&answer).unwrap()),
@@ -10813,6 +10877,7 @@ mod tests {
             provider_id: "tu_1".into(),
             name: "read_file".into(),
             arguments: serde_json::json!({}),
+            raw_arguments: None,
             execution: ToolCallExecution::Server,
             status: ToolCallStatus::Completed,
             result: Some("data".into()),

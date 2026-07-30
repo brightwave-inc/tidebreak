@@ -221,6 +221,7 @@ where
         history_order: Set(history_order),
         name: Set(SPAWN_SANDBOX_AGENT_TOOL.into()),
         arguments: Set(request.arguments.clone()),
+        raw_arguments: Set(None),
         execution: Set(ToolCallExecution::Orchestration.as_str().into()),
         status: Set(ToolCallStatus::Completed.as_str().into()),
         result: Set(Some(request.result.clone())),

@@ -392,6 +392,7 @@ pub(in crate::db) async fn park_turn_for_agent_run_wait_set(
         history_order: Set(history_order),
         name: Set(WAIT_FOR_AGENTS_TOOL.into()),
         arguments: Set(request.arguments.clone()),
+        raw_arguments: Set(None),
         execution: Set(ToolCallExecution::Orchestration.as_str().into()),
         status: Set(ToolCallStatus::Pending.as_str().into()),
         result: Set(None),

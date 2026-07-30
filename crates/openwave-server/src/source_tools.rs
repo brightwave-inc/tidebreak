@@ -593,6 +593,7 @@ mod tests {
                 provider_id: "call-1".into(),
                 name: "exec".into(),
                 arguments: json!({ "command": "cargo" }),
+                raw_arguments: None,
                 execution: openwave_core::ToolCallExecution::Server,
                 status: openwave_core::ToolCallStatus::Pending,
                 result: None,

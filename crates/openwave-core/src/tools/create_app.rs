@@ -329,6 +329,7 @@ mod tests {
                     provider_id: call_id.to_string(),
                     name: crate::local_app::CREATE_APP_TOOL.into(),
                     arguments: json!({}),
+                    raw_arguments: None,
                     execution: ToolCallExecution::Server,
                     status: ToolCallStatus::Pending,
                     result: None,
