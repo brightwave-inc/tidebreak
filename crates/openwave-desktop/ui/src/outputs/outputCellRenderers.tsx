@@ -1,6 +1,6 @@
 import type { CustomCellRendererProps } from "ag-grid-react";
 import { format } from "date-fns";
-import { BotIcon, DownloadIcon, MoreHorizontalIcon, Undo2Icon } from "lucide-react";
+import { BotIcon, DownloadIcon, MoreHorizontalIcon, Trash2Icon } from "lucide-react";
 import { useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -27,9 +27,9 @@ import { outputTypeLabel, revisionLabel } from "./outputFormat";
 export type OutputGridContext = {
   onOpen: (outputId: string) => void;
   onSave: (output: DeliverableSummary) => void;
-  /** Revert a merged output: step back a revision, or retract the merge. */
-  onRevert: (output: DeliverableSummary) => void;
-  /** The output with a save or revert in flight, whose actions are disabled. */
+  /** Soft-delete an output; the catalog banner offers Undo. */
+  onDelete: (output: DeliverableSummary) => void;
+  /** The output with a save or delete in flight, whose actions are disabled. */
   busyOutputId: string | null;
 };
 
@@ -143,9 +143,9 @@ export function ActionsCellRenderer(props: CellProps) {
             <span>Save as…</span>
           </DropdownMenuItem>
           <DropdownMenuSeparator />
-          <DropdownMenuItem variant="destructive" onClick={() => context.onRevert(output)}>
-            <Undo2Icon />
-            <span>{output.revisionCount > 1 ? "Revert version" : "Revert"}</span>
+          <DropdownMenuItem variant="destructive" onClick={() => context.onDelete(output)}>
+            <Trash2Icon />
+            <span>Delete</span>
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>

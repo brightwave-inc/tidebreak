@@ -12,14 +12,13 @@ import {
 } from "@/components/ui/empty";
 import { WithTooltip } from "@/components/ui/tooltip";
 import {
+  deleteOutput,
   exportDeliverable,
   listDeliverables,
   restoreOutput,
-  revertOutput,
   type DeliverableSummary,
   type DeliverablesCatalog,
   type OutputExportResult,
-  type OutputRevertResult,
 } from "@/deliverables";
 import {
   PICKER_BUSY_MESSAGE,
@@ -31,14 +30,14 @@ import { OutputsTable } from "./OutputsTable";
 export type OutputsApis = {
   list: (chatId: string) => Promise<DeliverablesCatalog>;
   export: (chatId: string, outputId: string) => Promise<OutputExportResult>;
-  revert: (chatId: string, outputId: string) => Promise<OutputRevertResult>;
+  delete: (chatId: string, outputId: string) => Promise<DeliverableSummary>;
   restore: (chatId: string, outputId: string) => Promise<DeliverableSummary>;
 };
 
 const defaultApis: OutputsApis = {
   list: listDeliverables,
   export: exportDeliverable,
-  revert: revertOutput,
+  delete: deleteOutput,
   restore: restoreOutput,
 };
 
@@ -71,7 +70,7 @@ export function OutputsView({
   const [saveStatus, setSaveStatus] = useState<{
     message: string;
     error: boolean;
-    /** A retract offers an inline undo that restores the output. */
+    /** A delete offers an inline undo that restores the output. */
     undo?: () => void;
   } | null>(null);
   const [countSuffix, setCountSuffix] = useState("");
@@ -149,29 +148,22 @@ export function OutputsView({
     [apis, chatId],
   );
 
-  const onRevert = useCallback(
+  const onDelete = useCallback(
     async (output: DeliverableSummary) => {
       if (busyOutputId) return;
       setBusyOutputId(output.outputId);
       setSaveStatus(null);
       try {
-        const result = await apis.revert(chatId, output.outputId);
-        if (result.status === "retracted") {
-          setSaveStatus({
-            message: `${output.filename} was retracted from this conversation.`,
-            error: false,
-            undo: () => void onRestore(output),
-          });
-        } else {
-          setSaveStatus({
-            message: `${output.filename} was reverted to its previous version.`,
-            error: false,
-          });
-        }
+        await apis.delete(chatId, output.outputId);
+        setSaveStatus({
+          message: `${output.filename} was deleted from this conversation.`,
+          error: false,
+          undo: () => void onRestore(output),
+        });
         void refresh();
       } catch (caught) {
         setSaveStatus({
-          message: friendlyOutputError(caught, "Could not revert that output."),
+          message: friendlyOutputError(caught, "Could not delete that output."),
           error: true,
         });
       } finally {
@@ -276,7 +268,7 @@ export function OutputsView({
             busyOutputId={busyOutputId}
             onOpen={onOpen}
             onSave={(output) => void onSave(output)}
-            onRevert={(output) => void onRevert(output)}
+            onDelete={(output) => void onDelete(output)}
             onCountChange={setCountSuffix}
           />
         )}
