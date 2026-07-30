@@ -7,6 +7,7 @@
 
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
+use crate::client::MAX_JSON_RPC_FRAME_BYTES;
 use crate::protocol::{error_code, Request, Response, RpcError};
 use crate::server::McpServer;
 use serde_json::Value;
@@ -26,25 +27,97 @@ pub async fn serve_stdio(server: McpServer) -> std::io::Result<()> {
 /// Each non-blank input line is parsed as a JSON-RPC request and dispatched;
 /// responses (and parse errors) are written as one JSON line each. Notifications
 /// and blank lines produce no output. Returns when the reader reaches EOF.
-pub async fn serve<R, W>(reader: R, mut writer: W, server: McpServer) -> std::io::Result<()>
+///
+/// A frame longer than [`MAX_JSON_RPC_FRAME_BYTES`] — the same bound this crate's
+/// client applies to the identical framing — is refused rather than buffered, so
+/// a hostile or broken client cannot drive unbounded memory growth. The oversized
+/// frame is discarded up to its newline so the stream stays in sync, and the
+/// client gets a protocol error instead of a silently truncated request.
+pub async fn serve<R, W>(mut reader: R, mut writer: W, server: McpServer) -> std::io::Result<()>
 where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let mut lines = reader.lines();
-    while let Some(line) = lines.next_line().await? {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let response = match parse_request(&line) {
-            Ok(request) => server.handle(request).await,
-            Err(error) => Some(Response::error(Value::Null, error)),
+    loop {
+        let Some(frame) = read_bounded_frame(&mut reader).await? else {
+            return Ok(());
+        };
+        let response = match frame {
+            Frame::Line(line) => {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                match parse_request(&line) {
+                    Ok(request) => server.handle(request).await,
+                    Err(error) => Some(Response::error(Value::Null, error)),
+                }
+            }
+            Frame::TooLarge => Some(Response::error(
+                Value::Null,
+                RpcError::new(
+                    error_code::INVALID_REQUEST,
+                    format!("request exceeds the {MAX_JSON_RPC_FRAME_BYTES}-byte frame limit"),
+                ),
+            )),
         };
         if let Some(response) = response {
             write_line(&mut writer, &response).await?;
         }
     }
-    Ok(())
+}
+
+/// One input frame: a complete line, or the marker that an oversized one was
+/// discarded.
+enum Frame {
+    Line(String),
+    TooLarge,
+}
+
+/// Read one newline-delimited frame, holding at most [`MAX_JSON_RPC_FRAME_BYTES`]
+/// in memory. Returns `None` at EOF with nothing buffered.
+async fn read_bounded_frame<R>(reader: &mut R) -> std::io::Result<Option<Frame>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut line = Vec::new();
+    let mut over_limit = false;
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if over_limit {
+                return Ok(Some(Frame::TooLarge));
+            }
+            return Ok((!line.is_empty()).then(|| Frame::Line(lossy_line(line))));
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map_or(available.len(), |index| index + 1);
+        if over_limit || line.len().saturating_add(consumed) > MAX_JSON_RPC_FRAME_BYTES {
+            // Keep draining to the newline so the next frame starts on a request
+            // boundary, but stop growing the buffer.
+            over_limit = true;
+            line = Vec::new();
+        } else {
+            line.extend_from_slice(&available[..consumed]);
+        }
+        reader.consume(consumed);
+        if newline.is_some() {
+            return Ok(Some(if over_limit {
+                Frame::TooLarge
+            } else {
+                Frame::Line(lossy_line(line))
+            }));
+        }
+    }
+}
+
+/// Decode a frame's bytes, trimming the delimiter. Invalid UTF-8 falls through to
+/// the parser, which reports it as a JSON parse error.
+fn lossy_line(bytes: Vec<u8>) -> String {
+    let mut line = String::from_utf8_lossy(&bytes).into_owned();
+    while line.ends_with('\n') || line.ends_with('\r') {
+        line.pop();
+    }
+    line
 }
 
 /// Parse one line into a [`Request`], distinguishing a syntax error (`-32700
@@ -133,5 +206,31 @@ mod tests {
         let response: serde_json::Value =
             serde_json::from_str(String::from_utf8(output).unwrap().trim()).unwrap();
         assert_eq!(response["error"]["code"], error_code::INVALID_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_frame_is_refused_without_desynchronizing_the_stream() {
+        let mut input = vec![b'x'; MAX_JSON_RPC_FRAME_BYTES + 1];
+        input.push(b'\n');
+        input.extend_from_slice(
+            br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
+        );
+        input.push(b'\n');
+
+        let mut output = Vec::new();
+        serve(&input[..], &mut output, empty_server())
+            .await
+            .unwrap();
+
+        let out = String::from_utf8(output).unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2);
+        let refused: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(refused["error"]["code"], error_code::INVALID_REQUEST);
+        // The request after the oversized frame is still read as a request, so
+        // the discarded bytes did not shift the framing.
+        let accepted: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(accepted["id"], 1);
+        assert!(accepted["result"]["protocolVersion"].is_string());
     }
 }

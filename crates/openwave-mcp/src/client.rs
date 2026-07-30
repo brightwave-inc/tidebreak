@@ -35,6 +35,13 @@ const MAX_TOOL_LIST_PAGES: usize = 64;
 const MAX_CURSOR_BYTES: usize = 4 * 1024;
 const MAX_UI_RESOURCE_URI_BYTES: usize = 2 * 1024;
 const MAX_RESOURCE_CONTENT_BYTES: usize = 1024 * 1024;
+/// A `tools/call` result is held to the same ceiling as a resource document: the
+/// two are the same kind of server-controlled payload, and both are bounded well
+/// under the durable clamp applied further down the pipeline.
+const MAX_CALL_RESULT_BYTES: usize = MAX_RESOURCE_CONTENT_BYTES;
+const CALL_RESULT_TRUNCATION_MARKER: &str = "\n… [truncated: MCP result exceeded 1 MiB]";
+const CALL_RESULT_DATA_DROPPED_MARKER: &str =
+    "\n… [dropped: MCP structured content exceeded 1 MiB]";
 pub(crate) const MAX_JSON_RPC_FRAME_BYTES: usize = 2 * 1024 * 1024;
 
 /// Default maximum time to wait for one external MCP request.
@@ -342,10 +349,19 @@ impl McpClient {
 
     /// Register namespaced proxies for all discovered tools.
     ///
-    /// Registry registration follows [`ToolRegistry::register`] semantics, so a
-    /// tool with the same fully-qualified name replaces an older registration.
-    pub fn mount(&self, registry: &mut ToolRegistry) {
+    /// An already-registered name is never replaced: built-in tools and tools
+    /// mounted from another server keep the name, and the refused names are
+    /// returned so the caller can report them. Silently taking over a name a
+    /// caller already relies on would let a remote server decide what `exec` or
+    /// `read_file` means; silently dropping the remote tool instead would hide
+    /// the collision, so the refusal is reported rather than swallowed.
+    pub fn mount(&self, registry: &mut ToolRegistry) -> Vec<String> {
+        let mut refused = Vec::new();
         for tool in &self.tools {
+            if registry.contains(&tool.spec.name) {
+                refused.push(tool.spec.name.clone());
+                continue;
+            }
             registry.register(Box::new(McpTool {
                 spec: tool.spec.clone(),
                 remote_name: tool.remote_name.clone(),
@@ -354,6 +370,7 @@ impl McpClient {
                 session: Arc::clone(&self.session),
             }));
         }
+        refused
     }
 }
 
@@ -949,15 +966,18 @@ impl Tool for McpTool {
                 ))
             })?;
         let result: CallToolResponse = decode_result("tools/call", result)?;
-        let content = result
-            .content
-            .iter()
-            .map(content_for_model)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let (content, data) = clamp_call_result(
+            result
+                .content
+                .iter()
+                .map(content_for_model)
+                .collect::<Vec<_>>()
+                .join("\n"),
+            result.structured_content,
+        );
         Ok(ToolOutput {
             content,
-            data: result.structured_content,
+            data,
             is_error: result.is_error,
             // The external server reports that it failed, not why in terms this
             // side can classify, so it is the tool's own failure.
@@ -983,6 +1003,32 @@ struct CallToolResponse {
     structured_content: Option<Value>,
     #[serde(default, rename = "isError")]
     is_error: bool,
+}
+
+/// Bound a `tools/call` result at [`MAX_CALL_RESULT_BYTES`].
+///
+/// Both halves of the result are server-controlled, so both are clamped: the text
+/// is cut at a character boundary and the structured payload is dropped whole,
+/// because a partial JSON document is not a document. Either clamp leaves a
+/// marker in the text the model reads, so a shortened result never passes for a
+/// complete one.
+fn clamp_call_result(mut content: String, data: Option<Value>) -> (String, Option<Value>) {
+    if content.len() > MAX_CALL_RESULT_BYTES {
+        let mut cut = MAX_CALL_RESULT_BYTES - CALL_RESULT_TRUNCATION_MARKER.len();
+        while cut > 0 && !content.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        content.truncate(cut);
+        content.push_str(CALL_RESULT_TRUNCATION_MARKER);
+    }
+    let oversized_data = data.as_ref().is_some_and(|data| {
+        serde_json::to_vec(data).is_ok_and(|bytes| bytes.len() > MAX_CALL_RESULT_BYTES)
+    });
+    if oversized_data {
+        content.push_str(CALL_RESULT_DATA_DROPPED_MARKER);
+        return (content, None);
+    }
+    (content, data)
 }
 
 fn content_for_model(content: &Value) -> String {
