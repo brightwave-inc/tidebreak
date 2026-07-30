@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -24,6 +24,7 @@ const chats = [
     model: null,
     reasoning_effort: null,
     project_id: null,
+    created_at: "2026-07-28T12:00:00Z",
   },
   {
     id: "chat-2",
@@ -31,6 +32,7 @@ const chats = [
     model: null,
     reasoning_effort: null,
     project_id: null,
+    created_at: "2026-07-27T12:00:00Z",
   },
 ];
 
@@ -165,9 +167,27 @@ async function mountApp({ at }: { at?: string } = {}) {
   return { ...result, router };
 }
 
+let rectSpy: ReturnType<typeof vi.spyOn>;
+
 beforeEach(() => {
   window.localStorage.clear();
   window.location.hash = "";
+  // jsdom reports zero for every measurement, and the All chats grid is
+  // virtualised: a zero-height viewport renders no rows at all. Give it a
+  // fixed box so the rows under test actually exist.
+  rectSpy = vi
+    .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+    .mockReturnValue({
+      width: 800,
+      height: 600,
+      top: 0,
+      left: 0,
+      right: 800,
+      bottom: 600,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    } as DOMRect);
   listChats.mockClear();
   listChats.mockResolvedValue(chats);
   createChat.mockClear();
@@ -190,13 +210,19 @@ beforeEach(() => {
   useChatListStore.setState({ chats: [], chatsLoaded: false });
   useUiStore.setState({ sidebarCollapsed: false });
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  rectSpy.mockRestore();
+});
 
 describe("app shell", () => {
-  it("opens on home rather than on a conversation", async () => {
+  // The first mount pays the one-time import of the route tree, which now
+  // includes the All chats grid — comfortably over the default timeout on a
+  // loaded machine.
+  it("opens on home rather than on a conversation", { timeout: 15000 }, async () => {
     const { router } = await mountApp();
 
-    expect(await screen.findByText("What are we working on?")).toBeInTheDocument();
+    expect(await screen.findByText("How can I help?")).toBeInTheDocument();
     expect(router.state.location.pathname).toBe("/");
     // Home used to create a chat on every cold start, leaving an empty one
     // behind whenever the reader did not use it.
@@ -232,7 +258,7 @@ describe("app shell", () => {
 
   it("says so when there is nothing to pick up", async () => {
     listChats.mockResolvedValue([]);
-    await mountApp();
+    await mountApp({ at: "/chats" });
 
     expect(await screen.findByText("No chats yet")).toBeInTheDocument();
   });
@@ -240,10 +266,8 @@ describe("app shell", () => {
   it("starts a conversation from the home composer and sends what was written", async () => {
     const user = userEvent.setup();
     const { router } = await mountApp();
-    await screen.findByText("What are we working on?");
+    await screen.findByText("How can I help?");
 
-    // Home also carries the chat explorer's search field, so the composer has
-    // to be picked out by name rather than by being the only input.
     await user.type(
       screen.getByRole("textbox", { name: "Message" }),
       "summarise the filing",
@@ -271,9 +295,9 @@ describe("app shell", () => {
   it("opens a conversation from the sidebar", async () => {
     const user = userEvent.setup();
     const { router } = await mountApp();
-    await screen.findByText("What are we working on?");
+    await screen.findByText("How can I help?");
 
-    const recentList = screen.getByLabelText("Chats");
+    const recentList = screen.getByLabelText("Recent chats");
     const [row] = screen
       .getAllByRole("button", { name: "Roadmap" })
       .filter((button) => recentList.contains(button));
@@ -317,7 +341,10 @@ describe("app shell", () => {
     expect(await screen.findByTestId("outputs")).toBeInTheDocument();
   });
 
-  it("leaves a conversation to find another one, and searches for it there", async () => {
+  it(
+    "leaves a conversation to find another one, and searches for it there",
+    { timeout: 15000 },
+    async () => {
     const user = userEvent.setup();
     const { router } = await mountApp({ at: "/c/chat-1" });
     await screen.findByTestId("transcript");
@@ -325,22 +352,25 @@ describe("app shell", () => {
     // Finding a chat is something done between conversations, so the way out
     // of one is what leads to it.
     await user.click(screen.getByRole("button", { name: "All chats" }));
-    await waitFor(() => expect(router.state.location.pathname).toBe("/"));
-    const search = await screen.findByRole("textbox", { name: "Search chats" });
+    await waitFor(() => expect(router.state.location.pathname).toBe("/chats"));
+    const search = await screen.findByRole("searchbox", { name: "Search chats" });
 
     await user.type(search, "roadmap");
-    expect(screen.getAllByRole("button", { name: "Roadmap" }).length).toBeGreaterThan(0);
+    const grid = await screen.findByRole("grid");
+    await within(grid).findByText("Roadmap");
+    expect(within(grid).queryByText("Release notes")).not.toBeInTheDocument();
 
     await user.clear(search);
     await user.type(search, "nothing matches this");
     expect(await screen.findByText("No matches")).toBeInTheDocument();
-  });
+    },
+  );
 
   it("gives each route only the controls that route can act on", async () => {
     const conversationOnly = ["Outputs", "Folders"];
 
     await mountApp();
-    await screen.findByText("What are we working on?");
+    await screen.findByText("How can I help?");
     // Not disabled — absent. Home has no conversation for these to describe,
     // and offering them here is what let the rail navigate into whichever
     // chat happened to have been open last.
@@ -355,13 +385,13 @@ describe("app shell", () => {
       expect(screen.getByRole("button", { name: label })).toBeEnabled();
     }
     // And the conversation's rail is not a place to browse the others from.
-    expect(screen.queryByLabelText("Chats")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Recent chats")).not.toBeInTheDocument();
   });
 
   it("remembers the collapsed rail across a restart", async () => {
     const user = userEvent.setup();
     await mountApp();
-    await screen.findByText("What are we working on?");
+    await screen.findByText("How can I help?");
 
     await user.click(screen.getByRole("button", { name: "Collapse sidebar" }));
 

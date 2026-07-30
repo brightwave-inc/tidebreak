@@ -19,9 +19,9 @@ import { WithTooltip } from "@/components/ui/tooltip";
 /**
  * BW-style breadcrumb header: "Chats / chat title".
  *
- * Clicking "Chats" navigates home; clicking the title swaps it for an inline
- * edit field. The ellipsis menu offers Rename and Delete, wired to the shell's
- * existing orchestration.
+ * Clicking "Chats" navigates to the All chats table; clicking the title swaps
+ * it for an inline edit field. The ellipsis menu offers Rename and Delete,
+ * wired to the shell's existing orchestration.
  */
 export function ChatHeaderTitle({ chat }: { chat: Chat }) {
   const navigate = useNavigate();
@@ -42,7 +42,7 @@ export function ChatHeaderTitle({ chat }: { chat: Chat }) {
       <button
         type="button"
         className="shrink-0 font-medium text-muted-foreground hover:underline cursor-pointer"
-        onClick={() => void navigate({ to: "/" })}
+        onClick={() => void navigate({ to: "/chats" })}
       >
         Chats
       </button>
