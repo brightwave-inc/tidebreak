@@ -319,6 +319,11 @@ pub fn app(state: AppState) -> Router {
             "/chats/{chat_id}/calls/{call_id}/mcp-app-payload",
             get(routes::get_mcp_app_payload),
         )
+        .route(
+            "/apps/{id}/invoke",
+            post(routes::post_app_invoke)
+                .layer(DefaultBodyLimit::max(routes::MAX_APP_INVOKE_BODY_BYTES)),
+        )
         .route("/policy", get(routes::get_policy))
         .route("/gateway/status", get(routes::get_gateway_status))
         .route("/gateway/apps", get(routes::get_gateway_apps))

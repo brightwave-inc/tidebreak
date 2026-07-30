@@ -116,6 +116,22 @@ export type AgentRunStatus = "active" | "queued" | "running" | "cancelling" | "w
 export type AgentRunTier = "foreground" | "background";
 
 /**
+ * The typed refusal body — the `{ kind, message }` shape every route error
+ * carries, with the kind closed so a client never string-matches prose.
+ */
+export type AppInvokeRefusal = { kind: AppInvokeRefusalKind, message: string, };
+
+/**
+ * The stable machine-readable refusals of `POST /apps/{id}/invoke`.
+ *
+ * Unlike the passthrough payloads, the refusal envelope is host-authored and
+ * the renderer must branch on it — `consent_required` is the arm that will
+ * open the grant sheet — so the kind is a closed generated union rather than
+ * a free-form string.
+ */
+export type AppInvokeRefusalKind = "app_not_found" | "not_pinned" | "consent_required" | "unknown_tool";
+
+/**
  * Where the sandboxed iframe should load one app revision from, valid once.
  */
 export type AppViewSession = { frame_path: string, };
