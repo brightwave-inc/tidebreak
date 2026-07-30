@@ -57,6 +57,18 @@ use crate::{
 pub use host::{HostConnection, WireClient};
 pub use sandbox::{serve_connection, ReverseOutcome, SandboxRun};
 
+/// How long either side waits for the handshake frame it is owed before it drops
+/// the connection.
+///
+/// [`read_frame`] bounds how *much* a peer may make this side buffer, not how
+/// long it may take: without a deadline a peer that connects and then says
+/// nothing — or dribbles a frame a byte at a time — holds a serving task and a
+/// descriptor indefinitely. The bound covers the whole frame rather than each
+/// read, so a slow drip is dropped just as an idle peer is. It is generous
+/// against the work being waited on (one write on a freshly established
+/// connection) and so is not a latency budget for anything else.
+pub const ATTACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Largest single frame a conforming transport reads or writes, re-exported from
 /// the protocol's [`MAX_FRAME_BYTES`](crate::protocol::MAX_FRAME_BYTES) so the
 /// byte transport and the semantic bound stay one number.

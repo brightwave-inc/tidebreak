@@ -28,7 +28,7 @@ use crate::{
     ids::EventCursor,
     protocol::{AttachAccepted, AttachRefused, AttachRequest, ErrorCode, HandshakeResponse},
     reverse::{ControlFrame, RequestFrame, ReverseResponseEnvelope},
-    wire::{read_frame, write_frame, write_prioritized, FrameError, WireFrame},
+    wire::{read_frame, write_frame, write_prioritized, FrameError, WireFrame, ATTACH_TIMEOUT},
 };
 
 /// Why dialing and attaching to a sandbox over the wire failed.
@@ -134,7 +134,18 @@ impl WireClient {
                 .await
                 .map_err(ConnectError::Transport)?;
 
-            let accepted = match read_frame(&mut reader).await {
+            // Bounded the same way the sandbox bounds its read of the attach: a
+            // peer that accepts the connection and then says nothing would
+            // otherwise park this dial forever.
+            let answer = match tokio::time::timeout(ATTACH_TIMEOUT, read_frame(&mut reader)).await {
+                Ok(answer) => answer,
+                Err(_elapsed) => {
+                    return Err(ConnectError::Handshake(
+                        "the sandbox did not answer the handshake in time".to_owned(),
+                    ));
+                }
+            };
+            let accepted = match answer {
                 Ok(WireFrame::Handshake(HandshakeResponse::Accepted(accepted))) => accepted,
                 Ok(WireFrame::Handshake(HandshakeResponse::Refused(refused))) => {
                     return Err(match refused.code {

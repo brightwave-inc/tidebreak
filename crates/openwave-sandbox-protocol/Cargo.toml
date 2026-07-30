@@ -20,7 +20,9 @@ async-trait = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time", "io-util"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "macros", "time", "io-util", "net"] }
+# `test-util` pauses the clock so the handshake deadline can be exercised without
+# the suite waiting on it.
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "macros", "time", "io-util", "net", "test-util"] }
 
 [lints]
 workspace = true
