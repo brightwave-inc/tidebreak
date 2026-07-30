@@ -29,10 +29,11 @@ use crate::deliverable::{CreateOutput, NewOutputRevision, OutputRecord, OutputRe
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{
-    AgentRunId, CallId, ChatId, DocumentId, MessageId, OutputId, OutputRevisionId, ProjectId,
-    RootAttachmentChangeId, TurnId, TurnSteerId,
+    AgentRunId, AppId, AppRevisionId, CallId, ChatId, DocumentId, MessageId, OutputId,
+    OutputRevisionId, ProjectId, RootAttachmentChangeId, TurnId, TurnSteerId,
 };
 use crate::image::ImageRef;
+use crate::local_app::{AppRecord, AppRevision, CreateApp, NewAppRevision};
 use crate::model::{
     AgentRun, AgentRunInboxEntry, AgentRunResult, AgentRunTier, AgentRunWaitSetCandidate,
     BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus, Chat, ClientToolCallRequest,
@@ -966,6 +967,12 @@ fn output_storage_unavailable<T>() -> Result<T> {
     ))
 }
 
+fn app_storage_unavailable<T>() -> Result<T> {
+    Err(AgentError::Store(
+        "local-app storage is not implemented by this Store".into(),
+    ))
+}
+
 fn context_checkpoint_storage_unavailable<T>() -> Result<T> {
     Err(AgentError::Store(
         "durable context-checkpoint storage is not implemented by this Store".into(),
@@ -1484,6 +1491,75 @@ pub trait Store: Send + Sync {
         _updated_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<OutputRecord> {
         output_storage_unavailable()
+    }
+
+    /// Create a profile-scoped local app together with its first revision.
+    ///
+    /// The caller has already published the bundle bytes under the profile
+    /// data directory at [`crate::local_app::app_revision_relative_path`] and
+    /// supplies their exact length and digest; the manifest is validated
+    /// structurally before anything is stored. Reusing `request.id` with
+    /// identical content returns the original record so an ambiguous store
+    /// response can be retried; reusing it with different content is rejected.
+    async fn create_app(&self, _request: &CreateApp) -> Result<AppRecord> {
+        app_storage_unavailable()
+    }
+
+    /// Append an immutable revision and publish it as the app's current one.
+    ///
+    /// The previous revision is retained and stays addressable by its own id,
+    /// so an update can never destroy the bundle it replaced. Reusing
+    /// `revision.id` with identical content is an exact retry; reaching the
+    /// revision cap refuses the write rather than dropping history.
+    async fn append_app_revision(
+        &self,
+        _app_id: AppId,
+        _revision: &NewAppRevision,
+    ) -> Result<AppRecord> {
+        app_storage_unavailable()
+    }
+
+    /// Fetch one app by opaque id, including a soft-deleted one.
+    async fn get_app(&self, _id: AppId) -> Result<Option<AppRecord>> {
+        app_storage_unavailable()
+    }
+
+    /// List the profile's live apps, most recently updated first.
+    async fn list_apps(&self, _limit: u64) -> Result<Vec<AppRecord>> {
+        app_storage_unavailable()
+    }
+
+    /// List one app's revisions, newest first.
+    async fn list_app_revisions(&self, _app_id: AppId) -> Result<Vec<AppRevision>> {
+        app_storage_unavailable()
+    }
+
+    /// Fetch one app revision by opaque id.
+    async fn get_app_revision(&self, _id: AppRevisionId) -> Result<Option<AppRevision>> {
+        app_storage_unavailable()
+    }
+
+    /// Soft-delete an app, hiding it from the library while retaining its
+    /// revisions. Returns `false` only when the app does not exist; deleting
+    /// an already-deleted app is the same durable outcome, not a conflict.
+    async fn delete_app(
+        &self,
+        _id: AppId,
+        _deleted_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        app_storage_unavailable()
+    }
+
+    /// Restore a soft-deleted app, returning it to the library. The exact
+    /// inverse of [`Store::delete_app`]; the revision history is untouched.
+    /// Returns `false` only when the app does not exist; restoring a live app
+    /// is the same durable outcome, not a conflict.
+    async fn restore_app(
+        &self,
+        _id: AppId,
+        _restored_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        app_storage_unavailable()
     }
 
     /// Persist the next versioned context checkpoint for one conversation.
