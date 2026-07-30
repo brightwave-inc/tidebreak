@@ -116,6 +116,27 @@ export type AgentRunStatus = "active" | "queued" | "running" | "cancelling" | "w
 export type AgentRunTier = "foreground" | "background";
 
 /**
+ * One app's detail: the summary fields plus its revision history.
+ */
+export type AppDetail = { id: AppId, name: string, 
+/**
+ * Creation time of the first revision.
+ */
+created_at: string, 
+/**
+ * Creation time of the current revision.
+ */
+updated_at: string, 
+/**
+ * Revision currently presented as the app's content.
+ */
+current_revision: AppRevisionId, 
+/**
+ * Every retained revision, newest first.
+ */
+revisions: Array<AppRevisionSummary>, };
+
+/**
  * One current-manifest binding, projected for the consent sheet.
  */
 export type AppGrantBindingState = { 
@@ -160,6 +181,15 @@ granted: boolean,
 bindings: Array<AppGrantBindingState>, };
 
 /**
+ * Identifies one profile-scoped local app across all of its revisions.
+ *
+ * Like [`OutputId`] this is a durable opaque handle: possession is not
+ * authority, and it never encodes a name or a host path. Unlike an
+ * output, an app has no owning conversation — the profile owns it.
+ */
+export type AppId = string;
+
+/**
  * The typed refusal body — the `{ kind, message }` shape every route error
  * carries, with the kind closed so a client never string-matches prose.
  */
@@ -174,6 +204,49 @@ export type AppInvokeRefusal = { kind: AppInvokeRefusalKind, message: string, };
  * a free-form string.
  */
 export type AppInvokeRefusalKind = "app_not_found" | "not_pinned" | "consent_required" | "unknown_tool";
+
+/**
+ * The library listing: every live app, newest activity first.
+ */
+export type AppLibrary = { apps: Array<AppSummary>, };
+
+/**
+ * Identifies one immutable revision of a local app.
+ */
+export type AppRevisionId = string;
+
+/**
+ * One revision row: identity and position only. The manifest and the
+ * bundle's content address stay server-side.
+ */
+export type AppRevisionSummary = { id: AppRevisionId, 
+/**
+ * One-based position in the app's revision history.
+ */
+ordinal: number, created_at: string, };
+
+/**
+ * One library row.
+ */
+export type AppSummary = { id: AppId, 
+/**
+ * Display name, following the current revision's manifest.
+ */
+name: string, 
+/**
+ * Number of retained revisions, always at least one.
+ */
+revision_count: number, 
+/**
+ * Creation time of the current revision.
+ */
+updated_at: string, 
+/**
+ * Whether a live grant fully covers the app right now — the same
+ * verdict `GET /apps/{id}/grant` reports, so the library badge and the
+ * consent sheet can never disagree.
+ */
+granted: boolean, };
 
 /**
  * Where the sandboxed iframe should load one app revision from, valid once.

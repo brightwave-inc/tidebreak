@@ -67,7 +67,7 @@ rows and bytes are keyed to a chat — so apps get their own record:
   directory — write-once, path derived only from durable identity, symlink-
   refusing, never under any conversation's private scratch.
 
-`create_app` mints identity the way `create_deliverable` does: ids derived
+`create_app` follows the outputs record's identity discipline: ids derived
 from the durable tool-call id, so an ambiguous store response retries into the
 same record instead of a duplicate. Authoring always happens inside a turn, so
 call identity exists; it is only *invocation* that happens outside one.

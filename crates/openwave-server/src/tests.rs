@@ -36,6 +36,7 @@ use tower::ServiceExt;
 
 mod app_grant;
 mod app_invoke;
+mod app_library;
 mod chat_titling;
 mod configuration;
 mod conversations;

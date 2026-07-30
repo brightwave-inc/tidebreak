@@ -25,12 +25,18 @@ export function usePanelNav() {
   const { chatId } = useParams({ strict: false }) as { chatId?: string };
 
   function go(next: LayoutState) {
-    if (!chatId) return;
-    void navigate({
-      to: "/c/$chatId",
-      params: { chatId },
-      search: searchFromLayout(next),
-    });
+    // Panels live beside a conversation when there is one; outside any
+    // conversation the home route hosts them (the Apps library), and its bare
+    // URL is the single-layout collapse the same way a chat's is.
+    if (chatId) {
+      void navigate({
+        to: "/c/$chatId",
+        params: { chatId },
+        search: searchFromLayout(next),
+      });
+    } else {
+      void navigate({ to: "/", search: searchFromLayout(next) });
+    }
   }
 
   return {

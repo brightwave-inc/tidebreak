@@ -330,6 +330,11 @@ pub fn app(state: AppState) -> Router {
                 .post(routes::post_app_grant)
                 .delete(routes::delete_app_grant),
         )
+        .route("/apps", get(routes::get_app_library))
+        .route(
+            "/apps/{id}",
+            get(routes::get_app_detail).delete(routes::delete_app),
+        )
         .route("/policy", get(routes::get_policy))
         .route("/gateway/status", get(routes::get_gateway_status))
         .route("/gateway/apps", get(routes::get_gateway_apps))

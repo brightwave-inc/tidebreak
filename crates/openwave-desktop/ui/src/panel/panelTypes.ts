@@ -13,7 +13,9 @@ export type PanelContent =
    */
   | { type: "document"; documentId: string; citationId?: string }
   | { type: "outputs"; outputId?: string }
-  | { type: "folders" };
+  | { type: "folders" }
+  /** The Apps library; an app id turns the list into that app's detail. */
+  | { type: "apps"; appId?: string };
 
 export type PanelType = PanelContent["type"];
 
@@ -48,6 +50,7 @@ export function isContentPanel(panel: PanelContent): boolean {
     case "chat":
     case "outputs":
     case "folders":
+    case "apps":
       return false;
     case "document":
       return true;

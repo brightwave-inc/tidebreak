@@ -35,6 +35,7 @@ import { ChatView } from "./ChatView";
 import type { RetryableTurn } from "./MessageList";
 import type { TranscriptFileAttachment } from "./TranscriptFileAttachments";
 import type { TranscriptImageAttachment } from "./ImageAttachments";
+import { AppsPanel } from "./apps/AppsPanel";
 import { OutputDetailRoot } from "./outputs/OutputDetailRoot";
 import { OutputsView } from "./outputs/OutputsView";
 import { DocumentDetailRoot } from "./document-detail/DocumentDetailRoot";
@@ -625,6 +626,8 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             <FoldersView chat={chat!} />
           </PanelFrame>
         );
+      case "apps":
+        return <AppsPanel panel={panel} position={side} />;
     }
   }
 

@@ -328,6 +328,10 @@ mod tests {
         // The grant-state projection the consent sheet renders: server and
         // tool names with coverage/staleness booleans, never definitions.
         generate::collect_from::<crate::routes::AppGrantState>(&cfg, &mut out);
+        // The Apps library projections: names, counts, timestamps, and the
+        // grant verdict — never manifests, bundles, or definitions.
+        generate::collect_from::<crate::routes::AppLibrary>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::AppDetail>(&cfg, &mut out);
         generate::collect_from::<openwave_core::PendingUserQuestions>(&cfg, &mut out);
         generate::collect_from::<openwave_core::PendingPlanApproval>(&cfg, &mut out);
         generate::collect_from::<openwave_core::PlanDecisionChoice>(&cfg, &mut out);

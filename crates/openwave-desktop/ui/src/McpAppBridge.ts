@@ -18,9 +18,19 @@
 
 export const MCP_APPS_PROTOCOL_VERSION = "2026-01-26";
 
-import type { McpAppPayload } from "./api";
+import { AppInvokeRefusalError, type AppInvokeResult, type McpAppPayload } from "./api";
 
 export type { McpAppPayload };
+
+/**
+ * Executes one tool call on the embedded view's behalf. Local-app hosts wire
+ * this to `POST /apps/{id}/invoke`; both the arguments and the result are
+ * opaque passthrough the bridge forwards without interpreting. A rejection
+ * becomes a JSON-RPC error reply — a typed [`AppInvokeRefusalError`] keeps
+ * its machine-readable kind in `error.data` (the refusal envelope is
+ * host-authored, so surfacing it is not interpretation).
+ */
+export type AppToolInvoker = (tool: string, args: unknown) => Promise<AppInvokeResult>;
 
 const MIN_FRAME_HEIGHT = 160;
 const MAX_FRAME_HEIGHT = 800;
@@ -41,6 +51,13 @@ export function createMcpAppBridge(options: {
    * buffered handshake state — survives a theme change. */
   theme: () => "light" | "dark";
   onHeight?: (height: number) => void;
+  /**
+   * When present, the view may call `tools/call` and the bridge forwards it
+   * here. Absent — the MCP App transcript card — `tools/call` refuses with
+   * method-not-found exactly as before: a view only gets the methods its
+   * host deliberately declared.
+   */
+  invokeTool?: AppToolInvoker;
 }): McpAppBridge {
   let viewInitialized = false;
   let payload: McpAppPayload | null = null;
@@ -107,6 +124,58 @@ export function createMcpAppBridge(options: {
         case "ping":
           post({ jsonrpc: "2.0", id, result: {} });
           break;
+        case "tools/call": {
+          const invoke = options.invokeTool;
+          if (!invoke) {
+            post({
+              jsonrpc: "2.0",
+              id,
+              error: { code: -32601, message: "Method not found" },
+            });
+            break;
+          }
+          const params = isRecord(message.params) ? message.params : {};
+          const tool = typeof params.name === "string" ? params.name : null;
+          if (!tool) {
+            post({
+              jsonrpc: "2.0",
+              id,
+              error: { code: -32602, message: "tools/call needs a string name" },
+            });
+            break;
+          }
+          // The reply is asynchronous; `post` already refuses after dispose,
+          // so a result landing after unmount goes nowhere.
+          void invoke(tool, params.arguments).then(
+            (result) =>
+              post({
+                jsonrpc: "2.0",
+                id,
+                result: {
+                  content: [{ type: "text", text: result.content }],
+                  ...(result.structured_content === undefined ||
+                  result.structured_content === null
+                    ? {}
+                    : { structuredContent: result.structured_content }),
+                  isError: result.is_error,
+                },
+              }),
+            (error: unknown) =>
+              post({
+                jsonrpc: "2.0",
+                id,
+                error:
+                  error instanceof AppInvokeRefusalError
+                    ? {
+                        code: -32000,
+                        message: error.message,
+                        data: { kind: error.kind },
+                      }
+                    : { code: -32000, message: String(error) },
+              }),
+          );
+          break;
+        }
         default:
           // Fail closed but politely: the view sees a rejected promise, not
           // a hung request or a torn-down connection.

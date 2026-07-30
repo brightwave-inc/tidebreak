@@ -26,6 +26,10 @@ import {
 import { ModelMenu, ReasoningEffortMenu } from "./ModelMenu";
 import { modelForSelection } from "./ModelSelection";
 import { useNewChatSettings } from "./NewChatSettings";
+import { AppsPanel } from "./apps/AppsPanel";
+import { PanelLayout } from "./panel/PanelLayout";
+import type { LayoutState, PanelContent } from "./panel/panelTypes";
+import { useLayoutState } from "./panel/usePanelNav";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import { RouteFrame } from "./RouteFrame";
 import { HomeSidebar } from "./sidebar/HomeSidebar";
@@ -232,9 +236,25 @@ export function HomeRoute() {
         }
       : undefined;
 
-  return (
-    <RouteFrame sidebar={<HomeSidebar />}>
-      <div className="content-container flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden px-[clamp(0.5rem,4%,5rem)]">
+  // Home hosts panels the way a conversation does, but only the ones that
+  // mean something outside a chat — today, the Apps library. Anything else in
+  // the URL collapses back to home alone rather than rendering a panel whose
+  // content is scoped to a conversation this route does not have.
+  const layout = homeLayout(useLayoutState());
+
+  function renderPanel(
+    panel: PanelContent,
+    position: "left" | "right" | "chat",
+  ) {
+    if (panel.type === "apps" && position !== "chat") {
+      return <AppsPanel panel={panel} position={position} />;
+    }
+    return homeContent();
+  }
+
+  function homeContent() {
+    return (
+      <div className="flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden px-[clamp(0.5rem,4%,5rem)]">
         <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto">
           {/* The same null state an empty conversation shows: home is where a
               chat starts, so it greets the same way. Picking a starter prompt
@@ -311,6 +331,29 @@ export function HomeRoute() {
           />
         </div>
       </div>
+    );
+  }
+
+  return (
+    <RouteFrame sidebar={<HomeSidebar />}>
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <PanelLayout layout={layout} renderPanel={renderPanel} />
+      </div>
     </RouteFrame>
   );
+}
+
+/**
+ * The layouts home is willing to host: itself alone, or itself beside the
+ * Apps library. A URL naming any conversation-scoped panel is a stale or
+ * hand-edited link; it lands on plain home rather than an empty panel.
+ */
+function homeLayout(layout: LayoutState): LayoutState {
+  if (layout.mode === "single") return { mode: "single", panel: { type: "chat" } };
+  const supported = (panel: PanelContent) =>
+    panel.type === "chat" || panel.type === "apps";
+  if (!supported(layout.left) || !supported(layout.right)) {
+    return { mode: "single", panel: { type: "chat" } };
+  }
+  return layout;
 }
