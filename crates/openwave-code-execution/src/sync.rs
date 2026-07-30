@@ -444,4 +444,27 @@ mod tests {
             .iter()
             .any(|note| { note.contains("preview/too-large.png") && note.contains("file limit") }));
     }
+
+    #[tokio::test]
+    async fn bundled_document_helpers_are_not_on_the_sync_skip_list() {
+        let host = tempfile::tempdir().unwrap();
+        let helper = host
+            .path()
+            .join(crate::DOCUMENT_SCRIPTS_DIR)
+            .join("render_pdf.py");
+        std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
+        std::fs::write(&helper, b"print('render')").unwrap();
+        let fake = FakeWorkspace::default();
+
+        let pushed = push_host_dir(&fake, &workspace_id(), host.path())
+            .await
+            .unwrap();
+
+        assert_eq!(pushed.transferred, 1);
+        assert!(pushed.notes.is_empty());
+        assert_eq!(
+            fake.get(".openwave/exec-scripts/render_pdf.py").unwrap(),
+            b"print('render')"
+        );
+    }
 }

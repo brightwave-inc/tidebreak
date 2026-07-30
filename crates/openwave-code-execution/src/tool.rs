@@ -52,7 +52,17 @@ impl Tool for ExecTool {
                           files this command writes are visible to read_file. Every provider \
                           returns bounded stdout/stderr. For visual review, save up to three \
                           PNG, JPEG, or WebP images in preview/; overview, grid, thumbnail, page, \
-                          and slide filenames are prioritized. Use output/ for durable artifacts."
+                          and slide filenames are prioritized. Use output/ for durable artifacts. \
+                          When bundled document helpers are present, invoke them directly from \
+                          .openwave/exec-scripts. Examples: command python3 with args \
+                          [\".openwave/exec-scripts/render_pdf.py\", \"documents/report.pdf\", \
+                          \"--pages\", \"1-2\"]; command python3 with args \
+                          [\".openwave/exec-scripts/extract_pdf_figures.py\", \
+                          \"documents/report.pdf\"]; or command python3 with args \
+                          [\".openwave/exec-scripts/analyze_xlsx.py\", \
+                          \"documents/model.xlsx\"]. Each helper writes visual review files to \
+                          preview/ and prints a concise summary; a missing Python or document \
+                          dependency is reported as a command error."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -258,6 +268,9 @@ mod tests {
         assert_eq!(spec.name, EXEC_TOOL_NAME);
         assert_eq!(spec.input_schema["additionalProperties"], false);
         assert!(spec.description.contains("preview/"));
+        assert!(spec.description.contains(".openwave/exec-scripts"));
+        assert!(spec.description.contains("render_pdf.py"));
+        assert!(spec.description.contains("analyze_xlsx.py"));
     }
 
     struct PreviewProvider {

@@ -679,11 +679,14 @@ async fn bind_inner(
         gateway.clone(),
         os_policy.clone(),
     ));
-    let code_execution = Arc::new(code_execution::ConfiguredCodeExecutionProvider::new(
-        store.clone(),
-        secrets.clone(),
-        config.data_dir.join("scratch"),
-    ));
+    let code_execution = Arc::new(
+        code_execution::ConfiguredCodeExecutionProvider::new(
+            store.clone(),
+            secrets.clone(),
+            config.data_dir.join("scratch"),
+        )
+        .with_document_scripts(config.exec_scripts_dir.clone()),
+    );
     let foreground_web_search =
         Box::new(web_search::foreground_tool(store.clone(), secrets.clone()));
     let web_extract = Box::new(web_search::foreground_extract_tool(
