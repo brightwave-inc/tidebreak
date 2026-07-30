@@ -1220,9 +1220,9 @@ export type TranscriptRole = "user" | "assistant";
  * worth a variant here unless a client would say or do something different
  * for it.
  *
- * It is also the worker's own retry taxonomy: [`Self::retries_may_succeed`]
- * decides whether a failed turn is rescheduled, so the category a client sees
- * and the category the scheduler acted on cannot drift apart.
+ * It is also the worker's own retry taxonomy — the same classification decides
+ * whether a failed turn is rescheduled — so the category a client sees and the
+ * category the scheduler acted on cannot drift apart.
  */
 export type TurnFailureCategory = "rate_limited" | "auth" | "transient" | "unknown";
 
