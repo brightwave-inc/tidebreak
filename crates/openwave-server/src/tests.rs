@@ -367,10 +367,16 @@ impl ModelProvider for GatedProvider {
         let gate = self.gate.clone();
         Ok(stream::once(async move {
             gate.notified().await;
-            ProviderEvent::Stop {
-                reason: StopReason::EndTurn,
-            }
+            stream::iter(vec![
+                ProviderEvent::TextDelta {
+                    text: "gated answer".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ])
         })
+        .flatten()
         .boxed())
     }
 }

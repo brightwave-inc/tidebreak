@@ -196,7 +196,7 @@ impl TurnFailureCategory {
         match kind {
             "rate_limited" | "overloaded" => Self::RateLimited,
             "authentication" => Self::Auth,
-            "provider" | "store" | "secret" => Self::Transient,
+            "provider" | "store" | "secret" | "empty_model_response" => Self::Transient,
             _ => Self::Unknown,
         }
     }

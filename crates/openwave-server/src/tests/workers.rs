@@ -705,13 +705,21 @@ async fn scanner_won_cancellation_does_not_wedge_the_only_worker_lane() {
                 output_tokens: 3,
                 ..Usage::default()
             })])
-            .chain(stream::once(async move {
-                entered.notify_one();
-                gate.notified().await;
-                ProviderEvent::Stop {
-                    reason: StopReason::EndTurn,
-                }
-            }))
+            .chain(
+                stream::once(async move {
+                    entered.notify_one();
+                    gate.notified().await;
+                    stream::iter(vec![
+                        ProviderEvent::TextDelta {
+                            text: "gated answer".into(),
+                        },
+                        ProviderEvent::Stop {
+                            reason: StopReason::EndTurn,
+                        },
+                    ])
+                })
+                .flatten(),
+            )
             .boxed())
         }
     }
@@ -976,6 +984,67 @@ async fn invalid_nul_agent_output_fails_without_wedging_the_worker() {
         Some(AgentEvent::TurnFailed { error }) if error.kind == "invalid_agent_output"
     ));
     assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 1);
+}
+
+/// A response with no text and no tool calls is not an answer, so it must not
+/// end the turn as a success. The remedy is to ask again on the same
+/// transcript, which is what the user would do by hand.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_empty_model_response_does_not_complete_the_turn() {
+    struct EmptyOnceProvider {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for EmptyOnceProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("empty-once")
+        }
+
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(stream::iter(vec![ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                }])
+                .boxed());
+            }
+            Ok(stream::iter(vec![
+                ProviderEvent::TextDelta {
+                    text: "here is the answer".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ])
+            .boxed())
+        }
+    }
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (router, token, store, _dir) = test_app_with(Arc::new(EmptyOnceProvider {
+        calls: calls.clone(),
+    }))
+    .await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    assert_eq!(
+        send_message(&router, &bearer, chat.id, "say something").await,
+        StatusCode::ACCEPTED
+    );
+
+    let events = wait_for_turn(&store, chat.id).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(matches!(
+        events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnCompleted { .. })
+    ));
+    let turn = store.list_turn_runs(chat.id).await.unwrap().pop().unwrap();
+    assert_eq!(turn.attempt_count, 2);
+    let messages = store.list_messages(chat.id).await.unwrap();
+    assert_eq!(
+        messages.last().map(|message| message.content.as_str()),
+        Some("here is the answer")
+    );
 }
 
 #[tokio::test]

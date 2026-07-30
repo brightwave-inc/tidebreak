@@ -985,6 +985,50 @@ impl TurnWorker {
                             )
                             .await;
                     }
+                    // A model step that ends the turn with neither prose nor a
+                    // tool call is not an answer, and completing on it hands the
+                    // user a blank turn that looks successful and gives them
+                    // nothing to act on. Two exemptions are deliberate: a
+                    // refusal is its own outcome and stays meaningful with no
+                    // prose behind it, and a step that only calls tools never
+                    // reaches here — the loop runs the calls and takes another
+                    // step. Assistant text persisted by earlier steps is already
+                    // durable and is not touched by failing here.
+                    if refusal.is_none() && output.content.trim().is_empty() {
+                        if remaining_steps == 0 {
+                            // The step budget is spent, so this was the turn's
+                            // closing call. A retry would reclaim the turn only
+                            // to fail immediately on the exhausted budget, so
+                            // report the budget as the reason it ended with
+                            // nothing to say.
+                            return self
+                                .record_failure(
+                                    &turn,
+                                    lease_token,
+                                    total_model_steps,
+                                    total_usage,
+                                    "max_steps_exceeded",
+                                    "the turn's closing model call returned no output after its step budget was spent",
+                                )
+                                .await;
+                        }
+                        // Budget is left, so asking again is the remedy: the
+                        // retry rebuilds the same transcript, tool results
+                        // included, and only re-runs the model call that came
+                        // back empty. Once the attempt budget is spent the user
+                        // gets a transient failure rather than a blank success.
+                        return self
+                            .record_classified_failure(
+                                &turn,
+                                lease_token,
+                                total_model_steps,
+                                total_usage,
+                                "empty_model_response",
+                                "the model returned neither text nor a tool call",
+                                None,
+                            )
+                            .await;
+                    }
                     let expected_steer_revision = steer_revision.ok_or_else(|| {
                         AgentError::msg(format!(
                             "turn {} completed without a durable generation fence",
