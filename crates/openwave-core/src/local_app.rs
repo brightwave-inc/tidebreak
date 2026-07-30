@@ -189,6 +189,89 @@ pub struct CreateApp {
     pub revision: NewAppRevision,
 }
 
+/// The durable consent object for one app: the granted `(server, tools[])`
+/// set, with each bound server pinned to a fingerprint of its definition as it
+/// was configured at consent time.
+///
+/// One grant per app, replaced wholesale by a fresh consent and deleted by
+/// revocation. The fingerprint is what keeps consent honest: a Settings edit
+/// can swap the process behind a stable server name, so enforcement compares
+/// the granted fingerprint against the current definition on every invoke and
+/// treats any difference as a stale grant, never as a match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppGrant {
+    /// App the consent belongs to.
+    pub app_id: AppId,
+    /// The granted bindings, computed by the host from the manifest and the
+    /// server definitions current at consent time — never supplied by a
+    /// renderer.
+    pub bindings: Vec<AppGrantBinding>,
+    /// Host-stamped consent time.
+    pub created_at: DateTime<Utc>,
+}
+
+/// One granted server binding: the tools the user consented to under this
+/// server name, pinned to the definition that name resolved to at consent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppGrantBinding {
+    /// Configured server namespace, matching the manifest binding it covers.
+    pub server: String,
+    /// Full mounted tool names (`mcp__{server}__{tool}`) the grant covers.
+    pub tools: Vec<String>,
+    /// SHA-256 fingerprint of the server's definition as configured at consent
+    /// time, computed by the host over a canonical serialization that carries
+    /// configuration *names and structure* only — never environment or token
+    /// values. Persisted as lowercase hex.
+    #[serde(with = "hex_fingerprint")]
+    pub fingerprint: [u8; 32],
+}
+
+/// Lowercase-hex persistence for a grant binding's definition fingerprint.
+mod hex_fingerprint {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8; 32], serializer: S) -> Result<S::Ok, S::Error> {
+        use std::fmt::Write as _;
+
+        let mut text = String::with_capacity(64);
+        for byte in bytes {
+            let _ = write!(text, "{byte:02x}");
+        }
+        serializer.serialize_str(&text)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<[u8; 32], D::Error> {
+        let text = String::deserialize(deserializer)?;
+        let malformed = || serde::de::Error::custom("malformed definition fingerprint");
+        if text.len() != 64 || !text.is_ascii() {
+            return Err(malformed());
+        }
+        let mut bytes = [0_u8; 32];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte =
+                u8::from_str_radix(&text[2 * index..2 * index + 2], 16).map_err(|_| malformed())?;
+        }
+        Ok(bytes)
+    }
+}
+
+/// Validate a grant's bindings structurally and return the JSON to store.
+///
+/// A grant is host-computed from an already-validated manifest, so this is the
+/// same binding grammar [`validate_app_manifest`] enforces — repeated at the
+/// storage door so no other write path can persist a binding the manifest
+/// validator would have refused.
+pub fn validate_app_grant(grant: &AppGrant) -> Result<serde_json::Value, String> {
+    validate_binding_set(
+        grant
+            .bindings
+            .iter()
+            .map(|binding| (binding.server.as_str(), binding.tools.as_slice())),
+    )?;
+    serde_json::to_value(&grant.bindings).map_err(|error| format!("unencodable app grant: {error}"))
+}
+
 /// The trusted half of an app revision: a display name and the exact mounted
 /// tools the app may call.
 ///
@@ -227,39 +310,12 @@ pub struct AppBinding {
 /// that could never match a mounted tool is refused at the door.
 pub fn validate_app_manifest(manifest: &AppManifest) -> Result<serde_json::Value, String> {
     validate_app_name(&manifest.name)?;
-    let mut servers = std::collections::HashSet::new();
-    for binding in &manifest.bindings {
-        if binding.server.is_empty() || !is_mounted_name_charset(&binding.server) {
-            return Err(format!(
-                "binding server {:?} must be a non-empty [A-Za-z0-9_-] name",
-                binding.server
-            ));
-        }
-        if !servers.insert(binding.server.as_str()) {
-            return Err(format!("duplicate binding for server {:?}", binding.server));
-        }
-        let prefix = format!("mcp__{}__", binding.server);
-        let mut tools = std::collections::HashSet::new();
-        for tool in &binding.tools {
-            if tool.len() > MAX_MOUNTED_TOOL_NAME_BYTES || !is_mounted_name_charset(tool) {
-                return Err(format!(
-                    "tool {tool:?} must be at most {MAX_MOUNTED_TOOL_NAME_BYTES} bytes of [A-Za-z0-9_-]"
-                ));
-            }
-            match tool.strip_prefix(&prefix) {
-                Some(rest) if !rest.is_empty() => {}
-                _ => {
-                    return Err(format!(
-                        "tool {tool:?} is not a mounted `{prefix}{{tool}}` name under server {:?}",
-                        binding.server
-                    ));
-                }
-            }
-            if !tools.insert(tool.as_str()) {
-                return Err(format!("duplicate tool {tool:?}"));
-            }
-        }
-    }
+    validate_binding_set(
+        manifest
+            .bindings
+            .iter()
+            .map(|binding| (binding.server.as_str(), binding.tools.as_slice())),
+    )?;
     let json =
         serde_json::to_value(manifest).map_err(|error| format!("unencodable manifest: {error}"))?;
     let encoded_len = json.to_string().len();
@@ -269,6 +325,46 @@ pub fn validate_app_manifest(manifest: &AppManifest) -> Result<serde_json::Value
         ));
     }
     Ok(json)
+}
+
+/// The binding grammar shared by manifests and grants: valid server names,
+/// no duplicate servers, and every tool a full mounted name under its
+/// binding's server namespace.
+fn validate_binding_set<'a>(
+    bindings: impl Iterator<Item = (&'a str, &'a [String])>,
+) -> Result<(), String> {
+    let mut servers = std::collections::HashSet::new();
+    for (server, binding_tools) in bindings {
+        if server.is_empty() || !is_mounted_name_charset(server) {
+            return Err(format!(
+                "binding server {server:?} must be a non-empty [A-Za-z0-9_-] name"
+            ));
+        }
+        if !servers.insert(server) {
+            return Err(format!("duplicate binding for server {server:?}"));
+        }
+        let prefix = format!("mcp__{server}__");
+        let mut tools = std::collections::HashSet::new();
+        for tool in binding_tools {
+            if tool.len() > MAX_MOUNTED_TOOL_NAME_BYTES || !is_mounted_name_charset(tool) {
+                return Err(format!(
+                    "tool {tool:?} must be at most {MAX_MOUNTED_TOOL_NAME_BYTES} bytes of [A-Za-z0-9_-]"
+                ));
+            }
+            match tool.strip_prefix(&prefix) {
+                Some(rest) if !rest.is_empty() => {}
+                _ => {
+                    return Err(format!(
+                        "tool {tool:?} is not a mounted `{prefix}{{tool}}` name under server {server:?}"
+                    ));
+                }
+            }
+            if !tools.insert(tool.as_str()) {
+                return Err(format!("duplicate tool {tool:?}"));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_app_name(name: &str) -> Result<(), String> {

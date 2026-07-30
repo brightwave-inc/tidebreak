@@ -116,6 +116,50 @@ export type AgentRunStatus = "active" | "queued" | "running" | "cancelling" | "w
 export type AgentRunTier = "foreground" | "background";
 
 /**
+ * One current-manifest binding, projected for the consent sheet.
+ */
+export type AppGrantBindingState = { 
+/**
+ * Configured server namespace, by name only.
+ */
+server: string, 
+/**
+ * Full mounted tool names the current manifest pins under this server.
+ */
+tools: Array<string>, 
+/**
+ * Whether the live grant covers every listed tool under this server and
+ * the server's current definition still matches the granted fingerprint.
+ */
+granted: boolean, 
+/**
+ * Whether a grant names this server but its definition changed (or
+ * disappeared) since consent — the "reconfigured since you agreed"
+ * affordance, distinct from a binding that was simply never granted.
+ */
+definition_changed: boolean, };
+
+/**
+ * Renderer-safe grant state for one app: the consent sheet's whole input.
+ *
+ * `bindings` follows the app's **current** revision's manifest — names only.
+ * The definitions behind the server names, and any environment or token
+ * values they select, are deliberately absent from this projection.
+ */
+export type AppGrantState = { 
+/**
+ * Whether a live grant fully covers the current manifest with every
+ * bound definition unchanged since consent — the "no sheet needed"
+ * verdict. When `false`, (re-)consent is required before every pinned
+ * tool is invokable.
+ */
+granted: boolean, 
+/**
+ * The current manifest's bindings, one entry per bound server.
+ */
+bindings: Array<AppGrantBindingState>, };
+
+/**
  * The typed refusal body — the `{ kind, message }` shape every route error
  * carries, with the kind closed so a client never string-matches prose.
  */

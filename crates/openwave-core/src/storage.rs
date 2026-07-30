@@ -33,7 +33,7 @@ use crate::id::{
     OutputRevisionId, ProjectId, RootAttachmentChangeId, TurnId, TurnSteerId,
 };
 use crate::image::ImageRef;
-use crate::local_app::{AppRecord, AppRevision, CreateApp, NewAppRevision};
+use crate::local_app::{AppGrant, AppRecord, AppRevision, CreateApp, NewAppRevision};
 use crate::model::{
     AgentRun, AgentRunInboxEntry, AgentRunResult, AgentRunTier, AgentRunWaitSetCandidate,
     BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus, Chat, ClientToolCallRequest,
@@ -1559,6 +1559,27 @@ pub trait Store: Send + Sync {
         _id: AppId,
         _restored_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool> {
+        app_storage_unavailable()
+    }
+
+    /// Record explicit user consent for one app, replacing any previous grant.
+    ///
+    /// The grant is host-computed from the app's current manifest and the
+    /// server definitions current at consent time; implementations validate
+    /// its bindings with the manifest grammar and refuse a missing or deleted
+    /// app. There is at most one grant per app.
+    async fn put_app_grant(&self, _grant: &AppGrant) -> Result<()> {
+        app_storage_unavailable()
+    }
+
+    /// Fetch one app's grant, when the user has consented and not revoked.
+    async fn get_app_grant(&self, _app_id: AppId) -> Result<Option<AppGrant>> {
+        app_storage_unavailable()
+    }
+
+    /// Revoke one app's grant. Returns `false` when no grant existed;
+    /// revoking twice is the same durable outcome, not a conflict.
+    async fn delete_app_grant(&self, _app_id: AppId) -> Result<bool> {
         app_storage_unavailable()
     }
 

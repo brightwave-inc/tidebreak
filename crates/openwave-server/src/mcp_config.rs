@@ -293,6 +293,86 @@ impl McpServerDefinition {
     }
 }
 
+/// SHA-256 fingerprint of a server definition as configured, the value an app
+/// grant pins each bound server to.
+///
+/// The digest is taken over the UTF-8 bytes of a compact JSON object with
+/// **exactly these keys, in exactly this order** (serde serializes struct
+/// fields in declaration order, and every key is always present):
+///
+/// ```json
+/// {"v":1,
+///  "transport":"stdio"|"http"|"gateway",
+///  "command":string|null,
+///  "args":[string,...],
+///  "cwd":string|null,
+///  "env_names":[string,...],
+///  "env_from":[string,...],
+///  "url":string|null,
+///  "bearer_token_env_set":bool,
+///  "gateway_endpoint":string|null}
+/// ```
+///
+/// `env_names` is the sorted *names* of the literal `env` entries and
+/// `env_from` the sorted selected parent-environment names — configuration
+/// values and resolved secrets never enter the canonical form, so the
+/// fingerprint can never be a value oracle. `bearer_token_env_set` records
+/// only whether a bearer name is selected. `cwd` is the configured path,
+/// lossily UTF-8. `name`, `enabled`, and `request_timeout_ms` are deliberately
+/// excluded: the grant binding already keys the fingerprint by server name,
+/// and toggling or re-timing a server does not change *what* the user
+/// consented to run.
+///
+/// **This canonical form is a compatibility surface.** Persisted grants store
+/// the digest; changing the form (or the meaning of any field in it)
+/// invalidates every existing grant and must bump `v`.
+pub(crate) fn definition_fingerprint(definition: &McpServerDefinition) -> [u8; 32] {
+    use sha2::Digest as _;
+
+    #[derive(Serialize)]
+    struct CanonicalDefinition<'a> {
+        v: u32,
+        transport: &'static str,
+        command: Option<&'a str>,
+        args: &'a [String],
+        cwd: Option<String>,
+        env_names: Vec<&'a str>,
+        env_from: Vec<&'a str>,
+        url: Option<&'a str>,
+        bearer_token_env_set: bool,
+        gateway_endpoint: Option<&'a str>,
+    }
+
+    let mut env_names: Vec<&str> = definition.env.keys().map(String::as_str).collect();
+    env_names.sort_unstable();
+    let mut env_from: Vec<&str> = definition.env_from.iter().map(String::as_str).collect();
+    env_from.sort_unstable();
+    let canonical = CanonicalDefinition {
+        v: 1,
+        transport: if definition.gateway_endpoint.is_some() {
+            "gateway"
+        } else if definition.url.is_some() {
+            "http"
+        } else {
+            "stdio"
+        },
+        command: definition.command.as_deref(),
+        args: &definition.args,
+        cwd: definition
+            .cwd
+            .as_ref()
+            .map(|cwd| cwd.to_string_lossy().into_owned()),
+        env_names,
+        env_from,
+        url: definition.url.as_deref(),
+        bearer_token_env_set: definition.bearer_token_env.is_some(),
+        gateway_endpoint: definition.gateway_endpoint.as_deref(),
+    };
+    let bytes = serde_json::to_vec(&canonical)
+        .expect("a canonical definition serializes infallibly to JSON");
+    sha2::Sha256::digest(&bytes).into()
+}
+
 const fn default_request_timeout_ms() -> u64 {
     DEFAULT_REQUEST_TIMEOUT_MS
 }
@@ -535,6 +615,20 @@ impl McpRuntime {
     pub(crate) async fn ui_view_document(&self, server: &str, uri: &str) -> Option<UiViewDocument> {
         let state = self.state.lock().await;
         state.servers.get(server)?.ui_views.get(uri).cloned()
+    }
+
+    /// The current definition fingerprint of every configured server, by name.
+    ///
+    /// Read live per call — never cached across a request — so grant
+    /// enforcement always compares against the definition a name resolves to
+    /// *now*, including a definition swapped in while the app stayed open.
+    pub(crate) async fn definition_fingerprints(&self) -> BTreeMap<String, [u8; 32]> {
+        let state = self.state.lock().await;
+        state
+            .definitions
+            .iter()
+            .map(|definition| (definition.name.clone(), definition_fingerprint(definition)))
+            .collect()
     }
 
     /// One immutable tool surface for a live turn.
