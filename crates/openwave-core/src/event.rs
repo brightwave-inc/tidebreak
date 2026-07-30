@@ -351,6 +351,7 @@ mod tests {
                     stdout: "on branch main".into(),
                     stderr: String::new(),
                     images: Vec::new(),
+                    outputs: Vec::new(),
                 }),
             },
             AgentEvent::TurnCompleted {

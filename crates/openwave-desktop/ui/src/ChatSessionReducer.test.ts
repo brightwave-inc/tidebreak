@@ -280,6 +280,54 @@ describe("tool call lifecycle", () => {
   });
 });
 
+describe("published outputs", () => {
+  it("signals an outputs refresh when an exec call published files", () => {
+    const execResult = {
+      tool: "exec" as const,
+      exit_code: 0,
+      timed_out: false,
+      output_truncated: false,
+      stdout: "",
+      stderr: "",
+      outputs: [
+        {
+          kind: "output" as const,
+          label: "report.md",
+          detail: null,
+          meta: "v2 · updated",
+          media_type: null,
+        },
+      ],
+    };
+    const { effects } = play([
+      TURN,
+      { type: "tool_call_started", call_id: "exec-1", name: "exec" },
+      {
+        type: "tool_call_completed",
+        call_id: "exec-1",
+        status: "completed",
+        result: execResult,
+      },
+    ]);
+    expect(effects).toContainEqual({ type: "refresh_output_writebacks" });
+
+    // A command that published nothing moves nothing.
+    const quiet = play([
+      TURN,
+      { type: "tool_call_started", call_id: "exec-2", name: "exec" },
+      {
+        type: "tool_call_completed",
+        call_id: "exec-2",
+        status: "completed",
+        result: { ...execResult, outputs: [] },
+      },
+    ]);
+    expect(quiet.effects).not.toContainEqual({
+      type: "refresh_output_writebacks",
+    });
+  });
+});
+
 describe("approvals", () => {
   const APPROVAL: AgentEvent = {
     type: "approval_required",

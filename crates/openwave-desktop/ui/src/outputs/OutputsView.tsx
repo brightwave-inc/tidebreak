@@ -25,6 +25,7 @@ import {
   PICKER_HOLDERS,
   useNativePickerLatch,
 } from "@/NativePickerLatch";
+import { useRefreshSignals } from "@/RefreshSignals";
 import { OutputsTable } from "./OutputsTable";
 
 export type OutputsApis = {
@@ -75,6 +76,9 @@ export function OutputsView({
   } | null>(null);
   const [countSuffix, setCountSuffix] = useState("");
   const generationRef = useRef(0);
+  // Bumped when the event stream reports the catalog moved — an exec call
+  // publishing outputs, or a writeback resolving.
+  const outputsRevision = useRefreshSignals((store) => store.outputWritebacks);
 
   async function refresh(showLoading = false) {
     const generation = ++generationRef.current;
@@ -102,6 +106,13 @@ export function OutputsView({
       generationRef.current += 1;
     };
   }, [chatId, apis]);
+
+  // A signal bump means the catalog moved server-side; re-list in place
+  // without blanking what is already on screen.
+  useEffect(() => {
+    if (outputsRevision === 0) return;
+    void refresh();
+  }, [outputsRevision]);
 
   const onSave = useCallback(
     async (output: DeliverableSummary) => {

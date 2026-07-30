@@ -318,6 +318,8 @@ export type ToolResultPreview =
         width: number;
         height: number;
       }[];
+      /** Durable outputs the command's output/ files created or updated. */
+      outputs?: ResultEntry[];
     }
   | {
       /** Web search is available after the reader configures a provider. */
@@ -1988,9 +1990,23 @@ export function parseToolResultPreview(
     };
   }
   if (value.tool !== "exec") return null;
-  const { exit_code, timed_out, output_truncated, stdout, stderr, images }: UncheckedExecResult =
-    value;
+  const {
+    exit_code,
+    timed_out,
+    output_truncated,
+    stdout,
+    stderr,
+    images,
+    outputs,
+  }: UncheckedExecResult = value;
   const imageValues = images ?? [];
+  const outputValues = outputs ?? [];
+  if (!Array.isArray(outputValues)) return null;
+  // Like listed entries, a malformed output row is dropped rather than
+  // poisoning the whole preview: the rows are display hints, not authority.
+  const parsedOutputs = outputValues
+    .map(parseResultEntry)
+    .filter((entry): entry is ResultEntry => entry !== null);
   if (
     (exit_code !== null && typeof exit_code !== "number") ||
     typeof timed_out !== "boolean" ||
@@ -2032,6 +2048,7 @@ export function parseToolResultPreview(
     stdout,
     stderr,
     images: parsedImages,
+    outputs: parsedOutputs,
   };
 }
 

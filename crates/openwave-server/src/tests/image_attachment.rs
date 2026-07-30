@@ -587,6 +587,7 @@ async fn a_tool_preview_is_fetchable_only_through_its_chat() {
             height: 480,
             byte_len: bytes.len() as u64,
         }],
+        outputs: Vec::new(),
     };
     store
         .resolve_server_tool_call_with_artifacts(

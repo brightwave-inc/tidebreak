@@ -1164,7 +1164,14 @@ output_truncated: boolean, stdout: string, stderr: string,
 /**
  * Preview images emitted by the command, in model-facing priority order.
  */
-images?: Array<ImageRef>, } | { "tool": "web_search_provider_required" } | { "tool": "mcp_app", 
+images?: Array<ImageRef>, 
+/**
+ * Durable outputs the command's `output/` files created or updated.
+ * Files that still match their published version are not news and are
+ * not listed. Defaulted so exec rows persisted before the field
+ * existed read back unchanged.
+ */
+outputs?: Array<ResultEntry>, } | { "tool": "web_search_provider_required" } | { "tool": "mcp_app", 
 /**
  * The configured MCP server namespace that serves the view.
  */

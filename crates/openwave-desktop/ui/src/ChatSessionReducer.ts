@@ -278,6 +278,17 @@ export function reduceChatSessionEvent(
     case "tool_call_completed": {
       const provisionalToolCallIds = new Set(state.provisionalToolCallIds);
       provisionalToolCallIds.delete(event.call_id);
+      // An exec call that published durable outputs changes the Outputs
+      // catalog; the sidebar count and outputs panel refresh on the same
+      // signal the writeback flow uses. The preview only lists created and
+      // updated files, so any row at all means the catalog moved.
+      const completedResult = parseToolResultPreview(event.result);
+      if (
+        completedResult?.tool === "exec" &&
+        (completedResult.outputs?.length ?? 0) > 0
+      ) {
+        effects.push({ type: "refresh_output_writebacks" });
+      }
       return {
         state: {
           ...state,
@@ -295,7 +306,7 @@ export function reduceChatSessionEvent(
             // A call approved by a standing grant never had an approval card,
             // so completion is the first time the action itself arrives.
             preview: parseToolActionPreview(event.action) ?? tool.preview,
-            result: parseToolResultPreview(event.result),
+            result: completedResult,
           })),
         },
         effects,

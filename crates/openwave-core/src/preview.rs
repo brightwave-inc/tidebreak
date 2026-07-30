@@ -356,6 +356,12 @@ pub enum ToolResultPreview {
         /// Preview images emitted by the command, in model-facing priority order.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<crate::ImageRef>,
+        /// Durable outputs the command's `output/` files created or updated.
+        /// Files that still match their published version are not news and are
+        /// not listed. Defaulted so exec rows persisted before the field
+        /// existed read back unchanged.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        outputs: Vec<ResultEntry>,
     },
     /// Web search is available after the reader chooses and configures a
     /// provider. Carries no model- or provider-authored text.
@@ -453,6 +459,7 @@ impl ToolResultPreview {
                     stdout: stream(data.get("stdout")),
                     stderr: stream(data.get("stderr")),
                     images: output.images.clone(),
+                    outputs: exec_output_entries(data.get("outputs")),
                 })
             }
             // Only an external MCP proxy can carry a view declaration, and a
@@ -561,6 +568,33 @@ fn web_capability_tool(tool_name: &str) -> bool {
 /// line the reader cannot interpret. `detail` and `meta` are genuinely
 /// optional, so one that clamps away to nothing simply goes missing rather than
 /// taking its row with it.
+/// Project the exec tool's published-output rows into bounded entries.
+///
+/// The tool's data lists every scanned file; only the ones that created or
+/// updated a durable output are a result worth a row. Malformed rows are
+/// dropped rather than degrading the whole preview, matching how listed
+/// entries behave elsewhere.
+fn exec_output_entries(value: Option<&Value>) -> Vec<ResultEntry> {
+    let Some(rows) = value.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    rows.iter()
+        .filter_map(|row| {
+            let status = row.get("status")?.as_str()?;
+            if status != "created" && status != "updated" {
+                return None;
+            }
+            let label = clamp(row.get("filename")?.as_str()?, MAX_RESULT_ENTRY_CHARS)?;
+            let version = row.get("version")?.as_u64()?;
+            Some(
+                ResultEntry::new(ResultEntryKind::Output, label)
+                    .with_meta(format!("v{version} · {status}")),
+            )
+        })
+        .take(MAX_RESULT_ENTRIES)
+        .collect()
+}
+
 fn result_entry(value: &Value) -> Option<ResultEntry> {
     Some(ResultEntry {
         kind: serde_json::from_value(value.get("kind")?.clone()).ok()?,
@@ -843,6 +877,55 @@ mod tests {
                 cwd: ".".into(),
             })
         );
+    }
+
+    /// The exec card lists the durable outputs the command published. Only
+    /// created/updated files are rows — an unchanged file is not news — and a
+    /// stored exec preview from before the field existed reads back unchanged.
+    #[test]
+    fn exec_result_lists_published_outputs_and_old_rows_read_back() {
+        let output = output_with_data(serde_json::json!({
+            "exit_code": 0,
+            "outputs": [
+                { "filename": "report.md", "version": 3, "status": "updated" },
+                { "filename": "chart.png", "version": 1, "status": "created" },
+                { "filename": "data.csv", "version": 2, "status": "unchanged" },
+                { "filename": 7, "version": "x", "status": "created" },
+            ],
+        }));
+        let Some(ToolResultPreview::Exec { outputs, .. }) =
+            ToolResultPreview::build("exec", &output)
+        else {
+            panic!("exec projects a result");
+        };
+        assert_eq!(
+            outputs
+                .iter()
+                .map(|entry| (entry.label.as_str(), entry.meta.as_deref()))
+                .collect::<Vec<_>>(),
+            [
+                ("report.md", Some("v3 · updated")),
+                ("chart.png", Some("v1 · created")),
+            ]
+        );
+        assert!(outputs
+            .iter()
+            .all(|entry| entry.kind == ResultEntryKind::Output));
+
+        // A pre-outputs journal row deserializes with the field defaulted.
+        let stored: ToolResultPreview = serde_json::from_value(serde_json::json!({
+            "tool": "exec",
+            "exit_code": 0,
+            "timed_out": false,
+            "output_truncated": false,
+            "stdout": "ok",
+            "stderr": "",
+        }))
+        .unwrap();
+        let ToolResultPreview::Exec { outputs, .. } = stored else {
+            panic!("stored exec row");
+        };
+        assert!(outputs.is_empty());
     }
 
     #[test]
@@ -1173,6 +1256,7 @@ mod tests {
                 stdout: "line one\nline two\n".into(),
                 stderr: "boom\n".into(),
                 images: Vec::new(),
+                outputs: Vec::new(),
             })
         );
         assert!(result.unwrap().has_output());
@@ -1195,6 +1279,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: String::new(),
                 images: Vec::new(),
+                outputs: Vec::new(),
             }
         );
         assert!(!result.has_output());
