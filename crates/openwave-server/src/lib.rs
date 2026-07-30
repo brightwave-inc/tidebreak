@@ -76,7 +76,7 @@ use openwave_core::{
     validate_import_connected_file_arguments, validate_list_connected_folders_arguments,
     validate_list_folder_arguments, validate_read_connected_file_arguments,
     validate_request_folder_access_arguments, validate_write_output_to_connected_folder_arguments,
-    write_output_to_connected_folder_tool_spec, AgentConfig, AgentError, BlobStore,
+    write_output_to_connected_folder_tool_spec, AgentConfig, AgentError, ApprovalClass, BlobStore,
     CachingSecretProvider, Config, CreateDeliverable, FsBlobStore, KeychainSecretProvider, ListDir,
     Profile, ReadFile, Result, SecretProvider, Store, Tool, ToolRegistry, WriteFile,
 };
@@ -891,27 +891,40 @@ fn agent_deps(
         .with(web_extract);
     tools.register_validated_client(
         request_folder_access_tool_spec(),
+        ApprovalClass::ReadOnly,
         validate_request_folder_access_arguments,
     );
     tools.register_validated_client(
         list_connected_folders_tool_spec(),
+        ApprovalClass::ReadOnly,
         validate_list_connected_folders_arguments,
     );
-    tools.register_validated_client(list_folder_tool_spec(), validate_list_folder_arguments);
     tools.register_validated_client(
-        read_connected_file_tool_spec(),
-        validate_read_connected_file_arguments,
+        list_folder_tool_spec(),
+        ApprovalClass::ReadOnly,
+        validate_list_folder_arguments,
     );
     tools.register_validated_client(
+        read_connected_file_tool_spec(),
+        ApprovalClass::ReadOnly,
+        validate_read_connected_file_arguments,
+    );
+    // Importing copies a connected file into the chat's sources: durable chat
+    // state, so it counts as a workspace mutation even though the connected
+    // folder itself is only read.
+    tools.register_validated_client(
         import_connected_file_tool_spec(),
+        ApprovalClass::Workspace,
         validate_import_connected_file_arguments,
     );
     tools.register_validated_client(
         write_output_to_connected_folder_tool_spec(),
+        ApprovalClass::Workspace,
         validate_write_output_to_connected_folder_arguments,
     );
     tools.register_validated_foreground_client(
         ask_user_questions_tool_spec(),
+        ApprovalClass::ReadOnly,
         validate_ask_user_questions_arguments,
     );
     // Foreground spawn checkpoints child acceptance and immediately resumes;

@@ -32,6 +32,7 @@ You are OpenWave, an assistant working with the user inside one conversation.
 - Never expose credentials, private broker state, hidden identifiers, or internal paths. A host folder path explicitly listed under Code execution is user-approved operating context and may be used for that purpose; otherwise refer only to user-visible names and opaque identifiers returned by available tools.
 - Respect tool approval and capability boundaries. A request or proposal is not proof that access was granted.";
 
+const PLAN_MODE_HEADING: &str = "## Plan mode";
 const USER_QUESTIONS_HEADING: &str = "## User clarification";
 const PRIVATE_SCRATCH_HEADING: &str = "## Private scratch";
 const SOURCES_HEADING: &str = "## Conversation sources and citations";
@@ -52,15 +53,21 @@ const MCP_HEADING: &str = "## External MCP tools";
 #[must_use]
 #[cfg(test)]
 pub(crate) fn compose(specs: &[ToolSpec]) -> String {
-    compose_with_exec_folders(specs, &[])
+    compose_for_surface(specs, &[], false)
 }
 
-/// Compose the prompt with a bounded snapshot of host-resolved local-exec
-/// folders. The sandbox profile resolves them again for each invocation.
+/// Compose the prompt for one exact tool surface, with a bounded snapshot of
+/// host-resolved local-exec folders, in the chat's current permission
+/// posture. The sandbox profile resolves the folders again per invocation.
+///
+/// A plan-mode surface is already narrowed to read-only tools before it
+/// reaches composition, so the section logic below stays truthful without
+/// consulting the flag; the flag only adds the planning contract itself.
 #[must_use]
-pub(crate) fn compose_with_exec_folders(
+pub(crate) fn compose_for_surface(
     specs: &[ToolSpec],
     exec_folders: &[ResolvedExecFolderGrant],
+    plan_mode: bool,
 ) -> String {
     let names = specs
         .iter()
@@ -68,6 +75,18 @@ pub(crate) fn compose_with_exec_folders(
         .collect::<BTreeSet<_>>();
     let has = |name: &str| names.contains(name);
     let mut prompt = BASELINE.to_owned();
+
+    if plan_mode {
+        push_section(
+            &mut prompt,
+            PLAN_MODE_HEADING,
+            &[
+                "- This chat is in plan mode: design the approach, do not carry it out. Every tool available this turn is read-only, and requests to modify anything will be refused until the user leaves plan mode.",
+                "- Explore with the available read-only tools until you understand the task, then present a concrete plan in your reply: the intended steps, what each one touches, and any open decisions the user should settle.",
+                "- Do not present work as done, staged, or in progress. The plan is a proposal; execution happens only after the user switches the chat out of plan mode.",
+            ],
+        );
+    }
 
     if has(openwave_core::ASK_USER_QUESTIONS_TOOL) {
         push_section(
@@ -366,6 +385,7 @@ mod tests {
         assert_eq!(prompt, BASELINE);
         assert!(prompt.contains("reasonable, reversible assumptions"));
         for unavailable in [
+            PLAN_MODE_HEADING,
             USER_QUESTIONS_HEADING,
             PRIVATE_SCRATCH_HEADING,
             SOURCES_HEADING,
@@ -454,6 +474,24 @@ mod tests {
     }
 
     #[test]
+    fn plan_mode_adds_the_planning_contract_and_nothing_else() {
+        let specs = [spec("read_file"), spec("list_sources")];
+        let plan = compose_for_surface(&specs, &[], true);
+        let normal = compose_for_surface(&specs, &[], false);
+
+        assert!(plan.contains(PLAN_MODE_HEADING));
+        assert!(plan.contains("do not carry it out"));
+        assert!(!normal.contains(PLAN_MODE_HEADING));
+        // The flag adds exactly one section; every tool-derived section stays
+        // keyed to the surface alone.
+        let start = plan.find("\n\n## Plan mode").expect("plan section present");
+        let end = plan[start + 2..]
+            .find("\n\n")
+            .map_or(plan.len(), |offset| start + 2 + offset);
+        assert_eq!(format!("{}{}", &plan[..start], &plan[end..]), normal);
+    }
+
+    #[test]
     fn composition_is_stable_across_registration_order_and_duplicates() {
         let forward = vec![
             spec("read_source"),
@@ -479,7 +517,7 @@ mod tests {
                 writable: index == 0,
             })
             .collect::<Vec<_>>();
-        let prompt = compose_with_exec_folders(&[spec("exec")], &folders);
+        let prompt = compose_for_surface(&[spec("exec")], &folders, false);
 
         assert!(prompt.contains("read-write folder: \"/Users/example/grant-0\""));
         assert!(prompt.contains("read-only folder: \"/Users/example/grant-1\""));
