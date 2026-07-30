@@ -42,7 +42,8 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use openwave_core::{
     AgentConfig, AgentError, AgentRun, AgentRunExecutionLocation, AgentRunId, AgentRunStatus,
-    ChatMessage, ChatRequest, ProviderEvent, Result, Role, Store, SubmitAgentRunResultOutcome,
+    BeginSandboxProvisionOutcome, ChatMessage, ChatRequest, ProviderEvent, Result, Role,
+    SandboxProvisionState, Store, SubmitAgentRunResultOutcome,
 };
 use openwave_sandbox_protocol::{
     events::EventPayload,
@@ -86,6 +87,14 @@ pub struct SandboxContainerRunConfig {
     pub reattach_attempts: u32,
     /// Backoff between re-dials.
     pub reattach_backoff: Duration,
+    /// How long the backend's create call may take before the run's durable
+    /// provisioning intent lapses.
+    ///
+    /// Recovery is driven by the intent, not by what the provider reports: a
+    /// crash on either side of the create converges through the lapse and the
+    /// tag sweep, and a handle commit that arrives after the lapse finds the
+    /// record already disowned and destroys its own container.
+    pub provision_window: Duration,
     /// How many model-inference operations the host will answer for one run.
     ///
     /// The sandbox's own step limit runs inside the untrusted container, so it
@@ -106,6 +115,9 @@ impl Default for SandboxContainerRunConfig {
             dial_timeout: Duration::from_secs(10),
             reattach_attempts: 5,
             reattach_backoff: Duration::from_millis(250),
+            // Ample for `docker run` against a present image; an image pull on
+            // a cold machine is paid at build/install time, not here.
+            provision_window: Duration::from_secs(120),
             // Three times the in-container loop's own step limit: a well-behaved
             // run never approaches it even with retried provider failures, and a
             // hostile one is cut off within one order of magnitude of legitimate
@@ -338,31 +350,94 @@ impl SandboxContainerRunner {
             }
         };
 
-        // Provisioning intent and correlation tag before the create call: the
-        // host mints the tag, and the backend stamps it into the container's
-        // metadata so an orphan sweep can reclaim a container whose run never
-        // committed a handle. (The durable intent row and the host-side sweep it
-        // drives are a follow-up; the tag discipline and the backend's sweep are
-        // here.)
+        // Durable provisioning intent — carrying the host-minted correlation
+        // tag and its window — committed before the create call, so a crash on
+        // either side of the create converges through the window lapse and the
+        // tag sweep instead of leaking a container or double-provisioning.
+        let run_uuid = *run_id.as_uuid();
         let tag = SandboxTag::new();
+        let window_expires_at = chrono::Utc::now() + chrono_duration(self.config.provision_window)?;
         let handle = match self
-            .backend
-            .provision(ProvisionRequest {
-                run_id: protocol_run_id,
-                tag,
-                // A local container has no external lifetime cap, which is why
-                // the run is attached-only.
-                lifetime_cap_secs: None,
-                // The delegated task. Interim delivery: see `ProvisionRequest::task`.
-                task: Some(task),
-            })
-            .await
+            .store
+            .begin_sandbox_provision(run_uuid, &tag.to_string(), window_expires_at)
+            .await?
         {
-            Ok(handle) => handle,
-            Err(error) => {
-                return self
-                    .fail(run_id, lease_token, "provision_failed", &error.to_string())
+            BeginSandboxProvisionOutcome::Started => {
+                let provisioned = self
+                    .backend
+                    .provision(ProvisionRequest {
+                        run_id: protocol_run_id,
+                        tag,
+                        // A local container has no external lifetime cap, which
+                        // is why the run is attached-only.
+                        lifetime_cap_secs: None,
+                        // The delegated task. Interim delivery: see
+                        // `ProvisionRequest::task`.
+                        task: Some(task),
+                    })
                     .await;
+                match provisioned {
+                    Ok(handle) => {
+                        if !self
+                            .store
+                            .commit_sandbox_provision_handle(run_uuid, &handle.reference)
+                            .await?
+                        {
+                            // The window lapsed mid-create and the sweep
+                            // disowned the intent: this driver holds a
+                            // container the durable state has already written
+                            // off. Destroy it and fail on the intent.
+                            self.teardown(run_uuid, &handle).await;
+                            return self
+                                .fail(
+                                    run_id,
+                                    lease_token,
+                                    "provision_window_lapsed",
+                                    "the provisioning window lapsed before the handle committed",
+                                )
+                                .await;
+                        }
+                        handle
+                    }
+                    Err(error) => {
+                        // Whatever the create half-made carries this run's tag;
+                        // the teardown obligation hands it to the tag sweep.
+                        let _ = self.store.enqueue_sandbox_teardown(run_uuid).await;
+                        return self
+                            .fail(run_id, lease_token, "provision_failed", &error.to_string())
+                            .await;
+                    }
+                }
+            }
+            BeginSandboxProvisionOutcome::Existing(record) => {
+                match (record.state, record.handle) {
+                    // A prior attempt of this same claim committed a handle and
+                    // then lost its own commit: reconcile the container that
+                    // already exists rather than creating a second one.
+                    (SandboxProvisionState::Committed, Some(reference)) => {
+                        let tag = record.tag.parse::<SandboxTag>().map_err(|_| {
+                            AgentError::Store(format!(
+                                "sandbox provision record for run {run_id} has a malformed tag"
+                            ))
+                        })?;
+                        SandboxHandle { reference, tag }
+                    }
+                    // Intended (the prior attempt died before the handle
+                    // committed) or already in teardown: this driver holds the
+                    // claim, so no create can still be in flight — disown the
+                    // intent and let the tag sweep reclaim whatever exists.
+                    _ => {
+                        let _ = self.store.enqueue_sandbox_teardown(run_uuid).await;
+                        return self
+                            .fail(
+                                run_id,
+                                lease_token,
+                                "provision_reclaimed",
+                                "the run's provisioning record was not reconcilable",
+                            )
+                            .await;
+                    }
+                }
             }
         };
 
@@ -371,7 +446,7 @@ impl SandboxContainerRunner {
         let outcome = self
             .attach_and_drive(&run, lease_token, protocol_run_id, config, &handle)
             .await;
-        self.teardown(&handle).await;
+        self.teardown(run_uuid, &handle).await;
         outcome
     }
 
@@ -692,14 +767,24 @@ impl SandboxContainerRunner {
         }
     }
 
-    /// Drive the container's teardown obligation to completion, idempotently. A
-    /// container that outlives its run is a bounded exposure the destroy exists
-    /// to end, so an unconfirmed destroy is retried within a small budget rather
-    /// than abandoned.
-    async fn teardown(&self, handle: &SandboxHandle) {
+    /// Drive the container's teardown obligation, idempotently. The obligation
+    /// is persisted before the first destroy attempt and marked done only on a
+    /// confirmed destroy, so an unconfirmed teardown survives this process and
+    /// is re-driven by [`sweep`](Self::sweep) rather than abandoned.
+    async fn teardown(&self, run_uuid: Uuid, handle: &SandboxHandle) {
+        if let Err(error) = self.store.enqueue_sandbox_teardown(run_uuid).await {
+            eprintln!("openwave: could not persist a container teardown obligation: {error}");
+        }
         for attempt in 0..3u32 {
             match self.backend.destroy(handle).await {
-                Ok(()) => return,
+                Ok(()) => {
+                    if let Err(error) = self.store.complete_sandbox_teardown(run_uuid).await {
+                        eprintln!(
+                            "openwave: container teardown confirmed but not recorded: {error}"
+                        );
+                    }
+                    return;
+                }
                 Err(error) => {
                     eprintln!(
                         "openwave: container teardown attempt {attempt} unconfirmed: {error}"
@@ -709,9 +794,80 @@ impl SandboxContainerRunner {
             }
         }
         eprintln!(
-            "openwave: container teardown for {} left unconfirmed; a sweep must re-drive it",
+            "openwave: container teardown for {} left unconfirmed; the sweep re-drives it",
             handle.reference
         );
+    }
+
+    /// One recovery pass over the durable provisioning records: lapse every
+    /// `Intended` record whose window expired, drive every pending teardown
+    /// obligation, and reclaim any backend sandbox whose tag names no live
+    /// record.
+    ///
+    /// Idempotent, and safe to run beside live drivers: the lapse is predicated
+    /// on `intended` (so it can never disown a committed handle), the live-tag
+    /// set is read *after* the lapse (so the tag sweep can never race a slow
+    /// in-flight create — an unlapsed intent's tag stays live), and destroy is
+    /// idempotent at the backend.
+    ///
+    /// # Errors
+    /// Propagates a durable-store failure. Backend failures leave the
+    /// obligations in place for the next pass.
+    pub async fn sweep(&self) -> Result<()> {
+        let lapsed = self
+            .store
+            .lapse_sandbox_provisions(chrono::Utc::now())
+            .await?;
+        for record in &lapsed {
+            eprintln!(
+                "openwave: sandbox provisioning intent for run {} lapsed; its tag is reclaimable",
+                record.run_id
+            );
+        }
+
+        // Directed destroys first: obligations with a committed handle name
+        // their container exactly.
+        for record in self.store.list_sandbox_teardowns().await? {
+            let Some(reference) = record.handle.clone() else {
+                continue;
+            };
+            let Ok(tag) = record.tag.parse::<SandboxTag>() else {
+                continue;
+            };
+            let handle = SandboxHandle { reference, tag };
+            if self.backend.destroy(&handle).await.is_ok() {
+                self.store.complete_sandbox_teardown(record.run_id).await?;
+            }
+        }
+
+        // The tag sweep: destroy everything the records disown. On `Ok` the
+        // backend guarantees no sandbox outside the live set remains, which is
+        // what lets a handle-less obligation (a lapsed intent whose create may
+        // or may not have reached the provider) be marked done.
+        let live: std::collections::HashSet<SandboxTag> = self
+            .store
+            .live_sandbox_tags()
+            .await?
+            .iter()
+            .filter_map(|tag| tag.parse().ok())
+            .collect();
+        match self.backend.reclaim_orphans(&live).await {
+            Ok(reclaimed) => {
+                for handle in &reclaimed {
+                    eprintln!(
+                        "openwave: reclaimed an orphaned sandbox container {}",
+                        handle.reference
+                    );
+                }
+                for record in self.store.list_sandbox_teardowns().await? {
+                    self.store.complete_sandbox_teardown(record.run_id).await?;
+                }
+            }
+            Err(error) => {
+                eprintln!("openwave: the sandbox orphan sweep proved nothing this pass: {error}");
+            }
+        }
+        Ok(())
     }
 }
 

@@ -137,40 +137,6 @@ impl DockerSandboxBackend {
         resolve_on_path(&self.config.binary).is_some()
     }
 
-    /// Reclaim orphaned containers: destroy every tagged container whose correlation
-    /// tag is *not* in `live_tags`.
-    ///
-    /// The reclaimable predicate is exactly "the container's stamped `openwave.run-tag`
-    /// names no live run". The host builds `live_tags` from its durable provisioning
-    /// intents and committed handles; a tagged container the host does not recognize
-    /// belongs to a lapsed intent — a run that never committed a handle, whether the
-    /// host crashed before or after the `docker run` returned — so it is reclaimed.
-    /// This mirrors the durable op-log's tag sweep, and it is idempotent: a second
-    /// sweep with the same live set finds the reclaimed containers already gone and
-    /// reclaims nothing. A container whose removal fails stays listed and is re-driven
-    /// by the next sweep rather than being abandoned.
-    ///
-    /// # Errors
-    /// [`BackendError::Teardown`] if the runtime cannot be asked to list containers.
-    pub async fn reclaim_orphans(
-        &self,
-        live_tags: &HashSet<SandboxTag>,
-    ) -> Result<Vec<SandboxHandle>, BackendError> {
-        if !self.is_available() {
-            return Ok(Vec::new());
-        }
-        let mut reclaimed = Vec::new();
-        for handle in self.list_tagged().await? {
-            if live_tags.contains(&handle.tag) {
-                continue;
-            }
-            if self.remove(&handle.reference).await.is_ok() {
-                reclaimed.push(handle);
-            }
-        }
-        Ok(reclaimed)
-    }
-
     /// A fresh runtime command with stdio detached from this process.
     fn command(&self) -> Command {
         let mut command = Command::new(&self.config.binary);
@@ -324,6 +290,41 @@ impl SandboxBackend for DockerSandboxBackend {
             return Err(BackendError::Teardown(RUNTIME_UNAVAILABLE.to_owned()));
         }
         self.remove(&handle.reference).await
+    }
+
+    /// Reclaim orphaned containers: destroy every tagged container whose
+    /// correlation tag is *not* in `live_tags`.
+    ///
+    /// The reclaimable predicate is exactly "the container's stamped
+    /// `openwave.run-tag` names no live run". Idempotent: a second sweep with
+    /// the same live set finds the reclaimed containers already gone and
+    /// reclaims nothing. `Ok` upholds the trait's guarantee that no container
+    /// outside `live_tags` remains — an unavailable runtime or an unconfirmed
+    /// removal is an error, so the sweep never marks a teardown obligation done
+    /// on a pass that proved nothing.
+    async fn reclaim_orphans(
+        &self,
+        live_tags: &HashSet<SandboxTag>,
+    ) -> Result<Vec<SandboxHandle>, BackendError> {
+        if !self.is_available() {
+            return Err(BackendError::Teardown(RUNTIME_UNAVAILABLE.to_owned()));
+        }
+        let mut reclaimed = Vec::new();
+        let mut unconfirmed = false;
+        for handle in self.list_tagged().await? {
+            if live_tags.contains(&handle.tag) {
+                continue;
+            }
+            if self.remove(&handle.reference).await.is_ok() {
+                reclaimed.push(handle);
+            } else {
+                unconfirmed = true;
+            }
+        }
+        if unconfirmed {
+            return Err(BackendError::Teardown(REMOVE_FAILED.to_owned()));
+        }
+        Ok(reclaimed)
     }
 }
 
@@ -510,15 +511,12 @@ mod tests {
             backend.destroy(&handle).await,
             Err(BackendError::Teardown(_))
         ));
-        // With no runtime there is nothing to sweep, and that is not an error.
-        assert_eq!(
-            backend
-                .reclaim_orphans(&HashSet::new())
-                .await
-                .unwrap()
-                .len(),
-            0
-        );
+        // With no runtime the sweep proves nothing, so it must error rather
+        // than report an Ok the caller would read as "no orphans remain".
+        assert!(matches!(
+            backend.reclaim_orphans(&HashSet::new()).await,
+            Err(BackendError::Teardown(_))
+        ));
     }
 
     #[test]

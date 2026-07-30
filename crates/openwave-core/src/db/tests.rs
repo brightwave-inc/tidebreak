@@ -2321,6 +2321,12 @@ async fn message_document_attachment_migration_has_a_working_down_and_reapply() 
     let conn = Database::connect(&url).await.unwrap();
     migration::Migrator::up(&conn, None).await.unwrap();
 
+    let appended = migrations_added_after("m20260729_000032_add_message_document_attachments");
+    if appended > 0 {
+        migration::Migrator::down(&conn, Some(appended))
+            .await
+            .unwrap();
+    }
     migration::Migrator::down(&conn, Some(1)).await.unwrap();
     assert!(conn
         .query_one_raw(Statement::from_string(

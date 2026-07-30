@@ -193,6 +193,29 @@ pub trait SandboxBackend: Send + Sync {
     /// [`BackendError::Teardown`] if teardown could not be confirmed; the caller
     /// re-drives the obligation on the next sweep.
     async fn destroy(&self, handle: &SandboxHandle) -> Result<(), BackendError>;
+
+    /// Destroy every sandbox this backend holds whose correlation tag is *not*
+    /// in `live_tags`, returning the handles it reclaimed.
+    ///
+    /// The host builds `live_tags` from its durable provisioning records, so a
+    /// tagged sandbox the host does not recognize belongs to a lapsed intent —
+    /// a run that never committed a handle, whether the host crashed before or
+    /// after the create returned. `Ok` means the backend now holds **no**
+    /// sandbox outside `live_tags`; that guarantee is what lets the sweep mark
+    /// a handle-less teardown obligation done. The default is for backends
+    /// that never hold provider-created sandboxes (the self-hosted case), for
+    /// which the guarantee is vacuously true.
+    ///
+    /// # Errors
+    /// [`BackendError::Teardown`] if the backend could not list its sandboxes
+    /// or could not confirm every removal; the sweep retries.
+    async fn reclaim_orphans(
+        &self,
+        live_tags: &std::collections::HashSet<SandboxTag>,
+    ) -> Result<Vec<SandboxHandle>, BackendError> {
+        let _ = live_tags;
+        Ok(Vec::new())
+    }
 }
 
 #[cfg(test)]

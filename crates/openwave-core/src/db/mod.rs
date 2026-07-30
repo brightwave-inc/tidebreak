@@ -711,6 +711,49 @@ impl Store for DbStore {
         ops::agent_run::claim_container_agent_run(self, id, lease_token, lease_duration).await
     }
 
+    async fn begin_sandbox_provision(
+        &self,
+        run_id: uuid::Uuid,
+        tag: &str,
+        window_expires_at: chrono::DateTime<Utc>,
+    ) -> Result<crate::storage::BeginSandboxProvisionOutcome> {
+        ops::sandbox_provision::begin(self, run_id, tag, window_expires_at).await
+    }
+
+    async fn commit_sandbox_provision_handle(
+        &self,
+        run_id: uuid::Uuid,
+        handle: &str,
+    ) -> Result<bool> {
+        ops::sandbox_provision::commit_handle(self, run_id, handle).await
+    }
+
+    async fn enqueue_sandbox_teardown(
+        &self,
+        run_id: uuid::Uuid,
+    ) -> Result<Option<crate::storage::SandboxProvision>> {
+        ops::sandbox_provision::enqueue_teardown(self, run_id).await
+    }
+
+    async fn complete_sandbox_teardown(&self, run_id: uuid::Uuid) -> Result<()> {
+        ops::sandbox_provision::complete_teardown(self, run_id).await
+    }
+
+    async fn lapse_sandbox_provisions(
+        &self,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Vec<crate::storage::SandboxProvision>> {
+        ops::sandbox_provision::lapse(self, now).await
+    }
+
+    async fn list_sandbox_teardowns(&self) -> Result<Vec<crate::storage::SandboxProvision>> {
+        ops::sandbox_provision::list_teardowns(self).await
+    }
+
+    async fn live_sandbox_tags(&self) -> Result<Vec<String>> {
+        ops::sandbox_provision::live_tags(self).await
+    }
+
     async fn checkpoint_sandbox_spawn(
         &self,
         request: &crate::model::SandboxSpawnCheckpointRequest,

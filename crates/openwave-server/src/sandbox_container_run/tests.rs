@@ -28,7 +28,7 @@ use openwave_core::{
 };
 use openwave_sandbox_agent::run_agent;
 use openwave_sandbox_protocol::{
-    ids::{OperationId, RunId},
+    ids::{OperationId, RunId, SandboxTag},
     protocol::{Response, PROTOCOL_VERSION},
     reverse::{
         Capability, GrantSet, ModelInferenceParams, ReverseEnvelope, ReverseRequest, ReverseResult,
@@ -151,12 +151,18 @@ impl ProviderResolver for FixedResolver {
 /// would answer the wrong question.
 struct MockBackend {
     /// When set, `address` resolves here instead of the provisioned sandbox —
-    /// used to point the driver at an unreachable port.
+    /// used to point the driver at an unreachable port, or at a sandbox the
+    /// test started itself for the reconcile path.
     address_override: Option<String>,
     /// The loopback address of the sandbox started at provision.
     address: Mutex<Option<String>>,
     provisions: AtomicUsize,
     destroys: AtomicUsize,
+    /// While set, `destroy` refuses to confirm — the unconfirmed-teardown case.
+    failing_destroys: std::sync::atomic::AtomicBool,
+    /// Every live-tag set `reclaim_orphans` was asked to preserve.
+    reclaim_live_sets:
+        Mutex<Vec<std::collections::HashSet<openwave_sandbox_protocol::ids::SandboxTag>>>,
     delivered_task: Mutex<Option<String>>,
 }
 
@@ -169,6 +175,8 @@ impl MockBackend {
             address: Mutex::new(None),
             provisions: AtomicUsize::new(0),
             destroys: AtomicUsize::new(0),
+            failing_destroys: std::sync::atomic::AtomicBool::new(false),
+            reclaim_live_sets: Mutex::new(Vec::new()),
             delivered_task: Mutex::new(None),
         })
     }
@@ -180,6 +188,8 @@ impl MockBackend {
             address: Mutex::new(None),
             provisions: AtomicUsize::new(0),
             destroys: AtomicUsize::new(0),
+            failing_destroys: std::sync::atomic::AtomicBool::new(false),
+            reclaim_live_sets: Mutex::new(Vec::new()),
             delivered_task: Mutex::new(None),
         })
     }
@@ -233,8 +243,22 @@ impl SandboxBackend for MockBackend {
     }
 
     async fn destroy(&self, _handle: &SandboxHandle) -> std::result::Result<(), BackendError> {
+        if self.failing_destroys.load(Ordering::SeqCst) {
+            return Err(BackendError::Teardown("destroy refused by test".to_owned()));
+        }
         self.destroys.fetch_add(1, Ordering::SeqCst);
         Ok(())
+    }
+
+    async fn reclaim_orphans(
+        &self,
+        live_tags: &std::collections::HashSet<openwave_sandbox_protocol::ids::SandboxTag>,
+    ) -> std::result::Result<Vec<SandboxHandle>, BackendError> {
+        self.reclaim_live_sets
+            .lock()
+            .unwrap()
+            .push(live_tags.clone());
+        Ok(Vec::new())
     }
 }
 
@@ -344,6 +368,7 @@ fn fast_config() -> SandboxContainerRunConfig {
         dial_timeout: Duration::from_secs(2),
         reattach_attempts: 2,
         reattach_backoff: Duration::from_millis(10),
+        provision_window: Duration::from_secs(120),
         max_inference_operations: 24,
     }
 }
@@ -780,6 +805,176 @@ async fn admission_routes_to_the_container_location_not_the_in_process_scheduler
             .expect("reusing the token recovers the live claim");
         assert_eq!(reclaimed.id, run_id);
         assert_eq!(reclaimed.attempt_count, claimed.attempt_count);
+    })
+    .await
+    .expect("test completed within its time bound");
+}
+
+// --- Durable provisioning records (issue #920) --------------------------------
+
+/// The commit predicate: a handle commit that arrives after the window lapsed
+/// finds the intent already disowned and must not resurrect it — the driver
+/// that holds the late container destroys it instead of running on it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lapsed_intent_refuses_a_late_handle_commit() {
+    let (_dir, store, _chat) = store().await;
+    let run_uuid = Uuid::new_v4();
+    let tag = SandboxTag::new();
+    let expired = chrono::Utc::now() - chrono::Duration::seconds(1);
+    assert!(matches!(
+        store
+            .begin_sandbox_provision(run_uuid, &tag.to_string(), expired)
+            .await
+            .unwrap(),
+        openwave_core::BeginSandboxProvisionOutcome::Started
+    ));
+
+    let lapsed = store
+        .lapse_sandbox_provisions(chrono::Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(lapsed.len(), 1);
+    assert_eq!(lapsed[0].run_id, run_uuid);
+
+    // The create returns late: its commit must lose.
+    assert!(!store
+        .commit_sandbox_provision_handle(run_uuid, "late-container")
+        .await
+        .unwrap());
+    // The disowned intent owes a teardown, and its tag is no longer live.
+    assert_eq!(store.list_sandbox_teardowns().await.unwrap().len(), 1);
+    assert!(store.live_sandbox_tags().await.unwrap().is_empty());
+}
+
+/// The sweep converges a crash between provision and handle commit: the lapsed
+/// intent is disowned, the tag sweep is asked to preserve only live tags, and
+/// the handle-less obligation completes once the backend proves nothing outside
+/// them remains. An unlapsed intent stays live throughout, so the sweep can
+/// never race a slow in-flight create.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_sweep_reclaims_a_lapsed_intent_and_preserves_live_ones() {
+    let (_dir, store, _chat) = store().await;
+    let dead_tag = SandboxTag::new();
+    let live_tag = SandboxTag::new();
+    let expired = chrono::Utc::now() - chrono::Duration::seconds(1);
+    let open = chrono::Utc::now() + chrono::Duration::seconds(600);
+    store
+        .begin_sandbox_provision(Uuid::new_v4(), &dead_tag.to_string(), expired)
+        .await
+        .unwrap();
+    store
+        .begin_sandbox_provision(Uuid::new_v4(), &live_tag.to_string(), open)
+        .await
+        .unwrap();
+
+    let backend = MockBackend::spawning();
+    let runner = SandboxContainerRunner::new(
+        store.clone(),
+        backend.clone(),
+        Arc::new(FixedResolver(Arc::new(ScriptedProvider::new(vec![])))),
+        fast_config(),
+    );
+    runner.sweep().await.expect("the sweep succeeds");
+
+    let live_sets = backend.reclaim_live_sets.lock().unwrap().clone();
+    assert_eq!(live_sets.len(), 1);
+    assert!(
+        live_sets[0].contains(&live_tag),
+        "an unlapsed intent's tag must stay live through the tag sweep"
+    );
+    assert!(
+        !live_sets[0].contains(&dead_tag),
+        "a lapsed intent's tag must be reclaimable"
+    );
+    // The obligation completed under the backend's nothing-remains guarantee.
+    assert!(store.list_sandbox_teardowns().await.unwrap().is_empty());
+    assert_eq!(
+        store.live_sandbox_tags().await.unwrap(),
+        vec![live_tag.to_string()]
+    );
+}
+
+/// An unconfirmed teardown outlives the driver: the obligation is persisted at
+/// the end of the drive, and the next sweep's directed destroy completes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unconfirmed_teardown_is_redriven_by_the_sweep() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (_dir, store, chat) = store().await;
+        let run_id = admit_container_run(&store, chat.id, "clean up after me").await;
+        let backend = MockBackend::spawning();
+        backend.failing_destroys.store(true, Ordering::SeqCst);
+        let provider = Arc::new(ScriptedProvider::new(vec![]));
+        let runner = SandboxContainerRunner::new(
+            store.clone(),
+            backend.clone(),
+            Arc::new(FixedResolver(provider)),
+            fast_config(),
+        );
+        let outcome = runner
+            .drive(run_id)
+            .await
+            .expect("driving succeeds")
+            .expect("the container run is claimable");
+        assert_eq!(outcome, SandboxContainerRunOutcome::Completed(run_id));
+        // The destroy never confirmed, so the obligation survived the drive.
+        assert_eq!(backend.destroys.load(Ordering::SeqCst), 0);
+        assert_eq!(store.list_sandbox_teardowns().await.unwrap().len(), 1);
+
+        backend.failing_destroys.store(false, Ordering::SeqCst);
+        runner.sweep().await.expect("the sweep succeeds");
+        assert_eq!(backend.destroys.load(Ordering::SeqCst), 1);
+        assert!(store.list_sandbox_teardowns().await.unwrap().is_empty());
+    })
+    .await
+    .expect("test completed within its time bound");
+}
+
+/// A committed handle from a prior interrupted attempt is reconciled: the
+/// driver attaches to the container that already exists instead of provisioning
+/// a second one for the same single-attempt run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_committed_handle_is_reconciled_not_reprovisioned() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (_dir, store, chat) = store().await;
+        let task = "resume where the interrupted attempt left off";
+        let run_id = admit_container_run(&store, chat.id, task).await;
+        let run_uuid = *run_id.as_uuid();
+
+        // The sandbox already exists — a prior attempt provisioned it and
+        // committed its handle before losing its own commit — so the backend
+        // can only address it, never create it.
+        let base_url = spawn_sandbox_agent(task).await;
+        let backend = MockBackend::unreachable(base_url);
+        let tag = SandboxTag::new();
+        store
+            .begin_sandbox_provision(
+                run_uuid,
+                &tag.to_string(),
+                chrono::Utc::now() + chrono::Duration::seconds(600),
+            )
+            .await
+            .unwrap();
+        assert!(store
+            .commit_sandbox_provision_handle(run_uuid, "prior-container")
+            .await
+            .unwrap());
+
+        let provider = Arc::new(ScriptedProvider::new(vec![]));
+        let runner = SandboxContainerRunner::new(
+            store.clone(),
+            backend.clone(),
+            Arc::new(FixedResolver(provider)),
+            fast_config(),
+        );
+        let outcome = runner
+            .drive(run_id)
+            .await
+            .expect("driving succeeds")
+            .expect("the container run is claimable");
+        assert_eq!(outcome, SandboxContainerRunOutcome::Completed(run_id));
+        // Reconciled, not re-provisioned — and its teardown still completed.
+        assert_eq!(backend.provisions.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.destroys.load(Ordering::SeqCst), 1);
     })
     .await
     .expect("test completed within its time bound");

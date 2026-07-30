@@ -1019,6 +1019,58 @@ pub struct OperationLogEntry {
     pub retained: bool,
 }
 
+/// Where one container run's durable provisioning record stands.
+///
+/// The record is written *before* the backend is asked to create a sandbox and
+/// carries the host-minted correlation tag, so recovery is driven by the intent
+/// rather than by what the provider reports: a crash on either side of the
+/// create call converges on the same terminal state through the window lapse
+/// and the tag sweep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxProvisionState {
+    /// The intent is committed and the provisioning window is running; no
+    /// handle has been recorded yet.
+    Intended,
+    /// The backend's sandbox handle is committed onto the record; a restarted
+    /// host reconciles this container instead of creating a second one.
+    Committed,
+    /// The sandbox owes a teardown: the run ended, the window lapsed, or the
+    /// handle was learned too late. The sweep drives this to `Done`.
+    Teardown,
+    /// The sandbox is confirmed gone.
+    Done,
+}
+
+/// One container run's durable provisioning record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxProvision {
+    /// The agent run this sandbox serves. Container runs have exactly one
+    /// execution attempt, so the run id keys the record.
+    pub run_id: uuid::Uuid,
+    /// The host-minted correlation tag stamped into the sandbox's metadata at
+    /// creation; the orphan sweep reclaims by it.
+    pub tag: String,
+    /// Where the record stands.
+    pub state: SandboxProvisionState,
+    /// The backend's own reference for the sandbox, present once committed.
+    pub handle: Option<String>,
+    /// When the provisioning window lapses: an `Intended` record older than
+    /// this failed its admission whether or not a create ever reached the
+    /// provider.
+    pub window_expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// The outcome of committing a provisioning intent for a container run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BeginSandboxProvisionOutcome {
+    /// A fresh intent was committed under the caller's tag; the caller may ask
+    /// the backend to create a sandbox.
+    Started,
+    /// A record for this run already exists — a prior driver got here first.
+    /// The caller reconciles from its state instead of provisioning again.
+    Existing(SandboxProvision),
+}
+
 /// Durable metadata and conversation state.
 ///
 /// Implementations must be safe to share across threads (`Send + Sync`) and are
@@ -1513,6 +1565,72 @@ pub trait Store: Send + Sync {
         _lease_token: uuid::Uuid,
         _lease_duration: chrono::Duration,
     ) -> Result<Option<AgentRun>> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Commit a durable provisioning intent for one container run, before the
+    /// backend is asked to create anything. Returns the existing record instead
+    /// when one is already present, so a restarted host reconciles rather than
+    /// provisioning a second sandbox for the same single-attempt run.
+    async fn begin_sandbox_provision(
+        &self,
+        _run_id: uuid::Uuid,
+        _tag: &str,
+        _window_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<BeginSandboxProvisionOutcome> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Commit the backend's handle onto the run's `Intended` record. Returns
+    /// `false` if the record is no longer `Intended` — the window lapsed and the
+    /// sweep claimed it first — in which case the caller owns a sandbox the
+    /// durable state has already disowned and must destroy it.
+    async fn commit_sandbox_provision_handle(
+        &self,
+        _run_id: uuid::Uuid,
+        _handle: &str,
+    ) -> Result<bool> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Move one run's provisioning record to `Teardown`, whatever non-`Done`
+    /// state it is in, returning it. `None` if no record exists or the sandbox
+    /// is already confirmed gone.
+    async fn enqueue_sandbox_teardown(
+        &self,
+        _run_id: uuid::Uuid,
+    ) -> Result<Option<SandboxProvision>> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Mark one run's `Teardown` record `Done` after its destroy confirmed.
+    async fn complete_sandbox_teardown(&self, _run_id: uuid::Uuid) -> Result<()> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Move every `Intended` record whose window lapsed before `now` to
+    /// `Teardown`, returning the lapsed records. The admission failed on the
+    /// intent whether or not a create ever reached the provider; the tag sweep
+    /// reclaims whatever the provider holds under those tags.
+    async fn lapse_sandbox_provisions(
+        &self,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<SandboxProvision>> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Every record currently owing a teardown.
+    async fn list_sandbox_teardowns(&self) -> Result<Vec<SandboxProvision>> {
+        agent_run_storage_unavailable()
+    }
+
+    /// The correlation tags of every live provisioning record — `Intended`
+    /// within its window plus `Committed` — the set the orphan sweep must not
+    /// reclaim. An `Intended` tag stays live until [`lapse_sandbox_provisions`]
+    /// moves it, so the sweep can never race a slow in-flight create.
+    ///
+    /// [`lapse_sandbox_provisions`]: Store::lapse_sandbox_provisions
+    async fn live_sandbox_tags(&self) -> Result<Vec<String>> {
         agent_run_storage_unavailable()
     }
 

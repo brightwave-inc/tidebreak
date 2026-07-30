@@ -19,6 +19,7 @@ pub(in crate::db) mod message_document_attachment;
 pub(in crate::db) mod operation_log;
 pub(in crate::db) mod output;
 pub(in crate::db) mod root_attachment;
+pub(in crate::db) mod sandbox_provision;
 pub(in crate::db) mod sandbox_tool;
 pub(in crate::db) mod turn;
 pub(in crate::db) mod user_question;

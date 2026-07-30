@@ -92,7 +92,97 @@ impl MigratorTrait for Migrator {
             Box::new(LightweightCitations),
             Box::new(RetireDocumentPipeline),
             Box::new(AddMessageDocumentAttachments),
+            Box::new(AddSandboxProvision),
         ]
+    }
+}
+
+/// Adds the durable sandbox provisioning record (issue #920): the intent a
+/// container run commits — carrying its host-minted correlation tag and
+/// provisioning window — *before* the backend is asked to create a sandbox, the
+/// handle committed onto it afterwards, and the teardown obligation the sweep
+/// drives to completion.
+///
+/// Recovery is driven by this row, not by what the provider reports: an
+/// `intended` record whose window lapses failed its admission whether or not a
+/// create ever reached the provider, and the orphan sweep reclaims any provider
+/// sandbox whose tag names no live record. Purely additive (a new table), with a
+/// symmetric `down` and identical shape on SQLite and PostgreSQL.
+struct AddSandboxProvision;
+
+impl MigrationName for AddSandboxProvision {
+    fn name(&self) -> &str {
+        "m20260730_000033_add_sandbox_provision"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddSandboxProvision {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(SandboxProvision::Table)
+                    .col(
+                        ColumnDef::new(SandboxProvision::RunId)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxProvision::Tag)
+                            .string_len(64)
+                            .not_null()
+                            .unique_key(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxProvision::State)
+                            .string_len(16)
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(SandboxProvision::Handle).string().null())
+                    .col(
+                        ColumnDef::new(SandboxProvision::WindowExpiresAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxProvision::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxProvision::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .check(Expr::col(SandboxProvision::State).is_in([
+                        "intended",
+                        "committed",
+                        "teardown",
+                        "done",
+                    ]))
+                    // An intent has no handle until the backend's create returns.
+                    .check(
+                        Expr::col(SandboxProvision::State)
+                            .ne("intended")
+                            .or(Expr::col(SandboxProvision::Handle).is_null()),
+                    )
+                    // A committed record always has one.
+                    .check(
+                        Expr::col(SandboxProvision::State)
+                            .ne("committed")
+                            .or(Expr::col(SandboxProvision::Handle).is_not_null()),
+                    )
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(SandboxProvision::Table).to_owned())
+            .await
     }
 }
 
@@ -8700,6 +8790,18 @@ enum OperationLog {
     OwnerEpoch,
     Body,
     Retained,
+    CreatedAt,
+    UpdatedAt,
+}
+
+#[derive(DeriveIden)]
+enum SandboxProvision {
+    Table,
+    RunId,
+    Tag,
+    State,
+    Handle,
+    WindowExpiresAt,
     CreatedAt,
     UpdatedAt,
 }
