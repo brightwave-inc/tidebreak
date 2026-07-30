@@ -90,6 +90,14 @@ export function reduceChatSessionEvent(
 
   switch (event.type) {
     case "turn_started": {
+      // A resumed attempt starts a new renderer candidate for the same turn.
+      // Calls admitted before an approval boundary have already left this set;
+      // any IDs still here were only streamed optimistically and will never
+      // receive completion events from the resumed attempt.
+      const messages = discardToolCalls(
+        state.messages,
+        state.provisionalToolCallIds,
+      );
       effects.push(
         { type: "invalidate_terminal_hydration" },
         {
@@ -109,7 +117,7 @@ export function reduceChatSessionEvent(
           markerScrubber: new AssistantSourceMarkerStreamScrubber(),
           provisionalToolCallIds: new Set(),
           messages: [
-            ...state.messages,
+            ...messages,
             {
               id: deps.nextId(),
               role: "assistant",
