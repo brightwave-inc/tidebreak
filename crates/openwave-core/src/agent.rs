@@ -1976,7 +1976,7 @@ impl Agent {
         if self.tools.is_foreground_client(&call.name) && !self.agent_orchestration_active() {
             return Err("not run: that user continuation is available only from a durably claimed foreground turn. Continue without it.");
         }
-        let Some(arguments) = parse_client_args(&call.args) else {
+        let Some(arguments) = parse_tool_args(&call.args) else {
             return Err("not run: the client tool arguments were not valid JSON. Ask again with one complete JSON value.");
         };
         let request = crate::model::ClientToolCallRequest {
@@ -2009,7 +2009,7 @@ impl Agent {
         call: &PendingCall,
         steer_revision: Option<i64>,
     ) -> std::result::Result<(SandboxAgentSpawnRequest, i64), &'static str> {
-        let Some(arguments) = parse_client_args(&call.args) else {
+        let Some(arguments) = parse_tool_args(&call.args) else {
             return Err("not run: the sandbox task arguments were not valid JSON. Ask again with one complete task value.");
         };
         let Some(task) = self.tools.sandbox_spawn_task(&call.name, &arguments) else {
@@ -2037,7 +2037,7 @@ impl Agent {
         call: &PendingCall,
         steer_revision: Option<i64>,
     ) -> std::result::Result<(ForegroundAgentWaitRequest, i64), &'static str> {
-        let Some(arguments) = parse_client_args(&call.args) else {
+        let Some(arguments) = parse_tool_args(&call.args) else {
             return Err("not run: the wait_for_agents arguments were not valid JSON. Ask again with one complete ordered agent_ids value.");
         };
         let Some(child_run_ids) = self.tools.wait_for_agent_ids(&call.name, &arguments) else {
@@ -2437,6 +2437,23 @@ impl Agent {
                 format!("unknown tool: {}", call.name),
             );
         };
+        // A garbled or truncated stream must be answered as invalid JSON, not
+        // coerced to `{}` and run with no arguments: the tool would report a
+        // missing field and the model would try to fix a request it had in
+        // fact sent correctly. Refuse before the approval gate so the reader
+        // is never asked about a call whose arguments could not be read, and
+        // return the advertised schema so the model can re-emit the call.
+        let Some(arguments) = parse_tool_args(&call.args) else {
+            return ToolOutput::failed(
+                ToolErrorCategory::InvalidArguments,
+                format!(
+                    "arguments for {} were not valid JSON; re-send the call with arguments \
+                     matching this schema: {}",
+                    call.name,
+                    tool.spec().input_schema
+                ),
+            );
+        };
         // Policy, decided in order: a standing grant the reader already made
         // covers its calls in every mode; otherwise the chat's permission mode
         // says which classes park on the gate. ReadOnly never parks; Workspace
@@ -2454,15 +2471,13 @@ impl Agent {
         // human was shown.
         let action = call_action_preview(call);
         let bypass_by_explicit_grant = durable_approval.is_none()
-            && serde_json::from_str::<Value>(&call.args).is_ok_and(|arguments| {
-                self.standing_grants.covers(
-                    chat.id,
-                    chat.project_id,
-                    &call.name,
-                    kind_for_call,
-                    &arguments,
-                )
-            });
+            && self.standing_grants.covers(
+                chat.id,
+                chat.project_id,
+                &call.name,
+                kind_for_call,
+                &arguments,
+            );
         // A recovered call re-enters the gate whatever the mode now says: its
         // durable approval may already hold a rejection the mode must not
         // outrun, and a still-pending card must resolve, not dangle.
@@ -2484,9 +2499,7 @@ impl Agent {
             // must see the real query, never a clamped rendering of it.
             let auto_judge = matches!(mode, PermissionMode::Auto)
                 && durable_approval.is_none()
-                && serde_json::from_str::<Value>(&call.args).is_ok_and(|arguments| {
-                    crate::approval::is_auto_judge_candidate(kind, &call.name, &arguments)
-                });
+                && crate::approval::is_auto_judge_candidate(kind, &call.name, &arguments);
             let auto_judging = durable_approval.map_or(auto_judge, |approval| {
                 matches!(
                     approval.auto_judge_status,
@@ -2642,7 +2655,7 @@ impl Agent {
         // unselected execution future propagates cancellation into async tools
         // such as reqwest instead of leaving egress alive after the turn ends.
         // Recheck after the execution arm wins to close a same-tick race.
-        let executing = tool.execute(&ctx, parse_args(&call.args));
+        let executing = tool.execute(&ctx, arguments);
         let mut output = match future::select(self.cancel.cancelled(), executing).await {
             Either::Left(((), _)) => ToolOutput::failed(
                 ToolErrorCategory::UserCancelled,
@@ -3873,8 +3886,9 @@ fn truncate_to_bytes(content: &str, max_bytes: usize, call_id: Option<CallId>) -
     ))
 }
 
-/// Parse accumulated tool-call args; malformed JSON becomes an empty object so a
-/// tool can report the problem itself rather than aborting the turn.
+/// Parse accumulated tool-call args for the durable record and the transcript,
+/// where a malformed call still has to be written down. Dispatch does not go
+/// through here: it uses [`parse_tool_args`] and refuses what will not parse.
 fn parse_args(raw: &str) -> Value {
     if raw.trim().is_empty() {
         return Value::Object(Default::default());
@@ -3882,9 +3896,10 @@ fn parse_args(raw: &str) -> Value {
     serde_json::from_str(raw).unwrap_or(Value::Object(Default::default()))
 }
 
-/// Client-owned calls cross a trusted execution boundary, so malformed input
-/// must be retried by the model rather than silently changed before dispatch.
-fn parse_client_args(raw: &str) -> Option<Value> {
+/// Parse tool-call args for dispatch. A call crosses into execution, so
+/// malformed input must be retried by the model rather than silently changed
+/// into something the tool will happily run.
+fn parse_tool_args(raw: &str) -> Option<Value> {
     if raw.trim().is_empty() {
         return Some(Value::Object(Default::default()));
     }
@@ -3928,16 +3943,13 @@ mod tests {
     }
 
     #[test]
-    fn client_tool_arguments_are_parsed_without_forgiving_malformed_json() {
+    fn tool_arguments_are_parsed_without_forgiving_malformed_json() {
+        assert_eq!(parse_tool_args(""), Some(Value::Object(Default::default())));
         assert_eq!(
-            parse_client_args(""),
-            Some(Value::Object(Default::default()))
-        );
-        assert_eq!(
-            parse_client_args(r#"{"hint":"Documents"}"#),
+            parse_tool_args(r#"{"hint":"Documents"}"#),
             Some(serde_json::json!({"hint": "Documents"}))
         );
-        assert_eq!(parse_client_args(r#"{"hint":"Documents""#), None);
+        assert_eq!(parse_tool_args(r#"{"hint":"Documents""#), None);
     }
 
     /// A scripted provider: step 0 calls `read_file`, step 1 gives a final answer.
@@ -5724,6 +5736,129 @@ mod tests {
         assert!(!output.is_error);
         assert!(output.content.len() < 10_000, "result should be capped");
         assert!(output.content.contains("[truncated:"));
+    }
+
+    /// A read-only tool that records whether it ran.
+    struct CountingTool {
+        ran: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for CountingTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "counter".into(),
+                description: "a read-only tool".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}}
+                }),
+            }
+        }
+        fn approval_class(&self) -> ApprovalClass {
+            ApprovalClass::ReadOnly
+        }
+        async fn execute(&self, _ctx: &ToolCtx, _args: Value) -> Result<ToolOutput> {
+            self.ran.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolOutput::text("counted"))
+        }
+    }
+
+    /// Streams a truncated argument fragment for `counter`, then finishes.
+    struct TruncatedArgsProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ModelProvider for TruncatedArgsProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("truncated")
+        }
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            let events = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                vec![
+                    ProviderEvent::ToolCallStarted {
+                        index: 0,
+                        id: "call_counter".into(),
+                        name: "counter".into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 0,
+                        fragment: r#"{"path": "note"#.into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::ToolUse,
+                    },
+                ]
+            } else {
+                vec![
+                    ProviderEvent::TextDelta { text: "ok".into() },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ]
+            };
+            Ok(stream::iter(events).boxed())
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_arguments_go_back_to_the_model_instead_of_running_the_tool() {
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            reasoning_effort: None,
+            permission_mode: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let ran = Arc::new(AtomicUsize::new(0));
+
+        let agent = Agent::new(
+            Arc::new(TruncatedArgsProvider {
+                calls: AtomicUsize::new(0),
+            }),
+            Arc::new(ToolRegistry::new().with(Box::new(CountingTool { ran: ran.clone() }))),
+            store,
+            AgentConfig {
+                model: "fake".into(),
+                ..Default::default()
+            },
+        );
+
+        let (tx, rx) = unbounded();
+        agent.run_turn(&chat, "count something", &tx).await.unwrap();
+        drop(tx);
+        let events: Vec<AgentEvent> = rx.collect().await;
+
+        assert_eq!(ran.load(Ordering::SeqCst), 0, "tool must not have run");
+        let output = events
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::ToolCallCompleted { output, .. } => Some(output.clone()),
+                _ => None,
+            })
+            .expect("the call was answered");
+        assert!(output.is_error);
+        assert_eq!(
+            output.error_category,
+            Some(ToolErrorCategory::InvalidArguments)
+        );
+        // The schema rides along so the model can re-emit the call.
+        assert!(output.content.contains("\"path\""), "{}", output.content);
     }
 
     /// A Sensitive tool that records whether it ran.
