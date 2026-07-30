@@ -775,7 +775,7 @@ export type PendingUserQuestions = { call_id: CallId, turn_id: TurnId, questions
  * start, like the model selection: changing it mid-turn applies from the
  * next turn, and a reopened chat runs the way it ran before.
  */
-export type PermissionMode = "ask" | "auto" | "allow";
+export type PermissionMode = "plan" | "ask" | "auto" | "allow";
 
 /**
  * An optional grouping of chats that share project context and a document

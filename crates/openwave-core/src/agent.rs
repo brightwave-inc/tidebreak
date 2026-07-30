@@ -85,10 +85,12 @@ enum RegisteredTool {
     Client {
         spec: ToolSpec,
         validate_arguments: Option<fn(&Value) -> bool>,
+        class: ApprovalClass,
     },
     ForegroundClient {
         spec: ToolSpec,
         validate_arguments: fn(&Value) -> bool,
+        class: ApprovalClass,
     },
     ForegroundOrchestration {
         spec: ToolSpec,
@@ -116,12 +118,17 @@ impl ToolRegistry {
     }
 
     /// Register a client-owned tool contract with no server-side executor.
-    pub fn register_client(&mut self, spec: ToolSpec) {
+    ///
+    /// The declared class is the host's reading of what the tool touches, kept
+    /// on the registration because a client tool has no [`Tool`] impl to ask.
+    /// Plan mode advertises and checkpoints only `ReadOnly` registrations.
+    pub fn register_client(&mut self, spec: ToolSpec, class: ApprovalClass) {
         self.tools.insert(
             spec.name.clone(),
             RegisteredTool::Client {
                 spec,
                 validate_arguments: None,
+                class,
             },
         );
     }
@@ -130,6 +137,7 @@ impl ToolRegistry {
     pub fn register_validated_client(
         &mut self,
         spec: ToolSpec,
+        class: ApprovalClass,
         validate_arguments: fn(&Value) -> bool,
     ) {
         self.tools.insert(
@@ -137,6 +145,7 @@ impl ToolRegistry {
             RegisteredTool::Client {
                 spec,
                 validate_arguments: Some(validate_arguments),
+                class,
             },
         );
     }
@@ -146,6 +155,7 @@ impl ToolRegistry {
     pub fn register_validated_foreground_client(
         &mut self,
         spec: ToolSpec,
+        class: ApprovalClass,
         validate_arguments: fn(&Value) -> bool,
     ) {
         self.tools.insert(
@@ -153,6 +163,7 @@ impl ToolRegistry {
             RegisteredTool::ForegroundClient {
                 spec,
                 validate_arguments,
+                class,
             },
         );
     }
@@ -223,23 +234,66 @@ impl ToolRegistry {
     /// other contexts receive the ordinary server/client tool set only.
     #[must_use]
     pub fn specs_for_foreground(&self, allow_agent_orchestration: bool) -> Vec<ToolSpec> {
+        self.specs_for_surface(allow_agent_orchestration, false)
+    }
+
+    /// The model-visible definitions for one execution surface, optionally
+    /// narrowed to the read-only planning subset.
+    ///
+    /// A plan-mode turn advertises only `ReadOnly` registrations — server
+    /// tools by their declared [`Tool::approval_class`], client tools by the
+    /// class declared at registration — and never the orchestration pair:
+    /// spawned agents execute, and executing is exactly what a plan turn
+    /// must not do.
+    #[must_use]
+    pub fn specs_for_surface(
+        &self,
+        allow_agent_orchestration: bool,
+        read_only: bool,
+    ) -> Vec<ToolSpec> {
         self.tools
             .values()
             .filter_map(|tool| match tool {
+                RegisteredTool::Server(tool)
+                    if read_only && tool.approval_class() != ApprovalClass::ReadOnly =>
+                {
+                    None
+                }
                 RegisteredTool::Server(tool) => Some(tool.spec()),
+                RegisteredTool::Client { class, .. }
+                | RegisteredTool::ForegroundClient { class, .. }
+                    if read_only && *class != ApprovalClass::ReadOnly =>
+                {
+                    None
+                }
                 RegisteredTool::Client { spec, .. } => Some(spec.clone()),
                 RegisteredTool::ForegroundClient { spec, .. } if allow_agent_orchestration => {
                     Some(spec.clone())
                 }
                 RegisteredTool::ForegroundClient { .. } => None,
                 RegisteredTool::ForegroundOrchestration { spec, .. }
-                    if allow_agent_orchestration =>
+                    if allow_agent_orchestration && !read_only =>
                 {
                     Some(spec.clone())
                 }
                 RegisteredTool::ForegroundOrchestration { .. } => None,
             })
             .collect()
+    }
+
+    /// The declared approval class of a registered tool, if it has one.
+    ///
+    /// Orchestration registrations return `None`: they have no class because
+    /// no mode admits them outside the foreground coordinator's opt-in, and
+    /// plan mode treats classless as mutating.
+    #[must_use]
+    pub fn registered_class(&self, name: &str) -> Option<ApprovalClass> {
+        match self.tools.get(name)? {
+            RegisteredTool::Server(tool) => Some(tool.approval_class()),
+            RegisteredTool::Client { class, .. }
+            | RegisteredTool::ForegroundClient { class, .. } => Some(*class),
+            RegisteredTool::ForegroundOrchestration { .. } => None,
+        }
     }
 
     /// Validate canonical arguments against a registered client-owned contract.
@@ -1169,9 +1223,10 @@ impl Agent {
                     reasoning_model: self.config.reasoning_model,
                     system: self.config.system_prompt.clone(),
                     messages: fitted,
-                    tools: self
-                        .tools
-                        .specs_for_foreground(self.agent_orchestration_active()),
+                    tools: self.tools.specs_for_surface(
+                        self.agent_orchestration_active(),
+                        matches!(chat.permission_mode, Some(PermissionMode::Plan)),
+                    ),
                     max_tokens: self.config.max_tokens,
                     temperature: self.config.temperature,
                     reasoning_effort: self.config.reasoning_effort,
@@ -1628,53 +1683,75 @@ impl Agent {
             // the resuming attempt to guess about.
             if let Some(index) = isolated {
                 let call = &calls[index];
-                match isolations[index].expect("an isolated call has a class") {
-                    CallIsolation::Client => {
-                        match self.client_checkpoint(chat, turn_id, call, generation_steer_revision)
-                        {
-                            Ok((request, steer_revision)) => {
-                                return Ok(AgentTurnOutcome::ClientToolCall {
-                                    request,
-                                    usage: total_usage,
-                                    steer_revision,
-                                    model_steps: step + 1,
-                                })
-                            }
-                            Err(reason) => {
-                                outputs[index] =
-                                    Some(self.decline_call(call, events, reason.into()));
+                // Delegated agents execute with their own tool surface, so a
+                // plan turn refuses to spawn or wait on them at all: the
+                // read-only promise has to hold transitively, not just for
+                // this agent's own calls.
+                let plan_mode_blocks_orchestration =
+                    matches!(chat.permission_mode, Some(PermissionMode::Plan))
+                        && matches!(
+                            isolations[index],
+                            Some(CallIsolation::SandboxSpawn | CallIsolation::AgentWait)
+                        );
+                if plan_mode_blocks_orchestration {
+                    outputs[index] = Some(self.decline_call(
+                        call,
+                        events,
+                        "not run: agent delegation is not available in plan mode; the chat is read-only until the reader leaves plan mode. Continue with read-only tools.".into(),
+                    ));
+                } else {
+                    match isolations[index].expect("an isolated call has a class") {
+                        CallIsolation::Client => {
+                            match self.client_checkpoint(
+                                chat,
+                                turn_id,
+                                call,
+                                generation_steer_revision,
+                            ) {
+                                Ok((request, steer_revision)) => {
+                                    return Ok(AgentTurnOutcome::ClientToolCall {
+                                        request,
+                                        usage: total_usage,
+                                        steer_revision,
+                                        model_steps: step + 1,
+                                    })
+                                }
+                                Err(reason) => {
+                                    outputs[index] =
+                                        Some(self.decline_call(call, events, reason.into()));
+                                }
                             }
                         }
-                    }
-                    CallIsolation::SandboxSpawn => {
-                        match self.sandbox_checkpoint(call, generation_steer_revision) {
-                            Ok((request, steer_revision)) => {
-                                return Ok(AgentTurnOutcome::SandboxAgentSpawn {
-                                    request,
-                                    usage: total_usage,
-                                    steer_revision,
-                                    model_steps: step + 1,
-                                })
-                            }
-                            Err(reason) => {
-                                outputs[index] =
-                                    Some(self.decline_call(call, events, reason.into()));
+                        CallIsolation::SandboxSpawn => {
+                            match self.sandbox_checkpoint(call, generation_steer_revision) {
+                                Ok((request, steer_revision)) => {
+                                    return Ok(AgentTurnOutcome::SandboxAgentSpawn {
+                                        request,
+                                        usage: total_usage,
+                                        steer_revision,
+                                        model_steps: step + 1,
+                                    })
+                                }
+                                Err(reason) => {
+                                    outputs[index] =
+                                        Some(self.decline_call(call, events, reason.into()));
+                                }
                             }
                         }
-                    }
-                    CallIsolation::AgentWait => {
-                        match self.agent_wait_checkpoint(call, generation_steer_revision) {
-                            Ok((request, steer_revision)) => {
-                                return Ok(AgentTurnOutcome::WaitForAgents {
-                                    request,
-                                    usage: total_usage,
-                                    steer_revision,
-                                    model_steps: step + 1,
-                                })
-                            }
-                            Err(reason) => {
-                                outputs[index] =
-                                    Some(self.decline_call(call, events, reason.into()));
+                        CallIsolation::AgentWait => {
+                            match self.agent_wait_checkpoint(call, generation_steer_revision) {
+                                Ok((request, steer_revision)) => {
+                                    return Ok(AgentTurnOutcome::WaitForAgents {
+                                        request,
+                                        usage: total_usage,
+                                        steer_revision,
+                                        model_steps: step + 1,
+                                    })
+                                }
+                                Err(reason) => {
+                                    outputs[index] =
+                                        Some(self.decline_call(call, events, reason.into()));
+                                }
                             }
                         }
                     }
@@ -1975,6 +2052,17 @@ impl Agent {
     ) -> std::result::Result<(crate::model::ClientToolCallRequest, i64), &'static str> {
         if self.tools.is_foreground_client(&call.name) && !self.agent_orchestration_active() {
             return Err("not run: that user continuation is available only from a durably claimed foreground turn. Continue without it.");
+        }
+        // Plan turns advertise only read-only client tools, and a call that
+        // slipped past advertisement is refused here for the same reason
+        // server-side mutations are: client execution is ungated by design,
+        // so the only write gate a plan turn has is never issuing the request.
+        if matches!(chat.permission_mode, Some(PermissionMode::Plan))
+            && self.tools.registered_class(&call.name) != Some(ApprovalClass::ReadOnly)
+        {
+            return Err(
+                "not run: this tool is not available in plan mode; the chat is read-only until the reader leaves plan mode. Continue with read-only tools.",
+            );
         }
         let Some(arguments) = parse_tool_args(&call.args) else {
             return Err("not run: the client tool arguments were not valid JSON. Ask again with one complete JSON value.");
@@ -2464,6 +2552,24 @@ impl Agent {
         let approval_class = durable_approval
             .map(|approval| approval.class)
             .unwrap_or_else(|| tool.approval_class());
+        // Plan mode is read-only by construction: a mutating call is refused
+        // outright, never parked, so nothing the reader could approve — and
+        // no standing grant made in another mode — lets a plan turn write.
+        // A recovered call keeps its durable-approval path so a card that
+        // was already pending resolves instead of dangling.
+        if durable_approval.is_none()
+            && matches!(chat.permission_mode, Some(PermissionMode::Plan))
+            && approval_class != ApprovalClass::ReadOnly
+        {
+            return ToolOutput::failed(
+                ToolErrorCategory::NotFound,
+                format!(
+                    "{} is not available in plan mode; this chat is read-only until \
+                     the reader leaves plan mode. Continue with read-only tools.",
+                    call.name
+                ),
+            );
+        }
         let kind_for_call = ToolApprovalKind::for_call(&call.name, approval_class);
         // The action a standing grant is matched against, and the one the card
         // shows if this call ends up parking. Built once so a grant can never
@@ -4180,7 +4286,7 @@ mod tests {
             input_schema: serde_json::json!({"type": "object"}),
         };
         let mut registry = ToolRegistry::new();
-        registry.register_client(client_spec.clone());
+        registry.register_client(client_spec.clone(), ApprovalClass::ReadOnly);
         assert_eq!(
             registry.execution("connect_folder"),
             Some(ToolCallExecution::Client)
@@ -4236,6 +4342,7 @@ mod tests {
         let mut validated_registry = ToolRegistry::new();
         validated_registry.register_validated_client(
             crate::request_folder_access_tool_spec(),
+            ApprovalClass::ReadOnly,
             crate::validate_request_folder_access_arguments,
         );
         let invalid_agent = Agent::new(
@@ -4275,6 +4382,7 @@ mod tests {
         let mut registry = ToolRegistry::new();
         registry.register_validated_foreground_client(
             crate::ask_user_questions_tool_spec(),
+            ApprovalClass::ReadOnly,
             crate::validate_ask_user_questions_arguments,
         );
 
@@ -4648,11 +4756,14 @@ mod tests {
             .await
             .unwrap();
         let mut registry = ToolRegistry::new();
-        registry.register_client(ToolSpec {
-            name: "connect_folder".into(),
-            description: "Ask the desktop to connect a folder".into(),
-            input_schema: serde_json::json!({"type": "object"}),
-        });
+        registry.register_client(
+            ToolSpec {
+                name: "connect_folder".into(),
+                description: "Ask the desktop to connect a folder".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            ApprovalClass::ReadOnly,
+        );
         registry.register(Box::new(ReadFile));
         let agent = Agent::new(
             Arc::new(ClientToolProvider {
@@ -4756,11 +4867,14 @@ mod tests {
             .await
             .unwrap();
         let mut registry = ToolRegistry::new();
-        registry.register_client(ToolSpec {
-            name: "connect_folder".into(),
-            description: "Ask the desktop to connect a folder".into(),
-            input_schema: serde_json::json!({"type": "object"}),
-        });
+        registry.register_client(
+            ToolSpec {
+                name: "connect_folder".into(),
+                description: "Ask the desktop to connect a folder".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            ApprovalClass::ReadOnly,
+        );
         let agent = Agent::new(
             Arc::new(ClientToolProvider {
                 assistant_text: false,
@@ -4948,11 +5062,14 @@ mod tests {
             .await
             .unwrap();
         let mut registry = ToolRegistry::new();
-        registry.register_client(ToolSpec {
-            name: "connect_folder".into(),
-            description: "Ask the desktop to connect a folder".into(),
-            input_schema: serde_json::json!({"type": "object"}),
-        });
+        registry.register_client(
+            ToolSpec {
+                name: "connect_folder".into(),
+                description: "Ask the desktop to connect a folder".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            ApprovalClass::ReadOnly,
+        );
         let agent = Agent::new(
             Arc::new(ClientToolProvider {
                 assistant_text: true,
@@ -6758,6 +6875,114 @@ mod tests {
             "Allow must not park a sensitive call"
         );
         assert_eq!(ran.load(Ordering::SeqCst), 1);
+    }
+
+    /// Plan mode refuses a mutating call outright: no approval card the
+    /// reader could accept, no tool run. Losing either half turns "plan mode
+    /// is read-only" into a prompt-level suggestion.
+    #[tokio::test]
+    async fn plan_mode_refuses_workspace_writes_without_parking() {
+        let store = search_grant_store().await;
+        let chat = permission_mode_chat(&store, Some(crate::model::PermissionMode::Plan)).await;
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let agent = workspace_write_agent(store, ran.clone());
+
+        let (tx, rx) = unbounded();
+        agent.run_turn(&chat, "go", &tx).await.unwrap();
+        drop(tx);
+        let events: Vec<AgentEvent> = rx.collect().await;
+
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ApprovalRequired { .. })),
+            "plan mode must refuse, not park: there is nothing to approve"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::ToolCallCompleted { output, .. }
+                    if output.is_error && output.content.contains("plan mode")
+            )),
+            "the model must be told the call was refused because of plan mode"
+        );
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
+    }
+
+    /// A standing grant made in another mode must not let a plan turn run a
+    /// mutating call: the refusal comes before grant matching on purpose.
+    #[tokio::test]
+    async fn plan_mode_standing_grant_does_not_bypass_the_refusal() {
+        use crate::approval::{GrantLevel, StandingGrant, StandingGrants};
+
+        let store = search_grant_store().await;
+        let chat = permission_mode_chat(&store, Some(crate::model::PermissionMode::Plan)).await;
+        let grants = Arc::new(StandingGrants::from_grants(vec![StandingGrant::new(
+            GrantLevel::Chat { chat_id: chat.id },
+            "search",
+            ToolApprovalKind::for_tool_name("search"),
+            Utc::now(),
+        )
+        .expect("search is grantable")]));
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let agent = search_agent(store, ran.clone(), grants);
+
+        let (tx, rx) = unbounded();
+        agent.run_turn(&chat, "go", &tx).await.unwrap();
+        drop(tx);
+        let events: Vec<AgentEvent> = rx.collect().await;
+
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "a covered sensitive call must still be refused in plan mode"
+        );
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ApprovalRequired { .. })));
+    }
+
+    /// The plan surface advertises only read-only registrations, so the model
+    /// is never offered a tool the turn would refuse.
+    #[test]
+    fn plan_surface_advertises_only_read_only_tools() {
+        let mut tools = ToolRegistry::new()
+            .with(Box::new(ReadFile))
+            .with(Box::new(WorkspaceWriteTool {
+                ran: Arc::new(AtomicUsize::new(0)),
+            }))
+            .with(Box::new(SearchTool {
+                ran: Arc::new(AtomicUsize::new(0)),
+            }));
+        tools.register_validated_client(
+            crate::read_connected_file_tool_spec(),
+            ApprovalClass::ReadOnly,
+            crate::validate_read_connected_file_arguments,
+        );
+        tools.register_validated_client(
+            crate::write_output_to_connected_folder_tool_spec(),
+            ApprovalClass::Workspace,
+            crate::validate_write_output_to_connected_folder_arguments,
+        );
+        tools.register_validated_foreground_client(
+            crate::ask_user_questions_tool_spec(),
+            ApprovalClass::ReadOnly,
+            crate::validate_ask_user_questions_arguments,
+        );
+        tools.register_foreground_agent_orchestration();
+
+        let mut names = tools
+            .specs_for_surface(true, true)
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["ask_user_questions", "read_connected_file", "read_file"]
+        );
     }
 
     /// A Sensitive tool that escapes the chat workspace (`exec`) and records

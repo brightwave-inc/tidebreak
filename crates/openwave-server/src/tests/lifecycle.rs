@@ -2074,11 +2074,14 @@ async fn worker_checkpoints_a_client_tool_and_resumes_after_its_result() {
     let store: Arc<dyn Store> = injected;
     let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut tools = ToolRegistry::new();
-    tools.register_client(ToolSpec {
-        name: "connect_folder".into(),
-        description: "Ask the desktop to connect a folder".into(),
-        input_schema: serde_json::json!({"type": "object"}),
-    });
+    tools.register_client(
+        ToolSpec {
+            name: "connect_folder".into(),
+            description: "Ask the desktop to connect a folder".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        },
+        openwave_core::ApprovalClass::ReadOnly,
+    );
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -2176,11 +2179,14 @@ async fn worker_checkpoints_a_client_tool_and_resumes_after_its_result() {
         .unwrap(),
     );
     let mut exhausted_tools = ToolRegistry::new();
-    exhausted_tools.register_client(ToolSpec {
-        name: "connect_folder".into(),
-        description: "Ask the desktop to connect a folder".into(),
-        input_schema: serde_json::json!({"type": "object"}),
-    });
+    exhausted_tools.register_client(
+        ToolSpec {
+            name: "connect_folder".into(),
+            description: "Ask the desktop to connect a folder".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        },
+        openwave_core::ApprovalClass::ReadOnly,
+    );
     let exhausted_state = AppState::new(
         Config::desktop(exhausted_dir.path()),
         exhausted_store.clone(),

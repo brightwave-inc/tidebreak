@@ -842,6 +842,11 @@ impl ReasoningEffort {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionMode {
+    /// The agent explores read-only and designs a plan instead of acting.
+    /// Mutating calls are refused outright — not parked on the approval
+    /// card — so a plan turn cannot change anything no matter what the
+    /// reader approves.
+    Plan,
     /// Every uncovered mutating call parks on the approval card. The default,
     /// and the only mode where `Workspace`-class tools ask.
     Ask,
@@ -856,12 +861,13 @@ pub enum PermissionMode {
 
 impl PermissionMode {
     /// Every mode, in ascending order of autonomy.
-    pub const ALL: &'static [Self] = &[Self::Ask, Self::Auto, Self::Allow];
+    pub const ALL: &'static [Self] = &[Self::Plan, Self::Ask, Self::Auto, Self::Allow];
 
     /// The wire/storage token for this mode.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Plan => "plan",
             Self::Ask => "ask",
             Self::Auto => "auto",
             Self::Allow => "allow",

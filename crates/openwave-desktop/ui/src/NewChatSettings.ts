@@ -19,7 +19,12 @@ const REASONING_EFFORTS: readonly ReasoningEffort[] = [
   "max",
 ];
 
-const PERMISSION_MODES: readonly PermissionMode[] = ["ask", "auto", "allow"];
+const PERMISSION_MODES: readonly PermissionMode[] = [
+  "plan",
+  "ask",
+  "auto",
+  "allow",
+];
 
 
 function read(key: string): string | null {

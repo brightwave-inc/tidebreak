@@ -1470,16 +1470,19 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() 
         config.system_prompt.is_none(),
         "prompt must not be frozen before boot-time tools are mounted"
     );
-    tools.register_client(ToolSpec {
-        name: "mcp__test__lookup".into(),
-        description: "untrusted remote metadata must not enter the operating prompt".into(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "private_runtime_value": {"default": "must-not-be-copied"}
-            }
-        }),
-    });
+    tools.register_client(
+        ToolSpec {
+            name: "mcp__test__lookup".into(),
+            description: "untrusted remote metadata must not enter the operating prompt".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "private_runtime_value": {"default": "must-not-be-copied"}
+                }
+            }),
+        },
+        openwave_core::ApprovalClass::Sensitive,
+    );
     let surface = crate::turn_worker::freeze_foreground_turn_surface(Arc::new(tools), &config);
     let system_prompt = surface
         .agent_config

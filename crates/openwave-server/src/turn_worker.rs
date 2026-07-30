@@ -123,18 +123,20 @@ pub(crate) fn freeze_foreground_turn_surface(
     tools: Arc<ToolRegistry>,
     base_agent_config: &AgentConfig,
 ) -> ForegroundTurnSurface {
-    freeze_foreground_turn_surface_with_folders(tools, base_agent_config, &[])
+    freeze_foreground_turn_surface_with_folders(tools, base_agent_config, &[], false)
 }
 
 fn freeze_foreground_turn_surface_with_folders(
     tools: Arc<ToolRegistry>,
     base_agent_config: &AgentConfig,
     exec_folders: &[crate::code_execution::ResolvedExecFolderGrant],
+    plan_mode: bool,
 ) -> ForegroundTurnSurface {
     let mut agent_config = base_agent_config.clone();
-    agent_config.system_prompt = Some(crate::foreground_prompt::compose_with_exec_folders(
-        &tools.specs_for_foreground(true),
+    agent_config.system_prompt = Some(crate::foreground_prompt::compose_for_surface(
+        &tools.specs_for_surface(true, plan_mode),
         exec_folders,
+        plan_mode,
     ));
     ForegroundTurnSurface {
         tools,
@@ -516,8 +518,15 @@ impl TurnWorker {
             },
             None => Vec::new(),
         };
-        let surface =
-            freeze_foreground_turn_surface_with_folders(tools, &self.agent_config, &exec_folders);
+        let surface = freeze_foreground_turn_surface_with_folders(
+            tools,
+            &self.agent_config,
+            &exec_folders,
+            matches!(
+                chat.permission_mode,
+                Some(openwave_core::PermissionMode::Plan)
+            ),
+        );
         if let Some(prompt) = surface.agent_config.system_prompt.as_deref() {
             eprintln!(
                 "openwave: turn {} operating_prompt={}",
@@ -2340,6 +2349,7 @@ mod committed_event_drain_tests {
         let mut original_registry = ToolRegistry::new();
         original_registry.register_validated_foreground_client(
             openwave_core::ask_user_questions_tool_spec(),
+            openwave_core::ApprovalClass::ReadOnly,
             openwave_core::validate_ask_user_questions_arguments,
         );
         let original_tools = Arc::new(original_registry);
@@ -2347,16 +2357,19 @@ mod committed_event_drain_tests {
             freeze_foreground_turn_surface(original_tools.clone(), &AgentConfig::default());
 
         let mut refreshed_registry = (*original_tools).clone();
-        refreshed_registry.register_client(openwave_core::ToolSpec {
-            name: "mcp__documents__lookup".into(),
-            description: "untrusted remote description marker".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "credential_marker": {"default": "untrusted remote schema marker"}
-                }
-            }),
-        });
+        refreshed_registry.register_client(
+            openwave_core::ToolSpec {
+                name: "mcp__documents__lookup".into(),
+                description: "untrusted remote description marker".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "credential_marker": {"default": "untrusted remote schema marker"}
+                    }
+                }),
+            },
+            openwave_core::ApprovalClass::Sensitive,
+        );
         let refreshed =
             freeze_foreground_turn_surface(Arc::new(refreshed_registry), &AgentConfig::default());
 
@@ -2566,6 +2579,7 @@ mod committed_event_drain_tests {
         let mut tools = ToolRegistry::new();
         tools.register_validated_client(
             openwave_core::request_folder_access_tool_spec(),
+            openwave_core::ApprovalClass::ReadOnly,
             openwave_core::validate_request_folder_access_arguments,
         );
         let chat_id = openwave_core::ChatId::new();

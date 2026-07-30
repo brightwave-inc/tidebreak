@@ -1,4 +1,11 @@
-import { Check, ChevronDown, ShieldCheck, Sparkles, Zap } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  NotebookPen,
+  ShieldCheck,
+  Sparkles,
+  Zap,
+} from "lucide-react";
 import type { PermissionMode } from "./api";
 import { Button } from "@/components/ui/button";
 import {
@@ -16,6 +23,15 @@ import { cn } from "@/lib/utils";
  * saved allowlists run without asking in every mode, and the mode governs
  * only the calls no grant covers.
  */
+const ASK_PERMISSION_MODE_OPTION = {
+  value: "ask",
+  label: "Ask",
+  description:
+    "Ask before edits and actions that leave the workspace. Allowlists you've saved still run without asking.",
+  icon: ShieldCheck,
+  elevated: false,
+} as const;
+
 const PERMISSION_MODE_SCALE: {
   value: PermissionMode;
   label: string;
@@ -25,13 +41,14 @@ const PERMISSION_MODE_SCALE: {
   elevated: boolean;
 }[] = [
   {
-    value: "ask",
-    label: "Ask",
+    value: "plan",
+    label: "Plan",
     description:
-      "Ask before edits and actions that leave the workspace. Allowlists you've saved still run without asking.",
-    icon: ShieldCheck,
+      "Read-only: the agent explores and proposes a plan. Nothing is edited or run until you switch modes.",
+    icon: NotebookPen,
     elevated: false,
   },
+  ASK_PERMISSION_MODE_OPTION,
   {
     value: "auto",
     label: "Auto",
@@ -56,7 +73,7 @@ export function permissionModeOption(mode: PermissionMode | null) {
   const value = mode ?? DEFAULT_PERMISSION_MODE;
   return (
     PERMISSION_MODE_SCALE.find((option) => option.value === value) ??
-    PERMISSION_MODE_SCALE[0]
+    ASK_PERMISSION_MODE_OPTION
   );
 }
 
