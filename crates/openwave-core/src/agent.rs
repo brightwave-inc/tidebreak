@@ -2767,10 +2767,11 @@ impl Agent {
                 tool_name: call.name.clone(),
                 class: approval_class,
                 kind,
-                grant_scopes: kind
-                    .is_standing_grantable()
-                    .then(|| GrantScope::ladder_for(&call.name, &arguments))
-                    .unwrap_or_default(),
+                grant_scopes: if kind.is_standing_grantable() {
+                    GrantScope::ladder_for(&call.name, &arguments)
+                } else {
+                    Vec::new()
+                },
                 preview,
                 summary,
             };

@@ -216,11 +216,11 @@ pub(in crate::db) async fn request_and_append_event(
         tool_name: request.tool_name.clone(),
         class: request.class,
         kind: request.kind,
-        grant_scopes: request
-            .kind
-            .is_standing_grantable()
-            .then(|| GrantScope::ladder_for(&call.name, &call.arguments))
-            .unwrap_or_default(),
+        grant_scopes: if request.kind.is_standing_grantable() {
+            GrantScope::ladder_for(&call.name, &call.arguments)
+        } else {
+            Vec::new()
+        },
         preview: request.preview.clone(),
         summary: request.summary.clone(),
     };
