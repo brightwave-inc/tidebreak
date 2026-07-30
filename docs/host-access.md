@@ -434,6 +434,12 @@ the time of use. A lexical `starts_with` check is not a security boundary.
 Cached directory handles never become grants by themselves; every operation
 rechecks live authorization so revocation takes effect immediately.
 
+Native local `exec` is the path-based exception: macOS compiles current root
+grants into a fresh sandbox profile for each command. Revocation applies to the
+next invocation; a command already running keeps its immutable profile until it
+exits. Managed execution providers and non-macOS local targets do not receive
+host-folder paths.
+
 Read access is privacy-sensitive even though it does not mutate the filesystem:
 file bytes may become model input and leave the machine when a hosted provider is
 selected. Permission UI should make that consequence understandable.

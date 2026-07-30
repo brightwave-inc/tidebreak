@@ -145,7 +145,9 @@ A request contains:
 - a stable execution ID derived from the canonical tool call;
 - an opaque workspace ID derived from the chat;
 - one executable and argument vector (not an implicitly parsed shell string);
-- one private-workspace-relative current directory.
+- one private-workspace-relative current directory;
+- for native local execution only, a bounded set of absolute folder paths
+  resolved by the host from the chat's current root attachments.
 
 The execution ID is a provider idempotency key. Reusing it with different
 arguments is an identity conflict. The workspace ID lets local execution map a
@@ -154,8 +156,28 @@ a reusable remote sandbox.
 
 Every provider returns the same bounded shape: provider kind, optional exit
 code, stdout, stderr, timeout and truncation flags, and duration. Provider-native
-responses, credentials, absolute host paths, and unbounded logs do not cross
-the contract.
+responses, credentials, and unbounded logs do not cross the contract. Absolute
+folder paths are a host-only input to the local adapter: they are never tool
+arguments and are stripped from managed-provider requests.
+
+## Connected folders in local exec
+
+On macOS, the configured server intersects the chat's product attachment IDs
+with the host broker's live read and write grants immediately before each
+`exec` invocation. The local adapter rejects missing roots and roots presented
+as symlinks, canonicalizes every path, and adds one narrow Seatbelt `subpath`
+read allowance per readable root. A write allowance is added only when the
+live grant is write-scoped. The profile's existing network denial and broad
+user-data read denials remain in place.
+
+Folder paths and access modes are listed in the foreground operating context so
+the model can address them without inventing paths. That list is bounded and is
+guidance rather than authority: the broker and profile are resolved again for
+every invocation. Revocation therefore applies to the next command. A process
+already running under a compiled profile keeps that access until it exits.
+
+Local host-folder grants are currently macOS-only. Other local targets retain
+their existing behavior, and E2B or Daytona cannot access host folders.
 
 ## Document helpers
 

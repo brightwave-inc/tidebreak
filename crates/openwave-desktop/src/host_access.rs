@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use openwave_core::{ChatId, Store};
 use openwave_host_broker::{
     Capability, ControlRequest, ControlResult, ExecutionContext, GrantSubject, OperationEnvelope,
-    OperationRequest, OperationResult, RootId, RootSummary,
+    OperationRequest, OperationResult, ResolveExecRootsRequest, RootId, RootSummary,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
@@ -95,6 +95,69 @@ impl HostAccess {
 
     pub(crate) async fn shutdown(&self) {
         self.broker.shutdown().await;
+    }
+}
+
+/// Native bridge for server-owned exec requests.
+///
+/// The query is derived from the chat's product attachment projection by the
+/// server. This implementation only intersects those opaque IDs with the
+/// broker's current grants; model arguments never supply a path or widen the
+/// returned set.
+pub(crate) struct DesktopExecFolderGrantResolver {
+    app: AppHandle,
+}
+
+impl DesktopExecFolderGrantResolver {
+    pub(crate) fn new(app: AppHandle) -> Self {
+        Self { app }
+    }
+}
+
+#[async_trait::async_trait]
+impl openwave_server::code_execution::ExecFolderGrantResolver for DesktopExecFolderGrantResolver {
+    async fn resolve(
+        &self,
+        query: openwave_server::code_execution::ExecFolderGrantQuery,
+    ) -> Result<Vec<openwave_server::code_execution::ResolvedExecFolderGrant>, String> {
+        let context = match query.project_id {
+            Some(project_id) => ExecutionContext::project_chat(query.chat_id.0, project_id.0),
+            None => ExecutionContext::standalone(query.chat_id.0),
+        }
+        .map_err(|_| "invalid conversation context".to_owned())?;
+        let root_ids = query
+            .root_ids
+            .into_iter()
+            .map(|root_id| {
+                RootId::from_uuid(*root_id.as_uuid())
+                    .map_err(|_| "invalid connected folder identity".to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let result = self
+            .app
+            .state::<HostAccess>()
+            .broker
+            .control(ControlRequest::ResolveExecRoots(ResolveExecRootsRequest {
+                context,
+                root_ids,
+            }))
+            .await
+            .map_err(|error| error.to_string())?;
+        let ControlResult::ResolveExecRoots { roots } = result else {
+            return Err("host broker returned an invalid folder resolution".to_owned());
+        };
+        roots
+            .into_iter()
+            .map(|root| {
+                let root_id = openwave_core::HostRootId::from_uuid(root.root_id.as_uuid())
+                    .map_err(|_| "host broker returned an invalid folder identity".to_owned())?;
+                Ok(openwave_server::code_execution::ResolvedExecFolderGrant {
+                    root_id,
+                    path: root.path,
+                    writable: root.writable,
+                })
+            })
+            .collect()
     }
 }
 
