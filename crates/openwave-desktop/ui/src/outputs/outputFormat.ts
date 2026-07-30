@@ -1,7 +1,7 @@
-import type { DeliverableMediaType, DeliverableSummary } from "@/deliverables";
+import type { DeliverableSummary } from "@/deliverables";
 
 /** The reader-facing name for an output's format, and the Type facet's values. */
-export function outputTypeLabel(mediaType: DeliverableMediaType): string {
+export function outputTypeLabel(mediaType: string): string {
   switch (mediaType) {
     case "text/markdown":
       return "Markdown";
@@ -13,6 +13,26 @@ export function outputTypeLabel(mediaType: DeliverableMediaType): string {
       return "HTML";
     case "text/plain":
       return "Plain text";
+    case "image/png":
+      return "PNG image";
+    case "image/jpeg":
+      return "JPEG image";
+    case "image/webp":
+      return "WebP image";
+    case "image/gif":
+      return "GIF image";
+    case "application/pdf":
+      return "PDF";
+    case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+      return "Excel spreadsheet";
+    case "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+      return "Word document";
+    case "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+      return "PowerPoint presentation";
+    case "application/zip":
+      return "ZIP archive";
+    default:
+      return "File";
   }
 }
 

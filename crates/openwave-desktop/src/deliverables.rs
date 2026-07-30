@@ -156,6 +156,17 @@ pub(crate) async fn read_deliverable(
     let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
     let (output, revision) =
         require_live_output(host_access.store(), chat_id, request.output_id).await?;
+    // Binary artifacts have no inline preview; the renderer keys its placeholder
+    // off the media type, so the response carries identity without content.
+    if !media_type_is_text(&output.media_type) {
+        return Ok(DeliverablePreview {
+            output_id: output.id,
+            filename: output.filename.clone(),
+            media_type: output.media_type.clone(),
+            content: String::new(),
+            truncated: false,
+        });
+    }
     let scratch_root = crate::data_dir(&app)?.join("scratch");
     let read_output = output.clone();
     let bytes = tauri::async_runtime::spawn_blocking(move || {
