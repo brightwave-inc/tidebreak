@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { ChevronDown } from "lucide-react";
 import type { ToolActionPreview, ToolResultPreview } from "./api";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { toolCallPresentation, type ToolCallStatus } from "./ToolCallCard";
 import { ToolEntriesList } from "./ToolEntriesList";
 import { ToolIcon } from "./ToolIcon";
@@ -54,35 +55,71 @@ export function ToolActivityGroup({
   groupIndex,
   children,
 }: ToolActivityGroupProps) {
+  const safeActivities = normalizeActivities(activities);
+
+  // The rail reads model-shaped data through several defensive parsers; the
+  // cards below it are the part a reader may have to act on. Containing the
+  // rail on its own means a phase line that cannot render costs the line and
+  // not the approval prompt sitting under it.
+  const rail =
+    safeActivities.length === 0 ? null : (
+      <ErrorBoundary
+        resetKey={railSignature(safeActivities)}
+        fallback={<ToolActivityUnavailable />}
+      >
+        <ToolActivityRail
+          activities={safeActivities}
+          groupIndex={groupIndex}
+        />
+      </ErrorBoundary>
+    );
+
+  // A phase can be all cards and no rail — every call in it parked on an
+  // approval, say. The cards are the part that must never go missing, so they
+  // render on their own rather than taking the trigger down with them.
+  if (rail === null && children === undefined) {
+    return (
+      <p className="text-muted-foreground self-start text-sm" role="status">
+        Tool activity unavailable
+      </p>
+    );
+  }
+
+  return (
+    <div className="w-full self-start">
+      {rail}
+      <div
+        className={cn(
+          "flex flex-col gap-2 empty:hidden",
+          rail !== null && "mt-2",
+        )}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The collapsed phase line and, once opened, the rail of rows beneath it.
+ */
+function ToolActivityRail({
+  activities: safeActivities,
+  groupIndex,
+}: {
+  activities: ToolActivity[];
+  groupIndex: number;
+}) {
   const [expanded, setExpanded] = useState(false);
   const contentId = `tool-activity-group-${groupIndex}`;
-  const safeActivities = normalizeActivities(activities);
   const summary = toolActivityGroupPresentation(safeActivities);
   // The phase line types itself out once when the phase first goes live, then
   // updates instantly as calls settle and nudge the wording — re-typing on
   // every change reads as a stutter, and a settled phase should never animate.
   const displayedSummary = useTypewriterOnce(summary.label, summary.inProgress);
 
-  // A phase can be all cards and no rail — every call in it parked on an
-  // approval, say. The cards are the part that must never go missing, so they
-  // render on their own rather than taking the trigger down with them.
-  if (safeActivities.length === 0) {
-    if (children === undefined) {
-      return (
-        <p className="text-muted-foreground self-start text-sm" role="status">
-          Tool activity unavailable
-        </p>
-      );
-    }
-    return (
-      <div className="flex w-full flex-col gap-2 self-start empty:hidden">
-        {children}
-      </div>
-    );
-  }
-
   return (
-    <div className="w-full self-start">
+    <>
       <Button
         type="button"
         variant="link"
@@ -116,17 +153,60 @@ export function ToolActivityGroup({
           className="relative ml-1.5 flex flex-col gap-4 border-l-2 py-1 pl-4 text-sm"
           role="list"
         >
+          {/* One boundary per row, not one per phase: a result this build
+              cannot render should cost its own line and leave the rest of the
+              rail — and the cards under it — standing. */}
           {safeActivities.map((activity, index) => (
-            <ToolActivityRow
+            <ErrorBoundary
               key={activity.id ?? `position:${index}`}
-              activity={activity}
-            />
+              resetKey={rowSignature(activity)}
+              fallback={<ToolActivityUnavailable role="listitem" />}
+            >
+              <ToolActivityRow activity={activity} />
+            </ErrorBoundary>
           ))}
         </div>
       )}
-      <div className="mt-2 flex flex-col gap-2 empty:hidden">{children}</div>
-    </div>
+    </>
   );
+}
+
+/**
+ * What stands in for a row, a rail, or a card that threw while rendering.
+ *
+ * Deliberately quiet and deliberately not blank: a gap reads as a step that
+ * never happened, which is a different and untrue claim.
+ */
+export function ToolActivityUnavailable({
+  role = "status",
+}: {
+  role?: string;
+}) {
+  return (
+    <p className="tool-activity-unavailable" role={role}>
+      This step could not be displayed.
+    </p>
+  );
+}
+
+/**
+ * The data a row draws on, reduced to what decides whether it can render.
+ *
+ * A row that threw is retried when its call moves on or its result arrives,
+ * and left alone while the transcript re-renders around it.
+ */
+function rowSignature(activity: ToolActivity): string {
+  return [
+    activity.name,
+    activity.status,
+    activity.resultUnreadable === true ? "unreadable" : "",
+    activity.preview?.tool ?? "",
+    activity.result?.tool ?? "",
+  ].join(" ");
+}
+
+function railSignature(activities: readonly ToolActivity[]): string {
+  return activities.map(rowSignature).join("|");
 }
 
 function ToolActivityRow({ activity }: { activity: ToolActivity }) {

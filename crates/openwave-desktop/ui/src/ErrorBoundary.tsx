@@ -15,6 +15,18 @@ type ErrorBoundaryProps = {
    * prompt.
    */
   fallback?: ReactNode;
+  /**
+   * Data signature of the children. A change clears a caught error and lets
+   * them render again.
+   *
+   * A boundary latches: whatever threw stays replaced by the fallback for the
+   * life of the mount, even though a streaming transcript re-renders around it
+   * many times a second. Callers pass a signal derived from the data being
+   * rendered, so a row that threw on a half-written result recovers once the
+   * result changes, while a row that is simply malformed stays quiet instead of
+   * throwing on every frame.
+   */
+  resetKey?: string | number;
 };
 
 type ErrorBoundaryState = {
@@ -38,6 +50,12 @@ export class ErrorBoundary extends Component<
 
   componentDidCatch(error: Error, info: { componentStack?: string | null }) {
     console.error("unhandled render error", error, info.componentStack);
+  }
+
+  componentDidUpdate(previous: ErrorBoundaryProps) {
+    if (this.state.error === null) return;
+    if (previous.resetKey === this.props.resetKey) return;
+    this.setState({ error: null });
   }
 
   render() {
