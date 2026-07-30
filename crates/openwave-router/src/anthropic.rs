@@ -38,10 +38,6 @@ const STRUCTURED_OUTPUT_TOOL_DESCRIPTION: &str =
     "Return the result of this request. Call this once, with the whole answer in \
      its arguments, and write nothing else.";
 
-fn provider_err(err: impl std::fmt::Display) -> AgentError {
-    AgentError::Provider(err.to_string())
-}
-
 /// A [`ModelProvider`] for Anthropic's Messages API.
 #[derive(Clone)]
 pub struct AnthropicProvider {
@@ -115,7 +111,10 @@ impl ModelProvider for AnthropicProvider {
             .json(&body)
             .send()
             .await
-            .map_err(provider_err)?;
+            // reqwest's display includes the URL, and a gateway URL can carry
+            // tenant-identifying parts; `AgentError` strings reach the client
+            // via TurnFailed. Only the fact of a failed request surfaces.
+            .map_err(|_| AgentError::Provider("anthropic request failed".into()))?;
 
         // Surface non-2xx without the raw body — it can echo key material, and
         // `AgentError` strings reach the client via TurnFailed. Status (+ a
@@ -148,9 +147,9 @@ impl ModelProvider for AnthropicProvider {
                     Ok(chunk) => chunk,
                     Err(error) => {
                         yield ProviderEvent::Failed {
-                            error: ProviderErrorInfo::provider(format!(
-                                "anthropic stream ended early: {error}"
-                            )),
+                            error: ProviderErrorInfo::provider(
+                                error.client_message("anthropic"),
+                            ),
                         };
                         return;
                     }

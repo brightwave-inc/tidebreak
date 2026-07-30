@@ -215,14 +215,7 @@ impl ModelProvider for GeminiProvider {
                     // carries no such thing and is worth surfacing.
                     Err(error) => {
                         yield ProviderEvent::Failed {
-                            error: ProviderErrorInfo::provider(match error {
-                                crate::http::StreamFailure::Deadline(_) => {
-                                    format!("gemini stream ended early: {error}")
-                                }
-                                crate::http::StreamFailure::Transport(_) => {
-                                    "gemini stream ended early".to_string()
-                                }
-                            }),
+                            error: ProviderErrorInfo::provider(error.client_message("gemini")),
                         };
                         return;
                     }

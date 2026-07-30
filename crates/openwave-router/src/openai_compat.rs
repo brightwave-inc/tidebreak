@@ -30,10 +30,6 @@ use crate::sse::{
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 
-fn provider_err(err: impl std::fmt::Display) -> AgentError {
-    AgentError::Provider(err.to_string())
-}
-
 /// A [`ModelProvider`] for any OpenAI-compatible Chat Completions endpoint.
 #[derive(Clone)]
 pub struct OpenAiCompatProvider {
@@ -105,7 +101,10 @@ impl ModelProvider for OpenAiCompatProvider {
             .json(&body)
             .send()
             .await
-            .map_err(provider_err)?;
+            // reqwest's display includes the URL, and a gateway URL can carry
+            // tenant-identifying parts; `AgentError` strings reach the client
+            // via TurnFailed. Only the fact of a failed request surfaces.
+            .map_err(|_| AgentError::Provider("openai-compat request failed".into()))?;
 
         let status = response.status();
         if !status.is_success() {
@@ -135,9 +134,9 @@ impl ModelProvider for OpenAiCompatProvider {
                     Ok(chunk) => chunk,
                     Err(error) => {
                         yield ProviderEvent::Failed {
-                            error: ProviderErrorInfo::provider(format!(
-                                "stream ended early: {error}"
-                            )),
+                            error: ProviderErrorInfo::provider(
+                                error.client_message("openai-compat"),
+                            ),
                         };
                         return;
                     }
