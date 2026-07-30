@@ -266,6 +266,95 @@ async fn document_file_content_supports_full_head_and_single_range_responses() {
     }
 }
 
+/// Original bytes are reader-supplied and served from the API's own origin, so
+/// the response must never let the stored media type decide that a browser may
+/// run them. The contract is invisible in the app — the renderer reads these
+/// responses as bytes and never navigates to one — so nothing else would notice
+/// the headers going missing.
+#[tokio::test]
+async fn document_file_content_serves_bytes_under_a_type_allowlist() {
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+
+    let ingest = |uri: &'static str, media_type: &'static str, body: &'static str| {
+        let router = router.clone();
+        let bearer = bearer.clone();
+        async move {
+            let accepted: serde_json::Value = json_body(
+                post_raw(
+                    &router,
+                    &bearer,
+                    uri,
+                    Some(media_type),
+                    body.as_bytes().to_vec(),
+                )
+                .await,
+            )
+            .await;
+            let document_id = accepted["document_id"].as_str().unwrap().to_owned();
+            let response = request_document_file_content(
+                &router,
+                axum::http::Method::GET,
+                &format!("/documents/{document_id}/file-content"),
+                Some(&bearer),
+                None,
+                None,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let header = |name: axum::http::HeaderName| {
+                response
+                    .headers()
+                    .get(name)
+                    .map(|value| value.to_str().unwrap().to_owned())
+            };
+            (
+                header(header::CONTENT_TYPE),
+                header(header::CONTENT_DISPOSITION),
+                header(header::X_CONTENT_TYPE_OPTIONS),
+                header(header::CONTENT_SECURITY_POLICY),
+            )
+        }
+    };
+
+    // A renderable format keeps its name and may be drawn in place, with
+    // sniffing off and a policy that denies the bytes any reach.
+    let (content_type, disposition, nosniff, policy) = ingest(
+        "/documents/raw?title=page.png&uri=file:///page.png",
+        "image/png",
+        "not really a png",
+    )
+    .await;
+    assert_eq!(content_type.as_deref(), Some("image/png"));
+    assert_eq!(disposition.as_deref(), Some("inline"));
+    assert_eq!(nosniff.as_deref(), Some("nosniff"));
+    assert_eq!(
+        policy.as_deref(),
+        Some("default-src 'none'; sandbox; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+    );
+
+    // Markup is still named honestly but is only ever offered as a download.
+    let (content_type, disposition, ..) = ingest(
+        "/documents/raw?title=page.html&uri=file:///page.html",
+        "text/html",
+        "<script>alert(document.cookie)</script>",
+    )
+    .await;
+    assert_eq!(content_type.as_deref(), Some("text/html"));
+    assert_eq!(disposition.as_deref(), Some("attachment"));
+
+    // An unfamiliar type still serves its bytes, but unnamed. The stored
+    // parameters are dropped rather than echoed back.
+    let (content_type, disposition, ..) = ingest(
+        "/documents/raw?title=odd.xhtml&uri=file:///odd.xhtml",
+        "application/xhtml+xml; charset=utf-8",
+        "<html/>",
+    )
+    .await;
+    assert_eq!(content_type.as_deref(), Some("application/octet-stream"));
+    assert_eq!(disposition.as_deref(), Some("attachment"));
+}
+
 #[tokio::test]
 async fn document_file_content_streams_only_the_requested_range() {
     let (upload_router, token, mut state, _store, _dir) = test_app_with_state().await;
