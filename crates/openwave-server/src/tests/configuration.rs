@@ -2516,3 +2516,71 @@ async fn a_managed_profile_refuses_manual_mcp_servers_and_accepts_gateway_mounts
     let info: serde_json::Value = json_body(removed).await;
     assert_eq!(info["servers"].as_array().unwrap().len(), 1);
 }
+
+/// After an MDM re-point the stored session belongs to the superseded
+/// deployment. Every route and token path already refuses it, so the
+/// readiness surfaces must agree: reading it as usable would advertise
+/// models no route can serve.
+#[tokio::test]
+async fn a_superseded_gateway_session_never_reads_usable() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}/test.db?mode=rwc",
+            dir.path().display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
+    let seed = |secrets: Arc<dyn SecretProvider>, base_url: &'static str| async move {
+        let credentials: openwave_connectors::GatewayCredentials =
+            serde_json::from_value(serde_json::json!({
+                "base_url": base_url,
+                "installation_id": "install-1",
+                "user_id": "user-1",
+                "refresh_token": "mg_rt_seed",
+                "access_tokens": {}
+            }))
+            .unwrap();
+        openwave_connectors::CredentialVault::new(secrets)
+            .save(&credentials)
+            .await
+            .unwrap();
+    };
+    seed(secrets.clone(), "https://old.gateway").await;
+    crate::managed_policy::provision(&*store, "https://corp.gateway")
+        .await
+        .unwrap();
+    let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+        .await
+        .unwrap();
+
+    assert!(!providers::provider_is_usable(
+        &*store,
+        &*secrets,
+        providers::ProviderKind::ModelGateway,
+        &policy
+    )
+    .await
+    .unwrap());
+    let gateway = providers::list_providers(&*store, &*secrets, &policy)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|provider| provider.kind == providers::ProviderKind::ModelGateway)
+        .unwrap();
+    assert!(!gateway.has_credential);
+
+    // A session for the policy's own deployment — trailing slash included,
+    // per the shared normalization — reads usable again.
+    seed(secrets.clone(), "https://corp.gateway/").await;
+    assert!(providers::provider_is_usable(
+        &*store,
+        &*secrets,
+        providers::ProviderKind::ModelGateway,
+        &policy
+    )
+    .await
+    .unwrap());
+}

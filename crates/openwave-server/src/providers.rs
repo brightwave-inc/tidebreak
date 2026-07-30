@@ -727,7 +727,14 @@ pub async fn list_providers(
                 enabled: policy.gateway_url.is_some(),
                 base_url: policy.gateway_url.clone(),
                 vertex_location: None,
-                has_credential: has_credential(secrets, kind).await,
+                // Deployment-matched: a session a re-point superseded must
+                // not read as this deployment's credential.
+                has_credential: match policy.gateway_url.as_deref() {
+                    Some(gateway_url) => {
+                        openwave_connectors::has_stored_credentials_for(secrets, gateway_url).await
+                    }
+                    None => false,
+                },
                 models: gateway_models(store, policy).await?,
             });
             continue;
@@ -1199,9 +1206,12 @@ pub async fn resolve_model_policy(
 /// Whether the provider can accept a new turn right now.
 ///
 /// The gateway is derived from policy in both directions: on a managed
-/// profile it is usable exactly when a session is stored (and BYOK kinds
-/// never are), and on an unmanaged profile it is never usable — whatever
-/// legacy rows persist in the store.
+/// profile it is usable exactly when a session for the policy's own
+/// deployment is stored (and BYOK kinds never are), and on an unmanaged
+/// profile it is never usable — whatever legacy rows persist in the store.
+/// The deployment match matters after an MDM re-point: the superseded
+/// session is unroutable (`route_token_source` filters it), so counting it
+/// usable would advertise models no route can serve.
 pub async fn provider_is_usable(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
@@ -1212,7 +1222,10 @@ pub async fn provider_is_usable(
         if kind != ProviderKind::ModelGateway {
             return Ok(false);
         }
-        return Ok(has_credential(secrets, kind).await);
+        let Some(gateway_url) = policy.gateway_url.as_deref() else {
+            return Ok(false);
+        };
+        return Ok(openwave_connectors::has_stored_credentials_for(secrets, gateway_url).await);
     }
     if kind == ProviderKind::ModelGateway {
         return Ok(false);
