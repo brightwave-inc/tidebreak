@@ -7,7 +7,9 @@ import type {
   AgentActivityHistoryEntry,
   PendingFolderAccessRequest,
   PendingOutputWritebackRequest,
+  PendingPlanApproval,
   PendingUserQuestions,
+  PlanDecision,
   ToolActionPreview,
   ToolResultPreview,
   UserQuestionAnswer,
@@ -33,6 +35,7 @@ import {
   ToolActivityUnavailable,
 } from "./ToolActivityGroup";
 import { WelcomeState } from "./WelcomeState";
+import { PlanApprovalCard } from "./PlanApprovalCard";
 import { UserQuestionsCard } from "./UserQuestionsCard";
 import type { TranscriptImageAttachment } from "./ImageAttachments";
 import { TranscriptImageAttachments } from "./TranscriptImageAttachments";
@@ -154,6 +157,7 @@ type MessageListProps = {
   folderAccessRequests: PendingFolderAccessRequest[];
   outputWritebackRequests?: PendingOutputWritebackRequest[];
   userQuestionRequests?: PendingUserQuestions[];
+  planApprovalRequests?: PendingPlanApproval[];
   nativeHost: boolean;
   nativeBusy: boolean;
   resolvingFolderCalls: Set<string>;
@@ -206,6 +210,10 @@ type MessageListProps = {
     answers: UserQuestionAnswer[],
   ) => void;
   onUserQuestionsCancel?: (turnId: string) => void;
+  decidingPlanCalls?: Set<string>;
+  planApprovalErrors?: Record<string, string>;
+  onPlanDecision?: (callId: string, decision: PlanDecision) => void;
+  onPlanCancel?: (turnId: string) => void;
   onSelectPrompt?: (prompt: string) => void;
   /** Resend the failed turn. Offered only on the transcript's newest failure. */
   onRetryTurn?: (turn: RetryableTurn) => void;
@@ -250,6 +258,11 @@ export function MessageList({
   onOutputWritebackDecision = () => undefined,
   onOutputWritebackCancel = () => undefined,
   onAnswerUserQuestions = () => undefined,
+  planApprovalRequests = [],
+  decidingPlanCalls = new Set<string>(),
+  planApprovalErrors = {},
+  onPlanDecision = () => undefined,
+  onPlanCancel = () => undefined,
   onUserQuestionsCancel = () => undefined,
   onSelectPrompt,
   onRetryTurn,
@@ -376,12 +389,26 @@ export function MessageList({
           />,
         ),
       )}
+      {planApprovalRequests.map((request) =>
+        isolatedCard(
+          `plan-approval-${request.callId}`,
+          `${decidingPlanCalls.has(request.callId)} ${planApprovalErrors[request.callId] ?? ""}`,
+          <PlanApprovalCard
+            request={request}
+            working={decidingPlanCalls.has(request.callId)}
+            error={planApprovalErrors[request.callId]}
+            onDecide={(decision) => onPlanDecision(request.callId, decision)}
+            onCancel={() => onPlanCancel(request.turnId)}
+          />,
+        ),
+      )}
       {shouldShowAssistantWorking(
         messages,
         busy,
         folderAccessRequests.length +
           outputWritebackRequests.length +
-          userQuestionRequests.length,
+          userQuestionRequests.length +
+          planApprovalRequests.length,
       ) && <AssistantWorkingIndicator thinking={reasoningActive} />}
     </>
   );

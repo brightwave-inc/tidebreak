@@ -22,6 +22,7 @@ import { useFolderAccessRequests } from "./useFolderAccessRequests";
 import { useOutputWritebackRequests } from "./useOutputWritebackRequests";
 import { useToolApprovals } from "./useToolApprovals";
 import { useTurnControls } from "./useTurnControls";
+import { usePlanApprovals } from "./usePlanApprovals";
 import { useUserQuestions } from "./useUserQuestions";
 import { useAgentRuns } from "./useAgentRuns";
 import { ArrowDown } from "lucide-react";
@@ -82,6 +83,7 @@ export function ChatView({
   const folderAccess = useFolderAccessRequests(client, chat.id);
   const outputWritebacks = useOutputWritebackRequests(client, chat.id);
   const userQuestions = useUserQuestions(client, chat.id);
+  const planApprovals = usePlanApprovals(client, chat.id);
   const approvals = useToolApprovals(client, chat.id);
   const turnControls = useTurnControls(client, chat.id, draftRef, () =>
     onDraftChange(""),
@@ -265,6 +267,7 @@ export function ChatView({
           folderAccessRequests={folderAccess.requests}
           outputWritebackRequests={outputWritebacks.requests}
           userQuestionRequests={userQuestions.requests}
+          planApprovalRequests={planApprovals.requests}
           nativeHost={nativeHost}
           nativeBusy={folderAccess.resolving.size > 0}
           resolvingFolderCalls={folderAccess.resolving}
@@ -273,6 +276,10 @@ export function ChatView({
           outputWritebackErrors={outputWritebacks.errors}
           answeringQuestionCalls={userQuestions.answering}
           userQuestionErrors={userQuestions.errors}
+          decidingPlanCalls={planApprovals.deciding}
+          planApprovalErrors={planApprovals.errors}
+          onPlanDecision={planApprovals.decide}
+          onPlanCancel={planApprovals.cancel}
           decidingApprovalCalls={approvals.deciding}
           approvalErrors={approvals.errors}
           grantScope={chat.project_id ? "project" : "chat"}

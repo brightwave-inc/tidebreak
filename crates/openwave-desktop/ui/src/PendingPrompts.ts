@@ -3,6 +3,7 @@ import { create } from "zustand";
 import type {
   PendingFolderAccessRequest,
   PendingOutputWritebackRequest,
+  PendingPlanApproval,
   PendingUserQuestions,
 } from "./api";
 
@@ -19,6 +20,7 @@ export type PendingPromptsStore = {
   /** The conversation these requests belong to; null before the first read. */
   chatId: string | null;
   userQuestions: PendingUserQuestions[];
+  planApprovals: PendingPlanApproval[];
   folderAccess: PendingFolderAccessRequest[];
   outputWritebacks: PendingOutputWritebackRequest[];
   /**
@@ -27,6 +29,7 @@ export type PendingPromptsStore = {
    */
   refresh: () => void;
   setUserQuestions: (chatId: string, requests: PendingUserQuestions[]) => void;
+  setPlanApprovals: (chatId: string, requests: PendingPlanApproval[]) => void;
   setFolderAccess: (chatId: string, requests: PendingFolderAccessRequest[]) => void;
   setOutputWritebacks: (
     chatId: string,
@@ -41,6 +44,7 @@ export function createPendingPromptsStore() {
   return create<PendingPromptsStore>()((set, get) => ({
     chatId: null,
     userQuestions: [],
+    planApprovals: [],
     folderAccess: [],
     outputWritebacks: [],
     refresh: () => {},
@@ -50,6 +54,10 @@ export function createPendingPromptsStore() {
     setUserQuestions: (chatId, userQuestions) => {
       if (get().chatId !== chatId) return;
       set({ userQuestions });
+    },
+    setPlanApprovals: (chatId, planApprovals) => {
+      if (get().chatId !== chatId) return;
+      set({ planApprovals });
     },
     setFolderAccess: (chatId, folderAccess) => {
       if (get().chatId !== chatId) return;
@@ -61,7 +69,13 @@ export function createPendingPromptsStore() {
     },
     setRefresh: (refresh) => set({ refresh }),
     reset: (chatId) =>
-      set({ chatId, userQuestions: [], folderAccess: [], outputWritebacks: [] }),
+      set({
+        chatId,
+        userQuestions: [],
+        planApprovals: [],
+        folderAccess: [],
+        outputWritebacks: [],
+      }),
   }));
 }
 
