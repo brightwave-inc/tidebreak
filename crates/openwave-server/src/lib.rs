@@ -405,6 +405,10 @@ pub fn app(state: AppState) -> Router {
         .route("/chats/{id}/cancel", post(routes::post_cancel))
         .route("/chats/{id}/steer", post(routes::post_steer))
         .route(
+            "/chats/{chat_id}/turns/{turn_id}/file-changes/undo",
+            post(routes::post_undo_turn_file_changes),
+        )
+        .route(
             "/chats/{id}/client-executions/pending",
             get(routes::list_pending_folder_access_requests),
         )
