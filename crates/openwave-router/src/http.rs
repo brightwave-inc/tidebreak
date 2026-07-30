@@ -164,6 +164,23 @@ impl<E: std::fmt::Display> std::fmt::Display for StreamFailure<E> {
     }
 }
 
+impl<E: std::fmt::Display> StreamFailure<E> {
+    /// The client-safe form of the failure: only the deadline text is ours.
+    ///
+    /// A transport error's `Display` is reqwest's, and reqwest includes the
+    /// request URL — a Vertex URL carries the project id, and any gateway URL
+    /// may carry tenant-identifying parts. These strings reach the client
+    /// through `ProviderEvent::Failed` and `TurnFailed`, so a transport
+    /// failure reports only the fact of an early end.
+    #[must_use]
+    pub fn client_message(&self, provider: &str) -> String {
+        match self {
+            Self::Deadline(_) => format!("{provider} stream ended early: {self}"),
+            Self::Transport(_) => format!("{provider} stream ended early"),
+        }
+    }
+}
+
 /// Cap the total duration of a provider byte stream.
 ///
 /// The returned stream forwards items unchanged until `ceiling` elapses, then
@@ -239,5 +256,25 @@ mod tests {
             other => panic!("expected a deadline failure, got {other:?}"),
         };
         assert_eq!(message, "exceeded the 120s stream duration limit");
+    }
+
+    #[test]
+    fn the_client_message_keeps_the_transport_error_and_its_url_out() {
+        // reqwest's error display includes the request URL; a Vertex URL
+        // carries the project id, and these strings reach the client.
+        let transport = StreamFailure::Transport(
+            "error sending request for url (https://us-central1-aiplatform.googleapis.com/v1/projects/secret-project/): connection closed".to_string(),
+        );
+        let message = transport.client_message("gemini");
+        assert_eq!(message, "gemini stream ended early");
+        assert!(!message.contains("http"), "{message}");
+        assert!(!message.contains("secret-project"), "{message}");
+
+        // The deadline text is our own and says why the stream was cut.
+        let deadline = StreamFailure::<String>::Deadline(Duration::from_secs(3600));
+        assert_eq!(
+            deadline.client_message("anthropic"),
+            "anthropic stream ended early: exceeded the 3600s stream duration limit"
+        );
     }
 }
