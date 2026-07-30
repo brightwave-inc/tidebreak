@@ -455,7 +455,9 @@ pub struct AgentConfig {
     pub max_tokens: Option<u32>,
     /// Sampling temperature.
     pub temperature: Option<f32>,
-    /// Max model calls in one turn before the turn fails (loop guard).
+    /// Max model calls in one turn before the loop stops asking for tools
+    /// (loop guard). Exhausting it does not fail the turn: the agent spends one
+    /// further model call, outside this budget, to write a closing answer.
     pub max_steps: usize,
     /// Max bytes of a single tool result fed back to the model; larger results
     /// are truncated with a notice, so one big read can't blow the context.
@@ -475,6 +477,26 @@ pub struct AgentConfig {
 /// Default context window: 200k tokens (Claude Opus/Sonnet).
 pub const DEFAULT_CONTEXT_WINDOW: usize = 200_000;
 
+/// Default model calls a turn may spend on tool work.
+///
+/// The budget is a runaway guard, not a work allowance: a turn that reads a
+/// directory, runs a build, and reacts to its output spends steps quickly, and
+/// the budget is shared across every lease segment of the turn, so a turn that
+/// is interrupted and resumed twice has fewer steps left in each later attempt
+/// than the number suggests. Reaching the ceiling no longer costs the user
+/// their answer either — the wrap-up step below turns exhaustion into a closing
+/// message — so the number only has to be high enough that ordinary
+/// exec-heavy work never notices it, and low enough to stop a model that is
+/// looping on a tool it cannot make progress with.
+pub const DEFAULT_MAX_STEPS: usize = 100;
+
+/// What the model is told once the step budget is spent.
+///
+/// The wrap-up call carries no tool schemas, so this only has to explain the
+/// silence: without it a model that was mid-plan tends to narrate its next tool
+/// call instead of answering.
+const WRAP_UP_INSTRUCTION: &str = "This turn has reached its limit on tool calls, so no tools are available for this reply and no further work can be done. Write the final answer now from what you already have: report what you found or changed, and state plainly what is still unfinished and what you would do next. Do not ask to run anything else.";
+
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
@@ -486,7 +508,7 @@ impl Default for AgentConfig {
             system_prompt: None,
             max_tokens: None,
             temperature: None,
-            max_steps: 16,
+            max_steps: DEFAULT_MAX_STEPS,
             max_tool_result_bytes: DEFAULT_MAX_TOOL_RESULT_BYTES,
             context_window: DEFAULT_CONTEXT_WINDOW,
             tool_scratch: None,
@@ -1179,10 +1201,34 @@ impl Agent {
         let mut reduction_level: u32 = 0;
         let mut checkpoint_attempt_boundary = None;
 
-        for step in 0..self.config.max_steps {
+        // A turn with no budget at all has nothing to wrap up: there is no work
+        // in flight and no prose to preserve, so it stays the hard failure the
+        // worker's accounting expects.
+        if self.config.max_steps == 0 {
+            return Err(AgentError::msg("max steps per turn exceeded"));
+        }
+
+        // One iteration past the budget is the wrap-up: the model is told the
+        // turn is over and asked for a closing answer with no tools advertised,
+        // so exhausting the budget ends in a real message rather than an error.
+        for step in 0..=self.config.max_steps {
+            let wrap_up = step >= self.config.max_steps;
+            // The wrap-up call is outside the budget. Counting it would let a
+            // resumed attempt inherit a step debt, and would make the turn's
+            // reported step count exceed the ceiling it just respected.
+            let steps_before = step.min(self.config.max_steps);
+            let steps_used = (step + 1).min(self.config.max_steps);
             // Between steps: stop before starting a fresh model call if cancelled.
             if self.cancel.is_cancelled() {
-                return Ok(self.finish_cancelled(events, total_usage, step, publish_terminal));
+                return Ok(self.finish_cancelled(
+                    events,
+                    total_usage,
+                    steps_before,
+                    publish_terminal,
+                ));
+            }
+            if wrap_up {
+                transcript.push(ChatMessage::text(Role::System, WRAP_UP_INSTRUCTION));
             }
             // Boundary steer: inject any queued messages before the next model call.
             self.apply_steers(chat, turn_id, &mut transcript, None, events)
@@ -1216,7 +1262,12 @@ impl Agent {
                 // was active. Its usage belongs to the checkpoint record, not
                 // the foreground turn, and no user model call should begin.
                 if self.cancel.is_cancelled() {
-                    return Ok(self.finish_cancelled(events, total_usage, step, publish_terminal));
+                    return Ok(self.finish_cancelled(
+                        events,
+                        total_usage,
+                        steps_before,
+                        publish_terminal,
+                    ));
                 }
                 let (mut fitted, reduced) = self.fit_transcript(
                     &transcript,
@@ -1238,10 +1289,18 @@ impl Agent {
                     reasoning_model: self.config.reasoning_model,
                     system: self.config.system_prompt.clone(),
                     messages: fitted,
-                    tools: self.tools.specs_for_surface(
-                        self.agent_orchestration_active(),
-                        matches!(chat.permission_mode, Some(PermissionMode::Plan)),
-                    ),
+                    // Withholding the schemas is what makes the wrap-up
+                    // terminal: a model with no tools to name cannot ask for
+                    // another round of them, so this works on every provider
+                    // without depending on a tool-choice constraint.
+                    tools: if wrap_up {
+                        Vec::new()
+                    } else {
+                        self.tools.specs_for_surface(
+                            self.agent_orchestration_active(),
+                            matches!(chat.permission_mode, Some(PermissionMode::Plan)),
+                        )
+                    },
                     max_tokens: self.config.max_tokens,
                     temperature: self.config.temperature,
                     reasoning_effort: self.config.reasoning_effort,
@@ -1249,7 +1308,7 @@ impl Agent {
                     ..Default::default()
                 };
 
-                progress.model_steps = step + 1;
+                progress.model_steps = steps_used;
                 match self.provider.stream(request).await {
                     Ok(stream) => {
                         // Tell clients the history was shortened for this call so
@@ -1367,7 +1426,12 @@ impl Agent {
             // the left arm of the nested select). Also catch a cancel that raced
             // the final stream event.
             if matches!(stream_end, StreamEnd::Cancelled) || self.cancel.is_cancelled() {
-                return Ok(self.finish_cancelled(events, total_usage, step + 1, publish_terminal));
+                return Ok(self.finish_cancelled(
+                    events,
+                    total_usage,
+                    steps_used,
+                    publish_terminal,
+                ));
             }
             if matches!(stream_end, StreamEnd::Steered) {
                 // Discard this step's partial output — nothing from it was
@@ -1389,6 +1453,24 @@ impl Agent {
                     // clients holding calls that never resolve. Mark them
                     // discarded the way the steer and stream-failure paths do.
                     events.send(AgentEvent::StreamInterrupted);
+                }
+                calls.clear();
+            }
+
+            // The wrap-up call advertised no tools, so a call here is a provider
+            // anomaly, not a decision to act. Answer each one so no client is
+            // left holding a call that never resolves, then drop them: there is
+            // no step left to run them in, and admitting them would ask the loop
+            // for a round it has already refused. The prose survives — losing
+            // text the reader can already see is the failure this whole path
+            // exists to avoid, so a discard marker is deliberately not sent.
+            if wrap_up && !calls.is_empty() {
+                for call in &calls {
+                    self.decline_call(
+                        call,
+                        events,
+                        "not run: this turn reached its step limit, and this reply is its last. Say what you have.".into(),
+                    );
                 }
                 calls.clear();
             }
@@ -1425,10 +1507,6 @@ impl Agent {
                 .map(|(index, call)| isolations[index].is_none() && self.call_is_sensitive(call))
                 .collect();
             let isolated = isolations.iter().position(Option::is_some);
-            // A checkpoint suspends the turn instead of consuming a step here,
-            // so the budget for the model call that reads its result belongs to
-            // the attempt that resumes, not to this one.
-            let checkpointing = isolated.is_some();
 
             // This step is about to persist tool-call rows, execute server tool
             // side effects, and record the assistant message. Fence those on the
@@ -1501,7 +1579,7 @@ impl Agent {
                         return Ok(self.finish_cancelled(
                             events,
                             total_usage,
-                            step + 1,
+                            steps_used,
                             publish_terminal,
                         ));
                     }
@@ -1525,7 +1603,7 @@ impl Agent {
                             stop_reason,
                             refusal: refusal.clone(),
                             steer_revision: generation_steer_revision,
-                            model_steps: step + 1,
+                            model_steps: steps_used,
                         });
                     }
                     if self.steer.try_complete(|| {
@@ -1550,7 +1628,7 @@ impl Agent {
                             stop_reason,
                             refusal: refusal.clone(),
                             steer_revision: generation_steer_revision,
-                            model_steps: step + 1,
+                            model_steps: steps_used,
                         });
                     }
                     // Steer arrived between drain and try_complete — loop.
@@ -1558,12 +1636,9 @@ impl Agent {
                 continue;
             }
 
-            // Tool calls need a following model call to consume their results. If
-            // no step remains, stop now — running them would be wasted side
-            // effects the model can never act on.
-            if !checkpointing && step + 1 >= self.config.max_steps {
-                return Err(AgentError::msg("max steps per turn exceeded"));
-            }
+            // Tool calls made on the last budgeted step still run: the wrap-up
+            // call that follows reads their results, so the work is not wasted
+            // and the closing answer is written with it in hand.
 
             // Run the tool calls and feed the results back for the next step.
             // Outputs are collected by position so the results message keeps the
@@ -1612,7 +1687,7 @@ impl Agent {
                     return Ok(self.finish_cancelled(
                         events,
                         total_usage,
-                        step + 1,
+                        steps_used,
                         publish_terminal,
                     ));
                 }
@@ -1641,7 +1716,7 @@ impl Agent {
                     return Ok(self.finish_cancelled(
                         events,
                         total_usage,
-                        step + 1,
+                        steps_used,
                         publish_terminal,
                     ));
                 }
@@ -1666,7 +1741,7 @@ impl Agent {
                     return Ok(self.finish_cancelled(
                         events,
                         total_usage,
-                        step + 1,
+                        steps_used,
                         publish_terminal,
                     ));
                 }
@@ -1728,7 +1803,7 @@ impl Agent {
                                         request,
                                         usage: total_usage,
                                         steer_revision,
-                                        model_steps: step + 1,
+                                        model_steps: steps_used,
                                     })
                                 }
                                 Err(reason) => {
@@ -1744,7 +1819,7 @@ impl Agent {
                                         request,
                                         usage: total_usage,
                                         steer_revision,
-                                        model_steps: step + 1,
+                                        model_steps: steps_used,
                                     })
                                 }
                                 Err(reason) => {
@@ -1760,7 +1835,7 @@ impl Agent {
                                         request,
                                         usage: total_usage,
                                         steer_revision,
-                                        model_steps: step + 1,
+                                        model_steps: steps_used,
                                     })
                                 }
                                 Err(reason) => {
@@ -1799,9 +1874,9 @@ impl Agent {
                 .await?;
         }
 
-        if self.config.max_steps == 0 {
-            return Err(AgentError::msg("max steps per turn exceeded"));
-        }
+        // Only a wrap-up call that was itself abandoned — steered, or
+        // interrupted and restarted — falls out of the loop. There is no step
+        // left to write an answer in, so the turn ends as the failure it is.
         Ok(AgentTurnOutcome::Failed {
             error: crate::error::AgentErrorInfo {
                 kind: "max_steps_exceeded".into(),
@@ -4114,6 +4189,53 @@ mod tests {
         calls: AtomicUsize,
     }
 
+    /// Asks for a tool once, then answers, recording the tool surface each
+    /// request advertised.
+    struct ToolSurfaceRecordingProvider {
+        calls: AtomicUsize,
+        advertised: Arc<Mutex<Vec<Vec<String>>>>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for ToolSurfaceRecordingProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("fake")
+        }
+
+        async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            self.advertised
+                .lock()
+                .unwrap()
+                .push(req.tools.iter().map(|tool| tool.name.clone()).collect());
+            let events = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                vec![
+                    ProviderEvent::ToolCallStarted {
+                        index: 0,
+                        id: "call_1".into(),
+                        name: "read_file".into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 0,
+                        fragment: r#"{"path":"note.txt"}"#.into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::ToolUse,
+                    },
+                ]
+            } else {
+                vec![
+                    ProviderEvent::TextDelta {
+                        text: "done".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ]
+            };
+            Ok(stream::iter(events).boxed())
+        }
+    }
+
     struct ContextRecordingTool {
         observed_project: Arc<Mutex<Option<Option<ProjectId>>>>,
         observed_call: Arc<Mutex<Option<CallId>>>,
@@ -4191,7 +4313,20 @@ mod tests {
             ProviderId::new("client-tool")
         }
 
-        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+        async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            // A wrap-up call advertises no tools, and a model with no schemas in
+            // front of it answers in prose.
+            if req.tools.is_empty() {
+                return Ok(stream::iter(vec![
+                    ProviderEvent::TextDelta {
+                        text: "that is as far as I got".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ])
+                .boxed());
+            }
             let mut events = vec![
                 ProviderEvent::ToolCallStarted {
                     index: 0,
@@ -4403,14 +4538,12 @@ mod tests {
             .run_claimed_turn(&chat, turn_id, MessageId::new(), 1, &invalid_tx)
             .await
             .unwrap();
-        assert!(matches!(
-            invalid_outcome,
-            AgentTurnOutcome::Failed {
-                error,
-                model_steps: 1,
-                ..
-            } if error.kind == "max_steps_exceeded"
-        ));
+        // Arguments the validator rejects never become a request: the call is
+        // answered in place and the turn runs on rather than suspending on it.
+        assert!(
+            !matches!(invalid_outcome, AgentTurnOutcome::ClientToolCall { .. }),
+            "invalid arguments must not reach a checkpoint: {invalid_outcome:?}"
+        );
         assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
     }
 
@@ -4497,9 +4630,6 @@ mod tests {
         agent.run_turn(&chat, "deploy", &tx).await.unwrap();
         drop(tx);
         let events = rx.collect::<Vec<_>>().await;
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, AgentEvent::TurnFailed { .. })));
         assert!(!events
             .iter()
             .any(|event| matches!(event, AgentEvent::UserQuestionsAsked { .. })));
@@ -5693,8 +5823,14 @@ mod tests {
         );
     }
 
+    /// The step budget used to be a cliff: a turn whose last budgeted step
+    /// asked for a tool failed with `max_steps_exceeded`, throwing away both the
+    /// tool work and any prose the reader could already see on screen. The
+    /// budget now bounds tool rounds only — one further model call, made with no
+    /// tools advertised so it cannot ask for another round, closes the turn with
+    /// a real answer.
     #[tokio::test]
-    async fn max_steps_guard_fails_before_running_tools() {
+    async fn a_turn_at_the_step_ceiling_concludes_with_an_answer() {
         let workspace = tempfile::tempdir().unwrap();
         std::fs::write(workspace.path().join("note.txt"), "secret").unwrap();
         let db = tempfile::tempdir().unwrap();
@@ -5719,11 +5855,13 @@ mod tests {
         };
         store.create_chat(&chat).await.unwrap();
 
-        // Only one step allowed, but step 0 returns a tool call — there's no
-        // step left to consume the result, so the tool must NOT run.
+        // One step of budget, and step 0 asks for a tool: the turn is at its
+        // ceiling the moment that call comes back.
+        let advertised = Arc::new(Mutex::new(Vec::new()));
         let agent = Agent::new(
-            Arc::new(FakeProvider {
+            Arc::new(ToolSurfaceRecordingProvider {
                 calls: AtomicUsize::new(0),
+                advertised: advertised.clone(),
             }),
             Arc::new(ToolRegistry::new().with(Box::new(ReadFile))),
             store.clone(),
@@ -5735,105 +5873,33 @@ mod tests {
         );
 
         let (tx, rx) = unbounded();
-        let result = agent.run_turn(&chat, "read note.txt", &tx).await;
+        agent.run_turn(&chat, "read note.txt", &tx).await.unwrap();
         drop(tx);
         let events: Vec<AgentEvent> = rx.collect().await;
 
-        assert!(result.is_err());
-        assert!(matches!(
-            events.first(),
-            Some(AgentEvent::TurnStarted { .. })
-        ));
-        assert!(matches!(events.last(), Some(AgentEvent::TurnFailed { .. })));
-        // The tool never ran: no completion event and nothing tool-related persisted.
-        assert!(!events
-            .iter()
-            .any(|e| matches!(e, AgentEvent::ToolCallCompleted { .. })));
-        let roles: Vec<Role> = store
-            .list_messages(chat.id)
-            .await
-            .unwrap()
-            .iter()
-            .map(|m| m.role)
-            .collect();
-        assert_eq!(roles, vec![Role::User]);
-    }
-
-    #[tokio::test]
-    async fn claimed_max_steps_failure_retains_provider_progress() {
-        let workspace = tempfile::tempdir().unwrap();
-        std::fs::write(workspace.path().join("note.txt"), "secret").unwrap();
-        let db = tempfile::tempdir().unwrap();
-        let store: Arc<dyn Store> = Arc::new(
-            DbStore::connect(&format!(
-                "sqlite://{}?mode=rwc",
-                db.path().join("t.db").display()
-            ))
-            .await
-            .unwrap(),
+        assert!(
+            matches!(events.last(), Some(AgentEvent::TurnCompleted { .. })),
+            "the ceiling must not end the turn as a failure: {events:?}"
         );
-        let chat = Chat {
-            id: ChatId::new(),
-            project_id: None,
-            title: None,
-            model: None,
-            reasoning_effort: None,
-            permission_mode: None,
-            attachment_revision: 0,
-            root_attachments: Vec::new(),
-            created_at: Utc::now(),
-        };
-        store.create_chat(&chat).await.unwrap();
-        let turn_id = TurnId::new();
-        store
-            .accept_turn(turn_id, chat.id, "fake", "read note.txt")
-            .await
-            .unwrap();
-        let claimed_at = Utc::now();
-        let lease_token = uuid::Uuid::new_v4();
-        store
-            .claim_turn_run(
-                lease_token,
-                claimed_at,
-                claimed_at + chrono::Duration::minutes(1),
-            )
-            .await
-            .unwrap();
-        let agent = Agent::new(
-            Arc::new(FakeProvider {
-                calls: AtomicUsize::new(0),
-            }),
-            Arc::new(ToolRegistry::new().with(Box::new(ReadFile))),
-            store.clone(),
-            AgentConfig {
-                model: "fake".into(),
-                max_steps: 1,
-                ..Default::default()
-            },
-        )
-        .with_durable_steer(lease_token);
-        let (tx, _rx) = unbounded();
-        let outcome = agent
-            .run_claimed_turn(&chat, turn_id, MessageId::new(), 1, &tx)
-            .await
-            .unwrap();
-        assert!(matches!(
-            outcome,
-            AgentTurnOutcome::Failed {
-                error,
-                usage: Usage {
-                    input_tokens: 5,
-                    output_tokens: 2,
-                    ..
-                },
-                model_steps: 1,
-                ..
-            } if error.kind == "message" && error.message == "max steps per turn exceeded"
-        ));
-        let calls = store.list_tool_calls(chat.id).await.unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].status, ToolCallStatus::Pending);
-        assert_eq!(calls[0].result, None);
+        // The last budgeted step's tool still ran, and the closing answer was
+        // written with its result in hand.
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolCallCompleted { .. })));
+        let messages = store.list_messages(chat.id).await.unwrap();
+        assert_eq!(
+            messages
+                .last()
+                .map(|message| (message.role, message.content.as_str())),
+            Some((Role::Assistant, "done")),
+            "the reader keeps a real answer: {messages:?}"
+        );
+        // The wrap-up call carries no tool schemas, so the model has no way to
+        // ask for a round the budget cannot pay for.
+        let advertised = advertised.lock().unwrap().clone();
+        assert_eq!(advertised.len(), 2, "one tool step, then the wrap-up");
+        assert!(!advertised[0].is_empty());
+        assert!(advertised[1].is_empty());
     }
 
     #[tokio::test]
