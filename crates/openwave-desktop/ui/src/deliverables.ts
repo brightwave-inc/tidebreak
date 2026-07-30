@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 export type DeliverableSummary = {
   outputId: string;
   filename: string;
-  mediaType: DeliverableMediaType;
+  mediaType: string;
   sizeBytes: number;
   revisionCount: number;
   updatedAt: string;
@@ -25,7 +25,7 @@ export type DeliverablesCatalog = {
 export type DeliverablePreview = {
   outputId: string;
   filename: string;
-  mediaType: DeliverableMediaType;
+  mediaType: string;
   content: string;
   truncated: boolean;
 };
@@ -48,7 +48,8 @@ export type OutputExportResult =
         | "ambiguous_native_failure";
     };
 
-export type DeliverableMediaType =
+/** The curated model-authored text types, which are the only previewable ones. */
+export type TextDeliverableMediaType =
   | "text/markdown"
   | "text/plain"
   | "text/csv"
@@ -57,9 +58,23 @@ export type DeliverableMediaType =
 
 const MAX_DELIVERABLES = 100;
 const MAX_FILENAME_CHARACTERS = 120;
+const MAX_MEDIA_TYPE_CHARACTERS = 127;
 const MAX_PREVIEW_CHARACTERS = 100_000;
 const MAX_DELIVERABLE_BYTES = 512 * 1024;
+const MAX_BINARY_DELIVERABLE_BYTES = 16 * 1024 * 1024;
 const MAX_OUTPUT_REVISIONS = 100;
+
+export function isTextDeliverableMediaType(
+  value: string,
+): value is TextDeliverableMediaType {
+  return [
+    "text/markdown",
+    "text/plain",
+    "text/csv",
+    "application/json",
+    "text/html",
+  ].includes(value);
+}
 
 export async function listDeliverables(
   chatId: string,
@@ -233,7 +248,7 @@ export function parseDeliverableSummary(value: unknown): DeliverableSummary {
     typeof value.sizeBytes !== "number" ||
     !Number.isSafeInteger(value.sizeBytes) ||
     value.sizeBytes < 0 ||
-    value.sizeBytes > MAX_DELIVERABLE_BYTES ||
+    value.sizeBytes > deliverableByteCeiling(value.mediaType) ||
     typeof value.revisionCount !== "number" ||
     !Number.isSafeInteger(value.revisionCount) ||
     value.revisionCount < 1 ||
@@ -287,27 +302,38 @@ export function parseOutputRevertResult(
 }
 
 function isDeliverableFilename(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    [...value].length <= MAX_FILENAME_CHARACTERS &&
+    /^[A-Za-z0-9][A-Za-z0-9 _().-]*$/.test(value) &&
+    !value.endsWith(".") &&
+    value.trim() === value
+  );
+}
+
+// Mirrors the native `validate_deliverable_media_type`: a bounded, well-formed
+// `type/subtype` token with no parameters. Binary artifacts carry arbitrary
+// media types, so this is a shape check, not an allowlist.
+function isDeliverableMediaType(value: unknown): value is string {
   if (
     typeof value !== "string" ||
     value.length === 0 ||
-    [...value].length > MAX_FILENAME_CHARACTERS ||
-    !/^[A-Za-z0-9][A-Za-z0-9 _().-]*$/.test(value) ||
-    value.endsWith(".") ||
-    value.trim() !== value
+    value.length > MAX_MEDIA_TYPE_CHARACTERS
   ) {
     return false;
   }
-  return /\.(?:md|txt|csv|json|html)$/i.test(value);
+  const parts = value.split("/");
+  return (
+    parts.length === 2 &&
+    parts.every((token) => /^[A-Za-z0-9!#$&^_.+-]+$/.test(token))
+  );
 }
 
-function isDeliverableMediaType(value: unknown): value is DeliverableMediaType {
-  return [
-    "text/markdown",
-    "text/plain",
-    "text/csv",
-    "application/json",
-    "text/html",
-  ].includes(String(value));
+function deliverableByteCeiling(mediaType: unknown): number {
+  return typeof mediaType === "string" && isTextDeliverableMediaType(mediaType)
+    ? MAX_DELIVERABLE_BYTES
+    : MAX_BINARY_DELIVERABLE_BYTES;
 }
 
 function isOpaqueId(value: unknown): value is string {

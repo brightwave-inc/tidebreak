@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import {
   exportDeliverable,
+  isTextDeliverableMediaType,
   readDeliverable,
   revertOutput,
   type DeliverablePreview,
@@ -196,7 +197,11 @@ export function OutputDetailRoot({
           </div>
           <div className="min-h-0 flex-1 overflow-auto p-6">
             <div className="mx-auto max-w-4xl">
-              {preview.mediaType === "text/markdown" ? (
+              {!isTextDeliverableMediaType(preview.mediaType) ? (
+                <p className="text-sm text-muted-foreground" role="status">
+                  No preview for this file type. Save as… exports the file.
+                </p>
+              ) : preview.mediaType === "text/markdown" ? (
                 <MessageMarkdown>{preview.content}</MessageMarkdown>
               ) : (
                 <pre className="font-mono text-xs break-words whitespace-pre-wrap">

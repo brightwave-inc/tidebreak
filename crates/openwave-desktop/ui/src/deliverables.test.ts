@@ -104,11 +104,68 @@ describe("deliverable renderer projections", () => {
     ).toThrow("Invalid output revert response");
   });
 
+  it("accepts a binary artifact at its wider size ceiling and bounds it there", () => {
+    const summary = {
+      outputId,
+      filename: "chart.png",
+      mediaType: "image/png",
+      sizeBytes: 16 * 1024 * 1024,
+      revisionCount: 1,
+      updatedAt: "2026-07-24T00:00:00Z",
+      producingRunId: null,
+    };
+    expect(
+      parseDeliverablesCatalog({ deliverables: [summary], truncated: false })
+        .deliverables[0],
+    ).toEqual(summary);
+    expect(() =>
+      parseDeliverablesCatalog({
+        deliverables: [{ ...summary, sizeBytes: 16 * 1024 * 1024 + 1 }],
+        truncated: false,
+      }),
+    ).toThrow("Invalid output response");
+    // Curated text keeps its own, smaller ceiling.
+    expect(() =>
+      parseDeliverablesCatalog({
+        deliverables: [
+          {
+            ...summary,
+            filename: "table.csv",
+            mediaType: "text/csv",
+            sizeBytes: 512 * 1024 + 1,
+          },
+        ],
+        truncated: false,
+      }),
+    ).toThrow("Invalid output response");
+  });
+
+  it.each(["", "noslash", "two/sl/ashes", "text/há", `x/${"y".repeat(127)}`])(
+    "rejects malformed media type %s",
+    (mediaType) => {
+      expect(() =>
+        parseDeliverablesCatalog({
+          deliverables: [
+            {
+              outputId,
+              filename: "artifact.bin",
+              mediaType,
+              sizeBytes: 1,
+              revisionCount: 1,
+              updatedAt: "2026-07-24T00:00:00Z",
+              producingRunId: null,
+            },
+          ],
+          truncated: false,
+        }),
+      ).toThrow("Invalid output response");
+    },
+  );
+
   it.each([
     "../escape.md",
     "/tmp/private.md",
     ".hidden.md",
-    "report.pdf",
     "bad\u{202e}.md",
   ])("rejects unsafe filename %s", (filename) => {
     expect(() =>

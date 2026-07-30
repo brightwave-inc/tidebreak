@@ -105,4 +105,24 @@ describe("OutputDetailRoot", () => {
     expect(screen.queryByRole("heading", { name: "not a heading,2" })).toBeNull();
     expect(screen.getByText(/Saving writes the complete file/)).toBeVisible();
   });
+
+  // Binary artifacts arrive with empty content; the panel offers export rather
+  // than an inline rendering it cannot produce.
+  it("offers export instead of a preview for a binary artifact", async () => {
+    const apis = detailApis({
+      read: vi.fn().mockResolvedValue(
+        preview({
+          filename: "chart.png",
+          mediaType: "image/png",
+          content: "",
+        }),
+      ),
+    });
+    await openOutput(apis);
+
+    expect(
+      await screen.findByText(/No preview for this file type/),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Save as…" })).toBeEnabled();
+  });
 });
