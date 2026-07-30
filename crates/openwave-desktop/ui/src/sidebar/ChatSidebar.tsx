@@ -54,7 +54,7 @@ export function ChatSidebar({ chat }: { chat: Chat }) {
 
   return (
     <SidebarFrame>
-      <SidebarButton onClick={() => void navigate({ to: "/" })}>
+      <SidebarButton onClick={() => void navigate({ to: "/chats" })}>
         <ChevronLeft />
         <span>All chats</span>
         {elsewhereNeedsAttention && (

@@ -1,10 +1,18 @@
-import { useMemo, useState } from "react";
+import {
+  AllCommunityModule,
+  ModuleRegistry,
+  type ColDef,
+} from "ag-grid-community";
+import { AgGridReact, type CustomCellRendererProps } from "ag-grid-react";
+import { format } from "date-fns";
+import { CircleAlert, MessageCircleMore } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { CircleAlert, MessageCircleMore, Search } from "lucide-react";
 
 import type { Chat } from "./api";
 import { useChatAttention } from "./ChatAttention";
 import { useChatListStore } from "./ChatListStore";
+import { SearchInput } from "./components/SearchInput";
 import {
   Empty,
   EmptyDescription,
@@ -12,7 +20,10 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "./components/ui/empty";
-import { Input } from "./components/ui/input";
+import { WithTooltip } from "./components/ui/tooltip";
+import { useAgGridTheme } from "./sources/useAgGridTheme";
+
+ModuleRegistry.registerModules([AllCommunityModule]);
 
 /** Case-insensitive match on the title, with untitled chats matching "new chat". */
 export function matchesChatSearch(chat: Chat, query: string): boolean {
@@ -22,13 +33,52 @@ export function matchesChatSearch(chat: Chat, query: string): boolean {
   return title.toLowerCase().includes(trimmed);
 }
 
+type ChatGridContext = {
+  needsAttention: (chatId: string) => boolean;
+};
+
+type CellProps = CustomCellRendererProps<Chat>;
+
+function TitleCellRenderer(props: CellProps) {
+  const chat = props.data!;
+  const context = props.context as ChatGridContext;
+  const title = chat.title?.trim() || "New chat";
+
+  return (
+    <div className="flex h-full min-w-0 items-center gap-2">
+      <MessageCircleMore className="size-4 shrink-0 text-muted-foreground" />
+      <span className="truncate text-sm">{title}</span>
+      {context.needsAttention(chat.id) && (
+        <span
+          className="text-warning ml-1 shrink-0"
+          aria-label={`${title} needs attention`}
+          title="Needs attention"
+        >
+          <CircleAlert aria-hidden="true" className="size-4" />
+        </span>
+      )}
+    </div>
+  );
+}
+
+function CreatedCellRenderer(props: CellProps) {
+  const createdAt = props.data!.created_at;
+  const date = new Date(createdAt);
+  return (
+    <WithTooltip label={format(date, "MMM dd, yyyy HH:mm")}>
+      <time dateTime={createdAt} className="text-sm text-foreground">
+        {format(date, "MMM dd")}
+      </time>
+    </WithTooltip>
+  );
+}
+
 /**
  * Every conversation, searchable.
  *
- * This lives on home rather than beside a conversation. Finding a chat is
- * something you do between conversations, not inside one — offering it from
- * within a chat is what made the rail there a general-purpose list that
- * happened to be mounted next to a specific conversation.
+ * Finding a chat is something you do between conversations, not inside one, so
+ * the table has its own route beside home rather than a place in a
+ * conversation's rail.
  */
 export function ChatExplorer() {
   const navigate = useNavigate();
@@ -36,31 +86,73 @@ export function ChatExplorer() {
   const chatIdsWithPendingPrompts = useChatAttention(
     (state) => state.chatIdsWithPendingPrompts,
   );
-  const deletingChatId = useChatListStore((state) => state.deletingChatId);
   const [query, setQuery] = useState("");
+  const gridTheme = useAgGridTheme();
+  const gridRef = useRef<AgGridReact<Chat>>(null);
 
   const matches = useMemo(
     () => chats.filter((chat) => matchesChatSearch(chat, query)),
     [chats, query],
   );
 
-  return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3">
-      <div className="relative">
-          <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            className="pl-8"
-            placeholder="Search chats"
-            aria-label="Search chats"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-          />
-        </div>
+  const gridContext = useMemo<ChatGridContext>(
+    () => ({ needsAttention: (chatId) => chatIdsWithPendingPrompts.has(chatId) }),
+    [chatIdsWithPendingPrompts],
+  );
 
+  // Cell renderers read their state off `context`, which the grid snapshots
+  // rather than re-reading, so a changed attention set needs the cells redrawn.
+  useEffect(() => {
+    gridRef.current?.api?.refreshCells({ force: true });
+  }, [gridContext]);
+
+  const columnDefs = useMemo<ColDef<Chat>[]>(
+    () => [
+      {
+        headerName: "Title",
+        field: "title",
+        flex: 1,
+        minWidth: 240,
+        cellRenderer: TitleCellRenderer,
+        sortable: true,
+        comparator: (left: string | null, right: string | null) =>
+          (left?.trim() || "New chat").localeCompare(right?.trim() || "New chat", undefined, {
+            sensitivity: "base",
+          }),
+      },
+      {
+        headerName: "Created",
+        field: "created_at",
+        width: 130,
+        cellRenderer: CreatedCellRenderer,
+        sortable: true,
+        comparator: (left: string, right: string) => Date.parse(left) - Date.parse(right),
+      },
+    ],
+    [],
+  );
+
+  const defaultColDef = useMemo<ColDef>(
+    () => ({ resizable: true, suppressMovable: true }),
+    [],
+  );
+
+  return (
+    <div className="flex h-full min-h-0 flex-col gap-4 px-6 pt-6 pb-6">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-3">
+        <h1 className="text-lg font-medium text-foreground">All chats</h1>
+        <SearchInput
+          placeholder="Search chats"
+          aria-label="Search chats"
+          value={query}
+          onValueChange={setQuery}
+          className="max-w-md min-w-64 flex-1"
+        />
+      </div>
+
+      <div className="relative min-h-0 flex-1">
         {matches.length === 0 ? (
-          // `flex-1` by default, which on a page this tall reads as a huge
-          // empty box rather than a note.
-          <Empty className="flex-none border">
+          <Empty className="h-full border">
             <EmptyHeader>
               <EmptyMedia variant="icon">
                 <MessageCircleMore />
@@ -74,36 +166,31 @@ export function ChatExplorer() {
             </EmptyHeader>
           </Empty>
         ) : (
-          <ul className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto">
-            {matches.map((chat) => {
-              const title = chat.title?.trim() || "New chat";
-              return (
-                <li key={chat.id}>
-                  <button
-                    type="button"
-                    disabled={deletingChatId !== null}
-                    onClick={() =>
-                      void navigate({ to: "/c/$chatId", params: { chatId: chat.id } })
-                    }
-                    className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-left text-sm transition-colors hover:bg-muted disabled:pointer-events-none disabled:opacity-50"
-                  >
-                    <MessageCircleMore className="size-4 shrink-0 text-muted-foreground" />
-                    <span className="min-w-0 truncate">{title}</span>
-                    {chatIdsWithPendingPrompts.has(chat.id) && (
-                      <span
-                        className="text-warning ml-auto shrink-0"
-                        aria-label={`${title} needs attention`}
-                        title="Needs attention"
-                      >
-                        <CircleAlert aria-hidden="true" className="size-4" />
-                      </span>
-                    )}
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
+          <div className="size-full">
+            <AgGridReact<Chat>
+              ref={gridRef}
+              theme={gridTheme}
+              context={gridContext}
+              rowData={matches}
+              columnDefs={columnDefs}
+              defaultColDef={defaultColDef}
+              suppressMovableColumns
+              suppressCellFocus
+              suppressRowClickSelection
+              getRowId={(params) => params.data.id}
+              domLayout="normal"
+              rowClass="cursor-pointer"
+              onRowClicked={(event) => {
+                if (!event.data) return;
+                void navigate({
+                  to: "/c/$chatId",
+                  params: { chatId: event.data.id },
+                });
+              }}
+            />
+          </div>
         )}
+      </div>
     </div>
   );
 }

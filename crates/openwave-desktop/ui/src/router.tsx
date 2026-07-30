@@ -8,12 +8,15 @@ import {
 } from "@tanstack/react-router";
 
 import { AppShell } from "./AppShell";
+import { ChatExplorer } from "./ChatExplorer";
 import { ChatRoute } from "./ChatRoute";
 import { HomeRoute } from "./HomeRoute";
 import { useManagedPolicy } from "./managedPolicy";
 import type { PanelSearch } from "./panel/panelUrl";
+import { RouteFrame } from "./RouteFrame";
 import { SettingsRoute } from "./SettingsRoute";
 import { defaultSettingsPathFor, SETTINGS_SECTIONS } from "./settings/sections";
+import { HomeSidebar } from "./sidebar/HomeSidebar";
 
 const rootRoute = createRootRoute({ component: AppShell });
 
@@ -22,6 +25,26 @@ const homeRoute = createRoute({
   path: "/",
   component: HomeRoute,
 });
+
+/**
+ * The whole chat list as a searchable table. It shares home's rail — nothing
+ * here is scoped to a conversation either.
+ */
+const allChatsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/chats",
+  component: AllChatsRoute,
+});
+
+function AllChatsRoute() {
+  return (
+    <RouteFrame sidebar={<HomeSidebar />}>
+      <div className="content-container min-h-0 w-full min-w-0 flex-1 overflow-hidden">
+        <ChatExplorer />
+      </div>
+    </RouteFrame>
+  );
+}
 
 const chatRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -85,6 +108,7 @@ const settingsSectionRoutes = SETTINGS_SECTIONS.map((section) =>
 
 export const routeTree = rootRoute.addChildren([
   homeRoute,
+  allChatsRoute,
   chatRoute,
   settingsRoute.addChildren([settingsIndexRoute, ...settingsSectionRoutes]),
 ]);

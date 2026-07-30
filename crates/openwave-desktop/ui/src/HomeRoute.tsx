@@ -3,7 +3,6 @@ import { useNavigate } from "@tanstack/react-router";
 
 import { useApp } from "./AppContext";
 import { attachChatFiles } from "./attachments";
-import { ChatExplorer } from "./ChatExplorer";
 import { useChatListStore } from "./ChatListStore";
 import { Composer, type ComposerImages } from "./Composer";
 import {
@@ -29,6 +28,7 @@ import { useNewChatSettings } from "./NewChatSettings";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import { RouteFrame } from "./RouteFrame";
 import { HomeSidebar } from "./sidebar/HomeSidebar";
+import { WelcomeState } from "./WelcomeState";
 import type { AttachedFiles } from "./attachments";
 import { MAX_IMAGE_ATTACHMENTS } from "./ImageAttachments";
 
@@ -45,7 +45,6 @@ function isImportedDocument(
 export function HomeRoute() {
   const navigate = useNavigate();
   const { client, models, defaultModelKey } = useApp();
-  const chatsLoaded = useChatListStore((state) => state.chatsLoaded);
   const creatingChat = useChatListStore((state) => state.creatingChat);
   const draft = useComposerDraft(HOME_DRAFT_KEY);
   const setDraft = (text: string) =>
@@ -202,18 +201,10 @@ export function HomeRoute() {
     <RouteFrame sidebar={<HomeSidebar />}>
       <div className="content-container flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden px-[clamp(0.5rem,4%,5rem)]">
         <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto">
-          <div className="mx-auto flex w-full max-w-3xl flex-col gap-8 py-10">
-            <div className="space-y-2 text-center">
-              <p className="text-3xl font-normal text-foreground">
-                What are we working on?
-              </p>
-              <p className="text-muted-foreground">
-                Start a chat, or pick up where you left off.
-              </p>
-            </div>
-
-            {chatsLoaded && <ChatExplorer />}
-          </div>
+          {/* The same null state an empty conversation shows: home is where a
+              chat starts, so it greets the same way. Picking a starter prompt
+              fills the composer rather than sending, the way it does in a chat. */}
+          <WelcomeState onSelectPrompt={setDraft} />
         </div>
 
         <div className="z-10 mx-auto w-full max-w-3xl pb-2">

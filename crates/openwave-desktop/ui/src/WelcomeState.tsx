@@ -43,7 +43,7 @@ export function WelcomeState({
       <div className="welcome-copy">
         <h2>How can I help?</h2>
         <p>
-          Ask a question, search sources attached to this chat, or start a task.
+          Ask a question, search attached sources, or start a task.
         </p>
       </div>
       {onSelectPrompt && (
