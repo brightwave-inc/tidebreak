@@ -1,4 +1,6 @@
+import { getName } from "@tauri-apps/api/app";
 import { ChevronLeft, ChevronRight } from "lucide-react";
+import { useEffect, useState } from "react";
 
 import { WithTooltip } from "@/components/ui/tooltip";
 import { useDesktopNavigation } from "./DesktopNavigation";
@@ -13,6 +15,19 @@ import { useDesktopNavigation } from "./DesktopNavigation";
  */
 export function Titlebar() {
   const navigation = useDesktopNavigation();
+  // The host owns the display name: debug builds report "OpenWave [dev]" so a
+  // dev window is distinguishable from an installed release. The titlebar only
+  // renders inside the native host, where `getName` is always available.
+  const [appName, setAppName] = useState("OpenWave");
+  useEffect(() => {
+    let cancelled = false;
+    getName().then((name) => {
+      if (!cancelled) setAppName(name);
+    }, () => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   return (
     <div className="titlebar" data-tauri-drag-region>
@@ -41,7 +56,7 @@ export function Titlebar() {
         </WithTooltip>
       </div>
       <span className="titlebar-title" data-tauri-drag-region>
-        OpenWave
+        {appName}
       </span>
     </div>
   );

@@ -143,7 +143,16 @@ pub fn run() {
     // installed release build.
     #[cfg(debug_assertions)]
     {
-        context.config_mut().identifier = "io.brightwave.openwave.dev".into();
+        let config = context.config_mut();
+        config.identifier = "io.brightwave.openwave.dev".into();
+        // A `[dev]` suffix keeps a debug window visually distinct from an
+        // installed release. The package-info name is what the app menu and
+        // the frontend's `getName()` report, so the UI titlebar follows it.
+        config.product_name = Some("OpenWave [dev]".into());
+        if let Some(window) = config.app.windows.first_mut() {
+            window.title = "OpenWave [dev]".into();
+        }
+        context.package_info_mut().name = "OpenWave [dev]".into();
     }
 
     let (info_tx, info_rx) = watch::channel(None);
