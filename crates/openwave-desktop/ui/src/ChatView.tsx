@@ -13,6 +13,7 @@ import { useChatSessionStore } from "./ChatSessionStore";
 import {
   Composer,
   type ComposerFiles,
+  type ComposerFolders,
   type ComposerImages,
 } from "./Composer";
 import { MessageList } from "./MessageList";
@@ -38,6 +39,7 @@ export type ChatViewProps = {
   composerModelMenu: ReactNode;
   composerImages: ComposerImages;
   files: ComposerFiles;
+  folders?: ComposerFolders;
   nativeDropTarget?: ReactNode;
   attachError: string | null;
   onDraftChange: (value: string) => void;
@@ -65,6 +67,7 @@ export function ChatView({
   composerModelMenu,
   composerImages,
   files,
+  folders,
   nativeDropTarget,
   attachError,
   onDraftChange,
@@ -326,6 +329,7 @@ export function ChatView({
           modelMenu={composerModelMenu}
           images={composerImages}
           files={files}
+          folders={folders}
           nativeDropTarget={nativeDropTarget}
           attachError={attachError}
           // Typing retires the verdict on the last piece of guidance. Accepted

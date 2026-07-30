@@ -30,6 +30,8 @@ import {
   PICKER_HOLDERS,
   useNativePickerLatch,
 } from "./NativePickerLatch";
+import { folderAccessLabel } from "./FolderAccess";
+import { useRefreshSignals } from "./RefreshSignals";
 
 /**
  * A chat's connected folders: the directories the native host may reach on this
@@ -48,6 +50,7 @@ export function FoldersView({ chat }: { chat: Chat }) {
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const refreshGeneration = useRef(0);
+  const folderAccess = useRefreshSignals((state) => state.folderAccess);
   const { confirm, dialog: confirmDialog } = useConfirm();
   const connectedIds = new Set(folders.map((folder) => folder.rootId));
   const availableFolders = approvedFolders.filter(
@@ -80,7 +83,7 @@ export function FoldersView({ chat }: { chat: Chat }) {
     return () => {
       refreshGeneration.current += 1;
     };
-  }, [chat.id, chat.project_id]);
+  }, [chat.id, chat.project_id, folderAccess]);
 
   /**
    * Run one native picker interaction under the app-wide latch.
@@ -98,7 +101,7 @@ export function FoldersView({ chat }: { chat: Chat }) {
     setError(null);
     try {
       const connected = await open();
-      if (connected) await refresh();
+      if (connected) useRefreshSignals.getState().signal("folderAccess");
     } catch (err) {
       setError(String(err));
     } finally {
@@ -129,7 +132,7 @@ export function FoldersView({ chat }: { chat: Chat }) {
     setError(null);
     try {
       await disconnectFolder(chat, folder.rootId);
-      await refresh();
+      useRefreshSignals.getState().signal("folderAccess");
     } catch (err) {
       setError(String(err));
     } finally {
@@ -253,17 +256,10 @@ export function FoldersView({ chat }: { chat: Chat }) {
  * access the agent no longer has, which is the failure worth designing out.
  */
 function AccessBadge({ capabilities }: { capabilities: FolderCapability[] }) {
-  const read = capabilities.includes("read");
-  const write = capabilities.includes("write");
-  const label = read
-    ? write
-      ? "Read and write"
-      : "Read only"
-    : write
-      ? "Write only"
-      : "No access";
+  const label = folderAccessLabel(capabilities);
+  const hasAccess = label !== "No access";
   return (
-    <Badge variant={read || write ? "secondary" : "outline"} size="sm">
+    <Badge variant={hasAccess ? "secondary" : "outline"} size="sm">
       {label}
     </Badge>
   );

@@ -60,6 +60,7 @@ import { ChatSidebar } from "./sidebar/ChatSidebar";
 import { useRefreshSignals } from "./RefreshSignals";
 import { TranscriptVisibilityProvider } from "./TranscriptVisibility";
 import { useTurnLifecycle } from "./TurnLifecycleSignals";
+import { useChatFolderAttachments } from "./useChatFolderAttachments";
 
 let msgSeq = 0;
 
@@ -105,6 +106,8 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   const draftRef = useRef("");
 
   const chat = chats.find((candidate) => candidate.id === chatId) ?? null;
+  const nativeHost = hasNativeHost();
+  const folders = useChatFolderAttachments(chat, nativeHost);
 
   // A chat id that is not in the list — deleted in another window, or a stale
   // deep link — should land somewhere real rather than on an empty frame.
@@ -412,7 +415,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             client={client}
             chat={chat!}
             hydrated={hydrated}
-            nativeHost={hasNativeHost()}
+            nativeHost={nativeHost}
             deletingChat={deletingChatId !== null}
             draft={draft}
             draftRef={draftRef}
@@ -425,6 +428,13 @@ export function ChatRoute({ chatId }: { chatId: string }) {
                 setFiles((current) =>
                   current.filter((file) => file.documentId !== documentId),
                 ),
+            }}
+            folders={{
+              items: folders.items,
+              working: folders.working,
+              error: folders.error,
+              onAttach: nativeHost ? folders.attach : undefined,
+              onRemove: folders.remove,
             }}
             nativeDropTarget={
               <DocumentDropTarget
