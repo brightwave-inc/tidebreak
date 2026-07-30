@@ -99,6 +99,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddLocalApps),
             Box::new(AddAppGrants),
             Box::new(AddToolCallRawArguments),
+            Box::new(RaiseAttemptBudgets),
         ]
     }
 }
@@ -453,6 +454,26 @@ impl MigrationName for AddToolCallRawArguments {
     }
 }
 
+/// Raises the durable attempt budgets of in-flight work from 3 to 5
+/// (issue #1147), matching the `DEFAULT_MAX_ATTEMPTS` constants new rows are
+/// accepted with. Only non-terminal rows move: finished rows keep the budget
+/// they actually ran against, and the raised budget is what lets a parked
+/// `retry_wait` row spend the worker's exponential schedule and wall-clock
+/// envelope instead of failing on the next transient error. Follows the
+/// row-bump pattern of `AddClaimedTurnEffectLeases`; the column default needs
+/// no alter because every accept path writes `max_attempts` explicitly.
+///
+/// The `down` is a deliberate no-op: shrinking a row that has already spent
+/// the extra attempts would strand it with `attempt_count > max_attempts`,
+/// which the shape checks reject.
+struct RaiseAttemptBudgets;
+
+impl MigrationName for RaiseAttemptBudgets {
+    fn name(&self) -> &str {
+        "m20260730_000037_raise_attempt_budgets"
+    }
+}
+
 #[async_trait::async_trait]
 impl MigrationTrait for AddToolCallRawArguments {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
@@ -475,6 +496,34 @@ impl MigrationTrait for AddToolCallRawArguments {
                     .to_owned(),
             )
             .await
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for RaiseAttemptBudgets {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(
+                "UPDATE turn_run SET max_attempts = 5 \
+                 WHERE max_attempts = 3 AND status IN \
+                 ('queued', 'running', 'retry_wait', 'resuming', 'waiting_for_client', \
+                  'waiting_for_agent_run', 'cancelling', 'cancelling_client')",
+            )
+            .await?;
+        manager
+            .get_connection()
+            .execute_unprepared(
+                "UPDATE agent_run SET max_attempts = 5 \
+                 WHERE max_attempts = 3 AND status IN \
+                 ('active', 'queued', 'running', 'cancelling', 'waiting', 'retry_wait')",
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        Ok(())
     }
 }
 

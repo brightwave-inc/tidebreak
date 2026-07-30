@@ -2497,6 +2497,150 @@ async fn m0024_widens_and_narrows_the_execution_location_domain() {
     );
 }
 
+/// The attempt-budget raise (issue #1147) is a persisted-value contract: rows
+/// still in flight under the old budget of three must come out of the
+/// migration with the raised budget, while terminal rows keep the budget they
+/// actually ran against.
+#[tokio::test]
+async fn m0037_raises_attempt_budgets_only_for_in_flight_runs() {
+    use sea_orm_migration::MigratorTrait;
+
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        dir.path().join("attempt-budget-upgrade.db").display()
+    );
+    let conn = Database::connect(&url).await.unwrap();
+    let raise_index = migration::Migrator::migrations()
+        .iter()
+        .position(|migration| migration.name() == "m20260730_000037_raise_attempt_budgets")
+        .expect("the attempt-budget migration is registered");
+    migration::Migrator::up(&conn, Some(raise_index as u32))
+        .await
+        .unwrap();
+
+    // Rows accepted under the old budget of three. Foreign keys stay off on
+    // this connection so no chat/message parent rows are needed; only the
+    // budget bump is under test. The literal 5 below is what the frozen
+    // migration writes, deliberately not re-derived from the constants.
+    conn.execute_unprepared("PRAGMA foreign_keys=OFF")
+        .await
+        .unwrap();
+    // One chat per row: turn_run allows a single active turn per chat, and
+    // the parent/agent rows the keys would point at are deliberately absent.
+    let queued_turn = TurnId::new();
+    let retry_turn = TurnId::new();
+    let failed_turn = TurnId::new();
+    conn.execute_unprepared(&format!(
+        "INSERT INTO turn_run \
+         (id, chat_id, agent_run_id, agent_run_depth, input_message_id, model, status, \
+          attempt_count, max_attempts, claim_count, available_at, started_at, finished_at, \
+          last_error_code, created_at, updated_at) \
+         VALUES \
+         (X'{queued_turn}', X'{queued_chat}', X'{queued_agent}', 0, X'{queued_msg}', \
+          'test-model', 'queued', 0, 3, 0, '2026-07-01 00:00:00+00:00', NULL, NULL, NULL, \
+          '2026-07-01 00:00:00+00:00', '2026-07-01 00:00:00+00:00'), \
+         (X'{retry_turn}', X'{retry_chat}', X'{retry_agent}', 0, X'{retry_msg}', \
+          'test-model', 'retry_wait', 2, 3, 2, '2026-07-01 00:01:00+00:00', \
+          '2026-07-01 00:00:30+00:00', NULL, 'overloaded', \
+          '2026-07-01 00:00:00+00:00', '2026-07-01 00:01:00+00:00'), \
+         (X'{failed_turn}', X'{failed_chat}', X'{failed_agent}', 0, X'{failed_msg}', \
+          'test-model', 'failed', 3, 3, 3, '2026-07-01 00:02:00+00:00', \
+          '2026-07-01 00:00:30+00:00', '2026-07-01 00:02:00+00:00', 'overloaded', \
+          '2026-07-01 00:00:00+00:00', '2026-07-01 00:02:00+00:00');",
+        queued_turn = queued_turn.0.simple(),
+        retry_turn = retry_turn.0.simple(),
+        failed_turn = failed_turn.0.simple(),
+        queued_chat = ChatId::new().0.simple(),
+        retry_chat = ChatId::new().0.simple(),
+        failed_chat = ChatId::new().0.simple(),
+        queued_agent = AgentRunId::foreground_for_chat(ChatId::new()).0.simple(),
+        retry_agent = AgentRunId::foreground_for_chat(ChatId::new()).0.simple(),
+        failed_agent = AgentRunId::foreground_for_chat(ChatId::new()).0.simple(),
+        queued_msg = MessageId::new().0.simple(),
+        retry_msg = MessageId::new().0.simple(),
+        failed_msg = MessageId::new().0.simple(),
+    ))
+    .await
+    .unwrap();
+
+    let queued_call = CallId::new();
+    let retry_call = CallId::new();
+    let failed_call = CallId::new();
+    let foreground_id = AgentRunId::foreground_for_chat(ChatId::new());
+    let queued_run = AgentRunId::sandbox_for_spawn_call(queued_call);
+    let retry_run = AgentRunId::sandbox_for_spawn_call(retry_call);
+    let failed_run = AgentRunId::sandbox_for_spawn_call(failed_call);
+    conn.execute_unprepared(&format!(
+        "INSERT INTO agent_run \
+         (id, chat_id, parent_id, parent_depth, spawn_call_id, tier, execution_location, \
+          depth, status, input, attempt_count, max_attempts, claim_count, available_at, \
+          deadline_at, started_at, finished_at, last_error_code, created_at, updated_at) \
+         VALUES \
+         (X'{foreground}', X'{foreground_chat}', NULL, NULL, NULL, 'foreground', \
+          'in_process', 0, 'active', NULL, 0, 0, 0, '2026-07-01 00:00:00+00:00', NULL, \
+          NULL, NULL, NULL, '2026-07-01 00:00:00+00:00', '2026-07-01 00:00:00+00:00'), \
+         (X'{queued_run}', X'{queued_chat}', X'{foreground}', 0, X'{queued_call}', \
+          'background', 'in_process', 1, 'queued', 'legacy delegated task', 0, 3, 0, \
+          '2026-07-01 00:00:00+00:00', '2026-07-01 00:30:00+00:00', NULL, NULL, NULL, \
+          '2026-07-01 00:00:00+00:00', '2026-07-01 00:00:00+00:00'), \
+         (X'{retry_run}', X'{retry_chat}', X'{foreground}', 0, X'{retry_call}', \
+          'background', 'in_process', 1, 'retry_wait', 'legacy delegated task', 1, 3, 1, \
+          '2026-07-01 00:01:00+00:00', '2026-07-01 00:30:00+00:00', \
+          '2026-07-01 00:00:30+00:00', NULL, 'overloaded', \
+          '2026-07-01 00:00:00+00:00', '2026-07-01 00:01:00+00:00'), \
+         (X'{failed_run}', X'{failed_chat}', X'{foreground}', 0, X'{failed_call}', \
+          'background', 'in_process', 1, 'failed', 'legacy delegated task', 3, 3, 3, \
+          '2026-07-01 00:02:00+00:00', '2026-07-01 00:30:00+00:00', \
+          '2026-07-01 00:00:30+00:00', '2026-07-01 00:02:00+00:00', 'overloaded', \
+          '2026-07-01 00:00:00+00:00', '2026-07-01 00:02:00+00:00');",
+        foreground = foreground_id.0.simple(),
+        foreground_chat = ChatId::new().0.simple(),
+        queued_chat = ChatId::new().0.simple(),
+        retry_chat = ChatId::new().0.simple(),
+        failed_chat = ChatId::new().0.simple(),
+        queued_run = queued_run.0.simple(),
+        retry_run = retry_run.0.simple(),
+        failed_run = failed_run.0.simple(),
+        queued_call = queued_call.0.simple(),
+        retry_call = retry_call.0.simple(),
+        failed_call = failed_call.0.simple(),
+    ))
+    .await
+    .unwrap();
+
+    migration::Migrator::up(&conn, None).await.unwrap();
+
+    let store = DbStore { conn };
+    for (turn, expected) in [(queued_turn, 5), (retry_turn, 5), (failed_turn, 3)] {
+        assert_eq!(
+            store
+                .get_turn_run(turn)
+                .await
+                .unwrap()
+                .unwrap()
+                .max_attempts,
+            expected
+        );
+    }
+    for (run, expected) in [
+        (queued_run, 5),
+        (retry_run, 5),
+        (failed_run, 3),
+        (foreground_id, 0),
+    ] {
+        assert_eq!(
+            store
+                .get_agent_run(run)
+                .await
+                .unwrap()
+                .unwrap()
+                .max_attempts,
+            expected
+        );
+    }
+}
+
 #[tokio::test]
 async fn m0011_preserves_legacy_documents_as_conversationless() {
     let dir = tempfile::tempdir().unwrap();

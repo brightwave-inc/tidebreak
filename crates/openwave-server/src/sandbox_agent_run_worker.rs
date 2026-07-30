@@ -72,8 +72,8 @@ impl Default for SandboxAgentRunWorkerConfig {
             // A parent turn may be waiting on this run, but nothing it retries
             // recovers in milliseconds: a sandbox that is still provisioning,
             // a provider that just refused, a delegated resource that has not
-            // appeared yet. Retrying inside a second only spends one of three
-            // attempts on the same unfinished state, so the first wait is five
+            // appeared yet. Retrying inside a second only spends an attempt
+            // on the same unfinished state, so the first wait is five
             // seconds. The envelope matches the run's own wall-clock deadline,
             // which the database already enforces.
             retry: RetrySchedule::new(
@@ -2575,16 +2575,14 @@ mod tests {
             .finish_agent_run_cancellation(second, claimed.lease_token.unwrap())
             .await
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert_eq!(
-            worker.run_once().await.unwrap(),
-            SandboxAgentRunWorkerOutcome::RetryScheduled(first)
-        );
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert_eq!(
-            worker.run_once().await.unwrap(),
-            SandboxAgentRunWorkerOutcome::Failed(first)
-        );
+        // Each remaining attempt parks in retry-wait until the durable
+        // budget is spent and the run fails terminally.
+        let mut outcome = SandboxAgentRunWorkerOutcome::RetryScheduled(first);
+        for _ in 1..openwave_core::AgentRun::DEFAULT_MAX_ATTEMPTS {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            outcome = worker.run_once().await.unwrap();
+        }
+        assert_eq!(outcome, SandboxAgentRunWorkerOutcome::Failed(first));
         let terminal = store.get_agent_run(first).await.unwrap().unwrap();
         assert_eq!(terminal.status, AgentRunStatus::Failed);
         let inbox = store
