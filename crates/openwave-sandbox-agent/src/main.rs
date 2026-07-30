@@ -22,8 +22,25 @@
 //! - `OPENWAVE_SANDBOX_WORKSPACE` — the agent's in-container workspace directory,
 //!   the root the `exec` and filesystem tools are scoped to (default
 //!   `/workspace`, provisioned in the container image).
+//! - `OPENWAVE_SANDBOX_LIFETIME_CAP_SECS` — an absolute lifetime cap. When it
+//!   elapses the entrypoint exits, which stops the container.
+//!
+//! # Why the cap is enforced here
+//!
+//! This process is the container's PID 1, so its exit is the container's exit.
+//! That is the only place an absolute cap can be enforced and still hold when the
+//! host is what failed: a host-side timer dies with the host, and the host dying
+//! mid-run is exactly the case that strands a container. The host's orphan sweep
+//! reclaims containers a *living* host has lost track of; this cap covers the
+//! host that never comes back.
+//!
+//! It is an absolute bound on existence, not an idle timeout — a long, legitimate
+//! exec is not interrupted for being slow, and a container that keeps itself
+//! nominally busy still dies. Distinguishing idle from busy would need a keepalive
+//! from the attached host, which the transport does not carry yet.
 
 use std::env;
+use std::time::Duration;
 
 use openwave_sandbox_agent::{run_agent, Supervisor};
 use openwave_sandbox_protocol::{reverse::Capability, SandboxRun, TransportSecret};
@@ -37,6 +54,11 @@ const TRANSPORT_SECRET_ENV: &str = "OPENWAVE_TRANSPORT_SECRET";
 
 /// Default in-container workspace root for the sandbox-resident tool surface.
 const DEFAULT_WORKSPACE: &str = "/workspace";
+
+/// Environment variable carrying the absolute lifetime cap, in seconds. Must
+/// match the name the backend injects (see `sandbox_docker`'s
+/// `LIFETIME_CAP_ENV`).
+const LIFETIME_CAP_ENV: &str = "OPENWAVE_SANDBOX_LIFETIME_CAP_SECS";
 
 #[tokio::main]
 async fn main() {
@@ -85,7 +107,70 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Keep serving so the host can drain the event stream and drive teardown.
-    supervisor.serve().await;
+    // Keep serving so the host can drain the event stream and drive teardown —
+    // but no longer than the lifetime cap, whose whole purpose is to end a run
+    // whose host will never drive that teardown.
+    let cap = lifetime_cap(env::var(LIFETIME_CAP_ENV).ok().as_deref());
+    tokio::select! {
+        () = supervisor.serve() => {}
+        () = lifetime_elapsed(cap) => {
+            let secs = cap.unwrap_or_default().as_secs();
+            eprintln!("openwave-sandbox-agent: lifetime cap of {secs}s reached; exiting");
+        }
+    }
     Ok(())
+}
+
+/// The configured cap, if the environment names a usable one.
+///
+/// Absent, unparseable, and zero all mean "no cap": a container must not die on
+/// arrival because a cap was mistyped, and a run with no cap configured is no
+/// worse off than before one existed.
+fn lifetime_cap(configured: Option<&str>) -> Option<Duration> {
+    configured?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+}
+
+/// Completes when the cap elapses. With no cap it never completes, so the
+/// `select!` above reduces to serving until teardown.
+async fn lifetime_elapsed(cap: Option<Duration>) {
+    match cap {
+        Some(cap) => tokio::time::sleep(cap).await,
+        None => std::future::pending().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_malformed_or_zero_cap_leaves_the_sandbox_uncapped() {
+        assert_eq!(lifetime_cap(Some(" 900 ")), Some(Duration::from_secs(900)));
+        assert_eq!(lifetime_cap(None), None);
+        assert_eq!(lifetime_cap(Some("")), None);
+        assert_eq!(lifetime_cap(Some("soon")), None);
+        assert_eq!(lifetime_cap(Some("-1")), None);
+        // The dangerous misreading: zero must not mean "expire immediately".
+        assert_eq!(lifetime_cap(Some("0")), None);
+    }
+
+    /// The cap must fire on its own, and only when configured. A paused clock
+    /// proves both without spending the wall time: tokio auto-advances to the
+    /// next deadline, and a future with no deadline never becomes ready.
+    #[tokio::test(start_paused = true)]
+    async fn the_cap_ends_the_run_only_when_one_is_configured() {
+        lifetime_elapsed(Some(Duration::from_secs(4 * 60 * 60))).await;
+
+        let uncapped = lifetime_elapsed(None);
+        tokio::pin!(uncapped);
+        tokio::select! {
+            () = &mut uncapped => panic!("an uncapped sandbox must never self-terminate"),
+            () = tokio::time::sleep(Duration::from_secs(365 * 24 * 60 * 60)) => {}
+        }
+    }
 }
