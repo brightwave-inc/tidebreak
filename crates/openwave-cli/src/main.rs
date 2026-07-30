@@ -4,8 +4,10 @@
 //! port and prints the address and per-launch bearer token it minted, so a local
 //! client (the desktop shell, or a script) can connect. Configuration comes from
 //! the environment via [`Config::from_env`] (`OPENWAVE_PROFILE`,
-//! `OPENWAVE_DATA_DIR`); the model API key comes from `ANTHROPIC_API_KEY`, and
-//! `OPENWAVE_MCP_CONFIG` may name an external stdio-server configuration file.
+//! `OPENWAVE_DATA_DIR`, `OPENWAVE_CONTAINER_EXECUTION_ENABLED`, and
+//! `OPENWAVE_CONTAINER_IMAGE`); the model API key comes from
+//! `ANTHROPIC_API_KEY`, and `OPENWAVE_MCP_CONFIG` may name an external
+//! stdio-server configuration file.
 //!
 //! `openwave mcp <workspace>` serves the built-in read-only filesystem tools over
 //! MCP stdio, confined to the explicit workspace directory.

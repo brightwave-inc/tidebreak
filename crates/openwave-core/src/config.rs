@@ -58,6 +58,15 @@ pub struct Config {
     /// other embeddings leave it absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec_scripts_dir: Option<PathBuf>,
+    /// Whether newly spawned background agent runs may execute inside a local
+    /// container when the configured runtime is available. Disabled by default,
+    /// so existing installations keep the in-process scheduler path.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub container_execution_enabled: bool,
+    /// Optional container image override for sandbox-resident agent runs.
+    /// `None` uses the server's documented placeholder image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_image: Option<String>,
 }
 
 impl Config {
@@ -69,17 +78,23 @@ impl Config {
             keychain_service: None,
             bundle_id: None,
             exec_scripts_dir: None,
+            container_execution_enabled: false,
+            container_image: None,
         }
     }
 
     /// Load from the environment, falling back to sensible defaults:
-    /// `OPENWAVE_PROFILE` (default `desktop`) and `OPENWAVE_DATA_DIR` (default
+    /// `OPENWAVE_PROFILE` (default `desktop`), `OPENWAVE_DATA_DIR` (default
     /// `./.openwave` under the current directory — desktop/CLI clients should set
-    /// this to the platform's app-data location).
+    /// this to the platform's app-data location),
+    /// `OPENWAVE_CONTAINER_EXECUTION_ENABLED` (default `false`), and
+    /// `OPENWAVE_CONTAINER_IMAGE` (defaulting to the server's placeholder image).
     pub fn from_env() -> Result<Self> {
         Self::from_vars(
             std::env::var("OPENWAVE_PROFILE").ok(),
             std::env::var_os("OPENWAVE_DATA_DIR"),
+            std::env::var("OPENWAVE_CONTAINER_EXECUTION_ENABLED").ok(),
+            std::env::var("OPENWAVE_CONTAINER_IMAGE").ok(),
         )
     }
 
@@ -90,7 +105,12 @@ impl Config {
     /// An **empty** value is treated as unset: a caller that exports
     /// `OPENWAVE_DATA_DIR=` (or an empty profile) gets the documented defaults,
     /// not an empty path rooted at the current directory.
-    fn from_vars(profile: Option<String>, data_dir: Option<OsString>) -> Result<Self> {
+    fn from_vars(
+        profile: Option<String>,
+        data_dir: Option<OsString>,
+        container_execution_enabled: Option<String>,
+        container_image: Option<String>,
+    ) -> Result<Self> {
         let profile = match profile.filter(|value| !value.is_empty()).as_deref() {
             None | Some("desktop") => Profile::Desktop,
             Some("self_host" | "selfhost") => Profile::SelfHost,
@@ -102,12 +122,24 @@ impl Config {
                 .map_err(|e| AgentError::config(format!("no working directory: {e}")))?
                 .join(".openwave"),
         };
+        let container_execution_enabled =
+            match container_execution_enabled.filter(|value| !value.is_empty()) {
+                None => false,
+                Some(value) => value.parse::<bool>().map_err(|_| {
+                    AgentError::config(format!(
+                        "invalid OPENWAVE_CONTAINER_EXECUTION_ENABLED: {value}"
+                    ))
+                })?,
+            };
+        let container_image = container_image.filter(|value| !value.is_empty());
         Ok(Self {
             profile,
             data_dir,
             keychain_service: None,
             bundle_id: None,
             exec_scripts_dir: None,
+            container_execution_enabled,
+            container_image,
         })
     }
 
@@ -125,6 +157,10 @@ impl Config {
                 .map_err(|_| AgentError::config("OPENWAVE_DATABASE_URL is required for self-host")),
         }
     }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[cfg(test)]
@@ -151,7 +187,7 @@ mod tests {
     fn empty_data_dir_var_falls_back_to_the_default() {
         // `OPENWAVE_DATA_DIR=` (set but empty) must behave like unset, not point
         // the store at `openwave.db` in the current directory.
-        let config = Config::from_vars(None, Some(OsString::new())).unwrap();
+        let config = Config::from_vars(None, Some(OsString::new()), None, None).unwrap();
         let expected = std::env::current_dir().unwrap().join(".openwave");
         assert_eq!(config.data_dir, expected);
         assert_eq!(config.profile, Profile::Desktop);
@@ -159,21 +195,32 @@ mod tests {
 
     #[test]
     fn empty_profile_var_defaults_to_desktop() {
-        let config = Config::from_vars(Some(String::new()), Some(OsString::from("/data"))).unwrap();
+        let config = Config::from_vars(
+            Some(String::new()),
+            Some(OsString::from("/data")),
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(config.profile, Profile::Desktop);
     }
 
     #[test]
     fn explicit_vars_are_honored() {
-        let config =
-            Config::from_vars(Some("self_host".into()), Some(OsString::from("/data"))).unwrap();
+        let config = Config::from_vars(
+            Some("self_host".into()),
+            Some(OsString::from("/data")),
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(config.profile, Profile::SelfHost);
         assert_eq!(config.data_dir, PathBuf::from("/data"));
     }
 
     #[test]
     fn unknown_profile_var_is_an_error() {
-        assert!(Config::from_vars(Some("bogus".into()), None).is_err());
+        assert!(Config::from_vars(Some("bogus".into()), None, None, None).is_err());
     }
 
     #[test]
@@ -188,5 +235,32 @@ mod tests {
         let config = serde_json::from_str::<Config>(r#"{"data_dir":"/data"}"#).unwrap();
         assert_eq!(config.keychain_service, None);
         assert_eq!(config.exec_scripts_dir, None);
+        assert!(!config.container_execution_enabled);
+        assert_eq!(config.container_image, None);
+    }
+
+    #[test]
+    fn container_execution_defaults_off_without_changing_default_json() {
+        let config = Config::desktop("/data");
+        let json = serde_json::to_value(config).unwrap();
+        assert_eq!(json.get("container_execution_enabled"), None);
+        assert_eq!(json.get("container_image"), None);
+    }
+
+    #[test]
+    fn container_execution_vars_are_validated_and_honored() {
+        let config = Config::from_vars(
+            None,
+            Some(OsString::from("/data")),
+            Some("true".into()),
+            Some("openwave-sandbox-agent:dev".into()),
+        )
+        .unwrap();
+        assert!(config.container_execution_enabled);
+        assert_eq!(
+            config.container_image.as_deref(),
+            Some("openwave-sandbox-agent:dev")
+        );
+        assert!(Config::from_vars(None, None, Some("yes".into()), None).is_err());
     }
 }
