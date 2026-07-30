@@ -123,9 +123,13 @@ interface; server-owned source tools use it too.
 ## Code execution
 
 Command execution lives in `openwave-code-execution`, not in core. Its `exec`
-tool accepts one executable, direct argument vector, and private-scratch-relative
-working directory. The host—not the model—selects the provider and timeout
-through `GET`/`PUT /code-execution`.
+tool accepts one executable, direct argument vector, private-scratch-relative
+working directory, and an optional bounded `files` list naming the scratch
+paths to stage into a managed sandbox before the command runs — managed
+sandboxes see only the listed paths (plus what earlier commands in the same
+session created), and only `output/` and `preview/` are copied back afterwards.
+The host—not the model—selects the provider and timeout through
+`GET`/`PUT /code-execution`.
 
 The provider contract includes both the canonical tool-call ID and an opaque
 chat workspace ID. The former is an idempotency key; the latter lets the local

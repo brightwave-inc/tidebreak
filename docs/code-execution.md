@@ -146,6 +146,8 @@ A request contains:
 - an opaque workspace ID derived from the chat;
 - one executable and argument vector (not an implicitly parsed shell string);
 - one private-workspace-relative current directory;
+- an optional bounded list of scratch-relative files or directories to stage
+  into a managed sandbox before the command runs;
 - for native local execution only, a bounded set of absolute folder paths
   resolved by the host from the chat's current root attachments.
 
@@ -286,6 +288,43 @@ The provider adapters own only their control-plane and command transports:
   and argv element before dispatch and prefixes the result with `exec`. Shell
   metacharacters therefore remain argument data. A caller that deliberately
   needs a shell must still name `/bin/sh` and `-c` explicitly.
+
+### File staging
+
+A managed sandbox has its own filesystem, so the host moves files between the
+chat's private scratch and the sandbox around each command. The contract is
+explicit, not a mirror:
+
+- **Only listed paths go in.** The `exec` call's `files` argument names the
+  scratch-relative files or directories (up to 64 paths) the command needs;
+  directories stage recursively. Nothing else in scratch is uploaded — a file
+  written with `write_file` or a materialized attachment under `documents/` is
+  visible to a managed command only if listed. The host also stages a fixed
+  set of infrastructure on its own: the hidden markers that make `output/` and
+  `preview/` exist remotely, and the bundled document helpers under
+  `.openwave/exec-scripts`.
+- **Failures are loud, never silent.** A listed path that does not exist, is a
+  symlink, or expands past the 256-file staging bound fails the call with an
+  error naming the path. The local provider validates the listed paths the
+  same way even though it stages nothing, so a bad path fails identically on
+  every provider. Only per-entry conditions found *inside* a listed directory
+  (a dependency tree, a nested symlink, an oversized file) degrade into
+  bounded sync notes in the tool result. The per-file transfer cap applies in
+  both directions.
+- **Unchanged files are not re-uploaded.** The session pool remembers a
+  content digest per staged path for the live sandbox instance and skips
+  identical content on later commands in the same session. The memory is bound
+  to the exact sandbox: a recreated or destroyed sandbox starts from an empty
+  ledger and is staged again.
+- **Only `output/` and `preview/` come back.** After the command, the host
+  pulls those two subtrees into scratch — they feed the output-versioning and
+  preview-image scans — validating every returned path and refusing anything
+  the backend lists outside them. Intermediates the command wrote elsewhere
+  stay in the sandbox for later commands in the same session.
+
+When a managed command fails, the sync notes include one bounded `staged:`
+line naming what was staged (or pointing at the `files` argument when nothing
+was), so a missing-input failure is diagnosable from the tool result.
 
 Managed credentials remain in the OS secret store and never enter configuration,
 tool arguments, logs, or renderer responses. Remote API endpoints are fixed by
