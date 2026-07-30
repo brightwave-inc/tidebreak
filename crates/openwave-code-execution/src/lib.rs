@@ -26,7 +26,10 @@ mod types;
 
 pub use daytona::{DaytonaCredential, DaytonaExecutionProvider, DAYTONA_CREDENTIAL_KEY};
 pub use e2b::{E2BCredential, E2BExecutionProvider, E2B_CREDENTIAL_KEY};
-pub use host_paths::{resolve_scratch_directory, write_without_following};
+pub use host_paths::{
+    resolve_scratch_directory, try_resolve_scratch_directory, write_without_following,
+    ScratchRefusal,
+};
 pub use local::LocalExecutionProvider;
 pub use preview::{scan_preview_directory, PreviewScan};
 pub use remote::RemoteSessionPool;

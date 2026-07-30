@@ -13,6 +13,51 @@ use std::path::{Path, PathBuf};
 
 use tokio::io::AsyncWriteExt;
 
+/// Why a host directory under the private scratch tree was refused.
+///
+/// The distinction is the point: a planted symlink and a permissions failure
+/// are the same `None` to a caller, but only one of them is the boundary being
+/// probed, and collapsing them makes an attack read as noise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScratchRefusal {
+    /// A component tried to leave the root, or the resolved directory landed
+    /// outside it. Nothing legitimate aims there.
+    Escape,
+    /// An intermediate component is a symlink. Following it is exactly the
+    /// escape this resolver exists to refuse.
+    SymlinkedComponent,
+    /// An intermediate component exists and is neither a directory nor a
+    /// symlink — a regular file where a directory was expected.
+    NotADirectory,
+    /// The directory is missing and could not be created, or could not be
+    /// canonicalized: a permissions failure, or a lost race with another
+    /// writer. Says nothing about the caller's intent.
+    Unavailable,
+}
+
+impl ScratchRefusal {
+    /// Whether the refusal is the containment boundary doing its job rather
+    /// than the host failing at an ordinary filesystem operation.
+    pub fn is_containment(self) -> bool {
+        matches!(self, Self::Escape | Self::SymlinkedComponent)
+    }
+}
+
+/// Resolve `relative` as a directory under `root` without walking through a
+/// symlink at any component, discarding why a refusal happened.
+///
+/// Callers that report or log the refusal should use
+/// [`try_resolve_scratch_directory`] instead.
+pub async fn resolve_scratch_directory(
+    root: &Path,
+    relative: &str,
+    create: bool,
+) -> Option<PathBuf> {
+    try_resolve_scratch_directory(root, relative, create)
+        .await
+        .ok()
+}
+
 /// Resolve `relative` as a directory under `root` without walking through a
 /// symlink at any component.
 ///
@@ -20,34 +65,42 @@ use tokio::io::AsyncWriteExt;
 /// a regular file refuses. With `create`, a missing component is created one
 /// level at a time, so a component planted between two host runs is seen
 /// rather than followed. The canonical result must still sit inside the
-/// canonical `root`. `None` means the path did not resolve inside the scratch
-/// directory, or the directories could not be made.
-pub async fn resolve_scratch_directory(
+/// canonical `root`.
+pub async fn try_resolve_scratch_directory(
     root: &Path,
     relative: &str,
     create: bool,
-) -> Option<PathBuf> {
+) -> Result<PathBuf, ScratchRefusal> {
     // macOS puts chat scratch under a symlinked `/var`, so containment is
     // judged against the canonical root rather than the path as handed in.
-    let root = tokio::fs::canonicalize(root).await.ok()?;
+    let root = tokio::fs::canonicalize(root)
+        .await
+        .map_err(|_| ScratchRefusal::Unavailable)?;
     let mut dir = root.clone();
     for component in relative.split('/').filter(|part| !part.is_empty()) {
         if component == "." || component == ".." {
-            return None;
+            return Err(ScratchRefusal::Escape);
         }
         dir.push(component);
         match tokio::fs::symlink_metadata(&dir).await {
             Ok(metadata) if metadata.is_dir() => {}
-            Ok(_) => return None,
-            Err(_) if create => tokio::fs::create_dir(&dir).await.ok()?,
-            Err(_) => return None,
+            Ok(metadata) if metadata.is_symlink() => {
+                return Err(ScratchRefusal::SymlinkedComponent)
+            }
+            Ok(_) => return Err(ScratchRefusal::NotADirectory),
+            Err(_) if create => tokio::fs::create_dir(&dir)
+                .await
+                .map_err(|_| ScratchRefusal::Unavailable)?,
+            Err(_) => return Err(ScratchRefusal::Unavailable),
         }
     }
-    let resolved = tokio::fs::canonicalize(&dir).await.ok()?;
+    let resolved = tokio::fs::canonicalize(&dir)
+        .await
+        .map_err(|_| ScratchRefusal::Unavailable)?;
     if !resolved.starts_with(&root) {
-        return None;
+        return Err(ScratchRefusal::Escape);
     }
-    Some(resolved)
+    Ok(resolved)
 }
 
 /// Write `content` at `host_path` without following a symlink at the final

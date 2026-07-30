@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::host_paths::{resolve_scratch_directory, write_without_following};
+use crate::host_paths::{try_resolve_scratch_directory, write_without_following, ScratchRefusal};
 use crate::{
     CodeExecutionError, ExecutionWorkspaceId, WorkspaceFilePath, WorkspaceLifecycle,
     MAX_WORKSPACE_FILE_BYTES,
@@ -206,28 +206,49 @@ pub async fn pull_into_host_dir(
         .await
         .map_err(|_| unwritable_dir())?;
     for path in files {
-        let content = lifecycle.get_workspace_file(workspace, &path).await?;
-        let Some(host_path) = host_file_path(&host_root, &path).await else {
-            report.skip(format!(
-                "not pulled: {} does not resolve inside the private scratch directory",
-                path.as_str()
-            ));
-            continue;
-        };
-        if let Ok(existing) = tokio::fs::read(&host_path).await {
-            if existing == content {
+        let content = match lifecycle.get_workspace_file(workspace, &path).await {
+            Ok(content) => content,
+            Err(error) if aborts_the_pull(&error) => return Err(error),
+            Err(error) => {
+                tracing::warn!(
+                    "workspace file '{}' could not be pulled: {error}",
+                    path.as_str()
+                );
+                report.skip(format!(
+                    "not pulled: {} could not be read from the workspace ({error})",
+                    path.as_str()
+                ));
                 continue;
             }
-        }
+        };
+        let host_path = match host_file_path(&host_root, &path).await {
+            Ok(host_path) => host_path,
+            Err(refusal) => {
+                refuse(&mut report, &path, refusal);
+                continue;
+            }
+        };
+        // Read for the equality shortcut only after the symlink check: reading
+        // by path follows a symlink at the final component, which would turn a
+        // planted link into a content-equality oracle on a host file.
         if tokio::fs::symlink_metadata(&host_path)
             .await
             .is_ok_and(|metadata| metadata.is_symlink())
         {
+            tracing::warn!(
+                "workspace pull refused: '{}' is a symlink on the host",
+                path.as_str()
+            );
             report.skip(format!(
                 "not pulled: {} is a symlink on the host",
                 path.as_str()
             ));
             continue;
+        }
+        if let Ok(existing) = tokio::fs::read(&host_path).await {
+            if existing == content {
+                continue;
+            }
         }
         write_without_following(&host_path, &content)
             .await
@@ -243,15 +264,61 @@ pub async fn pull_into_host_dir(
 /// Local exec is confined to this same scratch tree, so it can plant
 /// `<scratch>/out -> ~/.ssh` and wait for a pull: `create_dir_all` and a plain
 /// `write` both follow a symlinked *parent*, and the pull's host write is not
-/// sandboxed. `None` means the path resolved outside the scratch directory, or
-/// the directories could not be made.
-async fn host_file_path(host_root: &Path, path: &WorkspaceFilePath) -> Option<PathBuf> {
+/// sandboxed.
+async fn host_file_path(
+    host_root: &Path,
+    path: &WorkspaceFilePath,
+) -> Result<PathBuf, ScratchRefusal> {
     let parent = path
         .as_str()
         .rsplit_once('/')
         .map_or("", |(parent, _)| parent);
-    let dir = resolve_scratch_directory(host_root, parent, true).await?;
-    Some(dir.join(path.file_name()))
+    let dir = try_resolve_scratch_directory(host_root, parent, true).await?;
+    Ok(dir.join(path.file_name()))
+}
+
+/// Record a refused file in the report and, for the containment cases, on the
+/// host.
+///
+/// The note goes to the model; without the log line a sandbox probing the
+/// boundary would generate output only it can see.
+fn refuse(report: &mut SyncReport, path: &WorkspaceFilePath, refusal: ScratchRefusal) {
+    let reason = match refusal {
+        ScratchRefusal::Escape => "resolves outside the private scratch directory",
+        ScratchRefusal::SymlinkedComponent => "has a symlinked parent directory on the host",
+        ScratchRefusal::NotADirectory => "has a host parent that is not a directory",
+        ScratchRefusal::Unavailable => "has a host parent directory that could not be created",
+    };
+    if refusal.is_containment() {
+        tracing::warn!("workspace pull refused: '{}' {reason}", path.as_str());
+    } else {
+        tracing::debug!(
+            "workspace file '{}' was not pulled: {reason}",
+            path.as_str()
+        );
+    }
+    report.skip(format!("not pulled: {} {reason}", path.as_str()));
+}
+
+/// Whether one file's failure should end the whole pull.
+///
+/// A file that is missing, oversized, or unreadable is this file's problem:
+/// the pull reports it and keeps going, which is what the module promises. A
+/// provider that is unreachable or misconfigured is every remaining file's
+/// problem too, and degrading it into a few hundred identical notes would hide
+/// a real failure from the caller.
+fn aborts_the_pull(error: &CodeExecutionError) -> bool {
+    match error {
+        CodeExecutionError::WorkspaceFileNotFound
+        | CodeExecutionError::WorkspaceFileTooLarge
+        | CodeExecutionError::InvalidRequest(_)
+        | CodeExecutionError::Sandbox(_) => false,
+        CodeExecutionError::NotConfigured
+        | CodeExecutionError::Unavailable(_)
+        | CodeExecutionError::Spawn
+        | CodeExecutionError::IdentityConflict
+        | CodeExecutionError::AmbiguousExecution => true,
+    }
 }
 
 fn unreadable(path: &str) -> CodeExecutionError {
@@ -477,10 +544,37 @@ mod tests {
             std::fs::read(outside.path().join("authorized_keys")).unwrap(),
             b"host secret"
         );
+        assert!(pulled.notes.iter().any(|note| {
+            note.contains("out/authorized_keys") && note.contains("symlinked parent directory")
+        }));
+    }
+
+    #[tokio::test]
+    async fn pull_reports_an_unreadable_file_and_keeps_going() {
+        let host = tempfile::tempdir().unwrap();
+        let fake = FakeWorkspace::default();
+        fake.insert("kept.txt", b"sandbox output");
+        // A backend that omits the size passes the oversize filter and can
+        // still refuse the download; older E2B envd and Daytona both do.
+        fake.planted.lock().unwrap().push(WorkspaceFileEntry {
+            path: "huge.bin".into(),
+            directory: false,
+            size_bytes: None,
+        });
+
+        let pulled = pull_into_host_dir(&fake, &workspace_id(), host.path())
+            .await
+            .unwrap();
+
+        assert_eq!(pulled.transferred, 1, "{:?}", pulled.notes);
+        assert_eq!(
+            std::fs::read(host.path().join("kept.txt")).unwrap(),
+            b"sandbox output"
+        );
         assert!(pulled
             .notes
             .iter()
-            .any(|note| note.contains("out/authorized_keys")));
+            .any(|note| note.contains("huge.bin") && note.contains("could not be read")));
     }
 
     #[tokio::test]
