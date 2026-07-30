@@ -31,6 +31,8 @@ export type HydratedTranscriptEntry =
       backgroundAgentRunId?: string;
       preview: ToolActionPreview | null;
       result: ToolResultPreview | null;
+      /** Set when a retained projection no longer parses against this build. */
+      resultUnreadable?: boolean;
       status: ToolCallStatus;
       createdAt: string;
     };

@@ -79,6 +79,26 @@ describe("terminal transcript presentation", () => {
     ]);
   });
 
+  it("carries an unreadable projection through to the renderer", () => {
+    const presented = presentChatTranscript({
+      messages: [],
+      tool_activity: [
+        {
+          tool: "web_search",
+          result_unreadable: true,
+          status: "completed",
+          started_at: "2026-07-27T12:00:00Z",
+          finished_at: "2026-07-27T12:00:01Z",
+        },
+      ],
+      last_event_seq: 4,
+    });
+
+    expect(presented.messages).toEqual([
+      expect.objectContaining({ role: "tool", resultUnreadable: true }),
+    ]);
+  });
+
   it("replaces optimistic text with authoritative content and sources", async () => {
     const listChatMessages = vi.fn(async () => transcript);
     const presented = await loadCurrentTerminalTranscript(

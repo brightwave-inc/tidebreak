@@ -42,6 +42,7 @@ export function presentChatTranscript(
             status: entry.status,
             preview: entry.preview,
             result: entry.result,
+            resultUnreadable: entry.resultUnreadable,
           } satisfies ChatMessage,
         ];
       }
