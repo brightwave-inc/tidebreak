@@ -799,6 +799,49 @@ impl SandboxContainerRunner {
         );
     }
 
+    /// Recover container runs whose driver died: reclaim each expired-lease
+    /// run under a fresh lease — the **same** execution attempt, since exactly
+    /// one container was ever asked to run it — and drive it to a terminal
+    /// state.
+    ///
+    /// The drive that follows reconciles through the durable records: a
+    /// committed handle reattaches to the existing container and first drains
+    /// whatever it buffered while unattached (a finished run's result commits
+    /// instead of being reaped), the operation log replays recorded reverse
+    /// answers rather than spending twice, and every terminal path drives the
+    /// teardown obligation. A run whose deadline already crossed is not
+    /// reclaimed here — the claim scan fails it, enqueueing its teardown in
+    /// the same transition.
+    ///
+    /// # Errors
+    /// Propagates a durable-store failure; per-run drive outcomes are returned,
+    /// not raised.
+    pub async fn recover(&self) -> Result<Vec<SandboxContainerRunOutcome>> {
+        let mut outcomes = Vec::new();
+        for run in self
+            .store
+            .list_reclaimable_container_agent_runs(chrono::Utc::now())
+            .await?
+        {
+            let lease_token = Uuid::new_v4();
+            let Some(claimed) = self
+                .store
+                .reclaim_container_agent_run(
+                    run.id,
+                    lease_token,
+                    chrono_duration(self.config.lease)?,
+                )
+                .await?
+            else {
+                // Lost to a racing driver or a crossed deadline; both leave
+                // the run in owned hands.
+                continue;
+            };
+            outcomes.push(self.drive_claimed(claimed, lease_token).await?);
+        }
+        Ok(outcomes)
+    }
+
     /// One recovery pass over the durable provisioning records: lapse every
     /// `Intended` record whose window expired, drive every pending teardown
     /// obligation, and reclaim any backend sandbox whose tag names no live

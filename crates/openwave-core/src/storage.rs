@@ -1568,6 +1568,32 @@ pub trait Store: Send + Sync {
         agent_run_storage_unavailable()
     }
 
+    /// List container-located runs whose driver died: `running` under an
+    /// expired lease with the deadline still open. The in-process lease reaper
+    /// deliberately exempts container runs, so this scan feeds the recovery
+    /// pass that replaces it.
+    async fn list_reclaimable_container_agent_runs(
+        &self,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<AgentRun>> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Reclaim one expired-lease container run under a fresh bounded lease,
+    /// **without** a second execution attempt: exactly one container was ever
+    /// asked to run it, so recovery re-drives that same attempt through the
+    /// durable provisioning record and the operation log. Refuses a live lease
+    /// and a crossed deadline. Reusing `lease_token` recovers only its original
+    /// still-live claim.
+    async fn reclaim_container_agent_run(
+        &self,
+        _id: AgentRunId,
+        _lease_token: uuid::Uuid,
+        _lease_duration: chrono::Duration,
+    ) -> Result<Option<AgentRun>> {
+        agent_run_storage_unavailable()
+    }
+
     /// Commit a durable provisioning intent for one container run, before the
     /// backend is asked to create anything. Returns the existing record instead
     /// when one is already present, so a restarted host reconciles rather than

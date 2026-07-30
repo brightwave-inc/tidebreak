@@ -1221,6 +1221,165 @@ pub(in crate::db) async fn claim_container_agent_run(
     Ok(Some(claimed))
 }
 
+/// List container-located runs whose driver died: `running` under an expired
+/// lease with the deadline still open. The in-process lease reaper deliberately
+/// exempts container runs (lease expiry there means "the driving host died",
+/// not "the work died"), so this scan feeds the recovery pass that replaces it.
+pub(in crate::db) async fn list_reclaimable_container_agent_runs(
+    store: &DbStore,
+    now: chrono::DateTime<Utc>,
+) -> Result<Vec<AgentRun>> {
+    entities::agent_run::Entity::find()
+        .filter(entities::agent_run::Column::Tier.eq(AgentRunTier::Background.as_str()))
+        .filter(
+            entities::agent_run::Column::ExecutionLocation
+                .eq(AgentRunExecutionLocation::Container.as_str()),
+        )
+        .filter(entities::agent_run::Column::Status.eq(AgentRunStatus::Running.as_str()))
+        .filter(entities::agent_run::Column::LeaseExpiresAt.lte(now))
+        .filter(entities::agent_run::Column::DeadlineAt.gt(now))
+        .order_by_asc(entities::agent_run::Column::CreatedAt)
+        .order_by_asc(entities::agent_run::Column::Id)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(agent_run_from_model)
+        .collect()
+}
+
+/// Reclaim one expired-lease container run under a fresh bounded lease,
+/// **without** a second execution attempt.
+///
+/// A container run has exactly one attempt — exactly one container was ever
+/// asked to run it — so recovery re-drives that same attempt: the claim count
+/// advances, the attempt count does not, and the drive that follows reconciles
+/// the container through the durable provisioning record and the operation
+/// log rather than executing anything twice. Refuses a live lease (another
+/// driver still owns the run) and a crossed deadline (the claim scan fails
+/// those, enqueueing the container's teardown).
+pub(in crate::db) async fn reclaim_container_agent_run(
+    store: &DbStore,
+    id: AgentRunId,
+    lease_token: uuid::Uuid,
+    lease_duration: chrono::Duration,
+) -> Result<Option<AgentRun>> {
+    if lease_token.is_nil() || lease_duration <= chrono::Duration::zero() {
+        return Err(AgentError::Store(
+            "container agent-run reclaim requires a non-nil token and positive duration".into(),
+        ));
+    }
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    acquire_agent_run_claim_lock(&transaction).await?;
+    let now = database_now(&transaction).await?;
+    let lease_expires_at = now.checked_add_signed(lease_duration).ok_or_else(|| {
+        AgentError::Store("agent-run lease duration overflows the database timestamp range".into())
+    })?;
+
+    // Idempotent re-claim: recover only the exact still-live claim this token
+    // owns, exactly as the fresh-claim path does.
+    if let Some(receipt) = entities::agent_run_claim::Entity::find_by_id(lease_token)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    {
+        let Some(agent_run_id) = receipt.agent_run_id else {
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(None);
+        };
+        let existing = find_by_id_on(&transaction, AgentRunId(agent_run_id))
+            .await?
+            .filter(|run| {
+                run.tier == AgentRunTier::Background.as_str()
+                    && run.execution_location == AgentRunExecutionLocation::Container.as_str()
+                    && matches!(run.status.as_str(), "running" | "cancelling")
+                    && Some(run.attempt_count) == receipt.attempt_count
+                    && Some(run.claim_count) == receipt.claim_count
+                    && run.lease_token == Some(lease_token)
+                    && run.lease_expires_at.is_some_and(|expiry| expiry > now)
+                    && run.deadline_at.is_some_and(|deadline| deadline > now)
+            })
+            .map(agent_run_from_model)
+            .transpose()?;
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(existing);
+    }
+
+    let Some(candidate) = find_by_id_on(&transaction, id).await? else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    let reclaimable = candidate.tier == AgentRunTier::Background.as_str()
+        && candidate.execution_location == AgentRunExecutionLocation::Container.as_str()
+        && candidate.status == AgentRunStatus::Running.as_str()
+        && candidate
+            .lease_expires_at
+            .is_some_and(|expiry| expiry <= now)
+        && candidate.deadline_at.is_some_and(|deadline| deadline > now)
+        && candidate.updated_at <= now;
+    if !reclaimable {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let claim_count = candidate.claim_count.checked_add(1).ok_or_else(|| {
+        AgentError::Store(format!("agent run {} claim count overflow", candidate.id))
+    })?;
+    let deadline_at = candidate
+        .deadline_at
+        .ok_or_else(|| AgentError::Store("container agent run is missing its deadline".into()))?;
+    let effective_lease_expires_at = Ord::min(deadline_at, lease_expires_at);
+    entities::agent_run_claim::ActiveModel {
+        token: Set(lease_token),
+        agent_run_id: Set(Some(candidate.id)),
+        attempt_count: Set(Some(candidate.attempt_count)),
+        claim_count: Set(Some(claim_count)),
+        claimed_at: Set(now),
+        lease_expires_at: Set(Some(effective_lease_expires_at)),
+    }
+    .insert(&transaction)
+    .await
+    .map_err(store_err)?;
+
+    let reclaimed = entities::agent_run::Entity::update_many()
+        .col_expr(
+            entities::agent_run::Column::ClaimCount,
+            sea_orm::sea_query::Expr::value(claim_count),
+        )
+        .col_expr(
+            entities::agent_run::Column::LeaseToken,
+            sea_orm::sea_query::Expr::value(Some(lease_token)),
+        )
+        .col_expr(
+            entities::agent_run::Column::LeaseExpiresAt,
+            sea_orm::sea_query::Expr::value(Some(effective_lease_expires_at)),
+        )
+        .col_expr(
+            entities::agent_run::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(entities::agent_run::Column::Id.eq(candidate.id))
+        .filter(entities::agent_run::Column::Status.eq(AgentRunStatus::Running.as_str()))
+        .filter(entities::agent_run::Column::AttemptCount.eq(candidate.attempt_count))
+        .filter(entities::agent_run::Column::ClaimCount.eq(candidate.claim_count))
+        .filter(entities::agent_run::Column::UpdatedAt.eq(candidate.updated_at))
+        .filter(entities::agent_run::Column::LeaseToken.eq(candidate.lease_token))
+        .filter(entities::agent_run::Column::LeaseExpiresAt.lte(now))
+        .filter(entities::agent_run::Column::DeadlineAt.gt(now))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    if reclaimed.rows_affected != 1 {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let reclaimed = find_by_id_on(&transaction, id)
+        .await?
+        .ok_or_else(|| AgentError::Store("reclaimed container agent run disappeared".into()))?;
+    let reclaimed = agent_run_from_model(reclaimed)?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(Some(reclaimed))
+}
+
 async fn record_empty_claim_scan_on<C>(
     conn: &C,
     lease_token: uuid::Uuid,
@@ -1453,6 +1612,12 @@ pub(in crate::db) async fn fail_agent_run(
         .await
         .map_err(store_err)?
         .expect("inserted result exists");
+    // A container run that just failed terminally owes its container a
+    // teardown in the same transaction, so the sweep can never observe a
+    // failed run whose provisioning record still calls the container live.
+    if run.execution_location == AgentRunExecutionLocation::Container.as_str() {
+        super::sandbox_provision::enqueue_teardown_on(&transaction, id.0).await?;
+    }
     transaction.commit().await.map_err(store_err)?;
     Ok(Some(FailAgentRunOutcome::Failed(
         agent_run_result_from_model(result)?,
@@ -2448,6 +2613,12 @@ where
     if updated.rows_affected == 1 {
         deliver_terminal_candidate_failure_on(conn, candidate, now, error_code, error_detail)
             .await?;
+        // A container run that went terminal owes its container a teardown in
+        // the same transition — deadline expiry against a live unattached
+        // container is exactly the leak this closes.
+        if candidate.execution_location == AgentRunExecutionLocation::Container.as_str() {
+            super::sandbox_provision::enqueue_teardown_on(conn, candidate.id).await?;
+        }
     }
     Ok(updated.rows_affected == 1)
 }

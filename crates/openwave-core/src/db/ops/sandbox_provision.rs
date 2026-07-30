@@ -153,6 +153,32 @@ pub(in crate::db) async fn enqueue_teardown(
     Ok(row)
 }
 
+/// Transaction-scoped teardown enqueue for a container run that just went
+/// terminal: whatever provisioning record exists — an open intent or a
+/// committed handle — now owes a teardown, in the same transaction as the
+/// run's terminal transition, so the sweep can never observe a failed run
+/// whose container the records still call live.
+pub(in crate::db) async fn enqueue_teardown_on<C>(conn: &C, run_id: uuid::Uuid) -> Result<()>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    entities::sandbox_provision::Entity::update_many()
+        .col_expr(
+            sandbox_provision::Column::State,
+            Expr::value(STATE_TEARDOWN),
+        )
+        .col_expr(
+            sandbox_provision::Column::UpdatedAt,
+            Expr::value(Utc::now()),
+        )
+        .filter(sandbox_provision::Column::RunId.eq(run_id))
+        .filter(sandbox_provision::Column::State.is_in([STATE_INTENDED, STATE_COMMITTED]))
+        .exec(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(())
+}
+
 pub(in crate::db) async fn complete_teardown(store: &DbStore, run_id: uuid::Uuid) -> Result<()> {
     entities::sandbox_provision::Entity::update_many()
         .col_expr(sandbox_provision::Column::State, Expr::value(STATE_DONE))
