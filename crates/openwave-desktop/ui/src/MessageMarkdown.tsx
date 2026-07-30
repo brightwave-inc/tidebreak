@@ -9,10 +9,12 @@ import rehypeHighlight from "rehype-highlight";
 import rehypeKatex from "rehype-katex";
 import { ClipboardCopyButton } from "./ClipboardCopyButton";
 import {
-  CITATION_ID_PROPERTY,
+  CITATION_DOCUMENT_PROPERTY,
+  CITATION_LOCATOR_PROPERTY,
   hasCitationDirective,
   rehypeCitationDirectives,
 } from "./citationDirectives";
+import type { CitationLocator } from "./api";
 import {
   pieceStartOffsets,
   rangeWithinPiece,
@@ -178,13 +180,35 @@ const components: Components = {
   // straight through; the ones {@link rehypeCitationDirectives} built carry the
   // citation they cite and become the phrase a reader can open.
   span: ({ children, node, ...props }) => {
-    const citationId = node?.properties?.[CITATION_ID_PROPERTY];
-    if (typeof citationId !== "string") {
+    const documentId = node?.properties?.[CITATION_DOCUMENT_PROPERTY];
+    const rawLocator = node?.properties?.[CITATION_LOCATOR_PROPERTY];
+    const locator =
+      typeof rawLocator === "string" ? parseCitationLocator(rawLocator) : null;
+    if (typeof documentId !== "string" || !locator) {
       return <span {...props}>{children}</span>;
     }
-    return <InlineCitation citationId={citationId}>{children}</InlineCitation>;
+    return (
+      <InlineCitation documentId={documentId} locator={locator}>
+        {children}
+      </InlineCitation>
+    );
   },
 };
+
+function parseCitationLocator(value: string): CitationLocator | null {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object" || !("kind" in parsed)) return null;
+    const kind = (parsed as { kind?: unknown }).kind;
+    return ["document", "page", "pages", "lines", "sheet"].includes(
+      String(kind),
+    )
+      ? (parsed as CitationLocator)
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * The same components, with every heading carrying the slug id derived from its

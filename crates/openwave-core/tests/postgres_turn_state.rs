@@ -8,22 +8,21 @@ use openwave_core::{
     AgentRunCancellationReason, AgentRunId, AgentRunInboxStatus, AgentRunResultPayload,
     AgentRunStatus, AgentRunTier, AgentRunWaitCondition, AgentRunWaitSetCheckpointRequest,
     AnswerUserQuestions, AnswerUserQuestionsOutcome, AnswerUserQuestionsRequest,
-    ApplyTurnSteerOutcome, AssistantCitationReference, BeginRootAttachmentChange,
-    BeginRootAttachmentChangeOutcome, ByteSpan, CallId, Chat, ChatId, ChatRootAttachment,
-    CheckpointSandboxSpawnOutcome, ChunkId, ClaimClientToolCallOutcome, ClientToolCallRequest,
-    CompleteTurnRunOutcome, DbStore, DeleteChatOutcome, DeleteProjectOutcome, DocumentGeneration,
-    DocumentId, DocumentSourceBlob, DocumentSourceUpsert, EvidenceLocation,
+    ApplyTurnSteerOutcome, AssistantCitationInput, BeginRootAttachmentChange,
+    BeginRootAttachmentChangeOutcome, CallId, Chat, ChatId, ChatRootAttachment,
+    CheckpointSandboxSpawnOutcome, CitationLocator, ClaimClientToolCallOutcome,
+    ClientToolCallRequest, CompleteTurnRunOutcome, DbStore, DeleteChatOutcome,
+    DeleteProjectOutcome, DocumentId, DocumentSourceBlob, DocumentSourceUpsert, DocumentUpsert,
     FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
     FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, HostRootId, Message, MessageId,
     ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome, Project, ProjectId,
     RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome,
-    ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome, RetrievalEvidenceInput,
-    RetrievalEvidenceSource, Role, RootAttachmentChangeAction, RootAttachmentChangeId,
-    RootAttachmentChangeTerminal, RootAttachmentOrigin, SandboxSpawnCheckpointRequest,
-    SpawnSandboxAgentResult, StopReason, Store, SubmitAgentRunResultOutcome, ToolCallExecution,
-    ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnCheckpointProgress, TurnFailureRetry,
-    TurnId, TurnRun, TurnRunStatus, TurnSteerId, TurnSteerStatus, Usage, UserQuestionAnswer,
-    ASK_USER_QUESTIONS_TOOL,
+    ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome, Role, RootAttachmentChangeAction,
+    RootAttachmentChangeId, RootAttachmentChangeTerminal, RootAttachmentOrigin,
+    SandboxSpawnCheckpointRequest, SpawnSandboxAgentResult, StopReason, Store,
+    SubmitAgentRunResultOutcome, ToolCallExecution, ToolCallRecord, ToolCallResolution,
+    ToolCallStatus, TurnCheckpointProgress, TurnFailureRetry, TurnId, TurnRun, TurnRunStatus,
+    TurnSteerId, TurnSteerStatus, Usage, UserQuestionAnswer, ASK_USER_QUESTIONS_TOOL,
 };
 use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement, TransactionTrait};
 
@@ -132,52 +131,20 @@ async fn postgres_terminal_citations_are_atomic_and_exactly_recoverable() {
         .claim_turn_run(lease, claimed_at, claimed_at + Duration::minutes(1))
         .await
         .unwrap();
-    let call = ToolCallRecord {
-        id: CallId::new(),
-        chat_id: chat.id,
-        turn_id,
-        provider_id: "pg_search".into(),
-        name: "search".into(),
-        arguments: serde_json::json!({"query": "fact"}),
-        execution: ToolCallExecution::Server,
-        status: ToolCallStatus::Pending,
-        result: None,
-        error_code: None,
-        error_detail: None,
-        client_executor_id: None,
-        client_lease_expires_at: None,
-        created_at: claimed_at,
-        resolved_at: None,
-    };
-    store.accept_tool_call(&call).await.unwrap();
     let document_id = DocumentId::new();
-    let span = ByteSpan::new(0, 4);
-    let source_token = uuid::Uuid::new_v4();
     store
-        .resolve_server_tool_call_with_evidence(
-            call.id,
-            &ToolCallResolution::Completed {
-                result: "fact".into(),
-            },
-            claimed_at + Duration::milliseconds(1),
-            &[RetrievalEvidenceInput {
-                rank: 1,
-                source_token,
-                document_id,
-                generation: DocumentGeneration {
-                    content_revision: 1,
-                    revision_token: uuid::Uuid::new_v4(),
-                },
-                chunk_id: ChunkId::derive(document_id, span.start, span.end),
-                span,
-                snippet: "fact".into(),
-                location: EvidenceLocation::DocumentContent {
-                    heading_path: Vec::new(),
-                    source_regions: Vec::new(),
-                },
-                source: RetrievalEvidenceSource::Inline,
-            }],
-        )
+        .upsert_document(&DocumentUpsert {
+            id: document_id,
+            project_id: None,
+            chat_id: Some(chat.id),
+            source_uri: None,
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "fact".into(),
+            canonical_fingerprint: None,
+            source_regions: Vec::new(),
+            updated_at: claimed_at,
+        })
         .await
         .unwrap();
     let completed_at = utc_now_at_postgres_precision();
@@ -186,10 +153,13 @@ async fn postgres_terminal_citations_are_atomic_and_exactly_recoverable() {
         chat_id: chat.id,
         turn_id,
         role: Role::Assistant,
-        content: "answer".into(),
+        content: format!(":cit[answer]{{doc={} lines=1-1}}", document_id.0),
         created_at: completed_at,
     };
-    let citation = AssistantCitationReference { source_token };
+    let citation = AssistantCitationInput {
+        document_id,
+        locator: CitationLocator::Lines { start: 1, end: 1 },
+    };
     assert!(matches!(
         store
             .complete_turn_run_with_citations_and_append_event(
@@ -198,7 +168,7 @@ async fn postgres_terminal_citations_are_atomic_and_exactly_recoverable() {
                 0,
                 completed_at,
                 &output,
-                &[citation],
+                std::slice::from_ref(&citation),
                 Usage::default(),
                 StopReason::EndTurn,
             )
@@ -216,7 +186,7 @@ async fn postgres_terminal_citations_are_atomic_and_exactly_recoverable() {
                 0,
                 utc_now_at_postgres_precision(),
                 &output,
-                &[citation],
+                std::slice::from_ref(&citation),
                 Usage::default(),
                 StopReason::EndTurn,
             )
@@ -263,7 +233,6 @@ fn sample_chat() -> Chat {
         model: None,
         reasoning_effort: None,
         permission_mode: None,
-        citation_format: None,
         attachment_revision: 0,
         root_attachments: Vec::new(),
         created_at: utc_now_at_postgres_precision(),

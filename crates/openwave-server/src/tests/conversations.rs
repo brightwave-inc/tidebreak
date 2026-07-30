@@ -776,7 +776,6 @@ async fn a_retained_result_projection_survives_reopening_the_chat() {
                     result: "private model-facing listing".into(),
                 },
                 started_at + chrono::Duration::seconds(1),
-                &[],
                 Some(&preview),
             )
             .await

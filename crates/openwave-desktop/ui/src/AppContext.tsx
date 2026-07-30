@@ -1,6 +1,6 @@
 import { createContext, useContext } from "react";
 
-import type { ApiClient, Chat, CitationFormat, ModelInfo, ProviderInfo } from "./api";
+import type { ApiClient, Chat, ModelInfo, ProviderInfo } from "./api";
 import type { DesktopUpdateState } from "./updates";
 
 /**
@@ -25,11 +25,6 @@ export type AppContextValue = {
    * fallback is nothing the catalog names.
    */
   defaultModelKey: string | null;
-  /**
-   * The citation format a chat without an override runs under, so the picker
-   * can name its default the same way the model picker does.
-   */
-  defaultCitationFormat: CitationFormat;
   providers: ProviderInfo[];
   refreshCatalog: () => Promise<void>;
   status: string;

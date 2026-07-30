@@ -1,14 +1,14 @@
 use super::*;
 use crate::model::{
     ByteSpan, ChatRootAttachment, DocumentParseOutput, DocumentSourceBlob, DocumentSourceUpsert,
-    EvidenceLocation, PageBounds, RetrievalEvidenceInput, RetrievalEvidenceSource,
     RootAttachmentChangeAction, RootAttachmentChangeFailure, RootAttachmentChangeTerminal,
     RootAttachmentOrigin, SourceLocation, SourceRegion, ToolCallExecution, ToolCallResolution,
     ToolCallStatus, MAX_ATTACHMENT_REVISION, MAX_ROOT_ATTACHMENTS,
 };
 use crate::storage::ApplyTurnSteerOutcome;
-use crate::{ApprovalClass, ChunkId, CitationFormat, ToolApprovalStatus};
+use crate::{ApprovalClass, ToolApprovalStatus};
 use chrono::{DateTime, Utc};
+use sea_orm::{DatabaseBackend, Statement};
 
 mod agent_run;
 mod context_checkpoint;
@@ -21,17 +21,6 @@ mod parent_terminal_guard;
 mod root_attachment;
 mod sandbox_spawn_checkpoint;
 mod turn_steer;
-
-/// The pages and highlight rectangles of a projected citation, which today is
-/// always a document-content one.
-fn document_content_placement(
-    location: &crate::citation::CitationLocation,
-) -> (&[u32], &[crate::citation::CitationPageBounds]) {
-    match location {
-        crate::citation::CitationLocation::DocumentContent { pages, bounds } => (pages, bounds),
-        other => panic!("expected a document-content citation, got {other:?}"),
-    }
-}
 
 struct MigratedSqliteTemplate {
     _directory: tempfile::TempDir,
@@ -95,7 +84,6 @@ async fn create_chat_before_agent_run_split(store: &DbStore, chat: &Chat) {
         model: Set(chat.model.clone()),
         reasoning_effort: sea_orm::ActiveValue::NotSet,
         permission_mode: sea_orm::ActiveValue::NotSet,
-        citation_format: sea_orm::ActiveValue::NotSet,
         attachment_revision: Set(chat.attachment_revision),
         created_at: Set(chat.created_at),
     }
@@ -166,7 +154,6 @@ fn sample_chat() -> Chat {
         model: None,
         reasoning_effort: None,
         permission_mode: None,
-        citation_format: None,
         attachment_revision: 0,
         root_attachments: Vec::new(),
         created_at: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
@@ -471,7 +458,6 @@ async fn project_membership_fk_and_attachment_insertions_are_atomic() {
         model: Set(None),
         reasoning_effort: Set(None),
         permission_mode: Set(None),
-        citation_format: sea_orm::ActiveValue::NotSet,
         attachment_revision: Set(0),
         created_at: Set(Utc::now()),
     };
@@ -592,7 +578,6 @@ async fn chats_stored_before_the_effort_scale_widened_still_load() {
             model: Set(None),
             reasoning_effort: Set(Some(stored.to_owned())),
             permission_mode: Set(None),
-            citation_format: sea_orm::ActiveValue::NotSet,
             attachment_revision: Set(0),
             created_at: Set(chat.created_at),
         }
@@ -624,40 +609,6 @@ async fn chats_stored_before_the_effort_scale_widened_still_load() {
                 .unwrap()
                 .reasoning_effort,
             Some(*effort)
-        );
-    }
-}
-
-#[tokio::test]
-async fn a_chats_citation_format_round_trips_and_can_be_cleared() {
-    let (_dir, store) = temp_store().await;
-    for format in CitationFormat::ALL {
-        let mut chat = sample_chat();
-        chat.citation_format = Some(*format);
-        store.create_chat(&chat).await.unwrap();
-        assert_eq!(
-            store
-                .get_chat(chat.id)
-                .await
-                .unwrap()
-                .unwrap()
-                .citation_format,
-            Some(*format)
-        );
-        // Clearing returns the chat to the global default rather than pinning
-        // whatever it happened to resolve to when the choice was made.
-        assert!(store
-            .update_chat_metadata(chat.id, None, None, None, None, Some(None))
-            .await
-            .unwrap());
-        assert_eq!(
-            store
-                .get_chat(chat.id)
-                .await
-                .unwrap()
-                .unwrap()
-                .citation_format,
-            None
         );
     }
 }
@@ -1161,7 +1112,6 @@ async fn document_constraints_reject_invalid_catalog_state() {
         span: ByteSpan::new(4, 5),
         location: SourceLocation::Page {
             number: std::num::NonZeroU32::new(1).unwrap(),
-            bounds: None,
         },
     }];
     assert!(store.create_document(&invalid_regions).await.is_err());
@@ -1220,7 +1170,6 @@ async fn source_regions_roundtrip_and_provenance_changes_advance_revision() {
         span: ByteSpan::new(0, 9),
         location: SourceLocation::Page {
             number: std::num::NonZeroU32::new(number).unwrap(),
-            bounds: None,
         },
     };
     let source = DocumentUpsert {
@@ -1326,7 +1275,6 @@ async fn raw_source_parse_completion_publishes_a_ready_document() {
             span: ByteSpan::new(0, 8),
             location: SourceLocation::Page {
                 number: std::num::NonZeroU32::new(1).unwrap(),
-                bounds: None,
             },
         }],
     };
@@ -2526,6 +2474,97 @@ pub(super) fn migrations_added_after(name: &str) -> u32 {
 }
 
 #[tokio::test]
+async fn lightweight_citation_migration_has_a_working_down_and_reapply() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        dir.path().join("citation-migration.db").display()
+    );
+    let conn = Database::connect(&url).await.unwrap();
+    migration::Migrator::up(&conn, None).await.unwrap();
+
+    migration::Migrator::down(&conn, Some(1)).await.unwrap();
+    for query in [
+        "SELECT citation_format FROM chat LIMIT 1",
+        "SELECT location FROM retrieval_evidence LIMIT 1",
+        "SELECT evidence_call_id FROM assistant_citation LIMIT 1",
+        "SELECT evidence_call_id FROM output_revision_citation LIMIT 1",
+    ] {
+        conn.query_one_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            query.to_owned(),
+        ))
+        .await
+        .unwrap();
+    }
+
+    conn.execute_unprepared("PRAGMA foreign_keys=OFF")
+        .await
+        .unwrap();
+    conn.execute_unprepared(
+        r#"
+        INSERT INTO retrieval_evidence (
+            call_id, rank, source_token, chat_id, turn_id, document_id,
+            content_revision, revision_token, chunk_id, span_start, span_end,
+            snippet, heading_path, source_regions, source_kind, source_uri
+        ) VALUES (
+            X'00000000000000000000000000000001', 1,
+            X'00000000000000000000000000000002',
+            X'00000000000000000000000000000003',
+            X'00000000000000000000000000000004',
+            X'00000000000000000000000000000005', 1,
+            X'00000000000000000000000000000006',
+            X'00000000000000000000000000000007', 0, 10, 'fact', '[]',
+            '[{"span":{"start":0,"end":5},"location":{"kind":"page","number":2}},{"span":{"start":5,"end":10},"location":{"kind":"page","number":4}}]',
+            'inline', NULL
+        );
+        INSERT INTO assistant_citation (
+            id, message_id, ordinal, chat_id, turn_id, evidence_call_id, evidence_rank
+        ) VALUES (
+            X'00000000000000000000000000000008',
+            X'00000000000000000000000000000009', 1,
+            X'00000000000000000000000000000003',
+            X'00000000000000000000000000000004',
+            X'00000000000000000000000000000001', 1
+        );
+        "#,
+    )
+    .await
+    .unwrap();
+
+    migration::Migrator::up(&conn, None).await.unwrap();
+    let migrated = conn
+        .query_one_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "SELECT 1 FROM assistant_citation \
+         WHERE document_id = X'00000000000000000000000000000005' \
+           AND json_extract(locator, '$.kind') = 'pages' \
+           AND json_extract(locator, '$.start') = 2 \
+           AND json_extract(locator, '$.end') = 4"
+                .to_owned(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        migrated.is_some(),
+        "legacy page evidence must retain its page range"
+    );
+    for retired in [
+        "SELECT citation_format FROM chat LIMIT 1",
+        "SELECT * FROM retrieval_evidence LIMIT 1",
+        "SELECT * FROM output_revision_citation LIMIT 1",
+    ] {
+        assert!(conn
+            .query_one_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                retired.to_owned(),
+            ))
+            .await
+            .is_err());
+    }
+}
+
+#[tokio::test]
 async fn m0024_widens_and_narrows_the_execution_location_domain() {
     // Guards the container-location migration's bespoke SQLite table rebuild in
     // both directions: after `up` a `container` execution location is accepted,
@@ -2700,7 +2739,6 @@ async fn m0013_adds_outputs_to_an_existing_conversation_store() {
             sha256: [3; 32],
             turn_id: None,
             producing_run_id: None,
-            citations: Vec::new(),
             created_at: DateTime::<Utc>::from_timestamp(1_710_000_000, 0).unwrap(),
         },
     };
@@ -2762,11 +2800,6 @@ async fn m0015_adds_output_citations_without_changing_existing_outputs() {
     assert_eq!(revision.byte_len, 7);
     assert_eq!(revision.turn_id, None);
     assert_eq!(revision.producing_run_id, None);
-    assert!(store
-        .list_output_revision_citations(revision_id)
-        .await
-        .unwrap()
-        .is_empty());
 }
 
 #[tokio::test]
@@ -8411,7 +8444,7 @@ async fn claimed_tool_results_are_co_committed_with_the_turn_lease() {
     };
     assert_eq!(
         store
-            .resolve_claimed_server_tool_call_with_evidence(
+            .resolve_claimed_server_tool_call(
                 call.id,
                 chat.id,
                 turn_id,
@@ -8419,7 +8452,6 @@ async fn claimed_tool_results_are_co_committed_with_the_turn_lease() {
                 first_claim_at,
                 &resolution,
                 first_claim_at,
-                &[],
             )
             .await
             .unwrap(),
@@ -8445,7 +8477,7 @@ async fn claimed_tool_results_are_co_committed_with_the_turn_lease() {
     assert_eq!(retried.attempt_count, 2);
     assert_eq!(
         store
-            .resolve_claimed_server_tool_call_with_evidence(
+            .resolve_claimed_server_tool_call(
                 call.id,
                 chat.id,
                 turn_id,
@@ -8453,7 +8485,6 @@ async fn claimed_tool_results_are_co_committed_with_the_turn_lease() {
                 retry_at,
                 &resolution,
                 retry_at,
-                &[],
             )
             .await
             .unwrap(),
@@ -8561,688 +8592,6 @@ async fn claimed_intermediate_message_is_co_committed_with_the_turn_lease() {
         .await
         .unwrap()
         .is_none());
-}
-
-#[tokio::test]
-async fn retrieval_evidence_is_atomic_generation_fenced_and_survives_source_changes() {
-    let (_dir, store) = temp_store().await;
-    let chat = sample_chat();
-    store.create_chat(&chat).await.unwrap();
-    let updated_at = DateTime::<Utc>::from_timestamp(1_700_001_000, 0).unwrap();
-    let source = DocumentUpsert {
-        canonical_fingerprint: None,
-        chat_id: None,
-        id: DocumentId::new(),
-        project_id: None,
-        source_uri: Some("file:///facts.txt".into()),
-        media_type: "text/plain".into(),
-        title: Some("Facts".into()),
-        canonical_text: "old text".into(),
-        source_regions: Vec::new(),
-        updated_at,
-    };
-    let document = store.upsert_document(&source).await.unwrap();
-    let call = ToolCallRecord {
-        id: CallId::new(),
-        chat_id: chat.id,
-        turn_id: TurnId::new(),
-        provider_id: "search_1".into(),
-        name: "search".into(),
-        arguments: serde_json::json!({"query": "old"}),
-        execution: ToolCallExecution::Server,
-        status: ToolCallStatus::Pending,
-        result: None,
-        error_code: None,
-        error_detail: None,
-        client_executor_id: None,
-        client_lease_expires_at: None,
-        created_at: updated_at,
-        resolved_at: None,
-    };
-    store.accept_tool_call(&call).await.unwrap();
-    let span = ByteSpan::new(0, source.canonical_text.len());
-    // Positioned regions, deliberately not in reading order and with the last
-    // two on the same rectangle: the snapshot has to sort and collapse them.
-    let placed = |start: usize, end: usize, page: u32, left: u16, top: u16| SourceRegion {
-        span: ByteSpan::new(start, end),
-        location: SourceLocation::Page {
-            number: std::num::NonZeroU32::new(page).unwrap(),
-            bounds: Some(PageBounds {
-                left,
-                top,
-                width: 1_000,
-                height: 200,
-            }),
-        },
-    };
-    let evidence = RetrievalEvidenceInput {
-        rank: 1,
-        source_token: uuid::Uuid::new_v4(),
-        document_id: source.id,
-        generation: document.generation(),
-        chunk_id: ChunkId::derive(source.id, span.start, span.end),
-        span,
-        snippet: source.canonical_text.clone(),
-        location: EvidenceLocation::DocumentContent {
-            heading_path: vec!["Archive".into()],
-            source_regions: vec![
-                placed(0, 2, 2, 1_000, 5_000),
-                placed(2, 4, 1, 3_000, 1_000),
-                placed(4, 6, 1, 1_000, 1_000),
-                placed(6, 8, 1, 1_000, 1_000),
-            ],
-        },
-        source: RetrievalEvidenceSource::Uri {
-            uri: source.source_uri.clone().unwrap(),
-        },
-    };
-    let resolution = ToolCallResolution::Completed {
-        result: "Found 1 passage".into(),
-    };
-    let resolved_at = updated_at + chrono::Duration::seconds(1);
-    assert_eq!(
-        store
-            .resolve_server_tool_call_with_evidence(
-                call.id,
-                &resolution,
-                resolved_at,
-                std::slice::from_ref(&evidence),
-            )
-            .await
-            .unwrap(),
-        ResolveToolCallOutcome::Resolved
-    );
-    assert_eq!(
-        store
-            .resolve_server_tool_call_with_evidence(
-                call.id,
-                &resolution,
-                resolved_at,
-                std::slice::from_ref(&evidence),
-            )
-            .await
-            .unwrap(),
-        ResolveToolCallOutcome::Existing
-    );
-    let stored = store.list_retrieval_evidence(call.id).await.unwrap();
-    assert_eq!(stored.len(), 1);
-    assert_eq!(stored[0].call_id, call.id);
-    assert_eq!(stored[0].chat_id, call.chat_id);
-    assert_eq!(stored[0].turn_id, call.turn_id);
-    assert_eq!(stored[0].evidence, evidence);
-
-    // Direct source reads create the same durable citation evidence as semantic
-    // search. No other server tool may attach this private sidecar.
-    let read_call = ToolCallRecord {
-        id: CallId::new(),
-        provider_id: "read_source_1".into(),
-        name: "read_source".into(),
-        arguments: serde_json::json!({"document_id": source.id}),
-        created_at: updated_at + chrono::Duration::microseconds(500),
-        ..call.clone()
-    };
-    store.accept_tool_call(&read_call).await.unwrap();
-    let read_evidence = RetrievalEvidenceInput {
-        source_token: uuid::Uuid::new_v4(),
-        ..evidence.clone()
-    };
-    assert_eq!(
-        store
-            .resolve_server_tool_call_with_evidence(
-                read_call.id,
-                &ToolCallResolution::Completed {
-                    result: "Read source range".into(),
-                },
-                resolved_at,
-                std::slice::from_ref(&read_evidence),
-            )
-            .await
-            .unwrap(),
-        ResolveToolCallOutcome::Resolved
-    );
-    assert_eq!(
-        store.list_retrieval_evidence(read_call.id).await.unwrap()[0].evidence,
-        read_evidence
-    );
-
-    let second_call = ToolCallRecord {
-        id: CallId::new(),
-        provider_id: "search_2".into(),
-        created_at: updated_at + chrono::Duration::milliseconds(1),
-        ..call.clone()
-    };
-    store.accept_tool_call(&second_call).await.unwrap();
-    let private_tail = "PRIVATE_RENDERER_TAIL";
-    let long_snippet = format!("{}{private_tail}", "x".repeat(700));
-    let long_span = ByteSpan::new(0, long_snippet.len());
-    let second_evidence = RetrievalEvidenceInput {
-        source_token: uuid::Uuid::new_v4(),
-        chunk_id: ChunkId::derive(source.id, long_span.start, long_span.end),
-        span: long_span,
-        snippet: long_snippet,
-        location: EvidenceLocation::DocumentContent {
-            heading_path: vec!["H".repeat(200)],
-            source_regions: (0..9)
-                .map(|index| SourceRegion {
-                    span: ByteSpan::new(index, index + 1),
-                    location: SourceLocation::Page {
-                        number: std::num::NonZeroU32::new(
-                            u32::try_from(index + 1).expect("test page fits u32"),
-                        )
-                        .unwrap(),
-                        bounds: None,
-                    },
-                })
-                .collect(),
-        },
-        ..evidence.clone()
-    };
-    store
-        .resolve_server_tool_call_with_evidence(
-            second_call.id,
-            &resolution,
-            resolved_at,
-            std::slice::from_ref(&second_evidence),
-        )
-        .await
-        .unwrap();
-
-    let reference = crate::AssistantCitationReference {
-        source_token: evidence.source_token,
-    };
-    let second_reference = crate::AssistantCitationReference {
-        source_token: second_evidence.source_token,
-    };
-    let unknown_reference = crate::AssistantCitationReference {
-        source_token: uuid::Uuid::new_v4(),
-    };
-    // The model cites a phantom between two real passages, so the citation the
-    // store cannot resolve sits ahead of ones it can.
-    let assistant_id = MessageId::new();
-    let cited = crate::parse_assistant_citations(
-        &format!(
-            "{} then {} then {}",
-            crate::format_citation_directive("phantom claim", unknown_reference),
-            crate::format_citation_directive("second claim", second_reference),
-            crate::format_citation_directive("first claim", reference),
-        ),
-        assistant_id,
-    );
-    assert_eq!(
-        cited.references,
-        [unknown_reference, second_reference, reference]
-    );
-    let assistant = Message {
-        id: assistant_id,
-        chat_id: chat.id,
-        turn_id: call.turn_id,
-        role: Role::Assistant,
-        content: cited.content.clone(),
-        created_at: resolved_at + chrono::Duration::seconds(1),
-    };
-    store
-        .append_assistant_message_with_citations(
-            &assistant,
-            &[unknown_reference, second_reference, reference],
-        )
-        .await
-        .unwrap();
-    store
-        .append_assistant_message_with_citations(
-            &assistant,
-            &[unknown_reference, second_reference, reference],
-        )
-        .await
-        .unwrap();
-    assert!(store
-        .append_assistant_message_with_citations(&assistant, &[reference, second_reference])
-        .await
-        .is_err());
-    assert!(store
-        .append_assistant_message_with_citations(
-            &Message {
-                content: "different".into(),
-                ..assistant.clone()
-            },
-            &[second_reference, reference],
-        )
-        .await
-        .is_err());
-    let snapshot = store.get_chat_transcript(chat.id).await.unwrap().unwrap();
-    assert_eq!(snapshot.citations.len(), 2);
-    assert_eq!(snapshot.citations[0].message_id, assistant.id);
-    // The unresolved citation holds ordinal 1 rather than letting the two that
-    // resolved slide onto identities the message text already spent: each
-    // embedded id resolves to the evidence its own phrase cited, and the
-    // phantom's resolves to nothing at all.
-    assert_eq!(snapshot.citations[0].ordinal, 2);
-    assert_eq!(snapshot.citations[1].ordinal, 3);
-    let cited_id = |phrase: &str| {
-        let opened = assistant
-            .content
-            .split_once(&format!(":cit[{phrase}]{{citation_id="))
-            .expect("the phrase is cited")
-            .1;
-        opened
-            .split_once('}')
-            .expect("the citation closes")
-            .0
-            .parse::<crate::AssistantCitationId>()
-            .expect("the citation carries an id")
-    };
-    assert_eq!(cited_id("second claim"), snapshot.citations[0].id);
-    assert_eq!(cited_id("first claim"), snapshot.citations[1].id);
-    let phantom = cited_id("phantom claim");
-    assert!(snapshot
-        .citations
-        .iter()
-        .all(|citation| citation.id != phantom));
-    assert_eq!(snapshot.citations[0].excerpt.chars().count(), 600);
-    assert!(!snapshot.citations[0].excerpt.contains(private_tail));
-    assert_eq!(
-        snapshot.citations[0]
-            .heading
-            .as_ref()
-            .unwrap()
-            .chars()
-            .count(),
-        160
-    );
-    let (pages, bounds) = document_content_placement(&snapshot.citations[0].location);
-    assert_eq!(pages, [1, 2, 3, 4, 5, 6, 7, 8]);
-    // A page-granular source has nothing to draw; `pages` is the whole answer.
-    assert!(bounds.is_empty());
-    // Positioned regions keep their first-seen page order but are projected as
-    // rectangles ordered down and across each page, deduplicated.
-    let (pages, bounds) = document_content_placement(&snapshot.citations[1].location);
-    assert_eq!(pages, [2, 1]);
-    assert_eq!(
-        bounds
-            .iter()
-            .map(|placed| (placed.page, placed.bounds.top, placed.bounds.left))
-            .collect::<Vec<_>>(),
-        [(1, 1_000, 1_000), (1, 1_000, 3_000), (2, 5_000, 1_000)]
-    );
-
-    let other_chat = sample_chat();
-    store.create_chat(&other_chat).await.unwrap();
-    let cross_chat = Message {
-        id: MessageId::new(),
-        chat_id: other_chat.id,
-        turn_id: call.turn_id,
-        role: Role::Assistant,
-        content: "cross chat".into(),
-        created_at: assistant.created_at,
-    };
-    store
-        .append_assistant_message_with_citations(&cross_chat, &[reference])
-        .await
-        .unwrap();
-    assert!(store
-        .get_chat_transcript(other_chat.id)
-        .await
-        .unwrap()
-        .unwrap()
-        .citations
-        .is_empty());
-    let cross_turn = Message {
-        id: MessageId::new(),
-        chat_id: chat.id,
-        turn_id: TurnId::new(),
-        role: Role::Assistant,
-        content: "cross turn".into(),
-        created_at: assistant.created_at,
-    };
-    store
-        .append_assistant_message_with_citations(&cross_turn, &[reference])
-        .await
-        .unwrap();
-    assert_eq!(
-        store
-            .get_chat_transcript(chat.id)
-            .await
-            .unwrap()
-            .unwrap()
-            .citations
-            .len(),
-        2
-    );
-
-    let mut conflicting = evidence.clone();
-    conflicting.generation.revision_token = uuid::Uuid::new_v4();
-    assert_eq!(
-        store
-            .resolve_server_tool_call_with_evidence(
-                call.id,
-                &resolution,
-                resolved_at,
-                &[conflicting],
-            )
-            .await
-            .unwrap(),
-        ResolveToolCallOutcome::AlreadyTerminal
-    );
-
-    let replacement = DocumentUpsert {
-        canonical_fingerprint: None,
-        canonical_text: "new text".into(),
-        updated_at: updated_at + chrono::Duration::seconds(2),
-        ..source.clone()
-    };
-    let replacement = store.upsert_document(&replacement).await.unwrap();
-    assert_ne!(replacement.generation(), document.generation());
-    assert_eq!(
-        store.list_retrieval_evidence(call.id).await.unwrap(),
-        stored
-    );
-    store.delete_document(source.id).await.unwrap();
-    assert_eq!(
-        store.list_retrieval_evidence(call.id).await.unwrap(),
-        stored
-    );
-    let historical = store.get_chat_transcript(chat.id).await.unwrap().unwrap();
-    assert_eq!(historical.citations, snapshot.citations);
-    assert_eq!(
-        store.delete_chat(chat.id).await.unwrap(),
-        DeleteChatOutcome::Deleted
-    );
-    assert!(entities::assistant_citation::Entity::find()
-        .all(&store.conn)
-        .await
-        .unwrap()
-        .is_empty());
-}
-
-/// Evidence written before it had kinds carries no location payload, and no
-/// migration gives it one. Such a row is document content and has to read back
-/// as exactly the passage it was stored as.
-#[test]
-fn evidence_stored_before_the_taxonomy_reads_as_document_content() {
-    let document_id = DocumentId::new();
-    let span = ByteSpan::new(0, 8);
-    let regions = vec![SourceRegion {
-        span,
-        location: SourceLocation::Page {
-            number: std::num::NonZeroU32::new(3).unwrap(),
-            bounds: None,
-        },
-    }];
-    // Exactly the columns the pre-taxonomy writer produced, with no location.
-    let stored = entities::retrieval_evidence::Model {
-        call_id: uuid::Uuid::new_v4(),
-        rank: 1,
-        source_token: uuid::Uuid::new_v4(),
-        chat_id: uuid::Uuid::new_v4(),
-        turn_id: uuid::Uuid::new_v4(),
-        document_id: document_id.0,
-        content_revision: 1,
-        revision_token: uuid::Uuid::new_v4(),
-        chunk_id: ChunkId::derive(document_id, span.start, span.end).0,
-        span_start: 0,
-        span_end: 8,
-        snippet: "evidence".into(),
-        heading_path: serde_json::json!(["Archive", "1994"]),
-        source_regions: serde_json::to_value(&regions).unwrap(),
-        source_kind: "inline".into(),
-        source_uri: None,
-        location: None,
-    };
-    let read = super::ops::client_execution::evidence_from_model(stored).unwrap();
-    assert_eq!(
-        read.evidence.location,
-        EvidenceLocation::DocumentContent {
-            heading_path: vec!["Archive".into(), "1994".into()],
-            source_regions: regions,
-        }
-    );
-}
-
-/// A kind the evidence columns cannot express keeps its own location through
-/// the store and reaches the renderer as the place it addresses, not as pages.
-#[tokio::test]
-async fn evidence_of_another_kind_round_trips_and_projects_its_own_location() {
-    let (_dir, store) = temp_store().await;
-    let chat = sample_chat();
-    store.create_chat(&chat).await.unwrap();
-    let created_at = DateTime::<Utc>::from_timestamp(1_700_002_000, 0).unwrap();
-    let call = ToolCallRecord {
-        id: CallId::new(),
-        chat_id: chat.id,
-        turn_id: TurnId::new(),
-        provider_id: "search_sheet".into(),
-        name: "search".into(),
-        arguments: serde_json::json!({"query": "revenue"}),
-        execution: ToolCallExecution::Server,
-        status: ToolCallStatus::Pending,
-        result: None,
-        error_code: None,
-        error_detail: None,
-        client_executor_id: None,
-        client_lease_expires_at: None,
-        created_at,
-        resolved_at: None,
-    };
-    store.accept_tool_call(&call).await.unwrap();
-    let document_id = DocumentId::new();
-    let span = ByteSpan::new(0, 8);
-    let evidence = RetrievalEvidenceInput {
-        rank: 1,
-        source_token: uuid::Uuid::new_v4(),
-        document_id,
-        generation: DocumentGeneration {
-            content_revision: 1,
-            revision_token: uuid::Uuid::new_v4(),
-        },
-        chunk_id: ChunkId::derive(document_id, span.start, span.end),
-        span,
-        snippet: "1,204.00".into(),
-        location: EvidenceLocation::SpreadsheetCellRange {
-            start_cell: "B2".into(),
-            end_cell: Some("D10".into()),
-            sheet_index: 2,
-            sheet_name: "Q4 Results".into(),
-        },
-        source: RetrievalEvidenceSource::Inline,
-    };
-    store
-        .resolve_server_tool_call_with_evidence(
-            call.id,
-            &ToolCallResolution::Completed {
-                result: "Found 1 range".into(),
-            },
-            created_at + chrono::Duration::seconds(1),
-            std::slice::from_ref(&evidence),
-        )
-        .await
-        .unwrap();
-    let stored = store.list_retrieval_evidence(call.id).await.unwrap();
-    assert_eq!(stored[0].evidence, evidence);
-
-    let reference = crate::AssistantCitationReference {
-        source_token: evidence.source_token,
-    };
-    let assistant_id = MessageId::new();
-    let cited = crate::parse_assistant_citations(
-        &crate::format_citation_directive("revenue", reference),
-        assistant_id,
-    );
-    store
-        .append_assistant_message_with_citations(
-            &Message {
-                id: assistant_id,
-                chat_id: chat.id,
-                turn_id: call.turn_id,
-                role: Role::Assistant,
-                content: cited.content,
-                created_at: created_at + chrono::Duration::seconds(2),
-            },
-            &cited.references,
-        )
-        .await
-        .unwrap();
-    let snapshot = store.get_chat_transcript(chat.id).await.unwrap().unwrap();
-    assert_eq!(
-        snapshot.citations[0].location,
-        crate::citation::CitationLocation::SpreadsheetCellRange {
-            start_cell: "B2".into(),
-            end_cell: Some("D10".into()),
-            sheet_index: 2,
-            sheet_name: "Q4 Results".into(),
-        }
-    );
-}
-
-#[tokio::test]
-async fn invalid_retrieval_identity_rolls_back_tool_completion() {
-    let (_dir, store) = temp_store().await;
-    let chat = sample_chat();
-    store.create_chat(&chat).await.unwrap();
-    let created_at = Utc::now();
-    let call = ToolCallRecord {
-        id: CallId::new(),
-        chat_id: chat.id,
-        turn_id: TurnId::new(),
-        provider_id: "search_invalid".into(),
-        name: "search".into(),
-        arguments: serde_json::json!({"query": "facts"}),
-        execution: ToolCallExecution::Server,
-        status: ToolCallStatus::Pending,
-        result: None,
-        error_code: None,
-        error_detail: None,
-        client_executor_id: None,
-        client_lease_expires_at: None,
-        created_at,
-        resolved_at: None,
-    };
-    store.accept_tool_call(&call).await.unwrap();
-    let document_id = DocumentId::new();
-    let invalid = RetrievalEvidenceInput {
-        rank: 1,
-        source_token: uuid::Uuid::new_v4(),
-        document_id,
-        generation: DocumentGeneration {
-            content_revision: 1,
-            revision_token: uuid::Uuid::new_v4(),
-        },
-        chunk_id: ChunkId::derive(DocumentId::new(), 0, 4),
-        span: ByteSpan::new(0, 4),
-        snippet: "fact".into(),
-        location: EvidenceLocation::DocumentContent {
-            heading_path: Vec::new(),
-            source_regions: Vec::new(),
-        },
-        source: RetrievalEvidenceSource::Inline,
-    };
-    let resolution = ToolCallResolution::Completed {
-        result: "Found 1 passage".into(),
-    };
-    assert!(store
-        .resolve_server_tool_call_with_evidence(
-            call.id,
-            &resolution,
-            created_at + chrono::Duration::seconds(1),
-            &[invalid],
-        )
-        .await
-        .is_err());
-    assert!(store
-        .list_retrieval_evidence(call.id)
-        .await
-        .unwrap()
-        .is_empty());
-    let pending = store.list_tool_calls(chat.id).await.unwrap();
-    assert_eq!(pending[0].status, ToolCallStatus::Pending);
-
-    let oversized_snippet = "x".repeat(RetrievalEvidenceInput::MAX_SNIPPET_BYTES + 1);
-    let oversized_span = ByteSpan::new(0, oversized_snippet.len());
-    let oversized = RetrievalEvidenceInput {
-        rank: 1,
-        source_token: uuid::Uuid::new_v4(),
-        document_id,
-        generation: DocumentGeneration {
-            content_revision: 1,
-            revision_token: uuid::Uuid::new_v4(),
-        },
-        chunk_id: ChunkId::derive(document_id, oversized_span.start, oversized_span.end),
-        span: oversized_span,
-        snippet: oversized_snippet,
-        location: EvidenceLocation::DocumentContent {
-            heading_path: Vec::new(),
-            source_regions: Vec::new(),
-        },
-        source: RetrievalEvidenceSource::Inline,
-    };
-    assert!(store
-        .resolve_server_tool_call_with_evidence(
-            call.id,
-            &resolution,
-            created_at + chrono::Duration::seconds(1),
-            &[oversized],
-        )
-        .await
-        .is_err());
-    let nul_span = ByteSpan::new(0, 4);
-    let nul = RetrievalEvidenceInput {
-        rank: 1,
-        source_token: uuid::Uuid::new_v4(),
-        document_id,
-        generation: DocumentGeneration {
-            content_revision: 1,
-            revision_token: uuid::Uuid::new_v4(),
-        },
-        chunk_id: ChunkId::derive(document_id, nul_span.start, nul_span.end),
-        span: nul_span,
-        snippet: "a\0bc".into(),
-        location: EvidenceLocation::DocumentContent {
-            heading_path: Vec::new(),
-            source_regions: Vec::new(),
-        },
-        source: RetrievalEvidenceSource::Inline,
-    };
-    assert!(store
-        .resolve_server_tool_call_with_evidence(
-            call.id,
-            &resolution,
-            created_at + chrono::Duration::seconds(1),
-            &[nul],
-        )
-        .await
-        .is_err());
-    if usize::BITS > 63 {
-        let start = (i64::MAX as usize) + 1;
-        let span = ByteSpan::new(start, start + 4);
-        let outside_storage_range = RetrievalEvidenceInput {
-            rank: 1,
-            source_token: uuid::Uuid::new_v4(),
-            document_id,
-            generation: DocumentGeneration {
-                content_revision: 1,
-                revision_token: uuid::Uuid::new_v4(),
-            },
-            chunk_id: ChunkId::derive(document_id, span.start, span.end),
-            span,
-            snippet: "fact".into(),
-            location: EvidenceLocation::DocumentContent {
-                heading_path: Vec::new(),
-                source_regions: Vec::new(),
-            },
-            source: RetrievalEvidenceSource::Inline,
-        };
-        assert!(store
-            .resolve_server_tool_call_with_evidence(
-                call.id,
-                &resolution,
-                created_at + chrono::Duration::seconds(1),
-                &[outside_storage_range],
-            )
-            .await
-            .is_err());
-    }
-    assert_eq!(
-        store.list_tool_calls(chat.id).await.unwrap()[0].status,
-        ToolCallStatus::Pending
-    );
 }
 
 async fn claimed_sensitive_call(
@@ -9968,7 +9317,7 @@ async fn failed_tool_resolution_and_approval_decision_serialize_to_one_terminal_
     let (resolved, decided) = tokio::join!(
         async move {
             resolving
-                .resolve_server_tool_call_with_evidence(call_id, &resolution, Utc::now(), &[])
+                .resolve_server_tool_call(call_id, &resolution, Utc::now())
                 .await
         },
         async move {

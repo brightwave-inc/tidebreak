@@ -1,19 +1,16 @@
-use std::collections::HashSet;
-
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set,
     TransactionTrait,
 };
 
 use crate::citation::{
-    parse_assistant_citations, project_citation_location, AssistantCitationReference,
-    AssistantCitationSnapshot, CitationSpan, MAX_ASSISTANT_CITATIONS, MAX_CITATION_EXCERPT_CHARS,
-    MAX_CITATION_HEADING_CHARS,
+    parse_assistant_citations, AssistantCitationInput, AssistantCitationSnapshot, CitationLocator,
+    MAX_ASSISTANT_CITATIONS,
 };
 use crate::error::{AgentError, Result};
-use crate::id::{AssistantCitationId, ChatId, MessageId, TurnId};
+use crate::id::{AssistantCitationId, ChatId, MessageId};
 use crate::model::{Message, Role};
-use crate::storage::{AppendClaimedMessageOutcome, TurnLeaseFence};
+use crate::storage::{AppendClaimedMessageOutcome, ChatCitationSnapshot, TurnLeaseFence};
 
 use super::super::{entities, store_err, DbStore};
 use super::conversation::{
@@ -24,9 +21,9 @@ use super::{acquire_chat_write_lock, acquire_turn_write_lock};
 pub(in crate::db) async fn append_assistant_message(
     store: &DbStore,
     message: &Message,
-    references: &[AssistantCitationReference],
+    citations: &[AssistantCitationInput],
 ) -> Result<()> {
-    validate_assistant_message(message, references)?;
+    validate_assistant_message(message, citations)?;
     let created_at = super::turn::canonical_db_timestamp(message.created_at)?;
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_chat_write_lock(&transaction, message.chat_id).await? {
@@ -46,7 +43,7 @@ pub(in crate::db) async fn append_assistant_message(
     .await?
     {
         transaction.rollback().await.map_err(store_err)?;
-        if exact_appended_message_on(store, message, references).await? {
+        if exact_appended_message_on(store, message, citations).await? {
             return Ok(());
         }
         return Err(AgentError::Store(format!(
@@ -54,8 +51,6 @@ pub(in crate::db) async fn append_assistant_message(
             message.id
         )));
     }
-    let evidence =
-        resolve_references_on(&transaction, message.chat_id, message.turn_id, references).await?;
     entities::message::ActiveModel {
         id: Set(message.id.0),
         chat_id: Set(message.chat_id.0),
@@ -69,18 +64,18 @@ pub(in crate::db) async fn append_assistant_message(
     .insert(&transaction)
     .await
     .map_err(store_err)?;
-    insert_for_message_on(&transaction, message, references, &evidence).await?;
+    insert_for_message_on(&transaction, message, citations).await?;
     transaction.commit().await.map_err(store_err)
 }
 
 pub(in crate::db) async fn append_claimed_assistant_message(
     store: &DbStore,
     message: &Message,
-    references: &[AssistantCitationReference],
+    citations: &[AssistantCitationInput],
     lease_token: uuid::Uuid,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<AppendClaimedMessageOutcome> {
-    validate_assistant_message(message, references)?;
+    validate_assistant_message(message, citations)?;
     if lease_token.is_nil() {
         return Err(AgentError::Store(
             "claimed message lease token must not be nil".into(),
@@ -89,11 +84,9 @@ pub(in crate::db) async fn append_claimed_assistant_message(
     let created_at = super::turn::canonical_db_timestamp(message.created_at)?;
     let now = super::turn::canonical_db_timestamp(now)?;
     let transaction = store.conn.begin().await.map_err(store_err)?;
-    if !acquire_chat_write_lock(&transaction, message.chat_id).await? {
-        transaction.rollback().await.map_err(store_err)?;
-        return Ok(AppendClaimedMessageOutcome::LeaseLost);
-    }
-    if !acquire_turn_write_lock(&transaction, message.turn_id).await? {
+    if !acquire_chat_write_lock(&transaction, message.chat_id).await?
+        || !acquire_turn_write_lock(&transaction, message.turn_id).await?
+    {
         transaction.rollback().await.map_err(store_err)?;
         return Ok(AppendClaimedMessageOutcome::LeaseLost);
     }
@@ -106,7 +99,7 @@ pub(in crate::db) async fn append_claimed_assistant_message(
             &transaction,
             &existing,
             message,
-            references,
+            citations,
             Some(lease_token),
         )
         .await?;
@@ -136,8 +129,6 @@ pub(in crate::db) async fn append_claimed_assistant_message(
         transaction.commit().await.map_err(store_err)?;
         return Ok(AppendClaimedMessageOutcome::IdentityConflict);
     }
-    let evidence =
-        resolve_references_on(&transaction, message.chat_id, message.turn_id, references).await?;
     entities::message::ActiveModel {
         id: Set(message.id.0),
         chat_id: Set(message.chat_id.0),
@@ -151,7 +142,7 @@ pub(in crate::db) async fn append_claimed_assistant_message(
     .insert(&transaction)
     .await
     .map_err(store_err)?;
-    insert_for_message_on(&transaction, message, references, &evidence).await?;
+    insert_for_message_on(&transaction, message, citations).await?;
     transaction.commit().await.map_err(store_err)?;
     Ok(AppendClaimedMessageOutcome::Appended)
 }
@@ -159,7 +150,7 @@ pub(in crate::db) async fn append_claimed_assistant_message(
 async fn exact_appended_message_on(
     store: &DbStore,
     message: &Message,
-    references: &[AssistantCitationReference],
+    citations: &[AssistantCitationInput],
 ) -> Result<bool> {
     let Some(stored) = entities::message::Entity::find_by_id(message.id.0)
         .one(&store.conn)
@@ -168,14 +159,14 @@ async fn exact_appended_message_on(
     else {
         return Ok(false);
     };
-    exact_appended_message_model_on(&store.conn, &stored, message, references, None).await
+    exact_appended_message_model_on(&store.conn, &stored, message, citations, None).await
 }
 
 async fn exact_appended_message_model_on<C>(
     conn: &C,
     stored: &entities::message::Model,
     message: &Message,
-    references: &[AssistantCitationReference],
+    citations: &[AssistantCitationInput],
     turn_lease_token: Option<uuid::Uuid>,
 ) -> Result<bool>
 where
@@ -191,227 +182,121 @@ where
     {
         return Ok(false);
     }
-    let expected = resolve_references_on(conn, message.chat_id, message.turn_id, references)
-        .await?
-        .into_iter()
-        .map(|evidence| AssistantCitationReference {
-            source_token: evidence.source_token,
-        })
-        .collect::<Vec<_>>();
-    Ok(exact_references_for_message_on(conn, message.id).await? == expected)
+    Ok(exact_citations_for_message_on(conn, message.id).await? == citations)
 }
 
 pub(in crate::db) fn validate_assistant_message(
     message: &Message,
-    references: &[AssistantCitationReference],
+    citations: &[AssistantCitationInput],
 ) -> Result<()> {
     if message.role != Role::Assistant || message.id.0.is_nil() {
         return Err(AgentError::Store(
             "citations require a non-nil assistant message".into(),
         ));
     }
-    if parse_assistant_citations(&message.content, message.id).content != message.content {
-        return Err(AgentError::Store(
-            "assistant message contains an unstripped source reference".into(),
-        ));
-    }
-    if references.len() > MAX_ASSISTANT_CITATIONS
-        || references.iter().copied().collect::<HashSet<_>>().len() != references.len()
+    let parsed = parse_assistant_citations(&message.content);
+    if citations.len() > MAX_ASSISTANT_CITATIONS
+        || citations.iter().any(|citation| !citation.is_valid())
+        || parsed.citations != citations
     {
         return Err(AgentError::Store(
-            "assistant citation references are invalid".into(),
+            "assistant citation inputs do not match the message".into(),
         ));
     }
     Ok(())
 }
 
-pub(in crate::db) async fn resolve_references_on<C>(
-    conn: &C,
-    chat_id: ChatId,
-    turn_id: TurnId,
-    references: &[AssistantCitationReference],
-) -> Result<Vec<entities::retrieval_evidence::Model>>
-where
-    C: ConnectionTrait,
-{
-    let mut evidence = Vec::with_capacity(references.len());
-    for reference in references {
-        if let Some(row) = entities::retrieval_evidence::Entity::find()
-            .filter(entities::retrieval_evidence::Column::SourceToken.eq(reference.source_token))
-            .filter(entities::retrieval_evidence::Column::ChatId.eq(chat_id.0))
-            .filter(entities::retrieval_evidence::Column::TurnId.eq(turn_id.0))
-            .one(conn)
-            .await
-            .map_err(store_err)?
-        {
-            evidence.push(row);
-        }
-    }
-    Ok(evidence)
-}
-
-/// Record one citation per reference that resolved, numbered by where the model
-/// first used it.
-///
-/// The reference list is the only ordinal authority. A citation's identity is
-/// derived from its message and ordinal, and the message text embeds that same
-/// identity beside the phrase it backs, so numbering the surviving rows 1..n
-/// instead would hand a phrase whose reference resolved to nothing the identity
-/// of the next citation along — a reader would be shown another passage's
-/// evidence under it. A reference that resolves to no evidence leaves a gap
-/// instead: its embedded identity resolves to nothing, which renders as plain
-/// prose.
 pub(in crate::db) async fn insert_for_message_on<C>(
     conn: &C,
     message: &Message,
-    references: &[AssistantCitationReference],
-    evidence: &[entities::retrieval_evidence::Model],
+    citations: &[AssistantCitationInput],
 ) -> Result<()>
 where
     C: ConnectionTrait,
 {
-    let rows = references
-        .iter()
-        .enumerate()
-        .filter_map(|(index, reference)| {
-            let row = evidence
-                .iter()
-                .find(|row| row.source_token == reference.source_token)?;
-            let ordinal = u16::try_from(index + 1).expect("citation limit fits u16");
-            Some(entities::assistant_citation::ActiveModel {
-                id: Set(AssistantCitationId::derive(message.id, ordinal).0),
-                message_id: Set(message.id.0),
-                ordinal: Set(i32::from(ordinal)),
-                chat_id: Set(message.chat_id.0),
-                turn_id: Set(message.turn_id.0),
-                evidence_call_id: Set(row.call_id),
-                evidence_rank: Set(row.rank),
-            })
-        })
-        .collect::<Vec<_>>();
-    if rows.is_empty() {
-        return Ok(());
+    let mut rows = Vec::with_capacity(citations.len());
+    for (index, citation) in citations.iter().enumerate() {
+        let ordinal = u16::try_from(index + 1).expect("citation limit fits u16");
+        rows.push(entities::assistant_citation::ActiveModel {
+            id: Set(AssistantCitationId::derive(message.id, ordinal).0),
+            message_id: Set(message.id.0),
+            ordinal: Set(i32::from(ordinal)),
+            document_id: Set(citation.document_id.0),
+            locator: Set(serde_json::to_value(&citation.locator)
+                .map_err(|error| AgentError::Store(error.to_string()))?),
+        });
     }
-    entities::assistant_citation::Entity::insert_many(rows)
-        .exec(conn)
-        .await
-        .map_err(store_err)?;
+    if !rows.is_empty() {
+        entities::assistant_citation::Entity::insert_many(rows)
+            .exec(conn)
+            .await
+            .map_err(store_err)?;
+    }
     Ok(())
 }
 
-pub(in crate::db) async fn exact_references_for_message_on<C>(
+pub(in crate::db) async fn exact_citations_for_message_on<C>(
     conn: &C,
     message_id: MessageId,
-) -> Result<Vec<AssistantCitationReference>>
+) -> Result<Vec<AssistantCitationInput>>
 where
     C: ConnectionTrait,
 {
-    let rows = entities::assistant_citation::Entity::find()
-        .find_also_related(entities::retrieval_evidence::Entity)
+    entities::assistant_citation::Entity::find()
         .filter(entities::assistant_citation::Column::MessageId.eq(message_id.0))
         .order_by_asc(entities::assistant_citation::Column::Ordinal)
         .all(conn)
         .await
-        .map_err(store_err)?;
-    let mut references = Vec::with_capacity(rows.len());
-    for (row, evidence) in rows {
-        let evidence = evidence
-            .ok_or_else(|| AgentError::Store("assistant citation evidence disappeared".into()))?;
-        if evidence.chat_id != row.chat_id || evidence.turn_id != row.turn_id {
-            return Err(AgentError::Store(
-                "assistant citation evidence owner is corrupt".into(),
-            ));
-        }
-        references.push(AssistantCitationReference {
-            source_token: evidence.source_token,
-        });
-    }
-    Ok(references)
+        .map_err(store_err)?
+        .into_iter()
+        .map(|row| {
+            Ok(AssistantCitationInput {
+                document_id: crate::DocumentId(row.document_id),
+                locator: serde_json::from_value::<CitationLocator>(row.locator)
+                    .map_err(|error| AgentError::Store(error.to_string()))?,
+            })
+        })
+        .collect()
 }
 
 pub(in crate::db) async fn list_snapshots_on<C>(
     conn: &C,
     chat_id: ChatId,
-) -> Result<Vec<AssistantCitationSnapshot>>
+) -> Result<Vec<ChatCitationSnapshot>>
 where
     C: ConnectionTrait,
 {
     let rows = entities::assistant_citation::Entity::find()
-        .find_also_related(entities::retrieval_evidence::Entity)
-        .filter(entities::assistant_citation::Column::ChatId.eq(chat_id.0))
+        .find_also_related(entities::message::Entity)
         .order_by_asc(entities::assistant_citation::Column::MessageId)
         .order_by_asc(entities::assistant_citation::Column::Ordinal)
         .all(conn)
         .await
         .map_err(store_err)?;
-    let mut snapshots = Vec::with_capacity(rows.len());
-    let mut ordinal_owner = None;
-    // Ordinals ascend within a message but may skip: a reference the message
-    // cited and the store could not resolve holds its place rather than letting
-    // the citations after it inherit identities the text already spent.
-    let mut least_ordinal = 1_i32;
-    for (row, evidence) in rows {
-        let evidence = evidence
-            .ok_or_else(|| AgentError::Store("assistant citation evidence disappeared".into()))?;
-        if ordinal_owner != Some(row.message_id) {
-            ordinal_owner = Some(row.message_id);
-            least_ordinal = 1;
-        }
-        if row.ordinal < least_ordinal
-            || !(1..=MAX_ASSISTANT_CITATIONS as i32).contains(&row.ordinal)
-            || row.id
-                != AssistantCitationId::derive(
-                    MessageId(row.message_id),
-                    u16::try_from(row.ordinal).expect("validated citation ordinal fits u16"),
-                )
-                .0
-        {
-            return Err(AgentError::Store(
-                "assistant citation ordering or identity is corrupt".into(),
-            ));
-        }
-        least_ordinal = row.ordinal + 1;
-        let evidence = super::client_execution::evidence_from_model(evidence)?;
-        if evidence.chat_id != chat_id
-            || evidence.turn_id.0 != row.turn_id
-            || evidence.call_id.0 != row.evidence_call_id
-            || i32::from(evidence.evidence.rank) != row.evidence_rank
-        {
-            return Err(AgentError::Store(
-                "assistant citation projection owner is corrupt".into(),
-            ));
-        }
-        let location = project_citation_location(&evidence.evidence.location);
-        let headings = evidence.evidence.location.heading_path();
-        let heading = (!headings.is_empty()).then(|| {
-            headings
-                .join(" > ")
-                .chars()
-                .take(MAX_CITATION_HEADING_CHARS)
-                .collect()
-        });
-        let span = CitationSpan {
-            start: u32::try_from(evidence.evidence.span.start)
-                .map_err(|_| AgentError::Store("citation span exceeds the wire range".into()))?,
-            end: u32::try_from(evidence.evidence.span.end)
-                .map_err(|_| AgentError::Store("citation span exceeds the wire range".into()))?,
-        };
-        snapshots.push(AssistantCitationSnapshot {
-            id: AssistantCitationId(row.id),
-            message_id: MessageId(row.message_id),
-            ordinal: u16::try_from(row.ordinal)
-                .map_err(|_| AgentError::Store("invalid assistant citation ordinal".into()))?,
-            document_id: evidence.evidence.document_id,
-            span,
-            excerpt: evidence
-                .evidence
-                .snippet
-                .chars()
-                .take(MAX_CITATION_EXCERPT_CHARS)
-                .collect(),
-            heading,
-            location,
-        });
-    }
-    Ok(snapshots)
+    rows.into_iter()
+        .filter_map(|(row, message)| {
+            message
+                .is_some_and(|message| message.chat_id == chat_id.0)
+                .then_some(row)
+        })
+        .map(|row| {
+            let ordinal = u16::try_from(row.ordinal)
+                .map_err(|_| AgentError::Store("invalid assistant citation ordinal".into()))?;
+            if row.id != AssistantCitationId::derive(MessageId(row.message_id), ordinal).0 {
+                return Err(AgentError::Store(
+                    "assistant citation identity is corrupt".into(),
+                ));
+            }
+            Ok(ChatCitationSnapshot {
+                message_id: MessageId(row.message_id),
+                citation: AssistantCitationSnapshot {
+                    id: AssistantCitationId(row.id),
+                    ordinal,
+                    document_id: crate::DocumentId(row.document_id),
+                    locator: serde_json::from_value(row.locator)
+                        .map_err(|error| AgentError::Store(error.to_string()))?,
+                },
+            })
+        })
+        .collect()
 }

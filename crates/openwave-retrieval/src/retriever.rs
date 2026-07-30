@@ -56,7 +56,6 @@ mod tests {
                     span: ByteSpan::new(0, 99),
                     location: SourceLocation::Page {
                         number: NonZeroU32::new(1).expect("nonzero page"),
-                        bounds: None,
                     },
                 }]),
             )

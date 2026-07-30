@@ -52,9 +52,7 @@ mod types;
 pub use brave::BraveProvider;
 pub use credentials::{WebSearchCredential, WebSearchCredentialState, WebSearchCredentials};
 pub use exa::ExaProvider;
-pub use extract_source::{
-    ExtractedPageSink, ExtractedPageSinkError, StoredExtractedPage, MAX_EXTRACTED_PAGE_PASSAGES,
-};
+pub use extract_source::{ExtractedPageSink, ExtractedPageSinkError, StoredExtractedPage};
 pub use fetch_policy::{
     admit_fetch_address, admit_fetch_url, FetchPolicyViolation, MAX_FETCH_URL_BYTES,
 };

@@ -267,7 +267,7 @@ pub(in crate::db) async fn apply_turn_steer(
     steer_id: TurnSteerId,
     attempt_event_ordinal: i32,
     preceding_assistant: Option<&crate::model::Message>,
-    preceding_citations: &[crate::AssistantCitationReference],
+    preceding_citations: &[crate::AssistantCitationInput],
     now: chrono::DateTime<Utc>,
 ) -> Result<Option<JournaledTurnSteerOutcome>> {
     if turn_id.0.is_nil() || lease_token.is_nil() || steer_id.0.is_nil() {
@@ -328,24 +328,12 @@ pub(in crate::db) async fn apply_turn_steer(
             ensure_exact_applied_message_on(&transaction, &steer).await?;
             if let Some(preceding) = preceding_assistant {
                 ensure_exact_preceding_message_on(&transaction, &steer, preceding).await?;
-                let expected = super::super::citation::resolve_references_on(
-                    &transaction,
-                    preceding.chat_id,
-                    preceding.turn_id,
-                    preceding_citations,
-                )
-                .await?
-                .into_iter()
-                .map(|evidence| crate::AssistantCitationReference {
-                    source_token: evidence.source_token,
-                })
-                .collect::<Vec<_>>();
-                let stored = super::super::citation::exact_references_for_message_on(
+                let stored = super::super::citation::exact_citations_for_message_on(
                     &transaction,
                     preceding.id,
                 )
                 .await?;
-                if stored != expected {
+                if stored != preceding_citations {
                     return Err(AgentError::Store(format!(
                         "applied turn steer {} has different preceding citations",
                         TurnSteerId(steer.id)
@@ -449,20 +437,8 @@ pub(in crate::db) async fn apply_turn_steer(
             transaction.rollback().await.map_err(store_err)?;
             return Err(store_err(error));
         }
-        let evidence = super::super::citation::resolve_references_on(
-            &transaction,
-            preceding.chat_id,
-            preceding.turn_id,
-            preceding_citations,
-        )
-        .await?;
-        super::super::citation::insert_for_message_on(
-            &transaction,
-            preceding,
-            preceding_citations,
-            &evidence,
-        )
-        .await?;
+        super::super::citation::insert_for_message_on(&transaction, preceding, preceding_citations)
+            .await?;
     }
 
     if !transfer_steer_message_identity_on(

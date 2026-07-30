@@ -130,30 +130,9 @@ export type ApprovalClass = "read_only" | "workspace" | "sensitive";
 export type AssistantCitationId = string;
 
 /**
- * Renderer-safe historical citation projected from immutable evidence.
- *
- * The source identity and canonical-text span travel with the excerpt because
- * a citation is a position in a document, not just a quotation of one: without
- * them a reader can only be shown the words again, never where they came from.
- * Neither is a capability — the document id already addresses the source panel,
- * and the span only means anything against text the same client can already
- * read.
+ * Renderer-safe historical citation stored beside an assistant message.
  */
-export type AssistantCitationSnapshot = { id: AssistantCitationId, ordinal: number, 
-/**
- * The cited source, addressable as a document panel.
- */
-document_id: DocumentId, 
-/**
- * Half-open byte range of the cited passage in that document's canonical
- * text, which is the text the extracted-text view renders.
- */
-span: CitationSpan, excerpt: string, heading: string | null, 
-/**
- * Where the passage sits in its source, in the terms that source is
- * addressed by.
- */
-location: CitationLocation, };
+export type AssistantCitationSnapshot = { id: AssistantCitationId, ordinal: number, document_id: DocumentId, locator: CitationLocator, };
 
 /**
  * Where the Auto-mode judge stands on one parked call.
@@ -199,11 +178,6 @@ reasoning_effort: ReasoningEffort | null,
  * [`PermissionMode::Ask`].
  */
 permission_mode: PermissionMode | null, 
-/**
- * How turns in this chat ask the model to cite; `None` follows the global
- * default.
- */
-citation_format: CitationFormat | null, 
 /**
  * CAS revision of this conversation's exact root projection.
  */
@@ -311,61 +285,12 @@ export type ChatTranscript = { messages: Array<ChatMessageSnapshot>,
 tool_activity: Array<ChatToolActivitySnapshot>, last_event_seq: number, };
 
 /**
- * How a turn asks the model to cite the sources it read.
+ * A small, human-scale position inside a cited document.
  *
- * Only the authoring instruction changes. Both forms resolve through the same
- * grammar and land in the same durable shape — an ordered reference list, with
- * inline directives as an optional layer on top — so one conversation can hold
- * messages authored under either, and each keeps rendering as it was written.
- *
- * Persisted per chat as the token from [`Self::as_str`], with an absent value
- * meaning "follow the global default".
+ * Validation is intentionally loose. A page or line that does not exist still
+ * renders and opens the document as close to that position as the reader can.
  */
-export type CitationFormat = "inline" | "sources_attached";
-
-/**
- * Where a citation points, projected per evidence kind.
- *
- * The discriminant is the renderer's instruction for how to open the passage:
- * pages and rectangles address a paginated document, a cell range addresses a
- * sheet, and a path addresses a node. Only document content is produced today.
- */
-export type CitationLocation = { "kind": "document_content", pages: Array<number>, 
-/**
- * Where on those pages the passage sits, for sources whose parser
- * resolved it that finely. Empty for page-granular sources; `pages`
- * is the complete answer either way.
- */
-bounds: Array<CitationPageBounds>, } | { "kind": "spreadsheet_cell_range", start_cell: string, end_cell: string | null, sheet_index: number, sheet_name: string, } | { "kind": "structured_path", path: string, path_type: StructuredPathType, };
-
-/**
- * One highlight rectangle of a citation, on a named page.
- */
-export type CitationPageBounds = { 
-/**
- * One-based page the rectangle falls on.
- */
-page: number, 
-/**
- * The rectangle, in that page's normalized coordinate space.
- */
-bounds: PageBounds, };
-
-/**
- * A citation's byte range, projected for the renderer.
- *
- * [`crate::ByteSpan`] is `usize`, which is a host-width detail rather than part
- * of a wire contract; canonical text is bounded well inside `u32`.
- */
-export type CitationSpan = { 
-/**
- * Inclusive start byte offset.
- */
-start: number, 
-/**
- * Exclusive end byte offset.
- */
-end: number, };
+export type CitationLocator = { "kind": "document" } | { "kind": "page", page: number, } | { "kind": "pages", start: number, end: number, } | { "kind": "lines", start: number, end: number, } | { "kind": "sheet", sheet: string, cells: string | null, };
 
 /**
  * Renderer-safe configuration and readiness.
@@ -736,39 +661,6 @@ selection: string | null,
 resolved_key: string | null, };
 
 /**
- * A rectangle on a page, in the page's own normalized coordinate space.
- *
- * Coordinates are fractions of the page's width and height with the origin at
- * the top-left corner, expressed in ten-thousandths ([`PAGE_BOUNDS_SCALE`]).
- * Normalizing to the page box is what lets a viewer draw the rectangle at any
- * zoom or render size — multiply by the rendered page and place it — without
- * knowing the page dimensions the parser saw.
- *
- * Fixed-point rather than floating-point on purpose: these travel through JSON
- * and comparisons, and integers round-trip exactly, keep the enclosing types
- * `Eq`/`Hash`, and make containment in the page an invariant that can actually
- * be checked. A ten-thousandth of a US Letter page is ~0.06pt — far finer than
- * any highlight needs.
- */
-export type PageBounds = { 
-/**
- * Distance from the page's left edge.
- */
-left: number, 
-/**
- * Distance from the page's top edge.
- */
-top: number, 
-/**
- * Width of the rectangle.
- */
-width: number, 
-/**
- * Height of the rectangle.
- */
-height: number, };
-
-/**
  * Closed renderer-safe pending approval projection. Canonical arguments,
  * model-authored summaries, and unknown tool names never cross this boundary;
  * only a tool's own closed preview of the action under review does.
@@ -1083,11 +975,6 @@ export type Settings = {
  */
 model: string | null, 
 /**
- * The citation format new chats follow unless they carry their own.
- * Always resolved, so a client never has to know the product default.
- */
-citation_format: CitationFormat, 
-/**
  * Whether a model API key is configured (never the key itself).
  */
 has_api_key: boolean, };
@@ -1117,11 +1004,6 @@ level: GrantLevel,
  * that chat or project is untitled.
  */
 level_title: string | null, action: RendererToolName, approval: ToolApprovalKind, scope: GrantScope, granted_at: string, };
-
-/**
- * How the `path` of a structured-path evidence location is written.
- */
-export type StructuredPathType = "json_dot_notation" | "xml_xpath";
 
 /**
  * The action a call will take, in a form a human can inspect.

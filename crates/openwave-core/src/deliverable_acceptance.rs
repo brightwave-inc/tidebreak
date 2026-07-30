@@ -97,7 +97,6 @@ pub async fn accept_workspace_artifact(
         // bytes, not a turn's cited text.
         turn_id: None,
         producing_run_id: None,
-        citations: Vec::new(),
         created_at: proposal.created_at,
     }
     .with_producer(proposal.producer);
@@ -199,7 +198,6 @@ pub async fn merge_agent_run_result(
         // revision carries no turn-scoped retrieval citations.
         turn_id: None,
         producing_run_id: None,
-        citations: Vec::new(),
         created_at: merge.created_at,
     }
     .with_producer(RevisionProducer::Run(merge.run_id));

@@ -23,7 +23,6 @@ const chats = [
     title: "Roadmap",
     model: null,
     reasoning_effort: null,
-    citation_format: null,
     project_id: null,
   },
   {
@@ -31,7 +30,6 @@ const chats = [
     title: null,
     model: null,
     reasoning_effort: null,
-    citation_format: null,
     project_id: null,
   },
 ];
@@ -58,7 +56,6 @@ vi.mock("./api", () => ({
     listProviders = vi.fn(async () => ({ providers: [] }));
     getSettings = vi.fn(async () => ({
       model: null,
-      citation_format: "inline",
       has_api_key: false,
     }));
     listChats = listChats;

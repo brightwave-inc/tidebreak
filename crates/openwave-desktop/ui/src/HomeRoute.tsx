@@ -33,7 +33,7 @@ function isImportedDocument(
 
 export function HomeRoute() {
   const navigate = useNavigate();
-  const { client, models, defaultModelKey, defaultCitationFormat } = useApp();
+  const { client, models, defaultModelKey } = useApp();
   const chatsLoaded = useChatListStore((state) => state.chatsLoaded);
   const creatingChat = useChatListStore((state) => state.creatingChat);
   const [draft, setDraft] = useState("");
@@ -55,7 +55,6 @@ export function HomeRoute() {
     const created = await client.createChat(newChat.model ?? undefined, null, {
       reasoningEffort: newChat.reasoningEffort,
       permissionMode: newChat.permissionMode,
-      citationFormat: newChat.citationFormat,
     });
     chatListActions.prependChat(created);
     chatListActions.setChatsError(null);
@@ -111,7 +110,6 @@ export function HomeRoute() {
           {
             reasoningEffort: newChat.reasoningEffort,
             permissionMode: newChat.permissionMode,
-            citationFormat: newChat.citationFormat,
           },
         );
         chatListActions.prependChat(created);
@@ -186,9 +184,6 @@ export function HomeRoute() {
                   disabled={creatingChat}
                   onAttach={hasNativeHost() ? onAttach : undefined}
                   attaching={attaching}
-                  citationFormat={newChat.citationFormat}
-                  defaultCitationFormat={defaultCitationFormat}
-                  onCitationFormatChange={newChat.setCitationFormat}
                 />
                 <ModelMenu
                   models={models}

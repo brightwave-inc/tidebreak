@@ -14,12 +14,12 @@ use axum::body::{to_bytes, Body, Bytes};
 use axum::http::{header, Request, StatusCode};
 use futures::stream::{self, BoxStream, StreamExt};
 use openwave_core::{
-    Agent, AgentConfig, AgentErrorInfo, AgentEvent, AgentRunInboxStatus, AgentRunStatus,
-    ApprovalClass, BeginRootAttachmentChange, BlobMetadata, BlobStore, BlobStream, CallId, Chat,
-    ChatId, ChatRequest, ChatRootAttachment, ClaimedAgentEvent, ClientToolCallRequest,
-    ContentBlock, DeleteProjectOutcome, HostRootId, Message, MessageId, ModelProvider,
-    ParkSandboxToolCallOutcome, ParkTurnForClientCallOutcome, Project, ProjectId, ProviderEvent,
-    ProviderId, Role, RootAttachmentChangeAction, RootAttachmentChangeId, RootAttachmentOrigin,
+    AgentConfig, AgentErrorInfo, AgentEvent, AgentRunInboxStatus, AgentRunStatus, ApprovalClass,
+    BeginRootAttachmentChange, BlobMetadata, BlobStore, BlobStream, CallId, Chat, ChatId,
+    ChatRequest, ChatRootAttachment, ClientToolCallRequest, ContentBlock, DeleteProjectOutcome,
+    HostRootId, Message, MessageId, ModelProvider, ParkSandboxToolCallOutcome,
+    ParkTurnForClientCallOutcome, Project, ProjectId, ProviderEvent, ProviderId, Role,
+    RootAttachmentChangeAction, RootAttachmentChangeId, RootAttachmentOrigin,
     SandboxToolCallRequest, SecretProvider, SequencedEvent, StopReason, Tool, ToolCallExecution,
     ToolCallRecord, ToolCallResolution, ToolCallStatus, ToolCtx, ToolOutput, ToolRegistry,
     ToolSpec, TurnCheckpointProgress, TurnId, TurnRunStatus, TurnSteerId, Usage,
@@ -105,24 +105,9 @@ fn transcript_citation_json_is_closed_and_renderer_bounded() {
         created_at: chrono::Utc::now(),
         citations: vec![openwave_core::AssistantCitationSnapshot {
             id: openwave_core::AssistantCitationId::derive(message_id, 1),
-            message_id,
             ordinal: 1,
             document_id: openwave_core::DocumentId::new(),
-            span: openwave_core::CitationSpan { start: 0, end: 8 },
-            excerpt: "x".repeat(openwave_core::MAX_CITATION_EXCERPT_CHARS),
-            heading: Some("h".repeat(openwave_core::MAX_CITATION_HEADING_CHARS)),
-            location: openwave_core::CitationLocation::DocumentContent {
-                pages: (1..=u32::try_from(openwave_core::MAX_CITATION_PAGES).unwrap()).collect(),
-                bounds: vec![openwave_core::CitationPageBounds {
-                    page: 1,
-                    bounds: openwave_core::PageBounds {
-                        left: 100,
-                        top: 200,
-                        width: 5_000,
-                        height: 300,
-                    },
-                }],
-            },
+            locator: openwave_core::CitationLocator::Pages { start: 2, end: 4 },
         }],
         image_attachments: None,
         refusal: None,
@@ -136,302 +121,25 @@ fn transcript_citation_json_is_closed_and_renderer_bounded() {
             .keys()
             .cloned()
             .collect::<std::collections::BTreeSet<_>>(),
-        [
-            "document_id",
-            "excerpt",
-            "heading",
-            "id",
-            "location",
-            "ordinal",
-            "span"
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect()
+        ["document_id", "id", "locator", "ordinal"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
     );
-    // The location is a tagged union: the renderer opens a passage by its kind,
-    // and document content is the kind whose place is pages and rectangles.
+    // The locator is a tagged union that the renderer can navigate directly.
     assert_eq!(
-        citation["location"]
+        citation["locator"]
             .as_object()
             .unwrap()
             .keys()
             .cloned()
             .collect::<std::collections::BTreeSet<_>>(),
-        ["bounds", "kind", "pages"]
+        ["end", "kind", "start"]
             .into_iter()
             .map(str::to_owned)
             .collect()
     );
-    assert_eq!(citation["location"]["kind"], "document_content");
-    // The source and the place in it are what make a citation navigable. What
-    // stays behind are the retrieval mechanics: the token the model was given,
-    // the call it came from, the ranking, and the generation fencing.
-    let encoded = serde_json::to_string(&json).unwrap();
-    for private in [
-        "source_token",
-        "call_id",
-        "rank",
-        "revision",
-        "generation",
-        "chunk",
-        "source_uri",
-        "tool",
-    ] {
-        assert!(!encoded.contains(private), "leaked private field {private}");
-    }
-}
-
-struct AmbiguousCitationTool {
-    source_token: uuid::Uuid,
-}
-
-#[async_trait]
-impl Tool for AmbiguousCitationTool {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "search".into(),
-            description: "return evidence".into(),
-            input_schema: serde_json::json!({"type": "object"}),
-        }
-    }
-
-    fn approval_class(&self) -> ApprovalClass {
-        ApprovalClass::ReadOnly
-    }
-
-    async fn execute(&self, _ctx: &ToolCtx, _args: serde_json::Value) -> Result<ToolOutput> {
-        let document_id = openwave_core::DocumentId::new();
-        let span = openwave_core::ByteSpan::new(0, 8);
-        Ok(
-            ToolOutput::text("evidence result").with_private_evidence(vec![
-                openwave_core::RetrievalEvidenceInput {
-                    rank: 1,
-                    source_token: self.source_token,
-                    document_id,
-                    generation: openwave_core::DocumentGeneration {
-                        content_revision: 1,
-                        revision_token: uuid::Uuid::new_v4(),
-                    },
-                    chunk_id: openwave_core::ChunkId::derive(document_id, span.start, span.end),
-                    span,
-                    snippet: "evidence".into(),
-                    location: openwave_core::EvidenceLocation::DocumentContent {
-                        heading_path: vec!["Facts".into()],
-                        source_regions: Vec::new(),
-                    },
-                    source: openwave_core::RetrievalEvidenceSource::Inline,
-                },
-            ]),
-        )
-    }
-}
-
-struct ContinuationProbe;
-
-#[async_trait]
-impl Tool for ContinuationProbe {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "continuation_probe".into(),
-            description: "prove continuation".into(),
-            input_schema: serde_json::json!({"type": "object"}),
-        }
-    }
-
-    fn approval_class(&self) -> ApprovalClass {
-        ApprovalClass::ReadOnly
-    }
-
-    async fn execute(&self, _ctx: &ToolCtx, _args: serde_json::Value) -> Result<ToolOutput> {
-        Ok(ToolOutput::text("continued"))
-    }
-}
-
-struct AmbiguousCitationProvider {
-    calls: AtomicUsize,
-    marker: String,
-}
-
-#[async_trait]
-impl ModelProvider for AmbiguousCitationProvider {
-    fn id(&self) -> ProviderId {
-        ProviderId::new("ambiguous-citation")
-    }
-
-    async fn stream(&self, _request: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
-        let events = match self.calls.fetch_add(1, Ordering::SeqCst) {
-            0 => vec![
-                ProviderEvent::ToolCallStarted {
-                    index: 0,
-                    id: "search_1".into(),
-                    name: "search".into(),
-                },
-                ProviderEvent::ToolCallArgsDelta {
-                    index: 0,
-                    fragment: "{}".into(),
-                },
-                ProviderEvent::Stop {
-                    reason: StopReason::ToolUse,
-                },
-            ],
-            1 => {
-                let mut events = format!("intermediate {}", self.marker)
-                    .chars()
-                    .map(|character| ProviderEvent::TextDelta {
-                        text: character.to_string(),
-                    })
-                    .collect::<Vec<_>>();
-                events.extend([
-                    ProviderEvent::ToolCallStarted {
-                        index: 0,
-                        id: "probe_1".into(),
-                        name: "continuation_probe".into(),
-                    },
-                    ProviderEvent::ToolCallArgsDelta {
-                        index: 0,
-                        fragment: "{}".into(),
-                    },
-                    ProviderEvent::Stop {
-                        reason: StopReason::ToolUse,
-                    },
-                ]);
-                events
-            }
-            _ => "final [[ow-source:abcdef"
-                .chars()
-                .map(|character| ProviderEvent::TextDelta {
-                    text: character.to_string(),
-                })
-                .chain(std::iter::once(ProviderEvent::Stop {
-                    reason: StopReason::EndTurn,
-                }))
-                .collect(),
-        };
-        Ok(stream::iter(events).boxed())
-    }
-}
-
-#[tokio::test]
-async fn assistant_retry_and_stream_redaction_survive_durable_replay() {
-    let (_dir, database) = temp_db_store("citation-retry.db").await;
-    let database = Arc::new(database);
-    let chat = Chat {
-        id: ChatId::new(),
-        project_id: None,
-        title: None,
-        model: None,
-        reasoning_effort: None,
-        permission_mode: None,
-        citation_format: None,
-        attachment_revision: 0,
-        root_attachments: Vec::new(),
-        created_at: chrono::Utc::now(),
-    };
-    database.create_chat(&chat).await.unwrap();
-    let turn_id = TurnId::new();
-    database
-        .accept_turn(turn_id, chat.id, "test", "question")
-        .await
-        .unwrap();
-    let claimed_at = chrono::Utc::now();
-    let lease_token = uuid::Uuid::new_v4();
-    database
-        .claim_turn_run(
-            lease_token,
-            claimed_at,
-            claimed_at + chrono::Duration::minutes(1),
-        )
-        .await
-        .unwrap();
-
-    let injected = Arc::new(PauseTerminalStore::new(
-        database.clone(),
-        Arc::new(Notify::new()),
-        Arc::new(Notify::new()),
-    ));
-    injected.do_not_pause_terminal();
-    injected.fail_after_next_assistant_commit();
-    let source_token = uuid::Uuid::new_v4();
-    let marker =
-        openwave_core::format_source_reference(openwave_core::AssistantCitationReference {
-            source_token,
-        });
-    let agent = Agent::new(
-        Arc::new(AmbiguousCitationProvider {
-            calls: AtomicUsize::new(0),
-            marker: marker.clone(),
-        }),
-        Arc::new(
-            ToolRegistry::new()
-                .with(Box::new(AmbiguousCitationTool { source_token }))
-                .with(Box::new(ContinuationProbe)),
-        ),
-        injected.clone(),
-        AgentConfig {
-            model: "test".into(),
-            ..AgentConfig::default()
-        },
-    )
-    .with_durable_steer(lease_token);
-    let (tx, rx) = futures::channel::mpsc::unbounded();
-    let outcome = agent
-        .run_claimed_turn(&chat, turn_id, MessageId::new(), 1, &tx)
-        .await
-        .unwrap();
-    drop(tx);
-    let output = match outcome {
-        openwave_core::AgentTurnOutcome::Completed { output, .. } => output,
-        other => panic!("unexpected agent outcome: {other:?}"),
-    };
-    assert_eq!(output.content, "final [[ow-source:abcdef");
-    assert_eq!(injected.assistant_append_calls(), 2);
-
-    let emissions = rx.collect::<Vec<_>>().await;
-    for emission in emissions {
-        let ClaimedAgentEvent::Pending { ordinal, event } = emission else {
-            panic!("unexpected non-pending agent emission");
-        };
-        database
-            .append_turn_event(
-                chat.id,
-                turn_id,
-                lease_token,
-                ordinal,
-                chrono::Utc::now(),
-                &event,
-            )
-            .await
-            .unwrap()
-            .expect("live claimed event should append");
-    }
-    let replay = database.list_events(chat.id, 0).await.unwrap();
-    let replayed_text = replay
-        .iter()
-        .filter_map(|event| match &event.event {
-            AgentEvent::TextDelta { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<String>();
-    assert_eq!(replayed_text, "intermediate final [[ow-source:abcdef");
-    assert!(!replayed_text.contains(&marker));
-    assert!(!replayed_text.contains(&source_token.simple().to_string()));
-
-    let transcript = database
-        .get_chat_transcript(chat.id)
-        .await
-        .unwrap()
-        .unwrap();
-    let intermediate = transcript
-        .messages
-        .iter()
-        .find(|message| message.content == "intermediate ")
-        .expect("one clean intermediate assistant message");
-    assert_eq!(transcript.citations.len(), 1);
-    assert_eq!(transcript.citations[0].message_id, intermediate.id);
-    let calls = database.list_tool_calls(chat.id).await.unwrap();
-    assert_eq!(calls.len(), 2);
-    assert!(calls.iter().all(|call| call.status.is_terminal()));
+    assert_eq!(citation["locator"]["kind"], "pages");
 }
 
 /// A provider that answers with a one-line completion and no tool calls.
@@ -1213,17 +921,9 @@ impl Store for PauseTerminalStore {
         model: Option<Option<String>>,
         reasoning_effort: Option<Option<openwave_core::ReasoningEffort>>,
         permission_mode: Option<Option<openwave_core::PermissionMode>>,
-        citation_format: Option<Option<openwave_core::CitationFormat>>,
     ) -> Result<bool> {
         self.inner
-            .update_chat_metadata(
-                id,
-                title,
-                model,
-                reasoning_effort,
-                permission_mode,
-                citation_format,
-            )
+            .update_chat_metadata(id, title, model, reasoning_effort, permission_mode)
             .await
     }
     async fn get_turn_run(&self, id: TurnId) -> Result<Option<openwave_core::TurnRun>> {
@@ -1305,7 +1005,7 @@ impl Store for PauseTerminalStore {
         steer_id: TurnSteerId,
         attempt_event_ordinal: i32,
         preceding_assistant: Option<&Message>,
-        preceding_citations: &[openwave_core::AssistantCitationReference],
+        preceding_citations: &[openwave_core::AssistantCitationInput],
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<openwave_core::JournaledTurnSteerOutcome>> {
         let applied = self
@@ -1589,7 +1289,7 @@ impl Store for PauseTerminalStore {
         turn_id: TurnId,
         lease_token: uuid::Uuid,
         output: &Message,
-        citations: &[openwave_core::AssistantCitationReference],
+        citations: &[openwave_core::AssistantCitationInput],
         event: &AgentEvent,
     ) -> Result<Option<SequencedEvent>> {
         self.terminal_recovery_calls.fetch_add(1, Ordering::SeqCst);
@@ -1608,7 +1308,7 @@ impl Store for PauseTerminalStore {
     async fn append_assistant_message_with_citations(
         &self,
         message: &Message,
-        citations: &[openwave_core::AssistantCitationReference],
+        citations: &[openwave_core::AssistantCitationInput],
     ) -> Result<()> {
         self.assistant_append_calls.fetch_add(1, Ordering::SeqCst);
         self.inner
@@ -1627,7 +1327,7 @@ impl Store for PauseTerminalStore {
     async fn append_claimed_assistant_message_with_citations(
         &self,
         message: &Message,
-        citations: &[openwave_core::AssistantCitationReference],
+        citations: &[openwave_core::AssistantCitationInput],
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<openwave_core::AppendClaimedMessageOutcome> {
@@ -1698,42 +1398,6 @@ impl Store for PauseTerminalStore {
     ) -> Result<openwave_core::ResolveToolCallOutcome> {
         self.inner
             .resolve_server_tool_call(id, resolution, resolved_at)
-            .await
-    }
-    async fn resolve_server_tool_call_with_evidence(
-        &self,
-        id: openwave_core::CallId,
-        resolution: &openwave_core::ToolCallResolution,
-        resolved_at: chrono::DateTime<chrono::Utc>,
-        evidence: &[openwave_core::RetrievalEvidenceInput],
-    ) -> Result<openwave_core::ResolveToolCallOutcome> {
-        self.inner
-            .resolve_server_tool_call_with_evidence(id, resolution, resolved_at, evidence)
-            .await
-    }
-    #[allow(clippy::too_many_arguments)]
-    async fn resolve_claimed_server_tool_call_with_evidence(
-        &self,
-        id: openwave_core::CallId,
-        chat_id: ChatId,
-        turn_id: TurnId,
-        lease_token: uuid::Uuid,
-        now: chrono::DateTime<chrono::Utc>,
-        resolution: &openwave_core::ToolCallResolution,
-        resolved_at: chrono::DateTime<chrono::Utc>,
-        evidence: &[openwave_core::RetrievalEvidenceInput],
-    ) -> Result<openwave_core::ResolveToolCallOutcome> {
-        self.inner
-            .resolve_claimed_server_tool_call_with_evidence(
-                id,
-                chat_id,
-                turn_id,
-                lease_token,
-                now,
-                resolution,
-                resolved_at,
-                evidence,
-            )
             .await
     }
     #[allow(clippy::too_many_arguments)]

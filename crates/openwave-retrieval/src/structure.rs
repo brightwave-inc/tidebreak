@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 
-use openwave_core::{ByteSpan, EvidenceLocation, SourceLocation, SourceRegion, StructuredPathType};
+use openwave_core::{ByteSpan, SourceLocation, SourceRegion, StructuredPathType};
 
 /// Deepest nesting either scanner follows.
 ///
@@ -36,6 +36,7 @@ const MAX_DEPTH: usize = 128;
 /// with a million leaves must not turn into a million rows. Past the limit the
 /// document keeps its text, spans, and citations and loses only the node view.
 const MAX_REGIONS: usize = 50_000;
+const MAX_STRUCTURED_PATH_BYTES: usize = 4 * 1024;
 
 /// Which tree shape a source parses into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,10 +131,7 @@ type PathRegion = (ByteSpan, String);
 /// open: the root of a tree has no path, and one longer than evidence carries
 /// would be dropped later anyway.
 fn record(regions: &mut Vec<PathRegion>, span: ByteSpan, path: &str) {
-    if span.is_empty()
-        || path.is_empty()
-        || path.len() > EvidenceLocation::MAX_STRUCTURED_PATH_BYTES
-    {
+    if span.is_empty() || path.is_empty() || path.len() > MAX_STRUCTURED_PATH_BYTES {
         return;
     }
     regions.push((span, path.to_owned()));
@@ -695,28 +693,6 @@ mod tests {
                 ("/html[1]/body[1]/p[1]/br[1]".into(), "<br>"),
                 ("/html[1]/body[1]/p[1]".into(), "sharply"),
             ]
-        );
-    }
-
-    #[tokio::test]
-    async fn regions_for_one_structured_record_resolve_to_that_record() {
-        let parsed = crate::parse::StructuredTextParser::new()
-            .parse(INVOICES_JSON.as_bytes(), "application/json")
-            .await
-            .unwrap();
-        assert_eq!(parsed.text, INVOICES_JSON);
-        let first_invoice_end = parsed.text.find(r#"{"number": "B-2""#).unwrap();
-        let regions = parsed
-            .source_regions
-            .into_iter()
-            .filter(|region| region.span.end <= first_invoice_end)
-            .collect();
-        assert_eq!(
-            EvidenceLocation::for_source_regions(Vec::new(), regions),
-            EvidenceLocation::StructuredPath {
-                path: "invoices.0".into(),
-                path_type: StructuredPathType::JsonDotNotation,
-            }
         );
     }
 

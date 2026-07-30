@@ -43,6 +43,7 @@ impl MigratorTrait for Migrator {
             Box::new(AllowContainerExecutionLocation),
             Box::new(WidenStandingGrantScope),
             Box::new(RetireDocumentIndexing),
+            Box::new(LightweightCitations),
         ]
     }
 }
@@ -1561,14 +1562,8 @@ impl MigrationTrait for AddOutputRevisionCitations {
                             .to_col(RetrievalEvidence::TurnId)
                             .on_delete(ForeignKeyAction::Cascade),
                     )
-                    .check(
-                        Expr::col(OutputRevisionCitation::Ordinal)
-                            .between(1, crate::deliverable::MAX_OUTPUT_CITATIONS as i32),
-                    )
-                    .check(
-                        Expr::col(OutputRevisionCitation::EvidenceRank)
-                            .between(1, crate::RetrievalEvidenceInput::MAX_RESULTS as i32),
-                    )
+                    .check(Expr::col(OutputRevisionCitation::Ordinal).between(1, 64))
+                    .check(Expr::col(OutputRevisionCitation::EvidenceRank).between(1, 20))
                     .to_owned(),
             )
             .await?;
@@ -5343,10 +5338,7 @@ async fn create_retrieval_evidence_table(manager: &SchemaManager<'_>) -> Result<
                         .to_col(ToolCall::TurnId)
                         .on_delete(ForeignKeyAction::Cascade),
                 )
-                .check(
-                    Expr::col(RetrievalEvidence::Rank)
-                        .between(1, crate::model::RetrievalEvidenceInput::MAX_RESULTS as i32),
-                )
+                .check(Expr::col(RetrievalEvidence::Rank).between(1, 20))
                 .check(Expr::col(RetrievalEvidence::ContentRevision).gte(1))
                 .check(Expr::col(RetrievalEvidence::SpanStart).gte(0))
                 .check(
@@ -5455,10 +5447,7 @@ async fn create_assistant_citation_table(manager: &SchemaManager<'_>) -> Result<
                     Expr::col(AssistantCitation::Ordinal)
                         .between(1, crate::MAX_ASSISTANT_CITATIONS as i32),
                 )
-                .check(
-                    Expr::col(AssistantCitation::EvidenceRank)
-                        .between(1, crate::RetrievalEvidenceInput::MAX_RESULTS as i32),
-                )
+                .check(Expr::col(AssistantCitation::EvidenceRank).between(1, 20))
                 .to_owned(),
         )
         .await?;
@@ -7738,6 +7727,229 @@ impl MigrationTrait for AddSandboxToolCalls {
             .await?;
         Ok(())
     }
+}
+
+/// Replaces retrieval-span citations with direct document locators.
+struct LightweightCitations;
+
+impl MigrationName for LightweightCitations {
+    fn name(&self) -> &str {
+        "m20260729_000030_lightweight_citations"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for LightweightCitations {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(AssistantCitationLight::Table)
+                    .col(
+                        ColumnDef::new(AssistantCitationLight::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(AssistantCitationLight::MessageId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(AssistantCitationLight::Ordinal)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(AssistantCitationLight::DocumentId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(AssistantCitationLight::Locator)
+                            .json_binary()
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_assistant_citation_light_message")
+                            .from(
+                                AssistantCitationLight::Table,
+                                AssistantCitationLight::MessageId,
+                            )
+                            .to(Message::Table, Message::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_assistant_citation_light_document")
+                            .from(
+                                AssistantCitationLight::Table,
+                                AssistantCitationLight::DocumentId,
+                            )
+                            .to(Document::Table, Document::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .index(
+                        Index::create()
+                            .name("idx_assistant_citation_light_message_ordinal")
+                            .col(AssistantCitationLight::MessageId)
+                            .col(AssistantCitationLight::Ordinal)
+                            .unique(),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        let copy = match manager.get_database_backend() {
+            DatabaseBackend::Sqlite => r#"
+                INSERT INTO assistant_citation_light
+                    (id, message_id, ordinal, document_id, locator)
+                SELECT ac.id, ac.message_id, ac.ordinal, re.document_id,
+                    CASE
+                        WHEN json_array_length(re.source_regions) > 0
+                         AND json_extract(re.source_regions, '$[0].location.kind') = 'page'
+                         AND json_extract(
+                             re.source_regions,
+                             '$[' || (json_array_length(re.source_regions) - 1) || '].location.kind'
+                         ) = 'page'
+                        THEN CASE
+                            WHEN json_extract(re.source_regions, '$[0].location.number')
+                               = json_extract(
+                                   re.source_regions,
+                                   '$[' || (json_array_length(re.source_regions) - 1)
+                                   || '].location.number'
+                               )
+                            THEN json_object(
+                                'kind', 'page',
+                                'page', json_extract(
+                                    re.source_regions, '$[0].location.number'
+                                )
+                            )
+                            ELSE json_object(
+                                'kind', 'pages',
+                                'start', json_extract(
+                                    re.source_regions, '$[0].location.number'
+                                ),
+                                'end', json_extract(
+                                    re.source_regions,
+                                    '$[' || (json_array_length(re.source_regions) - 1)
+                                    || '].location.number'
+                                )
+                            )
+                        END
+                        ELSE json_object('kind', 'document')
+                    END
+                FROM assistant_citation ac
+                JOIN retrieval_evidence re
+                  ON re.call_id = ac.evidence_call_id
+                 AND re.rank = ac.evidence_rank
+                 AND re.chat_id = ac.chat_id
+                 AND re.turn_id = ac.turn_id
+                "#
+            .trim(),
+            DatabaseBackend::Postgres => r#"
+                INSERT INTO assistant_citation_light
+                    (id, message_id, ordinal, document_id, locator)
+                SELECT ac.id, ac.message_id, ac.ordinal, re.document_id,
+                    CASE
+                        WHEN jsonb_array_length(re.source_regions) > 0
+                         AND re.source_regions -> 0 -> 'location' ->> 'kind' = 'page'
+                         AND re.source_regions
+                             -> (jsonb_array_length(re.source_regions) - 1)
+                             -> 'location' ->> 'kind' = 'page'
+                        THEN CASE
+                            WHEN re.source_regions -> 0 -> 'location' ->> 'number'
+                               = re.source_regions
+                                   -> (jsonb_array_length(re.source_regions) - 1)
+                                   -> 'location' ->> 'number'
+                            THEN jsonb_build_object(
+                                'kind', 'page',
+                                'page', (
+                                    re.source_regions -> 0 -> 'location' ->> 'number'
+                                )::integer
+                            )
+                            ELSE jsonb_build_object(
+                                'kind', 'pages',
+                                'start', (
+                                    re.source_regions -> 0 -> 'location' ->> 'number'
+                                )::integer,
+                                'end', (
+                                    re.source_regions
+                                        -> (jsonb_array_length(re.source_regions) - 1)
+                                        -> 'location' ->> 'number'
+                                )::integer
+                            )
+                        END
+                        ELSE jsonb_build_object('kind', 'document')
+                    END
+                FROM assistant_citation ac
+                JOIN retrieval_evidence re
+                  ON re.call_id = ac.evidence_call_id
+                 AND re.rank = ac.evidence_rank
+                 AND re.chat_id = ac.chat_id
+                 AND re.turn_id = ac.turn_id
+                "#
+            .trim(),
+            backend => {
+                return Err(DbErr::Custom(format!(
+                    "lightweight citation migration does not support {backend:?}"
+                )));
+            }
+        };
+        manager.get_connection().execute_unprepared(copy).await?;
+
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(OutputRevisionCitation::Table)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .drop_table(Table::drop().table(AssistantCitation::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(RetrievalEvidence::Table).to_owned())
+            .await?;
+        manager
+            .rename_table(
+                Table::rename()
+                    .table(AssistantCitationLight::Table, AssistantCitation::Table)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Chat::Table)
+                    .drop_column(Chat::CitationFormat)
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(AssistantCitation::Table).to_owned())
+            .await?;
+        create_retrieval_evidence_table(manager).await?;
+        AddEvidenceLocation.up(manager).await?;
+        create_assistant_citation_table(manager).await?;
+        AddOutputRevisionCitations.up(manager).await?;
+        AddChatCitationFormat.up(manager).await
+    }
+}
+
+#[derive(DeriveIden)]
+enum AssistantCitationLight {
+    Table,
+    Id,
+    MessageId,
+    Ordinal,
+    DocumentId,
+    Locator,
 }
 
 #[derive(DeriveIden)]

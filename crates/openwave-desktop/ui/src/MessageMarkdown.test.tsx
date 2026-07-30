@@ -13,7 +13,7 @@ describe("citation directives", () => {
   it("renders the cited phrasing, with its Markdown, and never the syntax", () => {
     const markup = renderToStaticMarkup(
       <MessageMarkdown>
-        {`The reef :cit[is the *largest* in the world]{citation_id=${id}}, and it grows.`}
+        {`The reef :cit[is the *largest* in the world]{doc=${id} page=2}, and it grows.`}
       </MessageMarkdown>,
     );
 
@@ -21,7 +21,7 @@ describe("citation directives", () => {
     expect(markup).toContain("is the <em>largest</em> in the world");
     expect(markup).toContain(", and it grows.");
     expect(markup).not.toContain(":cit");
-    expect(markup).not.toContain("citation_id");
+    expect(markup).not.toContain("page=2");
   });
 
   it("keeps directive-shaped prose that never closes into a citation", () => {
@@ -40,7 +40,7 @@ describe("citation directives", () => {
   it("strips citations from the text the clipboard is handed", () => {
     expect(
       stripCitationDirectives(
-        `The reef :cit[is the largest in the world]{citation_id=${id}}, and it grows.`,
+        `The reef :cit[is the largest in the world]{doc=${id} page=2}, and it grows.`,
       ),
     ).toBe("The reef is the largest in the world, and it grows.");
   });

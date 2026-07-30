@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 
 import type {
-  CitationFormat,
   ModelInfo,
   ModelSelectionKey,
   PermissionMode,
@@ -93,8 +92,7 @@ const { signal: signalTurnLifecycle } = useTurnLifecycle.getState();
  */
 export function ChatRoute({ chatId }: { chatId: string }) {
   const navigate = useNavigate();
-  const { client, models, defaultModelKey, defaultCitationFormat, setStatus } =
-    useApp();
+  const { client, models, defaultModelKey, setStatus } = useApp();
   const { layout, openPanel } = usePanelNav();
   const sourceNav = useStableSourceNav(openPanel);
   const chats = useChatListStore((state) => state.chats);
@@ -354,11 +352,6 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     chatListActions.replaceChat(await client.patchChatPermissionMode(chatId, mode));
   }
 
-  async function onCitationFormatChange(format: CitationFormat | null) {
-    if (deletingChatId !== null) return;
-    chatListActions.replaceChat(await client.patchChatCitationFormat(chatId, format));
-  }
-
   if (!chat) return <div className="routed-surface-loading" />;
 
   function renderPanel(panel: PanelContent, position: "left" | "right" | "chat", visible: boolean) {
@@ -393,9 +386,6 @@ export function ChatRoute({ chatId }: { chatId: string }) {
                   disabled={deletingChatId !== null}
                   onAttach={hasNativeHost() ? onAttach : undefined}
                   attaching={attaching}
-                  citationFormat={chat!.citation_format}
-                  defaultCitationFormat={defaultCitationFormat}
-                  onCitationFormatChange={onCitationFormatChange}
                 />
                 <ModelMenu
                   models={models}
