@@ -654,6 +654,12 @@ where
     .insert(conn)
     .await
     .map_err(store_err)?;
+    // A cancelled container run owes its container a teardown in the same
+    // transaction — this is what lets a parent's cancellation cascade over an
+    // unattached container child without leaking the container.
+    if run.execution_location == crate::AgentRunExecutionLocation::Container.as_str() {
+        super::super::sandbox_provision::enqueue_teardown_on(conn, run.id).await?;
+    }
     Ok(true)
 }
 

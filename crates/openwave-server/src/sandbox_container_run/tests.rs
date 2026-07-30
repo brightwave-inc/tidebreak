@@ -1206,6 +1206,96 @@ async fn a_late_result_is_retained_as_evidence_not_committed() {
     assert_eq!(run.status, AgentRunStatus::Failed);
 }
 
+/// Cancelling a run mid-drive: the heartbeat refusal is read as cancellation,
+/// the driver commits the terminal cancellation it still owns, and the teardown
+/// that follows is what actually stops the container.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_attached_cancellation_is_acknowledged_and_torn_down() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (_dir, store, chat) = store().await;
+        let run_id = admit_container_run(&store, chat.id, "cancelled mid-flight").await;
+
+        let backend = MockBackend::spawning();
+        // Slow completions hold the drive open across several heartbeats, so
+        // the cancellation lands while the container is genuinely working.
+        let provider = Arc::new(ScriptedProvider::slow(vec![], Duration::from_secs(5)));
+        let runner = Arc::new(SandboxContainerRunner::new(
+            store.clone(),
+            backend.clone(),
+            Arc::new(FixedResolver(provider)),
+            SandboxContainerRunConfig {
+                lease: Duration::from_secs(2),
+                heartbeat: Duration::from_millis(100),
+                ..fast_config()
+            },
+        ));
+        let drive = tokio::spawn({
+            let runner = runner.clone();
+            async move { runner.drive(run_id).await }
+        });
+        // Let the drive claim and attach, then cancel out from under it.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        store
+            .request_agent_run_cancellation(run_id)
+            .await
+            .unwrap()
+            .expect("the cancellation request lands");
+
+        let outcome = drive
+            .await
+            .unwrap()
+            .expect("driving succeeds")
+            .expect("the container run is claimable");
+        assert_eq!(outcome, SandboxContainerRunOutcome::Cancelled(run_id));
+        let cancelled = store.get_agent_run(run_id).await.unwrap().unwrap();
+        assert_eq!(cancelled.status, AgentRunStatus::Cancelled);
+        // The container did not outlive the cancellation.
+        assert_eq!(backend.destroys.load(Ordering::SeqCst), 1);
+    })
+    .await
+    .expect("test completed within its time bound");
+}
+
+/// Cancelling an unattached container child — its driver is gone, its lease
+/// expired — terminalizes immediately and leaves the container's teardown
+/// obligation enqueued in the same transaction, for the sweep to destroy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelling_an_unattached_container_child_enqueues_its_teardown() {
+    let (_dir, store, chat) = store().await;
+    let run_id = admit_container_run(&store, chat.id, "orphaned by its driver").await;
+    let run_uuid = *run_id.as_uuid();
+    store
+        .claim_container_agent_run(run_id, Uuid::new_v4(), chrono::Duration::milliseconds(1), 4)
+        .await
+        .unwrap()
+        .expect("the dead driver's claim succeeds");
+    store
+        .begin_sandbox_provision(
+            run_uuid,
+            &SandboxTag::new().to_string(),
+            chrono::Utc::now() + chrono::Duration::seconds(600),
+        )
+        .await
+        .unwrap();
+    assert!(store
+        .commit_sandbox_provision_handle(run_uuid, "unattended-container")
+        .await
+        .unwrap());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    store
+        .request_agent_run_cancellation(run_id)
+        .await
+        .unwrap()
+        .expect("the cancellation request lands");
+
+    let cancelled = store.get_agent_run(run_id).await.unwrap().unwrap();
+    assert_eq!(cancelled.status, AgentRunStatus::Cancelled);
+    let teardowns = store.list_sandbox_teardowns().await.unwrap();
+    assert_eq!(teardowns.len(), 1);
+    assert_eq!(teardowns[0].handle.as_deref(), Some("unattended-container"));
+}
+
 // --- Docker end-to-end (gated on a container runtime + the agent image) -------
 
 /// Build the sandbox-agent image for the Docker-gated tests, returning its tag,
