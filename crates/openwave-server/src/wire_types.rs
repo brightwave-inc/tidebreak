@@ -325,6 +325,9 @@ mod tests {
         // only the refusal is generated, because the renderer branches on its
         // closed kind (`consent_required` opens the grant sheet).
         generate::collect_from::<crate::routes::AppInvokeRefusal>(&cfg, &mut out);
+        // The grant-state projection the consent sheet renders: server and
+        // tool names with coverage/staleness booleans, never definitions.
+        generate::collect_from::<crate::routes::AppGrantState>(&cfg, &mut out);
         generate::collect_from::<openwave_core::PendingUserQuestions>(&cfg, &mut out);
         generate::collect_from::<openwave_core::PendingPlanApproval>(&cfg, &mut out);
         generate::collect_from::<openwave_core::PlanDecisionChoice>(&cfg, &mut out);

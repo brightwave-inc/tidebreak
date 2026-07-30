@@ -1402,6 +1402,50 @@ pub mod app_revision {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod app_grant {
+    use sea_orm::entity::prelude::*;
+
+    // At most one grant per app — the app id is the primary key — replaced
+    // wholesale by a fresh consent and deleted by revocation. The bindings
+    // column carries the granted `(server, tools[])` set with each server's
+    // definition fingerprint, in the serde shape of
+    // `Vec<crate::local_app::AppGrantBinding>`.
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "app_grant")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub app_id: Uuid,
+        // Matches the migration's `.json_binary()` (JSONB on Postgres).
+        #[sea_orm(column_type = "JsonBinary")]
+        pub bindings_json: Json,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter)]
+    pub enum Relation {
+        App,
+    }
+
+    impl RelationTrait for Relation {
+        fn def(&self) -> RelationDef {
+            match self {
+                Self::App => Entity::belongs_to(super::app::Entity)
+                    .from(Column::AppId)
+                    .to(super::app::Column::Id)
+                    .into(),
+            }
+        }
+    }
+
+    impl Related<super::app::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::App.def()
+        }
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod event {
     use sea_orm::entity::prelude::*;
 

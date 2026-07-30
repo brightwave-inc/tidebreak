@@ -44,6 +44,7 @@ use crate::web_search::{
     WebSearchCredentialsInfo,
 };
 
+mod app_grant;
 mod app_invoke;
 pub(crate) mod client_execution;
 mod delegated_file_execution;
@@ -52,6 +53,7 @@ pub(crate) mod image_attachment;
 mod plans;
 mod root_attachment;
 mod user_questions;
+pub use app_grant::*;
 pub use app_invoke::*;
 pub use client_execution::*;
 pub use delegated_file_execution::*;

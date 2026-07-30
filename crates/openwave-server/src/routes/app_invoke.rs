@@ -7,9 +7,9 @@
 //! snapshot, `Tool::execute` — minus the turn. Enforcement is entirely
 //! server-side and fails closed, in a fixed order: the app must exist with a
 //! current revision, the requested tool must be pinned in that revision's
-//! manifest bindings, and a live app grant must cover the call. The grant
-//! store does not exist yet, so the grant gate refuses every invoke today and
-//! the route ships dark.
+//! manifest bindings, and a live app grant must cover the call — including
+//! that every granted server's current definition still matches the
+//! fingerprint recorded at consent.
 //!
 //! Chat approval gates, permission modes, and plan mode deliberately do not
 //! apply: there is no chat. The app grant is the whole policy.
@@ -205,20 +205,57 @@ fn require_pinned(revision: &AppRevision, tool: &str) -> Result<(), AppInvokeErr
 
 /// The consent gate, evaluated after the pin check and before dispatch.
 ///
-/// The grant store does not exist yet, so this refuses every invoke and the
-/// route ships dark. The grants slice replaces only this function's body —
-/// checking the live grant's `(server, tools)` cover and the bound server's
-/// definition fingerprint — while the route's enforcement order stays fixed.
+/// Three checks, all live and all fail-closed to `consent_required` — a
+/// missing or stale grant is a re-prompt, never an error:
+///
+/// 1. A grant exists for the app.
+/// 2. It covers the invoked `(server, tool)` pair as the *current* revision's
+///    manifest binds it — so a revision that widens the manifest exceeds the
+///    grant by construction, with no special-casing.
+/// 3. Every granted server's current definition fingerprint equals the
+///    granted one. A reconfigured server invalidates the whole grant: consent
+///    named a definition, not a name, and must never outlive it.
 async fn require_app_grant(
-    _state: &AppState,
-    _app: &AppRecord,
-    _revision: &AppRevision,
+    state: &AppState,
+    app: &AppRecord,
+    revision: &AppRevision,
     tool: &str,
 ) -> Result<(), AppInvokeError> {
-    Err(AppInvokeError::refused(
-        AppInvokeRefusalKind::ConsentRequired,
-        format!("no live app grant covers {tool:?}"),
-    ))
+    let consent_required =
+        |message: String| AppInvokeError::refused(AppInvokeRefusalKind::ConsentRequired, message);
+    let Some(grant) = state.store.get_app_grant(app.id).await? else {
+        return Err(consent_required(format!(
+            "no live app grant covers {tool:?}"
+        )));
+    };
+    // The pin check has already passed, so exactly one current-manifest
+    // binding names this tool; its server is the namespace the grant must
+    // cover the tool under.
+    let server = revision
+        .manifest
+        .bindings
+        .iter()
+        .find(|binding| binding.tools.iter().any(|pinned| pinned == tool))
+        .map(|binding| binding.server.as_str())
+        .unwrap_or_default();
+    let covered = grant.bindings.iter().any(|binding| {
+        binding.server == server && binding.tools.iter().any(|granted| granted == tool)
+    });
+    if !covered {
+        return Err(consent_required(format!(
+            "the app grant does not cover {tool:?}"
+        )));
+    }
+    let current = state.mcp.definition_fingerprints().await;
+    for binding in &grant.bindings {
+        if current.get(&binding.server) != Some(&binding.fingerprint) {
+            return Err(consent_required(format!(
+                "MCP server {:?} was reconfigured after consent; the grant is stale",
+                binding.server
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Resolve a pinned name against the current MCP snapshot and execute it.

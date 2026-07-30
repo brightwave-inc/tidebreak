@@ -121,6 +121,61 @@ async fn create_pinned_app(store: &Arc<dyn Store>, tools: &[&str]) -> AppId {
     app_id
 }
 
+/// Configure the mounted server set to one `srv` at `address` over the API.
+async fn put_srv(router: &Router, bearer: &str, address: std::net::SocketAddr) {
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/mcp/servers")
+                .header("authorization", bearer)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"servers": [{
+                        "name": "srv",
+                        "url": format!("http://{address}/mcp"),
+                        "request_timeout_ms": 30_000,
+                        "enabled": true
+                    }]})
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+/// Send one of the body-less grant requests (`GET`, `POST` consent, `DELETE`).
+async fn grant_request(
+    router: &Router,
+    bearer: &str,
+    method: &str,
+    app_id: AppId,
+) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(format!("/apps/{app_id}/grant"))
+                .header("authorization", bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// Record consent for the app and assert the resulting state is fully granted.
+async fn consent(router: &Router, bearer: &str, app_id: AppId) {
+    let response = grant_request(router, bearer, "POST", app_id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let state: serde_json::Value = json_body(response).await;
+    assert_eq!(state["granted"], json!(true));
+}
+
 async fn invoke(
     router: &Router,
     bearer: &str,
@@ -144,37 +199,16 @@ async fn invoke(
 
 /// The route's whole enforcement ladder, fail-closed at every rung: a missing
 /// or deleted app is 404, an unpinned or non-MCP name is refused before the
-/// gate, and — the dark-ship property — even a perfectly pinned tool on a
-/// mounted, healthy server is refused with `consent_required` and the external
-/// server never sees a `tools/call`.
+/// gate, and — the fail-closed default — even a perfectly pinned tool on a
+/// mounted, healthy server is refused with `consent_required` until the user
+/// consents, and the external server never sees a `tools/call`.
 #[tokio::test]
-async fn every_invoke_is_refused_before_dispatch_until_grants_exist() {
+async fn every_invoke_is_refused_before_dispatch_without_a_grant() {
     let log = Arc::new(ToolServerLog::default());
     let address = spawn_tool_server(log.clone(), "ok".into(), json!({})).await;
     let (router, token, store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");
-    let put = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("PUT")
-                .uri("/mcp/servers")
-                .header("authorization", &bearer)
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({"servers": [{
-                        "name": "srv",
-                        "url": format!("http://{address}/mcp"),
-                        "request_timeout_ms": 30_000,
-                        "enabled": true
-                    }]})
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(put.status(), StatusCode::OK);
+    put_srv(&router, &bearer, address).await;
     let app_id = create_pinned_app(&store, &["mcp__srv__viewer"]).await;
 
     let refusal = |status: StatusCode, kind: &str| (status, kind.to_owned());
@@ -197,8 +231,8 @@ async fn every_invoke_is_refused_before_dispatch_until_grants_exist() {
             json!({"tool": "read_file"}),
             refusal(StatusCode::FORBIDDEN, "not_pinned"),
         ),
-        // The dark ship: pinned, mounted, healthy — still refused, because no
-        // grant store exists yet.
+        // Pinned, mounted, healthy — still refused, because the user never
+        // consented. No grant, no call.
         (
             app_id,
             json!({"tool": "mcp__srv__viewer", "arguments": {"q": "open"}}),
@@ -228,6 +262,191 @@ async fn every_invoke_is_refused_before_dispatch_until_grants_exist() {
         0,
         "no refusal path may reach the external server"
     );
+}
+
+/// The grant lifecycle end to end over the API: consent opens the gate and a
+/// granted invoke round-trips to the external server; revocation closes it on
+/// the very next invoke, and the refusal is `consent_required` — a re-prompt,
+/// not an error.
+#[tokio::test]
+async fn consent_opens_the_gate_and_revocation_closes_it() {
+    let log = Arc::new(ToolServerLog::default());
+    let address = spawn_tool_server(log.clone(), "ok".into(), json!({})).await;
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    put_srv(&router, &bearer, address).await;
+    let app_id = create_pinned_app(&store, &["mcp__srv__viewer"]).await;
+
+    consent(&router, &bearer, app_id).await;
+    let response = invoke(
+        &router,
+        &bearer,
+        app_id,
+        json!({"tool": "mcp__srv__viewer", "arguments": {"q": "open"}}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let result: serde_json::Value = json_body(response).await;
+    assert_eq!(result["content"], json!("ok"));
+    assert_eq!(log.calls.load(Ordering::SeqCst), 1);
+
+    let revoked = grant_request(&router, &bearer, "DELETE", app_id).await;
+    assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
+    let response = invoke(
+        &router,
+        &bearer,
+        app_id,
+        json!({"tool": "mcp__srv__viewer"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let info: AgentErrorInfo = json_body(response).await;
+    assert_eq!(info.kind, "consent_required");
+    assert_eq!(
+        log.calls.load(Ordering::SeqCst),
+        1,
+        "a revoked grant must stop the next call before dispatch"
+    );
+}
+
+/// The property that makes MCP approvals per-call in chats, preserved here
+/// without per-call friction: a Settings edit can swap the process behind a
+/// stable server name, so a reconfigured definition invalidates the grant. The
+/// granted invoke works; after the definition changes the same invoke refuses
+/// with `consent_required` and the state projection flags the server as
+/// changed; a fresh consent re-pins to the new definition.
+#[tokio::test]
+async fn reconfiguring_a_bound_server_invalidates_the_grant() {
+    let log = Arc::new(ToolServerLog::default());
+    let address = spawn_tool_server(log.clone(), "first".into(), json!({})).await;
+    let swapped_log = Arc::new(ToolServerLog::default());
+    let swapped = spawn_tool_server(swapped_log.clone(), "second".into(), json!({})).await;
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    put_srv(&router, &bearer, address).await;
+    let app_id = create_pinned_app(&store, &["mcp__srv__viewer"]).await;
+
+    consent(&router, &bearer, app_id).await;
+    let response = invoke(
+        &router,
+        &bearer,
+        app_id,
+        json!({"tool": "mcp__srv__viewer"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The same name now resolves to a different process.
+    put_srv(&router, &bearer, swapped).await;
+    let response = invoke(
+        &router,
+        &bearer,
+        app_id,
+        json!({"tool": "mcp__srv__viewer"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let info: AgentErrorInfo = json_body(response).await;
+    assert_eq!(info.kind, "consent_required");
+    assert_eq!(
+        swapped_log.calls.load(Ordering::SeqCst),
+        0,
+        "the swapped-in server must not be reached under the stale grant"
+    );
+    let state = grant_request(&router, &bearer, "GET", app_id).await;
+    let state: serde_json::Value = json_body(state).await;
+    assert_eq!(state["granted"], json!(false));
+    assert_eq!(state["bindings"][0]["definition_changed"], json!(true));
+
+    consent(&router, &bearer, app_id).await;
+    let response = invoke(
+        &router,
+        &bearer,
+        app_id,
+        json!({"tool": "mcp__srv__viewer"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(swapped_log.calls.load(Ordering::SeqCst), 1);
+}
+
+/// A revision that widens the manifest exceeds the grant by construction: the
+/// new tool refuses with `consent_required` while the already-granted tool
+/// keeps working, with no widening-specific mechanism anywhere. Re-consent is
+/// computed from the server's current state — the renderer's bare "yes"
+/// cannot name tools — so afterwards the new tool is invokable.
+#[tokio::test]
+async fn a_widened_manifest_requires_fresh_consent_for_the_new_tools() {
+    let log = Arc::new(ToolServerLog::default());
+    let address = spawn_tool_server(log.clone(), "ok".into(), json!({})).await;
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    put_srv(&router, &bearer, address).await;
+    let app_id = create_pinned_app(&store, &["mcp__srv__viewer"]).await;
+    consent(&router, &bearer, app_id).await;
+
+    store
+        .append_app_revision(
+            app_id,
+            &NewAppRevision {
+                id: AppRevisionId::new(),
+                manifest: AppManifest {
+                    name: "Invoke fixture".into(),
+                    bindings: vec![AppBinding {
+                        server: "srv".into(),
+                        tools: vec!["mcp__srv__viewer".into(), "mcp__srv__unpinned".into()],
+                    }],
+                },
+                byte_len: 1,
+                sha256: [0; 32],
+                turn_id: None,
+                producing_run_id: None,
+                chat_id: None,
+                created_at: chrono::Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let response = invoke(
+        &router,
+        &bearer,
+        app_id,
+        json!({"tool": "mcp__srv__unpinned"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let info: AgentErrorInfo = json_body(response).await;
+    assert_eq!(info.kind, "consent_required");
+    let response = invoke(
+        &router,
+        &bearer,
+        app_id,
+        json!({"tool": "mcp__srv__viewer"}),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "tools within the granted set stay invokable"
+    );
+    let state = grant_request(&router, &bearer, "GET", app_id).await;
+    let state: serde_json::Value = json_body(state).await;
+    assert_eq!(
+        state["granted"],
+        json!(false),
+        "the widened manifest must re-prompt on next open"
+    );
+
+    consent(&router, &bearer, app_id).await;
+    let response = invoke(
+        &router,
+        &bearer,
+        app_id,
+        json!({"tool": "mcp__srv__unpinned"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 async fn dispatch_state(

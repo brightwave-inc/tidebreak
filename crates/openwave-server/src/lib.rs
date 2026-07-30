@@ -324,6 +324,12 @@ pub fn app(state: AppState) -> Router {
             post(routes::post_app_invoke)
                 .layer(DefaultBodyLimit::max(routes::MAX_APP_INVOKE_BODY_BYTES)),
         )
+        .route(
+            "/apps/{id}/grant",
+            get(routes::get_app_grant_state)
+                .post(routes::post_app_grant)
+                .delete(routes::delete_app_grant),
+        )
         .route("/policy", get(routes::get_policy))
         .route("/gateway/status", get(routes::get_gateway_status))
         .route("/gateway/apps", get(routes::get_gateway_apps))

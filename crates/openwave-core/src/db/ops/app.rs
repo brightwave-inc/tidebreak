@@ -16,8 +16,8 @@ use sea_orm::{
 use crate::error::{AgentError, Result};
 use crate::id::{AppId, AppRevisionId};
 use crate::local_app::{
-    validate_app_manifest, AppManifest, AppRecord, AppRevision, CreateApp, NewAppRevision,
-    MAX_APP_BUNDLE_BYTES, MAX_APP_REVISIONS,
+    validate_app_grant, validate_app_manifest, AppGrant, AppGrantBinding, AppManifest, AppRecord,
+    AppRevision, CreateApp, NewAppRevision, MAX_APP_BUNDLE_BYTES, MAX_APP_REVISIONS,
 };
 
 use super::super::{entities, store_err, DbStore};
@@ -233,6 +233,74 @@ pub(in crate::db) async fn restore_app(
     .map_err(store_err)?;
     transaction.commit().await.map_err(store_err)?;
     Ok(true)
+}
+
+pub(in crate::db) async fn put_app_grant(store: &DbStore, grant: &AppGrant) -> Result<()> {
+    let bindings_json = validate_app_grant(grant)
+        .map_err(|message| AgentError::Store(format!("invalid app grant: {message}")))?;
+    let created_at = canonical_db_timestamp(grant.created_at)?;
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    // The app row's write lock serializes replacement of the single grant row
+    // the same way it serializes revision appends.
+    if !acquire_app_write_lock(&transaction, grant.app_id).await? {
+        transaction.rollback().await.map_err(store_err)?;
+        return Err(AgentError::Store(format!("app {} not found", grant.app_id)));
+    }
+    let existing = require_app_on(&transaction, grant.app_id).await?;
+    if existing.deleted_at.is_some() {
+        transaction.rollback().await.map_err(store_err)?;
+        return Err(AgentError::Store(format!(
+            "app {} is deleted",
+            grant.app_id
+        )));
+    }
+    // A fresh consent replaces the whole grant: there is at most one per app.
+    entities::app_grant::Entity::delete_many()
+        .filter(entities::app_grant::Column::AppId.eq(grant.app_id.0))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    entities::app_grant::ActiveModel {
+        app_id: Set(grant.app_id.0),
+        bindings_json: Set(bindings_json),
+        created_at: Set(created_at),
+    }
+    .insert(&transaction)
+    .await
+    .map_err(store_err)?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(())
+}
+
+pub(in crate::db) async fn get_app_grant(
+    store: &DbStore,
+    app_id: AppId,
+) -> Result<Option<AppGrant>> {
+    entities::app_grant::Entity::find_by_id(app_id.0)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+        .map(grant_from_model)
+        .transpose()
+}
+
+pub(in crate::db) async fn delete_app_grant(store: &DbStore, app_id: AppId) -> Result<bool> {
+    let deleted = entities::app_grant::Entity::delete_many()
+        .filter(entities::app_grant::Column::AppId.eq(app_id.0))
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(deleted.rows_affected > 0)
+}
+
+fn grant_from_model(model: entities::app_grant::Model) -> Result<AppGrant> {
+    let bindings: Vec<AppGrantBinding> = serde_json::from_value(model.bindings_json)
+        .map_err(|_| AgentError::Store("stored app grant is malformed".into()))?;
+    Ok(AppGrant {
+        app_id: AppId(model.app_id),
+        bindings,
+        created_at: model.created_at,
+    })
 }
 
 /// Acquire the shared cross-backend write lock for one app row.

@@ -97,6 +97,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddPlanRequests),
             Box::new(AddExecFileSnapshots),
             Box::new(AddLocalApps),
+            Box::new(AddAppGrants),
         ]
     }
 }
@@ -241,6 +242,66 @@ impl MigrationTrait for AddLocalApps {
             .await?;
         manager
             .drop_table(Table::drop().table(App::Table).to_owned())
+            .await
+    }
+}
+
+/// Adds the durable app-grant consent record: at most one row per app — the
+/// app id is the primary key — carrying the granted `(server, tools[])`
+/// bindings with each bound server's definition fingerprint as JSON.
+///
+/// The grant is host-computed policy, replaced wholesale by a fresh consent
+/// and deleted by revocation, so the table needs no history and no surrogate
+/// identity. Cascade delete follows the app row: a grant never outlives the
+/// thing it consented to. Purely additive, symmetric `down`.
+struct AddAppGrants;
+
+impl MigrationName for AddAppGrants {
+    fn name(&self) -> &str {
+        "m20260730_000038_add_app_grants"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddAppGrants {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(AppGrant::Table)
+                    .col(
+                        ColumnDef::new(AppGrant::AppId)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(AppGrant::BindingsJson)
+                            .json_binary()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(AppGrant::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_app_grant_app")
+                            .from_tbl(AppGrant::Table)
+                            .from_col(AppGrant::AppId)
+                            .to_tbl(App::Table)
+                            .to_col(App::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(AppGrant::Table).to_owned())
             .await
     }
 }
@@ -9260,6 +9321,14 @@ enum AppRevision {
     TurnId,
     ProducingRunId,
     ChatId,
+    CreatedAt,
+}
+
+#[derive(DeriveIden)]
+enum AppGrant {
+    Table,
+    AppId,
+    BindingsJson,
     CreatedAt,
 }
 

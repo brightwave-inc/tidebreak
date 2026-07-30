@@ -27,7 +27,7 @@ use crate::id::{
     OutputRevisionId, ProjectId, RootAttachmentChangeId, TurnId, TurnSteerId,
 };
 use crate::image::ImageRef;
-use crate::local_app::{AppRecord, AppRevision, CreateApp, NewAppRevision};
+use crate::local_app::{AppGrant, AppRecord, AppRevision, CreateApp, NewAppRevision};
 #[cfg(test)]
 use crate::model::Role;
 use crate::model::{
@@ -642,6 +642,18 @@ impl Store for DbStore {
 
     async fn restore_app(&self, id: AppId, restored_at: chrono::DateTime<Utc>) -> Result<bool> {
         ops::app::restore_app(self, id, restored_at).await
+    }
+
+    async fn put_app_grant(&self, grant: &AppGrant) -> Result<()> {
+        ops::app::put_app_grant(self, grant).await
+    }
+
+    async fn get_app_grant(&self, app_id: AppId) -> Result<Option<AppGrant>> {
+        ops::app::get_app_grant(self, app_id).await
+    }
+
+    async fn delete_app_grant(&self, app_id: AppId) -> Result<bool> {
+        ops::app::delete_app_grant(self, app_id).await
     }
 
     async fn save_context_checkpoint(

@@ -34,6 +34,7 @@ use serde::de::DeserializeOwned;
 use tokio::sync::Notify;
 use tower::ServiceExt;
 
+mod app_grant;
 mod app_invoke;
 mod chat_titling;
 mod configuration;
