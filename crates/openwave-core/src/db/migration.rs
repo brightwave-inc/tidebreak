@@ -96,7 +96,152 @@ impl MigratorTrait for Migrator {
             Box::new(AddLateResultEvidence),
             Box::new(AddPlanRequests),
             Box::new(AddExecFileSnapshots),
+            Box::new(AddLocalApps),
         ]
+    }
+}
+
+/// Adds the profile-scoped local-app record: an `app` row per app plus
+/// insert-only `app_revision` rows pairing a bounded manifest with the length
+/// and digest of write-once bundle bytes.
+///
+/// Follows `output`/`output_revision` with one deliberate difference: there is
+/// no chat foreign key anywhere. The profile owns the app; `chat_id` on a
+/// revision is nullable provenance without a constraint, so an app and its
+/// history survive deletion of the conversation that authored them. Producer
+/// attribution reuses the outputs discipline — `turn_id` XOR
+/// `producing_run_id`, enforced by CHECK. Purely additive, symmetric `down`.
+struct AddLocalApps;
+
+impl MigrationName for AddLocalApps {
+    fn name(&self) -> &str {
+        "m20260730_000037_add_local_apps"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddLocalApps {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(App::Table)
+                    .col(ColumnDef::new(App::Id).uuid().not_null().primary_key())
+                    .col(ColumnDef::new(App::Name).text().not_null())
+                    .col(ColumnDef::new(App::CurrentRevisionId).uuid().not_null())
+                    .col(ColumnDef::new(App::RevisionCount).integer().not_null())
+                    .col(
+                        ColumnDef::new(App::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(App::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(App::DeletedAt).timestamp_with_time_zone())
+                    .check(
+                        Expr::col(App::RevisionCount)
+                            .between(1, crate::local_app::MAX_APP_REVISIONS as i32),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_app_updated")
+                    .table(App::Table)
+                    .col(App::UpdatedAt)
+                    .col(App::Id)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_table(
+                Table::create()
+                    .table(AppRevision::Table)
+                    .col(
+                        ColumnDef::new(AppRevision::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(AppRevision::AppId).uuid().not_null())
+                    .col(ColumnDef::new(AppRevision::Ordinal).integer().not_null())
+                    .col(
+                        ColumnDef::new(AppRevision::ManifestJson)
+                            .json_binary()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(AppRevision::ByteLen)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(AppRevision::Sha256)
+                            .binary_len(32)
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(AppRevision::TurnId).uuid())
+                    .col(ColumnDef::new(AppRevision::ProducingRunId).uuid())
+                    // Provenance only: no foreign key, so the revision outlives
+                    // the conversation that authored it.
+                    .col(ColumnDef::new(AppRevision::ChatId).uuid())
+                    .col(
+                        ColumnDef::new(AppRevision::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_app_revision_app")
+                            .from_tbl(AppRevision::Table)
+                            .from_col(AppRevision::AppId)
+                            .to_tbl(App::Table)
+                            .to_col(App::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .check(
+                        Expr::col(AppRevision::Ordinal)
+                            .between(1, crate::local_app::MAX_APP_REVISIONS as i32),
+                    )
+                    .check(
+                        Expr::col(AppRevision::ByteLen)
+                            .between(1, crate::local_app::MAX_APP_BUNDLE_BYTES as i64),
+                    )
+                    // A revision records the foreground turn or the background
+                    // run that produced it, never both.
+                    .check(
+                        Expr::col(AppRevision::TurnId)
+                            .is_null()
+                            .or(Expr::col(AppRevision::ProducingRunId).is_null()),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_app_revision_ordinal")
+                    .table(AppRevision::Table)
+                    .col(AppRevision::AppId)
+                    .col(AppRevision::Ordinal)
+                    .unique()
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(AppRevision::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(App::Table).to_owned())
+            .await
     }
 }
 
@@ -9088,6 +9233,33 @@ enum OutputRevision {
     Sha256,
     TurnId,
     ProducingRunId,
+    CreatedAt,
+}
+
+#[derive(DeriveIden)]
+enum App {
+    Table,
+    Id,
+    Name,
+    CurrentRevisionId,
+    RevisionCount,
+    CreatedAt,
+    UpdatedAt,
+    DeletedAt,
+}
+
+#[derive(DeriveIden)]
+enum AppRevision {
+    Table,
+    Id,
+    AppId,
+    Ordinal,
+    ManifestJson,
+    ByteLen,
+    Sha256,
+    TurnId,
+    ProducingRunId,
+    ChatId,
     CreatedAt,
 }
 

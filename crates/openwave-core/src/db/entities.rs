@@ -1322,6 +1322,86 @@ pub mod output_revision {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod app {
+    use sea_orm::entity::prelude::*;
+
+    // The profile-scoped analog of `output`, with the one deliberate
+    // difference that there is no chat foreign key: the profile owns the app
+    // and it outlives every conversation that touched it. As with outputs,
+    // `current_revision_id` and `revision_count` are maintained in the same
+    // transaction that inserts a revision and are deliberately not a foreign
+    // key (the revision table already references `app`; closing the cycle
+    // would order the two inserts against each other for no added safety).
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "app")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub name: String,
+        pub current_revision_id: Uuid,
+        pub revision_count: i32,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+        pub deleted_at: Option<DateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod app_revision {
+    use sea_orm::entity::prelude::*;
+
+    // Rows are insert-only. The bundle bytes live under the profile data
+    // directory keyed by (app id, revision id), so a revision row and its
+    // content are both write-once and can never disagree. `chat_id` is
+    // provenance only — deliberately no foreign key, so the revision survives
+    // deletion of the conversation that authored it.
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "app_revision")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub app_id: Uuid,
+        pub ordinal: i32,
+        // Matches the migration's `.json_binary()` (JSONB on Postgres).
+        #[sea_orm(column_type = "JsonBinary")]
+        pub manifest_json: Json,
+        pub byte_len: i64,
+        pub sha256: Vec<u8>,
+        pub turn_id: Option<Uuid>,
+        pub producing_run_id: Option<Uuid>,
+        pub chat_id: Option<Uuid>,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter)]
+    pub enum Relation {
+        App,
+    }
+
+    impl RelationTrait for Relation {
+        fn def(&self) -> RelationDef {
+            match self {
+                Self::App => Entity::belongs_to(super::app::Entity)
+                    .from(Column::AppId)
+                    .to(super::app::Column::Id)
+                    .into(),
+            }
+        }
+    }
+
+    impl Related<super::app::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::App.def()
+        }
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod event {
     use sea_orm::entity::prelude::*;
 

@@ -47,6 +47,7 @@ pub mod id;
 pub mod image;
 #[cfg(feature = "keychain")]
 pub mod keychain;
+pub mod local_app;
 pub mod model;
 #[cfg(feature = "tools")]
 pub mod output_scan;

@@ -23,10 +23,11 @@ use crate::event::{AgentEvent, SequencedEvent};
 #[cfg(test)]
 use crate::id::MessageId;
 use crate::id::{
-    AgentRunId, CallId, ChatId, DocumentId, HostRootId, OutputId, OutputRevisionId, ProjectId,
-    RootAttachmentChangeId, TurnId, TurnSteerId,
+    AgentRunId, AppId, AppRevisionId, CallId, ChatId, DocumentId, HostRootId, OutputId,
+    OutputRevisionId, ProjectId, RootAttachmentChangeId, TurnId, TurnSteerId,
 };
 use crate::image::ImageRef;
+use crate::local_app::{AppRecord, AppRevision, CreateApp, NewAppRevision};
 #[cfg(test)]
 use crate::model::Role;
 use crate::model::{
@@ -605,6 +606,42 @@ impl Store for DbStore {
         updated_at: chrono::DateTime<Utc>,
     ) -> Result<OutputRecord> {
         ops::output::set_current_output_revision(self, output_id, revision_id, updated_at).await
+    }
+
+    async fn create_app(&self, request: &CreateApp) -> Result<AppRecord> {
+        ops::app::create_app(self, request).await
+    }
+
+    async fn append_app_revision(
+        &self,
+        app_id: AppId,
+        revision: &NewAppRevision,
+    ) -> Result<AppRecord> {
+        ops::app::append_app_revision(self, app_id, revision).await
+    }
+
+    async fn get_app(&self, id: AppId) -> Result<Option<AppRecord>> {
+        ops::app::get_app(self, id).await
+    }
+
+    async fn list_apps(&self, limit: u64) -> Result<Vec<AppRecord>> {
+        ops::app::list_apps(self, limit).await
+    }
+
+    async fn list_app_revisions(&self, app_id: AppId) -> Result<Vec<AppRevision>> {
+        ops::app::list_app_revisions(self, app_id).await
+    }
+
+    async fn get_app_revision(&self, id: AppRevisionId) -> Result<Option<AppRevision>> {
+        ops::app::get_app_revision(self, id).await
+    }
+
+    async fn delete_app(&self, id: AppId, deleted_at: chrono::DateTime<Utc>) -> Result<bool> {
+        ops::app::delete_app(self, id, deleted_at).await
+    }
+
+    async fn restore_app(&self, id: AppId, restored_at: chrono::DateTime<Utc>) -> Result<bool> {
+        ops::app::restore_app(self, id, restored_at).await
     }
 
     async fn save_context_checkpoint(

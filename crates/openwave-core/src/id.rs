@@ -470,6 +470,20 @@ impl OutputRevisionId {
     }
 }
 
+id_type!(
+    /// Identifies one profile-scoped local app across all of its revisions.
+    ///
+    /// Like [`OutputId`] this is a durable opaque handle: possession is not
+    /// authority, and it never encodes a name or a host path. Unlike an
+    /// output, an app has no owning conversation — the profile owns it.
+    AppId
+);
+
+id_type!(
+    /// Identifies one immutable revision of a local app.
+    AppRevisionId
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
