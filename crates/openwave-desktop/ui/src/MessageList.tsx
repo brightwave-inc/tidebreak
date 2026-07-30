@@ -25,6 +25,7 @@ import { OutputWritebackCard } from "./OutputWritebackCard";
 import { MessageMarkdown } from "./MessageMarkdown";
 import { MessageFooter } from "./MessageFooter";
 import { AssistantSources, type AssistantSource } from "./AssistantSources";
+import { ThinkingAccordion } from "./ThinkingAccordion";
 import { stripCitationDirectives } from "./citationDirectives";
 import { MessageCitationsProvider } from "./InlineCitation";
 import { McpAppCard } from "./McpAppCard";
@@ -69,6 +70,8 @@ export type ChatMessage =
       text: string;
       sources: AssistantSource[];
       createdAt?: string;
+      /** The provider's presentable reasoning summary for this step, if any. */
+      reasoning?: string;
       /** Interrupted mid-stream and replaced; rendered dimmed until the
        *  authoritative transcript sweeps it. */
       superseded?: boolean;
@@ -180,7 +183,6 @@ type MessageListProps = {
   ) => Promise<AgentActivityHistoryEntry[]>;
   onViewBackgroundAgentOutput?: () => void;
   busy: boolean;
-  reasoningActive?: boolean;
   scrollRef: Ref<HTMLDivElement>;
   /** Attached to the transcript content column so growth can drive auto-follow. */
   contentRef?: RefCallback<HTMLDivElement>;
@@ -246,7 +248,6 @@ export function MessageList({
   onLoadBackgroundAgentActivity = async () => [],
   onViewBackgroundAgentOutput,
   busy,
-  reasoningActive = false,
   scrollRef,
   contentRef,
   maskClass,
@@ -409,7 +410,7 @@ export function MessageList({
           outputWritebackRequests.length +
           userQuestionRequests.length +
           planApprovalRequests.length,
-      ) && <AssistantWorkingIndicator thinking={reasoningActive} />}
+      ) && <AssistantWorkingIndicator />}
     </>
   );
 
@@ -888,7 +889,10 @@ function MessageBubbleImpl({
   );
 
   if (message.role === "assistant") {
-    if (!message.text && message.sources.length === 0) return null;
+    const reasoning = message.reasoning ?? "";
+    // A bubble that holds only reasoning is a real transcript entry: it is what
+    // the model did between two tool calls, or before the answer began.
+    if (!message.text && message.sources.length === 0 && !reasoning) return null;
 
     if (message.superseded) {
       return (
@@ -904,6 +908,12 @@ function MessageBubbleImpl({
     return (
       <MessageCitationsProvider value={citations}>
         <article className="message message-assistant" aria-label="Assistant">
+          {reasoning && (
+            <ThinkingAccordion
+              text={reasoning}
+              streaming={busy && !message.text}
+            />
+          )}
           {message.text && (
             <AssistantMessageBody text={message.text} streaming={busy} />
           )}

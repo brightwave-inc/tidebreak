@@ -471,6 +471,7 @@ impl Store for MemStore {
             message_document_attachments: Vec::new(),
             refusals: Vec::new(),
             citations: Vec::new(),
+            reasoning: Vec::new(),
             tool_activity: Vec::new(),
             cancellations: Vec::new(),
             last_event_seq,

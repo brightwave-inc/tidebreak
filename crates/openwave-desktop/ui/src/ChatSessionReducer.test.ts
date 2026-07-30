@@ -597,33 +597,41 @@ describe("forward compatibility", () => {
 });
 
 describe("reasoning presentation", () => {
-  it("marks reasoning active and clears it when visible output starts", () => {
-    const thinking = play([TURN, { type: "reasoning_delta" }]);
-    expect(thinking.state.reasoningActive).toBe(true);
-
-    const speaking = reduceChatSessionEvent(
-      thinking.state,
-      framed(thinking.state.lastSeq + 1, { type: "text_delta", text: "hi" }),
-      makeDeps(),
-    );
-    expect(speaking.state.reasoningActive).toBe(false);
+  it("accumulates reasoning onto the bubble it precedes", () => {
+    const { state } = play([
+      TURN,
+      { type: "reasoning_delta", text: "weighing " },
+      { type: "reasoning_delta", text: "two approaches" },
+      { type: "text_delta", text: "hi" },
+    ]);
+    expect(state.messages).toEqual([
+      expect.objectContaining({
+        role: "assistant",
+        text: "hi",
+        reasoning: "weighing two approaches",
+      }),
+    ]);
   });
 
-  it("clears reasoning at tool starts, interruptions, and terminals", () => {
-    for (const event of [
+  it("opens a bubble for reasoning that follows tool activity", () => {
+    const { state } = play([
+      TURN,
       { type: "tool_call_started", call_id: "c", name: "search" },
-      { type: "stream_interrupted" },
-      { type: "turn_completed" },
-      { type: "turn_failed", category: "unknown" },
-    ] as AgentEvent[]) {
-      const thinking = play([TURN, { type: "reasoning_delta" }]);
-      const next = reduceChatSessionEvent(
-        thinking.state,
-        framed(thinking.state.lastSeq + 1, event),
-        makeDeps(),
-      );
-      expect(next.state.reasoningActive).toBe(false);
-    }
+      { type: "reasoning_delta", text: "the search found nothing" },
+    ]);
+    // The empty bubble the turn opened, the call, then the reasoning that came
+    // after it — reasoning read in journal order, not hoisted above the call.
+    expect(state.messages.map((message) => message.role)).toEqual([
+      "assistant",
+      "tool",
+      "assistant",
+    ]);
+    expect(state.messages[2]).toEqual(
+      expect.objectContaining({
+        text: "",
+        reasoning: "the search found nothing",
+      }),
+    );
   });
 });
 

@@ -1254,6 +1254,12 @@ pub struct ChatMessageSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub refusal: Option<crate::event_projection::RendererRefusal>,
+    /// The presentable reasoning summary the turn behind this assistant message
+    /// produced, rebuilt from the journal. Absent when the turn reasoned in a
+    /// mode that exposes nothing, or when the model does not reason at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reasoning: Option<String>,
 }
 
 /// One renderer-safe image identity attached to a historical user message.
@@ -1359,6 +1365,7 @@ impl ChatMessageSnapshot {
             image_attachments: None,
             file_attachments: None,
             refusal: None,
+            reasoning: None,
         })
     }
 }
@@ -1396,6 +1403,11 @@ pub async fn list_chat_messages(
             .or_insert_with(Vec::new)
             .push(TranscriptFileAttachment::from(attachment));
     }
+    let mut reasoning_by_message = transcript
+        .reasoning
+        .into_iter()
+        .map(|snapshot| (snapshot.message_id, snapshot.text))
+        .collect::<std::collections::HashMap<_, _>>();
     let mut refusals_by_message = transcript
         .refusals
         .into_iter()
@@ -1427,6 +1439,7 @@ pub async fn list_chat_messages(
                     (!file_attachments.is_empty()).then_some(file_attachments);
             }
             snapshot.refusal = refusals_by_message.remove(&snapshot.id);
+            snapshot.reasoning = reasoning_by_message.remove(&snapshot.id);
             Some(snapshot)
         })
         .collect();

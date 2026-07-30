@@ -34,8 +34,6 @@ export type ChatSessionState = {
   provisionalToolCallIds: ReadonlySet<string>;
   /** Message ids already present via hydration; used to dedup steered echoes. */
   hydratedMessageIds: ReadonlySet<string>;
-  /** The model is emitting reasoning; cleared once visible output starts. */
-  reasoningActive: boolean;
   /** One truncation notice per turn, however many truncation events arrive. */
   contextTruncationNoted: boolean;
 };
@@ -75,7 +73,6 @@ export function initialChatSessionState(): ChatSessionState {
     markerScrubber: new AssistantSourceMarkerStreamScrubber(),
     provisionalToolCallIds: new Set(),
     hydratedMessageIds: new Set(),
-    reasoningActive: false,
     contextTruncationNoted: false,
   };
 }
@@ -113,7 +110,6 @@ export function reduceChatSessionEvent(
           ...state,
           busy: true,
           activeTurnId: event.turn_id,
-          reasoningActive: false,
           contextTruncationNoted: false,
           assistantBuffer: "",
           markerScrubber: new AssistantSourceMarkerStreamScrubber(),
@@ -139,7 +135,6 @@ export function reduceChatSessionEvent(
       return {
         state: {
           ...state,
-          reasoningActive: false,
           assistantBuffer,
           messages: withTrailingAssistantText(
             state.messages,
@@ -173,7 +168,6 @@ export function reduceChatSessionEvent(
       return {
         state: {
           ...state,
-          reasoningActive: false,
           assistantBuffer: "",
           provisionalToolCallIds: new Set(),
           messages,
@@ -202,7 +196,6 @@ export function reduceChatSessionEvent(
       return {
         state: {
           ...state,
-          reasoningActive: false,
           provisionalToolCallIds,
           messages: upsertToolCall(
             state.messages,
@@ -358,7 +351,6 @@ export function reduceChatSessionEvent(
           ...state,
           busy: false,
           activeTurnId: null,
-          reasoningActive: false,
           provisionalToolCallIds: new Set(),
         },
         effects,
@@ -378,7 +370,6 @@ export function reduceChatSessionEvent(
           ...state,
           busy: false,
           activeTurnId: null,
-          reasoningActive: false,
           provisionalToolCallIds: new Set(),
           messages: [
             ...discardToolCalls(
@@ -410,7 +401,6 @@ export function reduceChatSessionEvent(
           ...state,
           busy: false,
           activeTurnId: null,
-          reasoningActive: false,
           provisionalToolCallIds: new Set(),
           messages: [
             ...settleActiveToolCalls(state.messages, "cancelled"),
@@ -438,7 +428,6 @@ export function reduceChatSessionEvent(
           ...state,
           busy: false,
           activeTurnId: null,
-          reasoningActive: false,
           provisionalToolCallIds: new Set(),
           messages: [
             ...settleActiveToolCalls(state.messages, "failed"),
@@ -456,7 +445,21 @@ export function reduceChatSessionEvent(
     }
 
     case "reasoning_delta": {
-      return { state: { ...state, reasoningActive: true }, effects };
+      // Reasoning lands on the assistant bubble it precedes, so the accordion
+      // sits where the thinking happened rather than in a fixed slot. Between
+      // tool calls there is no such bubble yet: one opens with no text, which
+      // the following text deltas then fill in.
+      return {
+        state: {
+          ...state,
+          messages: withTrailingAssistantReasoning(
+            state.messages,
+            event.text,
+            deps,
+          ),
+        },
+        effects,
+      };
     }
 
     case "context_truncated": {
@@ -525,6 +528,32 @@ function flushMarkerTail(
     assistantBuffer,
     messages: withTrailingAssistantText(state.messages, assistantBuffer, deps),
   };
+}
+
+/** Extend the trailing assistant bubble's reasoning, opening one if needed. */
+function withTrailingAssistantReasoning(
+  messages: ChatMessage[],
+  text: string,
+  deps: ChatSessionDeps,
+): ChatMessage[] {
+  const copy = [...messages];
+  const last = copy[copy.length - 1];
+  if (last?.role === "assistant" && !last.superseded) {
+    copy[copy.length - 1] = {
+      ...last,
+      reasoning: (last.reasoning ?? "") + text,
+    };
+  } else {
+    copy.push({
+      id: deps.nextId(),
+      role: "assistant",
+      text: "",
+      sources: [],
+      reasoning: text,
+      createdAt: deps.now(),
+    });
+  }
+  return copy;
 }
 
 function withTrailingAssistantText(

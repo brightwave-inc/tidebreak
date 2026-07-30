@@ -112,6 +112,7 @@ fn transcript_citation_json_is_closed_and_renderer_bounded() {
         image_attachments: None,
         file_attachments: None,
         refusal: None,
+        reasoning: None,
     };
     let json = serde_json::to_value(snapshot).unwrap();
     let citation = &json["citations"][0];

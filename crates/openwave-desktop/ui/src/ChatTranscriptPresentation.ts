@@ -64,6 +64,7 @@ export function presentChatTranscript(
           text: entry.text,
           sources: entry.sources,
           createdAt: entry.createdAt,
+          reasoning: entry.reasoning,
         } satisfies ChatMessage;
         return entry.refusal
           ? [

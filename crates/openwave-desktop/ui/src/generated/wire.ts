@@ -223,7 +223,13 @@ image_attachments?: Array<TranscriptImageAttachment>,
  * Files submitted with this user message. Their bytes remain behind the
  * existing chat-scoped document endpoints.
  */
-file_attachments?: Array<TranscriptFileAttachment>, refusal?: RendererRefusal, };
+file_attachments?: Array<TranscriptFileAttachment>, refusal?: RendererRefusal, 
+/**
+ * The presentable reasoning summary the turn behind this assistant message
+ * produced, rebuilt from the journal. Absent when the turn reasoned in a
+ * mode that exposes nothing, or when the model does not reason at all.
+ */
+reasoning?: string, };
 
 /**
  * One pathless root in a conversation's exact ordered projection.
@@ -889,7 +895,7 @@ export type ProviderKind = "anthropic" | "openai" | "gemini" | "openai_compatibl
  */
 export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max";
 
-export type RendererAgentEvent = { "type": "turn_started", turn_id: TurnId, } | { "type": "text_delta", text: string, } | { "type": "reasoning_delta" } | { "type": "stream_interrupted" } | { "type": "tool_call_started", call_id: CallId, name: RendererToolName, } | { "type": "tool_call_args_delta", call_id: CallId, } | { "type": "user_questions_asked", call_id: CallId, turn_id: TurnId, } | { "type": "plan_proposed", call_id: CallId, turn_id: TurnId, } | { "type": "approval_required", call_id: CallId, action: RendererToolName, approval: ToolApprovalKind, class: ApprovalClass, 
+export type RendererAgentEvent = { "type": "turn_started", turn_id: TurnId, } | { "type": "text_delta", text: string, } | { "type": "reasoning_delta", text: string, } | { "type": "stream_interrupted" } | { "type": "tool_call_started", call_id: CallId, name: RendererToolName, } | { "type": "tool_call_args_delta", call_id: CallId, } | { "type": "user_questions_asked", call_id: CallId, turn_id: TurnId, } | { "type": "plan_proposed", call_id: CallId, turn_id: TurnId, } | { "type": "approval_required", call_id: CallId, action: RendererToolName, approval: ToolApprovalKind, class: ApprovalClass, 
 /**
  * Whether the Auto-mode judge owns this card right now. The card
  * stays fully actionable either way; this only adds the "deciding

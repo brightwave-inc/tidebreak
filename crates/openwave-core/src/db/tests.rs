@@ -9852,3 +9852,96 @@ async fn concurrent_client_claim_has_one_sqlite_winner() {
     assert_eq!(claimed, 1);
     assert_eq!(unavailable, 7);
 }
+
+/// Reasoning is journaled as deltas and has no column of its own, so the
+/// transcript rebuilds it by matching the payload's variant tag in SQL. That
+/// makes the serialized tag a persisted shape rather than an implementation
+/// detail: rename the variant and every historical chat silently loses its
+/// reasoning while nothing fails to compile.
+#[tokio::test]
+async fn reasoning_deltas_rebuild_into_the_transcript() {
+    use crate::event::AgentEvent;
+    use crate::provider::{StopReason, Usage};
+
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+    let accepted = match store
+        .accept_turn(turn_id, chat.id, "claude", "question")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let lease_token = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(
+            lease_token,
+            accepted.available_at,
+            accepted.available_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .turn
+        .expect("accepted turn is claimable");
+    for (ordinal, event) in [
+        AgentEvent::ReasoningDelta {
+            text: "weighing ".into(),
+        },
+        AgentEvent::TextDelta {
+            text: "not reasoning".into(),
+        },
+        AgentEvent::ReasoningDelta {
+            text: "two approaches".into(),
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        store
+            .append_turn_event(
+                chat.id,
+                turn_id,
+                lease_token,
+                i32::try_from(ordinal).unwrap() + 1,
+                accepted.available_at,
+                &event,
+            )
+            .await
+            .unwrap()
+            .expect("a live attempt may journal its own deltas");
+    }
+    let output = Message {
+        id: MessageId::new(),
+        chat_id: chat.id,
+        turn_id,
+        role: Role::Assistant,
+        content: "the answer".into(),
+        created_at: accepted.available_at,
+    };
+    store
+        .complete_turn_run_and_append_event(
+            turn_id,
+            lease_token,
+            0,
+            output.created_at,
+            &output,
+            Usage::default(),
+            StopReason::EndTurn,
+        )
+        .await
+        .unwrap()
+        .expect("live completion");
+
+    let transcript = store.get_chat_transcript(chat.id).await.unwrap().unwrap();
+    assert_eq!(
+        transcript.reasoning,
+        vec![crate::storage::ChatReasoningSnapshot {
+            message_id: output.id,
+            text: "weighing two approaches".into(),
+        }],
+        "one turn's deltas rebuild as one summary on the message it produced"
+    );
+}
