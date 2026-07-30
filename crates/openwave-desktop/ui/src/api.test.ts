@@ -107,6 +107,7 @@ describe("pending chat prompt summaries", () => {
   const safe = {
     chat_id: "chat-1",
     question_call_ids: ["question-1"],
+    plan_call_ids: ["plan-1"],
     folder_access_call_ids: ["folder-1"],
     output_writeback_call_ids: ["writeback-1"],
   };
@@ -115,6 +116,7 @@ describe("pending chat prompt summaries", () => {
     expect(parsePendingChatPrompt(safe)).toEqual({
       chatId: "chat-1",
       questionCallIds: ["question-1"],
+      planCallIds: ["plan-1"],
       folderAccessCallIds: ["folder-1"],
       outputWritebackCallIds: ["writeback-1"],
     });
@@ -129,6 +131,7 @@ describe("pending chat prompt summaries", () => {
       parsePendingChatPrompt({
         ...safe,
         question_call_ids: [],
+        plan_call_ids: [],
         folder_access_call_ids: [],
         output_writeback_call_ids: [],
       }),
@@ -149,6 +152,7 @@ describe("pending chat prompt summaries", () => {
       {
         chatId: "chat-1",
         questionCallIds: ["question-1"],
+        planCallIds: ["plan-1"],
         folderAccessCallIds: ["folder-1"],
         outputWritebackCallIds: ["writeback-1"],
       },

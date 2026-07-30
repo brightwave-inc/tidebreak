@@ -1819,6 +1819,21 @@ impl Store for DbStore {
         ops::user_question::answer(self, request, answered_at).await
     }
 
+    async fn list_pending_plan_approvals(
+        &self,
+        chat_id: ChatId,
+    ) -> Result<Vec<crate::PendingPlanApproval>> {
+        ops::plan::list_pending(self, chat_id).await
+    }
+
+    async fn decide_plan(
+        &self,
+        request: &crate::DecidePlanRequest,
+        decided_at: chrono::DateTime<Utc>,
+    ) -> Result<crate::storage::DecidePlanOutcome> {
+        ops::plan::decide(self, request, decided_at).await
+    }
+
     async fn list_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>> {
         ops::conversation::list_tool_calls(self, chat_id).await
     }

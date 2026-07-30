@@ -50,6 +50,7 @@ pub mod keychain;
 pub mod model;
 #[cfg(feature = "tools")]
 pub mod output_scan;
+pub mod plan_mode;
 pub mod preview;
 pub mod provider;
 mod renderer_tool;
@@ -159,6 +160,12 @@ pub use model::{
 pub use output_scan::{
     sync_output_directory, OutputDirectorySync, OutputSyncEntry, OutputSyncStatus,
     EXEC_OUTPUT_DIRECTORY, MAX_OUTPUT_SCAN_FILES,
+};
+pub use plan_mode::{
+    exit_plan_mode_tool_spec, plan_decision_result, validate_exit_plan_mode_arguments,
+    DecidePlanRequest, ExitPlanModeArgs, PendingPlanApproval, PlanDecision, PlanDecisionChoice,
+    PlanRequestStatus, DEFAULT_ACCEPTED_PLAN_MODE, EXIT_PLAN_MODE_TOOL, MAX_PLAN_CONTENT_CHARS,
+    MAX_PLAN_FEEDBACK_CHARS, MAX_PLAN_TITLE_CHARS, MIN_PLAN_CONTENT_CHARS,
 };
 pub use preview::{
     format_bytes, ResultEntry, ResultEntryKind, ResultFailure, ToolActionPreview,

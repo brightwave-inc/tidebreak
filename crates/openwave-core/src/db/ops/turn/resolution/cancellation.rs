@@ -271,6 +271,8 @@ async fn request_turn_cancellation_inner(
                 now,
             )
             .await?;
+            super::super::super::plan::close_pending_for_terminal_turn_on(&transaction, id, now)
+                .await?;
         }
         _ => {}
     }
@@ -328,6 +330,8 @@ async fn request_turn_cancellation_inner(
             now,
         )
         .await?;
+        super::super::super::plan::cancel_for_call_on(&transaction, crate::CallId(call.id), now)
+            .await?;
     }
     let update = entities::turn_run::Entity::update_many()
         .col_expr(
@@ -506,6 +510,7 @@ async fn finish_turn_cancellation_inner(
         .await?;
     super::super::super::user_question::close_pending_for_terminal_turn_on(&transaction, id, now)
         .await?;
+    super::super::super::plan::close_pending_for_terminal_turn_on(&transaction, id, now).await?;
 
     let cancelled = entities::turn_run::Entity::update_many()
         .col_expr(

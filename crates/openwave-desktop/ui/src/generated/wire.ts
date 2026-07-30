@@ -771,6 +771,11 @@ export type PendingFolderAccessRequest = { call_id: CallId, turn_id: TurnId, rea
 export type PendingOutputWritebackRequest = { call_id: CallId, turn_id: TurnId, claimed: boolean, };
 
 /**
+ * Renderer-safe, durable card projection of a proposed plan.
+ */
+export type PendingPlanApproval = { call_id: CallId, turn_id: TurnId, title: string, plan: string, proposed_at: string, };
+
+/**
  * Renderer-safe, durable card projection.
  *
  * It contains only the validated presentation contract. Provider metadata,
@@ -792,6 +797,11 @@ export type PendingUserQuestions = { call_id: CallId, turn_id: TurnId, questions
  * next turn, and a reopened chat runs the way it ran before.
  */
 export type PermissionMode = "plan" | "ask" | "auto" | "allow";
+
+/**
+ * The two decisions a reader can make about a proposed plan.
+ */
+export type PlanDecisionChoice = "accept" | "reject";
 
 /**
  * An optional grouping of chats that share project context and a document
@@ -879,7 +889,7 @@ export type ProviderKind = "anthropic" | "openai" | "gemini" | "openai_compatibl
  */
 export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max";
 
-export type RendererAgentEvent = { "type": "turn_started", turn_id: TurnId, } | { "type": "text_delta", text: string, } | { "type": "reasoning_delta" } | { "type": "stream_interrupted" } | { "type": "tool_call_started", call_id: CallId, name: RendererToolName, } | { "type": "tool_call_args_delta", call_id: CallId, } | { "type": "user_questions_asked", call_id: CallId, turn_id: TurnId, } | { "type": "approval_required", call_id: CallId, action: RendererToolName, approval: ToolApprovalKind, class: ApprovalClass, 
+export type RendererAgentEvent = { "type": "turn_started", turn_id: TurnId, } | { "type": "text_delta", text: string, } | { "type": "reasoning_delta" } | { "type": "stream_interrupted" } | { "type": "tool_call_started", call_id: CallId, name: RendererToolName, } | { "type": "tool_call_args_delta", call_id: CallId, } | { "type": "user_questions_asked", call_id: CallId, turn_id: TurnId, } | { "type": "plan_proposed", call_id: CallId, turn_id: TurnId, } | { "type": "approval_required", call_id: CallId, action: RendererToolName, approval: ToolApprovalKind, class: ApprovalClass, 
 /**
  * Whether the Auto-mode judge owns this card right now. The card
  * stays fully actionable either way; this only adds the "deciding
@@ -946,7 +956,7 @@ export type RendererSequencedEvent = { seq: number, event: RendererAgentEvent, }
  * are all generated from this enum, so a variant added here cannot leave one of
  * them behind — see `docs/wire-types.md`.
  */
-export type RendererToolName = "search" | "list_sources" | "read_source" | "read_tool_result" | "web_search" | "web_extract" | "read_delegated_file" | "read_file" | "list_dir" | "write_file" | "request_folder_access" | "connect_folder" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file" | "write_output_to_connected_folder" | "spawn_sandbox_agent" | "wait_for_agents" | "ask_user_questions" | "exec" | "other";
+export type RendererToolName = "search" | "list_sources" | "read_source" | "read_tool_result" | "web_search" | "web_extract" | "read_delegated_file" | "read_file" | "list_dir" | "write_file" | "request_folder_access" | "connect_folder" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file" | "write_output_to_connected_folder" | "spawn_sandbox_agent" | "wait_for_agents" | "ask_user_questions" | "exit_plan_mode" | "exec" | "other";
 
 export type RendererToolStatus = "completed" | "failed";
 
@@ -1308,6 +1318,7 @@ export const RENDERER_TOOL_NAMES = [
   "spawn_sandbox_agent",
   "wait_for_agents",
   "ask_user_questions",
+  "exit_plan_mode",
   "exec",
   "other",
 ] as const;

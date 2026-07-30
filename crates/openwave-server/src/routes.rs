@@ -45,12 +45,14 @@ pub(crate) mod client_execution;
 mod delegated_file_execution;
 mod document;
 pub(crate) mod image_attachment;
+mod plans;
 mod root_attachment;
 mod user_questions;
 pub use client_execution::*;
 pub use delegated_file_execution::*;
 pub use document::*;
 pub use image_attachment::*;
+pub use plans::*;
 pub use root_attachment::*;
 pub use user_questions::*;
 

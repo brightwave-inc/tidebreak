@@ -158,6 +158,15 @@ pub enum AgentEvent {
         /// Estimated tokens after fitting to the budget.
         fitted_tokens: u32,
     },
+    /// A validated plan-mode continuation committed and released its worker.
+    /// Like [`Self::UserQuestionsAsked`], this is only a bounded refresh hint;
+    /// clients load the plan from the renderer-safe pending-plan route.
+    PlanProposed {
+        /// Exact tool call awaiting the reader's decision.
+        call_id: CallId,
+        /// Turn that will resume after the decision commits.
+        turn_id: TurnId,
+    },
 }
 
 /// Whether to omit a defaulted `false` flag from a journal row.
@@ -262,6 +271,7 @@ mod tests {
             AgentEvent::TurnCancelled { .. } => 13,
             AgentEvent::UserSteered { .. } => 14,
             AgentEvent::ContextTruncated { .. } => 15,
+            AgentEvent::PlanProposed { .. } => 16,
         }
     }
 
@@ -382,6 +392,10 @@ mod tests {
             AgentEvent::ContextTruncated {
                 original_tokens: 100_000,
                 fitted_tokens: 60_000,
+            },
+            AgentEvent::PlanProposed {
+                call_id: CallId(id(5)),
+                turn_id: TurnId(id(1)),
             },
         ]
     }

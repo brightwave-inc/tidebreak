@@ -215,6 +215,7 @@ describe("app shell", () => {
       {
         chatId: "chat-2",
         questionCallIds: ["call-parked"],
+        planCallIds: [],
         folderAccessCallIds: [],
         outputWritebackCallIds: [],
       },
@@ -394,6 +395,7 @@ describe("app shell", () => {
       {
         chatId: "chat-1",
         questionCallIds: ["call-1"],
+        planCallIds: [],
         folderAccessCallIds: [],
         outputWritebackCallIds: [],
       },

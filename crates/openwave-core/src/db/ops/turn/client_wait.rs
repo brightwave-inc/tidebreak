@@ -76,7 +76,11 @@ pub(in crate::db) async fn park_turn_for_client_tool_call(
             && exact_call_request(&existing_call, call);
         let outcome = if exact {
             let renderer_event =
-                super::super::user_question::recover_checkpoint_on(&transaction, call).await?;
+                match super::super::user_question::recover_checkpoint_on(&transaction, call).await?
+                {
+                    Some(event) => Some(event),
+                    None => super::super::plan::recover_checkpoint_on(&transaction, call).await?,
+                };
             ParkTurnForClientCallOutcome::Existing {
                 turn: turn_run_from_model(turn)?,
                 call: super::super::client_execution::tool_call_from_model(existing_call)?,
@@ -263,7 +267,10 @@ pub(in crate::db) async fn park_turn_for_client_tool_call(
         .map_err(store_err)?
         .ok_or_else(|| AgentError::Store(format!("parked call {} disappeared", call.id)))?;
     let renderer_event =
-        super::super::user_question::checkpoint_on(&transaction, call, now).await?;
+        match super::super::user_question::checkpoint_on(&transaction, call, now).await? {
+            Some(event) => Some(event),
+            None => super::super::plan::checkpoint_on(&transaction, call, now).await?,
+        };
     let outcome = ParkTurnForClientCallOutcome::Parked {
         turn: turn_run_from_model(parked_turn)?,
         call: super::super::client_execution::tool_call_from_model(inserted_call)?,
@@ -307,7 +314,7 @@ fn exact_call_request(
 }
 
 fn checkpoint_execution(name: &str) -> ToolCallExecution {
-    if name == crate::ASK_USER_QUESTIONS_TOOL {
+    if name == crate::ASK_USER_QUESTIONS_TOOL || name == crate::EXIT_PLAN_MODE_TOOL {
         // The foreground user, rather than a separately leased native
         // executor, supplies this call's result. Orchestration records are
         // intentionally ineligible for either generic execution path.
