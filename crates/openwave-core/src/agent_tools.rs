@@ -687,7 +687,12 @@ mod tests {
             foreground.input_schema["properties"]["end_published_at"],
             serde_json::json!({"type": "string", "format": "date-time"})
         );
-        assert!(!foreground.input_schema.to_string().contains("\"default\""));
+        // Omitting `max_results` is a choice, so the model is told what it
+        // chooses by omitting it.
+        assert_eq!(
+            foreground.input_schema["properties"]["max_results"]["default"],
+            DEFAULT_WEB_SEARCH_RESULTS
+        );
         assert_eq!(foreground.input_schema["additionalProperties"], false);
         assert!(foreground.description.contains("exact result URLs"));
         assert!(sandbox.description.contains("at most once"));
