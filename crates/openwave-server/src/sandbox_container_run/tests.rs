@@ -14,7 +14,7 @@
 //! than hanging CI, and every test uses the multi-thread runtime the durable
 //! operation store's `block_in_place` bridge requires.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -344,6 +344,7 @@ fn fast_config() -> SandboxContainerRunConfig {
         dial_timeout: Duration::from_secs(2),
         reattach_attempts: 2,
         reattach_backoff: Duration::from_millis(10),
+        max_inference_operations: 24,
     }
 }
 
@@ -450,6 +451,68 @@ async fn terminalizes_and_tears_down_when_the_agent_loop_ends_without_a_result()
             "a loop that ended without a result is an agent failure, not a transport one"
         );
         // The container did not leak: teardown ran even though no result arrived.
+        assert_eq!(backend.destroys.load(Ordering::SeqCst), 1);
+    })
+    .await
+    .expect("test completed within its time bound");
+}
+
+/// The host stops answering model inference at the run's spend budget, no matter
+/// how many reverse calls the sandbox issues.
+///
+/// The in-container step limit is enforced by untrusted code, so it bounds
+/// nothing; this is the host-side cap #920 requires before anything routes to
+/// the container location. The refusal is non-retryable, so the sandbox's failed
+/// model step terminalizes the run and the container is torn down — and the
+/// provider must have been asked for exactly the budgeted number of completions,
+/// not one more.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stops_proxying_inference_at_the_runs_spend_budget() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (_dir, store, chat) = store().await;
+        let run_id = admit_container_run(&store, chat.id, "spends forever").await;
+
+        let backend = MockBackend::spawning();
+        // Every completion is another tool directive: left alone, the loop would
+        // take all of its 8 in-container steps. The host's budget of 2 must cut
+        // it off first.
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            "use-tool:write_file:{\"path\":\"note.txt\",\"content\":\"a\"}".to_owned();
+            16
+        ]));
+        let resolver = Arc::new(FixedResolver(provider.clone()));
+
+        let runner = SandboxContainerRunner::new(
+            store.clone(),
+            backend.clone(),
+            resolver,
+            SandboxContainerRunConfig {
+                max_inference_operations: 2,
+                ..fast_config()
+            },
+        );
+        let outcome = runner
+            .drive(run_id)
+            .await
+            .expect("driving succeeds")
+            .expect("the container run is claimable");
+        assert_eq!(outcome, SandboxContainerRunOutcome::Failed(run_id));
+
+        let failed = store.get_agent_run(run_id).await.unwrap().unwrap();
+        assert_eq!(failed.status, AgentRunStatus::Failed);
+        assert_eq!(
+            failed.last_error_code.as_deref(),
+            Some("sandbox_agent_failed")
+        );
+
+        // The user's credentials were spent exactly the budgeted number of
+        // times; the third request was refused before reaching the provider.
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            2,
+            "the host must not answer inference past the run's budget"
+        );
+        // The refusal closed the run rather than leaking the container.
         assert_eq!(backend.destroys.load(Ordering::SeqCst), 1);
     })
     .await
@@ -593,6 +656,8 @@ async fn host_model_proxy_answers_a_reissued_inference_from_the_op_log() {
                     model: "host-model".to_owned(),
                     ..AgentConfig::default()
                 },
+                spent: AtomicU32::new(0),
+                budget: 24,
             }),
             Arc::new(DurableOperationStore::new(store.clone(), run_id)),
         );
