@@ -472,6 +472,7 @@ impl Store for MemStore {
             refusals: Vec::new(),
             citations: Vec::new(),
             tool_activity: Vec::new(),
+            cancellations: Vec::new(),
             last_event_seq,
         }))
     }

@@ -1290,6 +1290,10 @@ pub struct ChatTranscript {
     /// Finished tool activity from terminal turns, projected through a fixed
     /// renderer-safe allowlist. Canonical tool records never cross this API.
     pub tool_activity: Vec<openwave_core::ChatToolActivitySnapshot>,
+    /// Turns the user stopped. A cancelled turn writes no assistant message, so
+    /// this is the only durable trace of it the transcript can carry — without
+    /// it a reopened conversation reads as though the response had finished.
+    pub cancellations: Vec<openwave_core::ChatCancellationSnapshot>,
     pub last_event_seq: i64,
 }
 
@@ -1413,6 +1417,7 @@ pub async fn list_chat_messages(
     Ok(Json(ChatTranscript {
         messages,
         tool_activity: transcript.tool_activity,
+        cancellations: transcript.cancellations,
         last_event_seq: transcript.last_event_seq,
     }))
 }

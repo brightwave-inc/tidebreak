@@ -808,6 +808,15 @@ function MessageBubbleImpl({
   return null;
 }
 
+/**
+ * The notice a stopped turn leaves in the transcript.
+ *
+ * One constant because two paths produce it — the live `turn_cancelled` event
+ * and hydration from the durable snapshot — and they have to read identically
+ * for a reopened conversation to look like the one the user left.
+ */
+export const TURN_CANCELLED_NOTICE = "Response cancelled";
+
 /** Renderer-owned refusal copy; provider categories remain data, not prose. */
 export function refusalCopy(
   category: string | null,

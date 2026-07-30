@@ -6286,6 +6286,17 @@ async fn running_turn_cancellation_holds_the_chat_until_exact_worker_acknowledge
         AcceptTurnOutcome::Accepted(_)
     ));
     assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 2);
+    // The stopped turn commits no assistant message, so the transcript carries
+    // the cancellation itself. Without it a reopened conversation cannot tell a
+    // response that was stopped from one that finished.
+    let transcript = store.get_chat_transcript(chat.id).await.unwrap().unwrap();
+    assert_eq!(
+        transcript.cancellations,
+        vec![crate::storage::ChatCancellationSnapshot {
+            turn_id: turn.id,
+            cancelled_at: acknowledged_at,
+        }]
+    );
 }
 
 #[tokio::test]

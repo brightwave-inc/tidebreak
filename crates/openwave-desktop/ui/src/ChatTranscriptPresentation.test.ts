@@ -4,7 +4,7 @@ import {
   loadCurrentTerminalTranscript,
   presentChatTranscript,
 } from "./ChatTranscriptPresentation";
-import { refusalCopy } from "./MessageList";
+import { refusalCopy, TURN_CANCELLED_NOTICE } from "./MessageList";
 
 const transcript: ChatTranscript = {
   messages: [
@@ -24,6 +24,7 @@ const transcript: ChatTranscript = {
     },
   ],
   tool_activity: [],
+  cancellations: [],
   last_event_seq: 12,
 };
 
@@ -41,6 +42,7 @@ describe("terminal transcript presentation", () => {
           background_agent_run_id: "child-run",
         },
       ],
+      cancellations: [],
       last_event_seq: 4,
     });
 
@@ -66,6 +68,7 @@ describe("terminal transcript presentation", () => {
           finished_at: "2026-07-27T12:00:01Z",
         },
       ],
+      cancellations: [],
       last_event_seq: 4,
     });
 
@@ -91,6 +94,7 @@ describe("terminal transcript presentation", () => {
           finished_at: "2026-07-27T12:00:01Z",
         },
       ],
+      cancellations: [],
       last_event_seq: 4,
     });
 
@@ -266,6 +270,7 @@ describe("terminal transcript presentation", () => {
         },
       ],
       tool_activity: [],
+      cancellations: [],
       last_event_seq: 15,
     });
 
@@ -315,6 +320,7 @@ describe("terminal transcript presentation", () => {
         },
       ],
       tool_activity: [],
+      cancellations: [],
       last_event_seq: 14,
     });
 
@@ -349,6 +355,47 @@ describe("terminal transcript presentation", () => {
     expect(presented.messageIds).toEqual(
       new Set(["empty-refusal", "partial-refusal"]),
     );
+  });
+
+  it("keeps a stopped turn readable as stopped after hydration", () => {
+    const presented = presentChatTranscript({
+      messages: [
+        {
+          id: "question",
+          role: "user",
+          content: "Long question",
+          created_at: "2026-07-19T10:00:00Z",
+          citations: [],
+        },
+        {
+          id: "later-answer",
+          role: "assistant",
+          content: "Answer to the follow-up",
+          created_at: "2026-07-19T10:02:00Z",
+          citations: [],
+        },
+      ],
+      tool_activity: [],
+      cancellations: [
+        { turn_id: "turn-1", cancelled_at: "2026-07-19T10:01:00Z" },
+      ],
+      last_event_seq: 20,
+    });
+
+    // The notice sits where the turn stopped, not at the end of the
+    // conversation: a later turn's answer still follows it.
+    expect(
+      presented.messages.map((message) => [message.id, message.role]),
+    ).toEqual([
+      ["question", "user"],
+      ["cancellation:turn-1", "system"],
+      ["later-answer", "assistant"],
+    ]);
+    expect(presented.messages[1]).toEqual({
+      id: "cancellation:turn-1",
+      role: "system",
+      text: TURN_CANCELLED_NOTICE,
+    });
   });
 
   it("uses renderer-owned copy that distinguishes an incomplete refusal", () => {

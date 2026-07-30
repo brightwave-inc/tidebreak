@@ -1,5 +1,6 @@
 import type { ApiClient, ChatTranscript } from "./api";
 import type { ChatMessage } from "./MessageList";
+import { TURN_CANCELLED_NOTICE } from "./MessageList";
 import { hydrateTranscriptHistory } from "./TranscriptHistory";
 
 type TranscriptClient = Pick<ApiClient, "listChatMessages">;
@@ -23,6 +24,7 @@ export function presentChatTranscript(
   const hydrated = hydrateTranscriptHistory(
     transcript.messages,
     transcript.tool_activity,
+    transcript.cancellations,
   );
   const messageIds = new Set(
     hydrated
@@ -31,6 +33,15 @@ export function presentChatTranscript(
   );
   const messages = hydrated.flatMap(
     (entry): ChatMessage[] => {
+      if (entry.kind === "cancellation") {
+        return [
+          {
+            id: entry.id,
+            role: "system",
+            text: TURN_CANCELLED_NOTICE,
+          } satisfies ChatMessage,
+        ];
+      }
       if (entry.kind === "tool") {
         return [
           {
