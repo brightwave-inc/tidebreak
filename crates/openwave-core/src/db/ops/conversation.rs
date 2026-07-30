@@ -720,18 +720,21 @@ where
         return Ok(Vec::new());
     }
 
+    // The tag is compared as a SQL literal rather than a bound value on
+    // purpose. sea-query does not rewrite `?` inside a custom expression for
+    // PostgreSQL - `?` is one of its own JSONB operators - so a placeholder
+    // here reaches the server verbatim and fails to parse, while SQLite
+    // accepts it. `REASONING_DELTA_TAG` is a crate constant, never caller
+    // input, so there is nothing to inject.
     let tag_matches = match conn.get_database_backend() {
-        // `?` is sea-query's placeholder in both arms; it rewrites it to the
-        // backend's own syntax when the statement is built.
-        DatabaseBackend::Postgres => "payload ->> 'type' = ?",
-        _ => "json_extract(payload, '$.type') = ?",
+        DatabaseBackend::Postgres => {
+            format!("payload ->> 'type' = '{REASONING_DELTA_TAG}'")
+        }
+        _ => format!("json_extract(payload, '$.type') = '{REASONING_DELTA_TAG}'"),
     };
     let events = entities::event::Entity::find()
         .filter(entities::event::Column::ChatId.eq(chat_id.0))
-        .filter(sea_orm::sea_query::Expr::cust_with_values(
-            tag_matches,
-            [REASONING_DELTA_TAG],
-        ))
+        .filter(sea_orm::sea_query::Expr::cust(tag_matches))
         .order_by_asc(entities::event::Column::Seq)
         .all(conn)
         .await
