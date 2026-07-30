@@ -76,9 +76,9 @@ use openwave_core::{
     validate_import_connected_file_arguments, validate_list_connected_folders_arguments,
     validate_list_folder_arguments, validate_read_connected_file_arguments,
     validate_request_folder_access_arguments, validate_write_output_to_connected_folder_arguments,
-    write_output_to_connected_folder_tool_spec, AgentConfig, AgentError, CachingSecretProvider,
-    Config, CreateDeliverable, KeychainSecretProvider, ListDir, Profile, ReadFile, Result,
-    SecretProvider, Store, Tool, ToolRegistry, WriteFile,
+    write_output_to_connected_folder_tool_spec, AgentConfig, AgentError, BlobStore,
+    CachingSecretProvider, Config, CreateDeliverable, FsBlobStore, KeychainSecretProvider, ListDir,
+    Profile, ReadFile, Result, SecretProvider, Store, Tool, ToolRegistry, WriteFile,
 };
 use resolver::KeyedResolver;
 
@@ -707,12 +707,14 @@ async fn bind_inner(
         gateway.clone(),
         os_policy.clone(),
     ));
+    let blobs: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(config.data_dir.join("blobs")));
     let code_execution = Arc::new(
         code_execution::ConfiguredCodeExecutionProvider::new(
             store.clone(),
             secrets.clone(),
             config.data_dir.join("scratch"),
         )
+        .with_blobs(blobs.clone())
         .with_document_scripts(config.exec_scripts_dir.clone())
         .with_folder_grant_resolver(folder_grant_resolver),
     );
@@ -741,6 +743,7 @@ async fn bind_inner(
         )?,
         None => AppState::new(config, store, resolver, secrets, tools, agent_config),
     };
+    state.blobs = blobs;
     // The resolver and the /gateway routes must share ONE runtime: refresh
     // rotation is serialized per GatewayConnection instance, and two
     // instances over the same keychain entry can race a stale refresh token

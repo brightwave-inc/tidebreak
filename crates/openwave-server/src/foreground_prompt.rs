@@ -119,6 +119,11 @@ pub(crate) fn compose_with_exec_folders(
                 "- Use `list_sources` to discover files added to this conversation when the user refers to a source without an exact identifier.",
             );
         }
+        if has("read_source") {
+            lines.push(
+                "- A file attachment announces its exact document id and truthful read or exec route in the user message. Follow that route directly instead of rediscovering the attachment first.",
+            );
+        }
         if has("search") {
             lines.push(
                 "- Use `search` to find relevant passages across this conversation's indexed sources.",
@@ -554,7 +559,7 @@ mod tests {
 
         assert_eq!(
             identity(&prompt),
-            "foreground-v2:sha256:f060d60ecb6a8fec6cee647b0dcd53b593e9548fb088aa4434ed00bfa69e127f"
+            "foreground-v2:sha256:69cb66297149a3ddaa4516ff891330d330d70daf80fcb1fdd40ba25e37f90e0b"
         );
     }
 }

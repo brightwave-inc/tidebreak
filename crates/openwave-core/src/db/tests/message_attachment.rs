@@ -194,11 +194,20 @@ async fn file_attachments_persist_with_the_message_and_join_its_idempotency_proo
                 attachment.document_id,
                 attachment.title.as_deref(),
                 attachment.media_type.as_str(),
+                attachment.source_blob.as_ref().map(|blob| blob.byte_len),
+                attachment.readable,
             ))
             .collect::<Vec<_>>(),
         vec![
-            (0, first.id, Some("brief.pdf"), "application/pdf"),
-            (1, second.id, Some("notes.txt"), "text/plain"),
+            (
+                0,
+                first.id,
+                Some("brief.pdf"),
+                "application/pdf",
+                Some(9),
+                true,
+            ),
+            (1, second.id, Some("notes.txt"), "text/plain", Some(5), true,),
         ]
     );
     assert!(attachments
@@ -389,7 +398,13 @@ async fn a_reloaded_conversation_rebuilds_the_same_image_blocks_in_order() {
             ContentBlock::Image { image: first },
             ContentBlock::Image { image: second },
             ContentBlock::Text {
-                text: "compare these".into()
+                text: format!(
+                    "compare these\n\n<attachments>\n\
+                     image_1: id={}; media_type=image/png; byte_size=20; this is image content block 1\n\
+                     image_2: id={}; media_type=image/webp; byte_size=21; this is image content block 2\n\
+                     </attachments>",
+                    first.blob_id, second.blob_id
+                )
             },
         ]
     );
