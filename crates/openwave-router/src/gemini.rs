@@ -26,7 +26,10 @@ use openwave_core::tool::{strict_json_schema, OptionalProperties};
 use openwave_core::{ImageAttachments, ReasoningEffort, Role};
 
 use crate::google_auth::{valid_resource_segment, valid_vertex_location};
-use crate::sse::{classify_provider_error, drain_frames, frame_data_raw, read_bounded_error_body};
+use crate::sse::{
+    classify_provider_error, drain_frames, frame_data_raw, read_bounded_error_body,
+    safe_in_band_error,
+};
 use crate::BearerTokenSource;
 
 const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com";
@@ -640,7 +643,7 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
     if let Some(error) = data.get("error") {
         state.terminal = true;
         return vec![ProviderEvent::Failed {
-            message: safe_in_band_error(error),
+            message: safe_in_band_error("gemini", error),
         }];
     }
     if let Some(block_reason) = data
@@ -829,16 +832,6 @@ fn refusal_details(reason: &str) -> RefusalDetails {
         })
         .collect::<String>();
     RefusalDetails::from_category(Some(&category))
-}
-
-fn safe_in_band_error(error: &Value) -> String {
-    let status = error
-        .get("code")
-        .and_then(Value::as_u64)
-        .and_then(|code| u16::try_from(code).ok())
-        .filter(|code| (100..=599).contains(code))
-        .unwrap_or(500);
-    format!("gemini returned {status}")
 }
 
 fn classify_gemini_error(status: u16, body: &str) -> AgentError {
