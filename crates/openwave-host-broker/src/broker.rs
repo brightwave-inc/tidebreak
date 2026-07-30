@@ -28,7 +28,7 @@ use uuid::Uuid;
 use crate::{
     audit::{
         AuditActor, AuditError, AuditEvent, AuditOperation, AuditOutcome, AuditSink, AuditTarget,
-        JsonlAuditSink, MemoryAuditSink, UnavailableAuditSink,
+        JsonlAuditSink, MemoryAuditSink,
     },
     path_policy::RootIdentity,
     protocol::{
@@ -141,7 +141,24 @@ struct Shared {
 }
 
 impl Shared {
-    fn record_audit(&self, event: &AuditEvent) {
+    /// Make the intent to mutate the host durable before anything is touched.
+    ///
+    /// The caller must refuse the operation when this fails. That is the whole
+    /// contract: a file the user cannot see a record of was never overwritten,
+    /// because the record comes first.
+    fn record_intent(&self, event: &AuditEvent) -> Result<(), AuditError> {
+        self.audit.record(event)
+    }
+
+    /// Record what an operation turned out to do.
+    ///
+    /// Nothing can be undone by the time this runs, so a failure here cannot
+    /// refuse anything; it leaves the paired intent record standing alone,
+    /// which reads as "this was attempted, the result is unknown". Read-only
+    /// operations carry no intent record and are logged only here — an
+    /// unrecorded read is worth less than the user losing access to their own
+    /// files while the log is unwritable.
+    fn record_completion(&self, event: &AuditEvent) {
         if let Err(error) = self.audit.record(event) {
             eprintln!("openwave host broker could not persist audit event: {error}");
         }
@@ -313,11 +330,20 @@ struct ControlAudit {
     operation: AuditOperation,
     operation_id: Option<OperationId>,
     target: AuditTarget,
+    /// This request can change consent or host state, so its record must be
+    /// durable before it runs.
+    mutates: bool,
 }
 
 impl ControlAudit {
     fn from_request(request: &ControlRequest) -> Option<Self> {
         match request {
+            // Neither reaches user data or changes anything. `Hello` is a
+            // version handshake against a constant, and `ListApprovedRoots`
+            // projects folders the trusted control surface already knows about
+            // for the management UI. Recording them would add volume to a
+            // bounded, rotating log without adding anything a reader could act
+            // on, which costs the records that matter their retention.
             ControlRequest::Hello | ControlRequest::ListApprovedRoots => None,
             ControlRequest::ResolveExecRoots(request) => Some(Self {
                 actor: AuditActor::Control {
@@ -328,6 +354,11 @@ impl ControlAudit {
                     .expect("execution contexts contain non-nil identities"),
                     conversation_id: Some(request.context.conversation_id()),
                 },
+                // A read of already-granted state. It hands absolute paths to
+                // the local sandbox, but the broker cannot audit what happens
+                // inside that sandbox either way, so gating it would cost the
+                // user folder-aware execution while buying no coverage.
+                mutates: false,
                 operation: AuditOperation::ResolveExecRoots,
                 operation_id: None,
                 target: AuditTarget::Subject,
@@ -337,6 +368,7 @@ impl ControlAudit {
                     subject: request.subject,
                     conversation_id: Some(request.conversation_id),
                 },
+                mutates: true,
                 operation: AuditOperation::RegisterRoot,
                 operation_id: Some(request.operation_id),
                 target: AuditTarget::selected_folder(&request.path),
@@ -346,6 +378,7 @@ impl ControlAudit {
                     subject: request.subject,
                     conversation_id: Some(request.conversation_id),
                 },
+                mutates: false,
                 operation: AuditOperation::LookupRegisterRootReceipt,
                 operation_id: Some(request.operation_id),
                 target: AuditTarget::Subject,
@@ -355,6 +388,7 @@ impl ControlAudit {
                     subject: request.subject,
                     conversation_id: Some(request.conversation_id),
                 },
+                mutates: true,
                 operation: AuditOperation::AttachRoot,
                 operation_id: Some(request.operation_id),
                 target: AuditTarget::Root {
@@ -366,6 +400,7 @@ impl ControlAudit {
                     subject: request.subject,
                     conversation_id: Some(request.conversation_id),
                 },
+                mutates: true,
                 operation: AuditOperation::DetachRoot,
                 operation_id: Some(request.operation_id),
                 target: AuditTarget::Root {
@@ -377,6 +412,7 @@ impl ControlAudit {
                     subject: request.subject,
                     conversation_id: Some(request.conversation_id),
                 },
+                mutates: false,
                 operation: AuditOperation::LookupRootAttachmentReceipt,
                 operation_id: Some(request.operation_id),
                 target: AuditTarget::Root {
@@ -388,12 +424,31 @@ impl ControlAudit {
                     subject: request.subject,
                     conversation_id: None,
                 },
+                mutates: true,
                 operation: AuditOperation::RevokeRoot,
                 operation_id: Some(request.operation_id),
                 target: AuditTarget::Root {
                     root_id: request.root_id,
                 },
             }),
+        }
+    }
+
+    fn intent(&self, request_id: RequestId) -> AuditEvent {
+        AuditEvent {
+            event_id: Uuid::new_v4(),
+            timestamp: Utc::now(),
+            request_id,
+            operation_id: self.operation_id,
+            actor: self.actor,
+            operation: self.operation,
+            target: self.target.clone(),
+            outcome: AuditOutcome::Attempted,
+            capability: None,
+            grant_id: None,
+            error_code: None,
+            item_count: None,
+            bytes: None,
         }
     }
 }
@@ -403,10 +458,14 @@ struct OperationAudit {
     operation: AuditOperation,
     capability: Capability,
     target: AuditTarget,
+    /// This operation can change bytes on the host, so its record must be
+    /// durable before it runs.
+    mutates: bool,
 }
 
 impl OperationAudit {
     fn from_envelope(envelope: &OperationEnvelope) -> Self {
+        let mutates = matches!(envelope.request, OperationRequest::WriteFile(_));
         let (operation, capability, target) = match &envelope.request {
             OperationRequest::ListRoots => (
                 AuditOperation::ListRoots,
@@ -441,6 +500,27 @@ impl OperationAudit {
             operation,
             capability,
             target,
+            mutates,
+        }
+    }
+
+    fn intent(&self, request_id: RequestId) -> AuditEvent {
+        AuditEvent {
+            event_id: Uuid::new_v4(),
+            timestamp: Utc::now(),
+            request_id,
+            operation_id: None,
+            actor: self.actor,
+            operation: self.operation,
+            target: self.target.clone(),
+            outcome: AuditOutcome::Attempted,
+            capability: Some(self.capability),
+            // The operation has not been authorized yet; the paired completion
+            // record names the grant that allowed it, if any did.
+            grant_id: None,
+            error_code: None,
+            item_count: None,
+            bytes: None,
         }
     }
 }
@@ -478,13 +558,11 @@ impl Broker {
     pub fn open(policy: RootPolicy, data_dir: &Path) -> Result<Self, BrokerError> {
         let state_file = StateFile::open(data_dir)?;
         let state = state_file.load(&policy)?;
-        let audit: Arc<dyn AuditSink> = match JsonlAuditSink::open(data_dir) {
-            Ok(audit) => Arc::new(audit),
-            Err(error) => {
-                eprintln!("openwave host broker audit unavailable at startup: {error}");
-                Arc::new(UnavailableAuditSink)
-            }
-        };
+        // A sink that could not be prepared is not replaced by one that discards
+        // records: it stays the real sink, refusing until the host can hold the
+        // log. Registration and writes fail with a stated reason, reads keep
+        // working, and everything resumes without a restart.
+        let audit: Arc<dyn AuditSink> = Arc::new(JsonlAuditSink::open(data_dir));
         let pruned = state
             .unavailable
             .iter()
@@ -500,7 +578,7 @@ impl Broker {
             }),
         };
         for event in &pruned {
-            broker.shared.record_audit(event);
+            broker.shared.record_completion(event);
         }
         Ok(broker)
     }
@@ -526,14 +604,22 @@ impl Controller {
     pub fn handle(&self, envelope: ControlEnvelope) -> ControlResponseEnvelope {
         let request_id = envelope.request_id;
         let audit = ControlAudit::from_request(&envelope.request);
+        if let Some(audit) = audit.as_ref().filter(|audit| audit.mutates) {
+            if let Err(error) = self.shared.record_intent(&audit.intent(request_id)) {
+                return response_envelope(
+                    request_id,
+                    Err(error_response(BrokerError::Audit(error))),
+                );
+            }
+        }
         let result = self.execute(envelope);
         if let Some(audit) = audit {
-            self.record_audit(request_id, audit, &result);
+            self.record_completion(request_id, audit, &result);
         }
         response_envelope(request_id, result)
     }
 
-    fn record_audit(
+    fn record_completion(
         &self,
         request_id: crate::RequestId,
         metadata: ControlAudit,
@@ -560,7 +646,7 @@ impl Controller {
             item_count: None,
             bytes: None,
         };
-        self.shared.record_audit(&event);
+        self.shared.record_completion(&event);
     }
 
     fn execute(&self, envelope: ControlEnvelope) -> Result<ControlResult, ErrorResponse> {
@@ -971,9 +1057,17 @@ impl Operator {
     pub fn handle(&self, envelope: OperationEnvelope) -> OperationResponseEnvelope {
         let request_id = envelope.request_id;
         let audit = OperationAudit::from_envelope(&envelope);
+        if audit.mutates {
+            if let Err(error) = self.shared.record_intent(&audit.intent(request_id)) {
+                return response_envelope(
+                    request_id,
+                    Err(error_response(BrokerError::Audit(error))),
+                );
+            }
+        }
         let (result, grant_id) = self.execute(envelope);
         let result = result.map_err(error_response);
-        self.record_audit(request_id, audit, grant_id, &result);
+        self.record_completion(request_id, audit, grant_id, &result);
         response_envelope(request_id, result)
     }
 
@@ -1025,7 +1119,7 @@ impl Operator {
         (result, grant_id)
     }
 
-    fn record_audit(
+    fn record_completion(
         &self,
         request_id: crate::RequestId,
         metadata: OperationAudit,
@@ -1061,7 +1155,7 @@ impl Operator {
             item_count,
             bytes,
         };
-        self.shared.record_audit(&event);
+        self.shared.record_completion(&event);
     }
 
     fn authorized_root(
@@ -1392,9 +1486,9 @@ fn error_response(error: BrokerError) -> ErrorResponse {
             false,
         ),
         BrokerError::Audit(_) => (
-            ErrorCode::Internal,
-            "broker audit storage is unavailable",
-            false,
+            ErrorCode::AuditUnavailable,
+            "the host audit log could not be written, so the operation was refused",
+            true,
         ),
     };
     ErrorResponse {

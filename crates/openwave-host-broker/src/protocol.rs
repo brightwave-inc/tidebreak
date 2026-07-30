@@ -287,6 +287,10 @@ pub enum ErrorCode {
     AlreadyExists,
     NotFound,
     AmbiguousWrite,
+    /// The operation was refused because the host could not record it. Nothing
+    /// was changed, and the same request may be re-issued once the audit log is
+    /// writable again.
+    AuditUnavailable,
 }
 
 /// Safe error payload; it never embeds an absolute path or raw OS error text.

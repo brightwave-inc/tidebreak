@@ -467,14 +467,22 @@ records opaque root IDs and bounded root-relative paths, never absolute host
 paths, raw OS errors, or file contents. Each append is synced before returning;
 the active file and one previous generation provide bounded local retention.
 Transient append failures retry only after the partial attempt has been rolled
-back and synced; an ambiguous append or rotation degrades the sink until restart,
-where an incomplete tail and interrupted rotation are repaired before new
-records are accepted. Unix rotation syncs the containing directory and Windows
-uses write-through file moves. Read-tier audit initialization or append failure
-is reported locally but does not prevent the user from reading their own files.
-Future write, command, and computer-control operations must durably record a
-bounded intent before acting and refuse the action if that record cannot be
-written. Forwarding this local trail off-device is a separate, explicit privacy
+back and synced; an ambiguous append or rotation is reported to the caller,
+which refuses the operation it was gating, and the layout is rebuilt on the next
+record — an incomplete tail and an interrupted rotation are repaired before new
+records are accepted. The sink never disables itself, so a transient host
+failure cannot silently retire the audit trail for the rest of the session.
+Unix rotation syncs the containing directory and Windows uses write-through file
+moves.
+
+Mutations — root registration, attachment, revocation, and file writes — durably
+record a bounded intent before acting and are refused if that record cannot be
+written, so nothing un-recorded reaches the disk. The completion record that
+follows carries the same request identity; an intent with no completion means
+the process died mid-operation and the effect is unknown. Read-tier audit
+initialization or append failure is reported locally but does not prevent the
+user from reading their own files, and no null sink is ever substituted for one
+that cannot be opened. Forwarding this local trail off-device is a separate, explicit privacy
 decision, not a side effect of choosing a hosted model.
 
 ## Deployment evolution
