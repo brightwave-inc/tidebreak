@@ -148,6 +148,9 @@ pub enum SandboxContainerRunOutcome {
     /// The run failed terminally (no result within its bounds); a sandbox-
     /// resident run is never re-executed.
     Failed(AgentRunId),
+    /// The run was cancelled while the driver drove it; the driver committed
+    /// the terminal cancellation and tore the container down.
+    Cancelled(AgentRunId),
     /// The lease was lost or the run was already terminal when the driver tried
     /// to commit — nothing was committed by this attempt.
     LeaseLost(AgentRunId),
@@ -596,7 +599,26 @@ impl SandboxContainerRunner {
                 )
                 .await
             }
-            DriveEnd::LeaseLost => Ok(SandboxContainerRunOutcome::LeaseLost(run_id)),
+            DriveEnd::LeaseLost => {
+                // The heartbeat was refused. Cancellation moves a run to
+                // `cancelling`, which fails the running-only heartbeat filter —
+                // so before reading this as a lost lease, acknowledge a
+                // cancellation this driver still owns: commit the terminal
+                // cancellation, and let the teardown that follows be the
+                // signal that actually stops the container.
+                let run = self.store.get_agent_run(run_id).await?;
+                if run.as_ref().is_some_and(|run| {
+                    run.status == AgentRunStatus::Cancelling && run.lease_token == Some(lease_token)
+                }) && self
+                    .store
+                    .finish_agent_run_cancellation(run_id, lease_token)
+                    .await?
+                    .is_some()
+                {
+                    return Ok(SandboxContainerRunOutcome::Cancelled(run_id));
+                }
+                Ok(SandboxContainerRunOutcome::LeaseLost(run_id))
+            }
         }
     }
 
