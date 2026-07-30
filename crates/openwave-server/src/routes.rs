@@ -2998,7 +2998,7 @@ async fn replay_after(
 async fn send_event(socket: &mut WebSocket, event: &SequencedEvent) -> Result<(), axum::Error> {
     send_frame(
         socket,
-        &RendererChatFrame::Event(RendererSequencedEvent::from(event)),
+        &RendererChatFrame::Event(Box::new(RendererSequencedEvent::from(event))),
     )
     .await
 }

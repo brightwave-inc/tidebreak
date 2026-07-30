@@ -33,8 +33,10 @@ use ts_rs::TS;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(untagged)]
 pub(crate) enum RendererChatFrame {
-    /// A journaled turn event at its sequence.
-    Event(RendererSequencedEvent),
+    /// A journaled turn event at its sequence. Boxed: an event frame carries
+    /// tool previews and dwarfs a metadata frame, and every frame is built
+    /// once and serialized, so the indirection costs nothing on the hot path.
+    Event(Box<RendererSequencedEvent>),
     /// Chat state that changed outside the journal.
     Metadata(RendererChatMetadata),
 }
