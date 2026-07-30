@@ -58,6 +58,7 @@ import {
   type PendingUserQuestions as WirePendingUserQuestions,
   type UserQuestion as WireUserQuestion,
   type UserQuestionOption as WireUserQuestionOption,
+  type UserQuestionType as WireUserQuestionType,
   type ChatTerminalTurnSnapshot,
   type ChatToolActivitySnapshot,
   type ChatToolActivityStatus,
@@ -531,6 +532,7 @@ export type UserQuestion = {
   header: string;
   question: string;
   options: UserQuestionOption[];
+  questionType: WireUserQuestionType;
   allowFreeForm: boolean;
 };
 
@@ -544,8 +546,8 @@ export type PendingUserQuestions = {
 
 export type UserQuestionAnswer = {
   questionId: string;
-  optionId?: string;
-  freeForm?: string;
+  selectedOptionIds: string[];
+  customAnswer?: string;
 };
 
 /** Closed renderer projection of one durable plan continuation. */
@@ -1476,6 +1478,7 @@ export class ApiClient {
     chatId: string,
     callId: string,
     answers: UserQuestionAnswer[],
+    additionalUserContext?: string,
   ): Promise<void> {
     await this.json(`/chats/${chatId}/questions/${callId}/answer`, {
       method: "POST",
@@ -1483,13 +1486,14 @@ export class ApiClient {
       body: JSON.stringify({
         answers: answers.map((answer) => ({
           question_id: answer.questionId,
-          ...(answer.optionId === undefined
+          selected_option_ids: answer.selectedOptionIds,
+          ...(answer.customAnswer === undefined
             ? {}
-            : { option_id: answer.optionId }),
-          ...(answer.freeForm === undefined
-            ? {}
-            : { free_form: answer.freeForm }),
+            : { custom_answer: answer.customAnswer }),
         })),
+        ...(additionalUserContext === undefined
+          ? {}
+          : { additional_user_context: additionalUserContext }),
       }),
     });
   }
@@ -1745,6 +1749,7 @@ export function parsePendingUserQuestions(
         "header",
         "question",
         "options",
+        "question_type",
         "allow_free_form",
       ]) ||
       !nonEmptyBounded(item.id, 64) ||
@@ -1753,6 +1758,8 @@ export function parsePendingUserQuestions(
       !nonEmptyBounded(item.question, 500) ||
       !Array.isArray(item.options) ||
       item.options.length > 5 ||
+      (item.question_type !== "single_select" &&
+        item.question_type !== "multi_select") ||
       typeof item.allow_free_form !== "boolean" ||
       (item.options.length === 0 && !item.allow_free_form)
     ) {
@@ -1784,6 +1791,7 @@ export function parsePendingUserQuestions(
       header: item.header,
       question: item.question,
       options,
+      questionType: item.question_type,
       allowFreeForm: item.allow_free_form,
     });
   }

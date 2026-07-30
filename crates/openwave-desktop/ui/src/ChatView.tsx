@@ -301,7 +301,6 @@ export function ChatView({
             outputWritebacks.cancel(callId, turnId)
           }
           onAnswerUserQuestions={userQuestions.answer}
-          onUserQuestionsCancel={userQuestions.cancel}
           onSelectPrompt={onSelectPrompt}
           onRetryTurn={onRetryTurn}
           hydrated={hydrated}

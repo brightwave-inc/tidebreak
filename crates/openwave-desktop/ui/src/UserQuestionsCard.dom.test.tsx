@@ -27,20 +27,22 @@ const request = {
           description: "Deploy to customers.",
         },
       ],
-      allowFreeForm: false,
+      questionType: "multi_select" as const,
+      allowFreeForm: true,
     },
     {
       id: "note",
       header: "Note",
       question: "Anything else?",
       options: [],
+      questionType: "single_select" as const,
       allowFreeForm: true,
     },
   ],
 };
 
 describe("UserQuestionsCard", () => {
-  it("submits every exact answer without creating chat text", async () => {
+  it("submits multi-select, partial answers, and additional context together", async () => {
     const user = userEvent.setup();
     const onAnswer = vi.fn();
     render(
@@ -49,41 +51,68 @@ describe("UserQuestionsCard", () => {
         working={false}
         error={undefined}
         onAnswer={onAnswer}
-        onCancel={vi.fn()}
       />,
     );
     expect(
       screen.queryByRole("button", { name: "Continue" }),
     ).not.toBeInTheDocument();
     await user.click(screen.getByLabelText(/Staging/));
+    await user.click(screen.getByLabelText(/Production/));
+    await user.type(
+      screen.getByRole("textbox", { name: "Other answer" }),
+      "Start with a canary.",
+    );
     await user.click(screen.getByRole("button", { name: "Next" }));
     const submit = screen.getByRole("button", { name: "Continue" });
-    expect(submit).toBeDisabled();
-    await user.type(screen.getByRole("textbox"), "Keep it reversible.");
     expect(submit).toBeEnabled();
+    await user.type(
+      screen.getByRole("textbox", { name: "Additional context" }),
+      "Keep it reversible.",
+    );
     await user.click(submit);
-    expect(onAnswer).toHaveBeenCalledWith([
-      { questionId: "target", optionId: "staging" },
-      { questionId: "note", freeForm: "Keep it reversible." },
-    ]);
+    expect(onAnswer).toHaveBeenCalledWith(
+      [
+        {
+          questionId: "target",
+          selectedOptionIds: ["staging", "production"],
+          customAnswer: "Start with a canary.",
+        },
+      ],
+      "Keep it reversible.",
+    );
   });
 
-  it("keeps cancellation explicit and disables mutation while sending", async () => {
+  it("skips all questions without cancelling the turn", async () => {
     const user = userEvent.setup();
-    const onCancel = vi.fn();
+    const onAnswer = vi.fn();
+    render(
+      <UserQuestionsCard
+        request={request}
+        working={false}
+        error={undefined}
+        onAnswer={onAnswer}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Skip questions" }));
+    expect(onAnswer).toHaveBeenCalledWith([]);
+  });
+
+  it("disables submission while sending", async () => {
+    const user = userEvent.setup();
+    const onAnswer = vi.fn();
     render(
       <UserQuestionsCard
         request={request}
         working
         error="Retry safely"
-        onAnswer={vi.fn()}
-        onCancel={onCancel}
+        onAnswer={onAnswer}
       />,
     );
     expect(screen.getByRole("alert")).toHaveTextContent("Retry safely");
-    const cancel = screen.getByRole("button", { name: "Cancel turn" });
-    expect(cancel).toBeDisabled();
-    await user.click(cancel);
-    expect(onCancel).not.toHaveBeenCalled();
+    const skip = screen.getByRole("button", { name: "Skip questions" });
+    expect(skip).toBeDisabled();
+    await user.click(skip);
+    expect(onAnswer).not.toHaveBeenCalled();
   });
 });

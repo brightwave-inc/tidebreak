@@ -210,8 +210,8 @@ type MessageListProps = {
   onAnswerUserQuestions?: (
     callId: string,
     answers: UserQuestionAnswer[],
+    additionalUserContext?: string,
   ) => void;
-  onUserQuestionsCancel?: (turnId: string) => void;
   decidingPlanCalls?: Set<string>;
   planApprovalErrors?: Record<string, string>;
   onPlanDecision?: (callId: string, decision: PlanDecision) => void;
@@ -264,7 +264,6 @@ export function MessageList({
   planApprovalErrors = {},
   onPlanDecision = () => undefined,
   onPlanCancel = () => undefined,
-  onUserQuestionsCancel = () => undefined,
   onSelectPrompt,
   onRetryTurn,
   hydrated = true,
@@ -383,10 +382,13 @@ export function MessageList({
             request={request}
             working={answeringQuestionCalls.has(request.callId)}
             error={userQuestionErrors[request.callId]}
-            onAnswer={(answers) =>
-              onAnswerUserQuestions(request.callId, answers)
+            onAnswer={(answers, additionalUserContext) =>
+              onAnswerUserQuestions(
+                request.callId,
+                answers,
+                additionalUserContext,
+              )
             }
-            onCancel={() => onUserQuestionsCancel(request.turnId)}
           />,
         ),
       )}

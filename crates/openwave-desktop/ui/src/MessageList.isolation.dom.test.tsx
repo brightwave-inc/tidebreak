@@ -124,6 +124,7 @@ describe("a continuation card that cannot render", () => {
               options: [
                 { id: "o1", label: "Staging", description: "the shared one" },
               ],
+              questionType: "single_select",
               allowFreeForm: false,
             },
           ],

@@ -202,6 +202,7 @@ describe("parsePendingUserQuestions", () => {
             description: "Deploy for internal verification.",
           },
         ],
+        question_type: "multi_select",
         allow_free_form: true,
       },
     ],
@@ -224,6 +225,7 @@ describe("parsePendingUserQuestions", () => {
               description: "Deploy for internal verification.",
             },
           ],
+          questionType: "multi_select",
           allowFreeForm: true,
         },
       ],
@@ -252,6 +254,12 @@ describe("parsePendingUserQuestions", () => {
       parsePendingUserQuestions({
         ...safe,
         questions: [{ ...safe.questions[0], header: "Target\u0085hidden" }],
+      }),
+    ).toBeNull();
+    expect(
+      parsePendingUserQuestions({
+        ...safe,
+        questions: [{ ...safe.questions[0], question_type: "ranked" }],
       }),
     ).toBeNull();
   });

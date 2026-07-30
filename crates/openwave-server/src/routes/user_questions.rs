@@ -83,7 +83,7 @@ pub async fn answer_user_questions(
         }
         AnswerUserQuestionsOutcome::InvalidAnswer => {
             return Err(ServerError::bad_request(
-                "answers must cover every question exactly once and select a valid option or allowed free-form answer",
+                "answers must name known questions and contain valid selections or allowed custom answers",
             ));
         }
         AnswerUserQuestionsOutcome::Unavailable => {

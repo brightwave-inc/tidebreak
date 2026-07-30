@@ -48,6 +48,7 @@ where
         event_seq: Set(seq),
         asked_at: Set(asked_at),
         resolved_at: Set(None),
+        additional_user_context: Set(None),
     }
     .insert(conn)
     .await
@@ -61,10 +62,14 @@ where
             header: Set(question.header),
             prompt: Set(question.question),
             options: Set(serde_json::to_value(question.options)?),
+            question_type: Set(question.question_type.as_str().into()),
             allow_free_form: Set(question.allow_free_form),
             answer_option_id: Set(None),
             answer_free_form: Set(None),
             answered_at: Set(None),
+            answer_selected_option_ids: Set(None),
+            answer_custom_answer: Set(None),
+            response_recorded_at: Set(None),
         }
         .insert(conn)
         .await
@@ -273,9 +278,21 @@ pub(in crate::db) async fn answer(
     let result = serde_json::to_string(&canonical)?;
 
     if question_request.status == UserQuestionRequestStatus::Answered.as_str() {
-        let exact = stored_answers_match(&questions, &canonical)
+        let result_matches = if questions
+            .iter()
+            .all(|question| question.response_recorded_at.is_some())
+        {
+            call.result.as_deref() == Some(result.as_str())
+        } else {
+            // Before the extension, the result used scalar `option_id` /
+            // `free_form` fields. The compatibility columns below still prove
+            // the semantic answer exactly; requiring byte-identical new JSON
+            // would turn an equivalent retry after upgrade into a conflict.
+            call.result.is_some()
+        };
+        let exact = stored_answers_match(&question_request, &questions, &canonical)?
             && call.status == ToolCallStatus::Completed.as_str()
-            && call.result.as_deref() == Some(result.as_str());
+            && result_matches;
         if !exact {
             transaction.commit().await.map_err(store_err)?;
             return Ok(AnswerUserQuestionsOutcome::AnswerConflict);
@@ -319,16 +336,27 @@ pub(in crate::db) async fn answer(
         .max(call.created_at)
         .max(turn.updated_at);
 
-    for (model, answer) in questions.iter().zip(canonical.answers.iter()) {
+    let answers_by_id: HashMap<_, _> = canonical
+        .answers
+        .iter()
+        .map(|answer| (answer.question_id.as_str(), answer))
+        .collect();
+    for model in &questions {
+        let answer = answers_by_id.get(model.question_id.as_str());
         let mut active: entities::user_question::ActiveModel = model.clone().into();
-        active.answer_option_id = Set(answer.option_id.clone());
-        active.answer_free_form = Set(answer.free_form.clone());
-        active.answered_at = Set(Some(answered_at));
+        active.answer_selected_option_ids = Set(Some(serde_json::to_value(
+            answer
+                .map(|answer| answer.selected_option_ids.as_slice())
+                .unwrap_or_default(),
+        )?));
+        active.answer_custom_answer = Set(answer.and_then(|answer| answer.custom_answer.clone()));
+        active.response_recorded_at = Set(Some(answered_at));
         active.update(&transaction).await.map_err(store_err)?;
     }
     let mut active_request: entities::user_question_request::ActiveModel = question_request.into();
     active_request.status = Set(UserQuestionRequestStatus::Answered.as_str().into());
     active_request.resolved_at = Set(Some(answered_at));
+    active_request.additional_user_context = Set(canonical.additional_user_context.clone());
     active_request
         .update(&transaction)
         .await
@@ -496,6 +524,15 @@ fn questions_from_models(models: &[entities::user_question::Model]) -> Result<Ve
                 header: model.header.clone(),
                 question: model.prompt.clone(),
                 options: serde_json::from_value(model.options.clone())?,
+                question_type: match model.question_type.as_str() {
+                    "single_select" => crate::UserQuestionType::SingleSelect,
+                    "multi_select" => crate::UserQuestionType::MultiSelect,
+                    _ => {
+                        return Err(AgentError::Store(
+                            "durable question has an unknown question type".into(),
+                        ));
+                    }
+                },
                 allow_free_form: model.allow_free_form,
             };
             if !question.is_well_formed() {
@@ -512,45 +549,97 @@ fn canonical_answers(
     questions: &[entities::user_question::Model],
     supplied: &crate::AnswerUserQuestions,
 ) -> Result<Option<crate::AnswerUserQuestions>> {
-    if questions.len() != supplied.answers.len() {
-        return Ok(None);
-    }
     let by_id: HashMap<_, _> = supplied
         .answers
         .iter()
         .map(|answer| (answer.question_id.as_str(), answer))
         .collect();
-    let mut answers = Vec::with_capacity(questions.len());
+    let mut answers = Vec::with_capacity(supplied.answers.len());
     for question in questions {
         let Some(answer) = by_id.get(question.question_id.as_str()) else {
-            return Ok(None);
+            continue;
         };
         let options: Vec<crate::UserQuestionOption> =
             serde_json::from_value(question.options.clone())?;
-        let valid = match (&answer.option_id, &answer.free_form) {
-            (Some(option_id), None) => options.iter().any(|option| option.id == *option_id),
-            (None, Some(_)) => question.allow_free_form,
+        let selections_are_valid = answer
+            .selected_option_ids
+            .iter()
+            .all(|option_id| options.iter().any(|option| option.id == *option_id));
+        let custom_is_valid = answer.custom_answer.is_none() || question.allow_free_form;
+        let selection_shape_is_valid = match question.question_type.as_str() {
+            "single_select" => {
+                (answer.selected_option_ids.len() == 1 && answer.custom_answer.is_none())
+                    || (answer.selected_option_ids.is_empty() && answer.custom_answer.is_some())
+            }
+            "multi_select" => true,
             _ => false,
         };
-        if !valid {
+        if !selections_are_valid || !custom_is_valid || !selection_shape_is_valid {
             return Ok(None);
         }
         answers.push((*answer).clone());
     }
-    Ok(Some(crate::AnswerUserQuestions { answers }))
+    if answers.len() != supplied.answers.len() {
+        return Ok(None);
+    }
+    Ok(Some(crate::AnswerUserQuestions {
+        answers,
+        additional_user_context: supplied.additional_user_context.clone(),
+    }))
 }
 
 fn stored_answers_match(
+    request: &entities::user_question_request::Model,
     questions: &[entities::user_question::Model],
     expected: &crate::AnswerUserQuestions,
-) -> bool {
-    questions
+) -> Result<bool> {
+    if request.additional_user_context != expected.additional_user_context {
+        return Ok(false);
+    }
+    let expected_by_id: HashMap<_, _> = expected
+        .answers
         .iter()
-        .zip(expected.answers.iter())
-        .all(|(question, answer)| {
-            question.question_id == answer.question_id
-                && question.answer_option_id == answer.option_id
-                && question.answer_free_form == answer.free_form
-                && question.answered_at.is_some()
-        })
+        .map(|answer| (answer.question_id.as_str(), answer))
+        .collect();
+    for question in questions {
+        let expected_answer = expected_by_id.get(question.question_id.as_str());
+        if question.response_recorded_at.is_some() {
+            let stored_option_ids: Vec<String> = question
+                .answer_selected_option_ids
+                .clone()
+                .map(serde_json::from_value)
+                .transpose()?
+                .unwrap_or_default();
+            if stored_option_ids
+                != expected_answer
+                    .map(|answer| answer.selected_option_ids.clone())
+                    .unwrap_or_default()
+                || question.answer_custom_answer
+                    != expected_answer.and_then(|answer| answer.custom_answer.clone())
+            {
+                return Ok(false);
+            }
+            continue;
+        }
+
+        // Rows answered before the extension used exactly one of the original
+        // scalar columns. Keep exact retries recoverable after upgrading.
+        let Some(expected_answer) = expected_answer else {
+            return Ok(false);
+        };
+        let legacy_matches = match (
+            &question.answer_option_id,
+            &question.answer_free_form,
+            expected_answer.selected_option_ids.as_slice(),
+            &expected_answer.custom_answer,
+        ) {
+            (Some(stored), None, [expected], None) => stored == expected,
+            (None, Some(stored), [], Some(expected)) => stored == expected,
+            _ => false,
+        };
+        if !legacy_matches || question.answered_at.is_none() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }

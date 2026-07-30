@@ -3595,9 +3595,10 @@ async fn postgres_user_questions_resume_exactly_and_serialize_with_cancellation(
     let answers = AnswerUserQuestions {
         answers: vec![UserQuestionAnswer {
             question_id: "target".into(),
-            option_id: Some("staging".into()),
-            free_form: None,
+            selected_option_ids: vec!["staging".into()],
+            custom_answer: None,
         }],
+        additional_user_context: None,
     };
     let answer_request = AnswerUserQuestionsRequest {
         chat_id: chat.id,

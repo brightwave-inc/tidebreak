@@ -37,7 +37,6 @@ function deferred<T>() {
 function stubClient(overrides: Record<string, unknown> = {}) {
   return {
     answerUserQuestions: vi.fn().mockResolvedValue(undefined),
-    cancel: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   } as unknown as ApiClient;
 }
@@ -72,24 +71,33 @@ describe("useUserQuestions", () => {
     });
   });
 
-  it("cancels the turn that owns a request", async () => {
+  it("forwards additional context with partial answers", async () => {
     const client = stubClient();
     seedQuestions("chat-1", [pending("call-9", "turn-9")]);
     const { result } = renderHook(() => useUserQuestions(client, "chat-1"));
     await waitFor(() => expect(result.current.requests).toHaveLength(1));
 
-    await act(async () => result.current.cancel("turn-9"));
+    act(() =>
+      result.current.answer(
+        "call-9",
+        [
+          {
+            questionId: "scope",
+            selectedOptionIds: ["desktop"],
+          },
+        ],
+        "Keep the interaction compact.",
+      ),
+    );
 
-    expect(client.cancel).toHaveBeenCalledWith("chat-1", "turn-9");
-  });
-
-  it("ignores a cancel for a turn it has no request for", async () => {
-    const client = stubClient();
-    const { result } = renderHook(() => useUserQuestions(client, "chat-1"));
-
-    await act(async () => result.current.cancel("turn-unknown"));
-
-    expect(client.cancel).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(client.answerUserQuestions).toHaveBeenCalledWith(
+        "chat-1",
+        "call-9",
+        [{ questionId: "scope", selectedOptionIds: ["desktop"] }],
+        "Keep the interaction compact.",
+      ),
+    );
   });
 
   it("does not report a failure onto the conversation that replaced it", async () => {

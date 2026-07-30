@@ -6,56 +6,93 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
-type DraftAnswer =
-  | { kind: "option"; value: string }
-  | { kind: "free_form"; value: string };
+type DraftAnswer = {
+  selectedOptionIds: string[];
+  customAnswer?: string;
+};
 
 export function UserQuestionsCard({
   request,
   working,
   error,
   onAnswer,
-  onCancel,
 }: {
   request: PendingUserQuestions;
   working: boolean;
   error: string | undefined;
-  onAnswer: (answers: UserQuestionAnswer[]) => void;
-  onCancel: () => void;
+  onAnswer: (
+    answers: UserQuestionAnswer[],
+    additionalUserContext?: string,
+  ) => void;
 }) {
   const [drafts, setDrafts] = useState<Record<string, DraftAnswer>>({});
   const [currentPage, setCurrentPage] = useState(0);
+  const [additionalContext, setAdditionalContext] = useState("");
   const answers = useMemo(
     () =>
       request.questions.flatMap<UserQuestionAnswer>((question) => {
         const draft = drafts[question.id];
-        if (!draft || !draft.value.trim()) return [];
+        if (!draft) return [];
+        const customAnswer = draft.customAnswer?.trim();
+        if (draft.selectedOptionIds.length === 0 && !customAnswer) return [];
         return [
-          draft.kind === "option"
-            ? { questionId: question.id, optionId: draft.value }
-            : { questionId: question.id, freeForm: draft.value.trim() },
+          {
+            questionId: question.id,
+            selectedOptionIds: draft.selectedOptionIds,
+            ...(customAnswer ? { customAnswer } : {}),
+          },
         ];
       }),
     [drafts, request.questions],
   );
-  const complete = answers.length === request.questions.length;
   const currentQuestion =
     request.questions[Math.min(currentPage, request.questions.length - 1)];
   if (!currentQuestion) return null;
-  const currentDraft = drafts[currentQuestion.id];
+  const currentDraft = drafts[currentQuestion.id] ?? {
+    selectedOptionIds: [],
+  };
+  const isMultiSelect = currentQuestion.questionType === "multi_select";
   const isLastPage = currentPage === request.questions.length - 1;
 
-  const chooseOption = (questionId: string, optionId: string) =>
+  const chooseSingleOption = (questionId: string, optionId: string) =>
     setDrafts((current) => ({
       ...current,
-      [questionId]: { kind: "option", value: optionId },
+      [questionId]: { selectedOptionIds: [optionId] },
     }));
 
-  const updateFreeForm = (questionId: string, value: string) =>
-    setDrafts((current) => ({
-      ...current,
-      [questionId]: { kind: "free_form", value },
-    }));
+  const toggleOption = (questionId: string, optionId: string) =>
+    setDrafts((current) => {
+      const draft = current[questionId] ?? { selectedOptionIds: [] };
+      return {
+        ...current,
+        [questionId]: {
+          ...draft,
+          selectedOptionIds: draft.selectedOptionIds.includes(optionId)
+            ? draft.selectedOptionIds.filter((id) => id !== optionId)
+            : [...draft.selectedOptionIds, optionId],
+        },
+      };
+    });
+
+  const updateCustomAnswer = (
+    questionId: string,
+    value: string | undefined,
+  ) =>
+    setDrafts((current) => {
+      const draft = current[questionId] ?? { selectedOptionIds: [] };
+      return {
+        ...current,
+        [questionId]: {
+          selectedOptionIds: isMultiSelect ? draft.selectedOptionIds : [],
+          ...(value === undefined ? {} : { customAnswer: value }),
+        },
+      };
+    });
+
+  const submitAnswers = () => {
+    const context = additionalContext.trim();
+    onAnswer(answers, context || undefined);
+  };
 
   return (
     <section
@@ -73,6 +110,7 @@ export function UserQuestionsCard({
             className="mt-1 text-[15px] leading-5 font-semibold break-words"
           >
             {currentQuestion.question}
+            {isMultiSelect && " Select all that apply."}
           </h3>
         </div>
         <Button
@@ -80,9 +118,9 @@ export function UserQuestionsCard({
           variant="ghost"
           size="icon-xs"
           disabled={working}
-          onClick={onCancel}
-          aria-label="Cancel turn"
-          title="Cancel turn"
+          onClick={() => onAnswer([])}
+          aria-label="Skip questions"
+          title="Skip questions"
           className="text-muted-foreground shrink-0"
         >
           <X aria-hidden="true" />
@@ -91,14 +129,12 @@ export function UserQuestionsCard({
 
       {currentQuestion.options.length > 0 && (
         <div
-          role="radiogroup"
+          role={isMultiSelect ? "group" : "radiogroup"}
           aria-label={currentQuestion.header}
           className="grid gap-1"
         >
           {currentQuestion.options.map((option) => {
-            const selected =
-              currentDraft?.kind === "option" &&
-              currentDraft.value === option.id;
+            const selected = currentDraft.selectedOptionIds.includes(option.id);
             return (
               <label
                 key={option.id}
@@ -109,12 +145,14 @@ export function UserQuestionsCard({
                 )}
               >
                 <input
-                  type="radio"
+                  type={isMultiSelect ? "checkbox" : "radio"}
                   name={`${request.callId}-${currentQuestion.id}`}
                   checked={selected}
                   disabled={working}
                   onChange={() =>
-                    chooseOption(currentQuestion.id, option.id)
+                    isMultiSelect
+                      ? toggleOption(currentQuestion.id, option.id)
+                      : chooseSingleOption(currentQuestion.id, option.id)
                   }
                   className="accent-foreground mt-0.5 size-[18px] shrink-0"
                 />
@@ -139,26 +177,31 @@ export function UserQuestionsCard({
               )}
             >
               <input
-                type="radio"
+                type={isMultiSelect ? "checkbox" : "radio"}
                 name={`${request.callId}-${currentQuestion.id}`}
-                checked={currentDraft?.kind === "free_form"}
+                checked={currentDraft.customAnswer !== undefined}
                 disabled={working}
-                onChange={() => updateFreeForm(currentQuestion.id, "")}
+                onChange={(event) =>
+                  updateCustomAnswer(
+                    currentQuestion.id,
+                    event.target.checked
+                      ? (currentDraft.customAnswer ?? "")
+                      : undefined,
+                  )
+                }
                 className="accent-foreground size-[18px] shrink-0"
               />
               <Input
                 type="text"
                 maxLength={2000}
-                value={
-                  currentDraft?.kind === "free_form" ? currentDraft.value : ""
-                }
+                value={currentDraft.customAnswer ?? ""}
                 onFocus={() => {
-                  if (currentDraft?.kind !== "free_form") {
-                    updateFreeForm(currentQuestion.id, "");
+                  if (currentDraft.customAnswer === undefined) {
+                    updateCustomAnswer(currentQuestion.id, "");
                   }
                 }}
                 onChange={(event) =>
-                  updateFreeForm(currentQuestion.id, event.target.value)
+                  updateCustomAnswer(currentQuestion.id, event.target.value)
                 }
                 disabled={working}
                 aria-label="Other answer"
@@ -175,11 +218,9 @@ export function UserQuestionsCard({
           <Textarea
             maxLength={2000}
             rows={3}
-            value={
-              currentDraft?.kind === "free_form" ? currentDraft.value : ""
-            }
+            value={currentDraft.customAnswer ?? ""}
             onChange={(event) =>
-              updateFreeForm(currentQuestion.id, event.target.value)
+              updateCustomAnswer(currentQuestion.id, event.target.value)
             }
             disabled={working}
             aria-label={currentQuestion.header}
@@ -187,6 +228,17 @@ export function UserQuestionsCard({
             className="min-h-16 resize-y rounded-[10px] py-2.5 text-sm focus-visible:border-foreground focus-visible:ring-0 focus-visible:ring-offset-0"
           />
         )}
+
+      <Textarea
+        maxLength={2000}
+        rows={2}
+        value={additionalContext}
+        onChange={(event) => setAdditionalContext(event.target.value)}
+        disabled={working}
+        aria-label="Additional context"
+        placeholder="Additional context (optional)"
+        className="min-h-14 resize-y rounded-[10px] py-2.5 text-sm focus-visible:border-foreground focus-visible:ring-0 focus-visible:ring-offset-0"
+      />
 
       {request.questions.length > 1 && (
         <div
@@ -236,8 +288,8 @@ export function UserQuestionsCard({
           <Button
             type="button"
             size="sm"
-            disabled={working || !complete}
-            onClick={() => onAnswer(answers)}
+            disabled={working}
+            onClick={submitAnswers}
           >
             {working ? "Sending…" : "Continue"}
             {!working && <CornerDownLeft aria-hidden="true" />}

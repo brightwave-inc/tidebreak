@@ -10967,9 +10967,10 @@ mod tests {
         let answer = crate::AnswerUserQuestions {
             answers: vec![crate::UserQuestionAnswer {
                 question_id: "target".into(),
-                option_id: Some("staging".into()),
-                free_form: None,
+                selected_option_ids: vec!["staging".into()],
+                custom_answer: None,
             }],
+            additional_user_context: None,
         };
         let calls = vec![ToolCallRecord {
             id: CallId::new(),

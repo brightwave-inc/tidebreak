@@ -26,8 +26,30 @@ pub const MAX_QUESTION_OPTION_ID_CHARS: usize = 64;
 pub const MAX_QUESTION_OPTION_LABEL_CHARS: usize = 80;
 pub const MAX_QUESTION_OPTION_DESCRIPTION_CHARS: usize = 240;
 pub const MAX_FREE_FORM_ANSWER_CHARS: usize = 2_000;
+pub const MAX_ADDITIONAL_USER_CONTEXT_CHARS: usize = 2_000;
 
-/// One mutually exclusive answer choice.
+/// Whether the reader may select one option or several independent options.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ts_rs::TS,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum UserQuestionType {
+    #[default]
+    SingleSelect,
+    MultiSelect,
+}
+
+impl UserQuestionType {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SingleSelect => "single_select",
+            Self::MultiSelect => "multi_select",
+        }
+    }
+}
+
+/// One selectable answer choice.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ts_rs::TS)]
 #[serde(deny_unknown_fields)]
 #[schemars(description = "")]
@@ -63,6 +85,8 @@ pub struct UserQuestion {
     #[serde(default)]
     #[schemars(length(max = MAX_QUESTION_OPTIONS))]
     pub options: Vec<UserQuestionOption>,
+    #[serde(default)]
+    pub question_type: UserQuestionType,
     #[serde(default)]
     pub allow_free_form: bool,
 }
@@ -106,26 +130,35 @@ impl AskUserQuestionsArgs {
     }
 }
 
-/// One exact answer. Exactly one of `option_id` and `free_form` is populated.
+/// One supplied answer. Omitted questions are explicitly skipped.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UserQuestionAnswer {
     pub question_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_option_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub option_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub free_form: Option<String>,
+    pub custom_answer: Option<String>,
 }
 
 impl UserQuestionAnswer {
     #[must_use]
     pub fn shape_is_well_formed(&self) -> bool {
-        valid_text(&self.question_id, MAX_QUESTION_ID_CHARS)
-            && match (&self.option_id, &self.free_form) {
-                (Some(option), None) => valid_text(option, MAX_QUESTION_OPTION_ID_CHARS),
-                (None, Some(answer)) => valid_free_form(answer),
-                _ => false,
-            }
+        if !valid_text(&self.question_id, MAX_QUESTION_ID_CHARS)
+            || self.selected_option_ids.len() > MAX_QUESTION_OPTIONS
+            || (self.selected_option_ids.is_empty() && self.custom_answer.is_none())
+            || self
+                .custom_answer
+                .as_deref()
+                .is_some_and(|answer| !valid_free_form(answer))
+        {
+            return false;
+        }
+        let mut option_ids = HashSet::with_capacity(self.selected_option_ids.len());
+        self.selected_option_ids.iter().all(|option_id| {
+            valid_text(option_id, MAX_QUESTION_OPTION_ID_CHARS)
+                && option_ids.insert(option_id.as_str())
+        })
     }
 }
 
@@ -134,12 +167,19 @@ impl UserQuestionAnswer {
 #[serde(deny_unknown_fields)]
 pub struct AnswerUserQuestions {
     pub answers: Vec<UserQuestionAnswer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_user_context: Option<String>,
 }
 
 impl AnswerUserQuestions {
     #[must_use]
     pub fn shape_is_well_formed(&self) -> bool {
-        if self.answers.is_empty() || self.answers.len() > MAX_USER_QUESTIONS {
+        if self.answers.len() > MAX_USER_QUESTIONS
+            || self
+                .additional_user_context
+                .as_deref()
+                .is_some_and(|context| !valid_additional_context(context))
+        {
             return false;
         }
         let mut ids = HashSet::with_capacity(self.answers.len());
@@ -201,7 +241,7 @@ pub fn validate_ask_user_questions_arguments(arguments: &Value) -> bool {
 pub fn ask_user_questions_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<AskUserQuestionsArgs>(
         ASK_USER_QUESTIONS_TOOL,
-        "Pause the current foreground turn and ask the user up to three short structured questions. Use stable question and option IDs. Options are mutually exclusive; enable allow_free_form only when a custom answer is useful. Call this tool alone, with no assistant text or sibling tools.",
+        "Pause the current foreground turn and ask the user up to three short structured questions. Use stable question and option IDs. Set question_type to single_select only when options are mutually exclusive; otherwise use multi_select. Enable allow_free_form when a custom answer is useful. The user may skip any or all questions, so proceed with reasonable defaults for omissions. Call this tool alone, with no assistant text or sibling tools.",
     )
 }
 
@@ -214,6 +254,14 @@ fn valid_text(value: &str, max_chars: usize) -> bool {
 fn valid_free_form(value: &str) -> bool {
     !value.trim().is_empty()
         && value.chars().count() <= MAX_FREE_FORM_ANSWER_CHARS
+        && !value
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+}
+
+fn valid_additional_context(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.chars().count() <= MAX_ADDITIONAL_USER_CONTEXT_CHARS
         && !value
             .chars()
             .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
@@ -290,6 +338,10 @@ mod tests {
             MAX_QUESTION_OPTION_DESCRIPTION_CHARS
         );
         // What omitting an optional field means is part of the contract.
+        assert_eq!(
+            question["properties"]["question_type"]["default"],
+            "single_select"
+        );
         assert_eq!(question["properties"]["allow_free_form"]["default"], false);
         assert_eq!(
             question["properties"]["options"]["default"],
@@ -317,28 +369,33 @@ mod tests {
     }
 
     #[test]
-    fn answers_require_exactly_one_value() {
+    fn answers_are_bounded_unique_and_may_be_skipped() {
         let option = UserQuestionAnswer {
             question_id: "target".into(),
-            option_id: Some("staging".into()),
-            free_form: None,
+            selected_option_ids: vec!["staging".into()],
+            custom_answer: None,
         };
         assert!(option.shape_is_well_formed());
         assert!(!UserQuestionAnswer {
-            free_form: Some("both".into()),
-            ..option
+            selected_option_ids: vec!["staging".into(), "staging".into()],
+            ..option.clone()
         }
         .shape_is_well_formed());
         assert!(UserQuestionAnswer {
             question_id: "note".into(),
-            option_id: None,
-            free_form: Some("First line\nSecond line".into()),
+            selected_option_ids: vec!["staging".into(), "production".into()],
+            custom_answer: Some("First line\nSecond line".into()),
         }
         .shape_is_well_formed());
         assert!(!UserQuestionAnswer {
             question_id: "note".into(),
-            option_id: None,
-            free_form: Some("unsafe\0answer".into()),
+            selected_option_ids: Vec::new(),
+            custom_answer: Some("unsafe\0answer".into()),
+        }
+        .shape_is_well_formed());
+        assert!(AnswerUserQuestions {
+            answers: Vec::new(),
+            additional_user_context: None,
         }
         .shape_is_well_formed());
     }

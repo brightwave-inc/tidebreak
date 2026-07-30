@@ -101,6 +101,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddToolCallRawArguments),
             Box::new(RaiseAttemptBudgets),
             Box::new(AddChatNetworkPolicy),
+            Box::new(ExtendUserQuestions),
         ]
     }
 }
@@ -144,6 +145,123 @@ impl MigrationTrait for AddChatNetworkPolicy {
             )
             .await?;
         Ok(())
+    }
+}
+
+/// Extends the first question checkpoint with skip, multi-select, and
+/// additional-context support without rewriting already answered rows.
+///
+/// The original scalar answer columns remain as the compatibility projection
+/// for databases created before this migration. New answers use the explicit
+/// response columns, which can represent selected options plus custom text and
+/// an explicit skipped question.
+struct ExtendUserQuestions;
+
+impl MigrationName for ExtendUserQuestions {
+    fn name(&self) -> &str {
+        "m20260730_000040_extend_user_questions"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for ExtendUserQuestions {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(UserQuestionRequest::Table)
+                    .add_column(
+                        ColumnDef::new(UserQuestionRequest::AdditionalUserContext)
+                            .string_len(crate::MAX_ADDITIONAL_USER_CONTEXT_CHARS as u32),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(UserQuestion::Table)
+                    .add_column(
+                        ColumnDef::new(UserQuestion::QuestionType)
+                            .string_len(16)
+                            .not_null()
+                            .default(crate::UserQuestionType::SingleSelect.as_str()),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(UserQuestion::Table)
+                    .add_column(ColumnDef::new(UserQuestion::AnswerSelectedOptionIds).json_binary())
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(UserQuestion::Table)
+                    .add_column(
+                        ColumnDef::new(UserQuestion::AnswerCustomAnswer)
+                            .string_len(crate::MAX_FREE_FORM_ANSWER_CHARS as u32),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(UserQuestion::Table)
+                    .add_column(
+                        ColumnDef::new(UserQuestion::ResponseRecordedAt).timestamp_with_time_zone(),
+                    )
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(UserQuestion::Table)
+                    .drop_column(UserQuestion::ResponseRecordedAt)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(UserQuestion::Table)
+                    .drop_column(UserQuestion::AnswerCustomAnswer)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(UserQuestion::Table)
+                    .drop_column(UserQuestion::AnswerSelectedOptionIds)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(UserQuestion::Table)
+                    .drop_column(UserQuestion::QuestionType)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(UserQuestionRequest::Table)
+                    .drop_column(UserQuestionRequest::AdditionalUserContext)
+                    .to_owned(),
+            )
+            .await
     }
 }
 
@@ -10075,6 +10193,7 @@ enum UserQuestionRequest {
     EventSeq,
     AskedAt,
     ResolvedAt,
+    AdditionalUserContext,
 }
 
 #[derive(DeriveIden)]
@@ -10101,10 +10220,14 @@ enum UserQuestion {
     Header,
     Prompt,
     Options,
+    QuestionType,
     AllowFreeForm,
     AnswerOptionId,
     AnswerFreeForm,
     AnsweredAt,
+    AnswerSelectedOptionIds,
+    AnswerCustomAnswer,
+    ResponseRecordedAt,
 }
 
 #[derive(DeriveIden)]

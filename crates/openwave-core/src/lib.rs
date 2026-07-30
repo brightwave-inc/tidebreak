@@ -218,8 +218,9 @@ pub use tools::{CreateAppTool, ListDir, ReadFile, WriteFile};
 pub use user_questions::{
     ask_user_questions_tool_spec, validate_ask_user_questions_arguments, AnswerUserQuestions,
     AnswerUserQuestionsRequest, AskUserQuestionsArgs, PendingUserQuestions, UserQuestion,
-    UserQuestionAnswer, UserQuestionOption, UserQuestionRequestStatus, ASK_USER_QUESTIONS_TOOL,
-    MAX_FREE_FORM_ANSWER_CHARS, MAX_QUESTION_HEADER_CHARS, MAX_QUESTION_ID_CHARS,
-    MAX_QUESTION_OPTIONS, MAX_QUESTION_OPTION_DESCRIPTION_CHARS, MAX_QUESTION_OPTION_ID_CHARS,
+    UserQuestionAnswer, UserQuestionOption, UserQuestionRequestStatus, UserQuestionType,
+    ASK_USER_QUESTIONS_TOOL, MAX_ADDITIONAL_USER_CONTEXT_CHARS, MAX_FREE_FORM_ANSWER_CHARS,
+    MAX_QUESTION_HEADER_CHARS, MAX_QUESTION_ID_CHARS, MAX_QUESTION_OPTIONS,
+    MAX_QUESTION_OPTION_DESCRIPTION_CHARS, MAX_QUESTION_OPTION_ID_CHARS,
     MAX_QUESTION_OPTION_LABEL_CHARS, MAX_QUESTION_PROMPT_CHARS, MAX_USER_QUESTIONS,
 };
