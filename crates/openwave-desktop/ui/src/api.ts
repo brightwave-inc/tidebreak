@@ -51,7 +51,7 @@ import {
   type PendingUserQuestions as WirePendingUserQuestions,
   type UserQuestion as WireUserQuestion,
   type UserQuestionOption as WireUserQuestionOption,
-  type ChatCancellationSnapshot,
+  type ChatTerminalTurnSnapshot,
   type ChatToolActivitySnapshot,
   type ChatToolActivityStatus,
   type RendererAgentEvent,
@@ -257,8 +257,8 @@ export type ChatMessageImageAttachment = WireTranscriptImageAttachment;
  */
 export type ChatToolActivity = ChatToolActivitySnapshot;
 
-/** One turn the user stopped, as the durable transcript records it. */
-export type ChatCancellation = ChatCancellationSnapshot;
+/** One terminal turn's status and renderer-safe streamed presentation. */
+export type ChatTerminalTurn = ChatTerminalTurnSnapshot;
 
 export type ChatTranscript = WireChatTranscript;
 

@@ -71,21 +71,16 @@ pub struct ChatTranscriptSnapshot {
     /// Durable document identities grouped into the renderer transcript under
     /// the same per-chat fence as `messages`.
     pub message_document_attachments: Vec<MessageDocumentAttachment>,
-    /// Refusal outcomes keyed to their durably completed assistant message.
-    pub refusals: Vec<ChatRefusalSnapshot>,
     /// Ordered renderer-safe sources keyed to their assistant message.
     pub citations: Vec<ChatCitationSnapshot>,
-    /// The presentable reasoning summary each completed turn produced, keyed to
-    /// the assistant message that turn committed.
-    pub reasoning: Vec<ChatReasoningSnapshot>,
+    /// Every terminal turn, including outcomes that committed no assistant
+    /// message. Keeping status and streamed content together prevents each new
+    /// terminal outcome from requiring another transcript side table.
+    pub terminal_turns: Vec<ChatTerminalTurnSnapshot>,
     /// A renderer-safe historical projection. It contains fixed tool identity,
     /// closed previews and lifecycle timestamps only; canonical tool records
     /// never leave storage.
     pub tool_activity: Vec<ChatToolActivitySnapshot>,
-    /// Turns the user stopped, in the order they were stopped. A cancelled turn
-    /// commits no assistant message, so without this the transcript loses the
-    /// fact that a response was interrupted rather than finished.
-    pub cancellations: Vec<ChatCancellationSnapshot>,
     pub last_event_seq: i64,
 }
 
@@ -99,36 +94,33 @@ pub struct ChatCitationSnapshot {
     pub citation: crate::AssistantCitationSnapshot,
 }
 
-/// One turn that reached its terminal state by cancellation.
+/// One terminal turn and the visible stream it produced.
 ///
-/// Carries when the turn stopped and nothing else: the renderer places the
-/// notice in transcript order and owns its wording. The turn identity is here
-/// so the entry has a stable key across hydrations, not so a client can address
-/// the turn.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
-pub struct ChatCancellationSnapshot {
+/// Completed turns point at their committed assistant message, which remains
+/// authoritative for final prose. Failed and cancelled turns have no message,
+/// so their partial prose and reasoning are rebuilt from the journal. Refusal
+/// and failure details stay outcome metadata on the same turn rather than
+/// becoming more transcript side tables.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatTerminalTurnSnapshot {
     pub turn_id: TurnId,
-    pub cancelled_at: chrono::DateTime<chrono::Utc>,
+    pub message_id: Option<MessageId>,
+    pub status: ChatTerminalTurnStatus,
+    pub partial_content: String,
+    pub reasoning: String,
+    pub refusal: Option<RefusalOutcome>,
+    /// Stable internal failure kind. Renderer projections must classify this
+    /// before it crosses the server boundary.
+    pub failure_kind: Option<String>,
+    pub finished_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// One turn's reasoning summary attached to the assistant message it produced.
-///
-/// Reasoning is journaled as a stream of deltas and has no durable home of its
-/// own, so the transcript rebuilds it from the journal and hangs it off the
-/// message the turn committed — the same join refusals use. A turn that
-/// committed no assistant output (cancelled, failed) contributes nothing: there
-/// is no transcript entry to attach it to.
+/// Terminal states visible in a conversation transcript.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChatReasoningSnapshot {
-    pub message_id: MessageId,
-    pub text: String,
-}
-
-/// One refused terminal outcome attached to its durable assistant output.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChatRefusalSnapshot {
-    pub message_id: MessageId,
-    pub refusal: RefusalOutcome,
+pub enum ChatTerminalTurnStatus {
+    Completed,
+    Failed,
+    Cancelled,
 }
 
 /// Opaque indication that a conversation is parked on a renderer-owned prompt.

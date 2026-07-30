@@ -24,7 +24,7 @@ const transcript: ChatTranscript = {
     },
   ],
   tool_activity: [],
-  cancellations: [],
+  terminal_turns: [],
   last_event_seq: 12,
 };
 
@@ -43,7 +43,7 @@ describe("terminal transcript presentation", () => {
         },
       ],
       tool_activity: [],
-      cancellations: [],
+      terminal_turns: [],
       last_event_seq: 2,
     });
 
@@ -70,7 +70,7 @@ describe("terminal transcript presentation", () => {
           background_agent_run_id: "child-run",
         },
       ],
-      cancellations: [],
+      terminal_turns: [],
       last_event_seq: 4,
     });
 
@@ -100,7 +100,7 @@ describe("terminal transcript presentation", () => {
           finished_at: "2026-07-27T12:00:01Z",
         },
       ],
-      cancellations: [],
+      terminal_turns: [],
       last_event_seq: 4,
     });
 
@@ -127,7 +127,7 @@ describe("terminal transcript presentation", () => {
           finished_at: "2026-07-27T12:00:01Z",
         },
       ],
-      cancellations: [],
+      terminal_turns: [],
       last_event_seq: 4,
     });
 
@@ -303,7 +303,7 @@ describe("terminal transcript presentation", () => {
         },
       ],
       tool_activity: [],
-      cancellations: [],
+      terminal_turns: [],
       last_event_seq: 15,
     });
 
@@ -341,7 +341,6 @@ describe("terminal transcript presentation", () => {
           content: "",
           created_at: "2026-07-19T10:00:00Z",
           citations: [],
-          refusal: { category: "cyber", partial_output: false },
         },
         {
           id: "partial-refusal",
@@ -349,11 +348,27 @@ describe("terminal transcript presentation", () => {
           content: "Visible partial",
           created_at: "2026-07-19T10:01:00Z",
           citations: [],
-          refusal: { category: "general_harms", partial_output: true },
         },
       ],
       tool_activity: [],
-      cancellations: [],
+      terminal_turns: [
+        {
+          turn_id: "turn-empty-refusal",
+          message_id: "empty-refusal",
+          status: "completed",
+          partial_content: "",
+          refusal: { category: "cyber", partial_output: false },
+          finished_at: "2026-07-19T10:00:00Z",
+        },
+        {
+          turn_id: "turn-partial-refusal",
+          message_id: "partial-refusal",
+          status: "completed",
+          partial_content: "",
+          refusal: { category: "general_harms", partial_output: true },
+          finished_at: "2026-07-19T10:01:00Z",
+        },
+      ],
       last_event_seq: 14,
     });
 
@@ -390,7 +405,7 @@ describe("terminal transcript presentation", () => {
     );
   });
 
-  it("keeps a stopped turn readable as stopped after hydration", () => {
+  it("keeps cancelled and failed reasoning at the turn that produced it", () => {
     const presented = presentChatTranscript({
       messages: [
         {
@@ -404,30 +419,58 @@ describe("terminal transcript presentation", () => {
           id: "later-answer",
           role: "assistant",
           content: "Answer to the follow-up",
-          created_at: "2026-07-19T10:02:00Z",
+          created_at: "2026-07-19T10:03:00Z",
           citations: [],
         },
       ],
       tool_activity: [],
-      cancellations: [
-        { turn_id: "turn-1", cancelled_at: "2026-07-19T10:01:00Z" },
+      terminal_turns: [
+        {
+          turn_id: "turn-cancelled",
+          status: "cancelled",
+          partial_content: "Partial answer",
+          reasoning: "Considering the first approach",
+          finished_at: "2026-07-19T10:01:00Z",
+        },
+        {
+          turn_id: "turn-failed",
+          status: "failed",
+          partial_content: "",
+          reasoning: "Trying a fallback",
+          failure_category: "transient",
+          finished_at: "2026-07-19T10:02:00Z",
+        },
       ],
       last_event_seq: 20,
     });
 
-    // The notice sits where the turn stopped, not at the end of the
-    // conversation: a later turn's answer still follows it.
     expect(
       presented.messages.map((message) => [message.id, message.role]),
     ).toEqual([
       ["question", "user"],
-      ["cancellation:turn-1", "system"],
+      ["terminal:turn-cancelled:assistant", "assistant"],
+      ["cancellation:turn-cancelled", "system"],
+      ["terminal:turn-failed:assistant", "assistant"],
+      ["failure:turn-failed", "turn_failure"],
       ["later-answer", "assistant"],
     ]);
-    expect(presented.messages[1]).toEqual({
-      id: "cancellation:turn-1",
+    expect(presented.messages[1]).toMatchObject({
+      text: "Partial answer",
+      reasoning: "Considering the first approach",
+    });
+    expect(presented.messages[2]).toEqual({
+      id: "cancellation:turn-cancelled",
       role: "system",
       text: TURN_CANCELLED_NOTICE,
+    });
+    expect(presented.messages[3]).toMatchObject({
+      text: "",
+      reasoning: "Trying a fallback",
+    });
+    expect(presented.messages[4]).toEqual({
+      id: "failure:turn-failed",
+      role: "turn_failure",
+      category: "transient",
     });
   });
 

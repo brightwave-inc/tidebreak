@@ -544,7 +544,7 @@ describe("terminal events", () => {
       text: TURN_CANCELLED_NOTICE,
     });
     expect(effects).toEqual([
-      { type: "invalidate_terminal_hydration" },
+      { type: "hydrate_terminal_transcript" },
       { type: "turn_resolved" },
       { type: "refresh_user_questions" },
       { type: "refresh_plan_approvals" },
@@ -552,7 +552,7 @@ describe("terminal events", () => {
   });
 
   it("turn_failed settles active tools as failed and carries the category through", () => {
-    const { state } = play([
+    const { state, effects } = play([
       TURN,
       { type: "tool_call_started", call_id: "call-1", name: "search" },
       { type: "turn_failed", category: "rate_limited" },
@@ -564,6 +564,7 @@ describe("terminal events", () => {
       role: "turn_failure",
       category: "rate_limited",
     });
+    expect(effects).toContainEqual({ type: "hydrate_terminal_transcript" });
   });
 
   it("terminal settling leaves already-finished tools untouched", () => {

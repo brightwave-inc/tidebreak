@@ -203,16 +203,6 @@ root_attachments: Array<ChatRootAttachment>,
 created_at: string, };
 
 /**
- * One turn that reached its terminal state by cancellation.
- *
- * Carries when the turn stopped and nothing else: the renderer places the
- * notice in transcript order and owns its wording. The turn identity is here
- * so the entry has a stable key across hydrations, not so a client can address
- * the turn.
- */
-export type ChatCancellationSnapshot = { turn_id: TurnId, cancelled_at: string, };
-
-/**
  * Identifies a persistent conversation.
  */
 export type ChatId = string;
@@ -232,13 +222,7 @@ image_attachments?: Array<TranscriptImageAttachment>,
  * Files submitted with this user message. Their bytes remain behind the
  * existing chat-scoped document endpoints.
  */
-file_attachments?: Array<TranscriptFileAttachment>, refusal?: RendererRefusal, 
-/**
- * The presentable reasoning summary the turn behind this assistant message
- * produced, rebuilt from the journal. Absent when the turn reasoned in a
- * mode that exposes nothing, or when the model does not reason at all.
- */
-reasoning?: string, };
+file_attachments?: Array<TranscriptFileAttachment>, };
 
 /**
  * One pathless root in a conversation's exact ordered projection.
@@ -252,6 +236,17 @@ root_id: HostRootId,
  * Product-level provenance for ordering and future management UI.
  */
 origin: RootAttachmentOrigin, };
+
+/**
+ * One terminal turn's renderer-safe status and visible streamed content.
+ *
+ * A completed turn points at its authoritative assistant message. Failed and
+ * cancelled turns have no message, but remain first-class transcript entries
+ * carrying the partial prose and reasoning the reader already saw live.
+ */
+export type ChatTerminalTurnSnapshot = { turn_id: TurnId, message_id?: MessageId, status: ChatTerminalTurnStatus, partial_content: string, reasoning?: string, refusal?: RendererRefusal, failure_category?: TurnFailureCategory, finished_at: string, };
+
+export type ChatTerminalTurnStatus = "completed" | "failed" | "cancelled";
 
 /**
  * A completed tool invocation with no arbitrary result text, provider
@@ -326,11 +321,10 @@ export type ChatTranscript = { messages: Array<ChatMessageSnapshot>,
  */
 tool_activity: Array<ChatToolActivitySnapshot>, 
 /**
- * Turns the user stopped. A cancelled turn writes no assistant message, so
- * this is the only durable trace of it the transcript can carry — without
- * it a reopened conversation reads as though the response had finished.
+ * Status and streamed presentation for every terminal turn. This owns
+ * terminal metadata even when no assistant message was committed.
  */
-cancellations: Array<ChatCancellationSnapshot>, last_event_seq: number, };
+terminal_turns: Array<ChatTerminalTurnSnapshot>, last_event_seq: number, };
 
 /**
  * A small, human-scale position inside a cited document.

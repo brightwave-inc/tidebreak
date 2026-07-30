@@ -16,7 +16,7 @@ use crate::model::{
     ToolCallRecord, TurnRunStatus, MAX_ROOT_ATTACHMENTS,
 };
 use crate::storage::{
-    ChatCancellationSnapshot, ChatReasoningSnapshot, ChatRefusalSnapshot, ChatToolActivitySnapshot,
+    ChatTerminalTurnSnapshot, ChatTerminalTurnStatus, ChatToolActivitySnapshot,
     ChatToolActivityStatus, ChatTranscriptSnapshot, DeleteChatOutcome,
 };
 
@@ -677,71 +677,98 @@ pub(in crate::db) async fn get_chat_transcript(
         super::message_attachment::list_for_chat_on(&transaction, chat_id).await?;
     let message_document_attachments =
         super::message_document_attachment::list_for_chat_on(&transaction, chat_id).await?;
-    let refusals = list_terminal_refusals_on(&transaction, chat_id).await?;
     let citations = super::citation::list_snapshots_on(&transaction, chat_id).await?;
-    let reasoning = list_terminal_reasoning_on(&transaction, chat_id).await?;
+    let terminal_turns = list_terminal_turns_on(&transaction, chat_id).await?;
     let tool_activity = list_terminal_tool_activity_on(&transaction, chat_id).await?;
-    let cancellations = list_cancellations_on(&transaction, chat_id).await?;
     let last_event_seq = terminal_event_cursor_on(&transaction, chat_id).await?;
     transaction.commit().await.map_err(store_err)?;
     Ok(Some(ChatTranscriptSnapshot {
         messages,
         message_attachments,
         message_document_attachments,
-        refusals,
         citations,
-        reasoning,
+        terminal_turns,
         tool_activity,
-        cancellations,
         last_event_seq,
     }))
 }
 
-/// Rebuild each completed turn's reasoning summary from its journaled deltas.
-///
-/// Reasoning has no durable home of its own — it is only ever a delta stream —
-/// so the transcript reconstitutes it here and hangs it off the assistant
-/// message the turn committed, exactly as refusals are joined.
+/// Rebuild the visible stream and outcome of every terminal turn.
 ///
 /// The journal holds every delta a chat has ever produced, tool arguments
 /// included, so this deliberately filters on the payload's variant tag in SQL
-/// rather than deserializing the chat's whole event history to find the few
-/// rows it wants. `AgentEvent` is internally tagged, which makes the tag a plain
-/// JSON string field both backends can read.
-async fn list_terminal_reasoning_on<C>(
+/// rather than deserializing the chat's whole event history. Completed prose
+/// still comes from its committed message; only message-less terminal turns
+/// retain their streamed text here.
+async fn list_terminal_turns_on<C>(
     conn: &C,
     chat_id: ChatId,
-) -> Result<Vec<ChatReasoningSnapshot>>
+) -> Result<Vec<ChatTerminalTurnSnapshot>>
 where
     C: ConnectionTrait,
 {
-    let output_by_turn: HashMap<_, _> = entities::turn_run::Entity::find()
+    let turns = entities::turn_run::Entity::find()
         .filter(entities::turn_run::Column::ChatId.eq(chat_id.0))
-        .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Completed.as_str()))
+        .filter(entities::turn_run::Column::Status.is_in([
+            TurnRunStatus::Completed.as_str(),
+            TurnRunStatus::Failed.as_str(),
+            TurnRunStatus::Cancelled.as_str(),
+        ]))
+        .order_by_asc(entities::turn_run::Column::FinishedAt)
+        .order_by_asc(entities::turn_run::Column::Id)
         .all(conn)
         .await
-        .map_err(store_err)?
-        .into_iter()
-        .filter_map(|turn| {
-            turn.output_message_id
-                .map(|message_id| (turn.id, message_id))
-        })
-        .collect();
-    if output_by_turn.is_empty() {
+        .map_err(store_err)?;
+    if turns.is_empty() {
         return Ok(Vec::new());
     }
 
-    // The tag is compared as a SQL literal rather than a bound value on
-    // purpose. sea-query does not rewrite `?` inside a custom expression for
-    // PostgreSQL - `?` is one of its own JSONB operators - so a placeholder
-    // here reaches the server verbatim and fails to parse, while SQLite
-    // accepts it. `REASONING_DELTA_TAG` is a crate constant, never caller
-    // input, so there is nothing to inject.
+    let mut snapshots = Vec::with_capacity(turns.len());
+    let mut index_of = HashMap::with_capacity(turns.len());
+    for turn in turns {
+        let Some(finished_at) = turn.finished_at else {
+            // Terminal rows are constrained to have a finish time. If legacy
+            // corruption violates that, it cannot be placed honestly.
+            continue;
+        };
+        let status = match turn.status.as_str() {
+            status if status == TurnRunStatus::Completed.as_str() => {
+                ChatTerminalTurnStatus::Completed
+            }
+            status if status == TurnRunStatus::Failed.as_str() => ChatTerminalTurnStatus::Failed,
+            status if status == TurnRunStatus::Cancelled.as_str() => {
+                ChatTerminalTurnStatus::Cancelled
+            }
+            _ => continue,
+        };
+        index_of.insert(turn.id, snapshots.len());
+        snapshots.push(ChatTerminalTurnSnapshot {
+            turn_id: TurnId(turn.id),
+            message_id: turn.output_message_id.map(MessageId),
+            status,
+            partial_content: String::new(),
+            reasoning: String::new(),
+            refusal: None,
+            failure_kind: turn.last_error_code,
+            finished_at,
+        });
+    }
+    if snapshots.is_empty() {
+        return Ok(snapshots);
+    }
+
+    // These tags are SQL literals rather than bound values on purpose.
+    // sea-query does not rewrite `?` inside a custom expression for PostgreSQL
+    // (`?` is one of its JSONB operators), so a placeholder reaches the server
+    // verbatim while SQLite accepts it. The values are crate constants, never
+    // caller input.
     let tag_matches = match conn.get_database_backend() {
-        DatabaseBackend::Postgres => {
-            format!("payload ->> 'type' = '{REASONING_DELTA_TAG}'")
-        }
-        _ => format!("json_extract(payload, '$.type') = '{REASONING_DELTA_TAG}'"),
+        DatabaseBackend::Postgres => format!(
+            "payload ->> 'type' IN ('{TEXT_DELTA_TAG}', '{REASONING_DELTA_TAG}', '{TURN_REFUSED_TAG}')"
+        ),
+        _ => format!(
+            "json_extract(payload, '$.type') IN ('{TEXT_DELTA_TAG}', '{REASONING_DELTA_TAG}', '{TURN_REFUSED_TAG}')"
+        ),
     };
     let events = entities::event::Entity::find()
         .filter(entities::event::Column::ChatId.eq(chat_id.0))
@@ -751,125 +778,31 @@ where
         .await
         .map_err(store_err)?;
 
-    // Concatenated in journal order per turn: the deltas of one turn are its
-    // whole reasoning, and a turn that reasoned across several model steps has
-    // one account of the turn rather than one per step.
-    let mut by_message: Vec<(MessageId, String)> = Vec::new();
-    let mut index_of: HashMap<MessageId, usize> = HashMap::new();
     for event in events {
         let Some(turn_id) = event.turn_id else {
             continue;
         };
-        let Some(message_id) = output_by_turn.get(&turn_id).copied().map(MessageId) else {
+        let Some(index) = index_of.get(&turn_id).copied() else {
             continue;
         };
-        let AgentEvent::ReasoningDelta { text } =
-            serde_json::from_value::<AgentEvent>(event.payload)?
-        else {
-            continue;
-        };
-        match index_of.get(&message_id) {
-            Some(index) => by_message[*index].1.push_str(&text),
-            None => {
-                index_of.insert(message_id, by_message.len());
-                by_message.push((message_id, text));
+        match serde_json::from_value::<AgentEvent>(event.payload)? {
+            AgentEvent::TextDelta { text } if snapshots[index].message_id.is_none() => {
+                snapshots[index].partial_content.push_str(&text);
             }
+            AgentEvent::ReasoningDelta { text } => snapshots[index].reasoning.push_str(&text),
+            AgentEvent::TurnRefused { refusal, .. } => snapshots[index].refusal = Some(refusal),
+            _ => {}
         }
     }
-    Ok(by_message
-        .into_iter()
-        .filter(|(_, text)| !text.trim().is_empty())
-        .map(|(message_id, text)| ChatReasoningSnapshot { message_id, text })
-        .collect())
+    Ok(snapshots)
 }
 
-/// The serialized `AgentEvent::ReasoningDelta` variant tag, as it appears in the
-/// journal's JSON payload. Journaled bytes are a persisted shape, so this is
-/// pinned by `reasoning_deltas_rebuild_into_the_transcript` rather than trusted
-/// to stay in step with the enum by inspection.
+/// Serialized `AgentEvent` tags used to rebuild terminal turn presentation.
+/// Journaled bytes are a persisted shape, so the transcript test pins them
+/// rather than trusting the enum names to stay in step by inspection.
+const TEXT_DELTA_TAG: &str = "text_delta";
 const REASONING_DELTA_TAG: &str = "reasoning_delta";
-
-/// Read the turns this conversation stopped on cancellation.
-///
-/// Cancellation is already durable — the turn run holds `cancelled` and the
-/// journal holds a terminal `TurnCancelled` — but it commits no assistant
-/// message, so it is the one terminal outcome with nothing in the transcript to
-/// hang off. Reading the turn rows directly avoids deserializing the journal
-/// for a fact the run status already states.
-async fn list_cancellations_on<C>(
-    conn: &C,
-    chat_id: ChatId,
-) -> Result<Vec<ChatCancellationSnapshot>>
-where
-    C: ConnectionTrait,
-{
-    Ok(entities::turn_run::Entity::find()
-        .filter(entities::turn_run::Column::ChatId.eq(chat_id.0))
-        .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Cancelled.as_str()))
-        .order_by_asc(entities::turn_run::Column::FinishedAt)
-        .order_by_asc(entities::turn_run::Column::Id)
-        .all(conn)
-        .await
-        .map_err(store_err)?
-        .into_iter()
-        .filter_map(|turn| {
-            // A cancelled turn always has a finish time. One without it is a row
-            // this projection cannot place in transcript order, and a notice in
-            // the wrong place reads worse than none.
-            turn.finished_at
-                .map(|cancelled_at| ChatCancellationSnapshot {
-                    turn_id: TurnId(turn.id),
-                    cancelled_at,
-                })
-        })
-        .collect())
-}
-
-/// Join refused terminal events to the exact assistant message committed in
-/// the same turn resolution transaction.
-async fn list_terminal_refusals_on<C>(conn: &C, chat_id: ChatId) -> Result<Vec<ChatRefusalSnapshot>>
-where
-    C: ConnectionTrait,
-{
-    let output_by_turn: HashMap<_, _> = entities::turn_run::Entity::find()
-        .filter(entities::turn_run::Column::ChatId.eq(chat_id.0))
-        .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Completed.as_str()))
-        .all(conn)
-        .await
-        .map_err(store_err)?
-        .into_iter()
-        .filter_map(|turn| {
-            turn.output_message_id
-                .map(|message_id| (turn.id, message_id))
-        })
-        .collect();
-
-    let events = entities::event::Entity::find()
-        .filter(entities::event::Column::ChatId.eq(chat_id.0))
-        .filter(entities::event::Column::Terminal.eq(true))
-        .order_by_asc(entities::event::Column::Seq)
-        .all(conn)
-        .await
-        .map_err(store_err)?;
-    let mut refusals = Vec::new();
-    for event in events {
-        let Some(turn_id) = event.turn_id else {
-            continue;
-        };
-        let AgentEvent::TurnRefused { refusal, .. } =
-            serde_json::from_value::<AgentEvent>(event.payload)?
-        else {
-            continue;
-        };
-        if let Some(message_id) = output_by_turn.get(&turn_id) {
-            refusals.push(ChatRefusalSnapshot {
-                message_id: MessageId(*message_id),
-                refusal,
-            });
-        }
-    }
-    Ok(refusals)
-}
+const TURN_REFUSED_TAG: &str = "turn_refused";
 
 /// Read only tool calls whose owning foreground turn has reached a terminal
 /// state. A live call is reconstructed from the event journal instead: showing

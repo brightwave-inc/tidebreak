@@ -24,7 +24,7 @@ export function presentChatTranscript(
   const hydrated = hydrateTranscriptHistory(
     transcript.messages,
     transcript.tool_activity,
-    transcript.cancellations,
+    transcript.terminal_turns,
   );
   const messageIds = new Set(
     hydrated
@@ -33,14 +33,34 @@ export function presentChatTranscript(
   );
   const messages = hydrated.flatMap(
     (entry): ChatMessage[] => {
-      if (entry.kind === "cancellation") {
-        return [
-          {
-            id: entry.id,
-            role: "system",
-            text: TURN_CANCELLED_NOTICE,
-          } satisfies ChatMessage,
-        ];
+      if (entry.kind === "terminal_turn") {
+        if (entry.status === "completed") return [];
+        const partial =
+          entry.text || entry.reasoning
+            ? [
+                {
+                  id: `terminal:${entry.id}:assistant`,
+                  role: "assistant" as const,
+                  text: entry.text,
+                  sources: [],
+                  createdAt: entry.createdAt,
+                  reasoning: entry.reasoning,
+                } satisfies ChatMessage,
+              ]
+            : [];
+        const outcome =
+          entry.status === "failed"
+            ? ({
+                id: `failure:${entry.id}`,
+                role: "turn_failure",
+                category: entry.failureCategory ?? "unknown",
+              } satisfies ChatMessage)
+            : ({
+                id: `cancellation:${entry.id}`,
+                role: "system",
+                text: TURN_CANCELLED_NOTICE,
+              } satisfies ChatMessage);
+        return [...partial, outcome];
       }
       if (entry.kind === "tool") {
         return [
