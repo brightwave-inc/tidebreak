@@ -504,6 +504,11 @@ pub enum AgentTurnOutcome {
     Failed {
         /// Stable terminal error payload for the durable failure event.
         error: crate::AgentErrorInfo,
+        /// The wait the provider asked for, when the failure carried a
+        /// `Retry-After`. The worker's retry schedule prefers it over its own
+        /// backoff; it is deliberately not part of the durable error payload,
+        /// which is a client-facing projection.
+        retry_after: Option<std::time::Duration>,
         /// Aggregate provider usage consumed before the failure.
         usage: Usage,
         /// Model-call steps consumed before the failure.
@@ -1056,6 +1061,7 @@ impl Agent {
                 } else if progress.model_steps > 0 {
                     return Ok(AgentTurnOutcome::Failed {
                         error: (&err).into(),
+                        retry_after: err.retry_after(),
                         usage: progress.usage,
                         model_steps: progress.model_steps,
                     });
@@ -1715,6 +1721,7 @@ impl Agent {
                 kind: "max_steps_exceeded".into(),
                 message: "max steps per turn exceeded".into(),
             },
+            retry_after: None,
             usage: total_usage,
             model_steps: self.config.max_steps,
         })
@@ -5673,6 +5680,7 @@ mod tests {
                     ..
                 },
                 model_steps: 1,
+                ..
             } if error.kind == "message" && error.message == "max steps per turn exceeded"
         ));
         let calls = store.list_tool_calls(chat.id).await.unwrap();

@@ -5,6 +5,9 @@
 //! `#[non_exhaustive]` so growing it is never a breaking change for downstream
 //! matches.
 
+use std::fmt;
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -12,6 +15,47 @@ use crate::ProjectId;
 
 /// Shorthand for results across the core crate.
 pub type Result<T, E = AgentError> = std::result::Result<T, E>;
+
+/// A client-safe provider failure plus the wait the provider asked for.
+///
+/// `retry_after` carries the response's `Retry-After` value when one was
+/// present. It is a hint from the provider about when the condition clears —
+/// the retry scheduler prefers it over its own blind backoff, because guessing
+/// shorter turns a rate limit into a wasted attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderFailure {
+    message: String,
+    retry_after: Option<Duration>,
+}
+
+impl ProviderFailure {
+    /// Build a failure carrying the provider's own retry hint.
+    #[must_use]
+    pub fn new(message: impl Into<String>, retry_after: Option<Duration>) -> Self {
+        Self {
+            message: message.into(),
+            retry_after,
+        }
+    }
+
+    /// The wait the provider asked for, when the response carried one.
+    #[must_use]
+    pub const fn retry_after(&self) -> Option<Duration> {
+        self.retry_after
+    }
+}
+
+impl fmt::Display for ProviderFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl<T: Into<String>> From<T> for ProviderFailure {
+    fn from(message: T) -> Self {
+        Self::new(message, None)
+    }
+}
 
 /// Anything that can go wrong inside the core.
 #[derive(Debug, Error)]
@@ -43,11 +87,11 @@ pub enum AgentError {
 
     /// The provider is rate limiting requests.
     #[error("provider rate limited the request: {0}")]
-    RateLimited(String),
+    RateLimited(ProviderFailure),
 
     /// The provider is temporarily overloaded or unavailable.
     #[error("provider overloaded: {0}")]
-    Overloaded(String),
+    Overloaded(ProviderFailure),
 
     /// The provider rejected a request that is invalid for the selected model.
     #[error("invalid provider request: {0}")]
@@ -101,6 +145,18 @@ impl AgentError {
             Self::PromptTooLong(_) => "prompt_too_long",
             Self::Message(_) => "message",
             Self::Serde(_) => "serde",
+        }
+    }
+
+    /// The wait the provider asked for, when this failure carried one.
+    ///
+    /// Only the throttling variants can carry a hint; every other failure
+    /// leaves the schedule to the caller's own backoff.
+    #[must_use]
+    pub const fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::RateLimited(failure) | Self::Overloaded(failure) => failure.retry_after(),
+            _ => None,
         }
     }
 
