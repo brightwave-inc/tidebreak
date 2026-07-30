@@ -37,6 +37,13 @@ export type ChatListStore = {
    */
   derivedTitleChatId: string | null;
   setChats: (chats: Chat[]) => void;
+  /**
+   * Record that fetching the list failed. The load is still settled — the
+   * gate that sends a stale deep link home keys on having asked, not on
+   * having rows, and must not wait on a fetch that already failed. Whatever
+   * list is in hand stays: a failed refresh is no reason to blank it.
+   */
+  failChatsLoad: (error: string) => void;
   /** Replace a chat in the list by id. */
   replaceChat: (chat: Chat) => void;
   /** Take a title the server derived, and mark it as newly arrived. */
@@ -65,6 +72,7 @@ export function createChatListStore() {
     savingTitle: false,
     derivedTitleChatId: null,
     setChats: (chats) => set({ chats, chatsLoaded: true }),
+    failChatsLoad: (error) => set({ chatsLoaded: true, chatsError: error }),
     replaceChat: (chat) =>
       set((state) => ({
         chats: state.chats.map((item) => (item.id === chat.id ? chat : item)),

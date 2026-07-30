@@ -136,16 +136,14 @@ export function AppShell() {
     let cancelled = false;
     void (async () => {
       try {
-        const [catalog, providerList, existingChats] = await Promise.all([
+        const [catalog, providerList] = await Promise.all([
           client.listModels(),
           client.listProviders(),
-          client.listChats(),
         ]);
         if (cancelled) return;
         setModels(catalog.models);
         setDefaultModelKey(resolvedRoleKey(catalog.roles, "chat"));
         setProviders(providerList.providers);
-        chatListActions.setChats(existingChats);
       } catch (err) {
         if (!cancelled) setBootError(String(err));
       }
@@ -154,6 +152,40 @@ export function AppShell() {
       cancelled = true;
     };
   }, [client, info]);
+
+  // The chat list loads apart from the catalog: a failure here is a sidebar
+  // problem, not a boot problem, and must not take down a shell the catalog
+  // already stood up. The store hears about the failure so the gate that
+  // sends a stale deep link home settles instead of waiting on a fetch that
+  // already failed, and the rail shows the error with a way to retry.
+  useEffect(() => {
+    if (!client || !info) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const existingChats = await client.listChats();
+        if (!cancelled) chatListActions.setChats(existingChats);
+      } catch (err) {
+        if (!cancelled) {
+          chatListActions.failChatsLoad(`Could not load chats: ${String(err)}`);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [client, info]);
+
+  /** Reload the chat list after a failed fetch — the rail's retry calls this. */
+  async function refreshChats() {
+    if (!client) return;
+    try {
+      chatListActions.setChats(await client.listChats());
+      chatListActions.setChatsError(null);
+    } catch (err) {
+      chatListActions.failChatsLoad(`Could not load chats: ${String(err)}`);
+    }
+  }
 
   async function refreshCatalog() {
     if (!client) return;
@@ -321,6 +353,7 @@ export function AppShell() {
           defaultModelKey,
           providers,
           refreshCatalog,
+          refreshChats,
           status,
           setStatus,
           newChat: () => void onNewChat(),

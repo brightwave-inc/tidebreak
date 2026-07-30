@@ -27,6 +27,8 @@ export type AppContextValue = {
   defaultModelKey: string | null;
   providers: ProviderInfo[];
   refreshCatalog: () => Promise<void>;
+  /** Reload the chat list after a failed fetch — the rail's retry. */
+  refreshChats: () => Promise<void>;
   status: string;
   setStatus: (next: string | ((current: string) => string)) => void;
   /** Start a conversation and open it. Fenced against a second in-flight create. */

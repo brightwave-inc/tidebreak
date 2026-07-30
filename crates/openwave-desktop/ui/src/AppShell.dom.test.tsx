@@ -207,7 +207,7 @@ beforeEach(() => {
   usePendingPrompts.setState({ chatId: null, userQuestions: [], folderAccess: [] });
   // The stores outlive a test file's renders, so a chat list left behind would
   // decide the next test's routing before its own boot ever ran.
-  useChatListStore.setState({ chats: [], chatsLoaded: false });
+  useChatListStore.setState({ chats: [], chatsLoaded: false, chatsError: null });
   useUiStore.setState({ sidebarCollapsed: false });
 });
 afterEach(() => {
@@ -261,6 +261,30 @@ describe("app shell", () => {
     await mountApp({ at: "/chats" });
 
     expect(await screen.findByText("No chats yet")).toBeInTheDocument();
+  });
+
+  it("keeps the shell up with a retryable list when loading chats fails", async () => {
+    listChats.mockRejectedValue(new Error("database is locked"));
+    const user = userEvent.setup();
+    const { router } = await mountApp({ at: "/c/chat-1" });
+
+    // A list failure is not a boot failure: the models and providers fetched
+    // fine, so the shell stands and the failure is reported where the list
+    // would be. The settled load also frees the deep link to redirect home
+    // rather than wait on a fetch that already failed.
+    expect(await screen.findByText("How can I help?")).toBeInTheDocument();
+    await waitFor(() => expect(router.state.location.pathname).toBe("/"));
+    expect(
+      await screen.findByText(/Could not load chats/),
+    ).toBeInTheDocument();
+
+    listChats.mockResolvedValue(chats);
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+
+    expect(
+      (await screen.findAllByRole("button", { name: "Roadmap" })).length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryByText(/Could not load chats/)).not.toBeInTheDocument();
   });
 
   it("starts a conversation from the home composer and sends what was written", async () => {
