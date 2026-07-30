@@ -16,6 +16,7 @@ import {
   prependReplacementChat,
 } from "./ChatDeletion";
 import { useChatListStore } from "./ChatListStore";
+import { useComposerDrafts } from "./ComposerDrafts";
 import { useConfirm } from "./components/ConfirmDialog";
 import { hasMacOverlayTitlebar } from "./host";
 import { useInterfaceZoom } from "./InterfaceZoom";
@@ -212,6 +213,8 @@ export function AppShell() {
     try {
       await detachChatFolders(current);
       await client.deleteChat(target.id);
+      // Nothing left to send it to.
+      useComposerDrafts.getState().clearDraft(target.id);
       let refreshed = await client.listChats();
       if (!deletingOpenChat) {
         chatListActions.setChats(refreshed);

@@ -14,6 +14,7 @@ import { ChatHeaderTitle } from "./ChatHeaderTitle";
 import { reconcilePendingApprovalCards } from "./ApprovalHistory";
 import { loadChatApprovalHydration } from "./ChatApprovalHydration";
 import { useChatListStore } from "./ChatListStore";
+import { useComposerDraft, useComposerDrafts } from "./ComposerDrafts";
 import { ChatSessionController } from "./ChatSessionController";
 import {
   applyTerminalHydration,
@@ -75,6 +76,7 @@ const sessionDeps = {
 };
 
 const chatListActions = useChatListStore.getState();
+const composerDraftActions = useComposerDrafts.getState();
 const firstMessageActions = useFirstMessage.getState();
 const { signal: signalRefresh } = useRefreshSignals.getState();
 const { signal: signalTurnLifecycle } = useTurnLifecycle.getState();
@@ -97,14 +99,16 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   const deletingChatId = useChatListStore((state) => state.deletingChatId);
   const busy = useChatSessionStore((session) => session.busy);
   const [hydrated, setHydrated] = useState(false);
-  const [draft, setDraft] = useState("");
+  const draft = useComposerDraft(chatId);
   const [attaching, setAttaching] = useState(false);
   const [files, setFiles] = useState<ImportedDocument[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
   const images = useImageAttachments(client, chatId);
   const handleEventRef = useRef<(event: SequencedEvent) => void>(() => {});
   const terminalHydrationGenerationRef = useRef(0);
-  const draftRef = useRef("");
+  // Steering reads the draft synchronously, from outside a render.
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
 
   const chat = chats.find((candidate) => candidate.id === chatId) ?? null;
   const nativeHost = hasNativeHost();
@@ -255,7 +259,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
 
   function setComposerDraft(next: string) {
     draftRef.current = next;
-    setDraft(next);
+    composerDraftActions.setDraft(chatId, next);
   }
 
   async function onSend() {
@@ -278,6 +282,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     const documentIds = fileItems.map((file) => file.documentId);
     const turnId = crypto.randomUUID();
     terminalHydrationGenerationRef.current += 1;
+    const optimisticId = nextId();
     setComposerDraft("");
     updateSession((session) => ({
       ...session,
@@ -286,7 +291,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       messages: [
         ...session.messages,
         {
-          id: nextId(),
+          id: optimisticId,
           role: "user",
           text: content,
           images: transcriptImages,
@@ -314,12 +319,20 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       images.clear();
       setFiles([]);
     } catch (err) {
+      // Nothing was accepted, so the message has to go back to where it can be
+      // fixed and sent again: the text returns to the composer and the
+      // optimistic bubble — which no turn will ever answer — comes out of the
+      // transcript. Attachments are already left in place for the same reason.
       updateSession((session) => ({
         ...session,
         busy: false,
         activeTurnId: null,
-        messages: [...session.messages, { id: nextId(), role: "error", text: String(err) }],
+        messages: [
+          ...session.messages.filter((message) => message.id !== optimisticId),
+          { id: nextId(), role: "error", text: String(err) },
+        ],
       }));
+      if (!draftRef.current) setComposerDraft(content);
       signalTurnLifecycle("resolved");
     }
   }
