@@ -13,22 +13,12 @@ import type { DocumentView } from "@/components/document/document-details";
 
 export function DocumentDetailBreadcrumb({
   documentName,
-  onBackToSources,
 }: {
   documentName?: string;
-  onBackToSources: () => void;
 }) {
   return (
     <PanelBreadcrumb
-      firstPart={
-        <button
-          type="button"
-          className="cursor-pointer hover:underline"
-          onClick={onBackToSources}
-        >
-          Sources
-        </button>
-      }
+      firstPart="Document"
       currentItem={documentName}
     />
   );

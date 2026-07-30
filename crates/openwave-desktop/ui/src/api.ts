@@ -1136,11 +1136,17 @@ export class ApiClient {
     turnId: string,
     content: string,
     attachments: readonly string[] = [],
+    fileAttachments: readonly string[] = [],
   ): Promise<void> {
     return this.json(`/chats/${chatId}/messages`, {
       method: "POST",
       headers: this.headers(true),
-      body: JSON.stringify({ turn_id: turnId, content, attachments }),
+      body: JSON.stringify({
+        turn_id: turnId,
+        content,
+        attachments,
+        file_attachments: fileAttachments,
+      }),
     });
   }
 

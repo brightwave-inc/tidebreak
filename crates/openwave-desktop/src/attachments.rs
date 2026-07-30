@@ -14,10 +14,12 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
-use crate::documents::{import_document_paths, pick_documents, LibraryImportBatch};
+use crate::documents::{
+    import_document_paths, pick_documents, LibraryImportBatch, PendingLibraryDrop,
+};
 use crate::host_access::HostAccess;
 use crate::image_attachments::{is_attachable_image, publish_image_at, AttachedImage};
 use crate::AppState;
@@ -76,10 +78,20 @@ pub(crate) async fn attach_chat_files(
         return Ok(None);
     };
 
+    Ok(Some(
+        attach_paths(app_state.inner(), &host_access, request.chat_id, paths).await,
+    ))
+}
+
+async fn attach_paths(
+    app_state: &Arc<AppState>,
+    host_access: &HostAccess,
+    chat_id: Uuid,
+    paths: Vec<std::path::PathBuf>,
+) -> AttachedFiles {
     let (image_paths, document_paths): (Vec<_>, Vec<_>) = paths
         .into_iter()
         .partition(|path| is_attachable_image(path));
-
     let mut images = Vec::new();
     let mut failed_images = Vec::new();
     for path in image_paths {
@@ -91,7 +103,7 @@ pub(crate) async fn attach_chat_files(
         // One bad image must not cost the reader the rest of the selection, so
         // each is reported on its own terms — the same rule the document batch
         // already follows.
-        match publish_image_at(app_state.inner(), &host_access, request.chat_id, path).await {
+        match publish_image_at(app_state, host_access, chat_id, path).await {
             Ok(attached) => images.push(attached),
             Err(message) => failed_images.push(FailedImage {
                 file_name: name,
@@ -103,23 +115,34 @@ pub(crate) async fn attach_chat_files(
     let documents = if document_paths.is_empty() {
         None
     } else {
-        Some(
-            import_document_paths(
-                &app,
-                app_state.inner(),
-                &host_access,
-                request.chat_id,
-                document_paths,
-            )
-            .await,
-        )
+        Some(import_document_paths(app_state, host_access, chat_id, document_paths).await)
     };
 
-    Ok(Some(AttachedFiles {
+    AttachedFiles {
         images,
         documents,
         failed_images,
-    }))
+    }
+}
+
+/// Claim the most recent operating-system drop for this window and attach it
+/// through the same image/document routing as the picker.
+#[tauri::command]
+pub(crate) async fn attach_dropped_chat_files(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    app_state: State<'_, Arc<AppState>>,
+    host_access: State<'_, HostAccess>,
+    request: AttachFilesRequest,
+) -> Result<Option<AttachedFiles>, String> {
+    crate::documents::resolve_conversation_scope(&host_access, request.chat_id).await?;
+    let paths = app
+        .state::<PendingLibraryDrop>()
+        .take(window.label())
+        .ok_or_else(|| "Drop the files into OpenWave again".to_owned())?;
+    Ok(Some(
+        attach_paths(app_state.inner(), &host_access, request.chat_id, paths).await,
+    ))
 }
 
 #[cfg(test)]

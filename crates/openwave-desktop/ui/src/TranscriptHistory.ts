@@ -8,6 +8,7 @@ import type {
 } from "./api";
 import type { AssistantSource } from "./AssistantSources";
 import type { TranscriptImageAttachment } from "./ImageAttachments";
+import type { TranscriptFileAttachment } from "./TranscriptFileAttachments";
 import type { ToolCallStatus } from "./ToolCallCard";
 
 export type HydratedTranscriptEntry =
@@ -17,6 +18,7 @@ export type HydratedTranscriptEntry =
       role: ChatMessage["role"];
       text: string;
       images: TranscriptImageAttachment[];
+      files: TranscriptFileAttachment[];
       sources: AssistantSource[];
       createdAt: string;
       refusal?: RendererRefusal;
@@ -52,6 +54,16 @@ export function hydrateTranscriptHistory(
                 mediaType: media_type,
                 width,
                 height,
+              }),
+            )
+          : [],
+      files:
+        message.role === "user"
+          ? (message.file_attachments ?? []).map(
+              ({ document_id, name, media_type }) => ({
+                documentId: document_id,
+                name,
+                mediaType: media_type,
               }),
             )
           : [],

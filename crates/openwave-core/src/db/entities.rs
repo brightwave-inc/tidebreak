@@ -371,6 +371,56 @@ pub mod message_attachment {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod message_document_attachment {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "message_document_attachment")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub message_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub ordinal: i32,
+        pub chat_id: Uuid,
+        pub document_id: Uuid,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {
+        #[sea_orm(
+            belongs_to = "super::message::Entity",
+            from = "Column::MessageId",
+            to = "super::message::Column::Id",
+            on_update = "NoAction",
+            on_delete = "Cascade"
+        )]
+        Message,
+        #[sea_orm(
+            belongs_to = "super::document::Entity",
+            from = "Column::DocumentId",
+            to = "super::document::Column::Id",
+            on_update = "NoAction",
+            on_delete = "Cascade"
+        )]
+        Document,
+    }
+
+    impl Related<super::message::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::Message.def()
+        }
+    }
+
+    impl Related<super::document::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::Document.def()
+        }
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod agent_run {
     use sea_orm::entity::prelude::*;
 

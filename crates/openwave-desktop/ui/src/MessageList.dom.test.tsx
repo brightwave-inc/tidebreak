@@ -864,7 +864,7 @@ describe("citation anchors", () => {
     const user = userEvent.setup();
     const openCitation = vi.fn();
     render(
-      <SourceNavProvider value={{ openCitation }}>
+      <SourceNavProvider value={{ openCitation, openDocument: vi.fn() }}>
         <MessageBubble message={message} busy={false} />
       </SourceNavProvider>,
     );
@@ -888,5 +888,36 @@ describe("citation anchors", () => {
     expect(await window.navigator.clipboard.readText()).toBe(
       "The reef is the largest in the world.",
     );
+  });
+});
+
+describe("file attachment chips", () => {
+  it("open the attached document in the viewer panel", async () => {
+    const user = userEvent.setup();
+    const openDocument = vi.fn();
+    render(
+      <SourceNavProvider
+        value={{ openCitation: vi.fn(), openDocument }}
+      >
+        <MessageBubble
+          busy={false}
+          message={{
+            id: "user-file",
+            role: "user",
+            text: "Read this",
+            files: [
+              {
+                documentId: "document-1",
+                name: "brief.pdf",
+                mediaType: "application/pdf",
+              },
+            ],
+          }}
+        />
+      </SourceNavProvider>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "brief.pdf" }));
+    expect(openDocument).toHaveBeenCalledWith("document-1");
   });
 });

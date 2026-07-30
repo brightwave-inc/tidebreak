@@ -18,9 +18,9 @@ use tokio::sync::broadcast::error::RecvError;
 use openwave_core::{
     AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentError, AgentRun, AgentRunExecutionLocation,
     AgentRunStatus, AgentRunTier, ApprovalDecision, CallId, Chat, ChatId, DeleteChatOutcome,
-    DeleteProjectOutcome, Message as StoredMessage, MessageId, PermissionMode, Project, ProjectId,
-    ReasoningEffort, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, Role,
-    SandboxToolCall, SandboxToolCallStatus, SecretProvider, SequencedEvent, Store,
+    DeleteProjectOutcome, DocumentId, Message as StoredMessage, MessageId, PermissionMode, Project,
+    ProjectId, ReasoningEffort, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome,
+    Role, SandboxToolCall, SandboxToolCallStatus, SecretProvider, SequencedEvent, Store,
     ToolCallExecution, ToolCallRecord, ToolCallStatus, TurnId, TurnSteer, TurnSteerId,
 };
 
@@ -1231,6 +1231,11 @@ pub struct ChatMessageSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub image_attachments: Option<Vec<TranscriptImageAttachment>>,
+    /// Files submitted with this user message. Their bytes remain behind the
+    /// existing chat-scoped document endpoints.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub file_attachments: Option<Vec<TranscriptFileAttachment>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub refusal: Option<crate::event_projection::RendererRefusal>,
@@ -1255,6 +1260,24 @@ impl From<openwave_core::MessageAttachment> for TranscriptImageAttachment {
             media_type: attachment.image.media_type.as_str().to_owned(),
             width: attachment.image.width,
             height: attachment.image.height,
+        }
+    }
+}
+
+/// One renderer-safe source document attached to a historical user message.
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub struct TranscriptFileAttachment {
+    pub document_id: DocumentId,
+    pub name: String,
+    pub media_type: String,
+}
+
+impl From<openwave_core::MessageDocumentAttachment> for TranscriptFileAttachment {
+    fn from(attachment: openwave_core::MessageDocumentAttachment) -> Self {
+        Self {
+            document_id: attachment.document_id,
+            name: attachment.title.unwrap_or_else(|| "Attachment".to_owned()),
+            media_type: attachment.media_type,
         }
     }
 }
@@ -1315,6 +1338,7 @@ impl ChatMessageSnapshot {
             created_at: message.created_at,
             citations: Vec::new(),
             image_attachments: None,
+            file_attachments: None,
             refusal: None,
         })
     }
@@ -1346,6 +1370,13 @@ pub async fn list_chat_messages(
             .or_insert_with(Vec::new)
             .push(TranscriptImageAttachment::from(attachment));
     }
+    let mut file_attachments_by_message = std::collections::HashMap::new();
+    for attachment in transcript.message_document_attachments {
+        file_attachments_by_message
+            .entry(attachment.message_id)
+            .or_insert_with(Vec::new)
+            .push(TranscriptFileAttachment::from(attachment));
+    }
     let mut refusals_by_message = transcript
         .refusals
         .into_iter()
@@ -1370,6 +1401,11 @@ pub async fn list_chat_messages(
                     .unwrap_or_default();
                 snapshot.image_attachments =
                     (!image_attachments.is_empty()).then_some(image_attachments);
+                let file_attachments = file_attachments_by_message
+                    .remove(&snapshot.id)
+                    .unwrap_or_default();
+                snapshot.file_attachments =
+                    (!file_attachments.is_empty()).then_some(file_attachments);
             }
             snapshot.refusal = refusals_by_message.remove(&snapshot.id);
             Some(snapshot)
@@ -2014,6 +2050,9 @@ pub struct PostMessage {
     /// an image as something it is not.
     #[serde(default)]
     pub attachments: Vec<uuid::Uuid>,
+    /// Chat-owned document ids returned by the file ingest endpoint.
+    #[serde(default)]
+    pub file_attachments: Vec<DocumentId>,
 }
 
 /// Resolve published attachment ids into authoritative image identity.
@@ -2056,6 +2095,57 @@ async fn resolve_message_attachments(
         images.push(image);
     }
     Ok(images)
+}
+
+async fn resolve_file_attachments(
+    state: &AppState,
+    chat_id: ChatId,
+    ids: &[DocumentId],
+) -> Result<Vec<DocumentId>, ServerError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    if ids.len() > openwave_core::MAX_MESSAGE_ATTACHMENTS {
+        return Err(ServerError::bad_request_kind(
+            "too_many_attachments",
+            format!(
+                "a message may carry at most {} attachments",
+                openwave_core::MAX_MESSAGE_ATTACHMENTS
+            ),
+        ));
+    }
+    let mut distinct = std::collections::HashSet::with_capacity(ids.len());
+    for &id in ids {
+        if !distinct.insert(id) {
+            return Err(ServerError::bad_request_kind(
+                "duplicate_file_attachment",
+                format!("file attachment {id} was submitted more than once"),
+            ));
+        }
+        let document = state.store.get_document(id).await?.ok_or_else(|| {
+            ServerError::bad_request_kind(
+                "file_attachment_not_found",
+                format!("file attachment {id} has not been imported"),
+            )
+        })?;
+        let source_blob = document.source_blob.as_ref();
+        if document.chat_id != Some(chat_id)
+            || document.project_id.is_some()
+            || source_blob.is_none()
+        {
+            return Err(ServerError::bad_request_kind(
+                "file_attachment_not_found",
+                format!("file attachment {id} has not been imported for chat {chat_id}"),
+            ));
+        }
+        if source_blob.is_some_and(|blob| blob.byte_len > openwave_core::MAX_IMAGE_BYTES) {
+            return Err(ServerError::bad_request_kind(
+                "file_attachment_too_large",
+                "files attached to a message must be 16 MB or smaller",
+            ));
+        }
+    }
+    Ok(ids.to_vec())
 }
 
 /// Refuse a turn whose model cannot see the images it carries.
@@ -2191,12 +2281,22 @@ pub async fn post_message(
         validate_model_selection(&state, &selected, true).await?
     };
     let images = resolve_message_attachments(&state, &body.attachments).await?;
+    let documents = resolve_file_attachments(&state, id, &body.file_attachments).await?;
+    if images.len().saturating_add(documents.len()) > openwave_core::MAX_MESSAGE_ATTACHMENTS {
+        return Err(ServerError::bad_request_kind(
+            "too_many_attachments",
+            format!(
+                "a message may carry at most {} attachments",
+                openwave_core::MAX_MESSAGE_ATTACHMENTS
+            ),
+        ));
+    }
     if !images.is_empty() {
         require_image_capable_model(&state, &model).await?;
     }
     match state
         .store
-        .accept_turn_with_attachments(body.turn_id, id, &model, &body.content, &images)
+        .accept_turn_with_attachments(body.turn_id, id, &model, &body.content, &images, &documents)
         .await?
     {
         AcceptTurnOutcome::Accepted(_) | AcceptTurnOutcome::Existing(_) => {
@@ -2223,6 +2323,7 @@ pub async fn post_message(
                             &existing.model,
                             &body.content,
                             &images,
+                            &documents,
                         )
                         .await?,
                     AcceptTurnOutcome::Existing(_)

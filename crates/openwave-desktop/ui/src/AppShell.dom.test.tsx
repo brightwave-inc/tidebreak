@@ -102,10 +102,6 @@ vi.mock("./ChatView", () => ({
   ChatView: () => <div data-testid="transcript">transcript</div>,
 }));
 
-vi.mock("./sources/SourcesView", () => ({
-  SourcesView: () => <div data-testid="sources">sources</div>,
-}));
-
 vi.mock("./outputs/OutputsView", () => ({
   OutputsView: () => <div data-testid="outputs">outputs</div>,
 }));
@@ -245,6 +241,7 @@ describe("app shell", () => {
         expect.any(String),
         "summarise the filing",
         [],
+        [],
       ),
     );
   });
@@ -269,13 +266,13 @@ describe("app shell", () => {
     const { router } = await mountApp({ at: "/c/chat-1" });
     await screen.findByTestId("transcript");
 
-    await user.click(screen.getByRole("button", { name: "Sources" }));
+    await user.click(screen.getByRole("button", { name: "Folders" }));
 
-    expect(await screen.findByTestId("sources")).toBeInTheDocument();
+    expect(await screen.findByTestId("folders")).toBeInTheDocument();
     // The conversation stays mounted beside it rather than being replaced.
     expect(screen.getByTestId("transcript")).toBeInTheDocument();
     await waitFor(() =>
-      expect(router.state.location.search).toEqual({ left: "sources", right: "chat" }),
+      expect(router.state.location.search).toEqual({ left: "folders", right: "chat" }),
     );
   });
 
@@ -283,13 +280,13 @@ describe("app shell", () => {
     const user = userEvent.setup();
     const { router } = await mountApp({ at: "/c/chat-1" });
     await screen.findByTestId("transcript");
-    await user.click(screen.getByRole("button", { name: "Sources" }));
-    await screen.findByTestId("sources");
+    await user.click(screen.getByRole("button", { name: "Folders" }));
+    await screen.findByTestId("folders");
 
     await user.click(screen.getByRole("button", { name: "Close" }));
 
     await waitFor(() => expect(router.state.location.search).toEqual({}));
-    expect(screen.queryByTestId("sources")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("folders")).not.toBeInTheDocument();
   });
 
   it("restores the arrangement a deep link describes", async () => {
@@ -318,7 +315,7 @@ describe("app shell", () => {
   });
 
   it("gives each route only the controls that route can act on", async () => {
-    const conversationOnly = ["Sources", "Outputs", "Folders"];
+    const conversationOnly = ["Outputs", "Folders"];
 
     await mountApp();
     await screen.findByText("What are we working on?");

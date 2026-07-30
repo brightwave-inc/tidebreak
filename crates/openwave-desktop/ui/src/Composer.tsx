@@ -10,8 +10,9 @@ import {
 } from "react";
 import {
   ArrowUpRight,
-  FileText,
   Image as ImageIcon,
+  LoaderCircle,
+  Paperclip,
   Square,
   X,
 } from "lucide-react";
@@ -27,6 +28,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { documentIcon } from "@/documentIcon";
+import type { ImportedDocument } from "@/documents";
 
 const MIN_COMPOSER_LINES = 1;
 export const MAX_COMPOSER_LINES = 6;
@@ -110,6 +113,13 @@ export type ComposerImages = {
   onRetry: (id: string) => void;
 };
 
+export type ComposerFiles = {
+  items: ImportedDocument[];
+  attaching: boolean;
+  onAttach?: () => void;
+  onRemove: (documentId: string) => void;
+};
+
 /** Whether attached images stop this turn from being sent, and why. */
 export function imageSendBlocker(images: ComposerImages | undefined): string | null {
   if (!images || images.items.length === 0) return null;
@@ -132,9 +142,9 @@ export type ComposerProps = {
   draft: string;
   modelMenu?: ReactNode;
   images?: ComposerImages;
-  attachedSourceName?: string | null;
+  files?: ComposerFiles;
+  nativeDropTarget?: ReactNode;
   attachError?: string | null;
-  onDismissAttachedSource?: () => void;
   onDraftChange: (draft: string) => void;
   onSend: () => Promise<void>;
   onSteer: () => Promise<void>;
@@ -154,9 +164,9 @@ export function Composer({
   draft,
   modelMenu,
   images,
-  attachedSourceName = null,
+  files,
+  nativeDropTarget,
   attachError = null,
-  onDismissAttachedSource,
   onDraftChange,
   onSend,
   onSteer,
@@ -277,30 +287,7 @@ export function Composer({
       }}
       onDrop={onDrop}
     >
-      {attachedSourceName && (
-        <div
-          className="flex w-fit max-w-full items-center gap-2 rounded-lg border border-border bg-muted/50 px-3 py-2 text-sm text-muted-foreground"
-          role="status"
-        >
-          <FileText size={15} aria-hidden="true" />
-          <span className="grid min-w-0">
-            <strong className="truncate text-xs font-semibold text-foreground">
-              {attachedSourceName}
-            </strong>
-            <small className="text-[0.68rem]">Added to this conversation</small>
-          </span>
-          {onDismissAttachedSource && (
-            <button
-              type="button"
-              className="inline-flex items-center justify-center rounded-full border-0 bg-transparent p-0.5 text-inherit hover:bg-accent hover:text-foreground"
-              aria-label={`Dismiss ${attachedSourceName}`}
-              onClick={onDismissAttachedSource}
-            >
-              <X size={14} aria-hidden="true" />
-            </button>
-          )}
-        </div>
-      )}
+      {nativeDropTarget}
       {dragging && (
         <div
           className="flex items-center gap-2 rounded-lg border border-dashed border-border px-3 py-2 text-xs text-muted-foreground"
@@ -321,6 +308,20 @@ export function Composer({
               attachment={item}
               onRemove={() => images.onRemove(item.id)}
               onRetry={() => images.onRetry(item.id)}
+            />
+          ))}
+        </ul>
+      )}
+      {files && files.items.length > 0 && (
+        <ul
+          className="m-0 flex list-none flex-wrap gap-2 p-0"
+          aria-label="Attached files"
+        >
+          {files.items.map((file) => (
+            <FileAttachmentChip
+              key={file.documentId}
+              file={file}
+              onRemove={() => files.onRemove(file.documentId)}
             />
           ))}
         </ul>
@@ -347,6 +348,24 @@ export function Composer({
       />
       <div className="flex items-center justify-between gap-2">
         <div className="flex grow items-center gap-2">
+          {files?.onAttach && (
+            <WithTooltip label={files.attaching ? "Attaching…" : "Attach files"}>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-8"
+                aria-label={files.attaching ? "Attaching files" : "Attach files"}
+                disabled={inputDisabled || files.attaching}
+                onClick={files.onAttach}
+              >
+                {files.attaching ? (
+                  <LoaderCircle className="animate-spin" size={15} />
+                ) : (
+                  <Paperclip size={15} />
+                )}
+              </Button>
+            </WithTooltip>
+          )}
           {modelMenu}
         </div>
         <div className="flex items-center gap-2">
@@ -440,6 +459,46 @@ export function Composer({
       )}
     </form>
   );
+}
+
+function FileAttachmentChip({
+  file,
+  onRemove,
+}: {
+  file: ImportedDocument;
+  onRemove: () => void;
+}) {
+  const Icon = documentIcon(file.mediaType);
+  return (
+    <li className="relative flex min-w-0 max-w-full items-center gap-2 rounded-lg border border-border bg-muted/50 py-1.5 pl-2 pr-7 text-muted-foreground">
+      <span className="inline-flex size-9 shrink-0 items-center justify-center rounded-md bg-background">
+        <Icon size={16} aria-hidden="true" />
+      </span>
+      <span className="grid min-w-0 gap-px">
+        <strong
+          className="max-w-[12rem] truncate text-xs font-semibold text-foreground"
+          title={file.displayName}
+        >
+          {file.displayName}
+        </strong>
+        <small className="text-[0.68rem]">{formatBytes(file.byteLen)}</small>
+      </span>
+      <button
+        type="button"
+        className="absolute right-0.5 top-0.5 inline-flex items-center justify-center rounded-full border-0 bg-transparent p-0.5 text-inherit hover:bg-accent hover:text-foreground"
+        aria-label={`Remove ${file.displayName}`}
+        onClick={onRemove}
+      >
+        <X size={14} aria-hidden="true" />
+      </button>
+    </li>
+  );
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1_024) return `${bytes} B`;
+  if (bytes < 1_024 * 1_024) return `${Math.ceil(bytes / 1_024)} KB`;
+  return `${(bytes / (1_024 * 1_024)).toFixed(1)} MB`;
 }
 
 /**
