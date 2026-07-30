@@ -39,7 +39,7 @@ use crate::{
     reverse::{
         Capability, ControlFrame, RequestFrame, ReverseEnvelope, ReverseRequest, ReverseResult,
     },
-    wire::{read_frame, write_frame, write_prioritized, FrameError, WireFrame},
+    wire::{read_frame, write_frame, write_prioritized, FrameError, WireFrame, ATTACH_TIMEOUT},
 };
 
 /// The outcome of one sandbox-originated reverse call over the current
@@ -319,6 +319,17 @@ impl SandboxRun {
             .collect()
     }
 
+    /// Whether `closed` belongs to the connection currently installed as the
+    /// run's live peer.
+    ///
+    /// A serve loop keeps reading until its own socket drops, which can be after
+    /// a reconnect has already installed a newer connection. Frames that mutate
+    /// run-scoped state are gated on this so a superseded peer cannot speak for
+    /// the run.
+    fn is_live(&self, closed: &Arc<AtomicBool>) -> bool {
+        matches!(&*self.inner.conn.borrow(), Some(current) if Arc::ptr_eq(&current.closed, closed))
+    }
+
     /// Advance the un-acknowledged buffer to the host's committed cursor.
     fn acknowledge(&self, cursor: EventCursor) {
         let mut buffer = self.inner.events.lock().expect("event buffer lock");
@@ -341,6 +352,13 @@ impl SandboxRun {
 /// responses back. Returns when the connection drops; the `run` survives for the
 /// host to reattach to.
 ///
+/// The attach frame is read under [`ATTACH_TIMEOUT`]. A peer that connects and
+/// then sends nothing, or dribbles bytes without ever completing the frame,
+/// holds a serving task and a descriptor for as long as it likes otherwise —
+/// [`read_frame`] bounds how *much* it will buffer, not how long it will wait.
+/// The bound applies to the whole frame, not to each read, so a slow drip is
+/// dropped just as an idle peer is.
+///
 /// # Errors
 /// [`FrameError`] if the transport fails before or during the handshake.
 pub async fn serve_connection<S>(stream: S, run: SandboxRun) -> Result<(), FrameError>
@@ -351,11 +369,17 @@ where
     let mut reader = BufReader::new(read_half);
     let mut write_half = write_half;
 
-    // The first frame must be the attach handshake.
-    let attach = match read_frame(&mut reader).await? {
-        WireFrame::Attach(attach) => attach,
-        // A peer that opens with anything else is not speaking the protocol.
-        _ => return Ok(()),
+    // The first frame must be the attach handshake, and must arrive promptly.
+    let opening = tokio::time::timeout(ATTACH_TIMEOUT, read_frame(&mut reader)).await;
+    let attach = match opening {
+        Ok(frame) => match frame? {
+            WireFrame::Attach(attach) => attach,
+            // A peer that opens with anything else is not speaking the protocol.
+            _ => return Ok(()),
+        },
+        // A peer that never finished its attach is dropped; nothing was
+        // installed, so the run is untouched and stands for a real host.
+        Err(_elapsed) => return Ok(()),
     };
 
     let response = handshake(
@@ -402,6 +426,11 @@ where
     // for want of one and leave the slot empty — `send_replace` updates the value
     // unconditionally, and a `call` that subscribes afterward still sees it.
     run.inner.conn.send_replace(Some(conn.clone()));
+    // The resume cursor is this host's own committed position, so take it as an
+    // acknowledgement. It is what makes ignoring a superseded peer's acks below
+    // lossless: the incoming host restates its commitment on attach rather than
+    // the run depending on an ack that may still be in flight on the old socket.
+    run.acknowledge(attach.resume_from);
     for event in run.events_since(attach.resume_from) {
         if conn.data.send(WireFrame::Event(event)).await.is_err() {
             break;
@@ -431,7 +460,16 @@ where
                     .send(WireFrame::Control(ControlFrame::Pong { nonce }))
                     .await;
             }
-            WireFrame::EventAck { cursor } => run.acknowledge(cursor),
+            // An acknowledgement is run-scoped state, so only the connection that
+            // is currently installed may advance it. A superseded peer still
+            // draining its socket after a reconnect speaks for a delivery the
+            // live host has not made — and the live host's own commitment is
+            // already taken from its resume cursor at attach.
+            WireFrame::EventAck { cursor } => {
+                if run.is_live(&closed) {
+                    run.acknowledge(cursor);
+                }
+            }
             // The sandbox originates cancels and requests; it never receives
             // them. Pong is liveness only. Ignore rather than trust peer input.
             WireFrame::Control(ControlFrame::Pong { .. } | ControlFrame::Cancel { .. })
@@ -456,4 +494,138 @@ where
     });
     writer.abort();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::io::{split, DuplexStream, WriteHalf};
+
+    use super::{
+        read_frame, write_frame, ControlFrame, EventCursor, SandboxRun, Sequence, TransportSecret,
+        WireFrame, ATTACH_TIMEOUT, PROTOCOL_VERSION,
+    };
+    use crate::{
+        ids::RunId,
+        protocol::{AttachRequest, HandshakeResponse},
+    };
+
+    fn run_with(secret: &TransportSecret) -> SandboxRun {
+        SandboxRun::new([], Some(secret.clone()))
+    }
+
+    /// Attach over `host_side`, returning the halves so the caller can keep
+    /// speaking on the connection afterwards.
+    async fn attach(
+        host_side: DuplexStream,
+        secret: &TransportSecret,
+        resume_from: EventCursor,
+    ) -> (
+        tokio::io::BufReader<tokio::io::ReadHalf<DuplexStream>>,
+        WriteHalf<DuplexStream>,
+    ) {
+        let (read_half, mut write_half) = split(host_side);
+        let mut reader = tokio::io::BufReader::new(read_half);
+        let attach = WireFrame::Attach(AttachRequest {
+            protocol_version: PROTOCOL_VERSION,
+            run_id: RunId::new(),
+            resume_from,
+            transport_secret: secret.clone(),
+        });
+        write_frame(&mut write_half, &attach)
+            .await
+            .expect("send attach");
+        let answered = read_frame(&mut reader).await.expect("handshake answered");
+        assert!(matches!(
+            answered,
+            WireFrame::Handshake(HandshakeResponse::Accepted(_))
+        ));
+        (reader, write_half)
+    }
+
+    /// A peer that connects and then never completes its attach is dropped rather
+    /// than holding a serving task forever, and nothing is installed on the run.
+    ///
+    /// Time is paused, so the deadline is exercised without the test waiting on
+    /// it: the runtime advances the clock once every task is idle, which a serve
+    /// loop that reads without a deadline never becomes.
+    #[tokio::test(start_paused = true)]
+    async fn a_peer_that_never_completes_its_attach_is_dropped() {
+        let secret = TransportSecret::new("slowloris-test");
+        let run = run_with(&secret);
+        let (host_side, sandbox_side) = tokio::io::duplex(1024);
+        let served = tokio::spawn(super::serve_connection(sandbox_side, run.clone()));
+
+        // The peer holds the connection open and sends nothing at all.
+        let outcome = tokio::time::timeout(ATTACH_TIMEOUT * 3, served)
+            .await
+            .expect("the silent peer is dropped at the attach deadline");
+        assert!(outcome.expect("serve task").is_ok());
+        assert!(
+            run.current_conn().is_none(),
+            "a peer that never attached must not be installed"
+        );
+        drop(host_side);
+    }
+
+    /// A superseded peer — still draining its socket after the host reconnected —
+    /// cannot advance the run's acknowledged cursor. Its ack speaks for a
+    /// delivery the live host has not made, and taking it would let the sandbox
+    /// discard backpressure the live host is entitled to.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_superseded_peer_cannot_advance_the_acknowledged_cursor() {
+        let secret = TransportSecret::new("stale-ack-test");
+        let run = run_with(&secret);
+
+        let (first_host, first_sandbox) = tokio::io::duplex(4096);
+        tokio::spawn(super::serve_connection(first_sandbox, run.clone()));
+        let (mut first_reader, mut first_writer) =
+            attach(first_host, &secret, EventCursor::START).await;
+
+        // The host reconnects; the second connection becomes the live one while
+        // the first is still readable.
+        let (second_host, second_sandbox) = tokio::io::duplex(4096);
+        tokio::spawn(super::serve_connection(second_sandbox, run.clone()));
+        let (_second_reader, _second_writer) =
+            attach(second_host, &secret, EventCursor::START).await;
+
+        // The stale peer acknowledges. A ping behind it, answered on the same
+        // connection, proves the ack was processed before we assert.
+        write_frame(
+            &mut first_writer,
+            &WireFrame::EventAck {
+                cursor: EventCursor::committed(Sequence::new(5)),
+            },
+        )
+        .await
+        .expect("send stale ack");
+        write_frame(
+            &mut first_writer,
+            &WireFrame::Control(ControlFrame::Ping { nonce: 1 }),
+        )
+        .await
+        .expect("send ping");
+        let pong = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            read_frame(&mut first_reader),
+        )
+        .await
+        .expect("the stale connection is still served")
+        .expect("pong");
+        assert!(matches!(
+            pong,
+            WireFrame::Control(ControlFrame::Pong { nonce: 1 })
+        ));
+
+        let acked = run
+            .inner
+            .events
+            .lock()
+            .expect("event buffer lock")
+            .acked_through;
+        assert_eq!(
+            acked,
+            EventCursor::START.get(),
+            "a superseded peer advanced the acknowledged cursor"
+        );
+    }
 }
