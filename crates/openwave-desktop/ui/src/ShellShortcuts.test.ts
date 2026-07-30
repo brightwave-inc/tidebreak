@@ -14,12 +14,18 @@ import {
 function keyEvent(overrides: Partial<KeyboardEvent>): KeyboardEvent {
   return {
     key: "b",
+    code: "KeyB",
     metaKey: true,
     ctrlKey: false,
     shiftKey: false,
     altKey: false,
     ...overrides,
   } as KeyboardEvent;
+}
+
+/** The default context: a mac-style keyboard, nothing in the way. */
+function context(overrides: Partial<Parameters<typeof resolveShellShortcut>[1]> = {}) {
+  return { editable: true, modalOpen: false, command: true, ...overrides };
 }
 
 describe("shell shortcut resolution", () => {
@@ -40,19 +46,51 @@ describe("shell shortcut resolution", () => {
   it("fires chorded shortcuts even while the composer has focus", () => {
     // The whole point of mod-chorded combos: the reader can reach them without
     // leaving the field they are typing in.
-    const cases: Array<[string, ShellShortcutAction]> = [
-      ["b", "toggle-sidebar"],
-      ["n", "new-chat"],
-      ["k", "focus-composer"],
-      ["/", "show-shortcuts"],
+    const cases: Array<[Partial<KeyboardEvent>, ShellShortcutAction]> = [
+      [{ key: "b", code: "KeyB" }, "toggle-sidebar"],
+      [{ key: "n", code: "KeyN" }, "new-chat"],
+      [{ key: "k", code: "KeyK" }, "focus-composer"],
+      [{ key: "/", code: "Slash" }, "show-shortcuts"],
+      [{ key: "0", code: "Digit0" }, "zoom-reset"],
     ];
-    for (const [key, id] of cases) {
-      const resolved = resolveShellShortcut(keyEvent({ key }), {
-        editable: true,
-        modalOpen: false,
-      });
+    for (const [event, id] of cases) {
+      const resolved = resolveShellShortcut(keyEvent(event), context());
       expect(resolved?.id).toBe(id);
     }
+  });
+
+  it("keeps letter shortcuts under the same physical keys on any layout", () => {
+    // Dvorak puts "l" where QWERTY puts N. The shortcut belongs to the key
+    // position the reader's muscle memory knows, not to the character that
+    // position happens to produce.
+    const dvorakN = keyEvent({ key: "l", code: "KeyN" });
+    expect(resolveShellShortcut(dvorakN, context())?.id).toBe("new-chat");
+
+    // And the key that does produce "n" on Dvorak is not a new chat.
+    const dvorakElsewhere = keyEvent({ key: "n", code: "KeyL" });
+    expect(resolveShellShortcut(dvorakElsewhere, context())).toBeNull();
+  });
+
+  it("matches punctuation on the character, which has no fixed position", () => {
+    // "/" sits on Period on AZERTY, on Bracketleft-adjacent keys elsewhere. The
+    // glyph is what the shortcut is named after, so the glyph is what matches.
+    const azertySlash = keyEvent({ key: "/", code: "Period", shiftKey: true });
+    expect(resolveShellShortcut(azertySlash, context())?.id).toBe(
+      "show-shortcuts",
+    );
+  });
+
+  it("takes only the modifier the platform actually uses", () => {
+    // Ctrl+B on macOS is the caret moving back a character; the sidebar has no
+    // claim on it. The same chord is the real binding everywhere else.
+    const ctrlB = keyEvent({ metaKey: false, ctrlKey: true });
+    expect(resolveShellShortcut(ctrlB, context())).toBeNull();
+    expect(resolveShellShortcut(ctrlB, context({ command: false }))?.id).toBe(
+      "toggle-sidebar",
+    );
+    expect(
+      resolveShellShortcut(keyEvent({}), context({ command: false })),
+    ).toBeNull();
   });
 
   it("reaches zoom whether or not shift is held for the key", () => {
@@ -64,26 +102,27 @@ describe("shell shortcut resolution", () => {
       ["-", false],
       ["_", true],
     ] as Array<[string, boolean]>) {
-      const resolved = resolveShellShortcut(keyEvent({ key, shiftKey }), {
-        editable: true,
-        modalOpen: false,
-      });
+      const resolved = resolveShellShortcut(
+        keyEvent({ key, shiftKey, code: "Equal" }),
+        context(),
+      );
       expect(resolved?.id).toBe(key === "=" || key === "+" ? "zoom-in" : "zoom-out");
     }
   });
 
   it("stays out of the way of plain typing", () => {
     const resolved = resolveShellShortcut(
-      keyEvent({ key: "n", metaKey: false, ctrlKey: false }),
-      { editable: true, modalOpen: false },
+      keyEvent({ key: "n", code: "KeyN", metaKey: false, ctrlKey: false }),
+      context(),
     );
     expect(resolved).toBeNull();
   });
 
   it("suppresses every shortcut while a modal dialog is open", () => {
-    const resolved = resolveShellShortcut(keyEvent({ key: "n" }), {
+    const resolved = resolveShellShortcut(keyEvent({ key: "n", code: "KeyN" }), {
       editable: false,
       modalOpen: true,
+      command: true,
     });
     expect(resolved).toBeNull();
   });

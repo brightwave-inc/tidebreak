@@ -27,14 +27,35 @@ export const SHELL_SHORTCUT_GROUPS: readonly ShellShortcutGroup[] = [
   "Help",
 ];
 
-export type ShellShortcutDef = {
-  id: ShellShortcutAction;
+/**
+ * How a definition recognises its key, which differs by what kind of key it is.
+ *
+ * Letters and digits are matched on `event.code` — the physical key position,
+ * `KeyN` for the key labelled N on a US board. A layout decides which character
+ * a position produces, so matching the character would move the shortcut to
+ * wherever that letter happens to sit: Cmd+N is under the QWERTY N on AZERTY
+ * too, and matching `event.key` would put it under the physical `?` key
+ * instead.
+ *
+ * Punctuation goes the other way. The glyph is the whole point of `Cmd+/`, and
+ * its position is nowhere near fixed across layouts, so those match the
+ * character the keyboard actually produced.
+ */
+type ShellShortcutBinding =
+  /**
+   * `event.code` values that trigger it. More than one because separate
+   * physical keys can carry the same digit — the number row and the numpad.
+   */
+  | { codes: readonly string[]; keys?: never }
   /**
    * The characters that trigger it, matched case-insensitively against
    * `event.key`. More than one because a keyboard can reach the same intent
    * through more than one glyph — zooming in is `=` unshifted and `+` shifted.
    */
-  keys: readonly string[];
+  | { keys: readonly string[]; codes?: never };
+
+export type ShellShortcutDef = ShellShortcutBinding & {
+  id: ShellShortcutAction;
   /** Requires the platform command modifier — Cmd on macOS, Ctrl elsewhere. */
   mod: boolean;
   /**
@@ -57,7 +78,7 @@ export type ShellShortcutDef = {
 export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
   {
     id: "new-chat",
-    keys: ["n"],
+    codes: ["KeyN"],
     mod: true,
     description: "Start a new chat",
     group: "Chat",
@@ -65,7 +86,7 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
   },
   {
     id: "focus-composer",
-    keys: ["k"],
+    codes: ["KeyK"],
     mod: true,
     description: "Focus the message composer",
     group: "Chat",
@@ -73,7 +94,7 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
   },
   {
     id: "toggle-sidebar",
-    keys: ["b"],
+    codes: ["KeyB"],
     mod: true,
     description: "Show or hide the sidebar",
     group: "View",
@@ -99,7 +120,7 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
   },
   {
     id: "zoom-reset",
-    keys: ["0"],
+    codes: ["Digit0", "Numpad0"],
     mod: true,
     description: "Reset the interface size",
     group: "View",
@@ -121,10 +142,12 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
 /**
  * Whether the platform command modifier is Cmd rather than Ctrl.
  *
- * The table records `mod: true` rather than a glyph because the listener
- * accepts either modifier; only the help dialog has to commit to one, and it
- * commits to whichever one the reader's keyboard actually has. Takes the
- * user-agent string rather than reading `navigator` so it is testable.
+ * The table records `mod: true` rather than a glyph because the modifier is a
+ * property of the platform, not of the shortcut. Both the listener and the help
+ * dialog resolve it through here, so what the dialog draws is what fires: on
+ * macOS only Cmd+B toggles the sidebar, and Ctrl+B is left to the text field it
+ * means something else in. Takes the user-agent string rather than reading
+ * `navigator` so it is testable.
  */
 export function usesCommandModifier(userAgent: string): boolean {
   return /Mac|iPhone|iPad|iPod/.test(userAgent);
@@ -135,8 +158,12 @@ export function usesCommandModifier(userAgent: string): boolean {
  *
  * Derived from the same definition the listener matches on, so the help dialog
  * cannot come to disagree with the binding. Only the first of a definition's
- * keys is shown — the alternates exist so a shifted glyph still matches, not
- * because they are a second shortcut worth documenting.
+ * keys is shown — the alternates exist so a shifted glyph or a second physical
+ * key still matches, not because they are a second shortcut worth documenting.
+ *
+ * A code-matched binding is drawn as the character its physical key carries on
+ * a US board, which is the label on most keycaps and the only name the reader
+ * has for the position.
  */
 export function shortcutKeycaps(
   def: ShellShortcutDef,
@@ -145,9 +172,19 @@ export function shortcutKeycaps(
   const caps: string[] = [];
   if (def.mod) caps.push(command ? "⌘" : "Ctrl");
   if (def.shift === true) caps.push(command ? "⇧" : "Shift");
-  const key = def.keys[0] ?? "";
-  caps.push(key.length === 1 ? key.toUpperCase() : key);
+  caps.push(shortcutKeyLabel(def));
   return caps;
+}
+
+/** The single keycap a definition's key is drawn as. */
+function shortcutKeyLabel(def: ShellShortcutDef): string {
+  if (def.codes) {
+    const code = def.codes[0] ?? "";
+    const label = code.replace(/^(Key|Digit|Numpad)/, "");
+    return label.length === 1 ? label.toUpperCase() : code;
+  }
+  const key = def.keys[0] ?? "";
+  return key.length === 1 ? key.toUpperCase() : key;
 }
 
 /**
@@ -174,18 +211,29 @@ export function groupedShellShortcuts(): Array<{
 
 type ShortcutKeyEvent = Pick<
   KeyboardEvent,
-  "key" | "metaKey" | "ctrlKey" | "shiftKey" | "altKey"
+  "key" | "code" | "metaKey" | "ctrlKey" | "shiftKey" | "altKey"
 >;
 
-/** Whether a key event is the combo a shortcut is bound to. */
+/**
+ * Whether a key event is the combo a shortcut is bound to.
+ *
+ * `command` says which modifier this platform's shortcuts are chorded with, and
+ * the other one is a mismatch rather than an alternative: Ctrl+B on macOS is
+ * the reader moving the caret back a character, not asking for the sidebar.
+ */
 export function matchesShellShortcut(
   event: ShortcutKeyEvent,
   def: ShellShortcutDef,
+  command: boolean,
 ): boolean {
   if (event.altKey) return false;
-  if (!def.keys.includes(event.key.toLowerCase())) return false;
+  const hit = def.codes
+    ? def.codes.includes(event.code)
+    : def.keys.includes(event.key.toLowerCase());
+  if (!hit) return false;
   if (def.shift !== "any" && event.shiftKey !== (def.shift ?? false)) return false;
-  const hasMod = event.metaKey || event.ctrlKey;
+  if (command ? event.ctrlKey : event.metaKey) return false;
+  const hasMod = command ? event.metaKey : event.ctrlKey;
   return def.mod ? hasMod : !hasMod;
 }
 
@@ -210,11 +258,11 @@ export function isEditableTarget(target: EventTarget | null): boolean {
  */
 export function resolveShellShortcut(
   event: ShortcutKeyEvent,
-  context: { editable: boolean; modalOpen: boolean },
+  context: { editable: boolean; modalOpen: boolean; command: boolean },
 ): ShellShortcutDef | null {
   if (context.modalOpen) return null;
   for (const def of SHELL_SHORTCUTS) {
-    if (!matchesShellShortcut(event, def)) continue;
+    if (!matchesShellShortcut(event, def, context.command)) continue;
     if (context.editable && !def.allowInEditable) return null;
     return def;
   }
@@ -243,11 +291,13 @@ export function useShellShortcuts(handlers: ShellShortcutHandlers): void {
   handlersRef.current = handlers;
 
   useEffect(() => {
+    const command = usesCommandModifier(navigator.userAgent);
     function onKeyDown(event: KeyboardEvent) {
       if (event.defaultPrevented) return;
       const def = resolveShellShortcut(event, {
         editable: isEditableTarget(event.target),
         modalOpen: hasOpenModalDialog(document),
+        command,
       });
       if (!def) return;
       event.preventDefault();
