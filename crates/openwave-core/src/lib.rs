@@ -121,8 +121,8 @@ pub use deliverable::{
 };
 #[cfg(feature = "tools")]
 pub use deliverable_acceptance::{
-    accept_workspace_artifact, merge_agent_run_result, AgentResultOutputMerge,
-    WorkspaceArtifactProposal,
+    accept_workspace_artifact, merge_agent_run_result, restore_output_to_revision,
+    AgentResultOutputMerge, WorkspaceArtifactProposal,
 };
 pub use error::{AgentError, AgentErrorInfo, ProviderFailure, Result};
 pub use event::{AgentEvent, SequencedEvent};

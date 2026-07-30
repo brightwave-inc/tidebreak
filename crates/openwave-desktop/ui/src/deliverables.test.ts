@@ -192,6 +192,7 @@ describe("deliverable renderer projections", () => {
         outputId,
         filename: "brief.md",
         mediaType: "text/markdown",
+        revisionCount: 1,
         content: "safe",
         truncated: false,
         path: "/private/scratch/brief.md",
@@ -201,6 +202,7 @@ describe("deliverable renderer projections", () => {
       parseDeliverablePreview({
         filename: "brief.md",
         mediaType: "text/markdown",
+        revisionCount: 1,
         content: "safe",
         truncated: false,
       }),
@@ -210,6 +212,7 @@ describe("deliverable renderer projections", () => {
         outputId,
         filename: "brief.md",
         mediaType: "text/markdown",
+        revisionCount: 1,
         content: "x".repeat(100_001),
         truncated: true,
       }),

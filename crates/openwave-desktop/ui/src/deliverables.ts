@@ -26,6 +26,7 @@ export type DeliverablePreview = {
   outputId: string;
   filename: string;
   mediaType: string;
+  revisionCount: number;
   content: string;
   truncated: boolean;
 };
@@ -153,12 +154,17 @@ export function parseDeliverablePreview(value: unknown): DeliverablePreview {
       "outputId",
       "filename",
       "mediaType",
+      "revisionCount",
       "content",
       "truncated",
     ]) ||
     !isOpaqueId(value.outputId) ||
     !isDeliverableFilename(value.filename) ||
     !isDeliverableMediaType(value.mediaType) ||
+    typeof value.revisionCount !== "number" ||
+    !Number.isSafeInteger(value.revisionCount) ||
+    value.revisionCount < 1 ||
+    value.revisionCount > MAX_OUTPUT_REVISIONS ||
     typeof value.content !== "string" ||
     [...value.content].length > MAX_PREVIEW_CHARACTERS ||
     value.content.includes("\0") ||
@@ -170,6 +176,7 @@ export function parseDeliverablePreview(value: unknown): DeliverablePreview {
     outputId: value.outputId,
     filename: value.filename,
     mediaType: value.mediaType,
+    revisionCount: value.revisionCount,
     content: value.content,
     truncated: value.truncated,
   };

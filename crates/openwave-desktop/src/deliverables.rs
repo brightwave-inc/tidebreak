@@ -103,8 +103,40 @@ pub(crate) struct DeliverablePreview {
     output_id: OutputId,
     filename: String,
     media_type: String,
+    /// Lets the detail panel gate its version-history affordance without a
+    /// second catalog fetch.
+    revision_count: u32,
     content: String,
     truncated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct OutputRevisionRequest {
+    chat_id: Uuid,
+    output_id: OutputId,
+    revision_id: OutputRevisionId,
+}
+
+/// One row of an output's version history, oldest ordinal highest in the list.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OutputRevisionInfo {
+    revision_id: OutputRevisionId,
+    ordinal: u32,
+    size_bytes: u64,
+    created_at: String,
+    /// Who produced the revision: `agent` (a foreground turn),
+    /// `backgroundAgent` (a run), or `user` (an edit or restore).
+    produced_by: &'static str,
+    is_current: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OutputRevisionsCatalog {
+    output_id: OutputId,
+    revisions: Vec<OutputRevisionInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -156,6 +188,16 @@ pub(crate) async fn read_deliverable(
     let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
     let (output, revision) =
         require_live_output(host_access.store(), chat_id, request.output_id).await?;
+    revision_preview(&app, chat_id, &output, &revision).await
+}
+
+/// Build the bounded preview of one exact revision's content.
+async fn revision_preview(
+    app: &AppHandle,
+    chat_id: ChatId,
+    output: &OutputRecord,
+    revision: &OutputRevision,
+) -> Result<DeliverablePreview, String> {
     // Binary artifacts have no inline preview; the renderer keys its placeholder
     // off the media type, so the response carries identity without content.
     if !media_type_is_text(&output.media_type) {
@@ -163,18 +205,149 @@ pub(crate) async fn read_deliverable(
             output_id: output.id,
             filename: output.filename.clone(),
             media_type: output.media_type.clone(),
+            revision_count: output.revision_count,
             content: String::new(),
             truncated: false,
         });
     }
-    let scratch_root = crate::data_dir(&app)?.join("scratch");
+    let scratch_root = crate::data_dir(app)?.join("scratch");
     let read_output = output.clone();
+    let read_revision = revision.clone();
     let bytes = tauri::async_runtime::spawn_blocking(move || {
-        read_output_revision_bytes(&scratch_root, chat_id, &read_output, &revision)
+        read_output_revision_bytes(&scratch_root, chat_id, &read_output, &read_revision)
     })
     .await
     .map_err(|_| "Could not preview that output".to_owned())??;
-    preview_from_bytes(&output, bytes)
+    preview_from_bytes(output, bytes)
+}
+
+/// List an output's version history, newest revision first.
+#[tauri::command]
+pub(crate) async fn list_output_revisions(
+    host_access: State<'_, HostAccess>,
+    request: DeliverableRequest,
+) -> Result<OutputRevisionsCatalog, String> {
+    let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
+    let (output, _) = require_live_output(host_access.store(), chat_id, request.output_id).await?;
+    let store = host_access
+        .store()
+        .ok_or_else(|| "OpenWave is still starting".to_owned())?;
+    let revisions = store
+        .list_output_revisions(output.id)
+        .await
+        .map_err(|_| "Could not load that output's versions".to_owned())?;
+    Ok(OutputRevisionsCatalog {
+        output_id: output.id,
+        revisions: revisions
+            .into_iter()
+            .map(|revision| OutputRevisionInfo {
+                revision_id: revision.id,
+                ordinal: revision.ordinal,
+                size_bytes: revision.byte_len,
+                created_at: revision.created_at.to_rfc3339(),
+                produced_by: if revision.producing_run_id.is_some() {
+                    "backgroundAgent"
+                } else if revision.turn_id.is_some() {
+                    "agent"
+                } else {
+                    "user"
+                },
+                is_current: revision.id == output.current_revision,
+            })
+            .collect(),
+    })
+}
+
+/// Preview one exact (possibly non-current) revision's content.
+#[tauri::command]
+pub(crate) async fn read_output_revision(
+    app: AppHandle,
+    host_access: State<'_, HostAccess>,
+    request: OutputRevisionRequest,
+) -> Result<DeliverablePreview, String> {
+    let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
+    let (output, _) = require_live_output(host_access.store(), chat_id, request.output_id).await?;
+    let store = host_access
+        .store()
+        .ok_or_else(|| "OpenWave is still starting".to_owned())?;
+    let revision = store
+        .get_output_revision(request.revision_id)
+        .await
+        .map_err(|_| "Could not load that version".to_owned())?
+        .filter(|revision| revision.output_id == output.id)
+        .ok_or_else(|| "That version does not belong to this output".to_owned())?;
+    revision_preview(&app, chat_id, &output, &revision).await
+}
+
+/// Restore an output to an earlier version by appending a new revision with
+/// that version's content. Append-only: nothing is rewound or lost.
+#[tauri::command]
+pub(crate) async fn restore_output_revision(
+    app: AppHandle,
+    host_access: State<'_, HostAccess>,
+    request: OutputRevisionRequest,
+) -> Result<DeliverableSummary, String> {
+    let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
+    let store = host_access
+        .store()
+        .ok_or_else(|| "OpenWave is still starting".to_owned())?
+        .clone();
+    let scratch_root = crate::data_dir(&app)?.join("scratch");
+    let scratch =
+        tauri::async_runtime::spawn_blocking(move || open_chat_scratch(&scratch_root, chat_id))
+            .await
+            .map_err(|_| "Could not restore that version".to_owned())??;
+    openwave_core::restore_output_to_revision(
+        &*store,
+        &scratch,
+        chat_id,
+        request.output_id,
+        request.revision_id,
+        Utc::now(),
+    )
+    .await
+    .map_err(|error| match error {
+        openwave_core::AgentError::Store(message) => message,
+        _ => "Could not restore that version".to_owned(),
+    })?;
+    let (output, revision) =
+        require_live_output(host_access.store(), chat_id, request.output_id).await?;
+    summary_from_record(&output, &revision)
+}
+
+/// Soft-delete an output. The explicit inverse is `restore_output`, which the
+/// catalog offers as Undo.
+#[tauri::command]
+pub(crate) async fn delete_output(
+    host_access: State<'_, HostAccess>,
+    request: DeliverableRequest,
+) -> Result<DeliverableSummary, String> {
+    let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
+    let (output, revision) =
+        require_live_output(host_access.store(), chat_id, request.output_id).await?;
+    let summary = summary_from_record(&output, &revision)?;
+    let store = host_access
+        .store()
+        .ok_or_else(|| "OpenWave is still starting".to_owned())?;
+    store
+        .delete_output(output.id, Utc::now())
+        .await
+        .map_err(|_| "Could not delete that output".to_owned())?;
+    Ok(summary)
+}
+
+/// Open the exact conversation's private scratch directory, refusing symlinked
+/// components.
+fn open_chat_scratch(scratch_root: &Path, chat_id: ChatId) -> Result<Dir, String> {
+    let Some(root) = open_regular_directory(scratch_root)? else {
+        return Err("Output content is unavailable".to_owned());
+    };
+    let chat_name = chat_id.to_string();
+    if !is_regular_child_directory(&root, &chat_name)? {
+        return Err("Output content is unavailable".to_owned());
+    }
+    root.open_dir_nofollow(&chat_name)
+        .map_err(|_| "Output content is unavailable".to_owned())
 }
 
 #[tauri::command]
@@ -549,6 +722,7 @@ fn preview_from_bytes(output: &OutputRecord, bytes: Vec<u8>) -> Result<Deliverab
         output_id: output.id,
         filename: output.filename.clone(),
         media_type: output.media_type.clone(),
+        revision_count: output.revision_count,
         content,
         truncated,
     })
@@ -826,7 +1000,14 @@ mod tests {
                 .keys()
                 .cloned()
                 .collect::<Vec<_>>(),
-            ["content", "filename", "mediaType", "outputId", "truncated"]
+            [
+                "content",
+                "filename",
+                "mediaType",
+                "outputId",
+                "revisionCount",
+                "truncated"
+            ]
         );
         for forbidden in ["path", "scratch", "chatId", "token", "sha256"] {
             assert!(!serialized.to_string().contains(forbidden));
@@ -1109,6 +1290,52 @@ mod tests {
             ["operationId", "outputId", "reason", "revisionId", "status"]
         );
         for forbidden in ["path", "destination", "content", "sha256", "chatId"] {
+            assert!(!serialized.to_string().contains(forbidden));
+        }
+    }
+
+    /// The version-history rows cross the renderer boundary with exactly the
+    /// display fields and nothing that names host state.
+    #[test]
+    fn revision_history_rows_are_renderer_safe() {
+        assert!(
+            serde_json::from_value::<OutputRevisionRequest>(serde_json::json!({
+                "chatId": Uuid::new_v4(),
+                "outputId": OutputId::new(),
+                "revisionId": OutputRevisionId::new(),
+                "path": "/tmp/private"
+            }))
+            .is_err()
+        );
+        let catalog = OutputRevisionsCatalog {
+            output_id: OutputId::new(),
+            revisions: vec![OutputRevisionInfo {
+                revision_id: OutputRevisionId::new(),
+                ordinal: 2,
+                size_bytes: 900,
+                created_at: "2026-07-30T00:00:00+00:00".into(),
+                produced_by: "user",
+                is_current: true,
+            }],
+        };
+        let serialized = serde_json::to_value(&catalog).unwrap();
+        assert_eq!(
+            serialized["revisions"][0]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            [
+                "createdAt",
+                "isCurrent",
+                "ordinal",
+                "producedBy",
+                "revisionId",
+                "sizeBytes"
+            ]
+        );
+        for forbidden in ["path", "sha256", "chatId", "turnId", "runId"] {
             assert!(!serialized.to_string().contains(forbidden));
         }
     }

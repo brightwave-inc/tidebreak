@@ -454,6 +454,20 @@ impl OutputRevisionId {
             &call_artifact_name(call_id, filename),
         ))
     }
+
+    /// Derive the retry-stable revision identity for restoring one target
+    /// revision at one exact history position.
+    ///
+    /// Restoring appends rather than rewinds, so the new revision's identity
+    /// covers the (target revision, new ordinal) pair: retrying an ambiguous
+    /// restore from the same state lands on the same revision, while restoring
+    /// the same target again later appends a distinct one.
+    #[must_use]
+    pub fn for_restore(target: OutputRevisionId, ordinal: u32) -> Self {
+        let mut name = target.as_uuid().as_bytes().to_vec();
+        name.extend_from_slice(&ordinal.to_be_bytes());
+        Self(Uuid::new_v5(&Self::NAMESPACE, &name))
+    }
 }
 
 #[cfg(test)]

@@ -20,6 +20,7 @@ function preview(overrides: Partial<DeliverablePreview> = {}): DeliverablePrevie
     outputId,
     filename: "Research brief.md",
     mediaType: "text/markdown",
+    revisionCount: 1,
     content: "# Findings\n\nGrounded.",
     truncated: false,
     ...overrides,
