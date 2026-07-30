@@ -78,7 +78,7 @@ async fn temp_store() -> (tempfile::TempDir, DbStore) {
 /// go through the retired single `execution` column that the split migration
 /// later maps onto `(tier, execution_location)`.
 async fn create_chat_before_agent_run_split(store: &DbStore, chat: &Chat) {
-    entities::chat::ActiveModel {
+    entities::chat::Entity::insert(entities::chat::ActiveModel {
         id: Set(chat.id.0),
         project_id: Set(chat.project_id.map(|p| p.0)),
         title: Set(chat.title.clone()),
@@ -88,8 +88,8 @@ async fn create_chat_before_agent_run_split(store: &DbStore, chat: &Chat) {
         network_policy: sea_orm::ActiveValue::NotSet,
         attachment_revision: Set(chat.attachment_revision),
         created_at: Set(chat.created_at),
-    }
-    .insert(&store.conn)
+    })
+    .exec_without_returning(&store.conn)
     .await
     .unwrap();
     store
