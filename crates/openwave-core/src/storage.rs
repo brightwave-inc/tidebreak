@@ -124,6 +124,7 @@ pub struct ChatRefusalSnapshot {
 pub struct PendingChatPrompt {
     pub chat_id: ChatId,
     pub question_call_ids: Vec<CallId>,
+    pub plan_call_ids: Vec<CallId>,
     pub folder_access_call_ids: Vec<CallId>,
     pub output_writeback_call_ids: Vec<CallId>,
 }
@@ -718,6 +719,22 @@ pub enum HeartbeatClientToolCallOutcome {
     Existing,
     /// The call, pending state, executor, or live lease no longer matches.
     LeaseLost,
+}
+
+/// Result of deciding one exact durable plan proposal.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DecidePlanOutcome {
+    /// The decision completed the tool call and made the turn resumable. An
+    /// accepted decision also moved the chat out of plan mode.
+    Decided(TurnRun),
+    /// An ambiguous retry recovered the same committed decision.
+    Existing(TurnRun),
+    /// The request already committed a different decision.
+    DecisionConflict,
+    /// The decision shape is invalid.
+    InvalidDecision,
+    /// The request is missing, cancelled, terminal, or scoped to another chat.
+    Unavailable,
 }
 
 /// Result of answering one exact durable foreground question request.
@@ -2922,6 +2939,25 @@ pub trait Store: Send + Sync {
         _request: &AnswerUserQuestionsRequest,
         _answered_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<AnswerUserQuestionsOutcome> {
+        turn_storage_unavailable()
+    }
+
+    /// List only validated renderer-safe pending plan proposals.
+    async fn list_pending_plan_approvals(
+        &self,
+        _chat_id: ChatId,
+    ) -> Result<Vec<crate::PendingPlanApproval>> {
+        turn_storage_unavailable()
+    }
+
+    /// Atomically commit one exact plan decision, complete the same tool
+    /// call, move its blocked turn to the shared resumable state, and — on
+    /// accept — move the chat out of plan mode.
+    async fn decide_plan(
+        &self,
+        _request: &crate::DecidePlanRequest,
+        _decided_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<DecidePlanOutcome> {
         turn_storage_unavailable()
     }
 

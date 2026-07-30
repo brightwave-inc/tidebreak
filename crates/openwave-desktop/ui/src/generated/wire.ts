@@ -194,16 +194,6 @@ root_attachments: Array<ChatRootAttachment>,
 created_at: string, };
 
 /**
- * One turn that reached its terminal state by cancellation.
- *
- * Carries when the turn stopped and nothing else: the renderer places the
- * notice in transcript order and owns its wording. The turn identity is here
- * so the entry has a stable key across hydrations, not so a client can address
- * the turn.
- */
-export type ChatCancellationSnapshot = { turn_id: TurnId, cancelled_at: string, };
-
-/**
  * Identifies a persistent conversation.
  */
 export type ChatId = string;
@@ -297,13 +287,7 @@ export type ChatTranscript = { messages: Array<ChatMessageSnapshot>,
  * Finished tool activity from terminal turns, projected through a fixed
  * renderer-safe allowlist. Canonical tool records never cross this API.
  */
-tool_activity: Array<ChatToolActivitySnapshot>, 
-/**
- * Turns the user stopped. A cancelled turn writes no assistant message, so
- * this is the only durable trace of it the transcript can carry — without
- * it a reopened conversation reads as though the response had finished.
- */
-cancellations: Array<ChatCancellationSnapshot>, last_event_seq: number, };
+tool_activity: Array<ChatToolActivitySnapshot>, last_event_seq: number, };
 
 /**
  * A small, human-scale position inside a cited document.
@@ -771,6 +755,11 @@ export type PendingFolderAccessRequest = { call_id: CallId, turn_id: TurnId, rea
 export type PendingOutputWritebackRequest = { call_id: CallId, turn_id: TurnId, claimed: boolean, };
 
 /**
+ * Renderer-safe, durable card projection of a proposed plan.
+ */
+export type PendingPlanApproval = { call_id: CallId, turn_id: TurnId, title: string, plan: string, proposed_at: string, };
+
+/**
  * Renderer-safe, durable card projection.
  *
  * It contains only the validated presentation contract. Provider metadata,
@@ -792,6 +781,11 @@ export type PendingUserQuestions = { call_id: CallId, turn_id: TurnId, questions
  * next turn, and a reopened chat runs the way it ran before.
  */
 export type PermissionMode = "plan" | "ask" | "auto" | "allow";
+
+/**
+ * The two decisions a reader can make about a proposed plan.
+ */
+export type PlanDecisionChoice = "accept" | "reject";
 
 /**
  * An optional grouping of chats that share project context and a document
@@ -879,7 +873,7 @@ export type ProviderKind = "anthropic" | "openai" | "gemini" | "openai_compatibl
  */
 export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max";
 
-export type RendererAgentEvent = { "type": "turn_started", turn_id: TurnId, } | { "type": "text_delta", text: string, } | { "type": "reasoning_delta" } | { "type": "stream_interrupted" } | { "type": "tool_call_started", call_id: CallId, name: RendererToolName, } | { "type": "tool_call_args_delta", call_id: CallId, } | { "type": "user_questions_asked", call_id: CallId, turn_id: TurnId, } | { "type": "approval_required", call_id: CallId, action: RendererToolName, approval: ToolApprovalKind, class: ApprovalClass, 
+export type RendererAgentEvent = { "type": "turn_started", turn_id: TurnId, } | { "type": "text_delta", text: string, } | { "type": "reasoning_delta" } | { "type": "stream_interrupted" } | { "type": "tool_call_started", call_id: CallId, name: RendererToolName, } | { "type": "tool_call_args_delta", call_id: CallId, } | { "type": "user_questions_asked", call_id: CallId, turn_id: TurnId, } | { "type": "plan_proposed", call_id: CallId, turn_id: TurnId, } | { "type": "approval_required", call_id: CallId, action: RendererToolName, approval: ToolApprovalKind, class: ApprovalClass, 
 /**
  * Whether the Auto-mode judge owns this card right now. The card
  * stays fully actionable either way; this only adds the "deciding
@@ -908,12 +902,7 @@ action?: ToolActionPreview,
  * withholding it leaves the transcript asserting that something
  * happened without ever showing what.
  */
-result?: ToolResultPreview, } | { "type": "turn_completed" } | { "type": "turn_refused", refusal: RendererRefusal, } | { "type": "turn_failed", 
-/**
- * Why the turn failed, at the only resolution a client can act on.
- * The failure's `kind` and `message` stay internal.
- */
-category: TurnFailureCategory, } | { "type": "turn_cancelled" } | { "type": "user_steered", message_id: MessageId, text: string, } | { "type": "context_truncated" } | { "type": "event_omitted" };
+result?: ToolResultPreview, } | { "type": "turn_completed" } | { "type": "turn_refused", refusal: RendererRefusal, } | { "type": "turn_failed" } | { "type": "turn_cancelled" } | { "type": "user_steered", message_id: MessageId, text: string, } | { "type": "context_truncated" } | { "type": "event_omitted" };
 
 /**
  * One frame on a chat's event socket.
@@ -946,7 +935,7 @@ export type RendererSequencedEvent = { seq: number, event: RendererAgentEvent, }
  * are all generated from this enum, so a variant added here cannot leave one of
  * them behind — see `docs/wire-types.md`.
  */
-export type RendererToolName = "search" | "list_sources" | "read_source" | "read_tool_result" | "web_search" | "web_extract" | "read_delegated_file" | "read_file" | "list_dir" | "write_file" | "request_folder_access" | "connect_folder" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file" | "write_output_to_connected_folder" | "spawn_sandbox_agent" | "wait_for_agents" | "ask_user_questions" | "exec" | "other";
+export type RendererToolName = "search" | "list_sources" | "read_source" | "read_tool_result" | "web_search" | "web_extract" | "read_delegated_file" | "read_file" | "list_dir" | "write_file" | "create_deliverable" | "request_folder_access" | "connect_folder" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file" | "write_output_to_connected_folder" | "spawn_sandbox_agent" | "wait_for_agents" | "ask_user_questions" | "exit_plan_mode" | "exec" | "other";
 
 export type RendererToolStatus = "completed" | "failed";
 
@@ -1210,23 +1199,6 @@ width: number, height: number, };
 export type TranscriptRole = "user" | "assistant";
 
 /**
- * Why a turn failed, closed and coarse enough to be stable.
- *
- * A failure's `kind` is an internal diagnostic vocabulary: it grows with the
- * server, and its `message` can carry provider diagnostics and host paths, so
- * neither crosses to the renderer. What a client actually needs is narrower —
- * what to tell the person, and whether running the same turn again could
- * plausibly do anything different. This enum is exactly that, and nothing is
- * worth a variant here unless a client would say or do something different
- * for it.
- *
- * It is also the worker's own retry taxonomy — the same classification decides
- * whether a failed turn is rescheduled — so the category a client sees and the
- * category the scheduler acted on cannot drift apart.
- */
-export type TurnFailureCategory = "rate_limited" | "auth" | "transient" | "unknown";
-
-/**
  * Identifies one turn: a single user input through to the final answer.
  */
 export type TurnId = string;
@@ -1298,6 +1270,7 @@ export const RENDERER_TOOL_NAMES = [
   "read_file",
   "list_dir",
   "write_file",
+  "create_deliverable",
   "request_folder_access",
   "connect_folder",
   "list_connected_folders",
@@ -1308,6 +1281,7 @@ export const RENDERER_TOOL_NAMES = [
   "spawn_sandbox_agent",
   "wait_for_agents",
   "ask_user_questions",
+  "exit_plan_mode",
   "exec",
   "other",
 ] as const;

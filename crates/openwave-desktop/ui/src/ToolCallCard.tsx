@@ -187,6 +187,12 @@ const TOOL_PRESENTATIONS: Record<
     complete: "Answer received",
     settled: "Asked a question",
   },
+  exit_plan_mode: {
+    label: "Propose a plan",
+    active: "Waiting for your decision",
+    complete: "Plan decided",
+    settled: "Proposed a plan",
+  },
   spawn_sandbox_agent: {
     label: "Delegate a task",
     active: "Delegating a task",

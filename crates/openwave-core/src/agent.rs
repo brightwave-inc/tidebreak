@@ -284,6 +284,14 @@ impl ToolRegistry {
                     None
                 }
                 RegisteredTool::Client { spec, .. } => Some(spec.clone()),
+                // The plan continuation exists only where a plan can be
+                // proposed: outside plan mode the tool would park a turn on a
+                // decision whose accept is meaningless.
+                RegisteredTool::ForegroundClient { spec, .. }
+                    if !read_only && spec.name == crate::EXIT_PLAN_MODE_TOOL =>
+                {
+                    None
+                }
                 RegisteredTool::ForegroundClient { spec, .. } if allow_agent_orchestration => {
                     Some(spec.clone())
                 }

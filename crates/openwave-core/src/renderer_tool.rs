@@ -45,6 +45,7 @@ pub enum RendererToolName {
     SpawnSandboxAgent,
     WaitForAgents,
     AskUserQuestions,
+    ExitPlanMode,
     Exec,
     /// The fold for anything unrecognized, including a tool that has since been
     /// removed and any name a provider invented.
@@ -79,6 +80,7 @@ impl From<&str> for RendererToolName {
             "spawn_sandbox_agent" => Self::SpawnSandboxAgent,
             "wait_for_agents" => Self::WaitForAgents,
             crate::ASK_USER_QUESTIONS_TOOL => Self::AskUserQuestions,
+            crate::EXIT_PLAN_MODE_TOOL => Self::ExitPlanMode,
             "exec" => Self::Exec,
             _ => Self::Other,
         }
@@ -124,6 +126,7 @@ mod tests {
             "spawn_sandbox_agent",
             "wait_for_agents",
             crate::ASK_USER_QUESTIONS_TOOL,
+            crate::EXIT_PLAN_MODE_TOOL,
             "exec",
         ] {
             let folded = RendererToolName::from(name);

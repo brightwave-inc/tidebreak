@@ -321,6 +321,8 @@ mod tests {
         generate::collect_from::<crate::routes::PendingApprovalSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::StandingGrantSnapshot>(&cfg, &mut out);
         generate::collect_from::<openwave_core::PendingUserQuestions>(&cfg, &mut out);
+        generate::collect_from::<openwave_core::PendingPlanApproval>(&cfg, &mut out);
+        generate::collect_from::<openwave_core::PlanDecisionChoice>(&cfg, &mut out);
         generate::collect_from::<crate::routes::client_execution::PendingFolderAccessRequest>(
             &cfg, &mut out,
         );

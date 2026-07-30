@@ -936,6 +936,31 @@ pub mod turn_client_wait {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod plan_request {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "plan_request")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub call_id: Uuid,
+        pub turn_id: Uuid,
+        pub chat_id: Uuid,
+        pub status: String,
+        pub event_seq: i64,
+        pub title: String,
+        pub plan: String,
+        pub feedback: Option<String>,
+        pub proposed_at: DateTimeUtc,
+        pub resolved_at: Option<DateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod user_question_request {
     use sea_orm::entity::prelude::*;
 

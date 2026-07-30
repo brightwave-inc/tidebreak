@@ -2337,12 +2337,17 @@ async fn message_document_attachment_migration_has_a_working_down_and_reapply() 
         .is_err());
 
     migration::Migrator::up(&conn, None).await.unwrap();
-    conn.query_one_raw(Statement::from_string(
-        DatabaseBackend::Sqlite,
-        "SELECT * FROM message_document_attachment LIMIT 1".to_owned(),
-    ))
-    .await
-    .unwrap();
+    for restored in [
+        "SELECT * FROM plan_request LIMIT 1",
+        "SELECT * FROM message_document_attachment LIMIT 1",
+    ] {
+        conn.query_one_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            restored.to_owned(),
+        ))
+        .await
+        .unwrap();
+    }
 }
 
 #[tokio::test]
@@ -4910,6 +4915,213 @@ async fn user_question_answer_and_worker_claim_race_is_recoverable() {
             .unwrap(),
         crate::FinishTurnCancellationOutcome::Cancelled(_)
     ));
+}
+
+async fn park_test_plan(
+    store: &DbStore,
+    chat_id: ChatId,
+) -> (TurnId, crate::model::ClientToolCallRequest, DateTime<Utc>) {
+    let turn_id = TurnId::new();
+    let accepted = match store
+        .accept_turn(turn_id, chat_id, "gpt-5", "plan this")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected plan turn acceptance: {outcome:?}"),
+    };
+    let claimed_at = accepted.available_at + chrono::Duration::seconds(1);
+    let lease = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(lease, claimed_at, claimed_at + chrono::Duration::minutes(1))
+        .await
+        .unwrap()
+        .turn
+        .unwrap();
+    let request = crate::model::ClientToolCallRequest {
+        id: CallId::new(),
+        chat_id,
+        turn_id,
+        provider_id: "provider-plan".into(),
+        name: crate::EXIT_PLAN_MODE_TOOL.into(),
+        arguments: serde_json::json!({
+            "title": "Add health checks",
+            "plan": "## Steps\n1. Add a `/healthz` route to the server.\n2. Cover it with one lifecycle test.\n",
+        }),
+    };
+    let parked_at = claimed_at + chrono::Duration::seconds(1);
+    let parked = store
+        .park_turn_for_client_tool_call(
+            turn_id,
+            lease,
+            0,
+            test_checkpoint_progress(),
+            parked_at,
+            &request,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    match parked {
+        ParkTurnForClientCallOutcome::Parked {
+            renderer_event:
+                Some(SequencedEvent {
+                    event:
+                        AgentEvent::PlanProposed {
+                            call_id,
+                            turn_id: event_turn_id,
+                        },
+                    ..
+                }),
+            ..
+        } => {
+            assert_eq!(call_id, request.id);
+            assert_eq!(event_turn_id, turn_id);
+        }
+        outcome => panic!("unexpected plan checkpoint: {outcome:?}"),
+    }
+    (turn_id, request, parked_at)
+}
+
+/// Accepting a plan is the whole hand-off in one transaction: the pending card
+/// survives a restart, the decision completes the call exactly once, and the
+/// chat leaves plan mode so the resumed turn re-freezes with execution tools.
+#[tokio::test]
+async fn accepted_plan_resumes_the_turn_and_leaves_plan_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        dir.path().join("plans.db").display()
+    );
+    let store = DbStore::connect(&url).await.unwrap();
+    let chat = Chat {
+        permission_mode: Some(crate::PermissionMode::Plan),
+        ..sample_chat()
+    };
+    store.create_chat(&chat).await.unwrap();
+    let (turn_id, request, parked_at) = park_test_plan(&store, chat.id).await;
+    drop(store);
+
+    let restarted = DbStore::connect(&url).await.unwrap();
+    let pending = restarted
+        .list_pending_plan_approvals(chat.id)
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].call_id, request.id);
+    assert_eq!(pending[0].turn_id, turn_id);
+    assert_eq!(pending[0].title, "Add health checks");
+    assert!(pending[0].plan.contains("/healthz"));
+
+    let decide_request = crate::DecidePlanRequest {
+        chat_id: chat.id,
+        call_id: request.id,
+        decision: crate::PlanDecision {
+            decision: crate::PlanDecisionChoice::Accept,
+            feedback: None,
+            permission_mode: None,
+        },
+    };
+    let decided_at = parked_at + chrono::Duration::seconds(1);
+    assert!(matches!(
+        restarted.decide_plan(&decide_request, decided_at).await.unwrap(),
+        crate::storage::DecidePlanOutcome::Decided(turn)
+            if turn.id == turn_id && turn.status == TurnRunStatus::Resuming
+    ));
+    assert_eq!(
+        restarted
+            .get_chat(chat.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .permission_mode,
+        Some(crate::PermissionMode::Auto),
+        "accepting must move the chat out of plan mode"
+    );
+    assert!(restarted
+        .list_pending_plan_approvals(chat.id)
+        .await
+        .unwrap()
+        .is_empty());
+    let calls = restarted.list_tool_calls(chat.id).await.unwrap();
+    let call = calls.iter().find(|call| call.id == request.id).unwrap();
+    let result: serde_json::Value = serde_json::from_str(call.result.as_deref().unwrap()).unwrap();
+    assert_eq!(result["decision"], "accepted");
+    assert!(result["note"].as_str().unwrap().contains("left plan mode"));
+
+    // An exact retry recovers; a different decision conflicts.
+    assert!(matches!(
+        restarted.decide_plan(&decide_request, decided_at).await.unwrap(),
+        crate::storage::DecidePlanOutcome::Existing(turn) if turn.id == turn_id
+    ));
+    let contradictory = crate::DecidePlanRequest {
+        decision: crate::PlanDecision {
+            decision: crate::PlanDecisionChoice::Reject,
+            feedback: Some("Different call.".into()),
+            permission_mode: None,
+        },
+        ..decide_request
+    };
+    assert!(matches!(
+        restarted
+            .decide_plan(&contradictory, decided_at)
+            .await
+            .unwrap(),
+        crate::storage::DecidePlanOutcome::DecisionConflict
+    ));
+}
+
+/// Rejecting keeps the chat in plan mode and hands the feedback to the model.
+#[tokio::test]
+async fn rejected_plan_keeps_plan_mode_and_carries_feedback() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        dir.path().join("plan-reject.db").display()
+    );
+    let store = DbStore::connect(&url).await.unwrap();
+    let chat = Chat {
+        permission_mode: Some(crate::PermissionMode::Plan),
+        ..sample_chat()
+    };
+    store.create_chat(&chat).await.unwrap();
+    let (turn_id, request, parked_at) = park_test_plan(&store, chat.id).await;
+
+    let decided_at = parked_at + chrono::Duration::seconds(1);
+    assert!(matches!(
+        store
+            .decide_plan(
+                &crate::DecidePlanRequest {
+                    chat_id: chat.id,
+                    call_id: request.id,
+                    decision: crate::PlanDecision {
+                        decision: crate::PlanDecisionChoice::Reject,
+                        feedback: Some("Split step 2 into its own slice.".into()),
+                        permission_mode: None,
+                    },
+                },
+                decided_at,
+            )
+            .await
+            .unwrap(),
+        crate::storage::DecidePlanOutcome::Decided(turn)
+            if turn.id == turn_id && turn.status == TurnRunStatus::Resuming
+    ));
+    assert_eq!(
+        store
+            .get_chat(chat.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .permission_mode,
+        Some(crate::PermissionMode::Plan),
+        "rejecting must keep the chat in plan mode"
+    );
+    let calls = store.list_tool_calls(chat.id).await.unwrap();
+    let call = calls.iter().find(|call| call.id == request.id).unwrap();
+    let result: serde_json::Value = serde_json::from_str(call.result.as_deref().unwrap()).unwrap();
+    assert_eq!(result["decision"], "rejected");
+    assert_eq!(result["feedback"], "Split step 2 into its own slice.");
 }
 
 #[tokio::test]

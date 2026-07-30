@@ -9,7 +9,7 @@ use crate::model::{ToolCallExecution, ToolCallStatus, TurnClientWaitStatus, Turn
 use crate::storage::PendingChatPrompt;
 use crate::{
     validate_request_folder_access_arguments, validate_write_output_to_connected_folder_arguments,
-    CallId, ChatId, ASK_USER_QUESTIONS_TOOL, REQUEST_FOLDER_ACCESS_TOOL,
+    CallId, ChatId, ASK_USER_QUESTIONS_TOOL, EXIT_PLAN_MODE_TOOL, REQUEST_FOLDER_ACCESS_TOOL,
     WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
 };
 
@@ -94,10 +94,67 @@ pub(in crate::db) async fn list_pending_chat_prompts(
             .or_insert_with(|| PendingChatPrompt {
                 chat_id: ChatId(request.chat_id),
                 question_call_ids: Vec::new(),
+                plan_call_ids: Vec::new(),
                 folder_access_call_ids: Vec::new(),
                 output_writeback_call_ids: Vec::new(),
             })
             .question_call_ids
+            .push(CallId(request.call_id));
+    }
+
+    let plan_requests = entities::plan_request::Entity::find()
+        .filter(
+            entities::plan_request::Column::Status.eq(crate::PlanRequestStatus::Pending.as_str()),
+        )
+        .order_by_asc(entities::plan_request::Column::ChatId)
+        .order_by_asc(entities::plan_request::Column::ProposedAt)
+        .order_by_asc(entities::plan_request::Column::CallId)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?;
+    let plan_calls = entities::tool_call::Entity::find()
+        .filter(entities::tool_call::Column::Name.eq(EXIT_PLAN_MODE_TOOL))
+        .filter(
+            entities::tool_call::Column::Execution.eq(ToolCallExecution::Orchestration.as_str()),
+        )
+        .filter(entities::tool_call::Column::Status.eq(ToolCallStatus::Pending.as_str()))
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(|call| (call.id, call))
+        .collect::<HashMap<_, _>>();
+    for request in plan_requests {
+        let Some(call) = plan_calls.get(&request.call_id) else {
+            continue;
+        };
+        let Some(wait) = waits.get(&request.call_id) else {
+            continue;
+        };
+        let Some(turn) = turns.get(&request.turn_id) else {
+            continue;
+        };
+        if call.chat_id != request.chat_id
+            || call.turn_id != request.turn_id
+            || call.client_executor_id.is_some()
+            || wait.chat_id != request.chat_id
+            || wait.turn_id != request.turn_id
+            || turn.chat_id != request.chat_id
+            || turn.attempt_count != wait.attempt_count
+            || turn.claim_count != wait.claim_count
+        {
+            continue;
+        }
+        prompts
+            .entry(request.chat_id)
+            .or_insert_with(|| PendingChatPrompt {
+                chat_id: ChatId(request.chat_id),
+                question_call_ids: Vec::new(),
+                plan_call_ids: Vec::new(),
+                folder_access_call_ids: Vec::new(),
+                output_writeback_call_ids: Vec::new(),
+            })
+            .plan_call_ids
             .push(CallId(request.call_id));
     }
 
@@ -119,6 +176,7 @@ pub(in crate::db) async fn list_pending_chat_prompts(
             .or_insert_with(|| PendingChatPrompt {
                 chat_id: ChatId(call.chat_id),
                 question_call_ids: Vec::new(),
+                plan_call_ids: Vec::new(),
                 folder_access_call_ids: Vec::new(),
                 output_writeback_call_ids: Vec::new(),
             })
@@ -144,6 +202,7 @@ pub(in crate::db) async fn list_pending_chat_prompts(
             .or_insert_with(|| PendingChatPrompt {
                 chat_id: ChatId(call.chat_id),
                 question_call_ids: Vec::new(),
+                plan_call_ids: Vec::new(),
                 folder_access_call_ids: Vec::new(),
                 output_writeback_call_ids: Vec::new(),
             })

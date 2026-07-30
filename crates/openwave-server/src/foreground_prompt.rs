@@ -77,15 +77,17 @@ pub(crate) fn compose_for_surface(
     let mut prompt = BASELINE.to_owned();
 
     if plan_mode {
-        push_section(
-            &mut prompt,
-            PLAN_MODE_HEADING,
-            &[
-                "- This chat is in plan mode: design the approach, do not carry it out. Every tool available this turn is read-only, and requests to modify anything will be refused until the user leaves plan mode.",
-                "- Explore with the available read-only tools until you understand the task, then present a concrete plan in your reply: the intended steps, what each one touches, and any open decisions the user should settle.",
-                "- Do not present work as done, staged, or in progress. The plan is a proposal; execution happens only after the user switches the chat out of plan mode.",
-            ],
-        );
+        let mut lines = vec![
+            "- This chat is in plan mode: design the approach, do not carry it out. Every tool available this turn is read-only, and requests to modify anything will be refused until the user leaves plan mode.",
+            "- Explore with the available read-only tools until you understand the task, then produce a concrete plan: the intended steps, what each one touches, and any open decisions the user should settle.",
+            "- Do not present work as done, staged, or in progress. The plan is a proposal; execution happens only after the user accepts it or switches the chat out of plan mode.",
+        ];
+        if has(openwave_core::EXIT_PLAN_MODE_TOOL) {
+            lines.push(
+                "- When the plan is ready, submit it with `exit_plan_mode` and stop; the user decides from there. If they send it back, revise it with their feedback and submit again.",
+            );
+        }
+        push_section(&mut prompt, PLAN_MODE_HEADING, &lines);
     }
 
     if has(openwave_core::ASK_USER_QUESTIONS_TOOL) {

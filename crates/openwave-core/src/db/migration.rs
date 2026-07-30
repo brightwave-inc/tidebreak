@@ -94,6 +94,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddMessageDocumentAttachments),
             Box::new(AddSandboxProvision),
             Box::new(AddLateResultEvidence),
+            Box::new(AddPlanRequests),
         ]
     }
 }
@@ -2149,6 +2150,157 @@ impl MigrationTrait for AddMessageAttachments {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .drop_table(Table::drop().table(MessageAttachment::Table).to_owned())
+            .await
+    }
+}
+
+/// Gives a plan-mode proposal a durable continuation record.
+///
+/// Mirrors `user_question_request`: the row is the renderer-safe projection of
+/// one parked `exit_plan_mode` call, and the decision resolves the same tool
+/// call and turn through the shared client-wait state machine.
+struct AddPlanRequests;
+
+impl MigrationName for AddPlanRequests {
+    fn name(&self) -> &str {
+        "m20260730_000035_add_plan_requests"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddPlanRequests {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(PlanRequest::Table)
+                    .col(
+                        ColumnDef::new(PlanRequest::CallId)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(PlanRequest::TurnId).uuid().not_null())
+                    .col(ColumnDef::new(PlanRequest::ChatId).uuid().not_null())
+                    .col(
+                        ColumnDef::new(PlanRequest::Status)
+                            .string_len(16)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PlanRequest::EventSeq)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PlanRequest::Title)
+                            .string_len(crate::MAX_PLAN_TITLE_CHARS as u32)
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(PlanRequest::Plan).text().not_null())
+                    .col(
+                        ColumnDef::new(PlanRequest::Feedback)
+                            .string_len(crate::MAX_PLAN_FEEDBACK_CHARS as u32),
+                    )
+                    .col(
+                        ColumnDef::new(PlanRequest::ProposedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(PlanRequest::ResolvedAt).timestamp_with_time_zone())
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_plan_request_call")
+                            .from(PlanRequest::Table, PlanRequest::CallId)
+                            .to(ToolCall::Table, ToolCall::Id)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_plan_request_turn")
+                            .from(PlanRequest::Table, PlanRequest::TurnId)
+                            .to(TurnRun::Table, TurnRun::Id)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_plan_request_chat")
+                            .from(PlanRequest::Table, PlanRequest::ChatId)
+                            .to(Chat::Table, Chat::Id)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_plan_request_event")
+                            .from_tbl(PlanRequest::Table)
+                            .from_col(PlanRequest::ChatId)
+                            .from_col(PlanRequest::EventSeq)
+                            .to_tbl(Event::Table)
+                            .to_col(Event::ChatId)
+                            .to_col(Event::Seq)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .check(Expr::col(PlanRequest::Status).is_in([
+                        crate::PlanRequestStatus::Pending.as_str(),
+                        crate::PlanRequestStatus::Accepted.as_str(),
+                        crate::PlanRequestStatus::Rejected.as_str(),
+                        crate::PlanRequestStatus::Cancelled.as_str(),
+                    ]))
+                    .check(
+                        Expr::col(PlanRequest::Status)
+                            .eq(crate::PlanRequestStatus::Pending.as_str())
+                            .and(Expr::col(PlanRequest::ResolvedAt).is_null())
+                            .or(Expr::col(PlanRequest::Status)
+                                .ne(crate::PlanRequestStatus::Pending.as_str())
+                                .and(Expr::col(PlanRequest::ResolvedAt).is_not_null())),
+                    )
+                    .check(Expr::col(PlanRequest::ResolvedAt).is_null().or(
+                        Expr::col(PlanRequest::ResolvedAt).gte(Expr::col(PlanRequest::ProposedAt)),
+                    ))
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_plan_request_pending")
+                    .table(PlanRequest::Table)
+                    .col(PlanRequest::ChatId)
+                    .col(PlanRequest::ProposedAt)
+                    .col(PlanRequest::CallId)
+                    .and_where(
+                        Expr::col(PlanRequest::Status)
+                            .eq(crate::PlanRequestStatus::Pending.as_str()),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_plan_request_turn")
+                    .table(PlanRequest::Table)
+                    .col(PlanRequest::TurnId)
+                    .col(PlanRequest::CallId)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_plan_request_event")
+                    .table(PlanRequest::Table)
+                    .col(PlanRequest::ChatId)
+                    .col(PlanRequest::EventSeq)
+                    .unique()
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(PlanRequest::Table).to_owned())
             .await
     }
 }
@@ -9398,6 +9550,21 @@ enum UserQuestionRequest {
     Status,
     EventSeq,
     AskedAt,
+    ResolvedAt,
+}
+
+#[derive(DeriveIden)]
+enum PlanRequest {
+    Table,
+    CallId,
+    TurnId,
+    ChatId,
+    Status,
+    EventSeq,
+    Title,
+    Plan,
+    Feedback,
+    ProposedAt,
     ResolvedAt,
 }
 
