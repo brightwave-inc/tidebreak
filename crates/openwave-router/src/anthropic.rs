@@ -172,6 +172,12 @@ impl ModelProvider for AnthropicProvider {
                     }
                 }
             }
+            // A stream that closes with a tool call's argument JSON still open
+            // was truncated — a clean TCP close carries no transport error.
+            // Fail the step rather than committing the fragment as a finish.
+            if let Some(event) = end_of_stream(&state) {
+                yield event;
+            }
         };
         Ok(Box::pin(stream))
     }
@@ -549,6 +555,30 @@ struct StreamState {
     /// Set once the stream has terminalized on an in-band error, so no later
     /// frame can append events after the failure.
     terminal: bool,
+    /// Tool-use content blocks still open — started, not yet stopped. Their
+    /// argument JSON is incomplete until `content_block_stop` arrives.
+    open_tool_blocks: std::collections::HashSet<u32>,
+    /// Set once the provider reported how the message ended (a stop, a
+    /// refusal, or an interrupting failure). Without it a silent close is
+    /// indistinguishable from a finished message on the wire.
+    finished: bool,
+}
+
+/// What a silent end of the byte stream means.
+///
+/// Anthropic closes every healthy message with a `message_delta` carrying a
+/// `stop_reason`, so a stream that ends without one and with a tool call's
+/// argument JSON still open was truncated: a clean TCP close mid-response
+/// carries no transport error, and committing the fragment would hand
+/// `parse_args` a cut-off call. Text alone keeps the clean-end reading the
+/// agent loop already gives an exhausted stream.
+fn end_of_stream(state: &StreamState) -> Option<ProviderEvent> {
+    if state.terminal || state.finished || state.open_tool_blocks.is_empty() {
+        return None;
+    }
+    Some(ProviderEvent::Failed {
+        error: ProviderErrorInfo::provider("anthropic stream ended mid-tool-call"),
+    })
 }
 
 fn u32_at(value: &Value, key: &str) -> u32 {
@@ -588,6 +618,7 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
             if block.and_then(|b| b.get("type")).and_then(Value::as_str) == Some("tool_use") {
                 let block = block.unwrap();
                 let name = str_at(block, "name");
+                state.open_tool_blocks.insert(index);
                 // The synthetic output tool is the request's own scaffolding.
                 // Announcing it as a tool call would hand consumers a call they
                 // never advertised and cannot answer.
@@ -604,6 +635,10 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
             } else {
                 Vec::new()
             }
+        }
+        Some("content_block_stop") => {
+            state.open_tool_blocks.remove(&u32_at(data, "index"));
+            Vec::new()
         }
         Some("content_block_delta") => {
             let index = u32_at(data, "index");
@@ -653,6 +688,9 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                 .and_then(|d| d.get("stop_reason"))
                 .and_then(Value::as_str)
             {
+                // However the message ended, the provider said it ended: a
+                // later silent close is no longer truncation evidence.
+                state.finished = true;
                 let mut reason = match map_stop_reason(reason) {
                     StopOutcome::Reason(reason) => reason,
                     // Whatever streamed before this stop is a fragment, so no
@@ -1126,6 +1164,57 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_silent_close_with_an_open_tool_call_fails_the_stream() {
+        // A clean TCP close mid-response carries no transport error and no
+        // stop_reason. With a tool call's argument JSON still open the stream
+        // was truncated, so the adapter must not let the fragment read as a
+        // finished turn. This changes behavior on streams that reported
+        // success before — the remaining silent-close route after the
+        // transport-error and in-band-error paths were closed.
+        let mut state = StreamState::default();
+        let out: Vec<ProviderEvent> = [
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "toolu_1", "name": "read_file"}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"path\":\"a"}}),
+        ]
+        .iter()
+        .flat_map(|frame| normalize(frame, &mut state))
+        .collect();
+        assert!(matches!(
+            out.last(),
+            Some(ProviderEvent::ToolCallArgsDelta { .. })
+        ));
+        let ending = end_of_stream(&state).expect("an open tool call fails the stream");
+        assert!(
+            matches!(
+                &ending,
+                ProviderEvent::Failed { error } if error.kind == "provider"
+            ),
+            "expected a failure, got {ending:?}"
+        );
+
+        // Once the block stops and the provider reports a stop_reason, the
+        // close is clean and the end-of-stream check stays silent.
+        let mut state = StreamState::default();
+        for frame in [
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "toolu_1", "name": "read_file"}}),
+            json!({"type": "content_block_stop", "index": 0}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}}),
+        ] {
+            let _ = normalize(&frame, &mut state);
+        }
+        assert!(end_of_stream(&state).is_none());
+
+        // Text alone keeps the clean-end reading an exhausted stream already
+        // had: no tool-call arguments exist that truncation could corrupt.
+        let mut state = StreamState::default();
+        let _ = normalize(
+            &json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "hi"}}),
+            &mut state,
+        );
+        assert!(end_of_stream(&state).is_none());
     }
 
     #[test]
