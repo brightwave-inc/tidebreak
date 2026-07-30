@@ -856,6 +856,22 @@ body {
   text-align: left;
 }
 
+/* A failure carries its recovery, so the notice becomes a row: explanation on
+   the left, the one action it offers pinned to the right. */
+.message-turn-failure {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding: 0.5rem 0.5rem 0.5rem 0.7rem;
+}
+
+.message-turn-failure-text {
+  min-width: 0;
+  flex: 1 1 16rem;
+}
+
 .message-notice.is-refusal {
   align-self: stretch;
   border: 1px solid color-mix(in srgb, var(--warning) 42%, var(--line));

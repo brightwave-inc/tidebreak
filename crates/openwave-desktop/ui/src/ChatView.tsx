@@ -16,7 +16,7 @@ import {
   type ComposerFolders,
   type ComposerImages,
 } from "./Composer";
-import { MessageList } from "./MessageList";
+import { MessageList, type RetryableTurn } from "./MessageList";
 import { useTranscriptVisible } from "./TranscriptVisibility";
 import { useFolderAccessRequests } from "./useFolderAccessRequests";
 import { useOutputWritebackRequests } from "./useOutputWritebackRequests";
@@ -45,6 +45,8 @@ export type ChatViewProps = {
   onDraftChange: (value: string) => void;
   onSelectPrompt: (prompt: string) => void;
   onSend: () => Promise<void>;
+  /** Put a failed turn back on the wire, unchanged, as a new turn. */
+  onRetryTurn?: (turn: RetryableTurn) => void;
   /** Open the outputs surface, offered on a completed background run's row. */
   onViewOutput?: () => void;
 };
@@ -73,6 +75,7 @@ export function ChatView({
   onDraftChange,
   onSelectPrompt,
   onSend,
+  onRetryTurn,
   onViewOutput,
 }: ChatViewProps) {
   const transcriptVisible = useTranscriptVisible();
@@ -297,6 +300,7 @@ export function ChatView({
           onAnswerUserQuestions={userQuestions.answer}
           onUserQuestionsCancel={userQuestions.cancel}
           onSelectPrompt={onSelectPrompt}
+          onRetryTurn={onRetryTurn}
           hydrated={hydrated}
           imageClient={client}
         />

@@ -432,10 +432,12 @@ export function reduceChatSessionEvent(
           provisionalToolCallIds: new Set(),
           messages: [
             ...settleActiveToolCalls(state.messages, "failed"),
+            // The category rides into the transcript as data; the renderer
+            // owns both the copy and which recovery it offers.
             {
               id: deps.nextId(),
-              role: "error",
-              text: "The turn could not be completed.",
+              role: "turn_failure",
+              category: event.category,
             },
           ],
         },

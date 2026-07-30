@@ -28,6 +28,9 @@ import {
 } from "./ChatTranscriptPresentation";
 import { useFirstMessage } from "./FirstMessage";
 import { ChatView } from "./ChatView";
+import type { RetryableTurn } from "./MessageList";
+import type { TranscriptFileAttachment } from "./TranscriptFileAttachments";
+import type { TranscriptImageAttachment } from "./ImageAttachments";
 import { OutputDetailRoot } from "./outputs/OutputDetailRoot";
 import { OutputsView } from "./outputs/OutputsView";
 import { DocumentDetailRoot } from "./document-detail/DocumentDetailRoot";
@@ -276,14 +279,66 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     imageItems: readonly ImageAttachment[] = images.attachments,
     fileItems: readonly ImportedDocument[] = files,
   ) {
+    await postTurn({
+      content,
+      attachments: readyImageAttachmentIds(imageItems),
+      transcriptImages: readyTranscriptImageAttachments(imageItems),
+      documentIds: fileItems.map((file) => file.documentId),
+      transcriptFiles: fileItems.map((file) => ({
+        documentId: file.documentId,
+        name: file.displayName,
+        mediaType: file.mediaType,
+      })),
+      fromComposer: true,
+    });
+  }
+
+  /**
+   * Retry sends the failed turn again — same prompt, same attachments, a new
+   * turn id.
+   *
+   * There is no server-side resume: a failed turn is terminal in the journal
+   * and nothing re-runs one in place. A fresh turn is exactly what the reader
+   * would get by retyping the prompt, without the retyping, and it reuses the
+   * attachment and document ids the first attempt published, so the model sees
+   * the same message rather than a text-only shadow of it.
+   */
+  function retryTurn(turn: RetryableTurn) {
+    void postTurn({
+      content: turn.text,
+      attachments: turn.images.map((image) => image.attachmentId),
+      transcriptImages: [...turn.images],
+      documentIds: turn.files.map((file) => file.documentId),
+      transcriptFiles: [...turn.files],
+      fromComposer: false,
+    });
+  }
+
+  /**
+   * The one path a turn takes to the server, whether the reader typed it or the
+   * retry button resent it. `fromComposer` is what separates the two: only a
+   * send that drew on the composer may empty it.
+   */
+  async function postTurn({
+    content,
+    attachments,
+    transcriptImages,
+    documentIds,
+    transcriptFiles,
+    fromComposer,
+  }: {
+    content: string;
+    attachments: readonly string[];
+    transcriptImages: readonly TranscriptImageAttachment[];
+    documentIds: readonly string[];
+    transcriptFiles: readonly TranscriptFileAttachment[];
+    fromComposer: boolean;
+  }) {
     if (!chat || !content || busy || deletingChatId !== null) return;
-    const attachments = readyImageAttachmentIds(imageItems);
-    const transcriptImages = readyTranscriptImageAttachments(imageItems);
-    const documentIds = fileItems.map((file) => file.documentId);
     const turnId = crypto.randomUUID();
     terminalHydrationGenerationRef.current += 1;
     const optimisticId = nextId();
-    setComposerDraft("");
+    if (fromComposer) setComposerDraft("");
     updateSession((session) => ({
       ...session,
       busy: true,
@@ -294,12 +349,8 @@ export function ChatRoute({ chatId }: { chatId: string }) {
           id: optimisticId,
           role: "user",
           text: content,
-          images: transcriptImages,
-          files: fileItems.map((file) => ({
-            documentId: file.documentId,
-            name: file.displayName,
-            mediaType: file.mediaType,
-          })),
+          images: [...transcriptImages],
+          files: [...transcriptFiles],
           createdAt: new Date().toISOString(),
         },
       ],
@@ -313,11 +364,15 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         attachments,
         documentIds,
       );
-      // Only once the turn is durably accepted. A refused send — an image the
-      // selected model cannot read, say — must leave the attachments where the
-      // reader can fix the problem and try again.
-      images.clear();
-      setFiles([]);
+      // Only once the turn is durably accepted, and only for what the composer
+      // actually contributed. A refused send — an image the selected model
+      // cannot read, say — must leave the attachments where the reader can fix
+      // the problem and try again; a retry must not throw away attachments the
+      // reader has queued for their *next* message.
+      if (fromComposer) {
+        images.clear();
+        setFiles([]);
+      }
     } catch (err) {
       // Nothing was accepted, so the message has to go back to where it can be
       // fixed and sent again: the text returns to the composer and the
@@ -509,6 +564,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             onDraftChange={setComposerDraft}
             onSelectPrompt={setComposerDraft}
             onSend={onSend}
+            onRetryTurn={retryTurn}
             onViewOutput={() => openPanel({ type: "outputs" })}
           />
         </TranscriptVisibilityProvider>
