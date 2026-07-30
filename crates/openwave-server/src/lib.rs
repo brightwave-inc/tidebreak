@@ -84,7 +84,10 @@ use resolver::KeyedResolver;
 
 pub use durable_oplog::DurableOperationStore;
 pub use error::ServerError;
-pub use pairing::{register_pending_pairing, PairingError, PairingHandle, PendingRegistration};
+pub use pairing::{
+    register_pending_pairing, register_replacing_pairing, PairingError, PairingHandle,
+    PendingRegistration,
+};
 pub use state::AppState;
 
 const MAX_RAW_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
