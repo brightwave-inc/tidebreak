@@ -83,23 +83,31 @@ fn prepare_for_product_major(data_dir: &Path, product_major: &str) -> Result<boo
     let saved = read_marker(&marker)?;
 
     match saved {
-        Some(saved) if saved == SchemaMarker::current() => Ok(false),
+        Some(saved) if saved == SchemaMarker::current() => {
+            // Vector data was derived and rebuildable; remove the retired
+            // feature's stale directory before opening the database.
+            remove_retired_vectors(&data_dir.join(VECTOR_DIRECTORY))?;
+            Ok(false)
+        }
         Some(saved)
             if saved.lifecycle == PRE_V1_LIFECYCLE && saved.epoch < DESKTOP_SCHEMA_EPOCH =>
         {
-            reset_pre_v1_state(data_dir, &database)?;
+            remove_retired_vectors(&data_dir.join(VECTOR_DIRECTORY))?;
+            reset_pre_v1_state(&database)?;
             Ok(true)
         }
         None if database.exists() => {
             // Databases predating this marker are from the disposable pre-v1
             // development line. The v1 lifecycle will always retain a marker.
-            reset_pre_v1_state(data_dir, &database)?;
+            remove_retired_vectors(&data_dir.join(VECTOR_DIRECTORY))?;
+            reset_pre_v1_state(&database)?;
             Ok(true)
         }
         None => {
             // Clean up journals left after an interrupted reset even when the
             // main database file is already gone.
-            reset_pre_v1_state(data_dir, &database)?;
+            remove_retired_vectors(&data_dir.join(VECTOR_DIRECTORY))?;
+            reset_pre_v1_state(&database)?;
             Ok(true)
         }
         Some(saved) => Err(AgentError::config(format!(
@@ -157,9 +165,8 @@ fn read_marker(marker: &Path) -> Result<Option<SchemaMarker>> {
         })
 }
 
-fn reset_pre_v1_state(data_dir: &Path, database: &Path) -> Result<()> {
-    remove_sqlite_files(database)?;
-    remove_derived_vectors(&data_dir.join(VECTOR_DIRECTORY))
+fn reset_pre_v1_state(database: &Path) -> Result<()> {
+    remove_sqlite_files(database)
 }
 
 fn remove_sqlite_files(database: &Path) -> Result<()> {
@@ -188,13 +195,13 @@ fn sqlite_files(database: &Path) -> [PathBuf; 4] {
     ]
 }
 
-fn remove_derived_vectors(path: &Path) -> Result<()> {
+fn remove_retired_vectors(path: &Path) -> Result<()> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
         Err(error) => {
             return Err(AgentError::config(format!(
-                "failed to inspect derived vector index {}: {error}",
+                "failed to inspect retired vector data {}: {error}",
                 path.display()
             )))
         }
@@ -206,7 +213,7 @@ fn remove_derived_vectors(path: &Path) -> Result<()> {
     };
     removed.map_err(|error| {
         AgentError::config(format!(
-            "failed to reset derived vector index {}: {error}",
+            "failed to remove retired vector data {}: {error}",
             path.display()
         ))
     })
@@ -334,7 +341,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -391,7 +397,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn current_schema_epoch_preserves_database_state() {
+    async fn current_schema_epoch_preserves_database_and_removes_retired_vectors() {
         let dir = tempfile::tempdir().unwrap();
         let config = Config::desktop(dir.path());
         let first = connect(&config).await.unwrap();
@@ -408,7 +414,7 @@ mod tests {
             reopened.get_chat(expected.id).await.unwrap(),
             Some(expected)
         );
-        assert_eq!(std::fs::read(vector).unwrap(), b"current vector state");
+        assert!(!vector.exists());
     }
 
     #[tokio::test]

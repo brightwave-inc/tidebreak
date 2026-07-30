@@ -1,6 +1,6 @@
 [package]
 name = "openwave-retrieval"
-description = "OpenWave retrieval: embeddings, vector search, chunking, ingestion, and citations."
+description = "OpenWave document ingestion: canonical parsing with source-region mappings."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,91 +10,13 @@ authors.workspace = true
 [lints]
 workspace = true
 
-[features]
-# On by default (like openwave-router's adapters) so both are built and tested in
-# CI. Depend with `default-features = false` for the lean, offline pipeline: the
-# seams, core-owned IDs, and HashEmbedder/InMemoryVectorStore, with no reqwest.
-default = ["tool", "embed-openai"]
-# The agent-facing `search` Tool implementation. Core is already a lean dependency
-# for DocumentId; this feature controls only the adapter module.
-tool = []
-# A real OpenAI-compatible embedding provider (network, via reqwest). The offline
-# HashEmbedder is always available regardless.
-embed-openai = ["dep:reqwest", "dep:sha2"]
-# A durable, embedded vector store backed by LanceDB (pure-Rust, on-disk). Not a
-# default feature for library consumers because it pulls a large dependency tree
-# and needs `protoc` at build time. `openwave-server` forwards it under the same
-# name, off by default there too and required for its release builds, so only the
-# CI lane that compiles this backend installs `protoc`.
-vec-lance = ["dep:lancedb", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-select", "dep:futures", "dep:tokio"]
-# Rich PDF parsing via the local, PDFium-backed `liteparse` engine. Not a default
-# feature: it pulls a large dependency tree. Tesseract OCR is disabled
-# (`default-features = false`), so text-layer PDFs parse fully offline with no
-# system OCR dependency; image-only pages simply yield little text. The server
-# enables this feature explicitly to accept `application/pdf` uploads.
-parse-liteparse = ["dep:liteparse", "dep:liteparse-pdfium-sys"]
-# Rich Office parsing (Word/Excel/PowerPoint/OpenDocument) via liteparse's
-# LibreOffice conversion path. Reuses `parse-liteparse`'s dependencies — no new
-# crates — so enabling it leaves the lockfile unchanged. LibreOffice itself is an
-# OPTIONAL runtime system tool: when it is absent the parser degrades to an empty
-# document instead of failing, so this feature is safe to enable by default in
-# consumers that want Office uploads searchable wherever LibreOffice is installed.
-parse-office = ["parse-liteparse"]
-# Raster image ingestion (PNG/JPEG/WebP/GIF/TIFF/BMP) via liteparse's image
-# conversion path. liteparse converts the image to a single-page PDF in pure Rust
-# (no ImageMagick binary) and parses it via PDFium, so this reuses
-# `parse-liteparse`'s dependencies — no new crates, lockfile unchanged. OCR is
-# off, so raster images are stored without searchable text (making image text
-# searchable is a later, OCR slice); when PDFium is absent the parser degrades to
-# an empty document instead of failing, so the feature is safe to enable wherever
-# images should route to a stable image parser rather than the generic fallback.
-parse-image = ["parse-liteparse"]
-# Spreadsheet-native ingestion (xlsx/xlsm/xlsb/xls/ods) via `calamine`, a
-# pure-Rust workbook reader. Takes precedence over `parse-office` for those
-# types: routing a workbook through LibreOffice to PDF destroys the sheet and
-# cell addresses a cell-range citation needs, and no PDF text layer can put them
-# back. Off by default in this library, like the other rich parsers; the server
-# turns it on. It needs no system tools at runtime.
-parse-spreadsheet = ["dep:calamine"]
-
 [dependencies]
 async-trait = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 thiserror = { workspace = true }
-# `v5` (name-based UUIDs) is additive over the workspace's `v4`/`serde`; it
-# backs the deterministic chunk ids derived from (document, byte span).
-uuid = { workspace = true, features = ["v5"] }
-# Core owns DocumentId so the authoritative catalog and derived vector index use
-# one persisted identity. Default features stay off: no SQLite, keychain, or file
-# tools are pulled into this library.
+# Core owns the canonical document identity and source-region contracts.
+# Default features stay off: no SQLite, keychain, or file tools are pulled into
+# this library.
 openwave-core = { path = "../openwave-core", default-features = false }
-# HTTP client for the OpenAI-compatible embedder (embed-openai feature only).
-reqwest = { workspace = true, optional = true }
-sha2 = { workspace = true, optional = true }
-# The LanceDB vector backend (vec-lance feature only). arrow-array/-schema are
-# pinned to the exact major LanceDB uses (58) so RecordBatch types are compatible.
-lancedb = { version = "=0.33.0", optional = true }
-arrow-array = { version = "=58.4.0", optional = true }
-arrow-schema = { version = "=58.4.0", optional = true }
-arrow-select = { version = "=58.4.0", optional = true }
-futures = { workspace = true, optional = true }
-tokio = { workspace = true, features = ["sync"], optional = true }
-# Rich PDF parser (parse-liteparse feature only). Local + PDFium-backed; OCR off.
-liteparse = { version = "=2.8.1", default-features = false, optional = true }
-# The PDFium loader liteparse builds on. Depended on directly (pinned to the same
-# version liteparse resolves, so cargo unifies the one runtime binding) only to
-# probe `load_default()` and fail closed with a clear error instead of the panic
-# liteparse raises when the PDFium library is absent.
-liteparse-pdfium-sys = { version = "=1.4.0", optional = true }
-# The workbook reader behind the spreadsheet parser (parse-spreadsheet feature
-# only). Pure Rust, MIT, and small: six crates, none of which needs a build tool
-# or a system library. `dates` turns Excel's date serials into calendar dates,
-# and costs no new crate — it pulls chrono, which the workspace already resolves.
-calamine = { version = "=0.36.1", features = ["dates"], optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread"] }
-tempfile = "=3.27.0"
-# Only to construct DocumentSummaryRecord fixtures for the search-card join.
-chrono = { workspace = true }

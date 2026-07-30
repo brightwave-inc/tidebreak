@@ -1,18 +1,14 @@
 //! Foreground tools for inspecting sources owned by the current conversation.
 //!
-//! Semantic [`openwave_retrieval::SearchTool`] remains the efficient path for a
-//! large corpus. These tools cover the smaller, more direct workflow: discover
-//! the files attached to this conversation and read a bounded range of one
-//! parsed source without waiting for its embedding stage.
+//! These tools discover files attached to the current conversation and read a
+//! bounded range of one parsed source.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use openwave_core::{
-    citation_authoring_instruction, format_citation_reference, ApprovalClass,
-    AssistantCitationReference, ByteSpan, CallId, ChunkId, DocumentId, DocumentProcessingStatus,
-    DocumentScope, EvidenceLocation, Result, RetrievalEvidenceInput, RetrievalEvidenceSource,
-    Store, Tool, ToolCtx, ToolOutput, ToolSpec,
+    citation_authoring_instruction, ApprovalClass, CallId, DocumentId, DocumentProcessingStatus,
+    DocumentScope, Result, Store, Tool, ToolCtx, ToolOutput, ToolSpec,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -94,10 +90,9 @@ impl Tool for ListSourcesTool {
             name: LIST_SOURCES_TOOL.into(),
             description: "List files added as sources to this exact conversation, newest first. \
                           Use this when the user refers to an added or attached file without an \
-                          exact document id; then use read_source for direct text or search for \
-                          relevant passages. Each source reports one status: `searchable` means \
-                          search and read_source can find its text; `processing` means checking \
-                          again shortly may change that; `stored_not_searchable` means the file \
+                          exact document id; then use read_source for direct text. Each source \
+                          reports one status: `readable` means read_source can return its text; \
+                          `processing` means checking again shortly may change that; `stored_no_text` means the file \
                           is kept and can be named but holds no text to find, so do not claim to \
                           have read it; `failed` means it could not be prepared."
                 .into(),
@@ -147,7 +142,7 @@ impl Tool for ListSourcesTool {
 
         let truncated = records.len() > MAX_LISTED_SOURCES as usize;
         // The readiness word is the one thing a reader has to see here: a
-        // source that is still processing, or that holds no searchable text,
+        // source that is still processing, or that holds no readable text,
         // is a source the next answer will quietly fail to use.
         let entries = records
             .iter()
@@ -195,8 +190,8 @@ impl Tool for ReadSourceTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: READ_SOURCE_TOOL.into(),
-            description: "Read a bounded text range from one source in this exact conversation. \
-                          The result carries the exact reference to cite the range by."
+            description: "Read a bounded, line-numbered text range from one source in this exact \
+                          conversation. Use the shown document id and line range in citations."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -251,9 +246,7 @@ impl Tool for ReadSourceTool {
             Err(_) => return Ok(ToolOutput::error("could not read the source")),
         };
 
-        // Parsing and indexing are separate jobs. Direct reads become useful as
-        // soon as canonical parser output exists, even while embedding is still
-        // running, so a small source does not inherit the full RAG wait.
+        // Direct reads become useful as soon as canonical parser output exists.
         if document.source_blob.is_some() && document.canonical_fingerprint.is_none() {
             let status = match document.processing_status {
                 DocumentProcessingStatus::Failed => "could not be prepared",
@@ -271,7 +264,7 @@ impl Tool for ReadSourceTool {
             &document.canonical_text,
             args.offset,
             max_characters,
-            RetrievalEvidenceInput::MAX_SNIPPET_BYTES,
+            MAX_READ_CHARACTERS * 4,
         ) else {
             return Ok(ToolOutput::error("offset is past the end of the source"));
         };
@@ -281,68 +274,29 @@ impl Tool for ReadSourceTool {
             ));
         }
 
-        let source_token = Uuid::new_v4();
-        // The same citation grammar the search tool teaches, under the same
-        // per-turn format, so a citation authored from a direct read reads
-        // exactly like one authored from a search hit.
-        let reference = format_citation_reference(
-            ctx.citation_format,
-            "your phrasing",
-            AssistantCitationReference { source_token },
-        );
         let title = document
             .title
             .as_deref()
             .filter(|title| !title.trim().is_empty())
             .unwrap_or("Untitled source");
+        let start_line = document.canonical_text[..window.start_byte]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count()
+            + 1;
+        let numbered = number_source_lines(window.text, start_line);
+        let end_line = start_line + window.text.bytes().filter(|byte| *byte == b'\n').count();
         let content = format!(
-            "Source: {title}\nDocument ID: {document_id}\nCharacters: {}..{} of {}\n{}\n\
-             Cite as: {reference}\n\n{}",
+            "Source: {title}\nDocument ID: {document_id}\nCharacters: {}..{} of {}\n\
+             Lines: {start_line}-{end_line}\n{}\n\n{}",
             window.start_character,
             window.end_character,
             window.total_characters,
-            citation_authoring_instruction(ctx.citation_format, "range"),
-            window.text
+            citation_authoring_instruction(document_id),
+            numbered
         );
-        let span = ByteSpan::new(window.start_byte, window.end_byte);
-        let source_regions = document
-            .source_regions
-            .iter()
-            .filter_map(|region| {
-                let start = region.span.start.max(span.start);
-                let end = region.span.end.min(span.end);
-                (start < end).then(|| openwave_core::SourceRegion {
-                    span: ByteSpan::new(start, end),
-                    location: region.location.clone(),
-                })
-            })
-            .collect();
-        let generation = document.generation();
-        let source = match document.source_uri.as_deref() {
-            Some(uri)
-                if !uri.is_empty()
-                    && uri.len() <= RetrievalEvidenceInput::MAX_SOURCE_URI_BYTES
-                    && !uri.contains('\0') =>
-            {
-                RetrievalEvidenceSource::Uri {
-                    uri: uri.to_owned(),
-                }
-            }
-            _ => RetrievalEvidenceSource::Inline,
-        };
-        let evidence = RetrievalEvidenceInput {
-            rank: 1,
-            source_token,
-            document_id,
-            generation,
-            chunk_id: ChunkId::derive(document_id, span.start, span.end),
-            span,
-            snippet: window.text.to_owned(),
-            location: EvidenceLocation::for_source_regions(Vec::new(), source_regions),
-            source,
-        };
-        Ok(ToolOutput::text(content)
-            .with_entries(vec![openwave_core::ResultEntry::new(
+        Ok(
+            ToolOutput::text(content).with_entries(vec![openwave_core::ResultEntry::new(
                 openwave_core::ResultEntryKind::Source,
                 title,
             )
@@ -353,21 +307,21 @@ impl Tool for ReadSourceTool {
             .with_meta(format!(
                 "characters {}–{} of {}",
                 window.start_character, window.end_character, window.total_characters
-            ))])
-            .with_private_evidence(vec![evidence]))
+            ))]),
+        )
     }
 }
 
 /// The readiness word a source row shows.
 ///
 /// Mapped rather than passed through: the tool's vocabulary is written for the
-/// model and says so — `stored_not_searchable` is a contract term, not
+/// model and says so — `stored_no_text` is a contract term, not
 /// something to put in front of a reader.
 fn readiness_label(readiness: &str) -> &'static str {
     match readiness {
-        "searchable" => "Searchable",
+        "readable" => "Readable",
         "processing" => "Processing",
-        "stored_not_searchable" => "No text",
+        "stored_no_text" => "No text",
         "failed" => "Failed",
         _ => "Unknown",
     }
@@ -378,8 +332,14 @@ struct SourceWindow<'a> {
     end_character: usize,
     total_characters: usize,
     start_byte: usize,
-    end_byte: usize,
     text: &'a str,
+}
+
+fn number_source_lines(text: &str, start_line: usize) -> String {
+    text.split_inclusive('\n')
+        .enumerate()
+        .map(|(index, line)| format!("{:>6} | {line}", start_line + index))
+        .collect()
 }
 
 fn source_window(
@@ -412,7 +372,6 @@ fn source_window(
         end_character: offset + characters,
         total_characters,
         start_byte,
-        end_byte,
         text: &text[start_byte..end_byte],
     })
 }
@@ -494,7 +453,7 @@ impl Tool for ReadToolResultTool {
             &result,
             args.offset,
             max_characters,
-            RetrievalEvidenceInput::MAX_SNIPPET_BYTES,
+            MAX_READ_CHARACTERS * 4,
         ) else {
             return Ok(ToolOutput::error("offset is past the end of the result"));
         };
@@ -530,9 +489,8 @@ fn historical_safe_name(name: &str) -> &'static str {
 mod tests {
     use chrono::Utc;
     use openwave_core::{
-        format_citation_directive, format_source_reference, Chat, ChatId, CitationFormat, DbStore,
-        DocumentUpsert, ReasoningEffort, SourceLocation, SourceRegion, Store, ToolCallRecord,
-        TurnId,
+        ByteSpan, Chat, ChatId, DbStore, DocumentUpsert, ReasoningEffort, SourceLocation,
+        SourceRegion, Store, ToolCallRecord, TurnId,
     };
     use serde_json::json;
     use std::num::NonZeroU32;
@@ -556,7 +514,6 @@ mod tests {
             model: None,
             reasoning_effort: None::<ReasoningEffort>,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -576,15 +533,11 @@ mod tests {
                 span: ByteSpan::new(0, canonical_text.len()),
                 location: SourceLocation::Page {
                     number: NonZeroU32::new(2).unwrap(),
-                    bounds: None,
                 },
             }],
             updated_at: Utc::now(),
         };
-        let (document, _) = store
-            .upsert_document_and_enqueue_index(&source, "test-pipeline", 3)
-            .await
-            .unwrap();
+        let document = store.upsert_document(&source).await.unwrap();
         (directory, store, chat, document.id)
     }
 
@@ -595,7 +548,6 @@ mod tests {
         assert_eq!(window.start_character, 1);
         assert_eq!(window.end_character, 3);
         assert_eq!(window.start_byte, 1);
-        assert_eq!(window.end_byte, 7);
         assert_eq!(window.total_characters, 4);
         assert!(source_window("short", 5, 1, 8).is_none());
     }
@@ -610,7 +562,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -708,19 +659,19 @@ mod tests {
     }
 
     #[test]
-    fn readiness_never_reports_an_unsearchable_source_as_usable() {
+    fn readiness_never_reports_an_unreadable_source_as_usable() {
         use openwave_core::{DocumentProcessingStatus, SourceReadiness};
 
         // The case this exists for: the pipeline finished and found nothing.
         assert_eq!(
             SourceReadiness::of(DocumentProcessingStatus::Ready, false).as_str(),
-            "stored_not_searchable"
+            "stored_no_text"
         );
         assert_eq!(
             SourceReadiness::of(DocumentProcessingStatus::Ready, true).as_str(),
-            "searchable"
+            "readable"
         );
-        // Not-yet-searchable while queued must stay distinguishable from
+        // Not-yet-readable while queued must stay distinguishable from
         // finished-and-empty, because only one of them is worth waiting on.
         for pending in [
             DocumentProcessingStatus::Queued,
@@ -744,15 +695,16 @@ mod tests {
             .await
             .unwrap();
         assert!(!listed.is_error);
-        // Freshly upserted sources are still queued, and the agent-facing
-        // vocabulary says so without exposing the durable job lifecycle.
-        assert!(listed.content.contains("\"status\": \"processing\""));
+        // Canonical text is readable the moment it is upserted, and the
+        // agent-facing vocabulary says so without exposing the durable job
+        // lifecycle.
+        assert!(listed.content.contains("\"status\": \"readable\""));
         assert!(!listed.content.contains("queued"));
         assert!(!listed.content.contains("\"ready\""));
     }
 
     #[tokio::test]
-    async fn tools_are_exactly_conversation_scoped_and_reads_emit_evidence() {
+    async fn tools_are_exactly_conversation_scoped_and_reads_show_line_locators() {
         let (_directory, store, chat, document_id) = source_fixture().await;
         let other_chat = Chat {
             id: ChatId::new(),
@@ -761,7 +713,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -798,51 +749,10 @@ mod tests {
             .await
             .unwrap();
         assert!(!read.is_error);
-        assert!(read.content.contains("é🌊\n"));
-        assert_eq!(read.private_evidence.len(), 1);
-        let evidence = &read.private_evidence[0];
-        assert_eq!(evidence.document_id, document_id);
-        assert_eq!(evidence.snippet, "é🌊\n");
-        assert_eq!(evidence.span, ByteSpan::new(1, 8));
-        assert_eq!(
-            evidence.location.source_regions(),
-            [SourceRegion {
-                span: ByteSpan::new(1, 8),
-                location: SourceLocation::Page {
-                    number: NonZeroU32::new(2).unwrap(),
-                    bounds: None,
-                },
-            }]
-        );
-        // The read teaches the grammar the turn's format asks for, and hands
-        // out nothing copyable in the other one — an instruction that offered
-        // both would let the model mix anchored and bare citations in one
-        // message.
-        let reference = AssistantCitationReference {
-            source_token: evidence.source_token,
-        };
+        assert!(read.content.contains("     1 | é🌊\n"));
         assert!(read
             .content
-            .contains(&format_citation_directive("your phrasing", reference)));
-        assert!(!read.content.contains(&format_source_reference(reference)));
-
-        let attached = ReadSourceTool::new(store.clone())
-            .execute(
-                &context
-                    .clone()
-                    .with_citation_format(CitationFormat::SourcesAttached),
-                json!({ "document_id": document_id }),
-            )
-            .await
-            .unwrap();
-        assert!(!attached.is_error);
-        let attached_reference = AssistantCitationReference {
-            source_token: attached.private_evidence[0].source_token,
-        };
-        assert!(attached
-            .content
-            .contains(&format_source_reference(attached_reference)));
-        assert!(!attached.content.contains(":cit["));
+            .contains(&format!("doc={document_id} lines=N-M")));
 
         let denied = ReadSourceTool::new(store)
             .execute(&other_context, json!({ "document_id": document_id }))

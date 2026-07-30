@@ -290,7 +290,6 @@ jobs:
             target/${{ matrix.target }}/release/openwave-host-broker
             target/${{ matrix.target }}/release/libopenwave_desktop_lib.*
             crates/openwave-desktop/binaries/openwave-host-broker-${{ matrix.target }}
-            crates/openwave-desktop/resources/pdfium/libpdfium.dylib
           key: macos-release-prepared-v2-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
           restore-keys: |
             macos-release-prepared-v2-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
@@ -303,7 +302,7 @@ jobs:
             macos-release-target-v1-${{ matrix.arch }}-
 
       - name: Set up compiler cache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
 
@@ -329,19 +328,13 @@ jobs:
         working-directory: crates/openwave-desktop/ui
         run: pnpm install --frozen-lockfile
 
-      - name: Install protobuf compiler
-        run: brew install protobuf
-
       - name: Compile without production credentials or bundles
         id: compile
         continue-on-error: true
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         with:
           projectPath: crates/openwave-desktop
-          # `vec-lance` carries the durable, on-disk vector store into the
-          # shipped app; the server's build script rejects a release build
-          # without it.
-          args: --target ${{ matrix.target }} --features vec-lance --no-bundle --ci
+          args: --target ${{ matrix.target }} --no-bundle --ci
 
       - name: Save release-specific unsigned Rust build cache
         if: ${{ !cancelled() && steps.rust-build-cache.outputs.cache-hit != 'true' }}
@@ -360,7 +353,6 @@ jobs:
             target/${{ matrix.target }}/release/openwave-host-broker
             target/${{ matrix.target }}/release/libopenwave_desktop_lib.*
             crates/openwave-desktop/binaries/openwave-host-broker-${{ matrix.target }}
-            crates/openwave-desktop/resources/pdfium/libpdfium.dylib
           key: ${{ steps.rust-build-cache.outputs.cache-primary-key }}
 
       - name: Require a successful unsigned compilation
@@ -427,7 +419,6 @@ jobs:
             target/${{ matrix.target }}/release/openwave-host-broker
             target/${{ matrix.target }}/release/libopenwave_desktop_lib.*
             crates/openwave-desktop/binaries/openwave-host-broker-${{ matrix.target }}
-            crates/openwave-desktop/resources/pdfium/libpdfium.dylib
           key: macos-release-prepared-v2-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
           restore-keys: |
             macos-release-prepared-v2-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
@@ -520,7 +511,7 @@ jobs:
           rustup target add "${{ matrix.target }}"
 
       - name: Set up compiler cache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
 
@@ -550,9 +541,6 @@ jobs:
         working-directory: crates/openwave-desktop/ui
         run: pnpm install --frozen-lockfile
 
-      - name: Install protobuf compiler
-        run: brew install protobuf
-
       - name: Write tag-derived Tauri configuration
         env:
           RELEASE_CONFIG: ${{ runner.temp }}/openwave-release.json
@@ -561,12 +549,6 @@ jobs:
             const fs = require("node:fs");
             fs.writeFileSync(process.env.RELEASE_CONFIG, JSON.stringify({
               version: process.env.OPENWAVE_VERSION,
-              build: {
-                beforeBundleCommand: {
-                  script: "bash scripts/sign-macos-release-resources.sh",
-                  cwd: process.env.GITHUB_WORKSPACE
-                }
-              },
               bundle: {
                 targets: ["app", "dmg"],
                 macOS: { signingIdentity: process.env.APPLE_SIGNING_IDENTITY }
@@ -581,7 +563,6 @@ jobs:
           projectPath: crates/openwave-desktop
           args: >-
             --target ${{ matrix.target }}
-            --features vec-lance
             --config ${{ runner.temp }}/openwave-release.json
             --bundles app,dmg
 
@@ -650,21 +631,6 @@ jobs:
           done
 
           codesign --verify --deep --strict --verbose=2 "$app_path"
-          pdfium_path="$app_path/Contents/Resources/pdfium/libpdfium.dylib"
-          [[ -f "$pdfium_path" ]] || {
-            echo "The packaged PDFium runtime is missing: $pdfium_path" >&2
-            exit 1
-          }
-          codesign --verify --strict --verbose=2 "$pdfium_path"
-          pdfium_signature="$(codesign --display --verbose=4 "$pdfium_path" 2>&1)"
-          [[ "$pdfium_signature" == *"Authority=$APPLE_SIGNING_IDENTITY"* ]] || {
-            echo "Packaged PDFium was not signed by the expected Developer ID identity." >&2
-            exit 1
-          }
-          [[ "$pdfium_signature" == *"Timestamp="* ]] || {
-            echo "Packaged PDFium signature does not contain a secure timestamp." >&2
-            exit 1
-          }
           xcrun stapler validate "$app_path"
           spctl --assess --type execute --verbose=4 "$app_path"
           codesign --verify --verbose=2 "$dmg_path"

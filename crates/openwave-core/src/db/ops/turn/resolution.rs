@@ -87,7 +87,7 @@ pub(in crate::db) async fn complete_turn_run_with_citations_and_append_event(
     expected_steer_revision: i64,
     now: chrono::DateTime<Utc>,
     output: &Message,
-    citations: &[crate::AssistantCitationReference],
+    citations: &[crate::AssistantCitationInput],
     usage: Usage,
     stop_reason: StopReason,
 ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
@@ -113,7 +113,7 @@ pub(in crate::db) async fn complete_refused_turn_run_with_citations_and_append_e
     expected_steer_revision: i64,
     now: chrono::DateTime<Utc>,
     output: &Message,
-    citations: &[crate::AssistantCitationReference],
+    citations: &[crate::AssistantCitationInput],
     usage: Usage,
     refusal: RefusalOutcome,
 ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
@@ -142,7 +142,7 @@ pub(in crate::db) async fn recover_exact_completed_turn_event(
     id: TurnId,
     lease_token: uuid::Uuid,
     output: &Message,
-    citations: &[crate::AssistantCitationReference],
+    citations: &[crate::AssistantCitationInput],
     event: &AgentEvent,
 ) -> Result<Option<SequencedEvent>> {
     if exact_completed_turn_on(store, id, lease_token, output, citations)
@@ -162,7 +162,7 @@ async fn complete_turn_run_inner(
     expected_steer_revision: i64,
     now: chrono::DateTime<Utc>,
     output: &Message,
-    citations: &[crate::AssistantCitationReference],
+    citations: &[crate::AssistantCitationInput],
     terminal_event: Option<&AgentEvent>,
 ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
     validate_turn_output(id, lease_token, output)?;
@@ -345,15 +345,7 @@ async fn complete_turn_run_inner(
         }
         return Err(store_err(error));
     }
-    let evidence = super::super::citation::resolve_references_on(
-        &transaction,
-        output.chat_id,
-        output.turn_id,
-        citations,
-    )
-    .await?;
-    super::super::citation::insert_for_message_on(&transaction, output, citations, &evidence)
-        .await?;
+    super::super::citation::insert_for_message_on(&transaction, output, citations).await?;
 
     let completed = entities::turn_run::Entity::update_many()
         .col_expr(
@@ -918,7 +910,7 @@ async fn exact_completed_turn_on(
     id: TurnId,
     lease_token: uuid::Uuid,
     output: &Message,
-    citations: &[crate::AssistantCitationReference],
+    citations: &[crate::AssistantCitationInput],
 ) -> Result<Option<TurnRun>> {
     let Some(receipt) = entities::turn_claim::Entity::find_by_id(lease_token)
         .one(&store.conn)
@@ -955,24 +947,12 @@ async fn exact_completed_turn_on(
 async fn exact_completed_citations_on<C>(
     conn: &C,
     output: &Message,
-    citations: &[crate::AssistantCitationReference],
+    citations: &[crate::AssistantCitationInput],
 ) -> Result<bool>
 where
     C: ConnectionTrait,
 {
-    let expected = super::super::citation::resolve_references_on(
-        conn,
-        output.chat_id,
-        output.turn_id,
-        citations,
-    )
-    .await?
-    .into_iter()
-    .map(|evidence| crate::AssistantCitationReference {
-        source_token: evidence.source_token,
-    })
-    .collect::<Vec<_>>();
-    Ok(super::super::citation::exact_references_for_message_on(conn, output.id).await? == expected)
+    Ok(super::super::citation::exact_citations_for_message_on(conn, output.id).await? == citations)
 }
 
 async fn journal_chat_id(

@@ -326,7 +326,6 @@ mod tests {
                         server: "gateway".into(),
                         resource_uri: "ui://gateway/app.html".into(),
                     })),
-                    private_evidence: Vec::new(),
                 },
                 action: Some(crate::preview::ToolActionPreview::Exec {
                     command: "git".into(),

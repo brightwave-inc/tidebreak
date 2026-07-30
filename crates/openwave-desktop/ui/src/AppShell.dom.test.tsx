@@ -23,7 +23,6 @@ const chats = [
     title: "Roadmap",
     model: null,
     reasoning_effort: null,
-    citation_format: null,
     project_id: null,
   },
   {
@@ -31,7 +30,6 @@ const chats = [
     title: null,
     model: null,
     reasoning_effort: null,
-    citation_format: null,
     project_id: null,
   },
 ];
@@ -44,6 +42,21 @@ const listPendingChatPrompts = vi.fn(async () => [] as unknown[]);
 const listPendingOutputWritebackRequests = vi.fn(async () => [] as unknown[]);
 const requestUserAttention = vi.fn(async () => {});
 const postMessage = vi.fn(async () => {});
+// Unmanaged is the shape most of these shell tests model; the managed gate
+// has its own DOM tests, and the one shell test that flips this to managed
+// pins that a gated shell does no work at all.
+const unmanaged: import("./api").ManagedPolicy = {
+  managed: false,
+  source: "unmanaged",
+  misconfigured: false,
+};
+const getPolicy = vi.fn(async () => unmanaged);
+const getGatewayStatus = vi.fn(async () => ({
+  base_url: "https://gateway.example",
+  signed_in: false,
+  model_count: 0,
+  sign_in: { state: "idle" },
+}));
 
 vi.mock("./boot", () => ({
   resolveServerInfo: vi.fn(async () => ({ baseUrl: "http://127.0.0.1:1", token: "t" })),
@@ -51,14 +64,13 @@ vi.mock("./boot", () => ({
 
 vi.mock("./api", () => ({
   ApiClient: class {
-    // Unmanaged is the shape these shell tests model; the managed gate has
-    // its own DOM tests.
-    getPolicy = vi.fn(async () => ({ managed: false, source: "unmanaged" }));
+    getPolicy = getPolicy;
+    getGatewayStatus = getGatewayStatus;
+    gatewaySignIn = vi.fn(async () => ({ authorization_url: "http://gw/authorize" }));
     listModels = vi.fn(async () => ({ models: [], roles: [] }));
     listProviders = vi.fn(async () => ({ providers: [] }));
     getSettings = vi.fn(async () => ({
       model: null,
-      citation_format: "inline",
       has_api_key: false,
     }));
     listChats = listChats;
@@ -155,6 +167,9 @@ beforeEach(() => {
   listPendingOutputWritebackRequests.mockResolvedValue([]);
   requestUserAttention.mockClear();
   postMessage.mockClear();
+  getPolicy.mockClear();
+  getPolicy.mockResolvedValue(unmanaged);
+  getGatewayStatus.mockClear();
   usePendingPrompts.setState({ chatId: null, userQuestions: [], folderAccess: [] });
   // The stores outlive a test file's renders, so a chat list left behind would
   // decide the next test's routing before its own boot ever ran.
@@ -372,6 +387,27 @@ describe("app shell", () => {
     );
     // And the dock still gets told, which is the whole point.
     await waitFor(() => expect(requestUserAttention).toHaveBeenCalled());
+  });
+
+  it("does no shell work behind the managed sign-in gate", async () => {
+    // Managed and signed out: the gate is a hard stop, not a curtain in
+    // front of a running app. The prompt watcher must not poll and the
+    // shortcuts must not act — Cmd+N creating chats behind the sign-in
+    // screen is the regression this pins.
+    getPolicy.mockResolvedValue({
+      managed: true,
+      gateway_url: "https://gateway.example/",
+      source: "os",
+      misconfigured: false,
+    });
+    const user = userEvent.setup();
+    await mountApp();
+
+    expect(await screen.findByText("Sign in to continue")).toBeInTheDocument();
+    await user.keyboard("{Meta>}n{/Meta}");
+
+    expect(createChat).not.toHaveBeenCalled();
+    expect(listPendingChatPrompts).not.toHaveBeenCalled();
   });
 
   it("returns from settings to the conversation that was open", async () => {

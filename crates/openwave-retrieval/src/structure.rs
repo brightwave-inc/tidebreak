@@ -1,13 +1,13 @@
 //! Node paths for structured sources: which part of the tree a byte span came
 //! from.
 //!
-//! JSON, XML, and HTML are indexed as their own text — nothing is extracted out
-//! of them, so a chunk's byte span already addresses the file verbatim. That is
+//! JSON, XML, and HTML are retained as their own text — nothing is extracted out
+//! of them, so a source region's byte span addresses the file verbatim. That is
 //! enough to highlight a passage in the extracted text and not enough to open
 //! the file as the tree it is, because "bytes 4100–5300" names no node. This
 //! module walks the source once and records, for each run of leaf content, the
 //! path of the node it belongs to. Those become [`SourceRegion`]s beside the
-//! spans they describe, so a passage retrieved later resolves to a node without
+//! spans they describe, so a passage read later resolves to a node without
 //! reparsing the document.
 //!
 //! Paths are written in the notation each tree is addressed by: dotted keys and
@@ -16,11 +16,11 @@
 //!
 //! Both scanners are lenient about what they cannot read: a document that does
 //! not parse yields no regions at all, which costs the node view and leaves
-//! everything else — text, chunks, spans, citations — exactly as it was.
+//! everything else — text, spans, citations — exactly as it was.
 
 use std::collections::HashMap;
 
-use openwave_core::{ByteSpan, EvidenceLocation, SourceLocation, SourceRegion, StructuredPathType};
+use openwave_core::{ByteSpan, SourceLocation, SourceRegion, StructuredPathType};
 
 /// Deepest nesting either scanner follows.
 ///
@@ -32,11 +32,11 @@ const MAX_DEPTH: usize = 128;
 
 /// Most regions one document's structure map holds.
 ///
-/// A structure map is stored with the document and read back on every search
-/// that touches it, so a machine-generated file with a million leaves must not
-/// turn into a million rows. Past the limit the document keeps its text, spans,
-/// and citations and loses only the node view.
+/// A structure map is stored with the document, so a machine-generated file
+/// with a million leaves must not turn into a million rows. Past the limit the
+/// document keeps its text, spans, and citations and loses only the node view.
 const MAX_REGIONS: usize = 50_000;
+const MAX_STRUCTURED_PATH_BYTES: usize = 4 * 1024;
 
 /// Which tree shape a source parses into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,10 +131,7 @@ type PathRegion = (ByteSpan, String);
 /// open: the root of a tree has no path, and one longer than evidence carries
 /// would be dropped later anyway.
 fn record(regions: &mut Vec<PathRegion>, span: ByteSpan, path: &str) {
-    if span.is_empty()
-        || path.is_empty()
-        || path.len() > EvidenceLocation::MAX_STRUCTURED_PATH_BYTES
-    {
+    if span.is_empty() || path.is_empty() || path.len() > MAX_STRUCTURED_PATH_BYTES {
         return;
     }
     regions.push((span, path.to_owned()));
@@ -602,8 +599,6 @@ fn find_after(text: &str, from: usize, needle: &str) -> Option<usize> {
 mod tests {
     use super::*;
 
-    use crate::chunk::{Chunker, TextChunker};
-    use crate::document::{Document, DocumentSource};
     use crate::parse::DocumentParser;
 
     const INVOICES_JSON: &str = r#"{
@@ -702,38 +697,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_chunk_of_a_structured_source_is_located_at_the_node_it_covers() {
-        let parsed = crate::parse::StructuredTextParser::new()
-            .parse(INVOICES_JSON.as_bytes(), "application/json")
-            .await
-            .unwrap();
-        assert_eq!(parsed.text, INVOICES_JSON);
-        let document = Document::new(DocumentSource::Inline, "application/json", &parsed.text)
-            .with_source_regions(parsed.source_regions);
-        // A window small enough to fall inside one invoice, so the passage has
-        // an enclosing record rather than the whole file.
-        let chunks = TextChunker::new(60, 0)
-            .chunk(&document, "application/json")
-            .unwrap();
-        let located: Vec<_> = chunks
-            .iter()
-            .map(|chunk| {
-                EvidenceLocation::for_source_regions(
-                    chunk.heading_path.clone(),
-                    chunk.source_regions.clone(),
-                )
-            })
-            .collect();
-        assert!(
-            located.contains(&EvidenceLocation::StructuredPath {
-                path: "invoices.0".into(),
-                path_type: StructuredPathType::JsonDotNotation,
-            }),
-            "a passage across one invoice's fields is at that invoice: {located:?}"
-        );
-    }
-
-    #[tokio::test]
     async fn a_source_that_does_not_parse_keeps_its_text_and_gains_no_paths() {
         let broken = b"{\"invoices\": [ truncated";
         let parsed = crate::parse::StructuredTextParser::new()
@@ -742,36 +705,5 @@ mod tests {
             .unwrap();
         assert_eq!(parsed.text, String::from_utf8_lossy(broken));
         assert!(parsed.source_regions.is_empty());
-    }
-
-    #[test]
-    fn a_passage_crossing_more_nodes_than_evidence_carries_stays_valid() {
-        let mut json = String::from("{\"rows\":[");
-        for row in 0..600 {
-            if row > 0 {
-                json.push(',');
-            }
-            json.push_str(&format!("{{\"a\":{row},\"b\":{row}}}"));
-        }
-        json.push_str("]}");
-        let document = Document::new(DocumentSource::Inline, "application/json", &json)
-            .with_source_regions(structured_regions(&json, StructuredFormat::Json));
-        let chunks = TextChunker::default()
-            .chunk(&document, "application/json")
-            .unwrap();
-        for chunk in &chunks {
-            chunk
-                .validate_source_regions()
-                .expect("a dense structured passage must still be valid evidence");
-            let located = EvidenceLocation::for_source_regions(
-                chunk.heading_path.clone(),
-                chunk.source_regions.clone(),
-            );
-            assert!(
-                matches!(located, EvidenceLocation::StructuredPath { .. })
-                    && located.is_well_formed(),
-                "every chunk of a structured source is at a node: {located:?}"
-            );
-        }
     }
 }

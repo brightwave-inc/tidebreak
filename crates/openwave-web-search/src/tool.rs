@@ -10,10 +10,7 @@ use serde_json::Value;
 use thiserror::Error;
 use url::Url;
 
-use crate::extract_source::{
-    extracted_evidence, extracted_page_result, extracted_passages, uncitable_page_result,
-    ExtractedPageSink,
-};
+use crate::extract_source::{extracted_page_result, uncitable_page_result, ExtractedPageSink};
 use crate::{
     SearchDomain, WebExtractFailure, WebExtractRequest, WebExtractResponse, WebSearchError,
     WebSearchProvider, WebSearchRequest, WebSearchResult, MAX_EXTRACT_OUTPUT_BYTES,
@@ -148,7 +145,7 @@ pub fn extract_request_from_tool_arguments(
 ///
 /// A host that supplies a [`ExtractedPageSink`] additionally makes each fetched
 /// page a source of the conversation, so a claim drawn from it can be cited,
-/// anchored, and reopened exactly like a claim drawn from an imported file. A
+/// identified, and reopened like a claim drawn from an imported file. A
 /// host without one still extracts; its pages are simply not citable, and the
 /// result says so.
 pub struct WebExtractTool {
@@ -185,22 +182,13 @@ impl WebExtractTool {
     /// model believing it can cite a page nobody kept.
     async fn citable_output(&self, ctx: &ToolCtx, response: &WebExtractResponse) -> ToolOutput {
         let Some(sink) = &self.sink else {
-            return extraction_output(response, uncitable_page_result(response), Vec::new());
+            return extraction_output(response, uncitable_page_result(response));
         };
         let Ok(stored) = sink.store_page(ctx.chat_id, response, Utc::now()).await else {
-            return extraction_output(response, uncitable_page_result(response), Vec::new());
+            return extraction_output(response, uncitable_page_result(response));
         };
-        let passages = extracted_passages(
-            &response.content,
-            openwave_core::RetrievalEvidenceInput::MAX_SNIPPET_BYTES,
-        );
-        if passages.is_empty() {
-            return extraction_output(response, uncitable_page_result(response), Vec::new());
-        }
-        let evidence = extracted_evidence(response, &stored, &passages);
-        let content =
-            extracted_page_result(response, stored.document_id, &passages, ctx.citation_format);
-        extraction_output(response, content, evidence)
+        let content = extracted_page_result(response, stored.document_id);
+        extraction_output(response, content)
     }
 }
 
@@ -272,17 +260,13 @@ impl Tool for WebExtractTool {
     }
 }
 
-/// One bounded extraction, its evidence, and its result-card row.
+/// One bounded extraction and its result-card row.
 ///
 /// `result` is already bounded by construction — the response's own content
 /// budget dominates the fixed framing around it — but the ceiling is asserted
 /// here anyway, because it is the last point before the text enters a model
 /// context.
-fn extraction_output(
-    response: &WebExtractResponse,
-    result: String,
-    evidence: Vec<openwave_core::RetrievalEvidenceInput>,
-) -> ToolOutput {
+fn extraction_output(response: &WebExtractResponse, result: String) -> ToolOutput {
     if result.len() > MAX_EXTRACT_OUTPUT_BYTES {
         return ToolOutput::error("Web page extraction returned an invalid response.");
     }
@@ -303,9 +287,7 @@ fn extraction_output(
     } else {
         format!("{} words", response.word_count)
     };
-    ToolOutput::text(result)
-        .with_entries(vec![entry.with_meta(meta)])
-        .with_private_evidence(evidence)
+    ToolOutput::text(result).with_entries(vec![entry.with_meta(meta)])
 }
 
 /// One web result as a card row.

@@ -30,10 +30,6 @@ const desktopUpdater = readFileSync(
   new URL("../crates/openwave-desktop/src/updater.rs", import.meta.url),
   "utf8",
 );
-const macosResourceSigner = readFileSync(
-  new URL("./sign-macos-release-resources.sh", import.meta.url),
-  "utf8",
-);
 
 function workflowJob(source, name) {
   const marker = `  ${name}:\n`;
@@ -100,7 +96,6 @@ test("Rust CI requires the same PostgreSQL lane on pull requests and main", () =
   const ci = workflows["ci.yml"];
   const changes = workflowJob(ci, "changes");
   const postgres = workflowJob(ci, "postgres");
-  const parsers = workflowJob(ci, "parsers");
   const testJob = workflowJob(ci, "test");
 
   assert.match(
@@ -109,7 +104,7 @@ test("Rust CI requires the same PostgreSQL lane on pull requests and main", () =
   );
   assert.doesNotMatch(ci, /^  build:$/m);
   // Scoped to the lanes that skip openwave-desktop, but still never exempted
-  // from pull requests the way the durable vector store is.
+  // from pull requests.
   assert.match(postgres, /if:.*needs\.changes\.outputs\.workspace == 'true'/);
   assert.doesNotMatch(postgres, /github\.event_name != 'pull_request'/);
   assert.match(postgres, /OPENWAVE_REQUIRE_POSTGRES_TEST: "true"/);
@@ -124,7 +119,6 @@ test("Rust CI requires the same PostgreSQL lane on pull requests and main", () =
 
   for (const job of [
     workflowJob(ci, "lint"),
-    parsers,
     workflowJob(ci, "desktop"),
     testJob,
     postgres,
@@ -140,48 +134,21 @@ test("Rust CI requires the same PostgreSQL lane on pull requests and main", () =
   assert.match(testJob, /cache-on-failure: true/);
   assert.match(
     testJob,
-    /cargo test --workspace --exclude openwave-desktop\n\s+--no-default-features\n\s+--features\n\s+openwave-core\/default,openwave-retrieval\/default,openwave-router\/default\n\s+--locked/,
+    /cargo test --workspace --exclude openwave-desktop --locked/,
   );
-  assert.match(
-    parsers,
-    /if:.*needs\.changes\.outputs\.parsers == 'true'/,
-  );
-  assert.match(ci, /parsers: \$\{\{ steps\.scope\.outputs\.parsers \}\}/);
-  assert.match(ci, /echo "parsers=\$parsers"/);
-  assert.match(
-    parsers,
-    /parser_features="parse-liteparse,parse-office,parse-image,parse-spreadsheet"/,
-  );
-  assert.match(parsers, /liteparse_parser::tests/);
-  assert.match(parsers, /liteparse_office_parser::tests/);
-  assert.match(parsers, /liteparse_image_parser::tests/);
-  assert.match(parsers, /spreadsheet_parser::tests/);
-  assert.match(
-    parsers,
-    /production_registry_routes_rich_formats_to_the_intended_parser/,
-  );
-  assert.match(parsers, /--test liteparse_pdf/);
-  assert.doesNotMatch(parsers, /cargo test -p openwave-server/);
-  assert.doesNotMatch(parsers, /Install system deps \(Tauri\)/);
+  assert.doesNotMatch(ci, /^  parsers:$/m);
+  assert.doesNotMatch(ci, /outputs\.parsers|echo "parsers=/);
 
   const desktop = workflowJob(ci, "desktop");
   assert.match(
     desktop,
-    /cargo test -p openwave-desktop --no-default-features --locked/,
-  );
-  assert.match(desktopCargo, /default = \["document-parsers"\]/);
-  assert.match(
-    desktopCargo,
-    /document-parsers = \["openwave-server\/document-parsers"\]/,
+    /cargo test -p openwave-desktop --locked/,
   );
   assert.match(
     desktopCargo,
-    /openwave-server = \{ path = "\.\.\/openwave-server", default-features = false \}/,
+    /openwave-server = \{ path = "\.\.\/openwave-server" \}/,
   );
-  assert.match(
-    changes,
-    /if \[\[ "\$parsers" == true && "\$workspace" != true \]\]; then/,
-  );
+  assert.doesNotMatch(desktopCargo, /document-parsers/);
 });
 
 test("UI tests and production build run as fixed parallel jobs", () => {
@@ -204,10 +171,8 @@ test("PR compiler caches are writable, isolated, and deleted on close", () => {
   const ci = workflows["ci.yml"];
   for (const name of [
     "lint",
-    "parsers",
     "desktop",
     "test",
-    "vectors",
     "postgres",
   ]) {
     assert.match(workflowJob(ci, name), /SCCACHE_GHA_RW_MODE: READ_WRITE/);
@@ -231,47 +196,28 @@ test("PR compiler caches are writable, isolated, and deleted on close", () => {
   assert.doesNotMatch(cleanup, /actions\/checkout|secrets\./);
 });
 
-test("heavy capability lanes run only for relevant merges and scheduled backstops", () => {
+test("the container capability lane runs only for relevant merges and scheduled backstops", () => {
   const ci = workflows["ci.yml"];
   const changes = workflowJob(ci, "changes");
-  const vectors = workflowJob(ci, "vectors");
   const sandboxContainer = workflowJob(ci, "sandbox-container");
 
   assert.match(ci, /^  schedule:\n    - cron: "17 6 \* \* 1"$/m);
   assert.match(changes, /schedule\|workflow_dispatch\)/);
-  assert.match(changes, /echo "vectors=true"/);
   assert.match(changes, /echo "sandbox_container=true"/);
 
-  // Positive scopes: feature implementations, production wiring, packaging,
-  // and dependency/toolchain inputs all exercise their expensive capability.
-  assert.match(changes, /crates\/openwave-retrieval\/\*\)/);
-  assert.match(
-    changes,
-    /crates\/openwave-server\/build\.rs\|crates\/openwave-server\/src\/lib\.rs\|crates\/openwave-server\/src\/tests\/documents\.rs\)/,
-  );
+  // Positive scopes: implementation, packaging, and dependency/toolchain
+  // inputs all exercise the expensive capability.
   assert.match(changes, /crates\/openwave-sandbox-agent\/\*/);
   assert.match(changes, /crates\/openwave-sandbox-protocol\/\*/);
   assert.match(changes, /\.cargo\/\*\|Cargo\.lock\|Cargo\.toml\|rust-toolchain\.toml\)/);
 
   // Negative scope: the generic Rust/workspace fallback deliberately does not
-  // turn either heavyweight capability on.
+  // turn the heavyweight capability on.
   assert.match(changes, /\*\) rust=true; workspace=true ;;/);
 
   assert.match(
-    vectors,
-    /if:.*needs\.changes\.outputs\.vectors == 'true'.*github\.event_name != 'pull_request'/,
-  );
-  assert.match(
-    vectors,
-    /cargo test -p openwave-server --features vec-lance --locked --lib \\\n\s+tests::documents::connect_vector_store_opens_a_durable_lance_index_under_data_dir \\\n\s+-- --exact/,
-  );
-  assert.match(
     sandboxContainer,
     /if:.*needs\.changes\.outputs\.sandbox_container == 'true'.*github\.event_name != 'pull_request'/,
-  );
-  assert.match(
-    changes,
-    /if \[\[ "\$vectors" == true && "\$workspace" != true \]\]; then/,
   );
   assert.match(
     changes,
@@ -442,10 +388,7 @@ test("release caches restore only credential-free compiler products", () => {
       cacheStep,
       /target\/\$\{\{ matrix\.target \}\}\/release\/openwave-host-broker/,
     );
-    assert.match(
-      cacheStep,
-      /crates\/openwave-desktop\/resources\/pdfium\/libpdfium\.dylib/,
-    );
+    assert.doesNotMatch(cacheStep, /pdfium/i);
     assert.doesNotMatch(cacheStep, /bundle|\.app|dmg|signature|keychain/i);
   }
 
@@ -534,27 +477,6 @@ test("the updater private key is isolated from compilation", () => {
   assert.doesNotMatch(release, /createUpdaterArtifacts/);
   assert.match(release, /tauri signer sign "\$updater_path"/);
   assert.doesNotMatch(release, /cargo tauri signer sign/);
-});
-
-test("nested macOS native resources receive a timestamped Developer ID signature", () => {
-  const release = workflows["release.yml"];
-  assert.match(release, /security import "\$certificate_path"/);
-  assert.match(release, /security find-identity -v -p codesigning/);
-  assert.ok(
-    release.indexOf("security import") <
-      release.indexOf("Build, sign, and notarize the Tauri app"),
-    "Developer ID certificate must be imported before beforeBundleCommand runs",
-  );
-  assert.match(release, /beforeBundleCommand/);
-  assert.match(release, /bash scripts\/sign-macos-release-resources\.sh/);
-  assert.match(
-    release,
-    /Contents\/Resources\/pdfium\/libpdfium\.dylib/,
-  );
-  assert.match(macosResourceSigner, /--sign "\$APPLE_SIGNING_IDENTITY"/);
-  assert.match(macosResourceSigner, /--options runtime/);
-  assert.match(macosResourceSigner, /--timestamp/);
-  assert.match(release, /security delete-keychain/);
 });
 
 test("macOS disk images are explicitly notarized and stapled", () => {

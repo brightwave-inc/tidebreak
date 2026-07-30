@@ -970,7 +970,6 @@ impl Tool for McpTool {
                     resource_uri: uri.clone(),
                 })
             }),
-            private_evidence: Vec::new(),
         })
     }
 }

@@ -122,8 +122,9 @@ describe("text_delta", () => {
     ]);
   });
 
-  it("withholds a partial source marker until the stream settles", () => {
-    const marker = "[[ow-source:0123456789abcdef0123456789abcdef]]";
+  it("withholds partial citation markup until the stream settles", () => {
+    const marker =
+      ":cit[the answer]{doc=0b2b1f2c-9d3e-4a5b-8c7d-6e5f4a3b2c1d page=2}";
     const split = 10;
     const mid = play([
       TURN,
@@ -141,18 +142,18 @@ describe("text_delta", () => {
       makeDeps(),
     );
     const lastDone = done.state.messages[done.state.messages.length - 1];
-    expect(lastDone).toMatchObject({ role: "assistant", text: "Answer " });
+    expect(lastDone).toMatchObject({ role: "assistant", text: "Answer the answer" });
   });
 
-  it("flushes a withheld non-marker tail at a terminal boundary", () => {
-    const mid = play([TURN, { type: "text_delta", text: "Answer [[ow-sour" }]);
+  it("flushes a withheld incomplete directive at a terminal boundary", () => {
+    const mid = play([TURN, { type: "text_delta", text: "Answer :cit[the" }]);
     const done = reduceChatSessionEvent(
       mid.state,
       framed(mid.state.lastSeq + 1, { type: "turn_completed" }),
       makeDeps(),
     );
     const last = done.state.messages[done.state.messages.length - 1];
-    expect(last).toMatchObject({ role: "assistant", text: "Answer [[ow-sour" });
+    expect(last).toMatchObject({ role: "assistant", text: "Answer :cit[the" });
   });
 });
 

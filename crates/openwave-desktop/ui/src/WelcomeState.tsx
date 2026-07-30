@@ -52,7 +52,7 @@ export function WelcomeState({
             <button
               key={label}
               type="button"
-              className="welcome-prompt"
+              className="flex items-center gap-2.5 rounded-[10px] border border-border bg-background px-3.5 py-2.5 text-[0.85rem] font-medium text-left text-foreground transition-[background-color,border-color] duration-[120ms] ease-in-out hover:border-[color-mix(in_srgb,var(--ink)_22%,var(--line))] hover:bg-accent [&_svg]:flex-none [&_svg]:text-muted-foreground [&:hover_svg]:text-foreground"
               onClick={() => onSelectPrompt(prompt)}
             >
               <Icon size={16} />

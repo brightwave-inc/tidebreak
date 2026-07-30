@@ -12,10 +12,7 @@ async fn test_app_with_executor_id(
         .await
         .unwrap(),
     );
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     let state = AppState::new_with_client_executor_id(
         Config::desktop(dir.path()),
         store.clone(),
@@ -91,11 +88,6 @@ async fn embedded_renderer_bearer_cannot_reach_canonical_document_routes() {
         ("GET", format!("/documents/{document_id}"), Body::empty()),
         (
             "POST",
-            "/search".to_owned(),
-            Body::from(r#"{"query":"private-content-sentinel"}"#),
-        ),
-        (
-            "POST",
             "/documents".to_owned(),
             Body::from(ingest_body.to_string()),
         ),
@@ -114,11 +106,6 @@ async fn embedded_renderer_bearer_cannot_reach_canonical_document_routes() {
             "GET",
             format!("/projects/{project_id}/documents/{document_id}"),
             Body::empty(),
-        ),
-        (
-            "POST",
-            format!("/projects/{project_id}/search"),
-            Body::from(r#"{"query":"private-content-sentinel"}"#),
         ),
     ] {
         let response = router
@@ -142,7 +129,6 @@ async fn embedded_renderer_bearer_cannot_reach_canonical_document_routes() {
             "review-sentinel",
             "private-content-sentinel",
             "content_revision",
-            "index_fingerprint",
         ] {
             assert!(
                 !body.contains(sentinel),

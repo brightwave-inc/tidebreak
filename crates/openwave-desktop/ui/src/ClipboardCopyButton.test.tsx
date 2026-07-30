@@ -19,7 +19,6 @@ describe("ClipboardCopyButton", () => {
     );
 
     expect(markup).toContain('aria-label="Copy table contents"');
-    expect(markup).toContain('title="Copy table contents"');
     expect(markup).toContain('role="status"');
     expect(markup).toContain('aria-live="polite"');
   });

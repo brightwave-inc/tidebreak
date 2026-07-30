@@ -37,9 +37,6 @@ pub mod document_generation {
         pub content_revision: i64,
         pub revision_token: Uuid,
         pub tombstone: bool,
-        pub retirement_pending: bool,
-        pub retirement_content_revision: Option<i64>,
-        pub retirement_revision_token: Option<Uuid>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -71,11 +68,8 @@ pub mod document {
         pub content_revision: i64,
         pub revision_token: Uuid,
         pub processing_status: String,
-        pub indexed_revision: Option<i64>,
-        pub index_fingerprint: Option<String>,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
-        pub indexed_at: Option<DateTimeUtc>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -158,7 +152,6 @@ pub mod chat {
         pub model: Option<String>,
         pub reasoning_effort: Option<String>,
         pub permission_mode: Option<String>,
-        pub citation_format: Option<String>,
         pub attachment_revision: i64,
         pub created_at: DateTimeUtc,
     }
@@ -1110,46 +1103,6 @@ pub mod standing_tool_grant {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
-pub mod retrieval_evidence {
-    use sea_orm::entity::prelude::*;
-
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "retrieval_evidence")]
-    pub struct Model {
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub call_id: Uuid,
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub rank: i32,
-        pub source_token: Uuid,
-        pub chat_id: Uuid,
-        pub turn_id: Uuid,
-        pub document_id: Uuid,
-        pub content_revision: i64,
-        pub revision_token: Uuid,
-        pub chunk_id: Uuid,
-        pub span_start: i64,
-        pub span_end: i64,
-        pub snippet: String,
-        #[sea_orm(column_type = "JsonBinary")]
-        pub heading_path: Json,
-        #[sea_orm(column_type = "JsonBinary")]
-        pub source_regions: Json,
-        pub source_kind: String,
-        pub source_uri: Option<String>,
-        /// Location payload for a kind other than document content, whose
-        /// headings and regions stay in the two columns above. Absent on every
-        /// row written before evidence had kinds — which are all document
-        /// content — so no row needs rewriting.
-        #[sea_orm(column_type = "JsonBinary", nullable)]
-        pub location: Option<Json>,
-    }
-
-    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {}
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
 pub mod assistant_citation {
     use sea_orm::entity::prelude::*;
 
@@ -1160,34 +1113,24 @@ pub mod assistant_citation {
         pub id: Uuid,
         pub message_id: Uuid,
         pub ordinal: i32,
-        pub chat_id: Uuid,
-        pub turn_id: Uuid,
-        pub evidence_call_id: Uuid,
-        pub evidence_rank: i32,
+        pub document_id: Uuid,
+        #[sea_orm(column_type = "JsonBinary")]
+        pub locator: Json,
     }
 
-    #[derive(Copy, Clone, Debug, EnumIter)]
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
     pub enum Relation {
-        RetrievalEvidence,
+        #[sea_orm(
+            belongs_to = "super::message::Entity",
+            from = "Column::MessageId",
+            to = "super::message::Column::Id"
+        )]
+        Message,
     }
 
-    impl RelationTrait for Relation {
-        fn def(&self) -> RelationDef {
-            match self {
-                Self::RetrievalEvidence => Entity::belongs_to(super::retrieval_evidence::Entity)
-                    .from((Column::EvidenceCallId, Column::EvidenceRank))
-                    .to((
-                        super::retrieval_evidence::Column::CallId,
-                        super::retrieval_evidence::Column::Rank,
-                    ))
-                    .into(),
-            }
-        }
-    }
-
-    impl Related<super::retrieval_evidence::Entity> for Entity {
+    impl Related<super::message::Entity> for Entity {
         fn to() -> RelationDef {
-            Relation::RetrievalEvidence.def()
+            Relation::Message.def()
         }
     }
 
@@ -1280,55 +1223,6 @@ pub mod output_revision {
     impl Related<super::output::Entity> for Entity {
         fn to() -> RelationDef {
             Relation::Output.def()
-        }
-    }
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
-pub mod output_revision_citation {
-    use sea_orm::entity::prelude::*;
-
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "output_revision_citation")]
-    pub struct Model {
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub id: Uuid,
-        pub output_revision_id: Uuid,
-        pub ordinal: i32,
-        pub chat_id: Uuid,
-        pub turn_id: Uuid,
-        pub evidence_call_id: Uuid,
-        pub evidence_rank: i32,
-    }
-
-    #[derive(Copy, Clone, Debug, EnumIter)]
-    pub enum Relation {
-        OutputRevision,
-        RetrievalEvidence,
-    }
-
-    impl RelationTrait for Relation {
-        fn def(&self) -> RelationDef {
-            match self {
-                Self::OutputRevision => Entity::belongs_to(super::output_revision::Entity)
-                    .from(Column::OutputRevisionId)
-                    .to(super::output_revision::Column::Id)
-                    .into(),
-                Self::RetrievalEvidence => Entity::belongs_to(super::retrieval_evidence::Entity)
-                    .from((Column::EvidenceCallId, Column::EvidenceRank))
-                    .to((
-                        super::retrieval_evidence::Column::CallId,
-                        super::retrieval_evidence::Column::Rank,
-                    ))
-                    .into(),
-            }
-        }
-    }
-
-    impl Related<super::retrieval_evidence::Entity> for Entity {
-        fn to() -> RelationDef {
-            Relation::RetrievalEvidence.def()
         }
     }
 

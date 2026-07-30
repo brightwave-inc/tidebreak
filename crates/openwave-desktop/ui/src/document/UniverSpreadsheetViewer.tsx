@@ -14,9 +14,8 @@ import type { HTMLAttributes, ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { ApiClient } from "@/api";
-import { useApp } from "@/AppContext";
 import { cn } from "@/lib/utils";
-import { resolveTheme } from "@/theme";
+import { useTheme } from "@/theme";
 import UniverFormulaWorker from "@/workers/univer-formula.worker?worker&inline";
 import { SpreadsheetShortcutsInfoBar } from "./SpreadsheetShortcutsInfo";
 import { parseCellAddress } from "./spreadsheet";
@@ -72,8 +71,7 @@ export default function UniverSpreadsheetViewer({
   highlightRangeRef.current = highlightRange;
   const [errorType, setErrorType] = useState<"parse" | "load" | null>(null);
   const univerWorker = useUniverWorker();
-  const { themeMode } = useApp();
-  const resolvedTheme = resolveTheme(themeMode);
+  const { resolved: resolvedTheme } = useTheme();
   const resolvedThemeRef = useRef(resolvedTheme);
   resolvedThemeRef.current = resolvedTheme;
 
@@ -444,16 +442,6 @@ function applyHighlight(
   instance: UniverInstance,
   highlightRange: SheetHighlightRange,
 ) {
-  if (!highlightRange.startCell) return;
-
-  const start = parseCellAddress(highlightRange.startCell);
-  if (!start) return;
-
-  const end = highlightRange.endCell
-    ? parseCellAddress(highlightRange.endCell)
-    : start;
-  if (!end) return;
-
   const { api: univerAPI, workbookData } = instance;
   const activeWorkbook = univerAPI.getActiveWorkbook();
   if (!activeWorkbook) return;
@@ -471,6 +459,14 @@ function applyHighlight(
   if (targetSheetName) {
     activeWorkbook.getSheetByName(targetSheetName)?.activate();
   }
+
+  if (!highlightRange.startCell) return;
+  const start = parseCellAddress(highlightRange.startCell);
+  if (!start) return;
+  const end = highlightRange.endCell
+    ? parseCellAddress(highlightRange.endCell)
+    : start;
+  if (!end) return;
 
   const activeSheet = activeWorkbook.getActiveSheet();
   if (!activeSheet) return;

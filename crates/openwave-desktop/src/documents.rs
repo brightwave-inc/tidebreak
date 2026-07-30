@@ -59,7 +59,7 @@ struct CatalogDocument {
     source_byte_len: Option<u64>,
     content_revision: i64,
     processing_status: DocumentProcessingStatus,
-    searchable: bool,
+    readable: bool,
     updated_at: String,
 }
 
@@ -78,7 +78,7 @@ pub(crate) struct LibraryDocument {
     media_type: String,
     size_bytes: Option<u64>,
     processing_status: DocumentProcessingStatus,
-    searchable: bool,
+    readable: bool,
     failure: Option<LibraryDocumentFailure>,
     updated_at: String,
 }
@@ -100,7 +100,7 @@ impl LibraryDocument {
             media_type: document.media_type,
             size_bytes: document.source_byte_len,
             processing_status: document.processing_status,
-            searchable: document.searchable,
+            readable: document.readable,
             failure,
             updated_at: document.updated_at,
         }
@@ -1069,14 +1069,6 @@ async fn library_document_failure(
 
 fn failure_projection(code: Option<&str>) -> LibraryDocumentFailure {
     let (message, retriable) = match code {
-        Some("embedding_failed") => (
-            "OpenWave could not prepare this source for search. Check the model connection, then retry.",
-            true,
-        ),
-        Some("vector_store_failed" | "index_failed") => (
-            "The local search index was unavailable. Retry preparing this source.",
-            true,
-        ),
         Some("source_blob_read_failed") => (
             "OpenWave could not read the stored file. Retry, or delete it and add it again if the problem continues.",
             true,
@@ -1097,11 +1089,7 @@ fn failure_projection(code: Option<&str>) -> LibraryDocumentFailure {
             "The stored file is unavailable or damaged. Delete this source and add the file again.",
             false,
         ),
-        Some("dimension_mismatch" | "generation_conflict") => (
-            "This source no longer matches the current search index. Delete it and add the file again.",
-            false,
-        ),
-        Some("generation_fenced" | "activation_fenced" | "invalid_document_stage") => (
+        Some("invalid_document_stage") => (
             "This source was superseded while it was being prepared. Delete it and add the file again.",
             false,
         ),
@@ -1168,7 +1156,7 @@ fn streaming_local_client() -> reqwest::Client {
 
 async fn pick_document(app: &AppHandle) -> Result<Option<PathBuf>, String> {
     let (tx, rx) = oneshot::channel();
-    // Any file may be imported: text-like formats are indexed and searchable,
+    // Any file may be imported: text-like formats are indexed and readable,
     // and the rest are stored so they can still be worked with. No filter is set
     // so the native picker never greys out a file for its type.
     let mut picker = app.dialog().file().set_title("Import a document");
@@ -1555,7 +1543,6 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
-            citation_format: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: chrono::Utc::now(),
@@ -1822,7 +1809,7 @@ mod tests {
                 source_byte_len: Some(42),
                 content_revision: 1,
                 processing_status: DocumentProcessingStatus::Ready,
-                searchable: true,
+                readable: true,
                 updated_at: "2026-07-18T00:00:00Z".to_owned(),
             },
             None,
@@ -1841,7 +1828,7 @@ mod tests {
                 "failure",
                 "mediaType",
                 "processingStatus",
-                "searchable",
+                "readable",
                 "sizeBytes",
                 "title",
                 "updatedAt"
@@ -1856,9 +1843,6 @@ mod tests {
     #[test]
     fn failure_projection_offers_retry_only_for_recoverable_worker_failures() {
         for code in [
-            "embedding_failed",
-            "vector_store_failed",
-            "index_failed",
             "source_blob_read_failed",
             "pipeline_changed",
             "lease_expired",
@@ -1872,10 +1856,6 @@ mod tests {
             "source_blob_missing",
             "source_blob_length_mismatch",
             "source_blob_digest_mismatch",
-            "dimension_mismatch",
-            "generation_conflict",
-            "generation_fenced",
-            "activation_fenced",
             "invalid_document_stage",
             "unknown",
         ] {

@@ -46,46 +46,6 @@ impl ByteSpan {
     }
 }
 
-/// Scale of [`PageBounds`] coordinates: one unit is 1/10000 of the page box.
-pub const PAGE_BOUNDS_SCALE: u16 = 10_000;
-
-/// A rectangle on a page, in the page's own normalized coordinate space.
-///
-/// Coordinates are fractions of the page's width and height with the origin at
-/// the top-left corner, expressed in ten-thousandths ([`PAGE_BOUNDS_SCALE`]).
-/// Normalizing to the page box is what lets a viewer draw the rectangle at any
-/// zoom or render size — multiply by the rendered page and place it — without
-/// knowing the page dimensions the parser saw.
-///
-/// Fixed-point rather than floating-point on purpose: these travel through JSON
-/// and comparisons, and integers round-trip exactly, keep the enclosing types
-/// `Eq`/`Hash`, and make containment in the page an invariant that can actually
-/// be checked. A ten-thousandth of a US Letter page is ~0.06pt — far finer than
-/// any highlight needs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
-pub struct PageBounds {
-    /// Distance from the page's left edge.
-    pub left: u16,
-    /// Distance from the page's top edge.
-    pub top: u16,
-    /// Width of the rectangle.
-    pub width: u16,
-    /// Height of the rectangle.
-    pub height: u16,
-}
-
-impl PageBounds {
-    /// Whether the rectangle is nonempty and falls entirely within the page.
-    #[must_use]
-    pub const fn is_valid(&self) -> bool {
-        // Saturating: an out-of-range pair must fail the check, not overflow.
-        self.width > 0
-            && self.height > 0
-            && self.left.saturating_add(self.width) <= PAGE_BOUNDS_SCALE
-            && self.top.saturating_add(self.height) <= PAGE_BOUNDS_SCALE
-    }
-}
-
 /// Format-specific location in the original source represented by canonical text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -95,14 +55,6 @@ pub enum SourceLocation {
     Page {
         /// One-based page number.
         number: NonZeroU32,
-        /// Where on the page the canonical text sits, when the parser resolved
-        /// it that finely. `None` means the span is known only to be somewhere
-        /// on this page — a page-granular parser, or a block whose position on
-        /// the page could not be recovered. Optional rather than a separate
-        /// variant so that "what page is this on?" stays one match arm whether
-        /// or not geometry is present.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        bounds: Option<PageBounds>,
     },
     /// One node of a structured source — a JSON value, an XML or HTML element.
     ///
@@ -274,15 +226,9 @@ pub fn validate_source_regions(
             return Err("source regions must be ordered and nonoverlapping");
         }
         match &region.location {
-            SourceLocation::Page { bounds, .. } => {
-                if bounds.is_some_and(|bounds| !bounds.is_valid()) {
-                    return Err("source region bounds must be nonempty and within the page");
-                }
-            }
+            SourceLocation::Page { .. } => {}
             SourceLocation::StructuredPath { path, .. } => {
-                if path.is_empty()
-                    || path.len() > EvidenceLocation::MAX_STRUCTURED_PATH_BYTES
-                    || path.contains('\0')
+                if path.is_empty() || path.len() > MAX_STRUCTURED_PATH_BYTES || path.contains('\0')
                 {
                     return Err("structured source region paths must be nonempty and bounded");
                 }
@@ -297,7 +243,7 @@ pub fn validate_source_regions(
                     || !end_cell.as_deref().is_none_or(is_a1_reference)
                     || *sheet_index < 0
                     || sheet_name.is_empty()
-                    || sheet_name.len() > EvidenceLocation::MAX_SHEET_NAME_BYTES
+                    || sheet_name.len() > MAX_SHEET_NAME_BYTES
                     || sheet_name.contains('\0')
                 {
                     return Err("spreadsheet source regions must name a sheet and A1 cells");
@@ -310,9 +256,14 @@ pub fn validate_source_regions(
 }
 
 use crate::id::{
-    AgentRunId, CallId, ChatId, ChunkId, DocumentId, DocumentJobId, HostRootId, MessageId,
-    ProjectId, RootAttachmentChangeId, TurnId,
+    AgentRunId, CallId, ChatId, DocumentId, DocumentJobId, HostRootId, MessageId, ProjectId,
+    RootAttachmentChangeId, TurnId,
 };
+
+const MAX_CELL_COLUMN_LETTERS: usize = 3;
+const MAX_CELL_ROW_DIGITS: usize = 7;
+const MAX_SHEET_NAME_BYTES: usize = 1024;
+const MAX_STRUCTURED_PATH_BYTES: usize = 4 * 1024;
 
 /// Maximum number of host roots projected onto one project or conversation.
 ///
@@ -715,7 +666,7 @@ pub enum DocumentProcessingStatus {
     Queued,
     /// A worker owns the current processing job.
     Processing,
-    /// The current revision is fully represented in the derived index.
+    /// The current revision's text of record is published and readable.
     Ready,
     /// Processing exhausted retries or hit a permanent failure.
     Failed,
@@ -736,39 +687,40 @@ impl DocumentProcessingStatus {
 
 /// What a caller can actually do with a source right now.
 ///
-/// The durable lifecycle and the searchability of the parsed result are two
+/// The durable lifecycle and whether parsing produced any text are two
 /// separate facts, and neither alone answers the question a caller has. `Ready`
 /// on its own says a pipeline finished, not that it found anything; a source
-/// that parsed to nothing is `Ready` and unsearchable forever. Collapsing both
-/// facts into one value keeps callers from reading "finished" as "usable".
+/// that parsed to nothing is `Ready` and holds no readable text forever.
+/// Collapsing both facts into one value keeps callers from reading "finished"
+/// as "usable".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum SourceReadiness {
-    /// Still being parsed or indexed. Checking again later may change this.
+    /// Still being parsed. Checking again later may change this.
     Processing,
-    /// Parsed, indexed, and matchable by a search of this conversation.
-    Searchable,
-    /// Durably stored and citable by name, but nothing in it can be searched.
+    /// Parsed to text a reader can be given.
+    Readable,
+    /// Durably stored and citable by name, but holding no text to read.
     ///
     /// A scan without OCR, or a format whose parser is not installed on this
     /// host. Waiting will not change this; reprocessing might.
-    StoredNotSearchable,
+    StoredNoText,
     /// Processing exhausted retries or hit a permanent failure.
     Failed,
 }
 
 impl SourceReadiness {
-    /// Combine the durable lifecycle with whether anything became searchable.
+    /// Combine the durable lifecycle with whether any text was extracted.
     #[must_use]
-    pub const fn of(status: DocumentProcessingStatus, searchable: bool) -> Self {
+    pub const fn of(status: DocumentProcessingStatus, readable: bool) -> Self {
         match status {
             DocumentProcessingStatus::Queued | DocumentProcessingStatus::Processing => {
                 Self::Processing
             }
             DocumentProcessingStatus::Failed => Self::Failed,
-            DocumentProcessingStatus::Ready if searchable => Self::Searchable,
-            DocumentProcessingStatus::Ready => Self::StoredNotSearchable,
+            DocumentProcessingStatus::Ready if readable => Self::Readable,
+            DocumentProcessingStatus::Ready => Self::StoredNoText,
         }
     }
 
@@ -777,8 +729,8 @@ impl SourceReadiness {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Processing => "processing",
-            Self::Searchable => "searchable",
-            Self::StoredNotSearchable => "stored_not_searchable",
+            Self::Readable => "readable",
+            Self::StoredNoText => "stored_no_text",
             Self::Failed => "failed",
         }
     }
@@ -791,8 +743,6 @@ impl SourceReadiness {
 pub enum DocumentJobKind {
     /// Parse immutable raw source bytes into canonical text and provenance.
     Parse,
-    /// Chunk and embed canonical content into the derived retrieval index.
-    Index,
 }
 
 impl DocumentJobKind {
@@ -801,7 +751,6 @@ impl DocumentJobKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Parse => "parse",
-            Self::Index => "index",
         }
     }
 }
@@ -929,240 +878,6 @@ pub struct DocumentGeneration {
     pub revision_token: Uuid,
 }
 
-/// Immutable provenance captured at retrieval time.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RetrievalEvidenceSource {
-    Uri { uri: String },
-    Inline,
-}
-
-/// How a passage addresses the place it was taken from.
-///
-/// A position in a source is not one shape: prose is a span of canonical text,
-/// a spreadsheet passage is a cell range on a named sheet, and a passage from a
-/// structured document is a path to a node. The discriminant is what lets a
-/// reader open the right one, so it travels with the evidence rather than being
-/// inferred later from the document's media type.
-///
-/// Document content is the only kind produced today; the others are declared
-/// and validated so that the pipelines which produce them are additive.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum EvidenceLocation {
-    /// A passage of canonical text, addressed by the evidence's own byte span.
-    DocumentContent {
-        /// Section headings above the passage, outermost first.
-        heading_path: Vec<String>,
-        /// Parser mappings from the passage back into the original source.
-        source_regions: Vec<SourceRegion>,
-    },
-    /// A cell or rectangular range on one sheet of a workbook.
-    SpreadsheetCellRange {
-        /// First cell of the range, in A1 notation.
-        start_cell: String,
-        /// Last cell of the range, in A1 notation, for a range wider than one
-        /// cell.
-        end_cell: Option<String>,
-        /// Zero-based position of the sheet in the workbook.
-        sheet_index: i32,
-        /// The sheet's own name, which is what a reader is shown.
-        sheet_name: String,
-    },
-    /// A node of a structured document, addressed by path.
-    StructuredPath {
-        /// The path itself, interpreted according to `path_type`.
-        path: String,
-        /// How to read the path.
-        path_type: StructuredPathType,
-    },
-}
-
-impl EvidenceLocation {
-    /// Longest accepted A1 reference: three column letters and seven row
-    /// digits are the widest and tallest a worksheet addresses.
-    const MAX_CELL_COLUMN_LETTERS: usize = 3;
-    const MAX_CELL_ROW_DIGITS: usize = 7;
-    pub const MAX_SHEET_NAME_BYTES: usize = 1024;
-    pub const MAX_STRUCTURED_PATH_BYTES: usize = 4 * 1024;
-
-    /// Section headings above a document-content passage, outermost first.
-    /// Empty for every other kind, which carries no heading trail.
-    #[must_use]
-    pub fn heading_path(&self) -> &[String] {
-        match self {
-            Self::DocumentContent { heading_path, .. } => heading_path,
-            Self::SpreadsheetCellRange { .. } | Self::StructuredPath { .. } => &[],
-        }
-    }
-
-    /// Parser mappings from a document-content passage back into its source.
-    /// Empty for every other kind, which addresses the source directly.
-    #[must_use]
-    pub fn source_regions(&self) -> &[SourceRegion] {
-        match self {
-            Self::DocumentContent { source_regions, .. } => source_regions,
-            Self::SpreadsheetCellRange { .. } | Self::StructuredPath { .. } => &[],
-        }
-    }
-
-    /// Whether this location is well formed on its own terms.
-    ///
-    /// Only the invariants a location can be judged by alone. A document
-    /// passage's regions are additionally checked against the span and snippet
-    /// they map, which is not knowable from here.
-    #[must_use]
-    pub fn is_well_formed(&self) -> bool {
-        match self {
-            Self::DocumentContent {
-                heading_path,
-                source_regions,
-            } => {
-                let heading_bytes = heading_path
-                    .iter()
-                    .try_fold(0_usize, |total, heading| total.checked_add(heading.len()));
-                heading_path.len() <= RetrievalEvidenceInput::MAX_HEADING_SEGMENTS
-                    && heading_bytes
-                        .is_some_and(|bytes| bytes <= RetrievalEvidenceInput::MAX_HEADING_BYTES)
-                    && !heading_path.iter().any(|heading| heading.contains('\0'))
-                    && source_regions.len() <= RetrievalEvidenceInput::MAX_SOURCE_REGIONS
-            }
-            Self::SpreadsheetCellRange {
-                start_cell,
-                end_cell,
-                sheet_index,
-                sheet_name,
-            } => {
-                is_a1_reference(start_cell)
-                    && end_cell.as_deref().is_none_or(is_a1_reference)
-                    && *sheet_index >= 0
-                    && !sheet_name.is_empty()
-                    && sheet_name.len() <= Self::MAX_SHEET_NAME_BYTES
-                    && !sheet_name.contains('\0')
-            }
-            Self::StructuredPath { path, .. } => {
-                !path.is_empty()
-                    && path.len() <= Self::MAX_STRUCTURED_PATH_BYTES
-                    && !path.contains('\0')
-            }
-        }
-    }
-
-    /// The location a passage occupies, given the parser regions its span maps
-    /// to and the headings above it.
-    ///
-    /// The regions decide the kind. A parser that resolved a structured source
-    /// hands back node paths, and a passage covering several of them is at the
-    /// node that contains them all — the enclosing record of three quoted
-    /// fields, not the first of the three. When the passage covers so much of
-    /// the tree that the only common node is the root, which has no path, the
-    /// first node it touches is where a reader is sent instead. A parser that
-    /// resolved a workbook hands back cells, and a passage covering several is
-    /// the rectangle enclosing them. Anything else is document content, which
-    /// is what pages, headings, and geometry describe.
-    #[must_use]
-    pub fn for_source_regions(
-        heading_path: Vec<String>,
-        source_regions: Vec<SourceRegion>,
-    ) -> Self {
-        if let Some(cells) = source_regions
-            .first()
-            .and_then(|region| region.location.spreadsheet_cells())
-        {
-            return Self::spreadsheet_cell_range(cells, &source_regions);
-        }
-        let Some((first, path_type)) = source_regions
-            .first()
-            .and_then(|region| region.location.structured_path())
-        else {
-            return Self::DocumentContent {
-                heading_path,
-                source_regions,
-            };
-        };
-        let mut common = first;
-        for region in &source_regions[1..] {
-            let Some((path, kind)) = region.location.structured_path() else {
-                continue;
-            };
-            if kind != path_type {
-                continue;
-            }
-            common = path_type.common_ancestor(common, path);
-        }
-        let path = if common.is_empty() { first } else { common };
-        Self::StructuredPath {
-            path: path.to_owned(),
-            path_type,
-        }
-    }
-
-    /// The rectangle of `sheet` that `regions` occupy, given the first of them.
-    ///
-    /// A cell range names one sheet, so only the regions on the sheet the
-    /// passage started on widen it. A passage that runs off the end of one sheet
-    /// and into the next is located on the first, covering the cells it read
-    /// there — the alternative is a range spanning two grids, which addresses
-    /// nothing a reader can be shown.
-    fn spreadsheet_cell_range(sheet: SpreadsheetCells<'_>, regions: &[SourceRegion]) -> Self {
-        let mut top_left = CellAddress::parse(sheet.start_cell);
-        let mut bottom_right = sheet.end_cell.map_or(top_left, CellAddress::parse);
-        for region in regions {
-            let Some(cells) = region.location.spreadsheet_cells() else {
-                continue;
-            };
-            if cells.sheet_index != sheet.sheet_index {
-                continue;
-            }
-            for cell in [Some(cells.start_cell), cells.end_cell]
-                .into_iter()
-                .flatten()
-                .filter_map(CellAddress::parse)
-            {
-                top_left = Some(match top_left {
-                    Some(corner) => CellAddress {
-                        column: corner.column.min(cell.column),
-                        row: corner.row.min(cell.row),
-                    },
-                    None => cell,
-                });
-                bottom_right = Some(match bottom_right {
-                    Some(corner) => CellAddress {
-                        column: corner.column.max(cell.column),
-                        row: corner.row.max(cell.row),
-                    },
-                    None => cell,
-                });
-            }
-        }
-        // Cells that do not read as A1, or a rectangle whose corners cannot be
-        // written back as A1, leave the range unresolved. Passing the parser's
-        // own text through keeps the location honest — it is checked by
-        // `is_well_formed` like any other, and a reader is not sent to a cell
-        // that was invented here.
-        let resolved = top_left.zip(bottom_right).and_then(|(start, end)| {
-            let start_cell = start.to_a1()?;
-            let end_cell = if start == end {
-                None
-            } else {
-                Some(end.to_a1()?)
-            };
-            Some((start_cell, end_cell))
-        });
-        let (start_cell, end_cell) = resolved.unwrap_or_else(|| {
-            (
-                sheet.start_cell.to_owned(),
-                sheet.end_cell.map(str::to_owned),
-            )
-        });
-        Self::SpreadsheetCellRange {
-            start_cell,
-            end_cell,
-            sheet_index: sheet.sheet_index,
-            sheet_name: sheet.sheet_name.to_owned(),
-        }
-    }
-}
-
 /// How the `path` of a structured-path evidence location is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
@@ -1218,44 +933,10 @@ impl StructuredPathType {
 fn is_a1_reference(cell: &str) -> bool {
     let column_letters = cell.bytes().take_while(u8::is_ascii_alphabetic).count();
     let (column, row) = cell.split_at(column_letters);
-    (1..=EvidenceLocation::MAX_CELL_COLUMN_LETTERS).contains(&column.len())
-        && (1..=EvidenceLocation::MAX_CELL_ROW_DIGITS).contains(&row.len())
+    (1..=MAX_CELL_COLUMN_LETTERS).contains(&column.len())
+        && (1..=MAX_CELL_ROW_DIGITS).contains(&row.len())
         && row.bytes().all(|byte| byte.is_ascii_digit())
         && !row.starts_with('0')
-}
-
-/// One bounded, generation-fenced passage produced by a search tool.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RetrievalEvidenceInput {
-    pub rank: u16,
-    /// Random opaque identity shown to the model instead of database keys.
-    pub source_token: Uuid,
-    pub document_id: DocumentId,
-    pub generation: DocumentGeneration,
-    pub chunk_id: ChunkId,
-    pub span: ByteSpan,
-    pub snippet: String,
-    /// Where the passage sits in its source, and in what terms.
-    pub location: EvidenceLocation,
-    pub source: RetrievalEvidenceSource,
-}
-
-impl RetrievalEvidenceInput {
-    pub const MAX_RESULTS: usize = 20;
-    pub const MAX_SNIPPET_BYTES: usize = 32 * 1024;
-    pub const MAX_HEADING_SEGMENTS: usize = 32;
-    pub const MAX_HEADING_BYTES: usize = 4 * 1024;
-    pub const MAX_SOURCE_REGIONS: usize = 128;
-    pub const MAX_SOURCE_URI_BYTES: usize = 8 * 1024;
-}
-
-/// A private evidence snapshot durably tied to one canonical tool call.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RetrievalEvidence {
-    pub call_id: CallId,
-    pub chat_id: ChatId,
-    pub turn_id: TurnId,
-    pub evidence: RetrievalEvidenceInput,
 }
 
 /// An authoritative source document whose derived chunks live in the retrieval
@@ -1294,19 +975,10 @@ pub struct DocumentRecord {
     pub revision_token: Uuid,
     /// Processing lifecycle of the current authoritative revision.
     pub processing_status: DocumentProcessingStatus,
-    /// Revision currently represented in the retrieval index, if any.
-    pub indexed_revision: Option<i64>,
-    /// Chunker/embedder fingerprint for the indexed revision.
-    ///
-    /// Parser provenance is separate because reparsing requires original source
-    /// bytes; canonical text alone can only be rechunked and re-embedded.
-    pub index_fingerprint: Option<String>,
     /// When this record was first created.
     pub created_at: DateTime<Utc>,
     /// When authoritative content or metadata last changed.
     pub updated_at: DateTime<Utc>,
-    /// When the current index watermark was recorded.
-    pub indexed_at: Option<DateTime<Utc>>,
 }
 
 impl DocumentRecord {
@@ -1319,13 +991,13 @@ impl DocumentRecord {
         }
     }
 
-    /// Whether this revision contributed text a search can match.
+    /// Whether this revision holds text a reader can be given.
     ///
-    /// Empty canonical text means the parser ran and found nothing to index —
-    /// an image without OCR, or a format whose parser is not installed. The
-    /// bytes are still retained, so a later reprocess can change this answer.
+    /// Empty canonical text means the parser ran and found nothing — an image
+    /// without OCR, or a format whose parser is not installed. The bytes are
+    /// still retained, so a later reprocess can change this answer.
     #[must_use]
-    pub fn is_searchable(&self) -> bool {
+    pub fn is_readable(&self) -> bool {
         self.processing_status == DocumentProcessingStatus::Ready && !self.canonical_text.is_empty()
     }
 }
@@ -1335,8 +1007,7 @@ impl DocumentRecord {
 /// Expensive work happens outside the operational database transaction. Every
 /// operational-state mutation must therefore present `lease_token` and still
 /// match the job's `(document_id, content_revision, revision_token)`. This fences
-/// stale database completion; derived stores such as the vector index also need
-/// generation-aware publication before multi-worker execution is safe.
+/// stale database completion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocumentJob {
     /// Stable job identity.
@@ -1511,32 +1182,26 @@ pub struct DocumentSummaryRecord {
     pub content_revision: i64,
     /// Processing lifecycle of the current authoritative revision.
     pub processing_status: DocumentProcessingStatus,
-    /// Whether the current revision contributed text a search can match.
+    /// Whether the current revision holds text a reader can be given.
     ///
     /// Processing that finishes is not the same as processing that found
     /// something. A scanned image, or a format whose parser is not installed on
     /// this host, produces a document that is durably stored and citable by
-    /// name but that no query will ever return. Keeping this separate from
+    /// name but whose text no reader will ever see. Keeping this separate from
     /// [`DocumentProcessingStatus::Ready`] stops that outcome from being
     /// presented as a fully usable source.
-    pub searchable: bool,
-    /// Revision currently represented in the retrieval index, if any.
-    pub indexed_revision: Option<i64>,
-    /// Chunker/embedder fingerprint for the indexed revision.
-    pub index_fingerprint: Option<String>,
+    pub readable: bool,
     /// When this record was first created.
     pub created_at: DateTime<Utc>,
     /// When authoritative content or metadata last changed.
     pub updated_at: DateTime<Utc>,
-    /// When the current index watermark was recorded.
-    pub indexed_at: Option<DateTime<Utc>>,
 }
 
 impl DocumentSummaryRecord {
     /// What a caller can do with this source right now.
     #[must_use]
     pub const fn readiness(&self) -> SourceReadiness {
-        SourceReadiness::of(self.processing_status, self.searchable)
+        SourceReadiness::of(self.processing_status, self.readable)
     }
 }
 
@@ -1785,9 +1450,6 @@ pub struct Chat {
     /// How much this chat lets the agent do between approvals; `None` means
     /// [`PermissionMode::Ask`].
     pub permission_mode: Option<PermissionMode>,
-    /// How turns in this chat ask the model to cite; `None` follows the global
-    /// default.
-    pub citation_format: Option<crate::citation::CitationFormat>,
     /// CAS revision of this conversation's exact root projection.
     pub attachment_revision: i64,
     /// Ordered opaque roots available for future broker-backed operations.
@@ -3235,10 +2897,6 @@ mod tests {
             "\"processing\""
         );
         assert_eq!(
-            serde_json::to_string(&DocumentJobKind::Index).unwrap(),
-            "\"index\""
-        );
-        assert_eq!(
             serde_json::to_string(&DocumentJobKind::Parse).unwrap(),
             "\"parse\""
         );
@@ -3365,7 +3023,6 @@ mod tests {
             span: ByteSpan::new(start, end),
             location: SourceLocation::Page {
                 number: NonZeroU32::new(page).unwrap(),
-                bounds: None,
             },
         }
     }
@@ -3388,65 +3045,6 @@ mod tests {
         assert!(
             validate_source_regions(text, &[page_region(2, 4, 2), page_region(0, 1, 1)]).is_err()
         );
-    }
-
-    #[test]
-    fn source_region_validation_rejects_bounds_outside_the_page() {
-        let text = "aéz";
-        let bounded = |bounds: PageBounds| {
-            vec![SourceRegion {
-                span: ByteSpan::new(0, 3),
-                location: SourceLocation::Page {
-                    number: NonZeroU32::new(1).unwrap(),
-                    bounds: Some(bounds),
-                },
-            }]
-        };
-        let full_page = PageBounds {
-            left: 0,
-            top: 0,
-            width: PAGE_BOUNDS_SCALE,
-            height: PAGE_BOUNDS_SCALE,
-        };
-        assert_eq!(validate_source_regions(text, &bounded(full_page)), Ok(()));
-        // A box a viewer would draw off the page, and a box with no area, are
-        // both geometry we would rather reject than store and render wrong.
-        assert!(validate_source_regions(
-            text,
-            &bounded(PageBounds {
-                left: 1,
-                ..full_page
-            })
-        )
-        .is_err());
-        assert!(validate_source_regions(
-            text,
-            &bounded(PageBounds {
-                height: 0,
-                ..full_page
-            })
-        )
-        .is_err());
-        // Near-overflow coordinates must fail the check, not wrap around it.
-        assert!(validate_source_regions(
-            text,
-            &bounded(PageBounds {
-                left: u16::MAX,
-                top: u16::MAX,
-                width: u16::MAX,
-                height: u16::MAX,
-            })
-        )
-        .is_err());
-    }
-
-    fn cell_range(start_cell: &str, sheet_index: i32, sheet_name: &str) -> EvidenceLocation {
-        EvidenceLocation::SpreadsheetCellRange {
-            start_cell: start_cell.into(),
-            end_cell: None,
-            sheet_index,
-            sheet_name: sheet_name.into(),
-        }
     }
 
     /// Column letters are bijective base-26, not base-26: `Z` is followed by
@@ -3488,96 +3086,6 @@ mod tests {
             }
             .to_a1(),
             None
-        );
-    }
-
-    #[test]
-    fn a_location_that_addresses_nothing_is_rejected() {
-        assert!(cell_range("A1", 0, "Summary").is_well_formed());
-        assert!(EvidenceLocation::SpreadsheetCellRange {
-            start_cell: "A1".into(),
-            end_cell: Some("XFD1048576".into()),
-            sheet_index: 3,
-            sheet_name: "Q4 Results".into(),
-        }
-        .is_well_formed());
-        // A1 notation is a column of letters then a one-based row, and nothing
-        // else: a half-written reference points at no cell at all.
-        for start_cell in ["", "A", "1", "1A", "A0", "AAAA1", "A12345678", "A 1", "A1:"] {
-            assert!(
-                !cell_range(start_cell, 0, "Summary").is_well_formed(),
-                "{start_cell} is not an A1 reference"
-            );
-        }
-        assert!(!EvidenceLocation::SpreadsheetCellRange {
-            start_cell: "A1".into(),
-            end_cell: Some("D".into()),
-            sheet_index: 0,
-            sheet_name: "Summary".into(),
-        }
-        .is_well_formed());
-        // A sheet is identified by both its position and its name: the index
-        // is what resolves it and the name is what a reader is shown.
-        assert!(!cell_range("A1", -1, "Summary").is_well_formed());
-        assert!(!cell_range("A1", 0, "").is_well_formed());
-
-        assert!(EvidenceLocation::StructuredPath {
-            path: "items.0.invoice_number".into(),
-            path_type: StructuredPathType::JsonDotNotation,
-        }
-        .is_well_formed());
-        // An empty path resolves to the whole document, which is not evidence.
-        assert!(!EvidenceLocation::StructuredPath {
-            path: String::new(),
-            path_type: StructuredPathType::XmlXpath,
-        }
-        .is_well_formed());
-    }
-
-    #[test]
-    fn a_location_carries_its_kind_on_the_wire() {
-        let location = EvidenceLocation::SpreadsheetCellRange {
-            start_cell: "B2".into(),
-            end_cell: Some("D10".into()),
-            sheet_index: 2,
-            sheet_name: "Q4 Results".into(),
-        };
-        let encoded = serde_json::to_value(&location).unwrap();
-        assert_eq!(
-            encoded,
-            serde_json::json!({
-                "kind": "spreadsheet_cell_range",
-                "start_cell": "B2",
-                "end_cell": "D10",
-                "sheet_index": 2,
-                "sheet_name": "Q4 Results",
-            })
-        );
-        assert_eq!(
-            serde_json::from_value::<EvidenceLocation>(encoded).unwrap(),
-            location
-        );
-
-        let structured = EvidenceLocation::StructuredPath {
-            path: "/invoice/total".into(),
-            path_type: StructuredPathType::XmlXpath,
-        };
-        assert_eq!(
-            serde_json::to_value(&structured).unwrap(),
-            serde_json::json!({
-                "kind": "structured_path",
-                "path": "/invoice/total",
-                "path_type": "xml_xpath",
-            })
-        );
-        // The discriminant is what tells the kinds apart, so a payload without
-        // one addresses nothing and must not be guessed at.
-        assert!(
-            serde_json::from_value::<EvidenceLocation>(serde_json::json!({
-                "path": "/invoice/total",
-                "path_type": "xml_xpath",
-            }))
-            .is_err()
         );
     }
 }

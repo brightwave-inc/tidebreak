@@ -1,5 +1,4 @@
-import { useState } from "react";
-import { Check, Clock, Loader2, Terminal, X } from "lucide-react";
+import { Check, Clock, Terminal, X } from "lucide-react";
 import {
   isRendererToolName,
   type ExecResultPreview,
@@ -7,6 +6,8 @@ import {
   type ToolActionPreview,
 } from "./api";
 import { Badge } from "@/components/ui/badge";
+import { Spinner } from "@/components/ui/spinner";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import type { ToolTone } from "./ToolStatusIcon";
 import { ScrollableContainer } from "./ScrollableContainer";
@@ -236,7 +237,6 @@ export function ToolCommandCard({
   const presentation = toolCallPresentation(name, status);
   const command = toolPreviewPresentation(preview, result);
   const running = presentation.tone === "running";
-  const [tab, setTab] = useState<"command" | "output">("output");
   const output = commandOutput(result);
   // A command that finished silently has nothing to tab between, and a
   // "Command / Output → no output" pair reads as confusing noise.
@@ -251,47 +251,43 @@ export function ToolCommandCard({
       badge={<ToolStatusBadge presentation={presentation} result={result} />}
       defaultExpanded={running}
     >
-      {tabbed && (
-        <div
-          role="tablist"
-          aria-label="Command detail"
-          className="flex w-full items-center justify-start gap-1 border-b px-1"
-        >
-          {(["command", "output"] as const).map((value) => (
-            <button
-              key={value}
-              type="button"
-              role="tab"
-              aria-selected={tab === value}
-              onClick={() => setTab(value)}
-              className={cn(
-                "cursor-pointer rounded-md px-2.5 py-1 text-xs font-medium capitalize transition-colors",
-                tab === value
-                  ? "text-foreground"
-                  : "text-muted-foreground hover:text-foreground",
+      {tabbed ? (
+        <Tabs defaultValue="output">
+          <TabsList className="flex w-full items-center justify-start gap-1 border-b px-1">
+            <TabsTrigger value="command" className="py-1 text-xs capitalize">
+              command
+            </TabsTrigger>
+            <TabsTrigger value="output" className="py-1 text-xs capitalize">
+              output
+            </TabsTrigger>
+          </TabsList>
+          <div className="p-1">
+            <TabsContent value="command" className="mt-0">
+              <ScrollableContainer className="bg-muted text-muted-foreground rounded-md p-2 text-xs whitespace-pre-wrap">
+                {command.detail}
+              </ScrollableContainer>
+            </TabsContent>
+            <TabsContent value="output" className="mt-0">
+              {output === null ? (
+                <p className="text-muted-foreground flex items-center gap-1.5 p-2 text-xs">
+                  <Spinner className="size-3.5" aria-hidden="true" />
+                  Waiting for output…
+                </p>
+              ) : (
+                <ScrollableContainer className="bg-muted text-muted-foreground rounded-md p-2 text-xs whitespace-pre-wrap">
+                  {output}
+                </ScrollableContainer>
               )}
-            >
-              {value}
-            </button>
-          ))}
-        </div>
-      )}
-      <div className="p-1">
-        {!tabbed || tab === "command" ? (
+            </TabsContent>
+          </div>
+        </Tabs>
+      ) : (
+        <div className="p-1">
           <ScrollableContainer className="bg-muted text-muted-foreground rounded-md p-2 text-xs whitespace-pre-wrap">
             {command.detail}
           </ScrollableContainer>
-        ) : output === null ? (
-          <p className="text-muted-foreground flex items-center gap-1.5 p-2 text-xs">
-            <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
-            Waiting for output…
-          </p>
-        ) : (
-          <ScrollableContainer className="bg-muted text-muted-foreground rounded-md p-2 text-xs whitespace-pre-wrap">
-            {output}
-          </ScrollableContainer>
-        )}
-      </div>
+        </div>
+      )}
     </ToolCardShell>
   );
 }
@@ -327,7 +323,7 @@ function ToolStatusBadge({
   if (presentation.tone === "running") {
     return (
       <Badge variant="outline" className="shrink-0 gap-1">
-        <Loader2 className="size-3 animate-spin" aria-hidden="true" />
+        <Spinner className="size-3" aria-hidden="true" />
         Running…
       </Badge>
     );

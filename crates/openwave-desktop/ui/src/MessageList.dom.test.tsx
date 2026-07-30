@@ -843,22 +843,19 @@ describe("actionable tool results", () => {
 });
 
 describe("citation anchors", () => {
-  const CITATION = "0b2b1f2c-9d3e-4a5b-8c7d-6e5f4a3b2c1d";
+  const CITATION = "citation-1";
+  const DOCUMENT = "0b2b1f2c-9d3e-4a5b-8c7d-6e5f4a3b2c1d";
 
   const message: ChatMessage = {
     id: "assistant-1",
     role: "assistant",
-    text: `The reef :cit[is the largest in the world]{citation_id=${CITATION}}.`,
+    text: `The reef :cit[is the largest in the world]{doc=${DOCUMENT} page=2}.`,
     sources: [
       {
         id: CITATION,
         ordinal: 1,
-        documentId: "document-1",
-        span: { start: 0, end: 26 },
-        excerpt: "A short supporting excerpt.",
-        heading: "Project notes",
-        pages: [2],
-        bounds: [],
+        documentId: DOCUMENT,
+        locator: { kind: "page", page: 2 },
       },
     ],
   };
@@ -878,7 +875,7 @@ describe("citation anchors", () => {
     expect(openCitation).toHaveBeenCalledTimes(2);
     expect(openCitation.mock.calls[0]).toEqual(openCitation.mock.calls[1]);
     expect(openCitation).toHaveBeenLastCalledWith({
-      documentId: "document-1",
+      documentId: DOCUMENT,
       citationId: CITATION,
     });
   });

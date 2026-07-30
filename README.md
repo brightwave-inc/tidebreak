@@ -64,9 +64,9 @@ that holds your data and meters your tokens. It should be something you own —
 local by default, model-agnostic, and open.
 
 The open version is **configurable end to end**. Bring your own API keys to
-connect the LLMs, embedding services, and document parsers you prefer — each
-behind a common interface — with sensible, local-friendly defaults out of the
-box, so it works on your machine from the first run.
+connect the LLMs you prefer behind a common interface, with sensible,
+local-friendly defaults out of the box, so it works on your machine from the
+first run.
 
 ## Why
 
@@ -77,15 +77,13 @@ own model — hosted or fully offline. Its MCP server foundation can expose the
 same tool registry to external agents; `openwave mcp <workspace>` serves the
 built-in read-only file tools today. The inverse client foundation can initialize
 external stdio MCP servers configured at boot and mount their tools into that
-registry; configuration UI and indexed search wiring remain in development.
+registry; configuration UI remains in development.
 
 ## Principles
 
 - **Local-first & private.** Your files, keys, and history stay on your machine.
 - **Bring your own keys.** Configure Anthropic, OpenAI, or an OpenAI-compatible
-  endpoint (vLLM, LM Studio, Ollama, OpenRouter), along with the embedding
-  services and document parsers you want — with local-friendly defaults. We
-  never meter tokens.
+  endpoint (vLLM, LM Studio, Ollama, OpenRouter). We never meter tokens.
 - **Slim by default.** Small install; no bundled model weights or language
   runtimes — fetched on first use, cached locally.
 - **Composable tool surface.** The MCP server foundation exposes OpenWave's
@@ -197,7 +195,7 @@ foreground/background execution model is described in
 | [`openwave-code-execution`](crates/openwave-code-execution) | provider-neutral command execution + native local sandbox |
 | [`openwave-server`](crates/openwave-server) | authenticated local HTTP/WebSocket API + durable workers |
 | [`openwave-connectors`](crates/openwave-connectors) | OAuth + source connectors |
-| [`openwave-retrieval`](crates/openwave-retrieval) | parsing, embeddings, hybrid search, citations |
+| [`openwave-retrieval`](crates/openwave-retrieval) | canonical document parsing and source-region mapping |
 | [`openwave-mcp`](crates/openwave-mcp) | lifecycle-gated MCP server plus external stdio client tool mounting |
 | [`openwave-desktop`](crates/openwave-desktop) | desktop app (Tauri) |
 | [`openwave-cli`](crates/openwave-cli) | headless `openwave serve` + `openwave mcp` commands |

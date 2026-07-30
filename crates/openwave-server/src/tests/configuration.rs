@@ -1267,10 +1267,7 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
     )
     .await
     .unwrap();
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -1418,10 +1415,7 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         .unwrap(),
     );
     let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -2213,6 +2207,111 @@ async fn an_unreadable_policy_fails_the_resolver_closed() {
         .await
         .unwrap();
     assert_eq!(resolver.resolve().await.id().0, "unconfigured");
+}
+
+/// `misconfigured` is a fail-closed security state end to end: `/policy`
+/// reporting it is the exact wire signal the renderer blocks the whole app
+/// on, and the accept path refuses the turn a blocked gate can no longer
+/// send. Driven over the real routes with the production resolver, against a
+/// profile whose BYOK setup demonstrably serves a turn until the policy
+/// breaks — so the refusal below is the policy's doing and nothing else's.
+#[tokio::test]
+async fn a_misconfigured_policy_gates_the_renderer_and_refuses_a_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("misconfigured.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
+    providers::write_credential(
+        &*secrets,
+        providers::ProviderKind::Anthropic,
+        &providers::ProviderCredential::api_key("sk-ready"),
+    )
+    .await
+    .unwrap();
+    providers::write_config(
+        &*store,
+        providers::ProviderKind::Anthropic,
+        &providers::ProviderConfig {
+            enabled: true,
+            base_url: None,
+            vertex_location: None,
+            models: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+    let (retrieval, _search) = build_retrieval(
+        Arc::new(HashEmbedder::default()),
+        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+    );
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(resolver::ConfiguredResolver::new(
+            store.clone(),
+            secrets.clone(),
+            crate::gateway_runtime::GatewayRuntime::new(
+                store.clone(),
+                secrets.clone(),
+                Arc::new(crate::managed_policy::NoOsPolicy),
+            ),
+            Arc::new(crate::managed_policy::NoOsPolicy),
+        )),
+        secrets.clone(),
+        Arc::new(ToolRegistry::new()),
+        retrieval,
+        AgentConfig {
+            model: "claude-opus-5".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let bearer = format!("Bearer {}", state.token);
+    let router = app(state);
+
+    // Control: with the policy healthy, this profile accepts a turn.
+    let healthy_chat = make_chat(&router, &bearer).await;
+    assert_eq!(
+        send_message(&router, &bearer, healthy_chat.id, "hello").await,
+        StatusCode::ACCEPTED
+    );
+
+    // The profile now claims to be managed but the claim cannot be read.
+    store
+        .set_setting("managed_policy_v1", &serde_json::json!({"gateway_url": 42}))
+        .await
+        .unwrap();
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/policy")
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let policy: serde_json::Value = json_body(response).await;
+    assert_eq!(policy["managed"], serde_json::json!(true));
+    assert_eq!(policy["misconfigured"], serde_json::json!(true));
+
+    // A turn cannot run: the send is refused at accept, and nothing was
+    // queued for the worker to pick up behind the blocked gate.
+    let gated_chat = make_chat(&router, &bearer).await;
+    let turn_id = TurnId::new();
+    assert_eq!(
+        send_message_with_id(&router, &bearer, gated_chat.id, turn_id, "hello").await,
+        StatusCode::CONFLICT
+    );
+    assert!(store.get_turn_run(turn_id).await.unwrap().is_none());
 }
 
 async fn put_json(

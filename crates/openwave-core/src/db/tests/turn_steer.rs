@@ -217,62 +217,22 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
         None
     );
 
-    let source_token = uuid::Uuid::new_v4();
-    let search_call = ToolCallRecord {
-        id: CallId::new(),
-        chat_id: chat.id,
-        turn_id: turn.id,
-        provider_id: "search_for_steer".into(),
-        name: "search".into(),
-        arguments: serde_json::json!({"query": "candidate"}),
-        execution: ToolCallExecution::Server,
-        status: ToolCallStatus::Pending,
-        result: None,
-        error_code: None,
-        error_detail: None,
-        client_executor_id: None,
-        client_lease_expires_at: None,
-        created_at: Utc::now(),
-        resolved_at: None,
+    let mut document = sample_document(None);
+    document.chat_id = Some(chat.id);
+    store.create_document(&document).await.unwrap();
+    let citation = crate::AssistantCitationInput {
+        document_id: document.id,
+        locator: crate::CitationLocator::Lines { start: 1, end: 1 },
     };
-    store.accept_tool_call(&search_call).await.unwrap();
-    let document_id = DocumentId::new();
-    let span = ByteSpan::new(0, 8);
-    let evidence = RetrievalEvidenceInput {
-        rank: 1,
-        source_token,
-        document_id,
-        generation: DocumentGeneration {
-            content_revision: 1,
-            revision_token: uuid::Uuid::new_v4(),
-        },
-        chunk_id: ChunkId::derive(document_id, span.start, span.end),
-        span,
-        snippet: "evidence".into(),
-        location: EvidenceLocation::DocumentContent {
-            heading_path: vec!["Section".into()],
-            source_regions: Vec::new(),
-        },
-        source: RetrievalEvidenceSource::Inline,
-    };
-    store
-        .resolve_server_tool_call_with_evidence(
-            search_call.id,
-            &ToolCallResolution::Completed {
-                result: "search result".into(),
-            },
-            Utc::now(),
-            &[evidence],
-        )
-        .await
-        .unwrap();
-    let citation = crate::AssistantCitationReference { source_token };
     let candidate = Message {
         id: MessageId::new(),
         chat_id: chat.id,
         turn_id: turn.id,
         role: Role::Assistant,
-        content: "candidate before steer".into(),
+        content: format!(
+            "candidate before steer :cit[candidate]{{doc={} lines=1-1}}",
+            document.id
+        ),
         created_at: Utc::now(),
     };
     let apply_at = Utc::now();
@@ -283,7 +243,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
             steer_id,
             1,
             Some(&candidate),
-            &[citation],
+            std::slice::from_ref(&citation),
             apply_at,
         )
         .await
@@ -336,7 +296,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
             .collect::<Vec<_>>(),
         vec![
             (Role::User, "initial input"),
-            (Role::Assistant, "candidate before steer"),
+            (Role::Assistant, candidate.content.as_str()),
             (Role::User, "change course"),
         ]
     );
@@ -373,7 +333,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
             steer_id,
             1,
             Some(&candidate),
-            &[citation],
+            std::slice::from_ref(&citation),
             Utc::now(),
         )
         .await
@@ -391,8 +351,9 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
             steer_id,
             1,
             Some(&candidate),
-            &[crate::AssistantCitationReference {
-                source_token: uuid::Uuid::nil(),
+            &[crate::AssistantCitationInput {
+                document_id: document.id,
+                locator: crate::CitationLocator::Lines { start: 2, end: 2 },
             }],
             Utc::now(),
         )
@@ -455,7 +416,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
         chat_id: chat.id,
         turn_id: turn.id,
         role: Role::Assistant,
-        content: "fresh final answer".into(),
+        content: format!("fresh final :cit[answer]{{doc={} lines=1-1}}", document.id),
         created_at: fresh_completed_at,
     };
     assert!(matches!(
@@ -466,7 +427,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
                 2,
                 fresh_completed_at,
                 &fresh_output,
-                &[citation],
+                std::slice::from_ref(&citation),
                 Usage::default(),
                 StopReason::EndTurn,
             )

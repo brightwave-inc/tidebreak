@@ -22,7 +22,6 @@ struct MemDocumentState {
     documents: HashMap<DocumentId, DocumentRecord>,
     generations: HashMap<DocumentId, DocumentGeneration>,
     tombstones: HashSet<DocumentId>,
-    pending_retirements: HashMap<DocumentId, DocumentGeneration>,
     jobs: HashMap<DocumentJobId, DocumentJob>,
 }
 
@@ -135,24 +134,6 @@ fn allocate_mem_generation(
     state.generations.insert(id, generation);
     state.tombstones.remove(&id);
     Ok(generation)
-}
-
-fn reset_mem_document_job(
-    job: &mut DocumentJob,
-    max_attempts: i32,
-    now: chrono::DateTime<chrono::Utc>,
-) {
-    job.status = DocumentJobStatus::Queued;
-    job.attempt_count = 0;
-    job.max_attempts = max_attempts;
-    job.available_at = now;
-    job.lease_token = None;
-    job.lease_expires_at = None;
-    job.started_at = None;
-    job.finished_at = None;
-    job.last_error_code = None;
-    job.last_error_detail = None;
-    job.updated_at = now;
 }
 
 fn root_attachment_terminal_matches(
@@ -356,7 +337,6 @@ impl Store for MemStore {
             let generation = allocate_mem_generation(&mut state, id)?;
             state.documents.remove(&id);
             state.tombstones.insert(id);
-            state.pending_retirements.insert(id, generation);
             generation
         } else if let Some(generation) = state.generations.get(&id) {
             *generation
@@ -367,48 +347,6 @@ impl Store for MemStore {
         Ok(generation)
     }
 
-    async fn list_pending_document_retirements(
-        &self,
-        after: Option<DocumentId>,
-        limit: u64,
-    ) -> Result<Vec<(DocumentId, DocumentGeneration)>> {
-        let state = self.document_state.lock().unwrap();
-        let mut retirements: Vec<_> = state
-            .pending_retirements
-            .iter()
-            .filter(|(id, _)| after.is_none_or(|after| id.0 > after.0))
-            .map(|(id, generation)| (*id, *generation))
-            .collect();
-        retirements.sort_unstable_by_key(|(id, _)| id.0);
-        retirements.truncate(limit.try_into().unwrap_or(usize::MAX));
-        Ok(retirements)
-    }
-
-    async fn get_pending_document_retirement(
-        &self,
-        id: DocumentId,
-    ) -> Result<Option<DocumentGeneration>> {
-        Ok(self
-            .document_state
-            .lock()
-            .unwrap()
-            .pending_retirements
-            .get(&id)
-            .copied())
-    }
-
-    async fn complete_document_retirement(
-        &self,
-        id: DocumentId,
-        generation: DocumentGeneration,
-    ) -> Result<bool> {
-        let mut state = self.document_state.lock().unwrap();
-        if state.pending_retirements.get(&id) != Some(&generation) {
-            return Ok(false);
-        }
-        state.pending_retirements.remove(&id);
-        Ok(true)
-    }
     async fn upsert_document(&self, document: &DocumentUpsert) -> Result<DocumentRecord> {
         crate::model::validate_source_regions(&document.canonical_text, &document.source_regions)
             .map_err(|message| AgentError::Store(message.into()))?;
@@ -451,301 +389,12 @@ impl Store for MemStore {
             source_regions: document.source_regions.clone(),
             content_revision: generation.content_revision,
             revision_token: generation.revision_token,
-            processing_status: DocumentProcessingStatus::Queued,
-            indexed_revision: None,
-            index_fingerprint: None,
+            processing_status: DocumentProcessingStatus::Ready,
             created_at,
             updated_at: document.updated_at,
-            indexed_at: None,
         };
         state.documents.insert(record.id, record.clone());
         Ok(record)
-    }
-    async fn upsert_document_and_enqueue_index(
-        &self,
-        document: &DocumentUpsert,
-        pipeline_fingerprint: &str,
-        max_attempts: i32,
-    ) -> Result<(DocumentRecord, DocumentJob)> {
-        crate::model::validate_source_regions(&document.canonical_text, &document.source_regions)
-            .map_err(|message| AgentError::Store(message.into()))?;
-        if pipeline_fingerprint.is_empty()
-            || pipeline_fingerprint.chars().count() > DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN
-            || max_attempts < 1
-            || document.media_type.is_empty()
-            || document.source_uri.as_deref() == Some("")
-            || (document.chat_id.is_some() && document.project_id.is_some())
-            || document
-                .chat_id
-                .is_some_and(|id| !self.chats.lock().unwrap().contains_key(&id))
-            || document
-                .project_id
-                .is_some_and(|id| !self.projects.lock().unwrap().contains_key(&id))
-        {
-            return Err(AgentError::Store("invalid document job enqueue".into()));
-        }
-
-        let mut state = self.document_state.lock().unwrap();
-        if state.documents.get(&document.id).is_some_and(|existing| {
-            existing.chat_id != document.chat_id || existing.project_id != document.project_id
-        }) {
-            return Err(AgentError::Store(format!(
-                "document {} cannot move between project corpora",
-                document.id
-            )));
-        }
-        if let Some(existing) = state.documents.get(&document.id).filter(|existing| {
-            existing.chat_id == document.chat_id
-                && existing.project_id == document.project_id
-                && existing.source_uri == document.source_uri
-                && existing.media_type == document.media_type
-                && existing.title == document.title
-                && existing.canonical_text == document.canonical_text
-                && existing.canonical_fingerprint == document.canonical_fingerprint
-                && existing.source_regions == document.source_regions
-        }) {
-            if let Some(job) = state.jobs.values().find(|job| {
-                job.document_id == existing.id
-                    && job.content_revision == existing.content_revision
-                    && job.revision_token == existing.revision_token
-                    && job.kind == DocumentJobKind::Index
-                    && job.pipeline_fingerprint == pipeline_fingerprint
-            }) {
-                return Ok((existing.clone(), job.clone()));
-            }
-        }
-
-        let workflow_now = chrono::Utc::now();
-        let created_at = state
-            .documents
-            .get(&document.id)
-            .map_or(document.updated_at, |existing| existing.created_at);
-        let generation = allocate_mem_generation(&mut state, document.id)?;
-        let record = DocumentRecord {
-            chat_id: document.chat_id,
-            id: document.id,
-            project_id: document.project_id,
-            source_uri: document.source_uri.clone(),
-            media_type: document.media_type.clone(),
-            title: document.title.clone(),
-            source_blob: None,
-            canonical_text: document.canonical_text.clone(),
-            canonical_fingerprint: document.canonical_fingerprint.clone(),
-            source_regions: document.source_regions.clone(),
-            content_revision: generation.content_revision,
-            revision_token: generation.revision_token,
-            processing_status: DocumentProcessingStatus::Queued,
-            indexed_revision: None,
-            index_fingerprint: None,
-            created_at,
-            updated_at: document.updated_at,
-            indexed_at: None,
-        };
-        state.documents.insert(record.id, record.clone());
-
-        for job in state.jobs.values_mut().filter(|job| {
-            job.document_id == record.id
-                && matches!(
-                    job.status,
-                    DocumentJobStatus::Queued
-                        | DocumentJobStatus::Running
-                        | DocumentJobStatus::RetryWait
-                )
-        }) {
-            job.status = DocumentJobStatus::Cancelled;
-            job.lease_token = None;
-            job.lease_expires_at = None;
-            job.finished_at = Some(workflow_now);
-            job.updated_at = workflow_now;
-        }
-        let job = DocumentJob {
-            id: DocumentJobId::new(),
-            document_id: record.id,
-            content_revision: record.content_revision,
-            revision_token: record.revision_token,
-            kind: DocumentJobKind::Index,
-            status: DocumentJobStatus::Queued,
-            pipeline_fingerprint: pipeline_fingerprint.into(),
-            attempt_count: 0,
-            max_attempts,
-            available_at: workflow_now,
-            lease_token: None,
-            lease_expires_at: None,
-            started_at: None,
-            finished_at: None,
-            last_error_code: None,
-            last_error_detail: None,
-            created_at: workflow_now,
-            updated_at: workflow_now,
-        };
-        state.jobs.insert(job.id, job.clone());
-        Ok((record, job))
-    }
-    async fn ensure_document_index_job(
-        &self,
-        document_id: DocumentId,
-        expected_generation: DocumentGeneration,
-        pipeline_fingerprint: &str,
-        max_attempts: i32,
-        reason: DocumentIndexJobReason,
-    ) -> Result<EnsureDocumentIndexJobOutcome> {
-        if pipeline_fingerprint.is_empty()
-            || pipeline_fingerprint.chars().count() > DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN
-            || max_attempts < 1
-        {
-            return Err(AgentError::Store(
-                "invalid document index-job maintenance request".into(),
-            ));
-        }
-
-        let mut state = self.document_state.lock().unwrap();
-        let Some(mut document) = state.documents.get(&document_id).cloned() else {
-            return Ok(EnsureDocumentIndexJobOutcome::MissingDocument);
-        };
-
-        if document.generation() != expected_generation {
-            if reason.advances_generation()
-                && expected_generation
-                    .content_revision
-                    .checked_add(1)
-                    .is_some_and(|revision| revision == document.content_revision)
-            {
-                if let Some(job) = state.jobs.values().find(|job| {
-                    job.document_id == document_id
-                        && job.generation() == document.generation()
-                        && job.kind == DocumentJobKind::Index
-                        && job.pipeline_fingerprint == pipeline_fingerprint
-                }) {
-                    return Ok(if job.status == DocumentJobStatus::Failed {
-                        EnsureDocumentIndexJobOutcome::Failed(job.clone())
-                    } else {
-                        EnsureDocumentIndexJobOutcome::Existing(job.clone())
-                    });
-                }
-            }
-            return Ok(EnsureDocumentIndexJobOutcome::GenerationChanged(
-                document.generation(),
-            ));
-        }
-
-        if document.source_blob.is_some() && document.canonical_fingerprint.is_none() {
-            let parse_job = state
-                .jobs
-                .values()
-                .filter(|job| {
-                    job.document_id == document_id
-                        && job.generation() == document.generation()
-                        && job.kind == DocumentJobKind::Parse
-                })
-                .max_by_key(|job| (job.created_at, job.id.0))
-                .cloned()
-                .ok_or_else(|| {
-                    AgentError::Store(format!(
-                        "unparsed document {document_id} has no current parse job"
-                    ))
-                })?;
-            return Ok(if parse_job.status == DocumentJobStatus::Failed {
-                EnsureDocumentIndexJobOutcome::Failed(parse_job)
-            } else if matches!(
-                parse_job.status,
-                DocumentJobStatus::Queued
-                    | DocumentJobStatus::Running
-                    | DocumentJobStatus::RetryWait
-            ) {
-                EnsureDocumentIndexJobOutcome::Parsing(parse_job)
-            } else {
-                return Err(AgentError::Store(format!(
-                    "unparsed document {document_id} has terminal parse state {}",
-                    parse_job.status.as_str()
-                )));
-            });
-        }
-
-        let desired_job_id = state.jobs.values().find_map(|job| {
-            (job.document_id == document_id
-                && job.generation() == document.generation()
-                && job.kind == DocumentJobKind::Index
-                && job.pipeline_fingerprint == pipeline_fingerprint)
-                .then_some(job.id)
-        });
-        if let Some(job_id) = desired_job_id {
-            let job = state.jobs.get(&job_id).unwrap().clone();
-            if matches!(
-                job.status,
-                DocumentJobStatus::Queued
-                    | DocumentJobStatus::Running
-                    | DocumentJobStatus::RetryWait
-            ) || (reason == DocumentIndexJobReason::PipelineChanged
-                && job.status == DocumentJobStatus::Succeeded)
-            {
-                return Ok(EnsureDocumentIndexJobOutcome::Existing(job));
-            }
-            if job.status == DocumentJobStatus::Failed {
-                return Ok(EnsureDocumentIndexJobOutcome::Failed(job));
-            }
-            if reason == DocumentIndexJobReason::DerivedStateMissing {
-                let now = chrono::Utc::now();
-                let job = state.jobs.get_mut(&job_id).unwrap();
-                reset_mem_document_job(job, max_attempts, now);
-                let job = job.clone();
-                document.processing_status = DocumentProcessingStatus::Queued;
-                document.indexed_revision = None;
-                document.index_fingerprint = None;
-                document.indexed_at = None;
-                state.documents.insert(document_id, document);
-                return Ok(EnsureDocumentIndexJobOutcome::Enqueued(job));
-            }
-        }
-
-        if reason.advances_generation() {
-            let generation = allocate_mem_generation(&mut state, document_id)?;
-            document.content_revision = generation.content_revision;
-            document.revision_token = generation.revision_token;
-        }
-        document.processing_status = DocumentProcessingStatus::Queued;
-        document.indexed_revision = None;
-        document.index_fingerprint = None;
-        document.indexed_at = None;
-        state.documents.insert(document_id, document.clone());
-
-        let now = chrono::Utc::now();
-        for job in state.jobs.values_mut().filter(|job| {
-            job.document_id == document_id
-                && matches!(
-                    job.status,
-                    DocumentJobStatus::Queued
-                        | DocumentJobStatus::Running
-                        | DocumentJobStatus::RetryWait
-                )
-        }) {
-            job.status = DocumentJobStatus::Cancelled;
-            job.lease_token = None;
-            job.lease_expires_at = None;
-            job.finished_at = Some(now);
-            job.updated_at = now;
-        }
-        let job = DocumentJob {
-            id: DocumentJobId::new(),
-            document_id,
-            content_revision: document.content_revision,
-            revision_token: document.revision_token,
-            kind: DocumentJobKind::Index,
-            status: DocumentJobStatus::Queued,
-            pipeline_fingerprint: pipeline_fingerprint.into(),
-            attempt_count: 0,
-            max_attempts,
-            available_at: now,
-            lease_token: None,
-            lease_expires_at: None,
-            started_at: None,
-            finished_at: None,
-            last_error_code: None,
-            last_error_detail: None,
-            created_at: now,
-            updated_at: now,
-        };
-        state.jobs.insert(job.id, job.clone());
-        Ok(EnsureDocumentIndexJobOutcome::Enqueued(job))
     }
     async fn ensure_document_parse_job(
         &self,
@@ -816,9 +465,6 @@ impl Store for MemStore {
         document.canonical_fingerprint = None;
         document.source_regions.clear();
         document.processing_status = DocumentProcessingStatus::Queued;
-        document.indexed_revision = None;
-        document.index_fingerprint = None;
-        document.indexed_at = None;
         state.documents.insert(document_id, document.clone());
 
         let now = chrono::Utc::now();
@@ -906,7 +552,6 @@ impl Store for MemStore {
             document.source_blob.is_some() && document.canonical_fingerprint.is_none();
         let stage_matches = match kind {
             DocumentJobKind::Parse => awaiting_parse,
-            DocumentJobKind::Index => !awaiting_parse,
         };
         if !stage_matches {
             return Ok(None);
@@ -972,9 +617,6 @@ impl Store for MemStore {
         let job = job.clone();
         let document = state.documents.get_mut(&document_id).unwrap();
         document.processing_status = DocumentProcessingStatus::Queued;
-        document.indexed_revision = None;
-        document.index_fingerprint = None;
-        document.indexed_at = None;
         Ok(Some(job))
     }
     async fn claim_document_job(
@@ -1122,61 +764,6 @@ impl Store for MemStore {
         job.updated_at = now;
         Ok(true)
     }
-    async fn complete_document_index_job(
-        &self,
-        id: DocumentJobId,
-        lease_token: uuid::Uuid,
-        completed_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<bool> {
-        let mut state = self.document_state.lock().unwrap();
-        let Some(candidate) = state.jobs.get(&id).cloned() else {
-            return Ok(false);
-        };
-        if candidate.kind != DocumentJobKind::Index {
-            return Err(AgentError::Store(format!(
-                "document job {id} is not an index job"
-            )));
-        }
-        if candidate.status != DocumentJobStatus::Running
-            || candidate.lease_token != Some(lease_token)
-            || candidate
-                .lease_expires_at
-                .is_none_or(|expiry| expiry <= completed_at)
-            || candidate.updated_at > completed_at
-        {
-            return Ok(false);
-        }
-        let document_matches =
-            state
-                .documents
-                .get(&candidate.document_id)
-                .is_some_and(|document| {
-                    document.content_revision == candidate.content_revision
-                        && document.revision_token == candidate.revision_token
-                        && document.processing_status == DocumentProcessingStatus::Processing
-                });
-        if !document_matches {
-            return Err(AgentError::Store(format!(
-                "running document job {} does not match its exact processing document {}",
-                candidate.id, candidate.document_id
-            )));
-        }
-
-        let job = state.jobs.get_mut(&id).unwrap();
-        job.status = DocumentJobStatus::Succeeded;
-        job.lease_token = None;
-        job.lease_expires_at = None;
-        job.finished_at = Some(completed_at);
-        job.last_error_code = None;
-        job.last_error_detail = None;
-        job.updated_at = completed_at;
-        let document = state.documents.get_mut(&candidate.document_id).unwrap();
-        document.processing_status = DocumentProcessingStatus::Ready;
-        document.indexed_revision = Some(candidate.content_revision);
-        document.index_fingerprint = Some(candidate.pipeline_fingerprint);
-        document.indexed_at = Some(completed_at);
-        Ok(true)
-    }
     async fn record_document_job_failure(
         &self,
         id: DocumentJobId,
@@ -1252,53 +839,6 @@ impl Store for MemStore {
             DocumentProcessingStatus::Failed
         };
         Ok(Some(status))
-    }
-    async fn mark_document_indexed(
-        &self,
-        id: DocumentId,
-        revision: i64,
-        revision_token: uuid::Uuid,
-        fingerprint: &str,
-        indexed_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<bool> {
-        if fingerprint.is_empty()
-            || fingerprint.chars().count() > crate::model::DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN
-        {
-            return Err(AgentError::Store(
-                "document index fingerprint must contain 1 to 512 characters".into(),
-            ));
-        }
-        let mut state = self.document_state.lock().unwrap();
-        let Some(document) = state.documents.get_mut(&id) else {
-            return Ok(false);
-        };
-        if document.content_revision != revision || document.revision_token != revision_token {
-            return Ok(false);
-        }
-        document.indexed_revision = Some(revision);
-        document.index_fingerprint = Some(fingerprint.to_string());
-        document.indexed_at = Some(indexed_at);
-        document.processing_status = DocumentProcessingStatus::Ready;
-        Ok(true)
-    }
-    async fn clear_document_index(
-        &self,
-        id: DocumentId,
-        revision: i64,
-        revision_token: uuid::Uuid,
-    ) -> Result<bool> {
-        let mut state = self.document_state.lock().unwrap();
-        let Some(document) = state.documents.get_mut(&id) else {
-            return Ok(false);
-        };
-        if document.content_revision != revision || document.revision_token != revision_token {
-            return Ok(false);
-        }
-        document.indexed_revision = None;
-        document.index_fingerprint = None;
-        document.indexed_at = None;
-        document.processing_status = DocumentProcessingStatus::Queued;
-        Ok(true)
     }
     async fn create_chat(&self, chat: &Chat) -> Result<()> {
         validate_chat_root_projection(chat).map_err(|message| AgentError::Store(message.into()))?;
@@ -1412,7 +952,6 @@ impl Store for MemStore {
         model: Option<Option<String>>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
         permission_mode: Option<Option<PermissionMode>>,
-        citation_format: Option<Option<crate::citation::CitationFormat>>,
     ) -> Result<bool> {
         let mut chats = self.chats.lock().unwrap();
         let Some(chat) = chats.get_mut(&id) else {
@@ -1429,9 +968,6 @@ impl Store for MemStore {
         }
         if let Some(permission_mode) = permission_mode {
             chat.permission_mode = permission_mode;
-        }
-        if let Some(citation_format) = citation_format {
-            chat.citation_format = citation_format;
         }
         Ok(true)
     }
@@ -2005,12 +1541,9 @@ fn document_summary(document: &DocumentRecord) -> DocumentSummaryRecord {
         source_byte_len: document.source_blob.as_ref().map(|blob| blob.byte_len),
         content_revision: document.content_revision,
         processing_status: document.processing_status,
-        searchable: document.is_searchable(),
-        indexed_revision: document.indexed_revision,
-        index_fingerprint: document.index_fingerprint.clone(),
+        readable: document.is_readable(),
         created_at: document.created_at,
         updated_at: document.updated_at,
-        indexed_at: document.indexed_at,
     }
 }
 
@@ -2032,11 +1565,8 @@ fn mem_store_create_document_rejects_an_unknown_project() {
         content_revision: 1,
         revision_token: uuid::Uuid::new_v4(),
         processing_status: DocumentProcessingStatus::Queued,
-        indexed_revision: None,
-        index_fingerprint: None,
         created_at: now,
         updated_at: now,
-        indexed_at: None,
     };
 
     assert!(block_on(store.create_document(&document)).is_err());
@@ -2057,7 +1587,6 @@ fn store_is_object_safe_and_roundtrips() {
         model: None,
         reasoning_effort: None,
         permission_mode: None,
-        citation_format: None,
         attachment_revision: 0,
         root_attachments: Vec::new(),
         created_at: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap(),
@@ -2084,42 +1613,12 @@ fn store_is_object_safe_and_roundtrips() {
         source_regions: Vec::new(),
         updated_at: chrono::DateTime::<chrono::Utc>::from_timestamp(1, 0).unwrap(),
     };
-    let first =
-        block_on(store.upsert_document_and_enqueue_index(&source, "pipeline-v1", 3)).unwrap();
-    let retry = DocumentUpsert {
-        canonical_fingerprint: None,
-        updated_at: chrono::DateTime::<chrono::Utc>::from_timestamp(2, 0).unwrap(),
-        ..source.clone()
-    };
+    let published = block_on(store.upsert_document(&source)).unwrap();
+    assert_eq!(published.processing_status, DocumentProcessingStatus::Ready);
     assert_eq!(
-        block_on(store.upsert_document_and_enqueue_index(&retry, "pipeline-v1", 3)).unwrap(),
-        first
+        block_on(store.get_document(source.id)).unwrap(),
+        Some(published)
     );
-    assert_eq!(
-        block_on(store.list_document_jobs(source.id)).unwrap(),
-        vec![first.1.clone()]
-    );
-
-    let claim_at = first.1.available_at + chrono::Duration::seconds(1);
-    let lease_expires_at = claim_at + chrono::Duration::minutes(5);
-    let claimed = block_on(store.claim_document_job(claim_at, lease_expires_at))
-        .unwrap()
-        .unwrap();
-    assert_eq!(claimed.id, first.1.id);
-    let extended = lease_expires_at + chrono::Duration::minutes(5);
-    assert!(block_on(store.heartbeat_document_job(
-        claimed.id,
-        claimed.lease_token.unwrap(),
-        claim_at + chrono::Duration::minutes(1),
-        extended,
-    ))
-    .unwrap());
-    assert!(block_on(store.complete_document_index_job(
-        claimed.id,
-        claimed.lease_token.unwrap(),
-        claim_at + chrono::Duration::minutes(2),
-    ))
-    .unwrap());
 
     let tombstone = block_on(store.delete_document(source.id)).unwrap();
     assert_eq!(tombstone.content_revision, 2);
@@ -2132,36 +1631,6 @@ fn store_is_object_safe_and_roundtrips() {
         Some(tombstone)
     );
     assert_eq!(block_on(store.get_document(source.id)).unwrap(), None);
-    assert_eq!(block_on(store.get_document_job(first.1.id)).unwrap(), None);
-
-    let retry_source = DocumentUpsert {
-        canonical_fingerprint: None,
-        canonical_text: "retry state".into(),
-        source_regions: Vec::new(),
-        ..source
-    };
-    let (recreated, retry_job) =
-        block_on(store.upsert_document_and_enqueue_index(&retry_source, "pipeline-v1", 2)).unwrap();
-    assert_eq!(recreated.content_revision, 3);
-    let retry_claim_at = retry_job.available_at + chrono::Duration::seconds(1);
-    let retry_claim = block_on(store.claim_document_job(
-        retry_claim_at,
-        retry_claim_at + chrono::Duration::minutes(5),
-    ))
-    .unwrap()
-    .unwrap();
-    assert_eq!(
-        block_on(store.record_document_job_failure(
-            retry_claim.id,
-            retry_claim.lease_token.unwrap(),
-            retry_claim_at + chrono::Duration::minutes(1),
-            Some(retry_claim_at + chrono::Duration::minutes(2)),
-            "timeout",
-            None,
-        ))
-        .unwrap(),
-        Some(DocumentJobStatus::RetryWait)
-    );
 }
 
 #[test]
@@ -2194,8 +1663,7 @@ fn mem_store_rejects_moving_a_live_document_between_corpora() {
         source_regions: Vec::new(),
         updated_at: chrono::Utc::now(),
     };
-    let first =
-        block_on(store.upsert_document_and_enqueue_index(&source, "pipeline-v1", 3)).unwrap();
+    let first = block_on(store.upsert_document(&source)).unwrap();
     let moved = DocumentUpsert {
         canonical_fingerprint: None,
         project_id: Some(project_b.id),
@@ -2203,122 +1671,12 @@ fn mem_store_rejects_moving_a_live_document_between_corpora() {
         source_regions: Vec::new(),
         ..source
     };
-    assert!(block_on(store.upsert_document_and_enqueue_index(&moved, "pipeline-v1", 3)).is_err());
-    assert_eq!(
-        block_on(store.get_document(moved.id)).unwrap(),
-        Some(first.0)
-    );
+    assert!(block_on(store.upsert_document(&moved)).is_err());
+    assert_eq!(block_on(store.get_document(moved.id)).unwrap(), Some(first));
 }
 
 #[test]
-fn mem_index_maintenance_requeues_or_advances_by_reason() {
-    let store = MemStore::default();
-    let source = DocumentUpsert {
-        canonical_fingerprint: None,
-        chat_id: None,
-        id: DocumentId::new(),
-        project_id: None,
-        source_uri: Some("file:///maintenance.txt".into()),
-        media_type: "text/plain".into(),
-        title: Some("maintenance".into()),
-        canonical_text: "stable source".into(),
-        source_regions: Vec::new(),
-        updated_at: chrono::DateTime::<chrono::Utc>::from_timestamp(100, 0).unwrap(),
-    };
-    let (first_document, first_job) =
-        block_on(store.upsert_document_and_enqueue_index(&source, "pipeline-v1", 3)).unwrap();
-    let claim_at = first_job.available_at + chrono::Duration::seconds(1);
-    let claimed =
-        block_on(store.claim_document_job(claim_at, claim_at + chrono::Duration::minutes(1)))
-            .unwrap()
-            .unwrap();
-    assert!(block_on(store.complete_document_index_job(
-        claimed.id,
-        claimed.lease_token.unwrap(),
-        claim_at + chrono::Duration::seconds(1),
-    ))
-    .unwrap());
-
-    let missing = block_on(store.ensure_document_index_job(
-        source.id,
-        first_document.generation(),
-        "pipeline-v1",
-        5,
-        DocumentIndexJobReason::DerivedStateMissing,
-    ))
-    .unwrap();
-    let EnsureDocumentIndexJobOutcome::Enqueued(requeued) = missing else {
-        panic!("missing state should requeue the exact succeeded job")
-    };
-    assert_eq!(requeued.id, first_job.id);
-    assert_eq!(requeued.generation(), first_document.generation());
-    assert_eq!(requeued.max_attempts, 5);
-
-    let changed = block_on(store.ensure_document_index_job(
-        source.id,
-        first_document.generation(),
-        "pipeline-v2",
-        4,
-        DocumentIndexJobReason::PipelineChanged,
-    ))
-    .unwrap();
-    let EnsureDocumentIndexJobOutcome::Enqueued(changed_job) = changed else {
-        panic!("pipeline change should enqueue an advanced generation")
-    };
-    assert_eq!(
-        changed_job.content_revision,
-        first_document.content_revision + 1
-    );
-    let repeated = block_on(store.ensure_document_index_job(
-        source.id,
-        first_document.generation(),
-        "pipeline-v2",
-        4,
-        DocumentIndexJobReason::PipelineChanged,
-    ))
-    .unwrap();
-    assert_eq!(
-        repeated,
-        EnsureDocumentIndexJobOutcome::Existing(changed_job.clone())
-    );
-    let changed_claim_at = changed_job.available_at + chrono::Duration::seconds(1);
-    let changed_claim = block_on(store.claim_document_job(
-        changed_claim_at,
-        changed_claim_at + chrono::Duration::minutes(1),
-    ))
-    .unwrap()
-    .unwrap();
-    assert_eq!(changed_claim.id, changed_job.id);
-    assert!(block_on(store.complete_document_index_job(
-        changed_claim.id,
-        changed_claim.lease_token.unwrap(),
-        changed_claim_at + chrono::Duration::seconds(1),
-    ))
-    .unwrap());
-    let incomplete = block_on(store.ensure_document_index_job(
-        source.id,
-        changed_job.generation(),
-        "pipeline-v2",
-        6,
-        DocumentIndexJobReason::DerivedStateIncomplete,
-    ))
-    .unwrap();
-    let EnsureDocumentIndexJobOutcome::Enqueued(incomplete_job) = incomplete else {
-        panic!("incomplete succeeded state should advance its generation")
-    };
-    assert_eq!(
-        incomplete_job.content_revision,
-        changed_job.content_revision + 1
-    );
-    let current = block_on(store.get_document(source.id)).unwrap().unwrap();
-    assert_eq!(current.generation(), incomplete_job.generation());
-    assert_eq!(current.canonical_text, source.canonical_text);
-    assert_eq!(current.created_at, first_document.created_at);
-    assert_eq!(current.updated_at, first_document.updated_at);
-}
-
-#[test]
-fn mem_store_generation_overflow_leaves_source_job_and_clock_unchanged() {
+fn mem_store_generation_overflow_leaves_the_clock_unchanged() {
     let store = MemStore::default();
     let source = DocumentUpsert {
         canonical_fingerprint: None,
@@ -2332,8 +1690,7 @@ fn mem_store_generation_overflow_leaves_source_job_and_clock_unchanged() {
         source_regions: Vec::new(),
         updated_at: chrono::DateTime::<chrono::Utc>::from_timestamp(1, 0).unwrap(),
     };
-    let (record, job) =
-        block_on(store.upsert_document_and_enqueue_index(&source, "pipeline-v1", 3)).unwrap();
+    let record = block_on(store.upsert_document(&source)).unwrap();
     let maximum = DocumentGeneration {
         content_revision: i64::MAX,
         revision_token: record.revision_token,
@@ -2355,129 +1712,6 @@ fn mem_store_generation_overflow_leaves_source_job_and_clock_unchanged() {
         block_on(store.get_document_generation(source.id)).unwrap(),
         Some(maximum)
     );
-    assert_eq!(
-        block_on(store.get_document_job(job.id)).unwrap(),
-        Some(job.clone())
-    );
-
-    let succeeded = {
-        let mut state = store.document_state.lock().unwrap();
-        let now = chrono::Utc::now();
-        let job = state.jobs.get_mut(&job.id).unwrap();
-        job.content_revision = i64::MAX;
-        job.status = DocumentJobStatus::Succeeded;
-        job.attempt_count = 1;
-        job.finished_at = Some(now);
-        job.updated_at = now;
-        job.clone()
-    };
-    assert!(block_on(store.ensure_document_index_job(
-        source.id,
-        maximum,
-        "pipeline-v1",
-        3,
-        DocumentIndexJobReason::DerivedStateIncomplete,
-    ))
-    .is_err());
-    assert_eq!(
-        block_on(store.get_document(source.id))
-            .unwrap()
-            .unwrap()
-            .generation(),
-        maximum
-    );
-    assert_eq!(
-        block_on(store.get_document_generation(source.id)).unwrap(),
-        Some(maximum)
-    );
-    assert_eq!(
-        block_on(store.get_document_job(succeeded.id)).unwrap(),
-        Some(succeeded)
-    );
-}
-
-#[test]
-fn mem_store_document_retirement_is_durable_state_with_exact_completion() {
-    let store = MemStore::default();
-    let source = DocumentUpsert {
-        canonical_fingerprint: None,
-        chat_id: None,
-        id: DocumentId::new(),
-        project_id: None,
-        source_uri: None,
-        media_type: "text/plain".into(),
-        title: None,
-        canonical_text: "retire me".into(),
-        source_regions: Vec::new(),
-        updated_at: chrono::DateTime::<chrono::Utc>::from_timestamp(1, 0).unwrap(),
-    };
-    block_on(store.upsert_document(&source)).unwrap();
-
-    let tombstone = block_on(store.delete_document(source.id)).unwrap();
-    assert_eq!(
-        block_on(store.list_pending_document_retirements(None, 10)).unwrap(),
-        vec![(source.id, tombstone)]
-    );
-    assert_eq!(
-        block_on(store.delete_document(source.id)).unwrap(),
-        tombstone
-    );
-
-    let recreated = block_on(store.upsert_document(&DocumentUpsert {
-        canonical_fingerprint: None,
-        canonical_text: "new lifecycle".into(),
-        source_regions: Vec::new(),
-        ..source.clone()
-    }))
-    .unwrap();
-    assert_eq!(
-        block_on(store.list_pending_document_retirements(None, 10)).unwrap(),
-        vec![(source.id, tombstone)]
-    );
-    assert_eq!(
-        block_on(store.get_pending_document_retirement(source.id)).unwrap(),
-        Some(tombstone)
-    );
-    assert!(block_on(store.complete_document_retirement(source.id, tombstone)).unwrap());
-    assert!(!block_on(store.complete_document_retirement(source.id, tombstone)).unwrap());
-
-    let current_tombstone = block_on(store.delete_document(source.id)).unwrap();
-    assert_ne!(current_tombstone, tombstone);
-    assert_eq!(
-        current_tombstone.content_revision,
-        recreated.content_revision + 1
-    );
-    assert!(!block_on(store.complete_document_retirement(source.id, tombstone)).unwrap());
-    assert!(block_on(store.complete_document_retirement(source.id, current_tombstone)).unwrap());
-    assert!(!block_on(store.complete_document_retirement(source.id, current_tombstone)).unwrap());
-    assert!(block_on(store.list_pending_document_retirements(None, 10))
-        .unwrap()
-        .is_empty());
-}
-
-#[test]
-fn mem_store_pending_retirement_cursor_advances_and_can_wrap() {
-    let store = MemStore::default();
-    let ids = [1_u128, 2, 3].map(|value| DocumentId(uuid::Uuid::from_u128(value)));
-    let generations = ids.map(|id| block_on(store.delete_document(id)).unwrap());
-
-    assert_eq!(
-        block_on(store.list_pending_document_retirements(None, 2)).unwrap(),
-        vec![(ids[0], generations[0]), (ids[1], generations[1])]
-    );
-    assert_eq!(
-        block_on(store.list_pending_document_retirements(Some(ids[1]), 2)).unwrap(),
-        vec![(ids[2], generations[2])]
-    );
-    assert!(
-        block_on(store.list_pending_document_retirements(Some(ids[2]), 2))
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(
-        block_on(store.list_pending_document_retirements(None, 1)).unwrap(),
-        vec![(ids[0], generations[0])]
-    );
 }
 
 #[test]
@@ -2489,14 +1723,14 @@ fn mem_store_ensure_parse_job_advances_parser_changes_once() {
         content_revision: 1,
         revision_token: uuid::Uuid::new_v4(),
     };
-    let index_job = DocumentJob {
+    let stale_parse_job = DocumentJob {
         id: DocumentJobId::new(),
         document_id,
         content_revision: generation.content_revision,
         revision_token: generation.revision_token,
-        kind: DocumentJobKind::Index,
+        kind: DocumentJobKind::Parse,
         status: DocumentJobStatus::Queued,
-        pipeline_fingerprint: "index-v1".into(),
+        pipeline_fingerprint: "parser-v1".into(),
         attempt_count: 0,
         max_attempts: 3,
         available_at: now,
@@ -2532,14 +1766,13 @@ fn mem_store_ensure_parse_job_advances_parser_changes_once() {
                 content_revision: generation.content_revision,
                 revision_token: generation.revision_token,
                 processing_status: DocumentProcessingStatus::Queued,
-                indexed_revision: None,
-                index_fingerprint: None,
                 created_at: now,
                 updated_at: now,
-                indexed_at: None,
             },
         );
-        state.jobs.insert(index_job.id, index_job.clone());
+        state
+            .jobs
+            .insert(stale_parse_job.id, stale_parse_job.clone());
     }
 
     let outcome =
@@ -2550,7 +1783,7 @@ fn mem_store_ensure_parse_job_advances_parser_changes_once() {
     assert_eq!(reparse_job.content_revision, 2);
     assert_eq!(reparse_job.kind, DocumentJobKind::Parse);
     assert_eq!(
-        block_on(store.get_document_job(index_job.id))
+        block_on(store.get_document_job(stale_parse_job.id))
             .unwrap()
             .unwrap()
             .status,
@@ -2578,202 +1811,6 @@ fn mem_store_ensure_parse_job_advances_parser_changes_once() {
         ))
         .unwrap(),
         EnsureDocumentParseJobOutcome::Existing(reparse_job)
-    );
-}
-
-#[test]
-fn mem_store_explicit_retry_only_revives_current_failed_index_job() {
-    let store = MemStore::default();
-    let source = DocumentUpsert {
-        canonical_fingerprint: None,
-        chat_id: None,
-        id: DocumentId::new(),
-        project_id: None,
-        source_uri: None,
-        media_type: "text/plain".into(),
-        title: None,
-        canonical_text: "retry me".into(),
-        source_regions: Vec::new(),
-        updated_at: chrono::DateTime::<chrono::Utc>::from_timestamp(1, 0).unwrap(),
-    };
-    let (document, queued) =
-        block_on(store.upsert_document_and_enqueue_index(&source, "pipeline-v1", 2)).unwrap();
-    assert_eq!(
-        block_on(store.retry_document_job(
-            source.id,
-            document.generation(),
-            DocumentJobKind::Index,
-            "pipeline-v1",
-            9,
-        ))
-        .unwrap(),
-        Some(queued.clone())
-    );
-
-    let claim_at = queued.available_at + chrono::Duration::seconds(1);
-    let running =
-        block_on(store.claim_document_job(claim_at, claim_at + chrono::Duration::minutes(1)))
-            .unwrap()
-            .unwrap();
-    assert_eq!(
-        block_on(store.retry_document_job(
-            source.id,
-            document.generation(),
-            DocumentJobKind::Index,
-            "pipeline-v1",
-            9,
-        ))
-        .unwrap(),
-        Some(running.clone())
-    );
-    assert_eq!(
-        block_on(store.record_document_job_failure(
-            running.id,
-            running.lease_token.unwrap(),
-            claim_at + chrono::Duration::seconds(1),
-            None,
-            "embedding_failed",
-            Some("service unavailable"),
-        ))
-        .unwrap(),
-        Some(DocumentJobStatus::Failed)
-    );
-    assert_eq!(
-        block_on(store.retry_document_job(
-            source.id,
-            document.generation(),
-            DocumentJobKind::Index,
-            "other-pipeline",
-            4,
-        ))
-        .unwrap(),
-        None
-    );
-    assert_eq!(
-        block_on(store.retry_document_job(
-            source.id,
-            DocumentGeneration {
-                content_revision: document.content_revision + 1,
-                revision_token: document.revision_token,
-            },
-            DocumentJobKind::Index,
-            "pipeline-v1",
-            4,
-        ))
-        .unwrap(),
-        None
-    );
-
-    let retried = block_on(store.retry_document_job(
-        source.id,
-        document.generation(),
-        DocumentJobKind::Index,
-        "pipeline-v1",
-        4,
-    ))
-    .unwrap()
-    .unwrap();
-    assert_eq!(retried.id, queued.id);
-    assert_eq!(retried.status, DocumentJobStatus::Queued);
-    assert_eq!(retried.attempt_count, 0);
-    assert_eq!(retried.max_attempts, 4);
-    assert_eq!(retried.lease_token, None);
-    assert_eq!(retried.lease_expires_at, None);
-    assert_eq!(retried.started_at, None);
-    assert_eq!(retried.finished_at, None);
-    assert_eq!(retried.last_error_code, None);
-    assert_eq!(retried.last_error_detail, None);
-    let document = block_on(store.get_document(source.id)).unwrap().unwrap();
-    assert_eq!(document.processing_status, DocumentProcessingStatus::Queued);
-    assert_eq!(document.indexed_revision, None);
-    assert_eq!(document.index_fingerprint, None);
-    assert_eq!(document.indexed_at, None);
-    assert_eq!(
-        block_on(store.retry_document_job(
-            source.id,
-            document.generation(),
-            DocumentJobKind::Index,
-            "pipeline-v1",
-            8,
-        ))
-        .unwrap(),
-        Some(retried.clone())
-    );
-
-    let retry_claim_at = retried.available_at + chrono::Duration::seconds(1);
-    let retry_running = block_on(store.claim_document_job(
-        retry_claim_at,
-        retry_claim_at + chrono::Duration::minutes(1),
-    ))
-    .unwrap()
-    .unwrap();
-    assert!(block_on(store.complete_document_index_job(
-        retry_running.id,
-        retry_running.lease_token.unwrap(),
-        retry_claim_at + chrono::Duration::seconds(1),
-    ))
-    .unwrap());
-    assert_eq!(
-        block_on(store.retry_document_job(
-            source.id,
-            document.generation(),
-            DocumentJobKind::Index,
-            "pipeline-v1",
-            4,
-        ))
-        .unwrap(),
-        None
-    );
-
-    let replacement = DocumentUpsert {
-        canonical_fingerprint: None,
-        canonical_text: "replacement".into(),
-        source_regions: Vec::new(),
-        updated_at: source.updated_at + chrono::Duration::seconds(1),
-        ..source.clone()
-    };
-    let (replacement_document, cancelled) =
-        block_on(store.upsert_document_and_enqueue_index(&replacement, "pipeline-v2", 2)).unwrap();
-    assert_eq!(
-        block_on(store.retry_document_job(
-            replacement.id,
-            replacement_document.generation(),
-            DocumentJobKind::Index,
-            "pipeline-v1",
-            4,
-        ))
-        .unwrap(),
-        None
-    );
-    let (newer_document, _) = block_on(store.upsert_document_and_enqueue_index(
-        &DocumentUpsert {
-            canonical_fingerprint: None,
-            canonical_text: "newer replacement".into(),
-            source_regions: Vec::new(),
-            updated_at: source.updated_at + chrono::Duration::seconds(2),
-            ..replacement
-        },
-        "pipeline-v3",
-        2,
-    ))
-    .unwrap();
-    assert_eq!(
-        block_on(store.get_document_job(cancelled.id))
-            .unwrap()
-            .unwrap()
-            .status,
-        DocumentJobStatus::Cancelled
-    );
-    assert_eq!(
-        block_on(store.retry_document_job(
-            source.id,
-            newer_document.generation(),
-            DocumentJobKind::Index,
-            "pipeline-v2",
-            4,
-        ))
-        .unwrap(),
-        None
     );
 }
 
@@ -2828,11 +1865,8 @@ fn mem_store_explicit_retry_revives_only_pending_parse_stage() {
                 content_revision: generation.content_revision,
                 revision_token: generation.revision_token,
                 processing_status: DocumentProcessingStatus::Failed,
-                indexed_revision: None,
-                index_fingerprint: None,
                 created_at: now,
                 updated_at: now,
-                indexed_at: None,
             },
         );
         state.jobs.insert(job.id, job.clone());
@@ -2844,17 +1878,6 @@ fn mem_store_explicit_retry_revives_only_pending_parse_stage() {
         EnsureDocumentParseJobOutcome::Failed(job.clone())
     );
 
-    assert_eq!(
-        block_on(store.retry_document_job(
-            document_id,
-            generation,
-            DocumentJobKind::Index,
-            "parser=pdf-v1",
-            5,
-        ))
-        .unwrap(),
-        None
-    );
     let retried = block_on(store.retry_document_job(
         document_id,
         generation,

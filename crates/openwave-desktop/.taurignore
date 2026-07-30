@@ -6,4 +6,3 @@
 # Staged or generated during builds; watching them retriggers the watcher.
 # (node_modules, target, and gen are already in tauri-cli's builtin ignores.)
 /binaries
-/resources/pdfium

@@ -17,12 +17,11 @@ use tokio::sync::broadcast::error::RecvError;
 
 use openwave_core::{
     AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentError, AgentRun, AgentRunExecutionLocation,
-    AgentRunStatus, AgentRunTier, ApprovalDecision, CallId, Chat, ChatId, CitationFormat,
-    DeleteChatOutcome, DeleteProjectOutcome, Message as StoredMessage, MessageId, PermissionMode,
-    Project, ProjectId, ReasoningEffort, RequestAgentRunCancellationOutcome,
-    RequestTurnCancellationOutcome, Role, SandboxToolCall, SandboxToolCallStatus, SecretProvider,
-    SequencedEvent, Store, ToolCallExecution, ToolCallRecord, ToolCallStatus, TurnId, TurnSteer,
-    TurnSteerId,
+    AgentRunStatus, AgentRunTier, ApprovalDecision, CallId, Chat, ChatId, DeleteChatOutcome,
+    DeleteProjectOutcome, Message as StoredMessage, MessageId, PermissionMode, Project, ProjectId,
+    ReasoningEffort, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, Role,
+    SandboxToolCall, SandboxToolCallStatus, SecretProvider, SequencedEvent, Store,
+    ToolCallExecution, ToolCallRecord, ToolCallStatus, TurnId, TurnSteer, TurnSteerId,
 };
 
 use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
@@ -362,9 +361,6 @@ pub struct Settings {
     /// The model turns run against, or `None` to use the server's default.
     #[serde(default)]
     pub model: Option<String>,
-    /// The citation format new chats follow unless they carry their own.
-    /// Always resolved, so a client never has to know the product default.
-    pub citation_format: CitationFormat,
     /// Whether a model API key is configured (never the key itself).
     pub has_api_key: bool,
 }
@@ -376,9 +372,6 @@ pub struct Settings {
 pub struct SettingsUpdate {
     #[serde(default, deserialize_with = "double_option")]
     pub model: Option<Option<String>>,
-    /// An explicit `null` returns the default to the product's own.
-    #[serde(default, deserialize_with = "double_option")]
-    pub citation_format: Option<Option<CitationFormat>>,
 }
 
 /// Deserialize a present field (including JSON `null`) as `Some(..)`; `#[serde(default)]`
@@ -395,7 +388,6 @@ where
 pub async fn get_settings(State(state): State<AppState>) -> Result<Json<Settings>, ServerError> {
     Ok(Json(Settings {
         model: read_model(&*state.store).await?,
-        citation_format: crate::citation_format::resolve(&*state.store, None).await?,
         has_api_key: has_api_key(&*state.secrets).await,
     }))
 }
@@ -424,12 +416,8 @@ pub async fn put_settings(
             model_roles::write_selection(&*state.store, ModelRole::Chat, Some(&model)).await?;
         }
     }
-    if let Some(citation_format) = body.citation_format {
-        crate::citation_format::write_default(&*state.store, citation_format).await?;
-    }
     Ok(Json(Settings {
         model: read_model(&*state.store).await?,
-        citation_format: crate::citation_format::resolve(&*state.store, None).await?,
         has_api_key: has_api_key(&*state.secrets).await,
     }))
 }
@@ -1126,10 +1114,6 @@ pub struct CreateChat {
     /// Optional permission mode for this chat; omitted means `ask`.
     #[serde(default)]
     pub permission_mode: Option<PermissionMode>,
-    /// Optional citation-format override for this chat; omitted to follow the
-    /// global default.
-    #[serde(default)]
-    pub citation_format: Option<CitationFormat>,
 }
 
 /// `POST /chats` — create a chat and return it (`201 Created`).
@@ -1156,7 +1140,6 @@ pub async fn create_chat(
         model: body.model,
         reasoning_effort: body.reasoning_effort,
         permission_mode: body.permission_mode,
-        citation_format: body.citation_format,
         attachment_revision: 0,
         root_attachments: Vec::new(),
         created_at: Utc::now(),
@@ -1184,9 +1167,6 @@ pub struct ChatUpdate {
     /// sets it.
     #[serde(default, deserialize_with = "double_option")]
     pub permission_mode: Option<Option<PermissionMode>>,
-    /// An explicit `null` returns this chat to the global default.
-    #[serde(default, deserialize_with = "double_option")]
-    pub citation_format: Option<Option<CitationFormat>>,
 }
 
 /// `PATCH /chats/{id}` — update the human-facing title and/or model selection.
@@ -1216,7 +1196,6 @@ pub async fn patch_chat(
             body.model.clone(),
             body.reasoning_effort,
             body.permission_mode,
-            body.citation_format,
         )
         .await?
     {
@@ -1233,9 +1212,6 @@ pub async fn patch_chat(
     }
     if let Some(permission_mode) = body.permission_mode {
         chat.permission_mode = permission_mode;
-    }
-    if let Some(citation_format) = body.citation_format {
-        chat.citation_format = citation_format;
     }
     Ok(Json(chat))
 }
@@ -1361,7 +1337,7 @@ pub async fn list_chat_messages(
         citations_by_message
             .entry(citation.message_id)
             .or_insert_with(Vec::new)
-            .push(citation);
+            .push(citation.citation);
     }
     let mut image_attachments_by_message = std::collections::HashMap::new();
     for attachment in transcript.message_attachments {

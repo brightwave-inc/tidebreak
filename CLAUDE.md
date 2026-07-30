@@ -17,18 +17,22 @@ React/TypeScript under `crates/openwave-desktop/ui`.
   a large multi-slice diff on a working branch. Ship a slice, open the PR, move
   on. Small and reviewable beats big and sprawling.
 - **Branch off `main`; PR back into `main`.** Never commit straight to `main`.
-- **Track substantial work on the board first.** For anything beyond a small fix,
-  open (or pick up) an issue, put it on the project board, and move it to
-  *In progress* **before you start editing** — see below. Several agent sessions
-  run in parallel against this repo and the board is how they avoid each other;
-  an issue claimed after the work is done has already failed at its job.
+- **Issues are for deferred or cross-agent work, not for narrating the current
+  task.** Open an issue when work is being set aside for later, or when it needs
+  to be visible to *other* sessions — a slice another agent might pick up, or a
+  claim on contested scope. Work the user is directing interactively in this
+  session doesn't need an issue; filing one adds tracking overhead without
+  coordinating anyone. If you do pick up substantial parallel-track work, claim
+  its issue on the board **before you start editing** — see below.
 - **Only commit or push when asked.** Don't merge your own PRs unless the request
   was explicitly to merge; default to opening the PR for review.
 
 ## Project board
 
 Work is tracked on a repo-scoped GitHub **Project** so the team and separate
-agent sessions can see where things stand without reading commit logs.
+agent sessions can see where things stand without reading commit logs. The
+board matters where sessions can collide or work outlives a session; it is not
+a ledger of everything an agent happens to be doing right now.
 
 - **Claim before you build, not after.** Assign yourself and move the issue to
   *In progress* **before the first edit**. Sessions run in parallel and cannot
@@ -118,40 +122,24 @@ is the whole rule, and it is coarse on purpose:
   -D warnings`), and the desktop tests. Every cargo invocation passes `--locked`,
   so a lockfile drift fails there too.
 - A Rust change also marks the **workspace** scope, which adds the headless
-  workspace tests with the server's rich parser adapters disabled, plus the
-  PostgreSQL turn-state lane, unless every changed file is one of
-  `openwave-desktop`'s own sources. Nothing in the workspace depends on the
-  desktop crate and the headless lane already excludes it, so those lanes cannot
-  see such a change.
-  Its `Cargo.toml` is not covered by the carve-out — it forwards features into
-  `openwave-server` — and neither is
-  `ui/src/generated/`, whose staleness check lives in `openwave-server`.
-- Parser, feature-wiring, dependency, and CI changes also mark the **parser**
-  scope. Its focused PDF/Office/image/spreadsheet contracts run in a headless
-  job parallel to the desktop behavior suite. Normal desktop builds keep those
-  parsers enabled by default; the desktop test harness disables them because the
-  focused lane already covers their behavior and clippy compile-checks the rich
-  production topology.
+  workspace tests plus the PostgreSQL turn-state lane, unless every changed file
+  is one of `openwave-desktop`'s own sources. Nothing in the workspace depends on
+  the desktop crate and the headless lane already excludes it, so those lanes
+  cannot see such a change. `ui/src/generated/` is not covered by the carve-out
+  because its staleness check lives in `openwave-server`.
 - Any file under `crates/openwave-desktop/ui/` marks it **UI**, which runs
   `pnpm test` and `pnpm build` as two fixed parallel jobs.
 - Branch protection requires the pull-request gate jobs directly. Conditional
   jobs report a successful skip when their scope is false; the always-running
   change detector rejects impossible narrower-scope combinations before those
   jobs consume them. There is no serial aggregate wrapper after the slowest job.
-- The two heavyweight capability lanes are scoped separately on merges to
-  `main`. `durable vector store` runs when retrieval, its server/CLI/desktop
-  feature wiring, or dependency/toolchain inputs change. `sandbox-resident
-  container e2e` runs when the sandbox agent/protocol, container driver,
+- The heavyweight `sandbox-resident container e2e` lane is scoped separately on
+  merges to `main`. It runs when the sandbox agent/protocol, container driver,
   Dockerfile, or dependency/toolchain inputs change. A weekly scheduled run and
-  every `workflow_dispatch` exercise both as a backstop.
-- **One exception, and it is a real coverage gap:** neither heavyweight lane
-  runs on pull requests. If you touch `openwave-retrieval`, the `vec-lance`
-  feature, or the release guard in `openwave-server`'s build script, run
-  `cargo test -p openwave-retrieval --features vec-lance` locally — a PR going
-  green says nothing about LanceDB. Tracked in #760. The container path has
-  lower residual risk because PRs drive the same host driver against the real
-  sandbox agent over loopback, but only the post-merge/scheduled lane proves the
-  Docker packaging and container network boundary.
+  every `workflow_dispatch` exercise it as a backstop. Pull requests drive the
+  same host driver against the real sandbox agent over loopback, but only the
+  post-merge/scheduled lane proves the Docker packaging and container network
+  boundary.
 
 So a scoped skip is not a coverage hole, and duplicating those lanes locally is
 wasted time. Run a cheap subset for fast feedback on what you actually touched —

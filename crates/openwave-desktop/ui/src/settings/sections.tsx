@@ -6,7 +6,6 @@ import {
   KeyRound,
   Palette,
   PlugZap,
-  Quote,
   RefreshCw,
   ShieldCheck,
   SquareTerminal,
@@ -15,8 +14,8 @@ import {
 
 import { useApp } from "@/AppContext";
 import { useManagedPolicy } from "@/managedPolicy";
+import { useTheme } from "@/theme";
 import { AppearancePanel } from "./AppearancePanel";
-import { CitationsPanel } from "./CitationsPanel";
 import { CodeExecutionPanel } from "./CodeExecutionPanel";
 import { GatewayPanel } from "./GatewayPanel";
 import { McpPanel } from "./McpPanel";
@@ -96,14 +95,9 @@ function PermissionsSection() {
   return <PermissionsPanel client={client} />;
 }
 
-function CitationsSection() {
-  const { client, refreshCatalog } = useApp();
-  return <CitationsPanel client={client} onChanged={() => void refreshCatalog()} />;
-}
-
 function AppearanceSection() {
-  const { themeMode, setThemeMode } = useApp();
-  return <AppearancePanel mode={themeMode} onChange={setThemeMode} />;
+  const { mode, setMode } = useTheme();
+  return <AppearancePanel mode={mode} onChange={setMode} />;
 }
 
 function UpdatesSection() {
@@ -166,7 +160,6 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     icon: ShieldCheck,
     Component: PermissionsSection,
   },
-  { path: "citations", label: "Citations", icon: Quote, Component: CitationsSection },
   { path: "appearance", label: "Appearance", icon: Palette, Component: AppearanceSection },
   { path: "updates", label: "Updates", icon: RefreshCw, Component: UpdatesSection },
 ];
@@ -190,4 +183,3 @@ export function settingsSectionsFor(managed: boolean): SettingsSectionDef[] {
 export function defaultSettingsPathFor(managed: boolean): string {
   return `/settings/${settingsSectionsFor(managed)[0].path}`;
 }
-

@@ -21,102 +21,54 @@ describe("code block copy", () => {
   });
 });
 
-const REEF = "0b2b1f2c-9d3e-4a5b-8c7d-6e5f4a3b2c1d";
-const TIDE = "3f7c8a91-2b4d-4e6f-9a1b-5c7d8e9f0a1b";
-const DANGLING = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+const DOCUMENT = "0b2b1f2c-9d3e-4a5b-8c7d-6e5f4a3b2c1d";
+const OLD_CITATION = "3f7c8a91-2b4d-4e6f-9a1b-5c7d8e9f0a1b";
 
-function source(overrides: Partial<AssistantSource> = {}): AssistantSource {
-  return {
-    id: REEF,
-    ordinal: 2,
-    documentId: "doc-reef",
-    span: { start: 10, end: 40 },
-    excerpt: "The reef spans 2,300 kilometres.",
-    heading: "Extent",
-    pages: [4],
-    bounds: [],
-    ...overrides,
-  };
-}
+const source: AssistantSource = {
+  id: "citation-1",
+  ordinal: 1,
+  documentId: DOCUMENT,
+  locator: { kind: "lines", start: 12, end: 18 },
+};
 
 describe("inline citations", () => {
-  // Ordinals skip: a citation dropped past the message's bound leaves a gap, so
-  // a badge counted off the rendering would renumber every citation after it.
-  const sources = [
-    source(),
-    source({
-      id: TIDE,
-      ordinal: 4,
-      documentId: "doc-tide",
-      excerpt: "Tides run to four metres.",
-      heading: "Tides",
-      pages: [11, 12],
-    }),
-  ];
-
-  function renderCited(text: string, onOpenSource = vi.fn()) {
-    const view = render(
-      <MessageCitationsProvider value={{ sources, onOpenSource }}>
-        <MessageMarkdown>{text}</MessageMarkdown>
-      </MessageCitationsProvider>,
-    );
-    return { ...view, onOpenSource };
-  }
-
-  it("anchors each citation on the phrase it backs and opens its document on one click", async () => {
-    const user = userEvent.setup();
-    const { container, onOpenSource } = renderCited(
-      `The reef :cit[is the largest in the world]{citation_id=${REEF}}, ` +
-        `and :cit[its tides are extreme]{citation_id=${TIDE}}.`,
-    );
-
-    const cited = screen.getAllByRole("button");
-    expect(cited).toHaveLength(2);
-    // The phrase names the control; the ordinal is the snapshot's own.
-    expect(cited[0]).toHaveAccessibleName(
-      "is the largest in the world, citation 2",
-    );
-    expect(cited[1]).toHaveAccessibleName("its tides are extreme, citation 4");
-    expect(container.textContent).toContain("The reef is the largest");
-    expect(container.textContent).not.toContain(":cit");
-    expect(container.textContent).not.toContain("citation_id");
-
-    // The document is the destination: one click gets there, with no popover in
-    // the way, and hands back the snapshot the phrase was anchored to.
-    await user.click(cited[1]!);
-    expect(onOpenSource).toHaveBeenCalledWith(sources[1]);
-    expect(screen.queryByText("Tides run to four metres.")).toBeNull();
-  });
-
-  it("shows the evidence in place when there is no document to open", async () => {
+  it("opens the model-authored document locator from its cited phrase", async () => {
     const user = userEvent.setup();
     const onOpenSource = vi.fn();
-    render(
-      <MessageCitationsProvider
-        value={{ sources: [source({ documentId: "" })], onOpenSource }}
-      >
+    const { container } = render(
+      <MessageCitationsProvider value={{ sources: [source], onOpenSource }}>
         <MessageMarkdown>
-          {`The reef :cit[is the largest in the world]{citation_id=${REEF}}.`}
+          {`The reef :cit[is the largest *in the world*]{doc=${DOCUMENT} lines=12-18}.`}
         </MessageMarkdown>
       </MessageCitationsProvider>,
     );
 
-    await user.click(screen.getByRole("button"));
-    const popover = await screen.findByText("Extent");
-    expect(popover.parentElement).toHaveTextContent(
-      "The reef spans 2,300 kilometres.",
-    );
-    expect(popover.parentElement).toHaveTextContent("Page 4");
-    expect(onOpenSource).not.toHaveBeenCalled();
+    const cited = screen.getByRole("button", {
+      name: "is the largest in the world, citation 1",
+    });
+    expect(container.textContent).not.toContain(":cit");
+    await user.click(cited);
+    expect(onOpenSource).toHaveBeenCalledWith(source);
   });
 
-  it("reads as prose when the citation is not one the message carries", () => {
-    const { container } = renderCited(
-      `Reefs :cit[grow slowly]{citation_id=${DANGLING}} and ` +
-        ":cit[tides turn]{citation_id=not-a-uuid}.",
+  it("leaves a locator as prose until its durable snapshot arrives", () => {
+    const { container } = render(
+      <MessageMarkdown>
+        {`The reef :cit[grows slowly]{doc=${DOCUMENT} page=4}.`}
+      </MessageMarkdown>,
     );
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(container).toHaveTextContent("The reef grows slowly.");
+  });
 
-    expect(screen.queryAllByRole("button")).toHaveLength(0);
-    expect(container.textContent).toBe("Reefs grow slowly and tides turn.");
+  it("degrades historical citation-id directives to bare cited text", () => {
+    const { container } = render(
+      <MessageMarkdown>
+        {`The reef :cit[grows slowly]{citation_id=${OLD_CITATION}}.`}
+      </MessageMarkdown>,
+    );
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(container).toHaveTextContent("The reef grows slowly.");
+    expect(container.textContent).not.toContain("citation_id");
   });
 });

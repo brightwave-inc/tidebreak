@@ -88,7 +88,6 @@ jobs:
             target/${{ matrix.target }}/release/openwave-host-broker
             target/${{ matrix.target }}/release/libopenwave_desktop_lib.*
             crates/openwave-desktop/binaries/openwave-host-broker-${{ matrix.target }}
-            crates/openwave-desktop/resources/pdfium/libpdfium.dylib
           key: macos-release-target-v2-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
           restore-keys: |
             macos-release-target-v2-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
@@ -97,7 +96,7 @@ jobs:
             macos-release-target-v1-${{ matrix.arch }}-
 
       - name: Set up compiler cache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
 
@@ -123,18 +122,13 @@ jobs:
         working-directory: crates/openwave-desktop/ui
         run: pnpm install --frozen-lockfile
 
-      - name: Install protobuf compiler
-        run: brew install protobuf
-
       - name: Compile without production credentials or bundles
         id: compile
         continue-on-error: true
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         with:
           projectPath: crates/openwave-desktop
-          # Match the release build, which compiles the durable vector store;
-          # a cache warmed without it would miss on every release compile.
-          args: --target ${{ matrix.target }} --features vec-lance --no-bundle --ci
+          args: --target ${{ matrix.target }} --no-bundle --ci
 
       - name: Report unsigned Rust build cache size
         if: ${{ !cancelled() }}
@@ -146,7 +140,6 @@ jobs:
             target/${{ matrix.target }}/release/openwave-host-broker \
             target/${{ matrix.target }}/release/libopenwave_desktop_lib.* \
             crates/openwave-desktop/binaries/openwave-host-broker-${{ matrix.target }} \
-            crates/openwave-desktop/resources/pdfium/libpdfium.dylib \
             2>/dev/null | tail -1 || true
 
       - name: Save unsigned Rust build cache
@@ -166,7 +159,6 @@ jobs:
             target/${{ matrix.target }}/release/openwave-host-broker
             target/${{ matrix.target }}/release/libopenwave_desktop_lib.*
             crates/openwave-desktop/binaries/openwave-host-broker-${{ matrix.target }}
-            crates/openwave-desktop/resources/pdfium/libpdfium.dylib
           key: ${{ steps.rust-build-cache.outputs.cache-primary-key }}
 
       - name: Require a successful cache-warm compilation

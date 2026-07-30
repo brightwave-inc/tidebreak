@@ -1,7 +1,6 @@
 import {
   CheckCircle2Icon,
   FileWarningIcon,
-  Loader2Icon,
   UploadIcon,
   XIcon,
 } from "lucide-react";
@@ -9,6 +8,7 @@ import {
 import { DocumentIcon } from "@/components/document-table/DocumentIcon";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import type { LibraryImportState } from "./documents";
 import {
   importIsActive,
@@ -69,7 +69,7 @@ export function ImportQueue() {
           )}
           {running ? (
             <Badge variant="info">
-              <Loader2Icon className="size-3 animate-spin" />
+              <Spinner className="size-3 text-current" />
               {percentage}%
             </Badge>
           ) : (
@@ -133,7 +133,9 @@ function StateGlyph({ status }: { status: LibraryImportState }) {
         />
       );
     case "streaming":
-      return <Loader2Icon aria-label="Adding" className="size-3 shrink-0 animate-spin" />;
+      return (
+        <Spinner aria-label="Adding" className="size-3 shrink-0 text-current" />
+      );
     case "imported":
     case "already_present":
       return (

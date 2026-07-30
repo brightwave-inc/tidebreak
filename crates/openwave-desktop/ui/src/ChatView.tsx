@@ -20,6 +20,7 @@ import { useTurnControls } from "./useTurnControls";
 import { useUserQuestions } from "./useUserQuestions";
 import { useAgentRuns } from "./useAgentRuns";
 import { ArrowDown } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 export type ChatViewProps = {
   client: ApiClient;
@@ -294,7 +295,10 @@ export function ChatView({
         />
         <button
           type="button"
-          className={`scroll-to-latest${scrolledAway ? " is-visible" : ""}`}
+          className={cn(
+            "absolute z-[1] left-1/2 bottom-3 -translate-x-1/2 inline-flex items-center justify-center rounded-full border border-border p-2 text-foreground bg-background shadow transition-[opacity,background-color] duration-150 ease-in-out opacity-0 pointer-events-none hover:bg-accent motion-reduce:transition-none",
+            scrolledAway && "opacity-100 pointer-events-auto",
+          )}
           aria-label="Scroll to latest"
           aria-hidden={!scrolledAway}
           tabIndex={scrolledAway ? 0 : -1}
@@ -304,39 +308,41 @@ export function ChatView({
         </button>
       </div>
 
-      <Composer
-        activeTurnId={activeTurnId}
-        busy={busy}
-        cancelError={turnControls.cancelError}
-        cancelPending={
-          activeTurnId !== null &&
-          turnControls.cancelPendingTurnId === activeTurnId
-        }
-        disabled={deletingChat}
-        draft={draft}
-        modelMenu={composerModelMenu}
-        images={composerImages}
-        attachedSourceName={attachedSourceName}
-        attachError={attachError}
-        onDismissAttachedSource={onDismissAttachedSource}
-        // Typing retires the verdict on the last piece of guidance. Accepted
-        // guidance clears the draft through the raw callback instead, so
-        // "Guidance sent" survives the clearing it caused.
-        onDraftChange={(value) => {
-          turnControls.clearSteerFeedback();
-          onDraftChange(value);
-        }}
-        onSend={handleSend}
-        onSteer={turnControls.steer}
-        onStop={turnControls.cancel}
-        resetKey={chat.id}
-        steerError={turnControls.steerError}
-        steerPending={
-          activeTurnId !== null &&
-          turnControls.steerPendingTurnId === activeTurnId
-        }
-        steerStatus={turnControls.steerStatus}
-      />
+      <div className="px-[clamp(0.5rem,4%,5rem)] pb-2">
+        <Composer
+          activeTurnId={activeTurnId}
+          busy={busy}
+          cancelError={turnControls.cancelError}
+          cancelPending={
+            activeTurnId !== null &&
+            turnControls.cancelPendingTurnId === activeTurnId
+          }
+          disabled={deletingChat}
+          draft={draft}
+          modelMenu={composerModelMenu}
+          images={composerImages}
+          attachedSourceName={attachedSourceName}
+          attachError={attachError}
+          onDismissAttachedSource={onDismissAttachedSource}
+          // Typing retires the verdict on the last piece of guidance. Accepted
+          // guidance clears the draft through the raw callback instead, so
+          // "Guidance sent" survives the clearing it caused.
+          onDraftChange={(value) => {
+            turnControls.clearSteerFeedback();
+            onDraftChange(value);
+          }}
+          onSend={handleSend}
+          onSteer={turnControls.steer}
+          onStop={turnControls.cancel}
+          resetKey={chat.id}
+          steerError={turnControls.steerError}
+          steerPending={
+            activeTurnId !== null &&
+            turnControls.steerPendingTurnId === activeTurnId
+          }
+          steerStatus={turnControls.steerStatus}
+        />
+      </div>
     </section>
   );
 }

@@ -25,9 +25,7 @@ use serde_json::Value;
 use std::ops::Range;
 
 use crate::approval::{ApprovalDecision, ApprovalRequest, StandingGrant, ToolApproval};
-use crate::deliverable::{
-    CreateOutput, NewOutputRevision, OutputCitationSnapshot, OutputRecord, OutputRevision,
-};
+use crate::deliverable::{CreateOutput, NewOutputRevision, OutputRecord, OutputRevision};
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{
@@ -73,12 +71,22 @@ pub struct ChatTranscriptSnapshot {
     /// Refusal outcomes keyed to their durably completed assistant message.
     pub refusals: Vec<ChatRefusalSnapshot>,
     /// Ordered renderer-safe sources keyed to their assistant message.
-    pub citations: Vec<crate::AssistantCitationSnapshot>,
+    pub citations: Vec<ChatCitationSnapshot>,
     /// A renderer-safe historical projection. It contains fixed tool identity,
     /// closed previews and lifecycle timestamps only; canonical tool records
     /// never leave storage.
     pub tool_activity: Vec<ChatToolActivitySnapshot>,
     pub last_event_seq: i64,
+}
+
+/// One renderer-safe citation paired with its transcript message.
+///
+/// Message identity is transcript assembly metadata, not part of the citation
+/// shape exposed to renderer clients.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatCitationSnapshot {
+    pub message_id: MessageId,
+    pub citation: crate::AssistantCitationSnapshot,
 }
 
 /// One refused terminal outcome attached to its durable assistant output.
@@ -196,43 +204,6 @@ pub struct ChatToolActivitySnapshot {
     pub status: ChatToolActivityStatus,
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-/// Why maintenance determined that a document needs an index job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DocumentIndexJobReason {
-    /// The operational watermark is current, but the derived generation is absent.
-    DerivedStateMissing,
-    /// The desired generation exists only partially and cannot be safely reused.
-    DerivedStateIncomplete,
-    /// The configured chunking/embedding pipeline differs from the indexed one.
-    PipelineChanged,
-}
-
-impl DocumentIndexJobReason {
-    /// Whether this repair must publish under a fresh generation fence.
-    #[must_use]
-    #[allow(dead_code)]
-    pub(crate) const fn advances_generation(self) -> bool {
-        matches!(self, Self::DerivedStateIncomplete | Self::PipelineChanged)
-    }
-}
-
-/// Result of atomically ensuring one desired document index job.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EnsureDocumentIndexJobOutcome {
-    /// A new job was inserted or an exact terminal job was reset to queued.
-    Enqueued(DocumentJob),
-    /// The desired current job already exists and requires no state change.
-    Existing(DocumentJob),
-    /// The desired current job failed and requires an explicit user retry.
-    Failed(DocumentJob),
-    /// Canonical content is still owned by the current parse stage.
-    Parsing(DocumentJob),
-    /// The source document no longer exists.
-    MissingDocument,
-    /// The caller inspected an obsolete source generation.
-    GenerationChanged(DocumentGeneration),
 }
 
 /// Result of atomically ensuring canonical output from one parser pipeline.
@@ -1232,39 +1203,6 @@ pub trait Store: Send + Sync {
         document_storage_unavailable()
     }
 
-    /// List durable tombstone watermarks whose retrieval retirement is unfinished.
-    ///
-    /// Results are ordered by document id, strictly after `after` when present,
-    /// and bounded by `limit`. A worker can advance past a poison entry and wrap
-    /// to the beginning by issuing a later scan with `after = None`.
-    async fn list_pending_document_retirements(
-        &self,
-        _after: Option<DocumentId>,
-        _limit: u64,
-    ) -> Result<Vec<(DocumentId, DocumentGeneration)>> {
-        document_storage_unavailable()
-    }
-
-    /// Read the exact retirement watermark currently pending for one document.
-    async fn get_pending_document_retirement(
-        &self,
-        _id: DocumentId,
-    ) -> Result<Option<DocumentGeneration>> {
-        document_storage_unavailable()
-    }
-
-    /// Mark one exact tombstone generation's retrieval retirement complete.
-    ///
-    /// Returns `false` when that exact generation is no longer pending. A live
-    /// recreation may coexist with an older pending retirement watermark.
-    async fn complete_document_retirement(
-        &self,
-        _id: DocumentId,
-        _generation: DocumentGeneration,
-    ) -> Result<bool> {
-        document_storage_unavailable()
-    }
-
     /// Hard-delete source content and return its durable tombstone generation.
     ///
     /// The generation clock is retained without source content. Repeated deletion
@@ -1276,34 +1214,13 @@ pub trait Store: Send + Sync {
     /// Create or replace authoritative document content.
     ///
     /// A never-seen id starts at revision one. Replacing or recreating an id
-    /// increments its retained generation atomically, preserves `created_at` only
-    /// for a live replacement, and clears the index watermark. `project_id`, when
-    /// present, must identify an existing project. A live document cannot move
-    /// between the unscoped and project corpora, or between projects; direct
-    /// upserts enforce the same ownership rules as the enqueueing write path.
+    /// increments its retained generation atomically and preserves `created_at`
+    /// only for a live replacement. Published canonical content is immediately
+    /// ready. `project_id`, when present, must identify an existing project. A
+    /// live document cannot move between the unscoped and project corpora, or
+    /// between projects; direct upserts enforce the same ownership rules as the
+    /// enqueueing write path.
     async fn upsert_document(&self, _document: &DocumentUpsert) -> Result<DocumentRecord> {
-        document_storage_unavailable()
-    }
-
-    /// Atomically persist a new source revision and enqueue its index job.
-    ///
-    /// Any older nonterminal job for the document is cancelled in the same
-    /// transaction. The returned job is bound to the returned record's exact
-    /// `(content_revision, revision_token)` identity. Repeating identical source
-    /// content and pipeline fingerprint returns that exact revision/job without
-    /// allocating another, including its original `max_attempts` and terminal
-    /// status. Intentional reprocessing/retry is an explicit job-state transition,
-    /// not another source write. `DocumentUpsert::updated_at` is source metadata
-    /// and is deliberately excluded from retry identity. Workflow timestamps are
-    /// owned by the store rather than copied from source metadata. `project_id`
-    /// must identify an existing project when present, and ownership of a live
-    /// document is immutable until that document is deleted.
-    async fn upsert_document_and_enqueue_index(
-        &self,
-        _document: &DocumentUpsert,
-        _pipeline_fingerprint: &str,
-        _max_attempts: i32,
-    ) -> Result<(DocumentRecord, DocumentJob)> {
         document_storage_unavailable()
     }
 
@@ -1311,8 +1228,8 @@ pub trait Store: Send + Sync {
     ///
     /// The blob must already be durably published. Repeating an identical source
     /// and parser fingerprint returns the exact existing generation and job.
-    /// Any source or parser change advances the generation, clears canonical and
-    /// index state, and cancels older nonterminal work in the same transaction.
+    /// Any source or parser change advances the generation, clears canonical
+    /// state, and cancels older nonterminal work in the same transaction.
     async fn accept_document_source_and_enqueue_parse(
         &self,
         _document: &DocumentSourceUpsert,
@@ -1322,38 +1239,18 @@ pub trait Store: Send + Sync {
         document_storage_unavailable()
     }
 
-    /// Atomically publish canonical parser output and enqueue the index stage.
+    /// Atomically publish canonical parser output and mark the document ready.
     ///
     /// The transition succeeds only for the exact live, unexpired parse lease.
-    /// On success the parse job becomes terminal, canonical state becomes
-    /// authoritative, and one index job is queued in the same transaction.
-    async fn complete_document_parse_job_and_enqueue_index(
+    /// On success the parse job becomes terminal and canonical state becomes
+    /// authoritative in the same transaction.
+    async fn complete_document_parse_job(
         &self,
         _id: DocumentJobId,
         _lease_token: uuid::Uuid,
         _completed_at: chrono::DateTime<chrono::Utc>,
         _output: &DocumentParseOutput,
-        _index_fingerprint: &str,
-        _index_max_attempts: i32,
-    ) -> Result<Option<(DocumentRecord, DocumentJob)>> {
-        document_storage_unavailable()
-    }
-
-    /// Atomically establish the current index job requested by an auditor.
-    ///
-    /// `expected_generation` is a compare-and-swap fence around the auditor's
-    /// observation. Missing derived state requeues the exact current generation;
-    /// incomplete derived state and a changed pipeline advance the source
-    /// generation once without changing source fields. Failed jobs remain failed
-    /// until an explicit retry.
-    async fn ensure_document_index_job(
-        &self,
-        _document_id: DocumentId,
-        _expected_generation: DocumentGeneration,
-        _pipeline_fingerprint: &str,
-        _max_attempts: i32,
-        _reason: DocumentIndexJobReason,
-    ) -> Result<EnsureDocumentIndexJobOutcome> {
+    ) -> Result<Option<DocumentRecord>> {
         document_storage_unavailable()
     }
 
@@ -1361,8 +1258,8 @@ pub trait Store: Send + Sync {
     ///
     /// The caller's observed generation is a compare-and-swap fence. Missing
     /// work for pending canonical output is repaired in that generation; a
-    /// parser change advances the generation once, clears derived canonical and
-    /// index state, and enqueues Parse without changing retained source fields.
+    /// parser change advances the generation once, clears derived canonical
+    /// state, and enqueues Parse without changing retained source fields.
     /// Failed work remains failed until an explicit retry.
     async fn ensure_document_parse_job(
         &self,
@@ -1435,20 +1332,6 @@ pub trait Store: Send + Sync {
         document_storage_unavailable()
     }
 
-    /// Atomically succeed a live index job and publish its exact document
-    /// revision as ready in the operational store.
-    ///
-    /// Returns `false` when the job is no longer running under the exact,
-    /// unexpired lease or its timestamp would regress durable state.
-    async fn complete_document_index_job(
-        &self,
-        _id: DocumentJobId,
-        _lease_token: uuid::Uuid,
-        _completed_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<bool> {
-        document_storage_unavailable()
-    }
-
     /// Atomically record a live job failure and its matching document state.
     ///
     /// A future `retry_at` moves a job with attempts remaining to `retry_wait`
@@ -1464,36 +1347,6 @@ pub trait Store: Send + Sync {
         _error_code: &str,
         _error_detail: Option<&str>,
     ) -> Result<Option<DocumentJobStatus>> {
-        document_storage_unavailable()
-    }
-
-    /// Mark an exact `(revision, revision_token)` as indexed with `fingerprint`.
-    ///
-    /// `fingerprint` must not be empty.
-    ///
-    /// Returns `false` without modifying the row when the document is missing,
-    /// the lifecycle token differs, or a newer content revision won the race.
-    async fn mark_document_indexed(
-        &self,
-        _id: DocumentId,
-        _revision: i64,
-        _revision_token: uuid::Uuid,
-        _fingerprint: &str,
-        _indexed_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<bool> {
-        document_storage_unavailable()
-    }
-
-    /// Clear the index watermark for an exact content revision and lifecycle.
-    ///
-    /// Returns `false` without modifying the row when the document or exact
-    /// revision identity is no longer current.
-    async fn clear_document_index(
-        &self,
-        _id: DocumentId,
-        _revision: i64,
-        _revision_token: uuid::Uuid,
-    ) -> Result<bool> {
         document_storage_unavailable()
     }
 
@@ -1562,7 +1415,6 @@ pub trait Store: Send + Sync {
         model: Option<Option<String>>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
         permission_mode: Option<Option<PermissionMode>>,
-        citation_format: Option<Option<crate::citation::CitationFormat>>,
     ) -> Result<bool>;
 
     /// Create a conversation output together with its first revision.
@@ -1606,14 +1458,6 @@ pub trait Store: Send + Sync {
 
     /// Fetch one revision by opaque id.
     async fn get_output_revision(&self, _id: OutputRevisionId) -> Result<Option<OutputRevision>> {
-        output_storage_unavailable()
-    }
-
-    /// List renderer-safe source citations for one immutable output revision.
-    async fn list_output_revision_citations(
-        &self,
-        _revision_id: OutputRevisionId,
-    ) -> Result<Vec<OutputCitationSnapshot>> {
         output_storage_unavailable()
     }
 
@@ -2341,7 +2185,7 @@ pub trait Store: Send + Sync {
         _steer_id: TurnSteerId,
         _attempt_event_ordinal: i32,
         _preceding_assistant: Option<&Message>,
-        _preceding_citations: &[crate::AssistantCitationReference],
+        _preceding_citations: &[crate::AssistantCitationInput],
         _now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<JournaledTurnSteerOutcome>> {
         turn_storage_unavailable()
@@ -2402,7 +2246,7 @@ pub trait Store: Send + Sync {
         expected_steer_revision: i64,
         now: chrono::DateTime<chrono::Utc>,
         output: &Message,
-        citations: &[crate::AssistantCitationReference],
+        citations: &[crate::AssistantCitationInput],
         usage: Usage,
         stop_reason: StopReason,
     ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
@@ -2432,7 +2276,7 @@ pub trait Store: Send + Sync {
         _expected_steer_revision: i64,
         _now: chrono::DateTime<chrono::Utc>,
         _output: &Message,
-        _citations: &[crate::AssistantCitationReference],
+        _citations: &[crate::AssistantCitationInput],
         _usage: Usage,
         _refusal: RefusalOutcome,
     ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
@@ -2611,7 +2455,7 @@ pub trait Store: Send + Sync {
     async fn append_assistant_message_with_citations(
         &self,
         message: &Message,
-        references: &[crate::AssistantCitationReference],
+        references: &[crate::AssistantCitationInput],
     ) -> Result<()> {
         if references.is_empty() {
             self.append_message(message).await
@@ -2627,7 +2471,7 @@ pub trait Store: Send + Sync {
     async fn append_claimed_assistant_message_with_citations(
         &self,
         _message: &Message,
-        _references: &[crate::AssistantCitationReference],
+        _references: &[crate::AssistantCitationInput],
         _lease_token: uuid::Uuid,
         _now: chrono::DateTime<chrono::Utc>,
     ) -> Result<AppendClaimedMessageOutcome> {
@@ -2805,48 +2649,22 @@ pub trait Store: Send + Sync {
         resolved_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<ResolveToolCallOutcome>;
 
-    /// Resolve one server search call and atomically retain its private evidence.
-    async fn resolve_server_tool_call_with_evidence(
-        &self,
-        id: CallId,
-        resolution: &ToolCallResolution,
-        resolved_at: chrono::DateTime<chrono::Utc>,
-        evidence: &[crate::RetrievalEvidenceInput],
-    ) -> Result<ResolveToolCallOutcome> {
-        if !evidence.is_empty() {
-            return Err(AgentError::Store(
-                "retrieval evidence persistence is unavailable".into(),
-            ));
-        }
-        self.resolve_server_tool_call(id, resolution, resolved_at)
-            .await
-    }
-
-    /// Resolve a server call, retaining its evidence and the renderer
-    /// projection of what it produced.
-    ///
-    /// Separate from [`Self::resolve_server_tool_call_with_evidence`] rather
-    /// than replacing it: most callers resolve a call that projects nothing,
-    /// and a store that cannot retain a projection should still resolve. The
-    /// default drops the projection, which costs the card on reload and
-    /// nothing else.
+    /// Resolve a server call and retain the renderer projection it produced.
     async fn resolve_server_tool_call_with_artifacts(
         &self,
         id: CallId,
         resolution: &ToolCallResolution,
         resolved_at: chrono::DateTime<chrono::Utc>,
-        evidence: &[crate::RetrievalEvidenceInput],
         _preview: Option<&crate::ToolResultPreview>,
     ) -> Result<ResolveToolCallOutcome> {
-        self.resolve_server_tool_call_with_evidence(id, resolution, resolved_at, evidence)
+        self.resolve_server_tool_call(id, resolution, resolved_at)
             .await
     }
 
-    /// Resolve a server tool result and retain its evidence only if the same
-    /// live turn lease that accepted the call still owns the turn. The result,
-    /// evidence, and lease comparison commit atomically.
+    /// Resolve a server tool result only if the same live turn lease that
+    /// accepted the call still owns the turn.
     #[allow(clippy::too_many_arguments)]
-    async fn resolve_claimed_server_tool_call_with_evidence(
+    async fn resolve_claimed_server_tool_call(
         &self,
         _id: CallId,
         _chat_id: ChatId,
@@ -2855,7 +2673,6 @@ pub trait Store: Send + Sync {
         _now: chrono::DateTime<chrono::Utc>,
         _resolution: &ToolCallResolution,
         _resolved_at: chrono::DateTime<chrono::Utc>,
-        _evidence: &[crate::RetrievalEvidenceInput],
     ) -> Result<ResolveToolCallOutcome> {
         turn_storage_unavailable()
     }
@@ -2872,10 +2689,9 @@ pub trait Store: Send + Sync {
         now: chrono::DateTime<chrono::Utc>,
         resolution: &ToolCallResolution,
         resolved_at: chrono::DateTime<chrono::Utc>,
-        evidence: &[crate::RetrievalEvidenceInput],
         _preview: Option<&crate::ToolResultPreview>,
     ) -> Result<ResolveToolCallOutcome> {
-        self.resolve_claimed_server_tool_call_with_evidence(
+        self.resolve_claimed_server_tool_call(
             id,
             chat_id,
             turn_id,
@@ -2883,7 +2699,6 @@ pub trait Store: Send + Sync {
             now,
             resolution,
             resolved_at,
-            evidence,
         )
         .await
     }
@@ -2904,13 +2719,6 @@ pub trait Store: Send + Sync {
         _resolved_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<ResolveToolCallOutcome> {
         turn_storage_unavailable()
-    }
-
-    /// Read private evidence for trusted server-side citation assembly.
-    async fn list_retrieval_evidence(&self, _id: CallId) -> Result<Vec<crate::RetrievalEvidence>> {
-        Err(AgentError::Store(
-            "retrieval evidence persistence is unavailable".into(),
-        ))
     }
 
     /// Resolve a pending client call under its exact unexpired executor lease.
@@ -3136,7 +2944,7 @@ pub trait Store: Send + Sync {
         turn_id: TurnId,
         lease_token: uuid::Uuid,
         _output: &Message,
-        citations: &[crate::AssistantCitationReference],
+        citations: &[crate::AssistantCitationInput],
         event: &AgentEvent,
     ) -> Result<Option<SequencedEvent>> {
         if citations.is_empty() {

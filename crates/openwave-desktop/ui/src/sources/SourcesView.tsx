@@ -255,7 +255,7 @@ export function SourcesView({
               ? {
                   ...candidate,
                   processingStatus: "queued",
-                  searchable: false,
+                  readable: false,
                   failure: null,
                 }
               : candidate,
@@ -366,7 +366,7 @@ export function SourcesView({
               <EmptyTitle>No sources yet</EmptyTitle>
               <EmptyDescription>
                 Drop files here, or add folders and ZIP archives. Anything OpenWave
-                can read becomes searchable in this conversation; anything else is
+                can read becomes readable in this conversation; anything else is
                 still kept as a source.
               </EmptyDescription>
             </EmptyHeader>

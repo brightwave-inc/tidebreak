@@ -391,7 +391,20 @@ export function ManagedGate({
             }}
           >
             Open the sign-in page again
-          </a>
+          </a>{" "}
+          ·{" "}
+          {/* A stalled flow otherwise blocks the gate for the full sign-in
+              timeout. Starting over begins a fresh attempt; the server
+              invalidates the abandoned one, so a late completion of it
+              cannot sign the device in. */}
+          <button
+            type="button"
+            className="underline disabled:opacity-50"
+            disabled={working}
+            onClick={() => void connect()}
+          >
+            Start over
+          </button>
         </p>
       ) : (
         <div className="flex items-center gap-2">

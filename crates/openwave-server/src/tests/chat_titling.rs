@@ -117,10 +117,7 @@ async fn titling_app(
     )
     .await
     .unwrap();
-    let (retrieval, _search) = build_retrieval(
-        Arc::new(HashEmbedder::default()),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    );
+    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),

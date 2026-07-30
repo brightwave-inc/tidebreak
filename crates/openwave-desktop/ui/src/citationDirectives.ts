@@ -1,44 +1,20 @@
+import type { CitationLocator } from "./api";
 import type { Element, ElementContent, Root, RootContent } from "hast";
 
-/**
- * How a stored citation wraps the phrase it backs: `:cit[phrase]{citation_id=…}`.
- *
- * The grammar is closed on the writing side — the parser that produces this form
- * closes the phrase at its first `]`, so no `]` can occur inside one — which is
- * what makes reading it back a scan rather than a parse, and is why this is a
- * few dozen lines here instead of a Markdown directive extension over every
- * message the model writes.
- */
 const OPENING = ":cit[";
-
-/**
- * The closing, anchored at the `]` that ended the phrase. The id is taken as
- * written and validated by the renderer: an id that is not a citation this
- * message carries still had its phrase authored as prose, and prose is what it
- * reads as.
- */
-const CLOSING = /^\]\{citation_id=([^}\s]*)\}/;
-
-/**
- * How far a phrase is followed before the opening is read as ordinary prose.
- * A citation wraps a clause the model just wrote; anything longer is text that
- * happens to begin like one. Mirrors the streaming scrubber's own bound.
- */
+const CLOSING = /^\]\{([^}]*)\}/;
 const MAX_PHRASE_CHARACTERS = 512;
+const UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const CELL_RANGE = /^[A-Z]+[1-9][0-9]*(?::[A-Z]+[1-9][0-9]*)?$/i;
 
-/** Where the citation's id is carried from the tree to the component. */
-export const CITATION_ID_PROPERTY = "dataCitationId";
+/** Properties carrying a validated locator from the hast tree to React. */
+export const CITATION_DOCUMENT_PROPERTY = "dataCitationDocument";
+export const CITATION_LOCATOR_PROPERTY = "dataCitationLocator";
 
-/**
- * The stored form, matched whole, for a caller that means to remove citations
- * rather than render them — the clipboard, which yields prose and not markup.
- */
-const STORED_CITATION =
-  /:cit\[([^\]]*)\]\{citation_id=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}/gi;
-
-/** Reduce stored citations to the phrasing they wrap. */
+/** Reduce stored citations, including the historical citation-id form, to prose. */
 export function stripCitationDirectives(input: string): string {
-  return input.replace(STORED_CITATION, "$1");
+  return input.replace(/:cit\[([^\]]*)\]\{[^}]*\}/g, "$1");
 }
 
 /** Whether text could carry a citation at all — a cheap conservative test. */
@@ -47,19 +23,9 @@ export function hasCitationDirective(input: string): boolean {
 }
 
 /**
- * Turn stored citations into spans carrying the id they cite, leaving the cited
- * phrase where the model wrote it.
- *
- * This runs over the parsed tree rather than the source so that a phrase with
- * Markdown in it — `:cit[the *largest* reef]{citation_id=…}` — keeps its
- * emphasis: the phrase is whatever inline nodes stand between the opening and
- * the closing, which is why the scan follows siblings rather than matching one
- * text node. Anything that does not close is left exactly as it was read, so
- * directive-shaped prose survives as prose.
- *
- * Code and math are skipped. Their text is source that is either displayed
- * verbatim or handed to another renderer, and rewriting nodes inside them would
- * corrupt what those render.
+ * Turn model-authored locator directives into spans while preserving any
+ * Markdown inside the cited phrase. Historical citation-id directives become
+ * bare prose: their evidence rows no longer exist, but their text still reads.
  */
 export function rehypeCitationDirectives() {
   return (tree: Root) => {
@@ -70,8 +36,6 @@ export function rehypeCitationDirectives() {
 function convertContent(nodes: ElementContent[]): ElementContent[] {
   const converted: ElementContent[] = [];
   let index = 0;
-  // Text left over from a citation just closed, or from an opening that turned
-  // out to be prose, which has to be rescanned rather than emitted.
   let carry: string | null = null;
 
   while (index < nodes.length || carry !== null) {
@@ -104,41 +68,42 @@ function convertContent(nodes: ElementContent[]): ElementContent[] {
     const phrase = value.slice(opening + OPENING.length);
     const citation = scanCitation(phrase, nodes.slice(index));
     if (!citation) {
-      // Not a citation after all. Release the opening as the prose it is and
-      // rescan the rest, so a real citation later in the same text is still
-      // found — and so the nodes a failed scan looked at stay untouched.
       pushText(converted, OPENING);
       carry = phrase;
       continue;
     }
 
     index += citation.consumed;
-    converted.push({
-      type: "element",
-      tagName: "span",
-      properties: { [CITATION_ID_PROPERTY]: citation.citationId },
-      children: citation.children,
-    });
+    if (citation.attributes.kind === "legacy") {
+      converted.push(...citation.children);
+    } else {
+      converted.push({
+        type: "element",
+        tagName: "span",
+        properties: {
+          [CITATION_DOCUMENT_PROPERTY]: citation.attributes.documentId,
+          [CITATION_LOCATOR_PROPERTY]: JSON.stringify(citation.attributes.locator),
+        },
+        children: citation.children,
+      });
+    }
     carry = citation.trailing;
   }
 
   return converted;
 }
 
+type CitationAttributes =
+  | { kind: "legacy" }
+  | { kind: "locator"; documentId: string; locator: CitationLocator };
+
 type ScannedCitation = {
-  /** The phrase, as the inline nodes it was written as. */
   children: ElementContent[];
-  citationId: string;
-  /** How many following siblings the phrase spanned. */
+  attributes: CitationAttributes;
   consumed: number;
-  /** What was left of the text node the citation closed in. */
   trailing: string;
 };
 
-/**
- * Read a citation that begins where `head` begins, following siblings until the
- * phrase closes, or `null` for an opening that never closes into one.
- */
 function scanCitation(
   head: string,
   following: readonly ElementContent[],
@@ -153,10 +118,12 @@ function scanCitation(
     if (close !== -1) {
       const closing = CLOSING.exec(text.slice(close));
       if (!closing) return null;
+      const attributes = parseAttributes(closing[1] ?? "");
+      if (!attributes) return null;
       pushText(children, text.slice(0, close));
       return {
         children,
-        citationId: closing[1] ?? "",
+        attributes,
         consumed,
         trailing: text.slice(close + closing[0].length),
       };
@@ -173,20 +140,85 @@ function scanCitation(
       text = next.value;
       continue;
     }
-    // A comment cannot be part of a phrase; an element — emphasis, code, a
-    // line break — is carried into it whole.
     if (next.type !== "element") return null;
     children.push(next);
     text = "";
   }
 }
 
+function parseAttributes(raw: string): CitationAttributes | null {
+  const values = new Map<string, string>();
+  const token = /([a-z_]+)=(?:"([^"]*)"|([^\s]+))/gy;
+  let offset = 0;
+  while (offset < raw.length) {
+    while (raw[offset] === " ") offset += 1;
+    if (offset >= raw.length) break;
+    token.lastIndex = offset;
+    const match = token.exec(raw);
+    if (!match || values.has(match[1]!)) return null;
+    values.set(match[1]!, match[2] ?? match[3] ?? "");
+    offset = token.lastIndex;
+  }
+
+  if (
+    values.size === 1 &&
+    values.has("citation_id") &&
+    UUID.test(values.get("citation_id") ?? "")
+  ) {
+    return { kind: "legacy" };
+  }
+
+  const documentId = values.get("doc");
+  if (!documentId || !UUID.test(documentId)) return null;
+
+  const locatorKeys = ["page", "pages", "lines", "sheet"].filter((key) =>
+    values.has(key),
+  );
+  if (locatorKeys.length > 1) return null;
+  if (values.has("cells") && !values.has("sheet")) return null;
+  const allowed = new Set(["doc", ...locatorKeys, ...(values.has("cells") ? ["cells"] : [])]);
+  if ([...values.keys()].some((key) => !allowed.has(key))) return null;
+
+  let locator: CitationLocator = { kind: "document" };
+  if (values.has("page")) {
+    const page = positiveInteger(values.get("page"));
+    if (page === null) return null;
+    locator = { kind: "page", page };
+  } else if (values.has("pages")) {
+    const range = numberRange(values.get("pages"));
+    if (!range) return null;
+    locator = { kind: "pages", start: range[0], end: range[1] };
+  } else if (values.has("lines")) {
+    const range = numberRange(values.get("lines"));
+    if (!range) return null;
+    locator = { kind: "lines", start: range[0], end: range[1] };
+  } else if (values.has("sheet")) {
+    const sheet = values.get("sheet")?.trim();
+    const cells = values.get("cells") ?? null;
+    if (!sheet || (cells !== null && !CELL_RANGE.test(cells))) return null;
+    locator = { kind: "sheet", sheet, cells };
+  }
+
+  return { kind: "locator", documentId, locator };
+}
+
+function positiveInteger(value: string | undefined): number | null {
+  if (!value || !/^[1-9][0-9]*$/.test(value)) return null;
+  const number = Number(value);
+  return Number.isSafeInteger(number) ? number : null;
+}
+
+function numberRange(value: string | undefined): [number, number] | null {
+  const match = /^([1-9][0-9]*)-([1-9][0-9]*)$/.exec(value ?? "");
+  const start = positiveInteger(match?.[1]);
+  const end = positiveInteger(match?.[2]);
+  return start !== null && end !== null && start <= end ? [start, end] : null;
+}
+
 const OPAQUE_TAGS = new Set(["code", "pre"]);
 
-/** Whether an element's text is source rather than prose. */
 function isOpaque(node: Element): boolean {
   if (OPAQUE_TAGS.has(node.tagName)) return true;
-  // remark-math parks a formula's source in a span for rehype-katex to render.
   const className = node.properties?.className;
   return Array.isArray(className) && className.includes("math");
 }

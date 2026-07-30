@@ -6,8 +6,7 @@
 # one you are usually in, and forgetting the first leaves Vite serving a stale
 # dependency tree. This does both, from anywhere in the repo.
 #
-#   scripts/dev.sh                      # the usual dev build
-#   scripts/dev.sh --features vec-lance # keep the document index across restarts
+#   scripts/dev.sh # the usual dev build
 #
 # Every argument is forwarded to `cargo tauri dev`.
 

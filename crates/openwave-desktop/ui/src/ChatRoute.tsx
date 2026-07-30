@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 
 import type {
-  CitationFormat,
   ModelInfo,
   ModelSelectionKey,
   PermissionMode,
@@ -93,8 +92,7 @@ const { signal: signalTurnLifecycle } = useTurnLifecycle.getState();
  */
 export function ChatRoute({ chatId }: { chatId: string }) {
   const navigate = useNavigate();
-  const { client, models, defaultModelKey, defaultCitationFormat, status, setStatus } =
-    useApp();
+  const { client, models, defaultModelKey, setStatus } = useApp();
   const { layout, openPanel } = usePanelNav();
   const sourceNav = useStableSourceNav(openPanel);
   const chats = useChatListStore((state) => state.chats);
@@ -117,10 +115,6 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   useEffect(() => {
     if (chats.length > 0 && !chat) void navigate({ to: "/", replace: true });
   }, [chats.length, chat, navigate]);
-
-  useEffect(() => {
-    setStatus(`chat ${chatId.slice(0, 8)}…`);
-  }, [chatId, setStatus]);
 
   // A conversation opened from the home composer arrives with its first message
   // already written. `take` clears it, so a re-render cannot send it twice.
@@ -312,7 +306,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
    * One picker for anything the reader wants to attach.
    *
    * Which of the two things each file becomes — pixels for the model, or a
-   * parsed and searchable source — is decided by the host from the bytes, so
+   * parsed and readable source — is decided by the host from the bytes, so
    * nothing here has to guess from a name or ask the reader to know first.
    */
   async function onAttach() {
@@ -358,11 +352,6 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     chatListActions.replaceChat(await client.patchChatPermissionMode(chatId, mode));
   }
 
-  async function onCitationFormatChange(format: CitationFormat | null) {
-    if (deletingChatId !== null) return;
-    chatListActions.replaceChat(await client.patchChatCitationFormat(chatId, format));
-  }
-
   if (!chat) return <div className="routed-surface-loading" />;
 
   function renderPanel(panel: PanelContent, position: "left" | "right" | "chat", visible: boolean) {
@@ -397,9 +386,6 @@ export function ChatRoute({ chatId }: { chatId: string }) {
                   disabled={deletingChatId !== null}
                   onAttach={hasNativeHost() ? onAttach : undefined}
                   attaching={attaching}
-                  citationFormat={chat!.citation_format}
-                  defaultCitationFormat={defaultCitationFormat}
-                  onCitationFormatChange={onCitationFormatChange}
                 />
                 <ModelMenu
                   models={models}
@@ -482,14 +468,8 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   return (
     <RouteFrame sidebar={<ChatSidebar chat={chat} />}>
     <div className="mr-2 flex min-h-0 min-w-0 flex-1 flex-col">
-      <header className="mt-2 flex h-9 w-full shrink-0 items-center justify-between gap-2 px-1">
-        <div className="w-24" />
+      <header className="mt-2 flex h-9 w-full shrink-0 items-center justify-between gap-2 pl-4 pr-1">
         <ChatHeaderTitle chat={chat} />
-        <div className="flex w-24 items-center justify-end">
-          <span className="truncate text-xs text-muted-foreground" title={status}>
-            {status}
-          </span>
-        </div>
       </header>
       {/* Citations live in the transcript but open into the panel beside it,
           so the way there is provided above both slots. */}

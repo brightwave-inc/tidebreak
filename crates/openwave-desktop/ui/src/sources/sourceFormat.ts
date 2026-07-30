@@ -43,7 +43,7 @@ export function statusLabel(document: LibraryDocument): string {
     case "failed":
       return "Failed";
     case "ready":
-      return document.searchable ? "Ready" : "Not searchable";
+      return document.readable ? "Ready" : "No text";
   }
 }
 

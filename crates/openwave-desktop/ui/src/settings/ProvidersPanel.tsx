@@ -8,7 +8,15 @@ import type {
 } from "../api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 import { useConfirm } from "../components/ConfirmDialog";
 import { SettingsError, SettingsPanel, SettingsSection } from "./primitives";
 import { providerLabel } from "../ModelSelection";
@@ -308,20 +316,23 @@ function ProviderRow({
       {info.kind === "gemini" && (
         <label className="grid gap-1 text-xs text-muted-foreground">
           Credential type
-          <select
-            aria-label="Gemini credential type"
-            className="h-9 rounded-md border border-input bg-background px-3 text-sm text-foreground"
+          <Select
             value={credentialType}
             disabled={saving}
-            onChange={(event) =>
-              setCredentialType(
-                event.target.value as "api_key" | "service_account",
-              )
+            onValueChange={(value) =>
+              setCredentialType(value as "api_key" | "service_account")
             }
           >
-            <option value="api_key">Gemini API key</option>
-            <option value="service_account">Google Cloud service account</option>
-          </select>
+            <SelectTrigger aria-label="Gemini credential type" className="h-9">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="api_key">Gemini API key</SelectItem>
+              <SelectItem value="service_account">
+                Google Cloud service account
+              </SelectItem>
+            </SelectContent>
+          </Select>
         </label>
       )}
       {credentialType === "api_key" && (
@@ -347,9 +358,9 @@ function ProviderRow({
             Gemini 3 models always use Google&apos;s global endpoint. This
             location applies to models that support regional Vertex endpoints.
           </p>
-          <textarea
+          <Textarea
             aria-label="Google service account JSON"
-            className="min-h-28 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm text-foreground"
+            className="min-h-28 font-mono text-sm text-foreground"
             placeholder="Paste the Google service-account JSON key file"
             value={serviceAccountJson}
             onChange={(event) => setServiceAccountJson(event.target.value)}

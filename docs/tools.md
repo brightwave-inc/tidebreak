@@ -88,17 +88,15 @@ same turn; reload, restart, cancellation, and answer races are storage-backed.
 Sandbox agents never receive the definition. See
 [Durable user questions](user-questions.md).
 
-Source access is tiered rather than search-only. `list_sources` discovers the
-conversation's exact corpus without loading content. `read_source` reads one
-bounded Unicode-character range as soon as parser output exists—even while the
-embedding job is still running—and returns an opaque reference that produces
-the same durable citation cards as `search`. Semantic search remains the
-efficient choice for finding passages across a large ready corpus.
+`list_sources` discovers the conversation's exact corpus without loading
+content. `read_source` reads one bounded Unicode-character range as soon as
+parser output exists and returns an opaque reference that produces a durable
+citation card.
 
 `web_extract` joins that tier from the other direction: a page it fetches is
 stored as a source of the conversation, so it too returns opaque references and
-produces the same citation cards, and `read_source` and `search` can reach the
-page afterwards. Those three are the only server calls permitted to retain
+produces the same citation cards, and `read_source` can reach the page
+afterwards. Those two are the only server calls permitted to retain
 retrieval evidence at all, which is what keeps a citation traceable to a call
 that was allowed to make one. See [Web search](web-search.md#fetched-pages-as-sources).
 

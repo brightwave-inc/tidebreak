@@ -1,10 +1,10 @@
 //! The document-parser seam: raw bytes in, plain text out.
 //!
-//! A [`DocumentParser`] turns a source file's bytes into the canonical plain text
-//! that chunking and embedding operate on. The always-on [`PlainTextParser`]
-//! handles `text/*` (plain, markdown) with zero dependencies. Rich formats
-//! (PDF/office/images) will arrive later as a feature-gated parser behind this
-//! same trait, so the pipeline never has to care which parser produced the text.
+//! A [`DocumentParser`] turns a source file's bytes into canonical text plus the
+//! source regions that make direct reads citable. The always-on
+//! [`PlainTextParser`] handles `text/*` (plain, markdown) with zero dependencies.
+//! Binary formats fall through to an empty canonical document until a future
+//! execution-based ingestion path replaces the retired in-process adapters.
 //!
 //! Parsing is async so native or remote implementations can yield while doing
 //! I/O. CPU-heavy parsers must still isolate blocking work at their own boundary;
@@ -16,9 +16,7 @@ use crate::error::{Result, RetrievalError};
 /// Ordered collection of parsers that dispatches by media type.
 ///
 /// The first parser whose [`DocumentParser::supports`] method returns `true`
-/// handles the document. Put narrow rich-format parsers before broad fallbacks.
-/// This lets applications enable PDF/Office parsers without coupling the ingest
-/// pipeline to a particular parsing library.
+/// handles the document. Put narrow format parsers before broad fallbacks.
 #[derive(Default)]
 pub struct ParserRegistry {
     parsers: Vec<Box<dyn DocumentParser>>,
@@ -51,38 +49,17 @@ impl ParserRegistry {
     }
 }
 
-/// Assemble the production document parsers, narrowest first. With the
-/// `parse-liteparse` feature, the PDF parser claims `application/pdf`; with
-/// `parse-spreadsheet`, the spreadsheet parser claims Excel and OpenDocument
-/// workbooks, reading their sheets and cells directly; with `parse-office`, the
-/// Office parser claims the remaining Word/PowerPoint/OpenDocument types
-/// (converting via LibreOffice when present, storing without searchable text
-/// when not); with `parse-image`, the image parser claims common raster types
-/// (PNG/JPEG/WebP/GIF/TIFF/BMP), stored without searchable text until OCR lands;
-/// the [`StructuredTextParser`] claims the tree-shaped text types (JSON, XML,
-/// HTML), whose text it passes through unchanged while recording which node
-/// each part came from; [`PlainTextParser`] claims the rest of `text/*`; the
-/// [`FallbackParser`] claims everything else so **any** upload is accepted —
-/// text-like unknown types stay searchable and binary ones are stored without
-/// polluting the index.
+/// Assemble the production document parsers, narrowest first.
 ///
-/// Order carries meaning between the two workbook paths: the Office parser
-/// still claims spreadsheets, and only registering the native one ahead of it
-/// keeps a workbook off the LibreOffice detour. That leaves the fallback
-/// intact — build without `parse-spreadsheet` and workbooks convert exactly as
-/// they did.
+/// The [`StructuredTextParser`] claims JSON, XML, and HTML, passing their text
+/// through unchanged while recording structural source regions.
+/// [`PlainTextParser`] claims the rest of `text/*`; [`FallbackParser`] claims
+/// everything else so any upload remains storable. Unknown UTF-8 content stays
+/// readable, while binary PDF, Office, workbook, and image bytes produce an
+/// empty canonical document.
 #[must_use]
 pub fn document_parser_registry() -> ParserRegistry {
-    let registry = ParserRegistry::new();
-    #[cfg(feature = "parse-liteparse")]
-    let registry = registry.with_parser(crate::LiteParsePdfParser::new());
-    #[cfg(feature = "parse-spreadsheet")]
-    let registry = registry.with_parser(crate::SpreadsheetParser::new());
-    #[cfg(feature = "parse-office")]
-    let registry = registry.with_parser(crate::LiteParseOfficeParser::new());
-    #[cfg(feature = "parse-image")]
-    let registry = registry.with_parser(crate::LiteParseImageParser::new());
-    registry
+    ParserRegistry::new()
         .with_parser(StructuredTextParser::new())
         .with_parser(PlainTextParser::new())
         .with_parser(FallbackParser::new())
@@ -121,7 +98,7 @@ impl DocumentParser for ParserRegistry {
 /// structure — page maps, headings, bounding boxes — without a breaking change.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ParsedDocument {
-    /// The canonical plain-text representation. Chunk spans index into this.
+    /// The canonical plain-text representation. Source-region spans refer to it.
     pub text: String,
     /// Mappings from canonical text to locations in the original source.
     pub source_regions: Vec<SourceRegion>,
@@ -147,7 +124,7 @@ impl ParsedDocument {
 /// Turns a document's raw bytes into plain text.
 ///
 /// Object-safe so parsers can be held as `Box<dyn DocumentParser>` and swapped by
-/// configuration (naive today, liteparse-backed later).
+/// configuration.
 #[async_trait::async_trait]
 pub trait DocumentParser: Send + Sync {
     /// Stable identity for canonical-text behavior for `media_type`.
@@ -168,11 +145,8 @@ pub trait DocumentParser: Send + Sync {
     /// `media_type`.
     ///
     /// Defaults to the source's own type, which is right for parsers that pass
-    /// text through. Parsers that *convert* must override it: a PDF's canonical
-    /// text is Markdown, and downstream stages that treat canonical text
-    /// according to its format — chunking at headings, for one — have no other
-    /// way to know that. Getting this wrong is silent: the text is still
-    /// indexed, just handled as though it had no structure.
+    /// text through. Parsers that convert must override it so downstream readers
+    /// interpret the canonical text according to the format actually produced.
     fn canonical_media_type(&self, media_type: &str) -> String {
         media_type.to_string()
     }
@@ -232,9 +206,9 @@ impl DocumentParser for PlainTextParser {
 /// from those spans to the nodes they came from, which is what lets a citation
 /// open the document as a tree rather than as a wall of characters.
 ///
-/// A file that does not parse is still indexed: it yields the same text with an
-/// empty map, which is indistinguishable downstream from a format that has no
-/// structure to record.
+/// A file that does not parse still yields the same text with an empty map,
+/// which is indistinguishable downstream from a format that has no structure to
+/// record.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StructuredTextParser;
 
@@ -273,15 +247,14 @@ impl DocumentParser for StructuredTextParser {
 /// A last-resort parser that accepts **any** media type so no upload is rejected
 /// for its format alone.
 ///
-/// Register it after the specific parsers ([`PlainTextParser`], a PDF parser,
-/// …): a document only reaches this fallback when nothing narrower claimed it.
-/// Bytes that decode as valid UTF-8 become canonical text and are indexed —
+/// Register it after the specific parsers ([`StructuredTextParser`],
+/// [`PlainTextParser`]): a document only reaches this fallback when nothing
+/// narrower claimed it. Bytes that decode as valid UTF-8 become canonical text —
 /// text-like uploads with an unknown media type (`.log`, `.yaml`, `.ndjson`, a
-/// bare `application/octet-stream`) stay searchable. Bytes that are not valid
+/// bare `application/octet-stream`) stay readable. Bytes that are not valid
 /// UTF-8 are treated as binary: the document is still stored and listed, but its
-/// canonical text is empty, so it produces no chunks and never pollutes search
-/// with decoded noise. This mirrors "import anything, index what we can" — the
-/// document remains available to work with even when it is not searchable.
+/// canonical text is empty. The document remains available even when it cannot
+/// be read as text.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FallbackParser;
 
@@ -304,8 +277,8 @@ impl DocumentParser for FallbackParser {
     }
 
     async fn parse(&self, raw: &[u8], _media_type: &str) -> Result<ParsedDocument> {
-        // Index only genuinely textual bytes; binary content is retained but not
-        // decoded into the search index.
+        // Decode only genuinely textual bytes; binary content is retained
+        // without pretending it is readable text.
         let text = std::str::from_utf8(raw)
             .map(str::to_owned)
             .unwrap_or_default();
@@ -316,58 +289,6 @@ impl DocumentParser for FallbackParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(all(
-        feature = "parse-liteparse",
-        feature = "parse-office",
-        feature = "parse-image",
-        feature = "parse-spreadsheet"
-    ))]
-    #[test]
-    fn production_registry_routes_rich_formats_to_the_intended_parser() {
-        let registry = document_parser_registry();
-        let cases: [(&str, &dyn DocumentParser, &str); 7] = [
-            (
-                "application/pdf",
-                &crate::LiteParsePdfParser::new(),
-                "PDF parser",
-            ),
-            (
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                &crate::SpreadsheetParser::new(),
-                "native spreadsheet parser",
-            ),
-            (
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                &crate::LiteParseOfficeParser::new(),
-                "Office parser",
-            ),
-            (
-                "image/png",
-                &crate::LiteParseImageParser::new(),
-                "image parser",
-            ),
-            (
-                "application/json",
-                &StructuredTextParser::new(),
-                "structured-text parser",
-            ),
-            ("text/plain", &PlainTextParser::new(), "plain-text parser"),
-            (
-                "application/octet-stream",
-                &FallbackParser::new(),
-                "fallback parser",
-            ),
-        ];
-
-        for (media_type, expected_parser, parser_name) in cases {
-            assert_eq!(
-                registry.fingerprint_for(media_type),
-                expected_parser.fingerprint_for(media_type),
-                "{parser_name} should handle {media_type}"
-            );
-        }
-    }
 
     struct PrefixParser {
         media_type: &'static str,
@@ -573,9 +494,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fallback_indexes_utf8_but_stores_binary_as_empty() {
+    async fn fallback_keeps_utf8_readable_but_stores_binary_as_empty() {
         let p = FallbackParser::new();
-        // A text-like file with an unknown media type stays searchable.
+        // A text-like file with an unknown media type stays readable.
         let text = p
             .parse(b"level=info msg=\"started\"", "application/octet-stream")
             .await

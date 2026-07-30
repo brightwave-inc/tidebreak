@@ -1,3 +1,4 @@
+import { WithTooltip } from "@/components/ui/tooltip";
 import { ClipboardCopyButton } from "./ClipboardCopyButton";
 
 type MessageFooterProps = {
@@ -34,9 +35,11 @@ export function MessageFooter({
       )}
       <span className="message-footer-spacer" />
       {timestamp && (
-        <time dateTime={createdAt} title={timestamp.full}>
-          {timestamp.short}
-        </time>
+        <WithTooltip label={timestamp.full}>
+          <time dateTime={createdAt}>
+            {timestamp.short}
+          </time>
+        </WithTooltip>
       )}
     </footer>
   );
