@@ -16,6 +16,7 @@ mod e2b;
 pub mod host_paths;
 mod http;
 mod local;
+#[cfg(target_os = "macos")]
 mod network;
 mod output;
 pub mod overlay;
@@ -33,7 +34,6 @@ pub use host_paths::{
     ScratchDir, ScratchEntry, ScratchEntryKind, ScratchRefusal,
 };
 pub use local::LocalExecutionProvider;
-pub use network::PACKAGE_MANAGER_DOMAINS;
 pub use overlay::{
     sweep_abandoned_overlays, MaterializedChange, MaterializedChangeKind, OverlayOutcome,
     OverlaySlot, PreparedWriteSnapshot, PriorContents, RejectedChange, RejectedChangeReason,
@@ -55,6 +55,26 @@ pub use types::{
 /// Stable workspace-relative location populated by hosts that ship the
 /// document helper library.
 pub const DOCUMENT_SCRIPTS_DIR: &str = ".openwave/exec-scripts";
+
+/// Exact registry endpoints admitted by the provider-neutral package-manager
+/// policy class.
+pub const PACKAGE_MANAGER_DOMAINS: &[&str] = &[
+    "api.nuget.org",
+    "crates.io",
+    "files.pythonhosted.org",
+    "globalcdn.nuget.org",
+    "index.crates.io",
+    "plugins.gradle.org",
+    "proxy.golang.org",
+    "pypi.org",
+    "registry.npmjs.org",
+    "repo.maven.apache.org",
+    "repo1.maven.org",
+    "repo.packagist.org",
+    "rubygems.org",
+    "static.crates.io",
+    "sum.golang.org",
+];
 
 /// Files copied as one indivisible helper library into an exec workspace.
 pub const DOCUMENT_SCRIPT_FILES: [&str; 5] = [

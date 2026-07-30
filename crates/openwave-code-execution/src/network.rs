@@ -15,33 +15,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{lookup_host, TcpListener, TcpStream};
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::CodeExecutionError;
+use crate::{CodeExecutionError, PACKAGE_MANAGER_DOMAINS};
 
 const MAX_CONNECT_HEADERS: usize = 16 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Registry endpoints admitted by the `package_managers` policy class.
-///
-/// This list is shared with managed-provider compilation. Every entry is an
-/// exact host: registries on multi-tenant infrastructure never gain a wildcard
-/// over neighboring tenants.
-pub const PACKAGE_MANAGER_DOMAINS: &[&str] = &[
-    "api.nuget.org",
-    "crates.io",
-    "files.pythonhosted.org",
-    "globalcdn.nuget.org",
-    "index.crates.io",
-    "plugins.gradle.org",
-    "proxy.golang.org",
-    "pypi.org",
-    "registry.npmjs.org",
-    "repo.maven.apache.org",
-    "repo1.maven.org",
-    "repo.packagist.org",
-    "rubygems.org",
-    "static.crates.io",
-    "sum.golang.org",
-];
 
 /// One execution-scoped broker. Dropping it closes the listener and every
 /// tunnel, so network authority cannot outlive the command that received it.

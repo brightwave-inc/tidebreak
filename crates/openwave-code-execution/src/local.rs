@@ -729,6 +729,7 @@ fn secure_dir(path: &Path) -> Result<(), CodeExecutionError> {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
 async fn run_native(
     request: &CodeExecutionRequest,
     workspace: &Path,
@@ -851,6 +852,7 @@ async fn run_native(
 }
 
 #[cfg(not(target_os = "macos"))]
+#[allow(clippy::too_many_arguments)]
 async fn run_native(
     _request: &CodeExecutionRequest,
     _workspace: &Path,
