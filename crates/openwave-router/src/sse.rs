@@ -121,30 +121,29 @@ pub fn safe_http_error(provider: &str, status: u16, body: &str) -> String {
     }
 }
 
-/// Build a client-safe message for an error delivered *inside* a 200 stream.
+/// Classify an error delivered *inside* a 200 stream — the in-band counterpart
+/// of [`classify_provider_error`].
 ///
 /// Providers can accept a request, start streaming, and then emit an error
-/// frame instead of finishing. There is no HTTP status to report in that case:
-/// some providers carry a numeric `code` (Gemini), others only a stable
-/// enum-style `type` / `code` token (Anthropic, OpenAI-compatible). As with
-/// [`safe_http_error`], nothing else from the untrusted payload is forwarded —
-/// these strings reach the client through `TurnFailed`.
-pub fn safe_in_band_error(provider: &str, error: &serde_json::Value) -> String {
+/// frame instead of finishing. The status is the numeric `code` some providers
+/// send (Gemini), defaulting to 500 when the frame carries only a stable
+/// enum-style `type`/`code` token (Anthropic, OpenAI-compatible). The kind
+/// mapping and the client-safe message are the HTTP path's own — nothing from
+/// the untrusted payload is forwarded beyond a vetted code token — so an
+/// in-band `overloaded_error` surfaces exactly like the 529 that never started
+/// streaming. A stream that accepted the request has no `Retry-After` header
+/// to honor, so the throttling kinds carry no hint.
+pub fn classify_in_band_error(
+    provider: &str,
+    error: &serde_json::Value,
+) -> openwave_core::error::AgentError {
     let status = error
         .get("code")
         .and_then(serde_json::Value::as_u64)
         .and_then(|code| u16::try_from(code).ok())
         .filter(|code| (100..=599).contains(code))
         .unwrap_or(500);
-    let detail = error
-        .get("type")
-        .or_else(|| error.get("code"))
-        .and_then(serde_json::Value::as_str)
-        .filter(|code| safe_error_code(code));
-    match detail {
-        Some(code) => format!("{provider} returned {status} ({code})"),
-        None => format!("{provider} returned {status}"),
-    }
+    classify_provider_error(provider, status, &error.to_string(), None)
 }
 
 /// Accept only a compact enum-style token. Error fields come from an
@@ -364,6 +363,33 @@ mod tests {
             ),
             AgentError::Refusal(_)
         ));
+    }
+
+    #[test]
+    fn in_band_error_classifies_like_the_http_status_path() {
+        use openwave_core::error::AgentError;
+        // The Anthropic overloaded frame arrives inside a 200 stream, so there
+        // is no status to read — the stable `type` token must still land on
+        // the same kind as the 529 that never started streaming.
+        let error = serde_json::json!({"type": "overloaded_error", "message": "Overloaded"});
+        assert!(matches!(
+            classify_in_band_error("anthropic", &error),
+            AgentError::Overloaded(_)
+        ));
+        // A numeric `code` (Gemini's shape) is the in-band status.
+        let error = serde_json::json!({"code": 401, "message": "bad key"});
+        assert!(matches!(
+            classify_in_band_error("gemini", &error),
+            AgentError::Authentication(_)
+        ));
+        // Nothing provider-supplied rides into the client-visible message.
+        let error = serde_json::json!({
+            "code": "rate_limit_error",
+            "message": "slow down, key sk-secret"
+        });
+        let classified = classify_in_band_error("openai-compat", &error);
+        assert!(matches!(classified, AgentError::RateLimited(_)));
+        assert!(!classified.to_string().contains("sk-secret"));
     }
 
     #[test]

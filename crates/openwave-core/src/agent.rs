@@ -39,7 +39,7 @@ use crate::approval::{
 use crate::cancel::CancelToken;
 use crate::citation::{parse_assistant_citations, AssistantCitationInput};
 use crate::context;
-use crate::error::{AgentError, Result};
+use crate::error::{AgentError, ProviderErrorInfo, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{AgentRunId, CallId, ChatId, MessageId, TurnId};
 use crate::image::{ImageAttachments, ImageData, ImageRef};
@@ -1362,7 +1362,7 @@ impl Agent {
                 Done,
                 Cancelled,
                 Steered,
-                Failed(String),
+                Failed(ProviderErrorInfo),
             }
             let mut streamed_events = AssistantStreamEventFilter::new(events);
             let stream_end = loop {
@@ -1419,7 +1419,7 @@ impl Agent {
                         stop_reason = StopReason::Refusal;
                         refusal_details = Some(details);
                     }
-                    ProviderEvent::Failed { message } => break StreamEnd::Failed(message),
+                    ProviderEvent::Failed { error } => break StreamEnd::Failed(error),
                 }
             };
             if matches!(stream_end, StreamEnd::Steered | StreamEnd::Failed(_)) {
@@ -1433,11 +1433,11 @@ impl Agent {
             }
             // A stream that broke mid-flight left this step's tool-call
             // arguments possibly truncated mid-JSON. Nothing here is safe to
-            // act on, and nothing was persisted, so fail the turn under a
-            // retryable provider code rather than executing the fragment.
-            if let StreamEnd::Failed(message) = stream_end {
+            // act on, and nothing was persisted, so fail the turn under the
+            // classified provider error rather than executing the fragment.
+            if let StreamEnd::Failed(error) = stream_end {
                 events.send(AgentEvent::StreamInterrupted);
-                return Err(AgentError::Provider(message));
+                return Err(error.into_agent_error());
             }
             // Prefer cancel when both cancel and interrupt are ready (cancel is
             // the left arm of the nested select). Also catch a cancel that raced
@@ -7638,6 +7638,84 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, AgentEvent::TurnFailed { .. })),
             "the failure surfaces as TurnFailed"
+        );
+    }
+
+    /// A mid-stream provider failure must keep the classification the
+    /// equivalent HTTP-status failure would have had: an in-band overload
+    /// surfaces to the client as `overloaded`, not the generic `provider`.
+    #[tokio::test]
+    async fn a_mid_stream_failure_reaches_the_client_with_its_classification() {
+        struct OverloadedProvider;
+
+        #[async_trait]
+        impl ModelProvider for OverloadedProvider {
+            fn id(&self) -> ProviderId {
+                ProviderId::new("overloaded")
+            }
+
+            async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+                Ok(stream::iter(vec![
+                    ProviderEvent::TextDelta {
+                        text: "partial".into(),
+                    },
+                    ProviderEvent::Failed {
+                        error: ProviderErrorInfo::from_error(&AgentError::Overloaded(
+                            "anthropic returned 500 (overloaded_error)".into(),
+                        )),
+                    },
+                ])
+                .boxed())
+            }
+        }
+
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            reasoning_effort: None,
+            permission_mode: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let agent = Agent::new(
+            Arc::new(OverloadedProvider),
+            Arc::new(ToolRegistry::new()),
+            store,
+            AgentConfig {
+                model: "fake".into(),
+                ..Default::default()
+            },
+        );
+
+        let (tx, rx) = unbounded();
+        let result = agent.run_turn(&chat, "say something", &tx).await;
+        drop(tx);
+        let events: Vec<AgentEvent> = rx.collect().await;
+
+        assert_eq!(
+            result.unwrap_err().kind(),
+            "overloaded",
+            "the turn fails under the classified kind"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::TurnFailed { error } if error.kind == "overloaded"
+            )),
+            "the classification reaches the client on TurnFailed"
         );
     }
 

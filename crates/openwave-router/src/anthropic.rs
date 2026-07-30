@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
-use openwave_core::error::{AgentError, Result};
+use openwave_core::error::{AgentError, ProviderErrorInfo, Result};
 use openwave_core::provider::{
     ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, RefusalDetails,
     ResponseFormat, StopReason, ToolChoice, Usage,
@@ -21,7 +21,8 @@ use openwave_core::tool::{strict_json_schema, OptionalProperties};
 use openwave_core::{ImageAttachments, Role};
 
 use crate::sse::{
-    classify_provider_error, drain_frames, frame_data, read_bounded_error_body, safe_in_band_error,
+    classify_in_band_error, classify_provider_error, drain_frames, frame_data,
+    read_bounded_error_body,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -147,7 +148,9 @@ impl ModelProvider for AnthropicProvider {
                     Ok(chunk) => chunk,
                     Err(error) => {
                         yield ProviderEvent::Failed {
-                            message: format!("anthropic stream ended early: {error}"),
+                            error: ProviderErrorInfo::provider(format!(
+                                "anthropic stream ended early: {error}"
+                            )),
                         };
                         return;
                     }
@@ -566,7 +569,10 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
         Some("error") => {
             state.terminal = true;
             vec![ProviderEvent::Failed {
-                message: safe_in_band_error("anthropic", data.get("error").unwrap_or(data)),
+                error: ProviderErrorInfo::from_error(&classify_in_band_error(
+                    "anthropic",
+                    data.get("error").unwrap_or(data),
+                )),
             }]
         }
         Some("message_start") => {
@@ -657,7 +663,7 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                     // any tool call inside it — as a finished answer.
                     StopOutcome::Interrupted(message) => {
                         events.push(ProviderEvent::Failed {
-                            message: message.into(),
+                            error: ProviderErrorInfo::provider(message),
                         });
                         return events;
                     }
@@ -1082,7 +1088,10 @@ mod tests {
                     text: "partial".into()
                 },
                 ProviderEvent::Failed {
-                    message: "anthropic returned 500 (overloaded_error)".into()
+                    error: ProviderErrorInfo {
+                        kind: "overloaded".into(),
+                        message: "anthropic returned 500 (overloaded_error)".into(),
+                    },
                 },
             ]
         );
@@ -1112,8 +1121,9 @@ mod tests {
                     ..Usage::default()
                 }),
                 ProviderEvent::Failed {
-                    message: "anthropic: the model's context window was exceeded mid-response"
-                        .into(),
+                    error: ProviderErrorInfo::provider(
+                        "anthropic: the model's context window was exceeded mid-response",
+                    ),
                 },
             ]
         );

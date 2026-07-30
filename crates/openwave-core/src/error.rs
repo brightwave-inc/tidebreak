@@ -169,6 +169,70 @@ impl AgentError {
     }
 }
 
+/// The stream-carrying form of a classified provider failure.
+///
+/// [`AgentError`] is not `Serialize`, but [`crate::provider::ProviderEvent`]
+/// is, and its `Failed` variant must carry the classification through the
+/// event stream so a mid-stream failure reaches the client under the same kind
+/// as the equivalent HTTP-status failure. This is that projection: the `kind`
+/// the client ultimately branches on, plus the client-safe message *without*
+/// the variant's `Display` prefix, so [`ProviderErrorInfo::into_agent_error`]
+/// rebuilds the classified error instead of doubling the prefix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderErrorInfo {
+    /// Machine-readable category — one of the provider-failure
+    /// [`AgentError::kind`] values.
+    pub kind: String,
+    /// Client-safe description, free of provider payload text and URLs.
+    pub message: String,
+}
+
+impl ProviderErrorInfo {
+    /// Project a provider failure into its stream-carrying form.
+    pub fn from_error(error: &AgentError) -> Self {
+        let message = match error {
+            AgentError::Provider(message)
+            | AgentError::Authentication(message)
+            | AgentError::InvalidRequest(message)
+            | AgentError::Refusal(message)
+            | AgentError::PromptTooLong(message) => message.clone(),
+            AgentError::RateLimited(failure) | AgentError::Overloaded(failure) => {
+                failure.to_string()
+            }
+            other => other.to_string(),
+        };
+        Self {
+            kind: error.kind().to_string(),
+            message,
+        }
+    }
+
+    /// A plain `provider`-kind failure with a client-safe message.
+    pub fn provider(message: impl Into<String>) -> Self {
+        Self {
+            kind: "provider".to_string(),
+            message: message.into(),
+        }
+    }
+
+    /// Rebuild the classified error for the consumer that fails the turn.
+    ///
+    /// A mid-stream failure carries no `Retry-After` header, so the throttling
+    /// variants rebuild without a hint and the retry schedule falls back to
+    /// its own backoff.
+    pub fn into_agent_error(self) -> AgentError {
+        match self.kind.as_str() {
+            "authentication" => AgentError::Authentication(self.message),
+            "rate_limited" => AgentError::RateLimited(self.message.into()),
+            "overloaded" => AgentError::Overloaded(self.message.into()),
+            "invalid_request" => AgentError::InvalidRequest(self.message),
+            "refusal" => AgentError::Refusal(self.message),
+            "prompt_too_long" => AgentError::PromptTooLong(self.message),
+            _ => AgentError::Provider(self.message),
+        }
+    }
+}
+
 /// The wire-facing representation of an error.
 ///
 /// [`AgentError`] itself is not `Serialize` (it wraps non-serializable source
@@ -205,5 +269,40 @@ mod tests {
         let info: AgentErrorInfo = (&AgentError::msg("boom")).into();
         let json = serde_json::to_string(&info).unwrap();
         assert_eq!(serde_json::from_str::<AgentErrorInfo>(&json).unwrap(), info);
+    }
+
+    #[test]
+    fn provider_error_info_roundtrips_the_classification() {
+        for (error, kind) in [
+            (AgentError::Provider("p".into()), "provider"),
+            (AgentError::Authentication("a".into()), "authentication"),
+            (AgentError::RateLimited("r".into()), "rate_limited"),
+            (AgentError::Overloaded("o".into()), "overloaded"),
+            (AgentError::InvalidRequest("i".into()), "invalid_request"),
+            (AgentError::Refusal("no".into()), "refusal"),
+            (AgentError::PromptTooLong("long".into()), "prompt_too_long"),
+        ] {
+            let info = ProviderErrorInfo::from_error(&error);
+            assert_eq!(info.kind, kind);
+            let rebuilt = info.into_agent_error();
+            assert_eq!(rebuilt.kind(), kind);
+            assert_eq!(rebuilt.to_string(), error.to_string());
+        }
+        // The throttling variants rebuild without a retry hint: a mid-stream
+        // failure never saw the response's headers.
+        assert!(
+            AgentError::RateLimited(ProviderFailure::new("r", Some(Duration::from_secs(5))))
+                .retry_after()
+                .is_some()
+        );
+        assert!(
+            ProviderErrorInfo::from_error(&AgentError::RateLimited(ProviderFailure::new(
+                "r",
+                Some(Duration::from_secs(5))
+            )))
+            .into_agent_error()
+            .retry_after()
+            .is_none()
+        );
     }
 }
