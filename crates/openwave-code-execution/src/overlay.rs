@@ -29,12 +29,12 @@
 //!
 //! ## Why applying changes is manifest-driven
 //!
-//! At the end of the turn the overlay is compared against the manifest recorded
-//! when it was made — not against whatever the real folder holds now. A file
-//! whose length and modification time still match the manifest was never
-//! touched and is left alone. A file that differs is written back. A file the
-//! manifest lists and the overlay no longer has was deleted, and is deleted
-//! from the folder too.
+//! At the end of the turn the overlay is compared against the digest manifest
+//! recorded when it was made — not against whatever the real folder holds now.
+//! A file whose bytes and mode still match the manifest was never touched and
+//! is left alone. A file that differs is written back. A file the manifest
+//! lists and the overlay no longer has was deleted, and is deleted from the
+//! folder too.
 //!
 //! Judging deletions against the manifest rather than against the real folder
 //! is deliberate: it is what keeps a partial copy, or a file the user added
@@ -51,9 +51,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use openwave_core::MAX_EXEC_SNAPSHOT_BYTES;
+use sha2::{Digest as _, Sha256};
 
 use crate::host_paths::{
-    resolve_scratch_directory, FileStamp, ScratchDir, ScratchEntry, ScratchEntryKind,
+    resolve_scratch_directory, FilePrecondition, FileStamp, ScratchDir, ScratchEntry,
+    ScratchEntryKind,
 };
 
 /// Scratch-root-relative home for every live overlay. It sits beside the chat
@@ -74,6 +76,13 @@ const MAX_OVERLAY_DEPTH: usize = 24;
 /// Ceiling on one staged file's size when it is written back.
 const MAX_STAGED_FILE_BYTES: u64 = 64 * 1_024 * 1_024;
 
+/// What one regular file in the staged copy looked like before exec ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ManifestEntry {
+    stamp: FileStamp,
+    sha256: [u8; 32],
+}
+
 /// One granted root and the private copy exec writes to instead.
 pub struct OverlaySlot {
     /// The real folder, as granted.
@@ -85,7 +94,7 @@ pub struct OverlaySlot {
     /// The staged copy, pinned when it was made.
     overlay_dir: ScratchDir,
     /// Every regular file the copy started with, by overlay-relative path.
-    manifest: BTreeMap<String, FileStamp>,
+    manifest: BTreeMap<String, ManifestEntry>,
 }
 
 impl std::fmt::Debug for OverlaySlot {
@@ -121,12 +130,77 @@ pub struct WriteOverlay {
     slots: Vec<OverlaySlot>,
 }
 
-/// What applying one overlay did, for the caller to report.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+/// A staged change that passed its precondition and reached the granted folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaterializedChange {
+    /// Granted folder the change landed in.
+    pub folder: PathBuf,
+    /// Changed file relative to `folder`.
+    pub relative: String,
+    /// Effect that reached the folder.
+    pub change: MaterializedChangeKind,
+}
+
+/// The effect one successfully materialized file had.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaterializedChangeKind {
+    /// A previously absent file was written.
+    Created,
+    /// An existing file was replaced.
+    Overwritten,
+    /// An existing file was removed.
+    Deleted,
+}
+
+/// A staged change that was deliberately left out of the granted folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RejectedChange {
+    /// Granted folder the change targeted.
+    pub folder: PathBuf,
+    /// Rejected file relative to `folder`.
+    pub relative: String,
+    /// Why the real folder was left untouched.
+    pub reason: RejectedChangeReason,
+}
+
+/// Why one staged file was not materialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RejectedChangeReason {
+    /// The real destination no longer has the bytes copied into the overlay.
+    Stale,
+    /// The prior bytes could not be retained for undo.
+    SnapshotUnavailable,
+    /// The staged file exceeds the write-back ceiling.
+    StagedFileTooLarge,
+    /// A filesystem operation failed or found an unsupported entry.
+    Unavailable,
+}
+
+/// Per-file result of applying one overlay.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct OverlayOutcome {
-    pub written: usize,
-    pub deleted: usize,
-    pub refused: usize,
+    /// Changes that reached their destinations.
+    pub written: Vec<MaterializedChange>,
+    /// Changes left staged because they could not safely be applied.
+    pub rejected: Vec<RejectedChange>,
+}
+
+impl OverlayOutcome {
+    fn written(&mut self, slot: &OverlaySlot, relative: &str, change: MaterializedChangeKind) {
+        self.written.push(MaterializedChange {
+            folder: slot.source.clone(),
+            relative: relative.to_owned(),
+            change,
+        });
+    }
+
+    fn rejected(&mut self, slot: &OverlaySlot, relative: &str, reason: RejectedChangeReason) {
+        self.rejected.push(RejectedChange {
+            folder: slot.source.clone(),
+            relative: relative.to_owned(),
+            reason,
+        });
+    }
 }
 
 /// The bytes a granted folder held immediately before one staged change.
@@ -160,17 +234,31 @@ pub struct StagedChange<'a> {
     pub next: Option<&'a [u8]>,
 }
 
+/// A snapshot prepared before a write and journaled only after it succeeds.
+pub trait PreparedWriteSnapshot: Send {
+    /// Confirm that the file mutation landed and make its journal row visible
+    /// to the sink's turn-level commit.
+    fn applied(self: Box<Self>);
+}
+
 /// Where a turn's file changes are journaled before they are materialized.
 ///
 /// The sink runs *before* the folder is touched and may refuse: a change whose
 /// prior bytes could not be retained is not applied, because an irreversible
-/// overwrite is exactly what this whole path exists to prevent. Recording is
-/// per file so the prior bytes never all sit in memory at once; the caller
-/// commits the accumulated journal once the overlay is applied.
+/// overwrite is exactly what this whole path exists to prevent. Preparation is
+/// per file so the prior bytes never all sit in memory at once; the receipt
+/// joins the accumulated journal only after the conditional mutation succeeds.
 #[async_trait::async_trait]
 pub trait WriteSnapshotSink: Send + Sync {
-    /// Retain `change`'s prior bytes and journal it, or refuse the change.
-    async fn record(&self, change: StagedChange<'_>) -> Result<(), String>;
+    /// Retain `change`'s prior bytes and prepare its journal row.
+    ///
+    /// Dropping the receipt means the filesystem mutation was refused or
+    /// failed. Calling [`PreparedWriteSnapshot::applied`] is the only action
+    /// that includes the row in the turn-level journal.
+    async fn prepare(
+        &self,
+        change: StagedChange<'_>,
+    ) -> Result<Box<dyn PreparedWriteSnapshot>, String>;
 }
 
 impl WriteOverlay {
@@ -225,7 +313,7 @@ impl WriteOverlay {
     ///
     /// Every change passes through `snapshots` first, so the bytes it replaces
     /// are retained before they stop existing. A sink that refuses one file
-    /// leaves that file untouched and counts it refused.
+    /// leaves that file untouched and returns it in `rejected`.
     ///
     /// Errors are per file: one refused write does not abandon the rest, since
     /// leaving the remainder unapplied would strand work the agent believes it
@@ -300,12 +388,12 @@ async fn stage_one(
 ///
 /// An individual entry that cannot be inspected is left out rather than failing
 /// the walk. Omission is the safe direction: an unrecorded file is never
-/// deleted from the folder, and the worst it costs is writing identical bytes
-/// back over itself.
+/// deleted, and any attempted overwrite is treated as a create whose
+/// absent-destination precondition rejects against the existing source file.
 async fn record_manifest(
     directory: &ScratchDir,
     prefix: &str,
-    manifest: &mut BTreeMap<String, FileStamp>,
+    manifest: &mut BTreeMap<String, ManifestEntry>,
     depth: usize,
 ) -> bool {
     if depth > MAX_OVERLAY_DEPTH {
@@ -321,8 +409,11 @@ async fn record_manifest(
         let relative = join_relative(prefix, &name);
         match kind {
             ScratchEntryKind::File => {
-                if let Some(stamp) = directory.file_stamp(&name).await {
-                    manifest.insert(relative, stamp);
+                if let (Some(stamp), Ok(sha256)) = (
+                    directory.file_stamp(&name).await,
+                    directory.file_sha256(&name).await,
+                ) {
+                    manifest.insert(relative, ManifestEntry { stamp, sha256 });
                 }
             }
             ScratchEntryKind::Directory => {
@@ -354,7 +445,7 @@ async fn apply_directory(
         return;
     }
     let Ok(entries) = directory.entries().await else {
-        outcome.refused += 1;
+        outcome.rejected(slot, prefix, RejectedChangeReason::Unavailable);
         return;
     };
     for ScratchEntry { name, kind } in entries {
@@ -362,18 +453,38 @@ async fn apply_directory(
         match kind {
             ScratchEntryKind::File => {
                 seen.push(relative.clone());
-                let stamp = directory.file_stamp(&name).await;
-                if stamp.is_some() && stamp == slot.manifest.get(&relative).copied() {
+                let Some(stamp) = directory.file_stamp(&name).await else {
+                    outcome.rejected(slot, &relative, RejectedChangeReason::Unavailable);
                     continue;
-                }
-                if stamp.is_some_and(|stamp| stamp.len > MAX_STAGED_FILE_BYTES) {
-                    outcome.refused += 1;
-                    continue;
-                }
-                match write_back(slot, prefix, &relative, &name, directory, snapshots, stamp).await
+                };
+                let content = match changed_staged_content(
+                    directory,
+                    &name,
+                    stamp,
+                    slot.manifest.get(&relative),
+                )
+                .await
                 {
-                    Ok(()) => outcome.written += 1,
-                    Err(_) => outcome.refused += 1,
+                    Ok(Some(content)) => content,
+                    Ok(None) => continue,
+                    Err(reason) => {
+                        outcome.rejected(slot, &relative, reason);
+                        continue;
+                    }
+                };
+                match write_back(
+                    slot,
+                    prefix,
+                    &name,
+                    snapshots,
+                    stamp,
+                    slot.manifest.get(&relative),
+                    &content,
+                )
+                .await
+                {
+                    Ok(change) => outcome.written(slot, &relative, change),
+                    Err(reason) => outcome.rejected(slot, &relative, reason),
                 }
             }
             ScratchEntryKind::Directory => match directory.open_dir(&name).await {
@@ -389,64 +500,166 @@ async fn apply_directory(
                     ))
                     .await;
                 }
-                Err(_) => outcome.refused += 1,
+                Err(_) => outcome.rejected(slot, &relative, RejectedChangeReason::Unavailable),
             },
             ScratchEntryKind::Other => {}
         }
     }
 }
 
+async fn changed_staged_content(
+    directory: &ScratchDir,
+    name: &str,
+    stamp: FileStamp,
+    manifest: Option<&ManifestEntry>,
+) -> Result<Option<Vec<u8>>, RejectedChangeReason> {
+    if stamp.len > MAX_STAGED_FILE_BYTES {
+        let unchanged = match manifest {
+            Some(manifest) if modes_match(stamp, manifest.stamp) => directory
+                .file_sha256(name)
+                .await
+                .is_ok_and(|sha256| sha256 == manifest.sha256),
+            _ => false,
+        };
+        return if unchanged {
+            Ok(None)
+        } else {
+            Err(RejectedChangeReason::StagedFileTooLarge)
+        };
+    }
+    let content = directory
+        .read_file(name)
+        .await
+        .map_err(|_| RejectedChangeReason::Unavailable)?;
+    let sha256: [u8; 32] = Sha256::digest(&content).into();
+    if manifest
+        .is_some_and(|manifest| sha256 == manifest.sha256 && modes_match(stamp, manifest.stamp))
+    {
+        Ok(None)
+    } else {
+        Ok(Some(content))
+    }
+}
+
+#[cfg(unix)]
+fn modes_match(left: FileStamp, right: FileStamp) -> bool {
+    left.mode == right.mode
+}
+
+#[cfg(not(unix))]
+fn modes_match(_: FileStamp, _: FileStamp) -> bool {
+    true
+}
+
 async fn write_back(
     slot: &OverlaySlot,
     prefix: &str,
-    relative: &str,
     name: &str,
-    directory: &ScratchDir,
     snapshots: Option<&dyn WriteSnapshotSink>,
-    stamp: Option<FileStamp>,
-) -> io::Result<()> {
-    let content = directory.read_file(name).await?;
-    let target = descend(&slot.source_dir, prefix, true).await?;
-    if let Some(snapshots) = snapshots {
-        let prior = read_prior(&target, name).await;
-        snapshots
-            .record(StagedChange {
-                folder: &slot.source,
-                relative,
-                prior,
-                next: Some(&content),
-            })
-            .await
-            .map_err(io::Error::other)?;
+    stamp: FileStamp,
+    manifest: Option<&ManifestEntry>,
+    content: &[u8],
+) -> Result<MaterializedChangeKind, RejectedChangeReason> {
+    let relative = join_relative(prefix, name);
+    let target = descend(&slot.source_dir, prefix, true)
+        .await
+        .map_err(|_| RejectedChangeReason::Unavailable)?;
+    let expected = manifest.map_or(FilePrecondition::Absent, |entry| {
+        FilePrecondition::Sha256(entry.sha256)
+    });
+    let observed = observe_prior(&target, name).await?;
+    if observed.precondition != expected {
+        return Err(RejectedChangeReason::Stale);
     }
+    let snapshot = match snapshots {
+        Some(snapshots) => Some(
+            snapshots
+                .prepare(StagedChange {
+                    folder: &slot.source,
+                    relative: &relative,
+                    prior: observed.prior,
+                    next: Some(content),
+                })
+                .await
+                .map_err(|_| RejectedChangeReason::SnapshotUnavailable)?,
+        ),
+        None => None,
+    };
     // The staged file carries the mode the folder's copy had, so writing it
     // back does not turn a script into a non-executable file or narrow who can
     // read a document the user shares.
     #[cfg(unix)]
-    let mode = stamp.map(|stamp| stamp.mode);
+    let mode = Some(stamp.mode);
     #[cfg(not(unix))]
     let mode = {
         let _ = stamp;
         None
     };
-    target.write_file_with_mode(name, &content, mode).await
+    let applied = target
+        .write_file_with_mode_if_matches(name, content, mode, expected)
+        .await
+        .map_err(|_| RejectedChangeReason::Unavailable)?;
+    if !applied {
+        return Err(RejectedChangeReason::Stale);
+    }
+    if let Some(snapshot) = snapshot {
+        snapshot.applied();
+    }
+    Ok(if manifest.is_some() {
+        MaterializedChangeKind::Overwritten
+    } else {
+        MaterializedChangeKind::Created
+    })
 }
 
-/// Read what the user's folder holds for `name`, within the snapshot budget.
-///
-/// A file too large to retain is reported as such rather than read, so nothing
-/// here loads an arbitrarily large file into memory to then discard it.
-async fn read_prior(target: &ScratchDir, name: &str) -> PriorContents {
+struct ObservedPrior {
+    prior: PriorContents,
+    precondition: FilePrecondition,
+}
+
+/// Read what the user's folder holds for `name` and derive the exact
+/// precondition from those same bytes.
+async fn observe_prior(
+    target: &ScratchDir,
+    name: &str,
+) -> Result<ObservedPrior, RejectedChangeReason> {
     match target.file_stamp(name).await {
-        None => PriorContents::Absent,
-        Some(stamp) if stamp.len > MAX_EXEC_SNAPSHOT_BYTES => PriorContents::TooLarge {
-            byte_len: stamp.len,
+        None => match target.open_file(name).await {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(ObservedPrior {
+                prior: PriorContents::Absent,
+                precondition: FilePrecondition::Absent,
+            }),
+            _ => Err(RejectedChangeReason::SnapshotUnavailable),
         },
-        Some(_) => match target.read_file(name).await {
-            Ok(bytes) => PriorContents::Bytes(bytes),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => PriorContents::Absent,
-            Err(_) => PriorContents::Unreadable,
-        },
+        Some(stamp) if stamp.len > MAX_EXEC_SNAPSHOT_BYTES => {
+            let sha256 = target
+                .file_sha256(name)
+                .await
+                .map_err(|_| RejectedChangeReason::SnapshotUnavailable)?;
+            Ok(ObservedPrior {
+                prior: PriorContents::TooLarge {
+                    byte_len: stamp.len,
+                },
+                precondition: FilePrecondition::Sha256(sha256),
+            })
+        }
+        Some(_) => {
+            let bytes = match target.read_file(name).await {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    return Ok(ObservedPrior {
+                        prior: PriorContents::Absent,
+                        precondition: FilePrecondition::Absent,
+                    });
+                }
+                Err(_) => return Err(RejectedChangeReason::SnapshotUnavailable),
+            };
+            let sha256: [u8; 32] = Sha256::digest(&bytes).into();
+            Ok(ObservedPrior {
+                prior: PriorContents::Bytes(bytes),
+                precondition: FilePrecondition::Sha256(sha256),
+            })
+        }
     }
 }
 
@@ -461,41 +674,54 @@ async fn apply_deletions(
     outcome: &mut OverlayOutcome,
 ) {
     let seen = seen.iter().collect::<std::collections::HashSet<_>>();
-    for relative in slot.manifest.keys() {
+    for (relative, manifest) in &slot.manifest {
         if seen.contains(relative) {
             continue;
         }
         let (prefix, name) = split_relative(relative);
         let Ok(target) = descend(&slot.source_dir, prefix, false).await else {
-            outcome.refused += 1;
+            outcome.rejected(slot, relative, RejectedChangeReason::Unavailable);
             continue;
         };
-        if let Some(snapshots) = snapshots {
-            let prior = read_prior(&target, name).await;
-            // Nothing to delete and nothing to keep: the file the manifest
-            // named is already gone, which is the outcome this pass wanted.
-            if prior == PriorContents::Absent {
+        let expected = FilePrecondition::Sha256(manifest.sha256);
+        let observed = match observe_prior(&target, name).await {
+            Ok(observed) if observed.precondition == expected => observed,
+            Ok(_) => {
+                outcome.rejected(slot, relative, RejectedChangeReason::Stale);
                 continue;
             }
-            if snapshots
-                .record(StagedChange {
+            Err(reason) => {
+                outcome.rejected(slot, relative, reason);
+                continue;
+            }
+        };
+        let snapshot = match snapshots {
+            Some(snapshots) => match snapshots
+                .prepare(StagedChange {
                     folder: &slot.source,
                     relative,
-                    prior,
+                    prior: observed.prior,
                     next: None,
                 })
                 .await
-                .is_err()
             {
-                outcome.refused += 1;
-                continue;
+                Ok(snapshot) => Some(snapshot),
+                Err(_) => {
+                    outcome.rejected(slot, relative, RejectedChangeReason::SnapshotUnavailable);
+                    continue;
+                }
+            },
+            None => None,
+        };
+        match target.remove_file_if_matches(name, expected).await {
+            Ok(true) => {
+                if let Some(snapshot) = snapshot {
+                    snapshot.applied();
+                }
+                outcome.written(slot, relative, MaterializedChangeKind::Deleted);
             }
-        }
-        match target.remove(name, ScratchEntryKind::File).await {
-            Ok(()) => outcome.deleted += 1,
-            // Already gone is the outcome we wanted, not a refusal.
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(_) => outcome.refused += 1,
+            Ok(false) => outcome.rejected(slot, relative, RejectedChangeReason::Stale),
+            Err(_) => outcome.rejected(slot, relative, RejectedChangeReason::Unavailable),
         }
     }
 }
@@ -667,13 +893,19 @@ mod tests {
         assert!(granted.path().join("nested/data.csv").exists());
 
         let outcome = overlay.materialize(None).await;
+        assert_eq!(outcome.rejected, Vec::new());
+        assert_eq!(outcome.written.len(), 3);
         assert_eq!(
-            outcome,
-            OverlayOutcome {
-                written: 2,
-                deleted: 1,
-                refused: 0
-            }
+            outcome
+                .written
+                .iter()
+                .map(|file| (file.relative.as_str(), file.change))
+                .collect::<BTreeMap<_, _>>(),
+            BTreeMap::from([
+                ("nested/data.csv", MaterializedChangeKind::Deleted),
+                ("nested/new.txt", MaterializedChangeKind::Created),
+                ("notes.md", MaterializedChangeKind::Overwritten),
+            ])
         );
         assert_eq!(
             std::fs::read_to_string(granted.path().join("notes.md")).unwrap(),
@@ -730,21 +962,38 @@ mod tests {
     /// A sink that records everything, and can be told to refuse one path.
     struct RecordingSink {
         refuse: Option<String>,
-        seen: std::sync::Mutex<Vec<Recorded>>,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<Recorded>>>,
+    }
+
+    struct RecordingReceipt {
+        seen: std::sync::Arc<std::sync::Mutex<Vec<Recorded>>>,
+        recorded: Recorded,
+    }
+
+    impl PreparedWriteSnapshot for RecordingReceipt {
+        fn applied(self: Box<Self>) {
+            let Self { seen, recorded } = *self;
+            seen.lock().unwrap().push(recorded);
+        }
     }
 
     #[async_trait::async_trait]
     impl WriteSnapshotSink for RecordingSink {
-        async fn record(&self, change: StagedChange<'_>) -> Result<(), String> {
+        async fn prepare(
+            &self,
+            change: StagedChange<'_>,
+        ) -> Result<Box<dyn PreparedWriteSnapshot>, String> {
             if self.refuse.as_deref() == Some(change.relative) {
                 return Err("cannot retain".into());
             }
-            self.seen.lock().unwrap().push(Recorded {
-                relative: change.relative.to_owned(),
-                prior: change.prior.clone(),
-                next: change.next.map(<[u8]>::to_vec),
-            });
-            Ok(())
+            Ok(Box::new(RecordingReceipt {
+                seen: std::sync::Arc::clone(&self.seen),
+                recorded: Recorded {
+                    relative: change.relative.to_owned(),
+                    prior: change.prior.clone(),
+                    next: change.next.map(<[u8]>::to_vec),
+                },
+            }))
         }
     }
 
@@ -768,19 +1017,20 @@ mod tests {
 
         let sink = RecordingSink {
             refuse: Some("precious.md".into()),
-            seen: std::sync::Mutex::new(Vec::new()),
+            seen: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         };
         let outcome = overlay.materialize(Some(&sink)).await;
+        assert_eq!(outcome.written.len(), 3);
         assert_eq!(
-            outcome,
-            OverlayOutcome {
-                written: 2,
-                deleted: 1,
-                refused: 1
-            }
+            outcome.rejected,
+            vec![RejectedChange {
+                folder: granted.path().to_path_buf(),
+                relative: "precious.md".to_owned(),
+                reason: RejectedChangeReason::SnapshotUnavailable,
+            }]
         );
 
-        let mut seen = sink.seen.into_inner().unwrap();
+        let mut seen = std::mem::take(&mut *sink.seen.lock().unwrap());
         seen.sort_by(|left, right| left.relative.cmp(&right.relative));
         assert_eq!(
             seen,
@@ -808,5 +1058,125 @@ mod tests {
             std::fs::read_to_string(granted.path().join("precious.md")).unwrap(),
             "irreplaceable"
         );
+    }
+
+    /// A user edit after the overlay is prepared wins every conflict: an
+    /// overwrite, a delete, and a create collision are each rejected rather
+    /// than replacing bytes the agent never saw.
+    #[tokio::test]
+    async fn stale_digest_preconditions_leave_user_files_untouched() {
+        let granted = tempfile::tempdir().unwrap();
+        std::fs::write(granted.path().join("notes.md"), "original").unwrap();
+        std::fs::write(granted.path().join("gone.txt"), "original").unwrap();
+        let original_modified = std::fs::metadata(granted.path().join("notes.md"))
+            .unwrap()
+            .modified()
+            .unwrap();
+
+        let (_scratch, overlay) = overlay_for(granted.path()).await;
+        let staged = overlay.slots()[0].overlay().to_path_buf();
+        std::fs::write(staged.join("notes.md"), "agent___").unwrap();
+        std::fs::remove_file(staged.join("gone.txt")).unwrap();
+        std::fs::write(staged.join("fresh.txt"), "agent").unwrap();
+
+        // Keep both the length and mtime equal to the manifest. A stamp-only
+        // precondition accepts this; the content digest must be what rejects
+        // the overwrite.
+        std::fs::write(granted.path().join("notes.md"), "useredit").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(granted.path().join("notes.md"))
+            .unwrap()
+            .set_modified(original_modified)
+            .unwrap();
+        std::fs::write(granted.path().join("gone.txt"), "user edit").unwrap();
+        std::fs::write(granted.path().join("fresh.txt"), "user file").unwrap();
+
+        let outcome = overlay.materialize(None).await;
+        assert_eq!(outcome.written, Vec::new());
+        assert_eq!(
+            outcome
+                .rejected
+                .iter()
+                .map(|file| (file.relative.as_str(), file.reason))
+                .collect::<BTreeMap<_, _>>(),
+            BTreeMap::from([
+                ("fresh.txt", RejectedChangeReason::Stale),
+                ("gone.txt", RejectedChangeReason::Stale),
+                ("notes.md", RejectedChangeReason::Stale),
+            ])
+        );
+        assert_eq!(
+            std::fs::read_to_string(granted.path().join("notes.md")).unwrap(),
+            "useredit"
+        );
+        assert_eq!(
+            std::fs::read_to_string(granted.path().join("gone.txt")).unwrap(),
+            "user edit"
+        );
+        assert_eq!(
+            std::fs::read_to_string(granted.path().join("fresh.txt")).unwrap(),
+            "user file"
+        );
+    }
+
+    struct RacingSink {
+        target: PathBuf,
+        applied: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    struct RacingReceipt(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl PreparedWriteSnapshot for RacingReceipt {
+        fn applied(self: Box<Self>) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl WriteSnapshotSink for RacingSink {
+        async fn prepare(
+            &self,
+            _: StagedChange<'_>,
+        ) -> Result<Box<dyn PreparedWriteSnapshot>, String> {
+            // Simulate the user's editor saving after the prior bytes were read
+            // and snapshotted but before the staged bytes are published.
+            std::fs::write(&self.target, "user edit").unwrap();
+            Ok(Box::new(RacingReceipt(std::sync::Arc::clone(
+                &self.applied,
+            ))))
+        }
+    }
+
+    /// Snapshot publication can take real time. The destination is checked
+    /// again afterwards, at the mutation boundary, and a receipt for a write
+    /// that lost that race never enters the journal.
+    #[tokio::test]
+    async fn a_change_between_snapshot_and_publication_is_rejected_and_not_journaled() {
+        let granted = tempfile::tempdir().unwrap();
+        let target = granted.path().join("notes.md");
+        std::fs::write(&target, "original").unwrap();
+
+        let (_scratch, overlay) = overlay_for(granted.path()).await;
+        std::fs::write(overlay.slots()[0].overlay().join("notes.md"), "agent").unwrap();
+
+        let applied = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sink = RacingSink {
+            target: target.clone(),
+            applied: std::sync::Arc::clone(&applied),
+        };
+        let outcome = overlay.materialize(Some(&sink)).await;
+
+        assert_eq!(outcome.written, Vec::new());
+        assert_eq!(
+            outcome.rejected,
+            vec![RejectedChange {
+                folder: granted.path().to_path_buf(),
+                relative: "notes.md".to_owned(),
+                reason: RejectedChangeReason::Stale,
+            }]
+        );
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "user edit");
+        assert!(!applied.load(std::sync::atomic::Ordering::SeqCst));
     }
 }

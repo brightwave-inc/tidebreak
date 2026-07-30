@@ -18,7 +18,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use openwave_code_execution::{PriorContents, StagedChange, WriteSnapshotSink};
+use openwave_code_execution::{
+    PreparedWriteSnapshot, PriorContents, StagedChange, WriteSnapshotSink,
+};
 use openwave_core::{
     BlobStore, ChatId, DocumentSourceBlob, ExecFileChange, ExecFileSnapshotRecord, ExecUndoState,
     Store, TurnId,
@@ -31,7 +33,7 @@ pub(crate) struct TurnSnapshotSink {
     store: Arc<dyn Store>,
     blobs: Arc<dyn BlobStore>,
     blob_writes: Arc<BlobWriteGuard>,
-    files: Mutex<Vec<ExecFileSnapshotRecord>>,
+    files: Arc<Mutex<Vec<ExecFileSnapshotRecord>>>,
 }
 
 impl TurnSnapshotSink {
@@ -44,7 +46,7 @@ impl TurnSnapshotSink {
             store,
             blobs,
             blob_writes,
-            files: Mutex::new(Vec::new()),
+            files: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -66,9 +68,27 @@ impl TurnSnapshotSink {
     }
 }
 
+struct PendingSnapshot {
+    files: Arc<Mutex<Vec<ExecFileSnapshotRecord>>>,
+    file: ExecFileSnapshotRecord,
+}
+
+impl PreparedWriteSnapshot for PendingSnapshot {
+    fn applied(self: Box<Self>) {
+        let Self { files, file } = *self;
+        files
+            .lock()
+            .expect("exec snapshot buffer is not poisoned")
+            .push(file);
+    }
+}
+
 #[async_trait::async_trait]
 impl WriteSnapshotSink for TurnSnapshotSink {
-    async fn record(&self, change: StagedChange<'_>) -> Result<(), String> {
+    async fn prepare(
+        &self,
+        change: StagedChange<'_>,
+    ) -> Result<Box<dyn PreparedWriteSnapshot>, String> {
         let change_kind = match (&change.prior, change.next) {
             (_, None) => ExecFileChange::Deleted,
             (PriorContents::Absent, Some(_)) => ExecFileChange::Created,
@@ -98,10 +118,9 @@ impl WriteSnapshotSink for TurnSnapshotSink {
                 (Some(blob.id), Some(blob.byte_len), ExecUndoState::Available)
             }
         };
-        self.files
-            .lock()
-            .expect("exec snapshot buffer is not poisoned")
-            .push(ExecFileSnapshotRecord {
+        Ok(Box::new(PendingSnapshot {
+            files: Arc::clone(&self.files),
+            file: ExecFileSnapshotRecord {
                 folder_path: change.folder.display().to_string(),
                 relative_path: change.relative.to_owned(),
                 change: change_kind,
@@ -109,8 +128,8 @@ impl WriteSnapshotSink for TurnSnapshotSink {
                 prior_byte_len,
                 new_sha256,
                 undo,
-            });
-        Ok(())
+            },
+        }))
     }
 }
 

@@ -28,13 +28,14 @@ mod types;
 pub use daytona::{DaytonaCredential, DaytonaExecutionProvider, DAYTONA_CREDENTIAL_KEY};
 pub use e2b::{E2BCredential, E2BExecutionProvider, E2B_CREDENTIAL_KEY};
 pub use host_paths::{
-    resolve_scratch_directory, try_resolve_scratch_directory, FileStamp, ScratchDir, ScratchEntry,
-    ScratchEntryKind, ScratchRefusal,
+    resolve_scratch_directory, try_resolve_scratch_directory, FilePrecondition, FileStamp,
+    ScratchDir, ScratchEntry, ScratchEntryKind, ScratchRefusal,
 };
 pub use local::LocalExecutionProvider;
 pub use overlay::{
-    sweep_abandoned_overlays, OverlayOutcome, OverlaySlot, PriorContents, StagedChange,
-    WriteOverlay, WriteSnapshotSink, OVERLAY_DIR,
+    sweep_abandoned_overlays, MaterializedChange, MaterializedChangeKind, OverlayOutcome,
+    OverlaySlot, PreparedWriteSnapshot, PriorContents, RejectedChange, RejectedChangeReason,
+    StagedChange, WriteOverlay, WriteSnapshotSink, OVERLAY_DIR,
 };
 pub use preview::{scan_preview_directory, PreviewScan};
 pub use remote::RemoteSessionPool;
