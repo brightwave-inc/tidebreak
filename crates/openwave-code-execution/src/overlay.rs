@@ -196,6 +196,8 @@ pub enum RejectedChangeReason {
     SnapshotUnavailable,
     /// The staged file exceeds the write-back ceiling.
     StagedFileTooLarge,
+    /// A recoverable copy could not be placed in the operating system's trash.
+    TrashUnavailable,
     /// A filesystem operation failed or found an unsupported entry.
     Unavailable,
 }
@@ -357,6 +359,31 @@ pub async fn materialized_file_matches(
             .is_ok_and(|digest| digest == sha256)
 }
 
+/// Destination for the recoverable copy made before a granted-root deletion.
+///
+/// Production uses [`NativeTrash`]. The trait keeps native Trash/Recycle Bin
+/// side effects out of contract tests while exercising the same ordering:
+/// trash must accept the verified copy before the real file can be unlinked.
+#[async_trait::async_trait]
+pub trait TrashSink: Send + Sync {
+    /// Move `path` into this trash destination.
+    async fn trash(&self, path: &Path) -> Result<(), String>;
+}
+
+/// The current user's native Trash, Recycle Bin, or FreeDesktop trash.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NativeTrash;
+
+#[async_trait::async_trait]
+impl TrashSink for NativeTrash {
+    async fn trash(&self, path: &Path) -> Result<(), String> {
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || trash::delete(path).map_err(|error| error.to_string()))
+            .await
+            .map_err(|_| "native trash operation did not complete".to_owned())?
+    }
+}
+
 impl WriteOverlay {
     /// Stage `sources` under a fresh per-turn home inside `scratch_root`.
     ///
@@ -433,7 +460,21 @@ impl WriteOverlay {
     /// leaving the remainder unapplied would strand work the agent believes it
     /// finished.
     pub async fn materialize(self, snapshots: Option<&dyn WriteSnapshotSink>) -> OverlayOutcome {
+        self.materialize_with_trash(snapshots, &NativeTrash).await
+    }
+
+    /// Apply staged changes with an explicit trash destination.
+    ///
+    /// This is the same operation as [`WriteOverlay::materialize`]; callers
+    /// that need deterministic isolation from the user's native trash can
+    /// supply a test destination.
+    pub async fn materialize_with_trash(
+        self,
+        snapshots: Option<&dyn WriteSnapshotSink>,
+        trash: &dyn TrashSink,
+    ) -> OverlayOutcome {
         let mut outcome = OverlayOutcome::default();
+        let trash_staging = self.home.join(".trash-staging");
         for slot in &self.slots {
             let mut seen = Vec::new();
             apply_directory(
@@ -446,7 +487,7 @@ impl WriteOverlay {
                 &mut outcome,
             )
             .await;
-            apply_deletions(slot, snapshots, &seen, &mut outcome).await;
+            apply_deletions(slot, snapshots, trash, &trash_staging, &seen, &mut outcome).await;
         }
         self.discard().await;
         outcome
@@ -1029,6 +1070,8 @@ async fn observe_prior(
 async fn apply_deletions(
     slot: &OverlaySlot,
     snapshots: Option<&dyn WriteSnapshotSink>,
+    trash: &dyn TrashSink,
+    trash_staging: &Path,
     seen: &[String],
     outcome: &mut OverlayOutcome,
 ) {
@@ -1072,6 +1115,18 @@ async fn apply_deletions(
             },
             None => None,
         };
+        let trashed = match stage_trash_copy(&target, name, expected, trash_staging).await {
+            Ok(trashed) => trashed,
+            Err(reason) => {
+                outcome.rejected(slot, relative, reason);
+                continue;
+            }
+        };
+        if trash.trash(&trashed).await.is_err() {
+            let _ = tokio::fs::remove_file(&trashed).await;
+            outcome.rejected(slot, relative, RejectedChangeReason::TrashUnavailable);
+            continue;
+        }
         match target.remove_file_if_matches(name, expected).await {
             Ok(true) => {
                 if let Some(snapshot) = snapshot {
@@ -1083,6 +1138,69 @@ async fn apply_deletions(
             Err(_) => outcome.rejected(slot, relative, RejectedChangeReason::Unavailable),
         }
     }
+}
+
+/// Copy one still-matching source file to private staging for native trash.
+///
+/// Native trash APIs are path-based. The granted root is deliberately not:
+/// every mutation there is descriptor-relative so a renamed directory or
+/// planted symlink cannot redirect it. Copying through a no-follow file handle
+/// bridges those models without reopening the granted path. The digest of the
+/// copied bytes is verified before the path-based native API sees them, and
+/// the original is checked again at the eventual unlink boundary.
+async fn stage_trash_copy(
+    source: &ScratchDir,
+    name: &str,
+    expected: FilePrecondition,
+    trash_staging: &Path,
+) -> Result<PathBuf, RejectedChangeReason> {
+    let FilePrecondition::Sha256(expected) = expected else {
+        return Err(RejectedChangeReason::Unavailable);
+    };
+    let source = source
+        .open_file(name)
+        .await
+        .map_err(|_| RejectedChangeReason::Unavailable)?;
+    let name = name.to_owned();
+    let trash_staging = trash_staging.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        use std::io::{Read as _, Write as _};
+
+        let item_home = trash_staging.join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&item_home).map_err(|_| RejectedChangeReason::TrashUnavailable)?;
+        let path = item_home.join(name);
+        let mut destination = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|_| RejectedChangeReason::TrashUnavailable)?;
+        let mut source = source;
+        let mut digest = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1_024];
+        loop {
+            let read = source
+                .read(&mut buffer)
+                .map_err(|_| RejectedChangeReason::Unavailable)?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+            destination
+                .write_all(&buffer[..read])
+                .map_err(|_| RejectedChangeReason::TrashUnavailable)?;
+        }
+        destination
+            .sync_all()
+            .map_err(|_| RejectedChangeReason::TrashUnavailable)?;
+        let copied: [u8; 32] = digest.finalize().into();
+        if copied != expected {
+            let _ = std::fs::remove_file(&path);
+            return Err(RejectedChangeReason::Stale);
+        }
+        Ok(path)
+    })
+    .await
+    .map_err(|_| RejectedChangeReason::TrashUnavailable)?
 }
 
 /// Open `relative` under `directory` one pinned component at a time.
@@ -1201,6 +1319,30 @@ fn split_relative(relative: &str) -> (&str, &str) {
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct RecordingTrash {
+        files: std::sync::Mutex<Vec<(String, Vec<u8>)>>,
+        fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl TrashSink for RecordingTrash {
+        async fn trash(&self, path: &Path) -> Result<(), String> {
+            if self.fail {
+                return Err("trash unavailable".into());
+            }
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| "trash name is not UTF-8".to_owned())?
+                .to_owned();
+            let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+            std::fs::remove_file(path).map_err(|error| error.to_string())?;
+            self.files.lock().unwrap().push((name, bytes));
+            Ok(())
+        }
+    }
+
     async fn overlay_for(source: &Path) -> (tempfile::TempDir, WriteOverlay) {
         let scratch = tempfile::tempdir().unwrap();
         let overlay = WriteOverlay::prepare(scratch.path(), "chat", &[source.to_path_buf()])
@@ -1251,7 +1393,8 @@ mod tests {
         );
         assert!(granted.path().join("nested/data.csv").exists());
 
-        let outcome = overlay.materialize(None).await;
+        let trash = RecordingTrash::default();
+        let outcome = overlay.materialize_with_trash(None, &trash).await;
         assert_eq!(outcome.rejected, Vec::new());
         assert_eq!(outcome.written.len(), 3);
         assert_eq!(
@@ -1275,6 +1418,10 @@ mod tests {
             "fresh"
         );
         assert!(!granted.path().join("nested/data.csv").exists());
+        assert_eq!(
+            *trash.files.lock().unwrap(),
+            vec![("data.csv".to_owned(), b"a,b".to_vec())]
+        );
 
         // A file written back keeps the mode it had rather than becoming a
         // private host-owned file the user can no longer share.
@@ -1299,7 +1446,8 @@ mod tests {
         let (_scratch, overlay) = overlay_for(granted.path()).await;
         std::fs::write(granted.path().join("arrived-later.txt"), "user").unwrap();
 
-        let outcome = overlay.materialize(None).await;
+        let trash = RecordingTrash::default();
+        let outcome = overlay.materialize_with_trash(None, &trash).await;
         assert_eq!(outcome, OverlayOutcome::default());
         assert_eq!(
             std::fs::read_to_string(granted.path().join("arrived-later.txt")).unwrap(),
@@ -1474,7 +1622,8 @@ mod tests {
             refuse: Some("precious.md".into()),
             seen: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         };
-        let outcome = overlay.materialize(Some(&sink)).await;
+        let trash = RecordingTrash::default();
+        let outcome = overlay.materialize_with_trash(Some(&sink), &trash).await;
         assert_eq!(outcome.written.len(), 3);
         assert_eq!(
             outcome.rejected,
@@ -1515,6 +1664,42 @@ mod tests {
         );
     }
 
+    /// A native trash failure is a per-file rejection, never permission to
+    /// fall back to the irreversible unlink this feature replaces.
+    #[tokio::test]
+    async fn a_trash_failure_leaves_the_granted_file_and_snapshot_unapplied() {
+        let granted = tempfile::tempdir().unwrap();
+        std::fs::write(granted.path().join("gone.txt"), "keep me").unwrap();
+
+        let (_scratch, overlay) = overlay_for(granted.path()).await;
+        std::fs::remove_file(overlay.slots()[0].overlay().join("gone.txt")).unwrap();
+
+        let sink = RecordingSink {
+            refuse: None,
+            seen: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        };
+        let trash = RecordingTrash {
+            fail: true,
+            ..RecordingTrash::default()
+        };
+        let outcome = overlay.materialize_with_trash(Some(&sink), &trash).await;
+
+        assert_eq!(outcome.written, Vec::new());
+        assert_eq!(
+            outcome.rejected,
+            vec![RejectedChange {
+                folder: granted.path().to_path_buf(),
+                relative: "gone.txt".to_owned(),
+                reason: RejectedChangeReason::TrashUnavailable,
+            }]
+        );
+        assert_eq!(
+            std::fs::read_to_string(granted.path().join("gone.txt")).unwrap(),
+            "keep me"
+        );
+        assert!(sink.seen.lock().unwrap().is_empty());
+    }
+
     /// A user edit after the overlay is prepared wins every conflict: an
     /// overwrite, a delete, and a create collision are each rejected rather
     /// than replacing bytes the agent never saw.
@@ -1547,7 +1732,8 @@ mod tests {
         std::fs::write(granted.path().join("gone.txt"), "user edit").unwrap();
         std::fs::write(granted.path().join("fresh.txt"), "user file").unwrap();
 
-        let outcome = overlay.materialize(None).await;
+        let trash = RecordingTrash::default();
+        let outcome = overlay.materialize_with_trash(None, &trash).await;
         assert_eq!(outcome.written, Vec::new());
         assert_eq!(
             outcome
@@ -1620,7 +1806,8 @@ mod tests {
             target: target.clone(),
             applied: std::sync::Arc::clone(&applied),
         };
-        let outcome = overlay.materialize(Some(&sink)).await;
+        let trash = RecordingTrash::default();
+        let outcome = overlay.materialize_with_trash(Some(&sink), &trash).await;
 
         assert_eq!(outcome.written, Vec::new());
         assert_eq!(
