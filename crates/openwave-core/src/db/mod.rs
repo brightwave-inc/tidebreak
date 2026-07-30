@@ -711,6 +711,22 @@ impl Store for DbStore {
         ops::agent_run::claim_container_agent_run(self, id, lease_token, lease_duration).await
     }
 
+    async fn list_reclaimable_container_agent_runs(
+        &self,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Vec<AgentRun>> {
+        ops::agent_run::list_reclaimable_container_agent_runs(self, now).await
+    }
+
+    async fn reclaim_container_agent_run(
+        &self,
+        id: AgentRunId,
+        lease_token: uuid::Uuid,
+        lease_duration: chrono::Duration,
+    ) -> Result<Option<AgentRun>> {
+        ops::agent_run::reclaim_container_agent_run(self, id, lease_token, lease_duration).await
+    }
+
     async fn begin_sandbox_provision(
         &self,
         run_id: uuid::Uuid,

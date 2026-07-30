@@ -980,6 +980,116 @@ async fn a_committed_handle_is_reconciled_not_reprovisioned() {
     .expect("test completed within its time bound");
 }
 
+/// The recovery pass that replaces the lease reaper for container runs: a run
+/// abandoned `running` under an expired lease is reclaimed under a fresh lease
+/// on the SAME attempt, its committed container reattached and driven to the
+/// result the reaper would have thrown away.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dead_drivers_container_run_is_recovered_to_completion() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (_dir, store, chat) = store().await;
+        let task = "finish what the dead driver started";
+        let run_id = admit_container_run(&store, chat.id, task).await;
+        let run_uuid = *run_id.as_uuid();
+
+        // The dead driver: claimed the run, provisioned a container, committed
+        // its handle — then vanished, leaving the lease to expire.
+        let dead_token = Uuid::new_v4();
+        store
+            .claim_container_agent_run(run_id, dead_token, chrono::Duration::milliseconds(50))
+            .await
+            .unwrap()
+            .expect("the dead driver's claim succeeds");
+        let base_url = spawn_sandbox_agent(task).await;
+        let backend = MockBackend::unreachable(base_url);
+        let tag = SandboxTag::new();
+        store
+            .begin_sandbox_provision(
+                run_uuid,
+                &tag.to_string(),
+                chrono::Utc::now() + chrono::Duration::seconds(600),
+            )
+            .await
+            .unwrap();
+        assert!(store
+            .commit_sandbox_provision_handle(run_uuid, "abandoned-container")
+            .await
+            .unwrap());
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let provider = Arc::new(ScriptedProvider::new(vec![]));
+        let runner = SandboxContainerRunner::new(
+            store.clone(),
+            backend.clone(),
+            Arc::new(FixedResolver(provider)),
+            fast_config(),
+        );
+        let outcomes = runner.recover().await.expect("recovery succeeds");
+        assert_eq!(
+            outcomes,
+            vec![SandboxContainerRunOutcome::Completed(run_id)]
+        );
+
+        let recovered = store.get_agent_run(run_id).await.unwrap().unwrap();
+        assert_eq!(recovered.status, AgentRunStatus::Completed);
+        assert_eq!(
+            recovered.attempt_count, 1,
+            "recovery re-drives the single attempt, never a second one"
+        );
+        // Reconciled the abandoned container: no new provision, torn down once.
+        assert_eq!(backend.provisions.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.destroys.load(Ordering::SeqCst), 1);
+    })
+    .await
+    .expect("test completed within its time bound");
+}
+
+/// A container run failed terminally through the fenced store path leaves its
+/// provisioning record owing a teardown in the same transaction — the link the
+/// deadline scan uses so an expired run's live container is swept, not leaked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_terminal_container_failure_enqueues_its_teardown() {
+    let (_dir, store, chat) = store().await;
+    let run_id = admit_container_run(&store, chat.id, "fails terminally").await;
+    let run_uuid = *run_id.as_uuid();
+    let token = Uuid::new_v4();
+    store
+        .claim_container_agent_run(run_id, token, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("the claim succeeds");
+    let tag = SandboxTag::new();
+    store
+        .begin_sandbox_provision(
+            run_uuid,
+            &tag.to_string(),
+            chrono::Utc::now() + chrono::Duration::seconds(600),
+        )
+        .await
+        .unwrap();
+    assert!(store
+        .commit_sandbox_provision_handle(run_uuid, "doomed-container")
+        .await
+        .unwrap());
+
+    store
+        .fail_agent_run(
+            run_id,
+            token,
+            "sandbox_agent_failed",
+            "the loop ended without a result",
+            chrono::Duration::seconds(1),
+        )
+        .await
+        .unwrap()
+        .expect("the terminal failure commits");
+
+    let teardowns = store.list_sandbox_teardowns().await.unwrap();
+    assert_eq!(teardowns.len(), 1);
+    assert_eq!(teardowns[0].run_id, run_uuid);
+    assert_eq!(teardowns[0].handle.as_deref(), Some("doomed-container"));
+}
+
 // --- Docker end-to-end (gated on a container runtime + the agent image) -------
 
 /// Build the sandbox-agent image for the Docker-gated tests, returning its tag,
