@@ -96,6 +96,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddLateResultEvidence),
             Box::new(AddPlanRequests),
             Box::new(AddExecFileSnapshots),
+            Box::new(AddExecFileRejections),
             Box::new(AddLocalApps),
             Box::new(AddAppGrants),
             Box::new(AddToolCallRawArguments),
@@ -593,6 +594,89 @@ impl MigrationTrait for AddExecFileSnapshots {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .drop_table(Table::drop().table(ExecFileSnapshot::Table).to_owned())
+            .await
+    }
+}
+
+/// Persists staged writes that were deliberately left out of the user's
+/// folder. These rows contain report metadata only; successful writes continue
+/// to use `exec_file_snapshot`, whose blob references power undo.
+struct AddExecFileRejections;
+
+impl MigrationName for AddExecFileRejections {
+    fn name(&self) -> &str {
+        "m20260730_000039_add_exec_file_rejections"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddExecFileRejections {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(ExecFileRejection::Table)
+                    .col(
+                        ColumnDef::new(ExecFileRejection::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(ExecFileRejection::ChatId).uuid().not_null())
+                    .col(ColumnDef::new(ExecFileRejection::TurnId).uuid().not_null())
+                    .col(
+                        ColumnDef::new(ExecFileRejection::FolderPath)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ExecFileRejection::RelativePath)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ExecFileRejection::Reason)
+                            .string_len(32)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ExecFileRejection::RecordedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_exec_file_rejection_chat")
+                            .from(ExecFileRejection::Table, ExecFileRejection::ChatId)
+                            .to(Chat::Table, Chat::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .check(Expr::col(ExecFileRejection::Reason).is_in([
+                        crate::model::ExecFileRejectionReason::Stale.as_str(),
+                        crate::model::ExecFileRejectionReason::SnapshotUnavailable.as_str(),
+                        crate::model::ExecFileRejectionReason::StagedFileTooLarge.as_str(),
+                        crate::model::ExecFileRejectionReason::TrashUnavailable.as_str(),
+                        crate::model::ExecFileRejectionReason::Unavailable.as_str(),
+                    ]))
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_exec_file_rejection_chat_turn")
+                    .table(ExecFileRejection::Table)
+                    .col(ExecFileRejection::ChatId)
+                    .col(ExecFileRejection::RecordedAt)
+                    .col(ExecFileRejection::TurnId)
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(ExecFileRejection::Table).to_owned())
             .await
     }
 }
@@ -9998,6 +10082,18 @@ enum ExecFileSnapshot {
     PriorByteLen,
     NewSha256,
     UndoState,
+    RecordedAt,
+}
+
+#[derive(DeriveIden)]
+enum ExecFileRejection {
+    Table,
+    Id,
+    ChatId,
+    TurnId,
+    FolderPath,
+    RelativePath,
+    Reason,
     RecordedAt,
 }
 

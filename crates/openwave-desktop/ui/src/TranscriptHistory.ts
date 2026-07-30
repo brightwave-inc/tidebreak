@@ -6,6 +6,7 @@ import type {
   RendererRefusal,
   ToolActionPreview,
   ToolResultPreview,
+  ExecFileChangeSummary,
 } from "./api";
 import type { AssistantSource } from "./AssistantSources";
 import type { TranscriptImageAttachment } from "./ImageAttachments";
@@ -48,6 +49,13 @@ export type HydratedTranscriptEntry =
       text: string;
       reasoning?: string;
       failureCategory?: NonNullable<ChatTerminalTurn["failure_category"]>;
+      createdAt: string;
+    }
+  | {
+      id: string;
+      kind: "change_summary";
+      turnId: string;
+      files: ExecFileChangeSummary[];
       createdAt: string;
     };
 
@@ -145,6 +153,15 @@ export function hydrateTranscriptHistory(
         text: turn.partial_content,
         reasoning: turn.reasoning,
         failureCategory: turn.failure_category,
+        createdAt: turn.finished_at,
+      })),
+    ...terminalTurns
+      .filter((turn) => turn.file_changes.length > 0)
+      .map((turn) => ({
+        id: `changes:${turn.turn_id}`,
+        kind: "change_summary" as const,
+        turnId: turn.turn_id,
+        files: turn.file_changes,
         createdAt: turn.finished_at,
       })),
   ];

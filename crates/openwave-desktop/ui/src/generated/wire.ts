@@ -386,7 +386,7 @@ origin: RootAttachmentOrigin, };
  * cancelled turns have no message, but remain first-class transcript entries
  * carrying the partial prose and reasoning the reader already saw live.
  */
-export type ChatTerminalTurnSnapshot = { turn_id: TurnId, message_id?: MessageId, status: ChatTerminalTurnStatus, partial_content: string, reasoning?: string, refusal?: RendererRefusal, failure_category?: TurnFailureCategory, finished_at: string, };
+export type ChatTerminalTurnSnapshot = { turn_id: TurnId, message_id?: MessageId, status: ChatTerminalTurnStatus, partial_content: string, reasoning?: string, refusal?: RendererRefusal, failure_category?: TurnFailureCategory, file_changes: Array<ExecFileChangeSummary>, finished_at: string, };
 
 export type ChatTerminalTurnStatus = "completed" | "failed" | "cancelled";
 
@@ -591,6 +591,32 @@ export type EgressConfig = { "mode": "open" } | { "mode": "allowlist", domains: 
  * the surface must not present it as a full boundary.
  */
 export type EgressEnforcementStatus = "boundary" | "conditional_boundary" | "applied_with_gaps" | "unconfirmed";
+
+/**
+ * Renderer-owned classification of one journal row.
+ */
+export type ExecFileChangeClassification = "applied" | "rejected";
+
+/**
+ * The successful filesystem effect, absent for a rejected write.
+ */
+export type ExecFileChangeKind = "created" | "overwritten" | "deleted";
+
+/**
+ * One renderer-safe row in a terminal turn's file-change summary, including a
+ * bounded unified diff when both revisions are text.
+ */
+export type ExecFileChangeSummary = { snapshot_id: string, folder_name: string, relative_path: string, classification: ExecFileChangeClassification, change: ExecFileChangeKind | null, rejection_reason: ExecFileRejectionReason | null, undo: ExecFileUndoAvailability, diff: string | null, };
+
+/**
+ * Why one staged file was left out of the user's folder.
+ */
+export type ExecFileRejectionReason = "stale" | "snapshot_unavailable" | "staged_file_too_large" | "trash_unavailable" | "unavailable";
+
+/**
+ * Whether an applied file can still be safely reverted now.
+ */
+export type ExecFileUndoAvailability = "available" | "already_undone" | "stale" | "not_available";
 
 /**
  * One entitled connected app, with the slugs of the MCP endpoints that
@@ -1111,7 +1137,7 @@ export type RendererChatFrame = RendererSequencedEvent | RendererChatMetadata;
 /**
  * Chat metadata pushed to an open client, outside the turn journal.
  */
-export type RendererChatMetadata = { "metadata": "titled", title: string, };
+export type RendererChatMetadata = { "metadata": "titled", title: string, } | { "metadata": "file_changes_recorded", turn_id: TurnId, };
 
 /**
  * Bounded refusal metadata safe to present in the desktop transcript.

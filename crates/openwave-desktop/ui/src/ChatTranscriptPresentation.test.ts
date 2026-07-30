@@ -358,6 +358,7 @@ describe("terminal transcript presentation", () => {
           status: "completed",
           partial_content: "",
           refusal: { category: "cyber", partial_output: false },
+          file_changes: [],
           finished_at: "2026-07-19T10:00:00Z",
         },
         {
@@ -366,6 +367,7 @@ describe("terminal transcript presentation", () => {
           status: "completed",
           partial_content: "",
           refusal: { category: "general_harms", partial_output: true },
+          file_changes: [],
           finished_at: "2026-07-19T10:01:00Z",
         },
       ],
@@ -430,6 +432,7 @@ describe("terminal transcript presentation", () => {
           status: "cancelled",
           partial_content: "Partial answer",
           reasoning: "Considering the first approach",
+          file_changes: [],
           finished_at: "2026-07-19T10:01:00Z",
         },
         {
@@ -438,6 +441,7 @@ describe("terminal transcript presentation", () => {
           partial_content: "",
           reasoning: "Trying a fallback",
           failure_category: "transient",
+          file_changes: [],
           finished_at: "2026-07-19T10:02:00Z",
         },
       ],

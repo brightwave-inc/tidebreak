@@ -64,9 +64,15 @@ function isWellFormedFrame(frame: SequencedEvent): boolean {
 function metadataFrame(frame: ChatFrame): ChatMetadataFrame | null {
   if (typeof frame !== "object" || frame === null) return null;
   const metadata = (frame as { metadata?: unknown }).metadata;
-  if (metadata !== "titled") return null;
-  const { title } = frame as { title?: unknown };
-  return typeof title === "string" ? { metadata, title } : null;
+  if (metadata === "titled") {
+    const { title } = frame as { title?: unknown };
+    return typeof title === "string" ? { metadata, title } : null;
+  }
+  if (metadata === "file_changes_recorded") {
+    const { turn_id } = frame as { turn_id?: unknown };
+    return typeof turn_id === "string" ? { metadata, turn_id } : null;
+  }
+  return null;
 }
 
 export class ChatSessionController {

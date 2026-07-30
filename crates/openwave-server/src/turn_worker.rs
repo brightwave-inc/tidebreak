@@ -474,7 +474,12 @@ impl TurnWorker {
         let chat_id = turn.chat_id;
         let outcome = self.run_turn(turn, lease_token).await;
         if let Some(provider) = self.exec_folder_context.as_ref() {
-            provider.close_write_overlay(chat_id).await;
+            if let Some(turn_id) = provider.close_write_overlay(chat_id).await {
+                self.events.publish_metadata(
+                    chat_id,
+                    crate::bus::ChatMetadataNotice::FileChangesRecorded { turn_id },
+                );
+            }
         }
         outcome
     }

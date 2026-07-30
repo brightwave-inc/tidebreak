@@ -62,6 +62,7 @@ import {
   type ChatTerminalTurnSnapshot,
   type ChatToolActivitySnapshot,
   type ChatToolActivityStatus,
+  type ExecFileChangeSummary as WireExecFileChangeSummary,
   type RendererAgentEvent,
   type RendererChatFrame,
   type RendererChatMetadata,
@@ -270,6 +271,23 @@ export type ChatToolActivity = ChatToolActivitySnapshot;
 
 /** One terminal turn's status and renderer-safe streamed presentation. */
 export type ChatTerminalTurn = ChatTerminalTurnSnapshot;
+export type ExecFileChangeSummary = WireExecFileChangeSummary;
+
+export type ExecFileUndoStatus =
+  | "restored"
+  | "deleted"
+  | "already_undone"
+  | "stale"
+  | "not_available"
+  | "snapshot_missing"
+  | "unavailable";
+
+export type ExecFileUndoOutcome = {
+  snapshot_id: string;
+  folder_name: string;
+  relative_path: string;
+  status: ExecFileUndoStatus;
+};
 
 export type ChatTranscript = WireChatTranscript;
 
@@ -1103,6 +1121,27 @@ export class ApiClient {
     return this.json(`/chats/${chatId}/messages`, {
       headers: this.headers(),
     });
+  }
+
+  undoTurnFileChanges(
+    chatId: string,
+    turnId: string,
+  ): Promise<{ chat_id: string; turn_id: string; files: ExecFileUndoOutcome[] }> {
+    return this.json(
+      `/chats/${encodeURIComponent(chatId)}/turns/${encodeURIComponent(turnId)}/file-changes/undo`,
+      { method: "POST", headers: this.headers() },
+    );
+  }
+
+  undoFileChange(
+    chatId: string,
+    turnId: string,
+    snapshotId: string,
+  ): Promise<ExecFileUndoOutcome> {
+    return this.json(
+      `/chats/${encodeURIComponent(chatId)}/turns/${encodeURIComponent(turnId)}/file-changes/${encodeURIComponent(snapshotId)}/undo`,
+      { method: "POST", headers: this.headers() },
+    );
   }
 
   private async blob(path: string, signal?: AbortSignal): Promise<Blob> {

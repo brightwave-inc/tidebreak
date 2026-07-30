@@ -401,6 +401,22 @@ impl Store for DbStore {
         ops::exec_file_snapshot::list_for_chat(self, chat_id).await
     }
 
+    async fn record_exec_file_rejections(
+        &self,
+        chat_id: ChatId,
+        turn_id: TurnId,
+        files: &[crate::model::ExecFileRejectionRecord],
+    ) -> Result<()> {
+        ops::exec_file_rejection::record(self, chat_id, turn_id, files).await
+    }
+
+    async fn list_exec_file_rejections(
+        &self,
+        chat_id: ChatId,
+    ) -> Result<Vec<crate::model::ExecFileRejection>> {
+        ops::exec_file_rejection::list_for_chat(self, chat_id).await
+    }
+
     async fn get_blob_retirement(&self, blob_id: uuid::Uuid) -> Result<Option<BlobRetirement>> {
         ops::blob::get(self, blob_id).await
     }

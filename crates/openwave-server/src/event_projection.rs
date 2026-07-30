@@ -47,6 +47,8 @@ pub(crate) enum RendererChatFrame {
 pub(crate) enum RendererChatMetadata {
     /// The chat was named — by titling, for a chat that had no name.
     Titled { title: String },
+    /// A post-turn file-change summary is ready for transcript hydration.
+    FileChangesRecorded { turn_id: TurnId },
 }
 
 impl From<&crate::bus::ChatMetadataNotice> for RendererChatMetadata {
@@ -55,6 +57,9 @@ impl From<&crate::bus::ChatMetadataNotice> for RendererChatMetadata {
             crate::bus::ChatMetadataNotice::Titled { title } => Self::Titled {
                 title: title.clone(),
             },
+            crate::bus::ChatMetadataNotice::FileChangesRecorded { turn_id } => {
+                Self::FileChangesRecorded { turn_id: *turn_id }
+            }
         }
     }
 }

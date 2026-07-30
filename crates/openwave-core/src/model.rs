@@ -666,6 +666,49 @@ impl ExecFileChange {
     }
 }
 
+/// Why one staged file was left out of the user's folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecFileRejectionReason {
+    /// The destination changed after the turn's writable copy was staged.
+    Stale,
+    /// The bytes that would be destroyed could not be retained for undo.
+    SnapshotUnavailable,
+    /// The staged replacement exceeded the write-back ceiling.
+    StagedFileTooLarge,
+    /// A recoverable copy could not be placed in the operating system's trash.
+    TrashUnavailable,
+    /// The path or filesystem operation could not be used safely.
+    Unavailable,
+}
+
+impl ExecFileRejectionReason {
+    /// Stable database and wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stale => "stale",
+            Self::SnapshotUnavailable => "snapshot_unavailable",
+            Self::StagedFileTooLarge => "staged_file_too_large",
+            Self::TrashUnavailable => "trash_unavailable",
+            Self::Unavailable => "unavailable",
+        }
+    }
+
+    /// Parse the stable representation written to the database.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "stale" => Some(Self::Stale),
+            "snapshot_unavailable" => Some(Self::SnapshotUnavailable),
+            "staged_file_too_large" => Some(Self::StagedFileTooLarge),
+            "trash_unavailable" => Some(Self::TrashUnavailable),
+            "unavailable" => Some(Self::Unavailable),
+            _ => None,
+        }
+    }
+}
+
 /// Whether the prior bytes for one journaled change are actually recoverable.
 ///
 /// This is recorded rather than inferred because "we did not snapshot" and "we
@@ -760,6 +803,32 @@ pub struct ExecFileSnapshot {
     pub recorded_at: DateTime<Utc>,
     /// The change itself.
     pub file: ExecFileSnapshotRecord,
+}
+
+/// One staged file that a turn could not safely materialize.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecFileRejectionRecord {
+    /// Absolute path of the granted folder the change targeted.
+    pub folder_path: String,
+    /// Path of the staged file relative to that folder.
+    pub relative_path: String,
+    /// Server-owned classification of why the write did not land.
+    pub reason: ExecFileRejectionReason,
+}
+
+/// One persisted [`ExecFileRejectionRecord`] with its journal identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecFileRejection {
+    /// Row identity.
+    pub id: Uuid,
+    /// Conversation whose turn attempted the change.
+    pub chat_id: ChatId,
+    /// Turn that attempted the change.
+    pub turn_id: TurnId,
+    /// When the rejected write was journaled.
+    pub recorded_at: DateTime<Utc>,
+    /// The rejected staged file.
+    pub file: ExecFileRejectionRecord,
 }
 
 /// Metadata returned by bounded document listings.

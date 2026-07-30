@@ -62,6 +62,17 @@ export function presentChatTranscript(
               } satisfies ChatMessage);
         return [...partial, outcome];
       }
+      if (entry.kind === "change_summary") {
+        return [
+          {
+            id: entry.id,
+            role: "change_summary",
+            turnId: entry.turnId,
+            files: entry.files,
+            createdAt: entry.createdAt,
+          } satisfies ChatMessage,
+        ];
+      }
       if (entry.kind === "tool") {
         return [
           {

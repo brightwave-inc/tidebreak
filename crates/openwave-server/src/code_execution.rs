@@ -25,9 +25,9 @@ use openwave_code_execution::{
     PACKAGE_MANAGER_DOMAINS,
 };
 use openwave_core::{
-    exec_attachment_file_name, BlobStore, CallId, Chat, ChatId, HostRootId,
-    MessageDocumentAttachment, NetworkPolicy, ProjectId, Result, RevisionProducer, SecretProvider,
-    Store, TurnId, MAX_EXEC_WORKSPACE_FILE_BYTES,
+    exec_attachment_file_name, BlobStore, CallId, Chat, ChatId, ExecFileRejectionReason,
+    ExecFileRejectionRecord, HostRootId, MessageDocumentAttachment, NetworkPolicy, ProjectId,
+    Result, RevisionProducer, SecretProvider, Store, TurnId, MAX_EXEC_WORKSPACE_FILE_BYTES,
 };
 use openwave_egress::{
     CidrBlock, DomainPattern, EgressAllowlist, EgressEnforcement, EgressError, EgressPolicy,
@@ -902,7 +902,7 @@ impl ConfiguredCodeExecutionProvider {
         turn: TurnId,
         grants: &mut [ResolvedExecFolderGrant],
     ) {
-        self.close_write_overlay(chat).await;
+        let _ = self.close_write_overlay(chat).await;
         let writable = grants
             .iter()
             .filter(|grant| grant.writable)
@@ -955,15 +955,13 @@ impl ConfiguredCodeExecutionProvider {
     /// to do. A turn that is abandoned rather than finished never reaches here,
     /// and its staged writes are discarded when the next turn sweeps them:
     /// applying them later would write a folder that has since moved on.
-    pub(crate) async fn close_write_overlay(&self, chat: ChatId) {
+    pub(crate) async fn close_write_overlay(&self, chat: ChatId) -> Option<TurnId> {
         let staged = self
             .write_overlays
             .lock()
             .expect("write overlay registry is not poisoned")
             .remove(&chat);
-        let Some(StagedTurn { turn, overlay, .. }) = staged else {
-            return;
-        };
+        let StagedTurn { turn, overlay, .. } = staged?;
         let snapshots =
             self.blobs
                 .as_ref()
@@ -978,6 +976,7 @@ impl ConfiguredCodeExecutionProvider {
                     .map(|sink| sink as &dyn WriteSnapshotSink),
             )
             .await;
+        let has_changes = !outcome.written.is_empty() || !outcome.rejected.is_empty();
         // The journal commits after the folders are written, not before: the
         // bytes it points at are already published, and a row for a write that
         // was refused would offer an undo for a change that never happened.
@@ -990,6 +989,39 @@ impl ConfiguredCodeExecutionProvider {
                     "could not journal this turn's changes to granted folders; undo is unavailable for them"
                 );
             }
+        }
+        let rejected = outcome
+            .rejected
+            .iter()
+            .map(|file| ExecFileRejectionRecord {
+                folder_path: file.folder.display().to_string(),
+                relative_path: file.relative.clone(),
+                reason: match file.reason {
+                    RejectedChangeReason::Stale => ExecFileRejectionReason::Stale,
+                    RejectedChangeReason::SnapshotUnavailable => {
+                        ExecFileRejectionReason::SnapshotUnavailable
+                    }
+                    RejectedChangeReason::StagedFileTooLarge => {
+                        ExecFileRejectionReason::StagedFileTooLarge
+                    }
+                    RejectedChangeReason::TrashUnavailable => {
+                        ExecFileRejectionReason::TrashUnavailable
+                    }
+                    RejectedChangeReason::Unavailable => ExecFileRejectionReason::Unavailable,
+                },
+            })
+            .collect::<Vec<_>>();
+        if let Err(error) = self
+            .store
+            .record_exec_file_rejections(chat, turn, &rejected)
+            .await
+        {
+            tracing::error!(
+                chat = %chat,
+                turn = %turn,
+                %error,
+                "could not journal this turn's rejected staged files"
+            );
         }
         if !outcome.written.is_empty() || !outcome.rejected.is_empty() {
             let deleted = outcome
@@ -1008,6 +1040,7 @@ impl ConfiguredCodeExecutionProvider {
                 "applied staged exec writes to granted folders"
             );
         }
+        has_changes.then_some(turn)
     }
 
     /// The folder-to-overlay pairs this chat's current turn is staging.

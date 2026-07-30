@@ -409,6 +409,10 @@ pub fn app(state: AppState) -> Router {
             post(routes::post_undo_turn_file_changes),
         )
         .route(
+            "/chats/{chat_id}/turns/{turn_id}/file-changes/{snapshot_id}/undo",
+            post(routes::post_undo_one_file_change),
+        )
+        .route(
             "/chats/{id}/client-executions/pending",
             get(routes::list_pending_folder_access_requests),
         )

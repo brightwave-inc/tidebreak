@@ -33,7 +33,10 @@ use crate::code_execution::{
 };
 use crate::error::ServerError;
 use crate::event_projection::{RendererChatFrame, RendererChatMetadata, RendererSequencedEvent};
-use crate::exec_write_snapshot::{undo_turn_file_changes, ExecTurnUndoOutcome};
+use crate::exec_write_snapshot::{
+    list_file_change_summaries, undo_one_file_change, undo_turn_file_changes,
+    ExecFileChangeSummary, ExecFileUndoOutcome, ExecTurnUndoOutcome,
+};
 use crate::extract::{Json, Path, Query};
 use crate::mcp_config::{McpServersConfig, McpServersInfo};
 use crate::model_roles::{self, ModelRole};
@@ -668,6 +671,18 @@ pub async fn post_undo_turn_file_changes(
         )));
     }
     Ok(Json(outcome))
+}
+
+/// `POST /chats/{chat_id}/turns/{turn_id}/file-changes/{snapshot_id}/undo` —
+/// restore one file from the turn without touching its siblings.
+pub async fn post_undo_one_file_change(
+    State(state): State<AppState>,
+    Path((chat_id, turn_id, snapshot_id)): Path<(ChatId, TurnId, uuid::Uuid)>,
+) -> Result<Json<ExecFileUndoOutcome>, ServerError> {
+    undo_one_file_change(&*state.store, &*state.blobs, chat_id, turn_id, snapshot_id)
+        .await?
+        .map(Json)
+        .ok_or_else(|| ServerError::not_found("no retained file change for this turn"))
 }
 
 /// Maximum API-key size accepted by the local credential endpoint. This is
@@ -1462,6 +1477,7 @@ pub struct ChatTerminalTurnSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub failure_category: Option<crate::event_projection::TurnFailureCategory>,
+    pub file_changes: Vec<ExecFileChangeSummary>,
     pub finished_at: chrono::DateTime<Utc>,
 }
 
@@ -1493,6 +1509,7 @@ impl From<openwave_core::ChatTerminalTurnSnapshot> for ChatTerminalTurnSnapshot 
             reasoning: (!snapshot.reasoning.trim().is_empty()).then_some(snapshot.reasoning),
             refusal: snapshot.refusal.as_ref().map(Into::into),
             failure_category,
+            file_changes: Vec::new(),
             finished_at: snapshot.finished_at,
         }
     }
@@ -1623,13 +1640,31 @@ pub async fn list_chat_messages(
             Some(snapshot)
         })
         .collect();
+    let mut file_changes_by_turn =
+        match list_file_change_summaries(&*state.store, &*state.blobs, id).await {
+            Ok(summaries) => summaries,
+            Err(error) => {
+                tracing::warn!(
+                    chat = %id,
+                    %error,
+                    "could not load connected-folder change summaries"
+                );
+                std::collections::HashMap::new()
+            }
+        };
     Ok(Json(ChatTranscript {
         messages,
         tool_activity: transcript.tool_activity,
         terminal_turns: transcript
             .terminal_turns
             .into_iter()
-            .map(ChatTerminalTurnSnapshot::from)
+            .map(|turn| {
+                let mut snapshot = ChatTerminalTurnSnapshot::from(turn);
+                snapshot.file_changes = file_changes_by_turn
+                    .remove(&snapshot.turn_id)
+                    .unwrap_or_default();
+                snapshot
+            })
             .collect(),
         last_event_seq: transcript.last_event_seq,
     }))

@@ -38,11 +38,12 @@ use crate::model::{
     AgentRun, AgentRunInboxEntry, AgentRunResult, AgentRunTier, AgentRunWaitSetCandidate,
     BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus, Chat, ClientToolCallRequest,
     DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert,
-    DocumentSummaryRecord, DocumentUpsert, ExecFileSnapshot, ExecFileSnapshotRecord, Message,
-    MessageAttachment, MessageDocumentAttachment, NetworkPolicy, PermissionMode, Project,
-    ReasoningEffort, RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord,
-    ToolCallResolution, TurnAgentRunWait, TurnAgentRunWaitSet, TurnCheckpointProgress,
-    TurnClientWait, TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnSteer,
+    DocumentSummaryRecord, DocumentUpsert, ExecFileRejection, ExecFileRejectionRecord,
+    ExecFileSnapshot, ExecFileSnapshotRecord, Message, MessageAttachment,
+    MessageDocumentAttachment, NetworkPolicy, PermissionMode, Project, ReasoningEffort,
+    RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord, ToolCallResolution,
+    TurnAgentRunWait, TurnAgentRunWaitSet, TurnCheckpointProgress, TurnClientWait,
+    TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnSteer,
 };
 use crate::provider::{RefusalOutcome, StopReason, Usage};
 use crate::semantic_checkpoint::{ContextCheckpoint, SaveContextCheckpointOutcome};
@@ -1235,6 +1236,21 @@ pub trait Store: Send + Sync {
 
     /// This chat's journaled file changes, newest first.
     async fn list_exec_file_snapshots(&self, _chat_id: ChatId) -> Result<Vec<ExecFileSnapshot>> {
+        document_storage_unavailable()
+    }
+
+    /// Journal the staged files one turn could not safely materialize.
+    async fn record_exec_file_rejections(
+        &self,
+        _chat_id: ChatId,
+        _turn_id: TurnId,
+        _files: &[ExecFileRejectionRecord],
+    ) -> Result<()> {
+        document_storage_unavailable()
+    }
+
+    /// This chat's rejected staged files, newest first.
+    async fn list_exec_file_rejections(&self, _chat_id: ChatId) -> Result<Vec<ExecFileRejection>> {
         document_storage_unavailable()
     }
 
