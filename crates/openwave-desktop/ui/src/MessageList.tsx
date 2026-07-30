@@ -28,7 +28,10 @@ import { MessageCitationsProvider } from "./InlineCitation";
 import { McpAppCard } from "./McpAppCard";
 import { ToolCommandCard, type ToolCallStatus } from "./ToolCallCard";
 import { ErrorBoundary } from "./ErrorBoundary";
-import { ToolActivityGroup } from "./ToolActivityGroup";
+import {
+  ToolActivityGroup,
+  ToolActivityUnavailable,
+} from "./ToolActivityGroup";
 import { WelcomeState } from "./WelcomeState";
 import { UserQuestionsCard } from "./UserQuestionsCard";
 import type { TranscriptImageAttachment } from "./ImageAttachments";
@@ -490,31 +493,29 @@ export function groupMessageItems(
     const children: ReactNode[] = [...cards];
     if (spawns.length > 0) {
       children.push(
-        <BackgroundAgentList
-          key="background-agents"
-          spawns={spawns}
-          runs={backgroundAgents.runs}
-          loading={backgroundAgents.loading}
-          error={backgroundAgents.error}
-          onRetry={backgroundAgents.retry}
-          onCancel={backgroundAgents.cancel}
-          onLoadActivity={backgroundAgents.loadActivity}
-          onViewOutput={backgroundAgents.viewOutput}
-        />,
+        isolatedCard(
+          "background-agents",
+          spawns.map((spawn) => spawn.status).join(" "),
+          <BackgroundAgentList
+            spawns={spawns}
+            runs={backgroundAgents.runs}
+            loading={backgroundAgents.loading}
+            error={backgroundAgents.error}
+            onRetry={backgroundAgents.retry}
+            onCancel={backgroundAgents.cancel}
+            onLoadActivity={backgroundAgents.loadActivity}
+            onViewOutput={backgroundAgents.viewOutput}
+          />,
+        ),
       );
     }
 
-    // A tool row renders model-influenced data through several defensive
-    // parsers. If one of them is ever wrong, the throw should cost this phase
-    // and not the conversation around it.
+    // The rail and every card inside carry their own boundary, so this one is
+    // only a backstop for the phase's own frame.
     items.push(
       <ErrorBoundary
         key={`tool-activity-group-${groupIndex}`}
-        fallback={
-          <p className="tool-activity-unavailable" role="status">
-            This step could not be displayed.
-          </p>
-        }
+        fallback={<ToolActivityUnavailable />}
       >
         <ToolActivityGroup activities={activities} groupIndex={groupIndex}>
           {children.length > 0 ? children : undefined}
@@ -525,6 +526,34 @@ export function groupMessageItems(
   }
 
   return { items, lastTurnStart };
+}
+
+/**
+ * One card, contained.
+ *
+ * Cards render model-influenced data through several defensive parsers, and one
+ * of them being wrong must not cost the card next to it. The sibling that makes
+ * this matter is the approval prompt: a phase parked on a decision that renders
+ * as nothing leaves the reader with no way to answer and no explanation.
+ *
+ * `signature` is the data the card draws on, reduced to what decides whether it
+ * can render, so a card that threw mid-stream is retried when its call moves on
+ * rather than staying broken for the life of the transcript.
+ */
+function isolatedCard(
+  key: string,
+  signature: string,
+  card: ReactNode,
+): ReactNode {
+  return (
+    <ErrorBoundary
+      key={key}
+      resetKey={signature}
+      fallback={<ToolActivityUnavailable />}
+    >
+      {card}
+    </ErrorBoundary>
+  );
 }
 
 /**
@@ -557,22 +586,25 @@ function surfacedCards(
     if (entry.role === "approval") {
       if (entry.resolved) continue;
       cards.push(
-        <ApprovalCard
-          key={entry.id}
-          callId={entry.callId}
-          summary={entry.summary}
-          preview={entry.preview ?? null}
-          canApprove={entry.canApprove}
-          canRemember={entry.canRemember}
-          grantScope={approvalState?.grantScope ?? "chat"}
-          autoJudging={entry.autoJudging ?? false}
-          prefixRungs={entry.prefixRungs ?? []}
-          deciding={
-            approvalState?.decidingApprovalCalls.has(entry.callId) ?? false
-          }
-          error={approvalState?.approvalErrors[entry.callId]}
-          onDecide={onApproval}
-        />,
+        isolatedCard(
+          entry.id,
+          `${entry.canApprove} ${approvalState?.approvalErrors[entry.callId] ?? ""}`,
+          <ApprovalCard
+            callId={entry.callId}
+            summary={entry.summary}
+            preview={entry.preview ?? null}
+            canApprove={entry.canApprove}
+            canRemember={entry.canRemember}
+            grantScope={approvalState?.grantScope ?? "chat"}
+            autoJudging={entry.autoJudging ?? false}
+            prefixRungs={entry.prefixRungs ?? []}
+            deciding={
+              approvalState?.decidingApprovalCalls.has(entry.callId) ?? false
+            }
+            error={approvalState?.approvalErrors[entry.callId]}
+            onDecide={onApproval}
+          />,
+        ),
       );
       continue;
     }
@@ -581,7 +613,7 @@ function surfacedCards(
       entry.result?.tool === "web_search_provider_required" &&
       !parked.has(entry.callId)
     ) {
-      cards.push(<WebSearchProviderRequiredCard key={entry.id} />);
+      cards.push(isolatedCard(entry.id, "", <WebSearchProviderRequiredCard />));
       continue;
     }
     // An MCP App view is keyed on the *result*: the tool has no action
@@ -589,13 +621,16 @@ function surfacedCards(
     // renders — inside the sandbox — not to restate arguments or output.
     if (entry.result?.tool === "mcp_app" && !parked.has(entry.callId)) {
       cards.push(
-        <McpAppCard
-          key={entry.id}
-          server={entry.result.server}
-          resourceUri={entry.result.resourceUri}
-          chatId={chatId}
-          callId={entry.callId}
-        />,
+        isolatedCard(
+          entry.id,
+          `${entry.result.server} ${entry.result.resourceUri}`,
+          <McpAppCard
+            server={entry.result.server}
+            resourceUri={entry.result.resourceUri}
+            chatId={chatId}
+            callId={entry.callId}
+          />,
+        ),
       );
       continue;
     }
@@ -610,15 +645,18 @@ function surfacedCards(
     // exec-shaped card with tabs and an exit code.
     if (entry.preview.tool !== "exec") continue;
     cards.push(
-      <ToolCommandCard
-        key={entry.id}
-        name={entry.name}
-        status={entry.status}
-        preview={entry.preview}
-        result={entry.result?.tool === "exec" ? entry.result : null}
-        imageClient={imageClient}
-        chatId={chatId}
-      />,
+      isolatedCard(
+        entry.id,
+        `${entry.status} ${entry.result?.tool ?? ""}`,
+        <ToolCommandCard
+          name={entry.name}
+          status={entry.status}
+          preview={entry.preview}
+          result={entry.result?.tool === "exec" ? entry.result : null}
+          imageClient={imageClient}
+          chatId={chatId}
+        />,
+      ),
     );
   }
   return cards;

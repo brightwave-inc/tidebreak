@@ -73,4 +73,30 @@ describe("ErrorBoundary with an inline fallback", () => {
     expect(screen.getByText("the conversation around it")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Reload" })).toBeNull();
   });
+
+  it("retries the children when their data changes, and not before", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    // Throws only while the result is half-written, the way a streaming row
+    // meets a shape its parser cannot read yet.
+    const Row = ({ result }: { result: string }) => {
+      if (result === "partial") throw new Error("half-written result");
+      return <p>{result}</p>;
+    };
+    const boundary = (result: string) => (
+      <ErrorBoundary resetKey={result} fallback={<p>unavailable</p>}>
+        <Row result={result} />
+      </ErrorBoundary>
+    );
+
+    const { rerender } = render(boundary("partial"));
+    expect(screen.getByText("unavailable")).toBeTruthy();
+
+    // A re-render carrying the same data leaves it alone: retrying every frame
+    // would throw on every frame.
+    rerender(boundary("partial"));
+    expect(screen.getByText("unavailable")).toBeTruthy();
+
+    rerender(boundary("settled"));
+    expect(screen.getByText("settled")).toBeTruthy();
+  });
 });
