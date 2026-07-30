@@ -169,10 +169,11 @@ fn mcp_app_payload_from_events(
 
 /// `GET /policy` — the resolved managed-mode policy. Read-only by design:
 /// provisioning has no renderer-writable route, which is what keeps the
-/// state sticky. A shell-registered pending pairing rides along while the
-/// profile is unmanaged, so the gate can present the sign-in that would
-/// commit it — runtime state, merged here and never part of the durable
-/// resolution.
+/// state sticky. A shell-registered pending pairing rides along — on an
+/// unmanaged profile awaiting its first sign-in, or on a provisioned one
+/// where the shell's confirmed re-pair flow parked it — so the gate can
+/// present the sign-in that would commit it. Runtime state, merged here and
+/// never part of the durable resolution.
 pub async fn get_policy(
     State(state): State<AppState>,
 ) -> Result<Json<crate::managed_policy::ManagedPolicy>, ServerError> {
@@ -183,9 +184,7 @@ async fn policy_with_pending(
     state: &AppState,
 ) -> Result<crate::managed_policy::ManagedPolicy, ServerError> {
     let mut policy = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
-    if !policy.managed {
-        policy.pending_gateway_url = state.gateway.pending_pairing_url().await;
-    }
+    policy.pending_gateway_url = state.gateway.pending_pairing_url().await;
     Ok(policy)
 }
 

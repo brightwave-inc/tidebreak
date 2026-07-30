@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use openwave_connectors::GatewayAuthConfig;
-use openwave_core::{AgentError, Result, Store};
+use openwave_core::{AgentError, Result, SecretProvider, Store};
 use tokio::sync::Mutex;
 
 use crate::managed_policy;
@@ -70,10 +70,12 @@ impl PairingHandle {
 /// Why a pairing did not provision this profile.
 ///
 /// The conflict is its own variant because it is a product refusal, not a
-/// fault: the recorded decision is refuse-forever (gateway migration is the
-/// MDM tier's job — OS-asserted policy already outranks provisioned state —
-/// or a profile reset), and the shell owes the user an explanation naming
-/// the gateway that actually manages this device rather than a log line.
+/// fault: the shell owes the user an explanation naming the gateway that
+/// actually manages this device rather than a log line. What the shell may
+/// offer next depends on the conflicting authority: the provisioned row is
+/// user-consented state, so the shell can escalate to an explicit re-pair
+/// confirmation ([`register_replacing_pairing`]); an OS (MDM) assertion is
+/// refuse-forever — gateway migration at that tier is the MDM's job.
 /// Every other failure — invalid URL, unreachable gateway, bad manifest,
 /// store errors — stays the [`AgentError`] it was.
 #[derive(Debug)]
@@ -86,6 +88,10 @@ pub enum PairingError {
     Conflict {
         /// The normalized base URL this profile is provisioned to.
         provisioned_url: String,
+        /// Whether the shell may offer re-pairing: true when the conflicting
+        /// authority is the user-consented provisioned row, false when the
+        /// OS (MDM) asserts the gateway and no local flow may replace it.
+        replaceable: bool,
     },
     /// Any other failure. No policy was written and nothing is pending.
     Other(AgentError),
@@ -150,10 +156,12 @@ pub async fn register_pending_pairing(
     let _guard = PAIRING.lock().await;
     let policy = handle.gateway.policy().await?;
     if policy.managed {
+        let replaceable = policy.source == crate::managed_policy::ManagedPolicySource::Provisioned;
         return match policy.gateway_url {
             Some(existing) if existing == base_url => Ok(PendingRegistration::AlreadyManaged),
             Some(existing) => Err(PairingError::Conflict {
                 provisioned_url: existing,
+                replaceable,
             }),
             None => Err(PairingError::Other(AgentError::config(
                 "this device's managed policy is misconfigured; contact your administrator",
@@ -162,7 +170,68 @@ pub async fn register_pending_pairing(
     }
     handle
         .gateway
-        .register_pending_pairing(base_url, handle.mcp.clone())
+        .register_pending_pairing(base_url, handle.mcp.clone(), None)
+        .await;
+    Ok(PendingRegistration::Registered)
+}
+
+/// Park a re-pairing the user explicitly confirmed: once a sign-in consents,
+/// replace the provisioned gateway `expected_current` with `gateway_url`.
+///
+/// The shell calls this only after a native confirmation naming both origins
+/// — it is the escalation a replaceable [`PairingError::Conflict`] invites,
+/// never a first move. Like plain registration, nothing durable is written
+/// here and the gateway is not probed: the parked pairing carries the URL
+/// the confirmation named, and the commit re-checks it under the pairing
+/// lock, so a row that changed in between refuses rather than overwrites. A
+/// state that moved since the confirmation — the provisioned URL is no
+/// longer `expected_current`, or an OS authority claimed the profile — is
+/// refused here the same way, so the shell reports a raced failure instead
+/// of parking a pairing whose consent no longer describes the device.
+pub async fn register_replacing_pairing(
+    handle: &PairingHandle,
+    gateway_url: &str,
+    expected_current: &str,
+) -> Result<PendingRegistration, PairingError> {
+    let config = GatewayAuthConfig::new(gateway_url)?;
+    let base_url = config.base_url().to_string();
+    let _guard = PAIRING.lock().await;
+    let policy = handle.gateway.policy().await?;
+    if policy.managed {
+        let replaceable = policy.source == crate::managed_policy::ManagedPolicySource::Provisioned;
+        match policy.gateway_url {
+            Some(existing) if existing == base_url => {
+                return Ok(PendingRegistration::AlreadyManaged)
+            }
+            Some(existing) if !replaceable || existing != expected_current => {
+                return Err(PairingError::Conflict {
+                    provisioned_url: existing,
+                    replaceable,
+                })
+            }
+            Some(_) => {}
+            None => {
+                return Err(PairingError::Other(AgentError::config(
+                    "this device's managed policy is misconfigured; contact your administrator",
+                )))
+            }
+        }
+        handle
+            .gateway
+            .register_pending_pairing(
+                base_url,
+                handle.mcp.clone(),
+                Some(expected_current.to_string()),
+            )
+            .await;
+        return Ok(PendingRegistration::Registered);
+    }
+    // The row vanished between the conflict and the confirmation (a profile
+    // reset). What the user confirmed — pair with this gateway — still
+    // describes the device; it just no longer replaces anything.
+    handle
+        .gateway
+        .register_pending_pairing(base_url, handle.mcp.clone(), None)
         .await;
     Ok(PendingRegistration::Registered)
 }
@@ -172,20 +241,29 @@ pub async fn register_pending_pairing(
 /// Called from the sign-in exchange task with a session already minted for
 /// `base_url`. Policy is re-resolved under the pairing lock: an authority
 /// that claimed the profile while the browser flow ran (an MDM push) wins,
-/// and the pairing is refused rather than written under it. Provisioning is
-/// the only durable write — the model snapshot is stamped with the
-/// deployment it was synced from, so one left behind by any earlier
-/// configuration is simply never honored for this gateway.
+/// and the pairing is refused rather than written under it. A *replacing*
+/// pairing carries the provisioned URL its confirmation named in `replaces`,
+/// and may write over exactly that row — the compare-and-swap in
+/// [`managed_policy::reprovision`] — so a row that moved to anything else
+/// mid-flow still wins and the pairing is refused. Provisioning is the only
+/// durable policy write — the model snapshot is stamped with the deployment
+/// it was synced from, so one left behind by any earlier configuration is
+/// simply never honored for this gateway.
 ///
 /// The new policy is applied to this process before returning: manual MCP
-/// servers running under the previously open profile are taken down here
-/// rather than at the supervisor's next sweep, so no locked child keeps
-/// serving tools across the window in between.
+/// servers running under the previous profile are taken down here rather
+/// than at the supervisor's next sweep, and a stored session the new policy
+/// no longer stands behind — the replaced gateway's — is retired
+/// (best-effort revoke, unconditional local clear) before the exchange task
+/// stores the new one, so its refresh token does not stay live at a gateway
+/// this profile no longer answers to.
 pub(crate) async fn commit_signed_in_pairing(
     store: &dyn Store,
     os_policy: &dyn crate::managed_policy::OsPolicySource,
+    secrets: Arc<dyn SecretProvider>,
     mcp: &McpRuntime,
     base_url: &str,
+    replaces: Option<&str>,
 ) -> openwave_core::Result<()> {
     // PAIRING makes the policy re-read and the write atomic against another
     // pairing path; no gateway-state lock, for the same reason the old
@@ -193,14 +271,23 @@ pub(crate) async fn commit_signed_in_pairing(
     let _guard = PAIRING.lock().await;
     let policy = managed_policy::resolve(store, os_policy).await?;
     if policy.managed && policy.gateway_url.as_deref() != Some(base_url) {
-        let authority = policy
-            .gateway_url
-            .unwrap_or_else(|| "another authority".to_string());
-        return Err(AgentError::config(format!(
-            "this device became managed by {authority} during sign-in; the pairing was not applied"
-        )));
+        let replacing = policy.source == crate::managed_policy::ManagedPolicySource::Provisioned
+            && replaces.is_some()
+            && policy.gateway_url.as_deref() == replaces;
+        if !replacing {
+            let authority = policy
+                .gateway_url
+                .unwrap_or_else(|| "another authority".to_string());
+            return Err(AgentError::config(format!(
+                "this device became managed by {authority} during sign-in; the pairing was not applied"
+            )));
+        }
+        managed_policy::reprovision(store, base_url, replaces.expect("checked above")).await?;
+    } else {
+        managed_policy::provision(store, base_url).await?;
     }
-    managed_policy::provision(store, base_url).await?;
+    let policy = managed_policy::resolve(store, os_policy).await?;
+    crate::gateway_runtime::retire_superseded_gateway_session(secrets, &policy).await?;
     mcp.enforce_manual_lockdown().await;
     Ok(())
 }
@@ -250,6 +337,10 @@ mod tests {
             self.0.lock().unwrap().remove(key);
             Ok(())
         }
+    }
+
+    fn test_secrets() -> Arc<dyn SecretProvider> {
+        Arc::new(TestSecrets::default())
     }
 
     /// The handle plus the runtimes behind it, for the assertions that are
@@ -379,8 +470,15 @@ mod tests {
             .err()
             .unwrap();
         match &error {
-            PairingError::Conflict { provisioned_url } => {
-                assert_eq!(provisioned_url, "http://managed.invalid/")
+            PairingError::Conflict {
+                provisioned_url,
+                replaceable,
+            } => {
+                assert_eq!(provisioned_url, "http://managed.invalid/");
+                assert!(
+                    replaceable,
+                    "a provisioned row is user-consented state, so the shell may offer re-pairing"
+                );
             }
             other => panic!("expected the typed conflict, got {other:?}"),
         }
@@ -398,6 +496,103 @@ mod tests {
             policy.gateway_url.as_deref(),
             Some("http://managed.invalid/")
         );
+    }
+
+    /// The confirmed re-pair's registration seam: parking demands the caller
+    /// name the row it replaces, a stale expectation is the typed conflict
+    /// (and clobbers nothing already parked), and an OS-asserted gateway is
+    /// never replaceable — from either registration path.
+    #[tokio::test]
+    async fn a_replacing_registration_holds_the_row_to_the_confirmed_expectation() {
+        let (store, _directory) = test_store().await;
+        managed_policy::provision(&*store, "http://managed.invalid/")
+            .await
+            .unwrap();
+        let (handle, _mcp, gateway) = test_handle_with_runtimes(&store);
+
+        let outcome =
+            register_replacing_pairing(&handle, "http://new.invalid", "http://managed.invalid/")
+                .await
+                .unwrap();
+        assert_eq!(outcome, PendingRegistration::Registered);
+        assert_eq!(
+            gateway.pending_pairing_url().await.as_deref(),
+            Some("http://new.invalid/")
+        );
+        // Parking is process-ephemeral: the durable row has not moved.
+        let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
+        assert_eq!(
+            policy.gateway_url.as_deref(),
+            Some("http://managed.invalid/")
+        );
+
+        // A confirmation that raced a row change: the expectation no longer
+        // matches, so the registration is the typed conflict naming what the
+        // row now holds — and the already-parked pairing is not clobbered.
+        let error =
+            register_replacing_pairing(&handle, "http://new.invalid", "http://elsewhere.invalid/")
+                .await
+                .err()
+                .unwrap();
+        match &error {
+            PairingError::Conflict {
+                provisioned_url,
+                replaceable: true,
+            } => assert_eq!(provisioned_url, "http://managed.invalid/"),
+            other => panic!("expected the replaceable conflict, got {other:?}"),
+        }
+        assert_eq!(
+            gateway.pending_pairing_url().await.as_deref(),
+            Some("http://new.invalid/")
+        );
+    }
+
+    /// An OS (MDM) assertion outranks pairing in both directions: plain
+    /// registration refuses with a conflict the shell must not escalate, and
+    /// even the confirmed replacing path refuses the same way.
+    #[tokio::test]
+    async fn an_os_asserted_gateway_is_never_replaceable() {
+        struct OsAsserted;
+
+        impl crate::managed_policy::OsPolicySource for OsAsserted {
+            fn gateway_url(&self) -> Result<Option<String>> {
+                Ok(Some("http://mdm.invalid/".to_string()))
+            }
+        }
+
+        let (store, _directory) = test_store().await;
+        let mcp = Arc::new(McpRuntime::new(
+            Arc::new(ToolRegistry::new()),
+            store.clone(),
+            Arc::new(NoGateway),
+            Arc::new(OsAsserted),
+        ));
+        let gateway = crate::gateway_runtime::GatewayRuntime::new(
+            store.clone(),
+            test_secrets(),
+            Arc::new(OsAsserted),
+        );
+        let handle = PairingHandle::new(store.clone(), mcp, gateway.clone());
+
+        for error in [
+            register_pending_pairing(&handle, "http://other.invalid")
+                .await
+                .err()
+                .unwrap(),
+            register_replacing_pairing(&handle, "http://other.invalid", "http://mdm.invalid/")
+                .await
+                .err()
+                .unwrap(),
+        ] {
+            match &error {
+                PairingError::Conflict {
+                    provisioned_url,
+                    replaceable: false,
+                } => assert_eq!(provisioned_url, "http://mdm.invalid/"),
+                other => panic!("expected the non-replaceable conflict, got {other:?}"),
+            }
+        }
+        assert_eq!(gateway.pending_pairing_url().await, None);
     }
 
     #[tokio::test]
@@ -422,9 +617,16 @@ mod tests {
         .await
         .unwrap();
 
-        commit_signed_in_pairing(&*store, &NoOsPolicy, &mcp, "http://gateway-a.invalid/")
-            .await
-            .unwrap();
+        commit_signed_in_pairing(
+            &*store,
+            &NoOsPolicy,
+            test_secrets(),
+            &mcp,
+            "http://gateway-a.invalid/",
+            None,
+        )
+        .await
+        .unwrap();
 
         let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
         assert!(policy.managed);
@@ -441,9 +643,16 @@ mod tests {
             .is_empty());
 
         // A later sign-in against the same gateway re-commits harmlessly.
-        commit_signed_in_pairing(&*store, &NoOsPolicy, &mcp, "http://gateway-a.invalid/")
-            .await
-            .unwrap();
+        commit_signed_in_pairing(
+            &*store,
+            &NoOsPolicy,
+            test_secrets(),
+            &mcp,
+            "http://gateway-a.invalid/",
+            None,
+        )
+        .await
+        .unwrap();
     }
 
     /// An authority that claimed the profile while the browser flow ran
@@ -457,15 +666,154 @@ mod tests {
             .await
             .unwrap();
 
-        let error = commit_signed_in_pairing(&*store, &NoOsPolicy, &mcp, "http://pending.invalid/")
-            .await
-            .err()
-            .unwrap();
+        let error = commit_signed_in_pairing(
+            &*store,
+            &NoOsPolicy,
+            test_secrets(),
+            &mcp,
+            "http://pending.invalid/",
+            None,
+        )
+        .await
+        .err()
+        .unwrap();
         assert!(error.to_string().contains("http://mdm.invalid/"));
         assert!(!error.to_string().contains("pending.invalid"));
 
         let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
         assert_eq!(policy.gateway_url.as_deref(), Some("http://mdm.invalid/"));
+    }
+
+    /// A minimal gateway that answers session revocation, standing in for
+    /// the *old* deployment during a re-pair: the commit must revoke the
+    /// superseded session there. Returns the base URL and the raw bodies
+    /// posted to `/oauth/revoke`.
+    async fn serve_revocable_gateway() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        let revoked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = revoked.clone();
+        let app = axum::Router::new()
+            .route(
+                "/api/v1/meta",
+                axum::routing::get(|| async {
+                    axum::Json(json!({
+                        "api_version": "v1",
+                        "installation_id": "install-1",
+                        "gateway_version": "1.0.0",
+                        "public_url": "http://gateway.test",
+                        "auth_mode": "oidc",
+                    }))
+                }),
+            )
+            .route(
+                "/oauth/revoke",
+                axum::routing::post(move |body: String| {
+                    let recorded = recorded.clone();
+                    async move {
+                        recorded.lock().unwrap().push(body);
+                        axum::Json(json!({}))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{address}"), revoked)
+    }
+
+    /// The whole point of the slice, at the commit seam: a replacing commit
+    /// swaps the provisioned row to the new gateway and retires the old
+    /// deployment's session — revoked at the old gateway and gone locally —
+    /// before the exchange task would store the new one.
+    #[tokio::test]
+    async fn a_replacing_commit_swaps_the_row_and_retires_the_old_session() {
+        let (old_base, revoked) = serve_revocable_gateway().await;
+        let old_url = format!("{old_base}/");
+        let (store, _directory) = test_store().await;
+        managed_policy::provision(&*store, &old_url).await.unwrap();
+        let (_handle, mcp, _gateway) = test_handle_with_runtimes(&store);
+        let secrets = test_secrets();
+        let credentials: openwave_connectors::GatewayCredentials = serde_json::from_value(json!({
+            "base_url": old_url,
+            "installation_id": "install-1",
+            "user_id": "user-1",
+            "refresh_token": "mg_rt_old",
+            "access_tokens": {}
+        }))
+        .unwrap();
+        openwave_connectors::CredentialVault::new(secrets.clone())
+            .save(&credentials)
+            .await
+            .unwrap();
+
+        commit_signed_in_pairing(
+            &*store,
+            &NoOsPolicy,
+            secrets.clone(),
+            &mcp,
+            "http://new-gw.invalid/",
+            Some(&old_url),
+        )
+        .await
+        .unwrap();
+
+        let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
+        assert!(policy.managed);
+        assert_eq!(
+            policy.gateway_url.as_deref(),
+            Some("http://new-gw.invalid/")
+        );
+        assert!(
+            revoked
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|body| body.contains("mg_rt_old")),
+            "the old session's refresh token must be revoked at the old gateway"
+        );
+        assert!(
+            !openwave_connectors::has_stored_credentials(&*secrets).await,
+            "the old session must be cleared before the new one is stored"
+        );
+    }
+
+    /// The compare-and-swap the confirmation rests on: a provisioned row
+    /// that moved to a third gateway while the browser flow ran wins, and
+    /// the replacing commit refuses rather than writing over consent the
+    /// user never gave.
+    #[tokio::test]
+    async fn a_replacing_commit_refuses_a_row_that_moved_mid_flow() {
+        let (store, _directory) = test_store().await;
+        managed_policy::provision(&*store, "http://old.invalid/")
+            .await
+            .unwrap();
+        let (_handle, mcp, _gateway) = test_handle_with_runtimes(&store);
+        // Another pairing path re-pointed the row after the user's
+        // confirmation named http://old.invalid/.
+        store
+            .set_setting(
+                "managed_policy_v1",
+                &json!({"gateway_url": "http://third.invalid/"}),
+            )
+            .await
+            .unwrap();
+
+        let error = commit_signed_in_pairing(
+            &*store,
+            &NoOsPolicy,
+            test_secrets(),
+            &mcp,
+            "http://new-gw.invalid/",
+            Some("http://old.invalid/"),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("http://third.invalid/"));
+
+        let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
+        assert_eq!(policy.gateway_url.as_deref(), Some("http://third.invalid/"));
     }
 
     /// The commit applies the policy it writes, not just persists it: a
@@ -499,9 +847,16 @@ mod tests {
         assert_eq!(mcp.info().await.servers[0].health, McpHealth::Healthy);
         assert!(mcp.snapshot().get("mcp__private_docs__lookup").is_some());
 
-        commit_signed_in_pairing(&*store, &NoOsPolicy, &mcp, "http://gateway.invalid/")
-            .await
-            .unwrap();
+        commit_signed_in_pairing(
+            &*store,
+            &NoOsPolicy,
+            test_secrets(),
+            &mcp,
+            "http://gateway.invalid/",
+            None,
+        )
+        .await
+        .unwrap();
 
         assert!(
             mcp.snapshot().get("mcp__private_docs__lookup").is_none(),

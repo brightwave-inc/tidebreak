@@ -522,9 +522,10 @@ pub(crate) fn validated_gateway_url(gateway_url: &str) -> Result<String> {
 /// A pairing payload cannot smuggle an invalid or credentialed origin into
 /// durable policy (the URL contract), and it cannot silently re-point an
 /// already-provisioned profile at a different gateway: re-provisioning the
-/// same gateway is idempotent, a conflicting one is refused. If re-pairing
-/// ever becomes a product flow, it belongs behind an explicit user
-/// confirmation in the deep-link slice, not in this write path.
+/// same gateway is idempotent, a conflicting one is refused. Re-pairing is
+/// a real product flow, but it runs through [`reprovision`] — which demands
+/// the caller name the row it believes it is replacing — never through this
+/// write path.
 pub(crate) async fn provision(store: &dyn Store, gateway_url: &str) -> Result<()> {
     let gateway_url = validated_gateway_url(gateway_url)?;
     if let Some(existing) = provisioned_url(store).await? {
@@ -539,6 +540,34 @@ pub(crate) async fn provision(store: &dyn Store, gateway_url: &str) -> Result<()
         .set_setting(
             SETTING_KEY,
             &serde_json::to_value(ProvisionedPolicy { gateway_url })?,
+        )
+        .await
+}
+
+/// Replace the provisioned gateway, compare-and-swap style: the write lands
+/// only if the row still holds `expected_current` — the URL the user's
+/// re-pair confirmation actually named. A row that changed in between (a
+/// competing pairing; deletion) refuses rather than overwrites, because the
+/// consent on record was given against a different state. Callers serialize
+/// the read-check-write under the pairing lock; this check is the belt to
+/// that suspender, and the part a unit seam can hold still.
+pub(crate) async fn reprovision(
+    store: &dyn Store,
+    new_url: &str,
+    expected_current: &str,
+) -> Result<()> {
+    let new_url = validated_gateway_url(new_url)?;
+    if provisioned_url(store).await?.as_deref() != Some(expected_current) {
+        return Err(AgentError::config(
+            "the gateway managing this profile changed while re-pairing; nothing was changed",
+        ));
+    }
+    store
+        .set_setting(
+            SETTING_KEY,
+            &serde_json::to_value(ProvisionedPolicy {
+                gateway_url: new_url,
+            })?,
         )
         .await
 }

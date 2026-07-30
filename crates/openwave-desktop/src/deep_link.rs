@@ -16,18 +16,25 @@
 //! ([`openwave_server::register_pending_pairing`]), and the in-app sign-in
 //! gate presents it. The consent is the sign-in: only a browser sign-in the
 //! user completes against that gateway commits the provision, so a drive-by
-//! link can at most raise a sign-in screen the user ignores. Registration
-//! and the commit both live server-side, called directly on the embedded
-//! server's handles, so no HTTP route — authenticated or otherwise — can
-//! reach the policy write path. The webview cannot reach it either: the main
-//! window's capability denies `core:event:emit`, so a compromised renderer
-//! cannot forge the plugin's open-URL event; its influence stops at
-//! completing or dismissing the sign-in it can already perform.
+//! link can at most raise a sign-in screen the user ignores. A link that
+//! conflicts with the gateway already provisioned escalates instead of
+//! refusing outright: a native confirmation names both origins, and only an
+//! explicit confirmation parks the *replacing* pairing
+//! ([`openwave_server::register_replacing_pairing`]) — the sign-in against
+//! the new gateway is still the commit, so a drive-by link on a managed
+//! device gets at most one dialog that defaults to changing nothing. An
+//! OS (MDM) assertion is never replaceable this way. Registration and the
+//! commit both live server-side, called directly on the embedded server's
+//! handles, so no HTTP route — authenticated or otherwise — can reach the
+//! policy write path. The webview cannot reach it either: the main window's
+//! capability denies `core:event:emit`, so a compromised renderer cannot
+//! forge the plugin's open-URL event; its influence stops at completing or
+//! dismissing the sign-in it can already perform.
 
 use tauri::Manager;
 use tauri_plugin_deep_link::DeepLinkExt;
-use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
-use tokio::sync::watch;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tokio::sync::{oneshot, watch};
 
 use openwave_server::{PairingError, PairingHandle, PendingRegistration};
 
@@ -188,10 +195,11 @@ fn spawn_pairing(app: tauri::AppHandle, link: ProvisionLink) {
         };
         // Registration writes nothing durable and probes nothing; the
         // sign-in gate presents the pairing on its next policy poll, and a
-        // sign-in the user completes there is what commits it. Only the
-        // refusals need a native surface — with no dialog in the happy
-        // path, a refusal that reached only the log would read as the app
-        // silently ignoring the link.
+        // sign-in the user completes there is what commits it. Only a
+        // conflict with the provisioned gateway gets a native question, and
+        // only the refusals get a native error — with no dialog in the
+        // happy path, a refusal that reached only the log would read as the
+        // app silently ignoring the link.
         match openwave_server::register_pending_pairing(&handle, &link.gateway_url).await {
             Ok(PendingRegistration::Registered) => {
                 log_pairing(&app, &format!("pairing with {origin} awaits sign-in"));
@@ -199,12 +207,97 @@ fn spawn_pairing(app: tauri::AppHandle, link: ProvisionLink) {
             Ok(PendingRegistration::AlreadyManaged) => {
                 log_pairing(&app, &format!("{origin} already manages this device"));
             }
+            Err(PairingError::Conflict {
+                provisioned_url,
+                replaceable: true,
+            }) => {
+                log_pairing(
+                    &app,
+                    &format!(
+                        "pairing with {origin} conflicts with {}; asking whether to re-pair",
+                        origin_of(&provisioned_url)
+                    ),
+                );
+                confirm_and_replace(&app, &handle, &link, &provisioned_url).await;
+            }
             Err(failure) => {
                 log_pairing(&app, &format!("pairing refused for {origin}: {failure}"));
                 show_pairing_failure(&app, &origin, &failure);
             }
         }
     });
+}
+
+/// Escalate a replaceable conflict to the user's explicit choice: a native
+/// dialog naming both origins, defaulting to changing nothing. Confirmation
+/// parks the replacing pairing — still nothing durable; the sign-in the gate
+/// then presents is the commit. A registration the confirmation raced (the
+/// provisioned row moved in between) surfaces as one failure dialog, never a
+/// retry loop: the link can simply be opened again against the new state.
+async fn confirm_and_replace(
+    app: &tauri::AppHandle,
+    handle: &PairingHandle,
+    link: &ProvisionLink,
+    provisioned_url: &str,
+) {
+    if PAIRING_DIALOG_SHOWING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        log_pairing(app, "a pairing dialog is already up; logged only");
+        return;
+    }
+    let approved = ask_to_repair(
+        app,
+        &repair_prompt(&link.origin, &origin_of(provisioned_url)),
+    )
+    .await;
+    PAIRING_DIALOG_SHOWING.store(false, std::sync::atomic::Ordering::SeqCst);
+    if !approved {
+        log_pairing(app, &format!("re-pairing with {} declined", link.origin));
+        return;
+    }
+    match openwave_server::register_replacing_pairing(handle, &link.gateway_url, provisioned_url)
+        .await
+    {
+        Ok(PendingRegistration::Registered) => {
+            log_pairing(
+                app,
+                &format!("re-pairing with {} awaits sign-in", link.origin),
+            );
+        }
+        Ok(PendingRegistration::AlreadyManaged) => {
+            log_pairing(app, &format!("{} already manages this device", link.origin));
+        }
+        Err(failure) => {
+            log_pairing(
+                app,
+                &format!("re-pairing refused for {}: {failure}", link.origin),
+            );
+            show_pairing_failure(app, &link.origin, &failure);
+        }
+    }
+}
+
+/// The confirmation itself, non-blocking like the folder-attachment prompt:
+/// the dialog's answer arrives on a callback, and a channel that drops
+/// unanswered reads as a decline — the failure direction of every path here
+/// is "change nothing".
+async fn ask_to_repair(app: &tauri::AppHandle, message: &str) -> bool {
+    let (tx, rx) = oneshot::channel();
+    let mut dialog = app
+        .dialog()
+        .message(message)
+        .title("Re-pair this device?")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Re-pair".to_owned(),
+            "Cancel".to_owned(),
+        ));
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.parent(&window);
+    }
+    dialog.show(move |approved| {
+        let _ = tx.send(approved);
+    });
+    rx.await.unwrap_or(false)
 }
 
 /// Reduce a stored gateway base URL to its origin — the only form
@@ -217,19 +310,39 @@ fn origin_of(url: &str) -> String {
         .unwrap_or_else(|_| "another gateway".to_string())
 }
 
+/// The re-pair question, pure for the same reason as [`refusal_message`]:
+/// what the confirmation claims — both origins, and what confirming does —
+/// is the load-bearing part, and it must be testable without a GUI.
+fn repair_prompt(new_origin: &str, old_origin: &str) -> String {
+    format!(
+        "This device is managed by {old_origin}. Replace it with {new_origin}?\n\n\
+         OpenWave will sign out of {old_origin}, and {new_origin} will control \
+         which models and settings are available. You'll complete a sign-in to \
+         {new_origin} to finish — until then, nothing changes."
+    )
+}
+
 /// The one user-facing line per refusal class, pure so the choice of what a
-/// refusal says is testable without a GUI. The conflict names the gateway
-/// that actually manages this device — refuse-forever is the recorded
-/// decision, so it points at the administrator instead of offering a retry.
-/// Any other refusal names only the link's origin — the raw reason stays in
-/// `pairing.log`.
+/// refusal says is testable without a GUI. An MDM-asserted conflict names
+/// the gateway that actually manages this device and points at the
+/// administrator — that tier is never replaceable locally. A replaceable
+/// conflict only reaches this dialog when the confirmed re-pair raced a
+/// change to the provisioned row, so it says the state moved and leaves the
+/// retry to the user's next link click. Any other refusal names only the
+/// link's origin — the raw reason stays in `pairing.log`.
 fn refusal_message(origin: &str, failure: &PairingError) -> String {
     match failure {
-        PairingError::Conflict { provisioned_url } => format!(
+        PairingError::Conflict {
+            provisioned_url,
+            replaceable: false,
+        } => format!(
             "This device is already managed by {}. Contact \
              your administrator to change gateways.",
             origin_of(provisioned_url)
         ),
+        PairingError::Conflict { .. } => "The gateway managing this device changed while \
+             re-pairing. Nothing was changed; open the pairing link again to retry."
+            .to_string(),
         _ => format!(
             "OpenWave could not accept the pairing link for {origin}. This \
              device was not paired; details are in pairing.log."
@@ -237,19 +350,20 @@ fn refusal_message(origin: &str, failure: &PairingError) -> String {
     }
 }
 
+/// At most one pairing dialog — question or refusal — is up at a time. A
+/// deep link is an unauthenticated remote trigger, and a page firing links
+/// in a loop must not stack dialogs; the extras get the log line only.
+static PAIRING_DIALOG_SHOWING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// One bounded error dialog per refused link. The happy path shows no
 /// native dialog at all — the sign-in gate is the surface — so a refusal
 /// that reached only the log would read as the app silently ignoring the
 /// link the user just clicked. No retry affordance, no loop: the dialog
-/// closes and the attempt is over. At most one refusal dialog is up at a
-/// time — a deep link is an unauthenticated remote trigger, and a page
-/// firing links in a loop must not stack blocking dialogs; the extras get
-/// the log line only.
+/// closes and the attempt is over.
 fn show_pairing_failure(app: &tauri::AppHandle, origin: &str, failure: &PairingError) {
-    static REFUSAL_SHOWING: std::sync::atomic::AtomicBool =
-        std::sync::atomic::AtomicBool::new(false);
-    if REFUSAL_SHOWING.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        log_pairing(app, "a refusal dialog is already up; logged only");
+    if PAIRING_DIALOG_SHOWING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        log_pairing(app, "a pairing dialog is already up; logged only");
         return;
     }
     app.dialog()
@@ -257,7 +371,7 @@ fn show_pairing_failure(app: &tauri::AppHandle, origin: &str, failure: &PairingE
         .title("Pairing refused")
         .kind(MessageDialogKind::Error)
         .blocking_show();
-    REFUSAL_SHOWING.store(false, std::sync::atomic::Ordering::SeqCst);
+    PAIRING_DIALOG_SHOWING.store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
 async fn wait_pairing_handle(app: &tauri::AppHandle) -> Result<PairingHandle, String> {
@@ -302,7 +416,7 @@ fn log_pairing(app: &tauri::AppHandle, message: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{origin_of, provision_link, refusal_message, PairingError};
+    use super::{origin_of, provision_link, refusal_message, repair_prompt, PairingError};
 
     #[test]
     fn provision_links_are_held_to_the_contract() {
@@ -389,23 +503,38 @@ mod tests {
         assert_eq!(provision_link(&url).is_ok(), cfg!(debug_assertions));
     }
 
-    /// The refusal dialog's one line per failure class: the conflict names
-    /// the gateway that actually manages this device (never the link's) —
-    /// reduced to its origin — and points at the administrator; a generic
-    /// failure names only the link's origin, keeping the raw reason out of
-    /// the dialog.
+    /// The refusal dialog's one line per failure class: an MDM-asserted
+    /// conflict names the gateway that actually manages this device (never
+    /// the link's) — reduced to its origin — and points at the
+    /// administrator; a raced replaceable conflict says the state moved and
+    /// offers no automatic retry; a generic failure names only the link's
+    /// origin, keeping the raw reason out of the dialog.
     #[test]
     fn the_refusal_dialog_names_the_right_gateway() {
         let conflict = refusal_message(
             "https://new.example",
             &PairingError::Conflict {
                 provisioned_url: "https://old.example/base/".to_string(),
+                replaceable: false,
             },
         );
         assert!(conflict.contains("already managed by https://old.example"));
         assert!(conflict.contains("administrator"));
         assert!(!conflict.contains("new.example"));
         assert!(!conflict.contains("/base"));
+
+        let raced = refusal_message(
+            "https://new.example",
+            &PairingError::Conflict {
+                provisioned_url: "https://third.example/".to_string(),
+                replaceable: true,
+            },
+        );
+        assert!(raced.contains("changed while"));
+        assert!(
+            !raced.contains("administrator"),
+            "a user-replaceable row must not be blamed on an administrator"
+        );
 
         let other = refusal_message(
             "https://new.example",
@@ -415,6 +544,18 @@ mod tests {
         );
         assert!(other.contains("https://new.example"));
         assert!(!other.contains("token=shh"));
+    }
+
+    /// The re-pair confirmation's load-bearing claims: both origins by name,
+    /// which one currently manages the device, and that nothing changes
+    /// before the finishing sign-in.
+    #[test]
+    fn the_repair_prompt_names_both_origins() {
+        let prompt = repair_prompt("https://new.example", "https://old.example");
+        assert!(prompt.contains("managed by https://old.example"));
+        assert!(prompt.contains("Replace it with https://new.example?"));
+        assert!(prompt.contains("sign out of https://old.example"));
+        assert!(prompt.contains("nothing changes"));
     }
 
     /// Pins the load-bearing reduction the conflict dialog's claim rests

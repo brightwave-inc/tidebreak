@@ -125,8 +125,11 @@ export function ManagedGate({
   // presents it exactly like the managed sign-in — full-window, nothing of
   // the app behind it — because from the user's seat it is the same step:
   // sign in to the named gateway. The one durable difference (the sign-in
-  // commits the provision) is the server's business.
-  const pendingPairingUrl = !managed ? (policy?.pending_gateway_url ?? null) : null;
+  // commits the provision) is the server's business. On a managed profile a
+  // pending pairing is a *re*-pair the user confirmed in the shell's native
+  // dialog, and it must surface even over a signed-in session — dismissing
+  // it ("Not now") is what returns the app.
+  const pendingPairingUrl = policy?.pending_gateway_url ?? null;
   const gateActive = managed || pendingPairingUrl !== null;
 
   useEffect(() => {
@@ -314,15 +317,18 @@ export function ManagedGate({
   // server already pins signed_in to the policy URL; the comparison stays as
   // defense in depth for a renderer running against an older server. A
   // pending pairing never lifts here — its sign-in flips the policy to
-  // managed server-side, and the managed branch takes over on the next poll.
+  // managed server-side, and the managed branch takes over on the next poll
+  // — and it holds the gate down even over a satisfied session, or a
+  // confirmed re-pair would be invisible exactly when the old gateway is
+  // still signed in.
+  const pairing = pendingPairingUrl !== null;
   const lockedUrl = policy?.gateway_url ?? null;
   const sessionSatisfiesPolicy =
     managed &&
+    !pairing &&
     status?.signed_in === true &&
     sameGateway(status.base_url, lockedUrl);
   if (sessionSatisfiesPolicy) return <Published policy={policy}>{children}</Published>;
-
-  const pairing = pendingPairingUrl !== null;
   // The device's managed gateway is the policy's URL — or, for a pairing
   // awaiting consent, the URL the shell registered from the provision link.
   const shownUrl = pairing
@@ -354,6 +360,13 @@ export function ManagedGate({
               manage this device — it controls which models are available —
               and the connection cannot be undone from within OpenWave.
             </p>
+            {managed && lockedUrl && (
+              <p>
+                This replaces <code className="font-medium">{lockedUrl}</code>,
+                which currently manages this device; OpenWave will sign out of
+                it when the new sign-in completes.
+              </p>
+            )}
           </>
         ) : (
           <>

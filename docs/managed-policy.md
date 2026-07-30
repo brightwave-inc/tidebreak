@@ -76,6 +76,11 @@ sqlite3 "<data dir>/openwave.db" \
   "DELETE FROM setting WHERE key = 'managed_policy_v1';"
 ```
 
-Note that an OS-managed (MDM) assertion always outranks this row, and a
-profile provisioned to one gateway refuses re-provisioning to another —
-delete the row first to switch deployments.
+Note that an OS-managed (MDM) assertion always outranks this row. A profile
+provisioned to one gateway refuses a bare provision link for another;
+opening such a link instead asks, in a native dialog naming both gateways,
+whether to re-pair. Confirming parks the replacement, and completing a
+sign-in against the new gateway commits it — the old gateway's session is
+revoked and cleared in the same step. Deleting the row (above) remains the
+way to return to the open profile; an OS-asserted gateway can never be
+replaced by re-pairing.

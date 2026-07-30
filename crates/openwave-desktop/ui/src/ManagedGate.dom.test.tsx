@@ -260,6 +260,46 @@ describe("ManagedGate", () => {
     expect(client.gatewaySignIn).not.toHaveBeenCalled();
   });
 
+  it("a confirmed re-pair gates even a signed-in managed profile until dismissed", async () => {
+    // The shell's confirmed re-pair parked a pending pairing on a profile
+    // provisioned to — and signed in to — the old gateway. The satisfied
+    // session must not hide the re-pair prompt.
+    const repairing: ManagedPolicy = {
+      managed: true,
+      gateway_url: "https://gateway.example/",
+      source: "provisioned",
+      misconfigured: false,
+      pending_gateway_url: "https://new-gw.example/",
+    };
+    const client = api({
+      getPolicy: vi.fn().mockResolvedValue(repairing),
+      getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
+      dismissGatewayPairing: vi.fn().mockResolvedValue({
+        ...repairing,
+        pending_gateway_url: undefined,
+      } satisfies ManagedPolicy),
+    });
+    const user = userEvent.setup();
+    mount(client);
+
+    // The prompt names the new gateway and what it replaces.
+    expect(
+      await screen.findByText("Connect to your model gateway"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("https://new-gw.example/")).toBeInTheDocument();
+    expect(
+      screen.getByText(/currently manages this device/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("https://gateway.example/")).toBeInTheDocument();
+    expect(screen.queryByText("the open product")).not.toBeInTheDocument();
+
+    // "Not now" abandons the re-pair and returns the signed-in app.
+    await user.click(screen.getByRole("button", { name: "Not now" }));
+    expect(await screen.findByText("the open product")).toBeInTheDocument();
+    expect(client.dismissGatewayPairing).toHaveBeenCalled();
+    expect(client.gatewaySignIn).not.toHaveBeenCalled();
+  });
+
   it("a session on the wrong gateway does not lift the gate", async () => {
     const client = api({
       getGatewayStatus: vi.fn().mockResolvedValue({

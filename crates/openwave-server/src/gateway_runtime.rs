@@ -61,6 +61,10 @@ struct PendingPairing {
     /// the commit cannot run without also applying what it decides to the
     /// MCP servers this process is running.
     mcp: Arc<crate::mcp_config::McpRuntime>,
+    /// For a re-pairing the user confirmed: the provisioned URL the
+    /// confirmation named, which the commit's compare-and-swap holds the row
+    /// to. `None` for a plain first-time pairing.
+    replaces: Option<String>,
 }
 
 /// Renderer-safe progress of the current sign-in attempt.
@@ -149,12 +153,17 @@ impl GatewayRuntime {
         &self,
         base_url: String,
         mcp: Arc<crate::mcp_config::McpRuntime>,
+        replaces: Option<String>,
     ) {
         let mut sign_in = self.sign_in.lock().await;
         self.sign_in_generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         *sign_in = SignInProgress::Idle;
-        *self.pending_pairing.lock().await = Some(PendingPairing { base_url, mcp });
+        *self.pending_pairing.lock().await = Some(PendingPairing {
+            base_url,
+            mcp,
+            replaces,
+        });
     }
 
     /// The pending pairing's gateway URL, for the `/policy` projection.
@@ -241,12 +250,15 @@ impl GatewayRuntime {
 
     /// Start a browser sign-in and return the URL to open.
     ///
-    /// On a managed profile the sign-in targets the policy's gateway. On an
-    /// unmanaged profile with a pending pairing it targets the pairing's
-    /// gateway instead, and a successful exchange is what commits the
+    /// A pending pairing wins the target: the sign-in runs against the
+    /// pairing's gateway, and a successful exchange is what commits the
     /// provision — the sign-in the user chose to complete is the pairing's
-    /// consent, so nothing durable exists until it succeeds. Unmanaged with
-    /// no pending pairing keeps the legible refusal.
+    /// consent, so nothing durable exists until it succeeds. That holds on a
+    /// managed profile too: a pending pairing can only exist there through
+    /// the shell's confirmed re-pair flow, never a bare deep link, so
+    /// honoring it is honoring that confirmation. With nothing pending, a
+    /// managed profile's sign-in targets the policy's gateway, and an
+    /// unmanaged one keeps the legible refusal.
     ///
     /// The exchange completes in a background task: on success the session is
     /// stored (after any pairing commit) and the entitled models synced; on
@@ -254,11 +266,7 @@ impl GatewayRuntime {
     /// attempt.
     pub(crate) async fn begin_sign_in(self: &Arc<Self>) -> Result<String> {
         let policy = self.policy().await?;
-        let pairing = if policy.managed {
-            None
-        } else {
-            self.pending_pairing.lock().await.clone()
-        };
+        let pairing = self.pending_pairing.lock().await.clone();
         let connection = match &pairing {
             Some(pending) => self.connection_at(pending.base_url.clone()).await?,
             None => self.connection_at(require_managed(&policy)?).await?,
@@ -339,8 +347,10 @@ impl GatewayRuntime {
         crate::pairing::commit_signed_in_pairing(
             &*self.store,
             &*self.os_policy,
+            self.secrets.clone(),
             &pending.mcp,
             &pending.base_url,
+            pending.replaces.as_deref(),
         )
         .await?;
         *self.pending_pairing.lock().await = None;
@@ -1185,7 +1195,7 @@ mod tests {
         assert!(runtime.begin_sign_in().await.is_err());
 
         runtime
-            .register_pending_pairing(base.clone(), mcp.clone())
+            .register_pending_pairing(base.clone(), mcp.clone(), None)
             .await;
         let url = runtime.begin_sign_in().await.unwrap();
         assert!(
