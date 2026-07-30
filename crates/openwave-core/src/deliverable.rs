@@ -335,6 +335,34 @@ pub fn deliverable_media_type(name: &str) -> Option<&'static str> {
     }
 }
 
+/// The declared media type for a binary artifact filename.
+///
+/// Curated text extensions never reach this mapping — they classify as
+/// [`DeliverableKind::Text`] first — so every result here is valid for
+/// [`validate_binary_deliverable`]. Unknown extensions fall back to the generic
+/// byte-stream type rather than being refused: the filename is display metadata,
+/// and export works regardless.
+#[must_use]
+pub fn binary_media_type_for_extension(name: &str) -> &'static str {
+    let Some((_, extension)) = name.rsplit_once('.') else {
+        return "application/octet-stream";
+    };
+    match extension.to_ascii_lowercase().as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        "xlsx" | "xlsm" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "zip" => "application/zip",
+        "parquet" => "application/vnd.apache.parquet",
+        _ => "application/octet-stream",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

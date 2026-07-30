@@ -399,6 +399,28 @@ impl OutputId {
     pub fn for_run(run_id: AgentRunId) -> Self {
         Self(Uuid::new_v5(&Self::NAMESPACE, run_id.as_uuid().as_bytes()))
     }
+
+    /// Derive the retry-stable output identity for one artifact filename
+    /// published by one canonical tool call.
+    ///
+    /// An execution call can publish several files at once, so unlike
+    /// [`OutputId::for_call`] the identity covers the (call, filename) pair: a
+    /// retried call lands each file on the same output instead of forking new
+    /// records, and two files from one call never collide.
+    #[must_use]
+    pub fn for_call_artifact(call_id: CallId, filename: &str) -> Self {
+        Self(Uuid::new_v5(
+            &Self::NAMESPACE,
+            &call_artifact_name(call_id, filename),
+        ))
+    }
+}
+
+/// The stable UUIDv5 name for a (call, filename) artifact identity.
+fn call_artifact_name(call_id: CallId, filename: &str) -> Vec<u8> {
+    let mut name = call_id.as_uuid().as_bytes().to_vec();
+    name.extend_from_slice(filename.as_bytes());
+    name
 }
 
 id_type!(
@@ -420,6 +442,17 @@ impl OutputRevisionId {
     #[must_use]
     pub fn for_run(run_id: AgentRunId) -> Self {
         Self(Uuid::new_v5(&Self::NAMESPACE, run_id.as_uuid().as_bytes()))
+    }
+
+    /// Derive the retry-stable revision identity for one artifact filename
+    /// published by one canonical tool call. See
+    /// [`OutputId::for_call_artifact`].
+    #[must_use]
+    pub fn for_call_artifact(call_id: CallId, filename: &str) -> Self {
+        Self(Uuid::new_v5(
+            &Self::NAMESPACE,
+            &call_artifact_name(call_id, filename),
+        ))
     }
 }
 
