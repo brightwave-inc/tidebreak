@@ -22,6 +22,7 @@ mod chat_titling;
 /// Host-owned code-execution provider selection and policy.
 pub mod code_execution;
 mod desktop_schema;
+mod document_decode;
 mod durable_oplog;
 mod error;
 mod event_projection;
@@ -79,8 +80,6 @@ use openwave_core::{
     Config, CreateDeliverable, KeychainSecretProvider, ListDir, Profile, ReadFile, Result,
     SecretProvider, Store, Tool, ToolRegistry, WriteFile,
 };
-use openwave_retrieval::Retriever;
-
 use resolver::KeyedResolver;
 
 pub use durable_oplog::DurableOperationStore;
@@ -687,17 +686,14 @@ async fn bind_inner(
     ));
     let foreground_web_search =
         Box::new(web_search::foreground_tool(store.clone(), secrets.clone()));
-    let extract_store = store.clone();
-    let extract_secrets = secrets.clone();
-    let (retrieval, tools, agent_config) = agent_deps(
+    let web_extract = Box::new(web_search::foreground_extract_tool(
+        store.clone(),
+        secrets.clone(),
+    ));
+    let (tools, agent_config) = agent_deps(
         code_execution,
         foreground_web_search,
-        |_| {
-            Box::new(web_search::foreground_extract_tool(
-                extract_store,
-                extract_secrets,
-            ))
-        },
+        web_extract,
         store.clone(),
     );
     let tools = Arc::new(tools);
@@ -708,19 +704,10 @@ async fn bind_inner(
             resolver,
             secrets,
             tools,
-            retrieval,
             agent_config,
             client_executor_id,
         )?,
-        None => AppState::new(
-            config,
-            store,
-            resolver,
-            secrets,
-            tools,
-            retrieval,
-            agent_config,
-        ),
+        None => AppState::new(config, store, resolver, secrets, tools, agent_config),
     };
     // The resolver and the /gateway routes must share ONE runtime: refresh
     // rotation is serialized per GatewayConnection instance, and two
@@ -830,23 +817,19 @@ async fn bind_inner(
     })
 }
 
-/// Assemble the agent dependencies for a real launch: the retrieval pipeline, the
-/// tool set, and the per-turn tuning. The model **provider** is not built here — it
-/// is resolved per turn by the [`KeyedResolver`] (a composite router over enabled
-/// providers; see [`resolver`]), so configuring a provider at runtime takes effect
-/// without a restart. The model *name* comes from `OPENWAVE_MODEL` (or the built-in
+/// Assemble the tools and per-turn tuning for a real launch.
+///
+/// The model **provider** is not built here — it is resolved per turn by the
+/// [`KeyedResolver`] (a composite router over enabled providers; see
+/// [`resolver`]), so configuring a provider at runtime takes effect without a
+/// restart. The model *name* comes from `OPENWAVE_MODEL` (or the built-in
 /// default) and can be overridden at runtime via `PUT /settings` or per-chat.
 fn agent_deps(
     code_execution: Arc<dyn openwave_code_execution::CodeExecutionProvider>,
     web_search: Box<dyn Tool>,
-    // Built from the retriever rather than handed in ready-made: extraction now
-    // files each fetched page as a source, which means queueing it for the same
-    // canonical parsing pipeline every other source uses.
-    web_extract: impl FnOnce(&Retriever) -> Box<dyn Tool>,
+    web_extract: Box<dyn Tool>,
     source_store: Arc<dyn Store>,
-) -> (Arc<Retriever>, ToolRegistry, AgentConfig) {
-    let retrieval = build_retrieval();
-    let web_extract = web_extract(&retrieval);
+) -> (ToolRegistry, AgentConfig) {
     let mut tools = ToolRegistry::new()
         .with(Box::new(ReadFile))
         .with(Box::new(ListDir))
@@ -898,13 +881,7 @@ fn agent_deps(
         model,
         ..AgentConfig::default()
     };
-    (retrieval, tools, agent_config)
-}
-
-fn build_retrieval() -> Arc<Retriever> {
-    Arc::new(Retriever::new(Box::new(
-        openwave_retrieval::document_parser_registry(),
-    )))
+    (tools, agent_config)
 }
 
 /// Open the durable store the profile selects.

@@ -169,7 +169,6 @@ async fn foreground_spawn_is_nonblocking_and_ordered_wait_resumes_with_child_res
         Arc::new(FixedResolver(provider.clone())),
         Arc::new(MemSecrets::default()),
         Arc::new(tools),
-        build_retrieval(),
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
@@ -374,14 +373,12 @@ async fn worker_drains_a_turn_queued_before_startup() {
         openwave_core::AcceptTurnOutcome::Accepted(_)
     ));
 
-    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
         Arc::new(FixedResolver(Arc::new(FakeProvider))),
         Arc::new(MemSecrets::default()),
         Arc::new(ToolRegistry::new()),
-        retrieval,
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
@@ -457,13 +454,8 @@ async fn concurrent_message_retry_converges_across_a_model_setting_race() {
         .await
         .unwrap();
     let gate = Arc::new(Notify::new());
-    let retrieval = build_retrieval();
-    let (router, token, store, _dir) = test_app_from_parts(
-        Arc::new(GatedProvider { gate: gate.clone() }),
-        retrieval,
-        store,
-        dir,
-    );
+    let (router, token, store, _dir) =
+        test_app_from_parts(Arc::new(GatedProvider { gate: gate.clone() }), store, dir);
     let bearer = format!("Bearer {token}");
     let chat = make_chat(&router, &bearer).await;
     let turn_id = TurnId::new();
@@ -521,10 +513,8 @@ async fn worker_recovers_ambiguous_claim_and_completion_with_exact_receipts() {
     injected.fail_after_next_completion_commit();
     injected.fail_next_terminal_recovery();
     let store: Arc<dyn Store> = injected.clone();
-    let retrieval = build_retrieval();
     let (router, token, store, _dir) = test_app_from_parts_with_worker_config(
         Arc::new(FakeProvider),
-        retrieval,
         store,
         dir,
         turn_worker::TurnWorkerConfig {
@@ -799,7 +789,6 @@ async fn worker_renews_a_near_expiry_ambiguous_claim_before_execution() {
         }))),
         Arc::new(MemSecrets::default()),
         Arc::new(ToolRegistry::new()),
-        build_retrieval(),
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
@@ -892,7 +881,6 @@ async fn worker_heartbeats_while_event_journaling_is_blocked() {
         Arc::new(FixedResolver(Arc::new(FakeProvider))),
         Arc::new(MemSecrets::default()),
         Arc::new(ToolRegistry::new()),
-        build_retrieval(),
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
@@ -1125,7 +1113,6 @@ async fn durable_slot_stays_held_and_cancel_can_win_terminal_commit_race() {
         Arc::new(FixedResolver(Arc::new(FakeProvider))),
         Arc::new(MemSecrets::default()),
         Arc::new(ToolRegistry::new()),
-        build_retrieval(),
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
@@ -1228,7 +1215,6 @@ async fn steer_wins_a_completion_race_and_restarts_generation() {
         release.clone(),
     ));
     let calls = Arc::new(AtomicUsize::new(0));
-    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -1237,7 +1223,6 @@ async fn steer_wins_a_completion_race_and_restarts_generation() {
         }))),
         Arc::new(MemSecrets::default()),
         Arc::new(ToolRegistry::new()),
-        retrieval,
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
@@ -1360,7 +1345,6 @@ async fn late_steers_share_the_turn_wide_model_step_budget() {
         release.clone(),
     ));
     let calls = Arc::new(AtomicUsize::new(0));
-    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -1369,7 +1353,6 @@ async fn late_steers_share_the_turn_wide_model_step_budget() {
         }))),
         Arc::new(MemSecrets::default()),
         Arc::new(ToolRegistry::new()),
-        retrieval,
         AgentConfig {
             model: "fake".into(),
             max_steps: 1,
@@ -1542,7 +1525,6 @@ async fn approval_endpoint_unparks_a_sensitive_tool() {
         }))),
         Arc::new(MemSecrets::default()),
         tools,
-        build_retrieval(),
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
@@ -1841,7 +1823,6 @@ async fn foreground_web_search_runs_end_to_end_through_durable_approval() {
         }))),
         Arc::new(MemSecrets::default()),
         tools,
-        build_retrieval(),
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
@@ -1985,7 +1966,6 @@ async fn ingest_then_chat_through_the_approval_gate() {
         .await
         .unwrap(),
     );
-    let retrieval = build_retrieval();
     let ran = Arc::new(AtomicUsize::new(0));
     // Named "search": the approval calibration only presents recognized tools,
     // so this is the one Sensitive name the approval endpoint can approve (an
@@ -2003,7 +1983,6 @@ async fn ingest_then_chat_through_the_approval_gate() {
         }))),
         Arc::new(MemSecrets::default()),
         tools,
-        retrieval,
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
@@ -2145,7 +2124,6 @@ async fn approval_endpoint_rejects_unpresentable_sensitive_tool_approval() {
         }))),
         Arc::new(MemSecrets::default()),
         tools,
-        build_retrieval(),
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()

@@ -11,7 +11,6 @@ use openwave_core::{
     AgentConfig, AgentError, AgentRunId, BlobStore, CallId, CancelToken, ChatId, Config,
     FsBlobStore, Result, SecretProvider, SteerInbox, Store, ToolRegistry, TurnId,
 };
-use openwave_retrieval::Retriever;
 use tokio::sync::Notify;
 use uuid::Uuid;
 
@@ -52,8 +51,6 @@ pub struct AppState {
     /// assembly in `bind_inner` replaces this with the platform's reader via
     /// `managed_policy::platform_source`.
     pub(crate) os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
-    /// The canonical parsing pipeline used by document upload requests.
-    pub retrieval: Arc<Retriever>,
     /// Wakes the durable turn worker after acceptance or cancellation commits.
     pub(crate) turn_job_wake: Arc<Notify>,
     /// Wakes the bounded sandbox-run worker after delegated work commits.
@@ -98,7 +95,6 @@ impl AppState {
         resolver: Arc<dyn ProviderResolver>,
         secrets: Arc<dyn SecretProvider>,
         tools: Arc<ToolRegistry>,
-        retrieval: Arc<Retriever>,
         agent_config: AgentConfig,
     ) -> Self {
         let mut state = Self::new_with_client_executor_id(
@@ -107,7 +103,6 @@ impl AppState {
             resolver,
             secrets,
             tools,
-            retrieval,
             agent_config,
             Uuid::new_v4(),
         )
@@ -125,7 +120,6 @@ impl AppState {
         resolver: Arc<dyn ProviderResolver>,
         secrets: Arc<dyn SecretProvider>,
         tools: Arc<ToolRegistry>,
-        retrieval: Arc<Retriever>,
         agent_config: AgentConfig,
         client_executor_id: Uuid,
     ) -> Result<Self> {
@@ -157,7 +151,6 @@ impl AppState {
             mcp,
             gateway,
             os_policy,
-            retrieval,
             turn_job_wake: Arc::new(Notify::new()),
             agent_run_wake: Arc::new(Notify::new()),
             blob_retirement_wake: Arc::new(Notify::new()),

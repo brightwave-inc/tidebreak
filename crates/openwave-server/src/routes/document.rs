@@ -10,11 +10,11 @@ use serde::{Deserialize, Serialize};
 use unicode_general_category::{get_general_category, GeneralCategory};
 
 use openwave_core::{
-    AgentError, ChatId, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceBlob,
-    DocumentSourceUpsert, DocumentSummaryRecord, ProjectId, SourceReadiness,
+    AgentError, ChatId, DocumentId, DocumentListCursor, DocumentRecord, DocumentScope,
+    DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, ProjectId, SourceReadiness,
 };
-use openwave_retrieval::{DocumentId, RetrievalError};
 
+use crate::document_decode::decode_document;
 use crate::error::ServerError;
 use crate::extract::{Json, Path, Query, RawBytes};
 use crate::state::AppState;
@@ -252,15 +252,6 @@ impl From<DocumentRecord> for DocumentDetail {
     }
 }
 
-/// Map a retrieval failure to an HTTP error: a parse problem is the caller's
-/// (unsupported media type / bad content), everything else is server-side.
-fn retrieval_error(err: RetrievalError) -> ServerError {
-    match err {
-        RetrievalError::Parse(_) => ServerError::bad_request(err.to_string()),
-        _ => ServerError::internal(err.to_string()),
-    }
-}
-
 /// `POST /documents` — decode and durably retain source bytes.
 pub async fn ingest_document(
     State(state): State<AppState>,
@@ -402,11 +393,7 @@ pub async fn ingest_streamed_raw_chat_document(
     let source_bytes = state.blobs.get(source_blob.id).await?.ok_or_else(|| {
         ServerError::internal("streamed document disappeared before synchronous decoding")
     })?;
-    let parsed = state
-        .retrieval
-        .parse_document(&media_type, &source_bytes)
-        .await
-        .map_err(retrieval_error)?;
+    let canonical_text = decode_document(&media_type, &source_bytes);
     let document = state
         .store
         .accept_document_source(&DocumentSourceUpsert {
@@ -417,7 +404,7 @@ pub async fn ingest_streamed_raw_chat_document(
             media_type,
             title,
             source_blob,
-            canonical_text: parsed.text,
+            canonical_text,
             updated_at: Utc::now(),
         })
         .await?;
@@ -484,11 +471,7 @@ async fn publish_document_source(
         }
     };
     let source_blob = DocumentSourceBlob::from_bytes(&source_bytes);
-    let parsed = state
-        .retrieval
-        .parse_document(&media_type, &source_bytes)
-        .await
-        .map_err(retrieval_error)?;
+    let canonical_text = decode_document(&media_type, &source_bytes);
 
     // Publication intentionally precedes the catalog transaction so an
     // accepted descriptor can never reference missing bytes. A later catalog
@@ -507,7 +490,7 @@ async fn publish_document_source(
             media_type,
             title,
             source_blob,
-            canonical_text: parsed.text,
+            canonical_text,
             updated_at: Utc::now(),
         })
         .await?;

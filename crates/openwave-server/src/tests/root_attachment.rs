@@ -12,14 +12,12 @@ async fn test_app_with_executor_id(
         .await
         .unwrap(),
     );
-    let retrieval = build_retrieval();
     let state = AppState::new_with_client_executor_id(
         Config::desktop(dir.path()),
         store.clone(),
         Arc::new(FixedResolver(Arc::new(FakeProvider))),
         Arc::new(MemSecrets::default()),
         Arc::new(ToolRegistry::new()),
-        retrieval,
         AgentConfig::default(),
         executor_id,
     )

@@ -376,7 +376,7 @@ max_output_tokens: number, };
  * Identifies an authoritative source document.
  *
  * Usually minted fresh with [`DocumentId::new`], but [`DocumentId::derive`]
- * preserves the existing stable URI identity used by retrieval ingestion.
+ * preserves the existing stable URI identity used by source ingestion.
  */
 export type DocumentId = string;
 

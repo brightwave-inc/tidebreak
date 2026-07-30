@@ -3973,16 +3973,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "openwave-retrieval"
-version = "0.0.0"
-dependencies = [
- "async-trait",
- "openwave-core",
- "thiserror 2.0.19",
- "tokio",
-]
-
-[[package]]
 name = "openwave-reverse-rpc-spike"
 version = "0.0.0"
 dependencies = [
@@ -4057,7 +4047,6 @@ dependencies = [
  "openwave-core",
  "openwave-egress",
  "openwave-mcp",
- "openwave-retrieval",
  "openwave-router",
  "openwave-sandbox-agent",
  "openwave-sandbox-protocol",

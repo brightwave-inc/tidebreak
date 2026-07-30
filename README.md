@@ -56,7 +56,7 @@ runs **fleets of agents in parallel** inside sandboxes, connects to your
 sources, and grounds its answers in citations. Skills and prompts are features
 on top of that runtime, not the point of it. **We're taking the core pieces of
 that platform — the agent loop, the tool model, sandboxing, connectors, and
-retrieval — and opening them up** under Apache-2.0, rebuilt lean in Rust as a
+source tools — and opening them up** under Apache-2.0, rebuilt lean in Rust as a
 local-first application you run yourself.
 
 The idea is simple: the engine that does the work shouldn't be a cloud service
@@ -94,16 +94,16 @@ registry; configuration UI remains in development.
 ## Status
 
 Pre-alpha, built in the open. The current product is conversation-first: each
-chat is its own workspace, with exact conversation-scoped sources and retrieval
-rather than a shared fallback corpus. Sources can be added from the composer,
-read directly after parsing, or searched semantically at corpus scale, with
-grounded citations in each path. Foreground agents can also create bounded text
-deliverables that remain private to the conversation until the user previews
-and explicitly exports them from the native Outputs view. The stack includes
-local file tools, multi-provider model routing, a turn engine with live
-journaled WebSocket events, a workspace-style desktop conversation shell, a
-bounded foreground/sandbox agent-run foundation, and durable asynchronous
-source ingestion/retrieval with grounded citations — all behind `openwave serve`.
+chat is its own workspace, with exact conversation-scoped sources rather than a
+shared fallback corpus. Sources can be added from the composer and read directly
+after synchronous text decoding, with model-authored citations. Foreground
+agents can also create bounded text deliverables that remain private to the
+conversation until the user previews and explicitly exports them from the
+native Outputs view. The stack includes local file tools, multi-provider model
+routing, a turn engine with live journaled WebSocket events, a workspace-style
+desktop conversation shell, a bounded foreground/sandbox agent-run foundation,
+and durable synchronous source ingestion and reading — all behind
+`openwave serve`.
 Project records and APIs remain dormant for compatibility and future design
 work, but Projects are not surfaced in the desktop and are not required to
 start working.
@@ -195,7 +195,6 @@ foreground/background execution model is described in
 | [`openwave-code-execution`](crates/openwave-code-execution) | provider-neutral command execution + native local sandbox |
 | [`openwave-server`](crates/openwave-server) | authenticated local HTTP/WebSocket API + durable workers |
 | [`openwave-connectors`](crates/openwave-connectors) | OAuth + source connectors |
-| [`openwave-retrieval`](crates/openwave-retrieval) | canonical document parsing and source-region mapping |
 | [`openwave-mcp`](crates/openwave-mcp) | lifecycle-gated MCP server plus external stdio client tool mounting |
 | [`openwave-desktop`](crates/openwave-desktop) | desktop app (Tauri) |
 | [`openwave-cli`](crates/openwave-cli) | headless `openwave serve` + `openwave mcp` commands |
