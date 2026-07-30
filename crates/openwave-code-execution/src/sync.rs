@@ -13,6 +13,8 @@
 
 use std::path::{Path, PathBuf};
 
+use tokio::io::AsyncWriteExt;
+
 use crate::{
     CodeExecutionError, ExecutionWorkspaceId, WorkspaceFilePath, WorkspaceLifecycle,
     MAX_WORKSPACE_FILE_BYTES,
@@ -191,9 +193,28 @@ pub async fn pull_into_host_dir(
             "not pulled: {overflow} more file(s) beyond the {MAX_SYNC_FILES}-file sync limit"
         ));
     }
-    for path in files.into_iter().take(MAX_SYNC_FILES) {
+    let files: Vec<WorkspaceFilePath> = files.into_iter().take(MAX_SYNC_FILES).collect();
+    if files.is_empty() {
+        return Ok(report);
+    }
+    // Every write below is bounded by the canonical host directory. macOS puts
+    // chat scratch under a symlinked `/var`, so comparing against the path as
+    // handed in would reject legitimate files.
+    tokio::fs::create_dir_all(host_dir)
+        .await
+        .map_err(|_| unwritable_dir())?;
+    let host_root = tokio::fs::canonicalize(host_dir)
+        .await
+        .map_err(|_| unwritable_dir())?;
+    for path in files {
         let content = lifecycle.get_workspace_file(workspace, &path).await?;
-        let host_path = host_dir.join(path.as_str());
+        let Some(host_path) = host_file_path(&host_root, &path).await else {
+            report.skip(format!(
+                "not pulled: {} does not resolve inside the private scratch directory",
+                path.as_str()
+            ));
+            continue;
+        };
         if let Ok(existing) = tokio::fs::read(&host_path).await {
             if existing == content {
                 continue;
@@ -209,17 +230,74 @@ pub async fn pull_into_host_dir(
             ));
             continue;
         }
-        if let Some(parent) = host_path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|_| unwritable(path.as_str()))?;
-        }
-        tokio::fs::write(&host_path, &content)
+        write_without_following(&host_path, &content)
             .await
             .map_err(|_| unwritable(path.as_str()))?;
         report.transferred += 1;
     }
     Ok(report)
+}
+
+/// Where `path` lands under `host_root`, creating missing parent directories
+/// only through components already proven to be real directories.
+///
+/// Local exec is confined to this same scratch tree, so it can plant
+/// `<scratch>/out -> ~/.ssh` and wait for a pull: `create_dir_all` and a plain
+/// `write` both follow a symlinked *parent*, and the pull's host write is not
+/// sandboxed. So each intermediate component is checked before it is walked or
+/// created, and the canonical parent must still sit inside `host_root`.
+/// `None` means the path resolved outside the scratch directory, or the
+/// directories could not be made.
+async fn host_file_path(host_root: &Path, path: &WorkspaceFilePath) -> Option<PathBuf> {
+    let mut dir = host_root.to_path_buf();
+    let mut components = path.as_str().split('/').peekable();
+    while let Some(component) = components.next() {
+        if components.peek().is_none() {
+            break;
+        }
+        dir.push(component);
+        match tokio::fs::symlink_metadata(&dir).await {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => return None,
+            Err(_) => tokio::fs::create_dir(&dir).await.ok()?,
+        }
+    }
+    let parent = tokio::fs::canonicalize(&dir).await.ok()?;
+    if !parent.starts_with(host_root) {
+        return None;
+    }
+    Some(parent.join(path.file_name()))
+}
+
+/// Write `content` at `host_path` without following a symlink at the final
+/// component either: the bytes go to an unpredictable temp name opened with an
+/// exclusive no-follow create, then a rename puts them in place. This is the
+/// same shape the workspace-put path in `local.rs` uses.
+async fn write_without_following(host_path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let parent = host_path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("host path has no parent"))?;
+    let temporary = parent.join(format!(".workspace-pull.{}", uuid::Uuid::new_v4()));
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(&temporary).await?;
+    let write = async {
+        file.write_all(content).await?;
+        file.sync_all().await?;
+        tokio::fs::rename(&temporary, host_path).await
+    };
+    match write.await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&temporary).await;
+            Err(error)
+        }
+    }
 }
 
 fn unreadable(path: &str) -> CodeExecutionError {
@@ -228,6 +306,10 @@ fn unreadable(path: &str) -> CodeExecutionError {
 
 fn unwritable(path: &str) -> CodeExecutionError {
     CodeExecutionError::Sandbox(format!("private scratch entry '{path}' is unwritable"))
+}
+
+fn unwritable_dir() -> CodeExecutionError {
+    CodeExecutionError::Sandbox("the private scratch directory is unwritable".into())
 }
 
 #[cfg(test)]
@@ -417,6 +499,34 @@ mod tests {
         assert_eq!(pulled.notes.len(), 2, "{:?}", pulled.notes);
         assert!(pulled.notes[0].contains("not a valid workspace path"));
         assert!(pulled.notes[1].contains("file limit"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pull_does_not_write_through_a_symlinked_parent_directory() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("authorized_keys"), b"host secret").unwrap();
+        let host = tempfile::tempdir().unwrap();
+        // Local exec is confined to the scratch directory but can create
+        // entries in it, including a symlink aimed at a host directory.
+        std::os::unix::fs::symlink(outside.path(), host.path().join("out")).unwrap();
+
+        let fake = FakeWorkspace::default();
+        fake.insert("out/authorized_keys", b"attacker key");
+
+        let pulled = pull_into_host_dir(&fake, &workspace_id(), host.path())
+            .await
+            .unwrap();
+
+        assert_eq!(pulled.transferred, 0, "{:?}", pulled.notes);
+        assert_eq!(
+            std::fs::read(outside.path().join("authorized_keys")).unwrap(),
+            b"host secret"
+        );
+        assert!(pulled
+            .notes
+            .iter()
+            .any(|note| note.contains("out/authorized_keys")));
     }
 
     #[tokio::test]
