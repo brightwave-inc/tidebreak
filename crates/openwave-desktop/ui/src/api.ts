@@ -1,5 +1,6 @@
 import {
   RENDERER_TOOL_NAMES,
+  type ApprovalGrantRung,
   type ApprovalClass,
   type AssistantCitationSnapshot,
   type CitationLocator as WireCitationLocator,
@@ -69,6 +70,7 @@ import {
 
 export type {
   ApprovalClass,
+  ApprovalGrantRung,
   GrantLevel,
   GrantScope,
   StandingGrantSnapshot,
@@ -407,18 +409,6 @@ export function isApprovableKind(kind: RendererApprovalKind): boolean {
   );
 }
 
-/**
- * How wide a standing grant to remember, narrowest first.
- *
- * The renderer only names the rung. The server builds the concrete grant from
- * the arguments the call is parked on, so a grant can never describe a broader
- * action than the one the human was shown.
- */
-export type ApprovalGrantRung =
-  | "exact_action"
-  | { command_prefix: { tokens: number } }
-  | "whole_tool";
-
 /** Approval kinds whose authority is stable enough to remember by tool name. */
 export function isRememberableKind(kind: RendererApprovalKind): boolean {
   return isApprovableKind(kind) && kind !== "external_mcp_may_call_server";
@@ -435,8 +425,8 @@ export type PendingToolApproval = {
   preview: ToolActionPreview | null;
   canApprove: boolean;
   canRemember: boolean;
-  /** Token counts of the prefix rungs the server will honor for this call. */
-  prefixRungs: number[];
+  /** Complete standing-grant ladder the server will honor for this call. */
+  grantRungs: ApprovalGrantRung[];
   /** Where the Auto-mode judge stands, or null when no judge was engaged. */
   autoJudgeStatus: "judging" | "approved" | "declined" | null;
 };
@@ -1748,7 +1738,7 @@ const PENDING_APPROVAL_KEYS = [
   "preview",
   "can_approve",
   "can_remember",
-  "prefix_rungs",
+  "grant_rungs",
   "auto_judge_status",
 ] as const satisfies readonly (keyof PendingApprovalSnapshot)[];
 
@@ -1773,15 +1763,10 @@ export function parsePendingToolApproval(
     typeof value.can_approve !== "boolean" ||
     value.can_approve !== isApprovableKind(value.approval) ||
     typeof value.can_remember !== "boolean" ||
-    value.can_remember !== isRememberableKind(value.approval) ||
-    // Absent reads as "no prefix rungs", which is the safe answer: the card
-    // offers nothing it was not told about.
-    (value.prefix_rungs !== undefined &&
-      (!Array.isArray(value.prefix_rungs) ||
-        value.prefix_rungs.some(
-          (tokens) =>
-            typeof tokens !== "number" || !Number.isInteger(tokens) || tokens < 1,
-        ))) ||
+    !Array.isArray(value.grant_rungs) ||
+    value.grant_rungs.some((rung) => parseApprovalGrantRung(rung) === null) ||
+    (value.grant_rungs.length > 0 && !isRememberableKind(value.approval)) ||
+    value.can_remember !== (value.grant_rungs.length > 0) ||
     !(
       value.auto_judge_status === undefined ||
       value.auto_judge_status === "judging" ||
@@ -1800,9 +1785,29 @@ export function parsePendingToolApproval(
     preview: parseToolActionPreview(value.preview),
     canApprove: value.can_approve,
     canRemember: value.can_remember,
-    prefixRungs: (value.prefix_rungs as number[] | undefined) ?? [],
+    grantRungs: value.grant_rungs.map(
+      (rung) => parseApprovalGrantRung(rung) as ApprovalGrantRung,
+    ),
     autoJudgeStatus: value.auto_judge_status ?? null,
   };
+}
+
+function parseApprovalGrantRung(value: unknown): ApprovalGrantRung | null {
+  if (value === "exact_action" || value === "whole_tool") return value;
+  if (
+    !isRecord(value) ||
+    Object.keys(value).length !== 1 ||
+    !isRecord(value.command_prefix) ||
+    Object.keys(value.command_prefix).length !== 1
+  ) {
+    return null;
+  }
+  const tokens = value.command_prefix.tokens;
+  return typeof tokens === "number" &&
+    Number.isInteger(tokens) &&
+    tokens > 0
+    ? { command_prefix: { tokens } }
+    : null;
 }
 
 /**

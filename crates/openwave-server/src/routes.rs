@@ -2555,7 +2555,7 @@ pub struct ApprovalBody {
 /// The renderer names a rung; the server builds the concrete grant from the
 /// arguments the call is parked on. A grant can therefore only ever describe
 /// the action that was actually under review.
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalGrantRung {
     /// Exactly the action the card showed.
@@ -2607,14 +2607,12 @@ pub(crate) struct PendingApprovalSnapshot {
     pub preview: Option<openwave_core::ToolActionPreview>,
     pub can_approve: bool,
     pub can_remember: bool,
-    /// Token counts of the command-prefix rungs this call may be granted at,
-    /// narrowest first.
+    /// Complete standing-grant ladder for this exact call, narrowest first.
     ///
-    /// Derived server-side, because whether a prefix rung exists at all is a
-    /// question only the analyzer can answer — a wrapper has none. The
-    /// renderer slices the action's own tokens to these lengths for the
-    /// labels rather than deciding for itself what to offer.
-    pub prefix_rungs: Vec<usize>,
+    /// Empty means only one-shot approval is available. The renderer receives
+    /// the whole ladder because command policy may refuse exact and whole-tool
+    /// grants as well as prefixes.
+    pub grant_rungs: Vec<ApprovalGrantRung>,
     /// Where the Auto-mode judge stands, when one was engaged. Absent means
     /// no judge ever owned this card.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2625,35 +2623,61 @@ pub(crate) struct PendingApprovalSnapshot {
 impl PendingApprovalSnapshot {
     fn from_approval(approval: openwave_core::ToolApproval) -> Self {
         let kind = approval.kind;
+        let grant_rungs =
+            approval_grant_rungs(kind, approval.preview.as_ref(), approval.action_is_exact);
         Self {
             call_id: approval.call_id,
             turn_id: approval.turn_id,
             action: openwave_core::RendererToolName::from(approval.tool_name.as_str()),
             approval: kind,
             class: approval.class,
-            prefix_rungs: approval
-                .preview
-                .as_ref()
-                .map(prefix_rung_lengths)
-                .unwrap_or_default(),
             preview: approval.preview,
             can_approve: kind.is_approvable(),
-            can_remember: kind.is_standing_grantable(),
+            can_remember: !grant_rungs.is_empty(),
+            grant_rungs,
             auto_judge_status: approval.auto_judge_status,
         }
     }
 }
 
-/// The command-prefix rungs on offer for an action, as token counts.
-///
-/// Empty for anything that is not a command, and for a command the analyzer
-/// would not auto-run under a prefix rule however it were granted.
-pub(crate) fn prefix_rung_lengths(action: &openwave_core::ToolActionPreview) -> Vec<usize> {
-    openwave_core::GrantScope::ladder_for_action(action)
-        .into_iter()
+/// Renderer names for the complete standing-grant ladder of one approval.
+pub(crate) fn approval_grant_rungs(
+    kind: openwave_core::ToolApprovalKind,
+    action: Option<&openwave_core::ToolActionPreview>,
+    action_is_exact: bool,
+) -> Vec<ApprovalGrantRung> {
+    if !kind.is_standing_grantable() {
+        return Vec::new();
+    }
+    let scopes = match action {
+        Some(action) => openwave_core::GrantScope::ladder_for_action(action),
+        None => vec![openwave_core::GrantScope::WholeTool],
+    };
+    grant_rungs_from_scopes(&scopes, action_is_exact)
+}
+
+pub(crate) fn grant_rungs_from_scopes(
+    scopes: &[openwave_core::GrantScope],
+    action_is_exact: bool,
+) -> Vec<ApprovalGrantRung> {
+    scopes
+        .iter()
         .filter_map(|scope| match scope {
-            openwave_core::GrantScope::CommandPrefix { tokens } => Some(tokens.len()),
-            _ => None,
+            openwave_core::GrantScope::ExactAction(_) if action_is_exact => {
+                Some(ApprovalGrantRung::ExactAction)
+            }
+            openwave_core::GrantScope::ExactAction(_) => None,
+            openwave_core::GrantScope::CommandPrefix { tokens } => {
+                Some(ApprovalGrantRung::CommandPrefix {
+                    tokens: tokens.len(),
+                })
+            }
+            openwave_core::GrantScope::WholeTool => Some(ApprovalGrantRung::WholeTool),
+            // Retained for old durable grants; the current ladder names the
+            // same authority as a one-token command prefix.
+            openwave_core::GrantScope::AnyArgsFor { .. } => {
+                Some(ApprovalGrantRung::CommandPrefix { tokens: 1 })
+            }
         })
         .collect()
 }

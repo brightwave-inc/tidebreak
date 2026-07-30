@@ -192,26 +192,26 @@ fn grant_scope(
 ) -> Option<GrantScope> {
     use crate::routes::ApprovalGrantRung;
     use openwave_core::ToolActionPreview;
-    if matches!(rung, ApprovalGrantRung::WholeTool) {
-        return Some(GrantScope::WholeTool);
-    }
     // A narrow rung names the action, and the preview it would be named from is
     // clamped for display. Naming one from a clamped preview would authorize
     // every other call that clamps to the same text, so an approximate
     // description is refused rather than turned into standing authority.
-    if !action_is_exact {
-        return None;
-    }
-    match (rung, action?) {
-        (ApprovalGrantRung::WholeTool, _) => Some(GrantScope::WholeTool),
-        (ApprovalGrantRung::ExactAction, action) => Some(GrantScope::ExactAction(action.clone())),
-        (ApprovalGrantRung::CommandPrefix { tokens }, action @ ToolActionPreview::Exec { .. }) => {
-            command_prefix_scope(action, tokens)
+    let candidate = match (rung, action) {
+        (ApprovalGrantRung::WholeTool, _) => GrantScope::WholeTool,
+        (ApprovalGrantRung::ExactAction, Some(action)) if action_is_exact => {
+            GrantScope::ExactAction(action.clone())
         }
-        // Only a command has a token run to name, so no other action can
-        // reach the rung between exact and whole-tool.
-        (ApprovalGrantRung::CommandPrefix { .. }, _) => None,
-    }
+        (
+            ApprovalGrantRung::CommandPrefix { tokens },
+            Some(action @ ToolActionPreview::Exec { .. }),
+        ) if action_is_exact => command_prefix_scope(action, tokens)?,
+        _ => return None,
+    };
+    let available = match action {
+        Some(action) => GrantScope::ladder_for_action(action),
+        None => vec![GrantScope::WholeTool],
+    };
+    available.contains(&candidate).then_some(candidate)
 }
 
 /// Rebuild a prefix rung from the parked call rather than from the request.
@@ -1244,6 +1244,57 @@ mod tests {
             request.kind,
             &json!({})
         ));
+    }
+
+    #[tokio::test]
+    async fn an_interpreter_call_cannot_resolve_with_a_grant_the_floor_refuses() {
+        let (store, request) = setup_with_arguments(
+            "exec",
+            json!({
+                "command": "python3",
+                "args": ["-c", "import pptx"],
+                "cwd": ".",
+            }),
+        )
+        .await;
+        let broker = ApprovalBroker::new(store.clone());
+        let _pending = broker.register(request.clone(), None).await;
+
+        for rung in [
+            crate::routes::ApprovalGrantRung::ExactAction,
+            crate::routes::ApprovalGrantRung::WholeTool,
+        ] {
+            assert_eq!(
+                broker
+                    .resolve_with_grant(
+                        request.chat_id,
+                        request.call_id,
+                        ApprovalDecision::Approve,
+                        Some(rung),
+                    )
+                    .await
+                    .unwrap(),
+                ResolveApprovalOutcome::GrantNotAvailable
+            );
+            assert_eq!(
+                store
+                    .get_tool_call_approval(request.call_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                openwave_core::ToolApprovalStatus::Pending
+            );
+        }
+
+        // A human may still approve this exact invocation once.
+        assert_eq!(
+            broker
+                .resolve(request.chat_id, request.call_id, ApprovalDecision::Approve)
+                .await
+                .unwrap(),
+            ResolveApprovalOutcome::Resolved
+        );
     }
 
     #[tokio::test]

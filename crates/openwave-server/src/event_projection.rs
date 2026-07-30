@@ -121,10 +121,10 @@ pub(crate) enum RendererAgentEvent {
         /// automatically" hint.
         #[serde(default)]
         auto_judging: bool,
-        /// Token counts of the command-prefix rungs on offer, narrowest
-        /// first. Empty when the action has none.
+        /// Complete standing-grant ladder for this exact call, narrowest first.
+        /// Empty means only one-shot approval is available.
         #[serde(default)]
-        prefix_rungs: Vec<usize>,
+        grant_rungs: Vec<crate::routes::ApprovalGrantRung>,
         /// The one deliberate opening in this boundary. A human cannot consent
         /// to a command they are not shown, so a tool may project a closed,
         /// field-by-field view of the action under review. Tools without one
@@ -266,6 +266,7 @@ impl From<&SequencedEvent> for RendererSequencedEvent {
                 tool_name,
                 class,
                 kind,
+                grant_scopes,
                 preview,
                 ..
             } => RendererAgentEvent::ApprovalRequired {
@@ -274,10 +275,7 @@ impl From<&SequencedEvent> for RendererSequencedEvent {
                 approval: *kind,
                 class: *class,
                 auto_judging: *auto_judging,
-                prefix_rungs: preview
-                    .as_ref()
-                    .map(crate::routes::prefix_rung_lengths)
-                    .unwrap_or_default(),
+                grant_rungs: crate::routes::grant_rungs_from_scopes(grant_scopes, true),
                 preview: preview.clone(),
             },
             AgentEvent::ApprovalDecided { call_id, approved } => {
@@ -388,6 +386,7 @@ mod tests {
                 tool_name: "provider_tool_with_secret".into(),
                 class: ApprovalClass::Sensitive,
                 kind: ToolApprovalKind::Unsupported,
+                grant_scopes: Vec::new(),
                 preview: None,
                 summary: "upload /Users/private/document.txt".into(),
             },
@@ -536,6 +535,14 @@ mod tests {
                 tool_name: "exec".into(),
                 class: ApprovalClass::Sensitive,
                 kind: ToolApprovalKind::ExecMayRunNetworkedCommand,
+                grant_scopes: openwave_core::GrantScope::ladder_for(
+                    "exec",
+                    &serde_json::json!({
+                        "command": "cargo",
+                        "args": ["test", "--workspace"],
+                        "cwd": "checkout",
+                    }),
+                ),
                 preview: ToolActionPreview::build(
                     "exec",
                     &serde_json::json!({
@@ -555,6 +562,37 @@ mod tests {
         assert!(json.contains(r#""cwd":"checkout""#));
         // The preview replaces the model-authored summary; it does not join it.
         assert!(!json.contains("private model-authored summary"));
+    }
+
+    #[test]
+    fn interpreter_approval_projects_no_remembered_grant_choices() {
+        let projected = RendererSequencedEvent::from(&SequencedEvent {
+            seq: 11,
+            event: AgentEvent::ApprovalRequired {
+                auto_judging: false,
+                call_id: CallId::new(),
+                tool_name: "exec".into(),
+                class: ApprovalClass::Sensitive,
+                kind: ToolApprovalKind::ExecMayRunNetworkedCommand,
+                grant_scopes: Vec::new(),
+                preview: ToolActionPreview::build(
+                    "exec",
+                    &serde_json::json!({
+                        "command": "python3",
+                        "args": ["-c", "import pptx"],
+                        "cwd": ".",
+                    }),
+                ),
+                summary: "run an interpreter".into(),
+            },
+        });
+
+        let encoded = serde_json::to_value(projected).unwrap();
+        assert_eq!(
+            encoded["event"]["grant_rungs"],
+            serde_json::json!([]),
+            "only one-shot approval may be presented"
+        );
     }
 
     #[test]
@@ -674,6 +712,7 @@ mod tests {
                 tool_name: "write_file".into(),
                 class: ApprovalClass::Workspace,
                 kind: ToolApprovalKind::Unsupported,
+                grant_scopes: Vec::new(),
                 // A tool with no variant projects nothing, so the card has no
                 // action to show and the summary is all that crosses.
                 preview: ToolActionPreview::build(
@@ -702,6 +741,13 @@ mod tests {
                 tool_name: "web_search".into(),
                 class: ApprovalClass::Sensitive,
                 kind: ToolApprovalKind::WebSearchMayShareQuery,
+                grant_scopes: openwave_core::GrantScope::ladder_for(
+                    "web_search",
+                    &serde_json::json!({
+                        "query": "quarterly filings",
+                        "max_results": 5,
+                    }),
+                ),
                 preview: ToolActionPreview::build(
                     "web_search",
                     &serde_json::json!({ "query": "quarterly filings", "max_results": 5 }),
@@ -782,6 +828,7 @@ mod tests {
                 tool_name: "search".into(),
                 class: ApprovalClass::Sensitive,
                 kind: ToolApprovalKind::SearchMayShareQueryAndExcerpts,
+                grant_scopes: vec![openwave_core::GrantScope::WholeTool],
                 preview: None,
                 summary: "private query and document title".into(),
             },
@@ -802,6 +849,7 @@ mod tests {
                 tool_name: "web_search".into(),
                 class: ApprovalClass::Sensitive,
                 kind: ToolApprovalKind::WebSearchMayShareQuery,
+                grant_scopes: Vec::new(),
                 preview: None,
                 summary: "private query and domain filters".into(),
             },
@@ -823,6 +871,7 @@ mod tests {
                 tool_name: "mcp__private_server__private_tool".into(),
                 class: ApprovalClass::Sensitive,
                 kind: ToolApprovalKind::ExternalMcpMayCallServer,
+                grant_scopes: Vec::new(),
                 preview: None,
                 summary: "private model-authored arguments".into(),
             },

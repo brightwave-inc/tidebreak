@@ -15,8 +15,14 @@ export const PENDING_APPROVAL = {
   "can_approve": true,
   "can_remember": true,
   "class": "sensitive",
-  "prefix_rungs": [
-    1
+  "grant_rungs": [
+    "exact_action",
+    {
+      "command_prefix": {
+        "tokens": 1
+      }
+    },
+    "whole_tool"
   ],
   "preview": {
     "args": [
@@ -36,7 +42,7 @@ export const PENDING_APPROVAL_WITHOUT_PREVIEW = {
   "can_approve": false,
   "can_remember": false,
   "class": "read_only",
-  "prefix_rungs": [],
+  "grant_rungs": [],
   "turn_id": "00000000-0000-0000-0000-000000000002"
 } as const;
 

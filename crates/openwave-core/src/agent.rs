@@ -34,7 +34,7 @@ use crate::agent_tools::{
 };
 use crate::approval::{
     ApprovalDecision, ApprovalGate, ApprovalJournalIdentity, ApprovalRequest,
-    ApprovalRequiredPublication, RefuseGate, StandingGrants, ToolApprovalKind,
+    ApprovalRequiredPublication, GrantScope, RefuseGate, StandingGrants, ToolApprovalKind,
 };
 use crate::cancel::CancelToken;
 use crate::citation::{parse_assistant_citations, AssistantCitationInput};
@@ -2767,6 +2767,11 @@ impl Agent {
                 tool_name: call.name.clone(),
                 class: approval_class,
                 kind,
+                grant_scopes: if kind.is_standing_grantable() {
+                    GrantScope::ladder_for(&call.name, &arguments)
+                } else {
+                    Vec::new()
+                },
                 preview,
                 summary,
             };

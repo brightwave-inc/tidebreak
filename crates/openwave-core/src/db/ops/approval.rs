@@ -191,15 +191,6 @@ pub(in crate::db) async fn request_and_append_event(
             "approval journal identity must be valid".into(),
         ));
     }
-    let event = AgentEvent::ApprovalRequired {
-        auto_judging: request.auto_judge,
-        call_id: request.call_id,
-        tool_name: request.tool_name.clone(),
-        class: request.class,
-        kind: request.kind,
-        preview: request.preview.clone(),
-        summary: request.summary.clone(),
-    };
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_chat_write_lock(&transaction, request.chat_id).await?
         || !acquire_turn_write_lock(&transaction, request.turn_id).await?
@@ -219,6 +210,20 @@ pub(in crate::db) async fn request_and_append_event(
         .await
         .map_err(store_err)?
         .expect("locked tool call exists");
+    let event = AgentEvent::ApprovalRequired {
+        auto_judging: request.auto_judge,
+        call_id: request.call_id,
+        tool_name: request.tool_name.clone(),
+        class: request.class,
+        kind: request.kind,
+        grant_scopes: if request.kind.is_standing_grantable() {
+            GrantScope::ladder_for(&call.name, &call.arguments)
+        } else {
+            Vec::new()
+        },
+        preview: request.preview.clone(),
+        summary: request.summary.clone(),
+    };
     let turn = entities::turn_run::Entity::find_by_id(request.turn_id.0)
         .one(&transaction)
         .await

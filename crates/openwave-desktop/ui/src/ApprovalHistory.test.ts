@@ -13,7 +13,7 @@ const pending = {
   preview: null,
   canApprove: true,
   canRemember: true,
-  prefixRungs: [],
+  grantRungs: ["whole_tool" as const],
   autoJudgeStatus: null,
 };
 
@@ -38,7 +38,7 @@ describe("reconcilePendingApprovalCards", () => {
         canApprove: true,
         canRemember: true,
         autoJudging: false,
-        prefixRungs: [],
+        grantRungs: ["whole_tool"],
       },
     ]);
   });
@@ -68,8 +68,33 @@ describe("reconcilePendingApprovalCards", () => {
     expect(stale).toEqual([{ id: "message-new", role: "user", text: "new chat" }]);
   });
 
-  it("upserts a replayed live requirement by call id", () => {
-    const once = upsertPendingApprovalCard([], pending);
-    expect(upsertPendingApprovalCard(once, pending)).toEqual(once);
+  it("moves a hydrated card behind earlier events when its live frame replays", () => {
+    const hydrated = upsertPendingApprovalCard(
+      [{ id: "user", role: "user", text: "run it" }],
+      pending,
+    );
+    const withEarlierReplay = [
+      ...hydrated,
+      {
+        id: "thought",
+        role: "assistant" as const,
+        text: "",
+        reasoning: "checking the command",
+        sources: [],
+      },
+    ];
+
+    expect(upsertPendingApprovalCard(withEarlierReplay, pending, true)).toEqual([
+      { id: "user", role: "user", text: "run it" },
+      {
+        id: "thought",
+        role: "assistant",
+        text: "",
+        reasoning: "checking the command",
+        sources: [],
+      },
+      expect.objectContaining({ role: "tool", callId: "call-search" }),
+      expect.objectContaining({ role: "approval", callId: "call-search" }),
+    ]);
   });
 });

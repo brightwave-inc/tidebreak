@@ -86,6 +86,14 @@ pub enum AgentEvent {
         /// The approval class that triggered the prompt.
         class: ApprovalClass,
         kind: crate::approval::ToolApprovalKind,
+        /// The complete standing-grant ladder this exact call cleared.
+        ///
+        /// Empty means approving once is the only affirmative choice. The
+        /// renderer must not reconstruct broader rungs from the approval kind:
+        /// command policy can refuse every standing grant for an interpreter
+        /// while still allowing one explicit human approval.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        grant_scopes: Vec<crate::approval::GrantScope>,
         /// Closed projection of what the call will do, when its tool has one.
         /// Absent on journal rows written before previews existed.
         #[serde(default)]
@@ -311,6 +319,7 @@ mod tests {
                 tool_name: "exec".into(),
                 class: ApprovalClass::Sensitive,
                 kind: crate::approval::ToolApprovalKind::ExecMayRunNetworkedCommand,
+                grant_scopes: Vec::new(),
                 preview: Some(crate::preview::ToolActionPreview::Exec {
                     command: "git".into(),
                     args: vec!["status".into()],

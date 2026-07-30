@@ -19,6 +19,7 @@ function card(overrides: Partial<Parameters<typeof ApprovalCard>[0]> = {}) {
       preview={null}
       canApprove
       canRemember
+      grantRungs={["exact_action", "whole_tool"]}
       deciding={false}
       onDecide={noop}
       {...overrides}
@@ -150,6 +151,25 @@ describe("approval card interactions", () => {
     ).toEqual([ONCE, "2.No, don't allow this"]);
   });
 
+  it("offers an interpreter command once when policy supplies no grant rung", () => {
+    render(
+      card({
+        preview: {
+          tool: "exec",
+          command: "python3",
+          args: ["-c", "import pptx"],
+          cwd: ".",
+        },
+        canRemember: false,
+        grantRungs: [],
+      }),
+    );
+
+    expect(
+      screen.getAllByRole("option").map((option) => option.textContent),
+    ).toEqual(["1.Yes, run it once", "2.No, don't allow this"]);
+  });
+
   it("hides the broader grants behind one more keystroke", async () => {
     const user = userEvent.setup();
     const onDecide = vi.fn();
@@ -162,8 +182,12 @@ describe("approval card interactions", () => {
           args: ["test"],
           cwd: ".",
         },
-        // Both prefix rungs the server offers for `cargo test`.
-        prefixRungs: [2, 1],
+        grantRungs: [
+          "exact_action",
+          { command_prefix: { tokens: 2 } },
+          { command_prefix: { tokens: 1 } },
+          "whole_tool",
+        ],
       }),
     );
 

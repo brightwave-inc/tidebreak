@@ -108,8 +108,8 @@ export type ChatMessage =
       canRemember: boolean;
       /** The Auto-mode judge is deciding; the card stays fully actionable. */
       autoJudging?: boolean;
-      /** Prefix rungs the server will honor for this call. */
-      prefixRungs?: readonly number[];
+      /** Complete standing-grant ladder the server will honor for this call. */
+      grantRungs?: readonly ApprovalGrantRung[];
       resolved?: boolean;
     }
   | { id: string; role: "error"; text: string }
@@ -765,7 +765,7 @@ function surfacedCard(entry: ChatMessage, context: CardContext): ReactNode {
         canRemember={entry.canRemember}
         grantScope={approvalState?.grantScope ?? "chat"}
         autoJudging={entry.autoJudging ?? false}
-        prefixRungs={entry.prefixRungs ?? []}
+        grantRungs={entry.grantRungs ?? []}
         deciding={
           approvalState?.decidingApprovalCalls.has(entry.callId) ?? false
         }
