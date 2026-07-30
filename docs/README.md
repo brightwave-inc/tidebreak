@@ -27,6 +27,9 @@ Project documentation, versioned alongside the code.
 - [Execution providers and sandbox-resident agent runs](sandbox-providers.md) —
   the run-tier/execution-provider split, reachability and credential
   invariants, and the phased route to detached background agent runs.
+- [Local apps](local-apps.md) — agent-generated mini-apps in the profile:
+  sandboxed frame rendering, manifest-pinned tool invocation with durable
+  consent, and the planned promotion path to gateway shared apps.
 - [The OpenWave ↔ model gateway boundary](gateway-boundary.md) — how a profile
   becomes gateway-managed (pairing, policy tiers, sessions) and what crosses
   the wire once it is.
