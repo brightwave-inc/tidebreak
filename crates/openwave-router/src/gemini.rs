@@ -17,7 +17,7 @@ use futures::stream::{BoxStream, StreamExt};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use openwave_core::error::{AgentError, Result};
+use openwave_core::error::{AgentError, ProviderErrorInfo, Result};
 use openwave_core::provider::{
     ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, RefusalDetails,
     ResponseFormat, StopReason, ToolChoice, Usage,
@@ -27,8 +27,8 @@ use openwave_core::{ImageAttachments, ReasoningEffort, Role};
 
 use crate::google_auth::{valid_resource_segment, valid_vertex_location};
 use crate::sse::{
-    classify_provider_error, drain_frames, frame_data_raw, read_bounded_error_body,
-    safe_in_band_error,
+    classify_in_band_error, classify_provider_error, drain_frames, frame_data_raw,
+    read_bounded_error_body,
 };
 use crate::BearerTokenSource;
 
@@ -215,14 +215,14 @@ impl ModelProvider for GeminiProvider {
                     // carries no such thing and is worth surfacing.
                     Err(error) => {
                         yield ProviderEvent::Failed {
-                            message: match error {
+                            error: ProviderErrorInfo::provider(match error {
                                 crate::http::StreamFailure::Deadline(_) => {
                                     format!("gemini stream ended early: {error}")
                                 }
                                 crate::http::StreamFailure::Transport(_) => {
                                     "gemini stream ended early".to_string()
                                 }
-                            },
+                            }),
                         };
                         return;
                     }
@@ -236,7 +236,9 @@ impl ModelProvider for GeminiProvider {
                         Ok(data) => data,
                         Err(_) => {
                             yield ProviderEvent::Failed {
-                                message: "gemini returned an invalid stream frame".to_string(),
+                                error: ProviderErrorInfo::provider(
+                                    "gemini returned an invalid stream frame",
+                                ),
                             };
                             return;
                         }
@@ -256,7 +258,9 @@ impl ModelProvider for GeminiProvider {
                         Ok(data) => data,
                         Err(_) => {
                             yield ProviderEvent::Failed {
-                                message: "gemini returned an invalid stream frame".to_string(),
+                                error: ProviderErrorInfo::provider(
+                                    "gemini returned an invalid stream frame",
+                                ),
                             };
                             return;
                         }
@@ -657,7 +661,7 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
     if let Some(error) = data.get("error") {
         state.terminal = true;
         return vec![ProviderEvent::Failed {
-            message: safe_in_band_error("gemini", error),
+            error: ProviderErrorInfo::from_error(&classify_in_band_error("gemini", error)),
         }];
     }
     if let Some(block_reason) = data
@@ -719,7 +723,9 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                 else {
                     state.terminal = true;
                     events.push(ProviderEvent::Failed {
-                        message: "gemini returned a malformed function call".to_string(),
+                        error: ProviderErrorInfo::provider(
+                            "gemini returned a malformed function call",
+                        ),
                     });
                     return events;
                 };
@@ -739,7 +745,9 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                 if !args.is_object() {
                     state.terminal = true;
                     events.push(ProviderEvent::Failed {
-                        message: "gemini returned non-object function arguments".to_string(),
+                        error: ProviderErrorInfo::provider(
+                            "gemini returned non-object function arguments",
+                        ),
                     });
                     return events;
                 }
@@ -790,7 +798,7 @@ fn finish_candidate(reason: &str, state: &mut StreamState, events: &mut Vec<Prov
         }
         "MALFORMED_FUNCTION_CALL" | "UNEXPECTED_TOOL_CALL" => {
             events.push(ProviderEvent::Failed {
-                message: "gemini rejected a function call".to_string(),
+                error: ProviderErrorInfo::provider("gemini rejected a function call"),
             });
         }
         "MAX_TOKENS" => events.push(ProviderEvent::Stop {
@@ -1141,7 +1149,10 @@ mod tests {
         assert_eq!(
             failed,
             vec![ProviderEvent::Failed {
-                message: "gemini returned 401".into(),
+                error: ProviderErrorInfo {
+                    kind: "authentication".into(),
+                    message: "gemini returned 401".into(),
+                },
             }]
         );
     }

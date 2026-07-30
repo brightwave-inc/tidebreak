@@ -235,8 +235,11 @@ impl CapabilityResponder for HostModelProxy {
         while let Some(event) = stream.next().await {
             match event {
                 ProviderEvent::TextDelta { text } => completion.push_str(&text),
-                ProviderEvent::Failed { message } => {
-                    eprintln!("openwave: host model proxy inference failed: {message}");
+                ProviderEvent::Failed { error } => {
+                    eprintln!(
+                        "openwave: host model proxy inference failed: {}",
+                        error.message
+                    );
                     return Response::Error(ErrorResponse::new(
                         ErrorCode::Internal,
                         "host model inference failed",

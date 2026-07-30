@@ -408,9 +408,13 @@ pub enum ProviderEvent {
     /// particular may be truncated mid-value. Consumers must discard the
     /// partial step and treat the completion as failed rather than acting on
     /// it.
+    ///
+    /// The payload is classified the way the equivalent HTTP-status failure
+    /// would be, so a mid-stream overload or rate limit surfaces to the client
+    /// under that kind rather than the generic `provider`.
     Failed {
-        /// Why the stream broke, for the turn's failure detail.
-        message: String,
+        /// Why the stream broke, classified for the turn's failure detail.
+        error: crate::error::ProviderErrorInfo,
     },
 }
 
@@ -503,6 +507,17 @@ mod tests {
         };
         let json = serde_json::to_string(&ev).unwrap();
         assert_eq!(serde_json::from_str::<ProviderEvent>(&json).unwrap(), ev);
+
+        let failed = ProviderEvent::Failed {
+            error: crate::error::ProviderErrorInfo::from_error(
+                &crate::error::AgentError::Overloaded("p returned 529 (overloaded_error)".into()),
+            ),
+        };
+        let json = serde_json::to_string(&failed).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ProviderEvent>(&json).unwrap(),
+            failed
+        );
     }
 
     #[test]

@@ -14,7 +14,7 @@ use base64::Engine as _;
 use futures::stream::{BoxStream, StreamExt};
 use serde_json::{json, Value};
 
-use openwave_core::error::{AgentError, Result};
+use openwave_core::error::{AgentError, ProviderErrorInfo, Result};
 use openwave_core::provider::{
     ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, ResponseFormat,
     StopReason, ToolChoice, Usage,
@@ -23,7 +23,8 @@ use openwave_core::tool::{strict_json_schema, OptionalProperties};
 use openwave_core::{ImageAttachments, Role};
 
 use crate::sse::{
-    classify_provider_error, drain_frames, frame_data, read_bounded_error_body, safe_in_band_error,
+    classify_in_band_error, classify_provider_error, drain_frames, frame_data,
+    read_bounded_error_body,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -134,7 +135,9 @@ impl ModelProvider for OpenAiCompatProvider {
                     Ok(chunk) => chunk,
                     Err(error) => {
                         yield ProviderEvent::Failed {
-                            message: format!("stream ended early: {error}"),
+                            error: ProviderErrorInfo::provider(format!(
+                                "stream ended early: {error}"
+                            )),
                         };
                         return;
                     }
@@ -446,7 +449,7 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
     if let Some(error) = data.get("error") {
         state.terminal = true;
         return vec![ProviderEvent::Failed {
-            message: safe_in_band_error("openai-compat", error),
+            error: ProviderErrorInfo::from_error(&classify_in_band_error("openai-compat", error)),
         }];
     }
 
@@ -792,7 +795,10 @@ mod tests {
                     fragment: "{\"pa".into(),
                 },
                 ProviderEvent::Failed {
-                    message: "openai-compat returned 500 (server_error)".into(),
+                    error: ProviderErrorInfo {
+                        kind: "overloaded".into(),
+                        message: "openai-compat returned 500 (server_error)".into(),
+                    },
                 },
             ]
         );
