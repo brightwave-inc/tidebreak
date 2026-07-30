@@ -817,13 +817,20 @@ impl ConfiguredCodeExecutionProvider {
                 );
             }
         }
-        if outcome.written > 0 || outcome.deleted > 0 || outcome.refused > 0 {
+        if !outcome.written.is_empty() || !outcome.rejected.is_empty() {
+            let deleted = outcome
+                .written
+                .iter()
+                .filter(|file| {
+                    file.change == openwave_code_execution::MaterializedChangeKind::Deleted
+                })
+                .count();
             tracing::info!(
                 chat = %chat,
                 turn = %turn,
-                written = outcome.written,
-                deleted = outcome.deleted,
-                refused = outcome.refused,
+                written = outcome.written.len().saturating_sub(deleted),
+                deleted,
+                rejected = outcome.rejected.len(),
                 "applied staged exec writes to granted folders"
             );
         }

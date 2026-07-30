@@ -106,6 +106,19 @@ pub struct FileStamp {
     pub mode: u32,
 }
 
+/// What one conditional file mutation expects to find at its destination.
+///
+/// This is checked through the already-pinned parent descriptor immediately
+/// before the rename or unlink. A path lookup from `/` would reopen the
+/// containment race this module exists to avoid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilePrecondition {
+    /// No entry may occupy the destination.
+    Absent,
+    /// The destination must be a regular file with exactly this content.
+    Sha256([u8; 32]),
+}
+
 /// Resolve `relative` as a directory under `root` without walking through a
 /// symlink at any component, discarding why a refusal happened.
 ///
@@ -208,6 +221,27 @@ impl ScratchDir {
         let content = content.to_vec();
         self.blocking(move |directory| write_blocking(directory, &name, &content, mode))
             .await
+    }
+
+    /// Write `content` only if the destination still satisfies `expected`.
+    ///
+    /// Returns `false` for a stale precondition and leaves the destination
+    /// untouched. The content is fully written and synced to a private temp
+    /// file before the check, keeping the check as close to the final rename as
+    /// userspace can make it.
+    pub async fn write_file_with_mode_if_matches(
+        &self,
+        name: &str,
+        content: &[u8],
+        mode: Option<u32>,
+        expected: FilePrecondition,
+    ) -> io::Result<bool> {
+        let name = single_component(name)?;
+        let content = content.to_vec();
+        self.blocking(move |directory| {
+            write_conditionally_blocking(directory, &name, &content, mode, Some(expected))
+        })
+        .await
     }
 
     /// Read `name` inside this directory, refusing a symlink at the final
@@ -341,6 +375,14 @@ impl ScratchDir {
         .ok()
     }
 
+    /// SHA-256 of one regular file, read through a no-follow handle.
+    pub async fn file_sha256(&self, name: &str) -> io::Result<[u8; 32]> {
+        let file = self.open_file(name).await?;
+        tokio::task::spawn_blocking(move || sha256_reader(file))
+            .await
+            .map_err(|_| io::Error::other("scratch digest did not complete"))?
+    }
+
     /// Remove `name` and everything beneath it, relative to this directory.
     /// A symlink at `name` is unlinked rather than followed, so a name swapped
     /// for a symlink after the caller checked it cannot turn the removal loose
@@ -358,6 +400,25 @@ impl ScratchDir {
         self.blocking(move |directory| match kind {
             ScratchEntryKind::Directory => directory.remove_dir(&name),
             _ => directory.remove_file(&name),
+        })
+        .await
+    }
+
+    /// Remove a regular file only if it still satisfies `expected`.
+    ///
+    /// Returns `false` for a stale precondition and leaves the entry untouched.
+    pub async fn remove_file_if_matches(
+        &self,
+        name: &str,
+        expected: FilePrecondition,
+    ) -> io::Result<bool> {
+        let name = single_component(name)?;
+        self.blocking(move |directory| {
+            if !entry_matches_precondition(directory, &name, expected)? {
+                return Ok(false);
+            }
+            directory.remove_file(&name)?;
+            Ok(true)
         })
         .await
     }
@@ -380,6 +441,16 @@ fn write_blocking(
     content: &[u8],
     mode: Option<u32>,
 ) -> io::Result<()> {
+    write_conditionally_blocking(directory, name, content, mode, None).map(|_| ())
+}
+
+fn write_conditionally_blocking(
+    directory: &Dir,
+    name: &str,
+    content: &[u8],
+    mode: Option<u32>,
+    expected: Option<FilePrecondition>,
+) -> io::Result<bool> {
     use std::io::Write as _;
 
     // A process with write access to chat scratch could plant a symlink at a
@@ -413,11 +484,75 @@ fn write_blocking(
             }
             Ok(())
         })
-        .and_then(|()| directory.rename(&temporary, directory, name));
+        .and_then(|()| {
+            match expected {
+                // A hard link is the portable no-replace publication primitive
+                // already used by the connected-folder broker. Unlike a
+                // check-then-rename, a creator racing us cannot be overwritten
+                // between the absence check and publication.
+                Some(FilePrecondition::Absent) => {
+                    return match directory.hard_link(&temporary, directory, name) {
+                        Ok(()) => {
+                            let _ = directory.remove_file(&temporary);
+                            Ok(true)
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+                        Err(error) => Err(error),
+                    };
+                }
+                Some(expected) if !entry_matches_precondition(directory, name, expected)? => {
+                    return Ok(false);
+                }
+                Some(_) | None => {}
+            }
+            directory.rename(&temporary, directory, name)?;
+            Ok(true)
+        });
     if write.is_err() {
         let _ = directory.remove_file(&temporary);
     }
+    if matches!(write, Ok(false)) {
+        let _ = directory.remove_file(&temporary);
+    }
     write
+}
+
+fn entry_matches_precondition(
+    directory: &Dir,
+    name: &str,
+    expected: FilePrecondition,
+) -> io::Result<bool> {
+    match expected {
+        FilePrecondition::Absent => match directory.symlink_metadata(name) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
+            Ok(_) => Ok(false),
+            Err(error) => Err(error),
+        },
+        FilePrecondition::Sha256(expected) => {
+            let mut options = OpenOptions::new();
+            options.read(true).follow(FollowSymlinks::No);
+            let file = match directory.open_with(name, &options) {
+                Ok(file) => file.into_std(),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => return Err(error),
+            };
+            Ok(sha256_reader(file)? == expected)
+        }
+    }
+}
+
+fn sha256_reader(mut reader: impl io::Read) -> io::Result<[u8; 32]> {
+    use sha2::{Digest as _, Sha256};
+
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1_024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(digest.finalize().into());
+        }
+        digest.update(&buffer[..read]);
+    }
 }
 
 /// Names addressed inside a pinned directory must be a single ordinary
