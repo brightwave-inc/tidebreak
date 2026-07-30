@@ -16,6 +16,10 @@ React/TypeScript under `crates/openwave-desktop/ui`.
 - **Land work as small, focused PRs — one logical change each.** Don't accumulate
   a large multi-slice diff on a working branch. Ship a slice, open the PR, move
   on. Small and reviewable beats big and sprawling.
+- **Stacking PRs on top of one another is encouraged.** When a slice depends on
+  one still in review, branch off that PR's branch and keep going — don't sit
+  idle waiting for the base to merge. Retarget the stacked PR to `main` (and
+  rebase) once its base lands.
 - **Branch off `main`; PR back into `main`.** Never commit straight to `main`.
 - **Issues are for deferred or cross-agent work, not for narrating the current
   task.** Open an issue when work is being set aside for later, or when it needs
