@@ -407,6 +407,7 @@ describe("terminal events", () => {
     expect(effects).toEqual([
       { type: "turn_resolved" },
       { type: "refresh_user_questions" },
+      { type: "refresh_plan_approvals" },
       { type: "hydrate_terminal_transcript" },
     ]);
   });
@@ -434,6 +435,7 @@ describe("terminal events", () => {
     expect(effects).toEqual([
       { type: "turn_resolved" },
       { type: "refresh_user_questions" },
+      { type: "refresh_plan_approvals" },
       { type: "hydrate_terminal_transcript" },
     ]);
   });
@@ -497,6 +499,7 @@ describe("terminal events", () => {
       { type: "invalidate_terminal_hydration" },
       { type: "turn_resolved" },
       { type: "refresh_user_questions" },
+      { type: "refresh_plan_approvals" },
     ]);
   });
 

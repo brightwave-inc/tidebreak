@@ -46,6 +46,7 @@ import {
   type WebSearchProviderKind as WireWebSearchProviderKind,
   type PendingFolderAccessRequest as WirePendingFolderAccessRequest,
   type PendingOutputWritebackRequest as WirePendingOutputWritebackRequest,
+  type PendingPlanApproval as WirePendingPlanApproval,
   type PendingUserQuestions as WirePendingUserQuestions,
   type UserQuestion as WireUserQuestion,
   type UserQuestionOption as WireUserQuestionOption,
@@ -492,6 +493,19 @@ export type UserQuestionAnswer = {
   optionId?: string;
   freeForm?: string;
 };
+
+/** Closed renderer projection of one durable plan continuation. */
+export type PendingPlanApproval = {
+  callId: string;
+  turnId: string;
+  title: string;
+  plan: string;
+  proposedAt: string;
+};
+
+export type PlanDecision =
+  | { decision: "accept" }
+  | { decision: "reject"; feedback?: string };
 
 /**
  * The only consent prose a folder-access prompt will render.
@@ -1319,6 +1333,42 @@ export class ApiClient {
     });
   }
 
+  async listPendingPlanApprovals(
+    chatId: string,
+  ): Promise<PendingPlanApproval[]> {
+    const body = await this.json<unknown>(`/chats/${chatId}/plans/pending`, {
+      headers: this.headers(),
+    });
+    if (!Array.isArray(body)) {
+      throw new Error("pending plan response is not an array");
+    }
+    const requests = new Map<string, PendingPlanApproval>();
+    for (const item of body) {
+      const request = parsePendingPlanApproval(item);
+      if (!request || requests.has(request.callId)) {
+        throw new Error("pending plan response contains invalid data");
+      }
+      requests.set(request.callId, request);
+    }
+    return [...requests.values()];
+  }
+
+  async decidePlan(
+    chatId: string,
+    callId: string,
+    decision: PlanDecision,
+  ): Promise<void> {
+    await this.json(`/chats/${chatId}/plans/${callId}/decision`, {
+      method: "POST",
+      headers: this.headers(true),
+      body: JSON.stringify(
+        decision.decision === "reject" && decision.feedback !== undefined
+          ? { decision: "reject", feedback: decision.feedback }
+          : { decision: decision.decision },
+      ),
+    });
+  }
+
   /** Open the chat event stream; auth via Sec-WebSocket-Protocol. */
   openEvents(chatId: string, after: number, onFrame: (frame: ChatFrame) => void): WebSocket {
     const url = `${this.baseUrl.replace(/^http/, "ws")}/chats/${chatId}/events?after=${after}`;
@@ -1470,6 +1520,37 @@ function parseOpaqueCallIds(value: unknown): string[] | null {
     callIds.add(callId);
   }
   return [...callIds];
+}
+
+export function parsePendingPlanApproval(
+  value: unknown,
+): PendingPlanApproval | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WirePendingPlanApproval>(value, [
+      "call_id",
+      "turn_id",
+      "title",
+      "plan",
+      "proposed_at",
+    ]) ||
+    !nonEmptyBounded(value.call_id, 128) ||
+    !nonEmptyBounded(value.turn_id, 128) ||
+    !nonEmptyBounded(value.title, 120) ||
+    typeof value.plan !== "string" ||
+    !value.plan.trim() ||
+    Array.from(value.plan).length > 40_000 ||
+    !nonEmptyBounded(value.proposed_at, 64)
+  ) {
+    return null;
+  }
+  return {
+    callId: value.call_id,
+    turnId: value.turn_id,
+    title: value.title,
+    plan: value.plan,
+    proposedAt: value.proposed_at,
+  };
 }
 
 export function parsePendingUserQuestions(

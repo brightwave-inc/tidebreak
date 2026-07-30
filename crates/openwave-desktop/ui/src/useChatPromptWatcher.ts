@@ -27,6 +27,7 @@ export function useChatPromptWatcher(client: ApiClient | null, chatId: string | 
   const refreshRef = useRef<(() => void) | null>(null);
   const detailsRefreshRef = useRef<(() => void) | null>(null);
   const questionsSignal = useRefreshSignals((state) => state.userQuestions);
+  const plansSignal = useRefreshSignals((state) => state.planApprovals);
   const folderSignal = useRefreshSignals((state) => state.folderAccess);
   const writebackSignal = useRefreshSignals((state) => state.outputWritebacks);
 
@@ -108,6 +109,7 @@ export function useChatPromptWatcher(client: ApiClient | null, chatId: string | 
 
     let cancelled = false;
     let questionsSeq = 0;
+    let plansSeq = 0;
     let folderSeq = 0;
     let writebackSeq = 0;
 
@@ -121,6 +123,20 @@ export function useChatPromptWatcher(client: ApiClient | null, chatId: string | 
       } catch (err) {
         if (!cancelled && seq === questionsSeq) {
           console.error("failed to refresh pending user questions", err);
+        }
+      }
+    };
+
+    const readPlans = async () => {
+      const seq = ++plansSeq;
+      try {
+        const pending = await client.listPendingPlanApprovals(chatId);
+        if (!cancelled && seq === plansSeq) {
+          promptActions.setPlanApprovals(chatId, pending);
+        }
+      } catch (err) {
+        if (!cancelled && seq === plansSeq) {
+          console.error("failed to refresh pending plan approvals", err);
         }
       }
     };
@@ -155,6 +171,7 @@ export function useChatPromptWatcher(client: ApiClient | null, chatId: string | 
 
     const readDetails = () => {
       void readQuestions();
+      void readPlans();
       void readFolderAccess();
       void readOutputWritebacks();
     };
@@ -166,6 +183,7 @@ export function useChatPromptWatcher(client: ApiClient | null, chatId: string | 
     return () => {
       cancelled = true;
       questionsSeq += 1;
+      plansSeq += 1;
       folderSeq += 1;
       writebackSeq += 1;
       detailsRefreshRef.current = null;
@@ -177,6 +195,7 @@ export function useChatPromptWatcher(client: ApiClient | null, chatId: string | 
   // app-wide and may already be well past zero on arrival.
   const lastSignalsRef = useRef({
     questions: questionsSignal,
+    plans: plansSignal,
     folder: folderSignal,
     writeback: writebackSignal,
   });
@@ -184,14 +203,16 @@ export function useChatPromptWatcher(client: ApiClient | null, chatId: string | 
     const last = lastSignalsRef.current;
     if (
       last.questions === questionsSignal &&
+      last.plans === plansSignal &&
       last.folder === folderSignal &&
       last.writeback === writebackSignal
     ) return;
     lastSignalsRef.current = {
       questions: questionsSignal,
+      plans: plansSignal,
       folder: folderSignal,
       writeback: writebackSignal,
     };
     refreshRef.current?.();
-  }, [questionsSignal, folderSignal, writebackSignal]);
+  }, [questionsSignal, plansSignal, folderSignal, writebackSignal]);
 }

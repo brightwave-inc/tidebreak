@@ -228,6 +228,9 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       case "refresh_user_questions":
         signalRefresh("userQuestions");
         return;
+      case "refresh_plan_approvals":
+        signalRefresh("planApprovals");
+        return;
       case "turn_began":
         signalTurnLifecycle(effect.startsDifferentTurn ? "began" : "began_same_turn");
         return;

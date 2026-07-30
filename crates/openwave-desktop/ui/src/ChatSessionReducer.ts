@@ -44,6 +44,7 @@ export type ChatSessionEffect =
   | { type: "refresh_folder_access" }
   | { type: "refresh_output_writebacks" }
   | { type: "refresh_user_questions" }
+  | { type: "refresh_plan_approvals" }
   /** A turn began; the host resets cancel state (and steer state when asked). */
   | { type: "turn_began"; turnId: string; startsDifferentTurn: boolean }
   /** A turn reached a terminal event; the host clears cancel/steer state. */
@@ -236,6 +237,11 @@ export function reduceChatSessionEvent(
       return { state, effects };
     }
 
+    case "plan_proposed": {
+      effects.push({ type: "refresh_plan_approvals" });
+      return { state, effects };
+    }
+
     case "approval_required": {
       const approval = toolApprovalPresentation(event.approval);
       const provisionalToolCallIds = new Set(state.provisionalToolCallIds);
@@ -344,6 +350,7 @@ export function reduceChatSessionEvent(
       effects.push(
         { type: "turn_resolved" },
         { type: "refresh_user_questions" },
+        { type: "refresh_plan_approvals" },
         { type: "hydrate_terminal_transcript" },
       );
       return {
@@ -363,6 +370,7 @@ export function reduceChatSessionEvent(
       effects.push(
         { type: "turn_resolved" },
         { type: "refresh_user_questions" },
+        { type: "refresh_plan_approvals" },
         { type: "hydrate_terminal_transcript" },
       );
       return {
@@ -395,6 +403,7 @@ export function reduceChatSessionEvent(
         { type: "invalidate_terminal_hydration" },
         { type: "turn_resolved" },
         { type: "refresh_user_questions" },
+        { type: "refresh_plan_approvals" },
       );
       return {
         state: {
@@ -422,6 +431,7 @@ export function reduceChatSessionEvent(
         { type: "invalidate_terminal_hydration" },
         { type: "turn_resolved" },
         { type: "refresh_user_questions" },
+        { type: "refresh_plan_approvals" },
       );
       return {
         state: {

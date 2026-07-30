@@ -6,7 +6,8 @@ import { create } from "zustand";
 export type RefreshTarget =
   | "folderAccess"
   | "outputWritebacks"
-  | "userQuestions";
+  | "userQuestions"
+  | "planApprovals";
 
 /**
  * A revision counter per pollable target.
@@ -22,6 +23,7 @@ export type RefreshSignalStore = {
   folderAccess: number;
   outputWritebacks: number;
   userQuestions: number;
+  planApprovals: number;
   signal: (target: RefreshTarget) => void;
 };
 
@@ -30,6 +32,7 @@ export function createRefreshSignalStore() {
     folderAccess: 0,
     outputWritebacks: 0,
     userQuestions: 0,
+    planApprovals: 0,
     signal: (target) =>
       set((state) => ({ [target]: state[target] + 1 }) as Partial<RefreshSignalStore>),
   }));
