@@ -1244,6 +1244,9 @@ pub struct CreateChat {
     /// Optional permission mode for this chat; omitted means `ask`.
     #[serde(default)]
     pub permission_mode: Option<PermissionMode>,
+    /// Code-execution network access for this conversation workspace.
+    #[serde(default)]
+    pub network_policy: openwave_core::NetworkPolicy,
 }
 
 /// `POST /chats` — create a chat and return it (`201 Created`).
@@ -1263,6 +1266,7 @@ pub async fn create_chat(
     if let Some(model) = body.model.as_mut() {
         *model = validate_model_selection(&state, model, false).await?;
     }
+    crate::code_execution::normalize_network_policy(&mut body.network_policy)?;
     let chat = Chat {
         id: ChatId::new(),
         project_id: body.project_id,
@@ -1270,6 +1274,7 @@ pub async fn create_chat(
         model: body.model,
         reasoning_effort: body.reasoning_effort,
         permission_mode: body.permission_mode,
+        network_policy: body.network_policy,
         attachment_revision: 0,
         root_attachments: Vec::new(),
         created_at: Utc::now(),
@@ -1297,6 +1302,9 @@ pub struct ChatUpdate {
     /// sets it.
     #[serde(default, deserialize_with = "double_option")]
     pub permission_mode: Option<Option<PermissionMode>>,
+    /// Replace the code-execution network policy. Omitted leaves it unchanged.
+    #[serde(default)]
+    pub network_policy: Option<openwave_core::NetworkPolicy>,
 }
 
 /// `PATCH /chats/{id}` — update the human-facing title and/or model selection.
@@ -1309,6 +1317,9 @@ pub async fn patch_chat(
     // mixed request all-or-nothing from the user's point of view.
     if let Some(Some(model)) = body.model.as_mut() {
         *model = validate_model_selection(&state, model, false).await?;
+    }
+    if let Some(policy) = body.network_policy.as_mut() {
+        crate::code_execution::normalize_network_policy(policy)?;
     }
     let title = body.title.map(normalize_chat_title).transpose()?;
 
@@ -1326,6 +1337,7 @@ pub async fn patch_chat(
             body.model.clone(),
             body.reasoning_effort,
             body.permission_mode,
+            body.network_policy.clone(),
         )
         .await?
     {
@@ -1342,6 +1354,9 @@ pub async fn patch_chat(
     }
     if let Some(permission_mode) = body.permission_mode {
         chat.permission_mode = permission_mode;
+    }
+    if let Some(network_policy) = body.network_policy {
+        chat.network_policy = network_policy;
     }
     Ok(Json(chat))
 }

@@ -114,7 +114,7 @@ Be conservative: when in any doubt, set `safe` or `confident` to false and the p
 ///
 /// The "already handled" section states only what this deployment actually
 /// enforces, and nothing more. Writes really are confined to the chat's own
-/// workspace and the local sandbox really does deny the network outright,
+/// workspace and network access is independently bounded by the chat's policy,
 /// failing closed rather than running unconfined when it cannot be applied.
 /// Reads are the honest exception: the sandbox permits them broadly outside
 /// a deny list, so what a command *looks at* is the residual exposure and
@@ -123,7 +123,7 @@ fn command_system_prompt() -> &'static str {
     r#"An AI assistant is helping someone with their work. To take its next step it wants to run a command. You decide whether that command is routine and expected enough to run AUTOMATICALLY, or whether the assistant should pause and ask the person first.
 
 What's already handled (do not re-check it):
-- The command runs in a sandbox. It can only WRITE inside this conversation's own scratch workspace, and it has NO network access.
+- The command runs in a sandbox. It can only WRITE inside this conversation's own scratch workspace. Network access is independently limited by this conversation's explicit policy (off, package registries, exact hosts, or public internet); do not re-evaluate that policy here.
 - A strict deterministic check has ALREADY cleared it: it is not an interpreter invocation, it is not destructive, it does not write to sensitive locations, and nothing in it reaches outside the workspace. Assume all of that is true.
 
 One thing is NOT fully handled, and it is the thing to weigh: the sandbox permits READING files fairly broadly. So the question worth asking is what this command would look at, and whether reading that plausibly serves what the user asked for.

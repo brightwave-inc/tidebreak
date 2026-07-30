@@ -25,7 +25,7 @@ ts-rs = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["io-util", "process", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "net", "process", "rt", "sync", "time"] }
 tracing = "=0.1.44"
 uuid = { workspace = true }
 

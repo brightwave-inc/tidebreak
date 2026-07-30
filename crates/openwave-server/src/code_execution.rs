@@ -21,12 +21,12 @@ use openwave_code_execution::{
     OutputArtifactEntry, OutputArtifactScan, OutputArtifactStatus, PreviewScan, RemoteSessionPool,
     StagedUpload, WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing, WriteOverlay,
     WriteSnapshotSink, DAYTONA_CREDENTIAL_KEY, DOCUMENT_SCRIPTS_DIR, DOCUMENT_SCRIPT_FILES,
-    E2B_CREDENTIAL_KEY,
+    E2B_CREDENTIAL_KEY, PACKAGE_MANAGER_DOMAINS,
 };
 use openwave_core::{
     exec_attachment_file_name, BlobStore, CallId, Chat, ChatId, HostRootId,
-    MessageDocumentAttachment, ProjectId, Result, RevisionProducer, SecretProvider, Store, TurnId,
-    MAX_EXEC_WORKSPACE_FILE_BYTES,
+    MessageDocumentAttachment, NetworkPolicy, ProjectId, Result, RevisionProducer, SecretProvider,
+    Store, TurnId, MAX_EXEC_WORKSPACE_FILE_BYTES,
 };
 use openwave_egress::{
     CidrBlock, DomainPattern, EgressAllowlist, EgressEnforcement, EgressError, EgressPolicy,
@@ -41,6 +41,79 @@ const CODE_EXECUTION_SETTING: &str = "code_execution";
 pub const DEFAULT_TIMEOUT_MS: u64 = 20_000;
 pub const MIN_TIMEOUT_MS: u64 = 1_000;
 pub const MAX_TIMEOUT_MS: u64 = 120_000;
+const MAX_NETWORK_ALLOWED_HOSTS: usize = 64;
+
+/// Validate and canonicalize one user-authored per-chat network policy.
+///
+/// Custom entries are exact DNS hosts. Wildcards, address literals, and
+/// duplicate spellings are refused or collapsed before persistence so every
+/// renderer and provider compiles the same authority.
+pub(crate) fn normalize_network_policy(
+    policy: &mut NetworkPolicy,
+) -> std::result::Result<(), ServerError> {
+    let NetworkPolicy::AllowedHosts { allowed_hosts, .. } = policy else {
+        return Ok(());
+    };
+    if allowed_hosts.len() > MAX_NETWORK_ALLOWED_HOSTS {
+        return Err(ServerError::bad_request(format!(
+            "network policy accepts at most {MAX_NETWORK_ALLOWED_HOSTS} allowed hosts"
+        )));
+    }
+    let mut normalized = Vec::with_capacity(allowed_hosts.len());
+    let mut seen = HashSet::new();
+    for host in allowed_hosts.iter() {
+        let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+        if host.starts_with("*.") {
+            return Err(ServerError::bad_request(
+                "network policy allowed hosts must be exact DNS names",
+            ));
+        }
+        let pattern = DomainPattern::parse(&host)
+            .map_err(|error| ServerError::bad_request(error.to_string()))?;
+        let host = pattern.to_string();
+        if seen.insert(host.clone()) {
+            normalized.push(host);
+        }
+    }
+    *allowed_hosts = normalized;
+    Ok(())
+}
+
+fn network_egress_config(policy: &NetworkPolicy) -> EgressConfig {
+    match policy {
+        NetworkPolicy::Off => EgressConfig::Allowlist {
+            domains: Vec::new(),
+            cidrs: Vec::new(),
+        },
+        NetworkPolicy::PackageManagers => EgressConfig::Allowlist {
+            domains: PACKAGE_MANAGER_DOMAINS
+                .iter()
+                .map(|domain| (*domain).to_owned())
+                .collect(),
+            cidrs: Vec::new(),
+        },
+        NetworkPolicy::AllowedHosts {
+            allowed_hosts,
+            package_managers,
+        } => {
+            let mut domains = allowed_hosts.clone();
+            if *package_managers {
+                domains.extend(
+                    PACKAGE_MANAGER_DOMAINS
+                        .iter()
+                        .map(|domain| (*domain).to_owned()),
+                );
+            }
+            domains.sort();
+            domains.dedup();
+            EgressConfig::Allowlist {
+                domains,
+                cidrs: Vec::new(),
+            }
+        }
+        NetworkPolicy::Open => EgressConfig::Open,
+    }
+}
 
 /// Exact product attachment projection sent to the trusted desktop host.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,8 +213,9 @@ impl EgressConfig {
 }
 
 /// Non-secret host selection. Local is usable by default because its mandatory
-/// sandbox denies network and outside-workspace writes. `None` explicitly
-/// removes execution from service without changing the stable tool contract.
+/// sandbox confines writes and enforces each chat's network policy outside the
+/// workload. `None` explicitly removes execution from service without changing
+/// the stable tool contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodeExecutionConfig {
     #[serde(default)]
@@ -915,6 +989,7 @@ impl ConfiguredCodeExecutionProvider {
     /// Resolve the currently selected adapter at the last boundary before use.
     async fn resolve(
         &self,
+        network_policy: Option<&NetworkPolicy>,
     ) -> std::result::Result<
         (CodeExecutionProviderKind, Box<dyn CodeExecutionProvider>),
         CodeExecutionError,
@@ -931,28 +1006,35 @@ impl ConfiguredCodeExecutionProvider {
                     &self.scratch_root,
                     Duration::from_millis(config.timeout_ms),
                 )?
+                .with_network_policy(network_policy.cloned().unwrap_or_default())
                 .with_document_scripts(self.document_scripts_source.clone()),
             ),
             CodeExecutionProviderKind::E2b => {
                 let credential = E2BCredential::load(&*self.secrets)
                     .await?
                     .ok_or(CodeExecutionError::NotConfigured)?;
+                let egress = network_policy
+                    .map(network_egress_config)
+                    .unwrap_or_else(|| config.egress.clone());
                 Box::new(configured_e2b(
                     credential,
                     Duration::from_millis(config.timeout_ms),
                     self.remote_sessions.clone(),
-                    &config.egress,
+                    &egress,
                 )?)
             }
             CodeExecutionProviderKind::Daytona => {
                 let credential = DaytonaCredential::load(&*self.secrets)
                     .await?
                     .ok_or(CodeExecutionError::NotConfigured)?;
+                let egress = network_policy
+                    .map(network_egress_config)
+                    .unwrap_or_else(|| config.egress.clone());
                 Box::new(configured_daytona(
                     credential,
                     Duration::from_millis(config.timeout_ms),
                     self.remote_sessions.clone(),
-                    &config.egress,
+                    &egress,
                 )?)
             }
             _ => {
@@ -973,7 +1055,7 @@ impl ConfiguredCodeExecutionProvider {
     pub async fn workspace(
         &self,
     ) -> std::result::Result<Option<ConfiguredWorkspace>, CodeExecutionError> {
-        let provider = match self.resolve().await {
+        let provider = match self.resolve(None).await {
             Ok((_, provider)) => provider,
             Err(CodeExecutionError::NotConfigured) => return Ok(None),
             Err(error) => return Err(error),
@@ -996,29 +1078,27 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
                 "execution folder grants are host-resolved state".into(),
             ));
         }
-        let (kind, provider) = self.resolve().await?;
+        let chat_id = request
+            .workspace_id
+            .as_str()
+            .parse::<ChatId>()
+            .map_err(|_| {
+                CodeExecutionError::InvalidRequest(
+                    "execution workspace does not identify a conversation".into(),
+                )
+            })?;
+        let chat = self
+            .store
+            .get_chat(chat_id)
+            .await
+            .map_err(|_| {
+                CodeExecutionError::Unavailable("conversation storage is unavailable".into())
+            })?
+            .ok_or_else(|| {
+                CodeExecutionError::InvalidRequest("execution conversation does not exist".into())
+            })?;
+        let (kind, provider) = self.resolve(Some(&chat.network_policy)).await?;
         if kind == CodeExecutionProviderKind::Local && cfg!(target_os = "macos") {
-            let chat_id = request
-                .workspace_id
-                .as_str()
-                .parse::<ChatId>()
-                .map_err(|_| {
-                    CodeExecutionError::InvalidRequest(
-                        "execution workspace does not identify a conversation".into(),
-                    )
-                })?;
-            let chat = self
-                .store
-                .get_chat(chat_id)
-                .await
-                .map_err(|_| {
-                    CodeExecutionError::Unavailable("conversation storage is unavailable".into())
-                })?
-                .ok_or_else(|| {
-                    CodeExecutionError::InvalidRequest(
-                        "execution conversation does not exist".into(),
-                    )
-                })?;
             // Authority is resolved again here rather than reused from the
             // turn's prompt snapshot, so a revocation mid-turn fails closed.
             // Staging is looked up rather than re-established: the overlay
@@ -1579,6 +1659,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: Some(PermissionMode::Ask),
+            network_policy: Default::default(),
             attachment_revision: 1,
             root_attachments: vec![ChatRootAttachment {
                 root_id: granted,
@@ -1631,6 +1712,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
+            network_policy: Default::default(),
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -1751,6 +1833,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             permission_mode: None,
+            network_policy: Default::default(),
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),
@@ -1978,6 +2061,37 @@ mod tests {
         }
         .validate()
         .is_err());
+    }
+
+    #[test]
+    fn chat_network_policy_compiles_package_class_and_deny_all_for_managed_providers() {
+        let off = network_egress_config(&NetworkPolicy::Off)
+            .to_policy()
+            .unwrap();
+        let Some(EgressPolicy::Allowlist(off)) = off else {
+            panic!("off must compile to an explicit deny-all policy");
+        };
+        assert!(off.is_empty());
+
+        let packages = network_egress_config(&NetworkPolicy::PackageManagers)
+            .to_policy()
+            .unwrap();
+        let Some(EgressPolicy::Allowlist(packages)) = packages else {
+            panic!("package managers must compile to an allowlist");
+        };
+        assert_eq!(packages.domains().len(), PACKAGE_MANAGER_DOMAINS.len());
+        assert!(packages
+            .domains()
+            .iter()
+            .any(|domain| domain.to_string() == "pypi.org"));
+        assert!(packages.cidrs().is_empty());
+
+        assert_eq!(
+            network_egress_config(&NetworkPolicy::Open)
+                .to_policy()
+                .unwrap(),
+            None
+        );
     }
 
     #[test]

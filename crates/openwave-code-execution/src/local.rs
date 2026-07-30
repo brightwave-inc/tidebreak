@@ -14,12 +14,15 @@ use std::time::Duration;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use openwave_core::NetworkPolicy;
 #[cfg(target_os = "macos")]
 use tokio::io::{AsyncRead, AsyncReadExt};
 #[cfg(target_os = "macos")]
 use tokio::process::Command;
 
 use crate::host_paths::{resolve_scratch_directory, ScratchDir, ScratchEntryKind};
+#[cfg(target_os = "macos")]
+use crate::network::LocalEgressBroker;
 #[cfg(target_os = "macos")]
 use crate::output::{Capture, StreamKind};
 use crate::receipt::{request_fingerprint, BeginExecution, ExecutionReceipt};
@@ -51,6 +54,7 @@ pub struct LocalExecutionProvider {
     scratch_root: PathBuf,
     timeout: Duration,
     document_scripts_dir: Option<PathBuf>,
+    network_policy: NetworkPolicy,
 }
 
 /// Host paths resolved for one execution: the model-visible workspace and cwd,
@@ -84,7 +88,15 @@ impl LocalExecutionProvider {
             scratch_root: scratch_root.into(),
             timeout,
             document_scripts_dir: None,
+            network_policy: NetworkPolicy::Off,
         })
+    }
+
+    /// Apply the conversation's provider-neutral network policy.
+    #[must_use]
+    pub fn with_network_policy(mut self, policy: NetworkPolicy) -> Self {
+        self.network_policy = policy;
+        self
     }
 
     /// Expose the trusted bundled document helpers as a read-only subtree.
@@ -100,10 +112,9 @@ impl LocalExecutionProvider {
         cfg!(target_os = "macos") && Path::new(SANDBOX_EXEC).is_file()
     }
 
-    /// Host knowledge about the local adapter's egress enforcement: the
-    /// Seatbelt profile denies network outright, from outside the workload,
-    /// with no exceptions. The one shipped surface that qualifies as a
-    /// boundary for third-party-credential-bearing work.
+    /// Host knowledge about the local adapter's egress enforcement: Seatbelt
+    /// exposes only the execution-scoped broker port and the broker applies
+    /// the destination policy outside the workload, with no bypass exception.
     #[must_use]
     pub fn egress_enforcement() -> openwave_egress::EgressEnforcement {
         openwave_egress::EgressEnforcement::external(Vec::new())
@@ -325,6 +336,7 @@ impl CodeExecutionProvider for LocalExecutionProvider {
             self.timeout,
             document_scripts_dir.as_deref(),
             &folder_grants,
+            &self.network_policy,
         )
         .await;
         match result {
@@ -725,7 +737,13 @@ async fn run_native(
     timeout: Duration,
     document_scripts_dir: Option<&Path>,
     folder_grants: &[CanonicalExecFolderGrant],
+    network_policy: &NetworkPolicy,
 ) -> Result<CodeExecutionResponse, CodeExecutionError> {
+    let broker = if matches!(network_policy, NetworkPolicy::Off) {
+        None
+    } else {
+        Some(LocalEgressBroker::start(network_policy.clone()).await?)
+    };
     let developer_dir = macos_developer_dir();
     let profile = macos_profile(
         workspace,
@@ -733,6 +751,7 @@ async fn run_native(
         developer_dir.as_deref(),
         document_scripts_dir,
         folder_grants,
+        broker.as_ref().map(LocalEgressBroker::port),
     )?;
     let mut command = Command::new(SANDBOX_EXEC);
     command
@@ -746,6 +765,18 @@ async fn run_native(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    if let Some(broker) = broker.as_ref() {
+        let proxy = broker.proxy_url();
+        command
+            .env("HTTP_PROXY", &proxy)
+            .env("HTTPS_PROXY", &proxy)
+            .env("http_proxy", &proxy)
+            .env("https_proxy", &proxy)
+            .env("ALL_PROXY", &proxy)
+            .env("all_proxy", &proxy)
+            .env("NO_PROXY", "")
+            .env("no_proxy", "");
+    }
     if let Some(developer_dir) = developer_dir {
         command.env("DEVELOPER_DIR", &developer_dir).env(
             "PATH",
@@ -828,6 +859,7 @@ async fn run_native(
     _timeout: Duration,
     _document_scripts_dir: Option<&Path>,
     _folder_grants: &[()],
+    _network_policy: &NetworkPolicy,
 ) -> Result<CodeExecutionResponse, CodeExecutionError> {
     Err(CodeExecutionError::Unavailable(
         "native local sandboxing is not supported on this host".into(),
@@ -908,6 +940,7 @@ fn macos_profile(
     developer_dir: Option<&Path>,
     document_scripts_dir: Option<&Path>,
     folder_grants: &[CanonicalExecFolderGrant],
+    broker_port: Option<u16>,
 ) -> Result<String, CodeExecutionError> {
     const DENIED_READS: &[&str] = &[
         "/Applications",
@@ -950,11 +983,13 @@ fn macos_profile(
     ];
     const ALLOWED_RUNTIME_SUBPATHS: &[&str] = &[
         "/Applications/Xcode.app/Contents/Developer",
+        "/etc/ssl",
         "/Library/Developer/CommandLineTools",
         "/System/Volumes/Data/Applications/Xcode.app/Contents/Developer",
         "/System/Volumes/Data/Library/Developer/CommandLineTools",
         "/System/Volumes/Data/private/var/select",
         "/private/var/select",
+        "/private/etc/ssl",
         "/var/select",
         "/var/db/timezone",
     ];
@@ -1035,12 +1070,16 @@ fn macos_profile(
     // writable like the workspace but lives outside the model-visible tree, so
     // interpreter caches never surface as chat files.
     let env_home = sandbox_subpath(env_home)?;
+    let network = broker_port
+        .map(|port| format!("(allow network-outbound (remote tcp \"localhost:{port}\"))"))
+        .unwrap_or_default();
     Ok(format!(
         "(version 1)\n\
          (deny default)\n\
          (allow process-exec)\n\
          (allow process-fork)\n\
          (allow sysctl-read)\n\
+         {network}\n\
          (allow file-read*)\n\
          (deny file-read*\n  {denied})\n\
          (allow file-read-metadata\n  {runtime_metadata}\n  {grant_metadata})\n\
@@ -1302,6 +1341,45 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
+    async fn local_network_policy_exposes_only_the_broker_port() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (_root, provider, workspace) = fixture(Duration::from_secs(5));
+        let provider = provider.with_network_policy(NetworkPolicy::Open);
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let direct_port = listener.local_addr().unwrap().port();
+        let direct_server = tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                    .await;
+            }
+        });
+        let script = format!(
+            "if /usr/bin/curl --noproxy '*' -fsS --max-time 1 \
+                 http://127.0.0.1:{direct_port} >/dev/null 2>&1; \
+             then echo direct-open; else echo direct-blocked; fi; \
+             /usr/bin/curl -sS --max-time 2 https://127.0.0.1:9 2>&1 || true"
+        );
+        let response = provider
+            .execute(request(&workspace, "call-broker-pinhole", &script))
+            .await
+            .unwrap();
+        direct_server.abort();
+
+        assert_eq!(response.exit_code, Some(0), "{}", response.stderr);
+        assert!(response.stdout.contains("direct-blocked"));
+        assert!(
+            response.stdout.contains("403"),
+            "a fast broker refusal proves the exact proxy pinhole was reachable: {}",
+            response.stdout
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
     async fn local_sandbox_times_out_and_rejects_identity_conflicts() {
         let (_root, provider, workspace) = fixture(Duration::from_millis(100));
         let timed_out = provider
@@ -1537,6 +1615,7 @@ mod tests {
                 "/Applications/OpenWave.app/Contents/Resources/exec-scripts",
             )),
             &[],
+            None,
         )
         .unwrap();
         assert!(profile.contains("(deny default)"));
@@ -1557,9 +1636,22 @@ mod tests {
             Path::new("/Users/test/env-home"),
             None,
             None,
-            &[]
+            &[],
+            None,
         )
         .is_err());
+
+        let proxied = macos_profile(
+            Path::new("/Users/test/workspace"),
+            Path::new("/Users/test/env-home"),
+            None,
+            None,
+            &[],
+            Some(43127),
+        )
+        .unwrap();
+        assert!(proxied.contains("(allow network-outbound (remote tcp \"localhost:43127\"))"));
+        assert!(!proxied.contains("localhost:*"));
     }
 
     #[cfg(target_os = "macos")]
@@ -1581,6 +1673,7 @@ mod tests {
             None,
             None,
             &grants,
+            None,
         )
         .unwrap();
         let canonical_read = fs::canonicalize(read_only).unwrap();

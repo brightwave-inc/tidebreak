@@ -147,7 +147,7 @@ pub use model::{
     DelegatedFileReadClaim, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceBlob,
     DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, ExecFileChange, ExecFileSnapshot,
     ExecFileSnapshotRecord, ExecUndoState, Message, MessageAttachment, MessageDocumentAttachment,
-    PermissionMode, Project, ReasoningEffort, Role, RootAttachmentChange,
+    NetworkPolicy, PermissionMode, Project, ReasoningEffort, Role, RootAttachmentChange,
     RootAttachmentChangeAction, RootAttachmentChangeFailure, RootAttachmentChangePhase,
     RootAttachmentChangeTerminal, RootAttachmentOrigin, RootAttachmentSubjectKind,
     SandboxAgentAdmission, SandboxSpawnCheckpoint, SandboxSpawnCheckpointRequest, SandboxToolCall,

@@ -159,12 +159,13 @@ sandbox. Requests carry a canonical execution id for retry reconciliation and
 an opaque workspace id that providers interpret without exposing a host path to
 the model.
 
-The initial local provider is macOS Seatbelt: no network, no inherited
-environment or stdin, writes confined to private chat scratch, bounded time and
-output, process-group cleanup, and private running/terminal receipts. Other
-platforms fail closed rather than running unconfined. `openwave-server` owns the
-runtime provider/timeout setting and can later resolve E2B or another managed
-adapter behind the same contract.
+The initial local provider is macOS Seatbelt: no direct network, one exact
+loopback broker pinhole when a chat grants egress, no inherited environment or
+stdin, writes confined to private chat scratch, bounded time and output,
+process-group cleanup, and private running/terminal receipts. Other platforms
+fail closed rather than running unconfined. `openwave-server` owns the runtime
+provider/timeout setting and resolves the same per-chat network policy into the
+local broker, E2B, or Daytona behind the common contract.
 
 See [Code execution](code-execution.md).
 
@@ -251,4 +252,3 @@ confined to one explicit workspace. Indexed-document MCP search and additional
 command-line client workflows remain in development.
 
 **Depends on:** `openwave-core`, `openwave-mcp`, `openwave-server`.
-

@@ -95,6 +95,7 @@ pub mod chat {
         pub model: Option<String>,
         pub reasoning_effort: Option<String>,
         pub permission_mode: Option<String>,
+        pub network_policy: String,
         pub attachment_revision: i64,
         pub created_at: DateTimeUtc,
     }

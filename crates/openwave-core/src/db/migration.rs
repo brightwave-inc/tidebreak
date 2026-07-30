@@ -100,7 +100,50 @@ impl MigratorTrait for Migrator {
             Box::new(AddAppGrants),
             Box::new(AddToolCallRawArguments),
             Box::new(RaiseAttemptBudgets),
+            Box::new(AddChatNetworkPolicy),
         ]
+    }
+}
+
+/// Adds the provider-neutral per-chat code-execution network policy. Existing
+/// conversations stay at the native sandbox's historical behavior: off.
+struct AddChatNetworkPolicy;
+
+impl MigrationName for AddChatNetworkPolicy {
+    fn name(&self) -> &str {
+        "m20260730_000039_add_chat_network_policy"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddChatNetworkPolicy {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Chat::Table)
+                    .add_column(
+                        ColumnDef::new(Chat::NetworkPolicy)
+                            .text()
+                            .not_null()
+                            .default(r#"{"mode":"off"}"#),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Chat::Table)
+                    .drop_column(Chat::NetworkPolicy)
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
     }
 }
 
@@ -9515,6 +9558,7 @@ enum Chat {
     Model,
     ReasoningEffort,
     PermissionMode,
+    NetworkPolicy,
     CitationFormat,
     AttachmentRevision,
     CreatedAt,

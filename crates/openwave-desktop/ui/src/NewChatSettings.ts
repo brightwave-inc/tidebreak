@@ -2,6 +2,7 @@ import { create } from "zustand";
 
 import type {
   ModelSelectionKey,
+  NetworkPolicy,
   PermissionMode,
   ReasoningEffort,
 } from "./api";
@@ -9,6 +10,7 @@ import type {
 const MODEL_KEY = "openwave.new-chat-model";
 const REASONING_EFFORT_KEY = "openwave.new-chat-reasoning-effort";
 const PERMISSION_MODE_KEY = "openwave.new-chat-permission-mode";
+const NETWORK_POLICY_KEY = "openwave.new-chat-network-policy";
 
 const REASONING_EFFORTS: readonly ReasoningEffort[] = [
   "none",
@@ -63,10 +65,38 @@ type NewChatSettings = {
   model: ModelSelectionKey | null;
   reasoningEffort: ReasoningEffort | null;
   permissionMode: PermissionMode | null;
+  networkPolicy: NetworkPolicy;
   setModel: (model: ModelSelectionKey | null) => void;
   setReasoningEffort: (effort: ReasoningEffort | null) => void;
   setPermissionMode: (mode: PermissionMode) => void;
+  setNetworkPolicy: (policy: NetworkPolicy) => void;
 };
+
+function readNetworkPolicy(): NetworkPolicy {
+  const stored = read(NETWORK_POLICY_KEY);
+  if (!stored) return { mode: "off" };
+  try {
+    const value = JSON.parse(stored) as NetworkPolicy;
+    if (
+      value.mode === "off" ||
+      value.mode === "package_managers" ||
+      value.mode === "open"
+    ) {
+      return value;
+    }
+    if (
+      value.mode === "allowed_hosts" &&
+      Array.isArray(value.allowed_hosts) &&
+      value.allowed_hosts.every((host) => typeof host === "string") &&
+      typeof value.package_managers === "boolean"
+    ) {
+      return value;
+    }
+  } catch {
+    // Fall through to the deny-by-default policy.
+  }
+  return { mode: "off" };
+}
 
 /**
  * What the next chat will be created with, chosen before it exists.
@@ -87,6 +117,7 @@ export const useNewChatSettings = create<NewChatSettings>((set) => ({
   model: (read(MODEL_KEY) as ModelSelectionKey | null) ?? null,
   reasoningEffort: readEnum(REASONING_EFFORT_KEY, REASONING_EFFORTS),
   permissionMode: readEnum(PERMISSION_MODE_KEY, PERMISSION_MODES),
+  networkPolicy: readNetworkPolicy(),
   setModel: (model) => {
     write(MODEL_KEY, model);
     set({ model });
@@ -98,5 +129,9 @@ export const useNewChatSettings = create<NewChatSettings>((set) => ({
   setPermissionMode: (permissionMode) => {
     write(PERMISSION_MODE_KEY, permissionMode);
     set({ permissionMode });
+  },
+  setNetworkPolicy: (networkPolicy) => {
+    write(NETWORK_POLICY_KEY, JSON.stringify(networkPolicy));
+    set({ networkPolicy });
   },
 }));

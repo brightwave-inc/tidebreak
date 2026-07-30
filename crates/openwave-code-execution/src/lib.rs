@@ -16,6 +16,7 @@ mod e2b;
 pub mod host_paths;
 mod http;
 mod local;
+mod network;
 mod output;
 pub mod overlay;
 mod preview;
@@ -32,6 +33,7 @@ pub use host_paths::{
     ScratchDir, ScratchEntry, ScratchEntryKind, ScratchRefusal,
 };
 pub use local::LocalExecutionProvider;
+pub use network::PACKAGE_MANAGER_DOMAINS;
 pub use overlay::{
     sweep_abandoned_overlays, MaterializedChange, MaterializedChangeKind, OverlayOutcome,
     OverlaySlot, PreparedWriteSnapshot, PriorContents, RejectedChange, RejectedChangeReason,

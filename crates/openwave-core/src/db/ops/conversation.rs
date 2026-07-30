@@ -188,6 +188,12 @@ where
             Some(mode) => Set(Some(mode.as_str().to_owned())),
             None => sea_orm::ActiveValue::NotSet,
         },
+        network_policy: match &chat.network_policy {
+            crate::NetworkPolicy::Off => sea_orm::ActiveValue::NotSet,
+            policy => Set(serde_json::to_string(policy).map_err(|error| {
+                AgentError::Store(format!("could not encode chat network policy: {error}"))
+            })?),
+        },
         attachment_revision: Set(chat.attachment_revision),
         created_at: Set(chat.created_at),
     }
@@ -273,8 +279,13 @@ pub(in crate::db) async fn update_chat_metadata(
     model: Option<Option<String>>,
     reasoning_effort: Option<Option<ReasoningEffort>>,
     permission_mode: Option<Option<PermissionMode>>,
+    network_policy: Option<crate::NetworkPolicy>,
 ) -> Result<bool> {
-    if title.is_none() && model.is_none() && reasoning_effort.is_none() && permission_mode.is_none()
+    if title.is_none()
+        && model.is_none()
+        && reasoning_effort.is_none()
+        && permission_mode.is_none()
+        && network_policy.is_none()
     {
         return Ok(entities::chat::Entity::find_by_id(id.0)
             .one(&store.conn)
@@ -308,6 +319,15 @@ pub(in crate::db) async fn update_chat_metadata(
         update = update.col_expr(
             entities::chat::Column::PermissionMode,
             sea_orm::sea_query::Expr::value(permission_mode.map(|mode| mode.as_str().to_owned())),
+        );
+    }
+    if let Some(network_policy) = network_policy {
+        let encoded = serde_json::to_string(&network_policy).map_err(|error| {
+            AgentError::Store(format!("could not encode chat network policy: {error}"))
+        })?;
+        update = update.col_expr(
+            entities::chat::Column::NetworkPolicy,
+            sea_orm::sea_query::Expr::value(encoded),
         );
     }
     let result = update
@@ -1265,6 +1285,12 @@ fn chat_from_models(
             .permission_mode
             .as_deref()
             .and_then(PermissionMode::from_str),
+        network_policy: serde_json::from_str(&model.network_policy).map_err(|error| {
+            AgentError::Store(format!(
+                "chat {} has an invalid network policy: {error}",
+                model.id
+            ))
+        })?,
         attachment_revision: model.attachment_revision,
         root_attachments,
         created_at: model.created_at,

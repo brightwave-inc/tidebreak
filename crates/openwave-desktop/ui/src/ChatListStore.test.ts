@@ -11,6 +11,7 @@ function chat(id: string, title: string | null): Chat {
     model: null,
     reasoning_effort: null,
     permission_mode: null,
+    network_policy: { mode: "off" },
     attachment_revision: 0,
     root_attachments: [],
     created_at: "2026-07-28T12:00:00Z",

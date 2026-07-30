@@ -5,12 +5,9 @@ import type {
   CodeExecutionConfigInfo,
   CodeExecutionCredentialReadiness,
   CodeExecutionProviderKind,
-  EgressConfig,
 } from "../api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
-import { Textarea } from "@/components/ui/textarea";
 import {
   ActiveProviderField,
   ProviderCredentialField,
@@ -19,7 +16,6 @@ import {
 } from "./ProviderFields";
 import {
   SettingsError,
-  SettingsField,
   SettingsPanel,
   SettingsSection,
   SettingsStatus,
@@ -43,10 +39,6 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
   const [apiKeys, setApiKeys] = useState<
     Partial<Record<CodeExecutionProviderKind, string>>
   >({});
-  // Egress restriction is opt-in: off means today's open-internet sandboxes.
-  const [restrictEgress, setRestrictEgress] = useState(false);
-  const [egressDomains, setEgressDomains] = useState("");
-  const [egressCidrs, setEgressCidrs] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [removing, setRemoving] = useState<CodeExecutionProviderKind | null>(
@@ -69,7 +61,6 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
         setCredentials(nextCredentials.credentials);
         setProvider(nextConfig.provider ?? "");
         setTimeoutSeconds(String(nextConfig.timeout_ms / 1000));
-        hydrateEgress(nextConfig.egress.policy);
       } catch (err) {
         if (!cancelled) setError(String(err));
       } finally {
@@ -83,18 +74,6 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
 
   const working = saving || removing !== null;
   const state = codeExecutionState(config);
-
-  function hydrateEgress(policy: EgressConfig) {
-    if (policy.mode === "allowlist") {
-      setRestrictEgress(true);
-      setEgressDomains(policy.domains.join("\n"));
-      setEgressCidrs(policy.cidrs.join("\n"));
-    } else {
-      setRestrictEgress(false);
-      setEgressDomains("");
-      setEgressCidrs("");
-    }
-  }
 
   async function save() {
     const timeout = timeoutMsFromSeconds(
@@ -121,20 +100,12 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
       const nextConfig = await client.putCodeExecutionConfig({
         provider: provider || null,
         timeout_ms: timeout.timeoutMs,
-        egress: restrictEgress
-          ? {
-              mode: "allowlist",
-              domains: splitEntries(egressDomains),
-              cidrs: splitEntries(egressCidrs),
-            }
-          : { mode: "open" },
       });
       const nextCredentials = await client.listCodeExecutionCredentials();
       setConfig(nextConfig);
       setCredentials(nextCredentials.credentials);
       setProvider(nextConfig.provider ?? "");
       setTimeoutSeconds(String(nextConfig.timeout_ms / 1000));
-      hydrateEgress(nextConfig.egress.policy);
       toast.success("Saved code-execution settings");
     } catch (err) {
       setError(String(err));
@@ -237,66 +208,9 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
           </SettingsSection>
 
           <SettingsSection
-            title="Network egress"
-            description="Cloud sandboxes reach the internet freely by default. Turn on restriction to allow only the destinations you list; everything else is denied. The local sandbox already blocks all network."
+            title="Provider network enforcement"
+            description="Network access is chosen per conversation beside the composer. Providers enforce that same policy with different fidelity; limitations are disclosed here."
           >
-            <div className="flex items-start justify-between gap-4">
-              <div className="flex flex-col gap-0.5">
-                <span className="font-bold">Restrict network egress</span>
-                <span className="text-sm text-muted-foreground">
-                  {restrictEgress
-                    ? "Only the domains and address blocks below are reachable from the cloud sandbox."
-                    : "Open egress — the cloud sandbox can reach any destination, as it does today."}
-                </span>
-              </div>
-              <Switch
-                checked={restrictEgress}
-                disabled={working}
-                onCheckedChange={setRestrictEgress}
-                aria-label="Restrict network egress"
-              />
-            </div>
-
-            {restrictEgress && (
-              <>
-                <SettingsField
-                  label="Allowed domains"
-                  hint="One per line. An exact host (api.example.com) or a leading wildcard (*.pypi.org)."
-                >
-                  <Textarea
-                    className={ENTRY_TEXTAREA_CLASS}
-                    rows={4}
-                    spellCheck={false}
-                    value={egressDomains}
-                    disabled={working}
-                    placeholder={"*.pypi.org\nfiles.pythonhosted.org"}
-                    onChange={(event) => setEgressDomains(event.target.value)}
-                  />
-                </SettingsField>
-
-                <SettingsField
-                  label="Allowed address blocks"
-                  hint="One per line, in CIDR notation (140.82.112.0/20) or a bare address."
-                >
-                  <Textarea
-                    className={ENTRY_TEXTAREA_CLASS}
-                    rows={3}
-                    spellCheck={false}
-                    value={egressCidrs}
-                    disabled={working}
-                    placeholder={"140.82.112.0/20"}
-                    onChange={(event) => setEgressCidrs(event.target.value)}
-                  />
-                </SettingsField>
-
-                <p className="text-sm leading-relaxed text-muted-foreground">
-                  An empty allowlist blocks all egress. Domain and address rules
-                  are independent: a domain grant never opens a raw IP, and an
-                  address block never opens a hostname.
-                </p>
-              </>
-            )}
-
             <EgressEnforcementDisclosure
               enforcement={config.egress.enforcement}
             />
@@ -312,32 +226,18 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
           </div>
 
           <p className="text-sm leading-relaxed text-muted-foreground">
-            Local execution blocks network and confines writes to private chat
-            scratch. E2B and Daytona run commands in managed cloud sandboxes,
-            reuse their workspace while the sandbox is alive, and allow internet
-            access. Every provider retains the same direct-command, bounded
-            output, idempotency, and execution-consent contract.
+            Local execution confines writes to private chat scratch and routes
+            any granted network access through a loopback broker. E2B and
+            Daytona run commands in managed cloud sandboxes and reuse their
+            workspace while it is alive. Every provider retains the same
+            direct-command, bounded-output, idempotency, and execution-consent
+            contract.
           </p>
         </>
       )}
       {error && <SettingsError>{error}</SettingsError>}
     </SettingsPanel>
   );
-}
-
-/** One grant per line reads as a list, so the entries are set in monospace. */
-const ENTRY_TEXTAREA_CLASS = "font-mono text-sm";
-
-/**
- * Split a textarea of grants into trimmed, non-empty entries. Newlines and
- * commas both separate, so a pasted comma-joined list works as well as one per
- * line; the server re-validates each entry's grammar.
- */
-function splitEntries(value: string): string[] {
-  return value
-    .split(/[\n,]/)
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0);
 }
 
 type EgressEnforcementRow =

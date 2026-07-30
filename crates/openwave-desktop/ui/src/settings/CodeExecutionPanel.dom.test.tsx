@@ -104,11 +104,9 @@ describe("CodeExecutionPanel", () => {
       "daytona",
       "daytona-secret",
     );
-    // Egress restriction is opt-in: an untouched panel saves the open policy.
     expect(putCodeExecutionConfig).toHaveBeenCalledWith({
       provider: "e2b",
       timeout_ms: 30_000,
-      egress: { mode: "open" },
     });
     // A provider must not go active in a pass that failed to store its key.
     expect(
@@ -141,41 +139,6 @@ describe("CodeExecutionPanel", () => {
       expect(deleteCodeExecutionCredential).toHaveBeenCalledWith("daytona"),
     );
     expect(deleteCodeExecutionCredential).toHaveBeenCalledTimes(1);
-  });
-
-  it("sends a domain-and-CIDR allowlist once egress restriction is turned on", async () => {
-    const { client, putCodeExecutionConfig } = clientFor({
-      provider: "e2b",
-      timeout_ms: 20_000,
-      available: true,
-      has_credential: true,
-      egress: OPEN_EGRESS,
-    });
-
-    render(<CodeExecutionPanel client={client} />);
-
-    fireEvent.click(
-      await screen.findByRole("switch", { name: "Restrict network egress" }),
-    );
-    fireEvent.change(screen.getByLabelText(/Allowed domains/), {
-      target: { value: "*.pypi.org\nfiles.pythonhosted.org" },
-    });
-    fireEvent.change(screen.getByLabelText(/Allowed address blocks/), {
-      target: { value: "140.82.112.0/20" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
-
-    await waitFor(() =>
-      expect(putCodeExecutionConfig).toHaveBeenCalledWith({
-        provider: "e2b",
-        timeout_ms: 20_000,
-        egress: {
-          mode: "allowlist",
-          domains: ["*.pypi.org", "files.pythonhosted.org"],
-          cidrs: ["140.82.112.0/20"],
-        },
-      }),
-    );
   });
 
   it("does not present E2B as a full boundary and surfaces its gaps inline", async () => {

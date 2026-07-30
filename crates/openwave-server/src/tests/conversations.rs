@@ -509,6 +509,70 @@ async fn patch_chat_sets_and_clears_the_model() {
 }
 
 #[tokio::test]
+async fn chat_network_policy_defaults_off_and_persists_normalized_exact_hosts() {
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    assert_eq!(chat.network_policy, openwave_core::NetworkPolicy::Off);
+
+    let updated = patch_chat(
+        &router,
+        &bearer,
+        chat.id,
+        serde_json::json!({
+            "network_policy": {
+                "mode": "allowed_hosts",
+                "allowed_hosts": [" API.Example.COM. ", "api.example.com"],
+                "package_managers": true
+            }
+        }),
+    )
+    .await;
+    assert_eq!(updated.status(), StatusCode::OK);
+    let updated = json_body::<Chat>(updated).await;
+    assert_eq!(
+        updated.network_policy,
+        openwave_core::NetworkPolicy::AllowedHosts {
+            allowed_hosts: vec!["api.example.com".into()],
+            package_managers: true,
+        }
+    );
+
+    let fetched: Chat = json_body(
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/chats/{}", chat.id))
+                    .header(header::AUTHORIZATION, &bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(fetched.network_policy, updated.network_policy);
+
+    for host in ["*.example.com", "127.0.0.1"] {
+        let rejected = patch_chat(
+            &router,
+            &bearer,
+            chat.id,
+            serde_json::json!({
+                "network_policy": {
+                    "mode": "allowed_hosts",
+                    "allowed_hosts": [host],
+                    "package_managers": false
+                }
+            }),
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST, "{host}");
+    }
+}
+
+#[tokio::test]
 async fn chat_title_patch_is_trimmed_bounded_and_clearable() {
     let (router, token, _store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");

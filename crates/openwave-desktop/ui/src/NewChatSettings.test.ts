@@ -23,6 +23,7 @@ describe("new chat settings", () => {
 
     expect(state.permissionMode).toBe("auto");
     expect(state.reasoningEffort).toBeNull();
+    expect(state.networkPolicy).toEqual({ mode: "off" });
   });
 
   it("persists a choice so it outlives the visit that made it", async () => {
@@ -34,5 +35,22 @@ describe("new chat settings", () => {
     expect(window.localStorage.getItem("openwave.new-chat-permission-mode")).toBe(
       "allow",
     );
+  });
+
+  it("persists and validates the next chat's network policy", async () => {
+    const { useNewChatSettings } = await import("./NewChatSettings");
+
+    useNewChatSettings.getState().setNetworkPolicy({
+      mode: "package_managers",
+    });
+
+    expect(useNewChatSettings.getState().networkPolicy).toEqual({
+      mode: "package_managers",
+    });
+    expect(
+      JSON.parse(
+        window.localStorage.getItem("openwave.new-chat-network-policy")!,
+      ),
+    ).toEqual({ mode: "package_managers" });
   });
 });
