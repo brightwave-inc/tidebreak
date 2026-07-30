@@ -292,6 +292,37 @@ pub mod context_checkpoint {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod sandbox_provision {
+    use sea_orm::entity::prelude::*;
+
+    /// One container run's durable provisioning record, keyed by the run id
+    /// (container runs have exactly one execution attempt). Written before the
+    /// backend's create call, so recovery — the window lapse and the tag sweep —
+    /// is driven by the intent rather than by what the provider reports. See
+    /// issue #920.
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "sandbox_provision")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub run_id: Uuid,
+        /// The host-minted correlation tag stamped into the sandbox's metadata.
+        pub tag: String,
+        /// `intended` | `committed` | `teardown` | `done`.
+        pub state: String,
+        /// The backend's sandbox reference, `NULL` until committed.
+        pub handle: Option<String>,
+        /// When the provisioning window lapses for an `intended` record.
+        pub window_expires_at: DateTimeUtc,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod operation_log {
     use sea_orm::entity::prelude::*;
 
