@@ -29,6 +29,8 @@ export type HydratedTranscriptEntry =
   | {
       id: string;
       kind: "tool";
+      /** Canonical call id — the payload key for a rehydrated MCP App view. */
+      callId: string;
       name: string;
       /** Opaque child correlation for a historical sandbox spawn. */
       backgroundAgentRunId?: string;
@@ -97,11 +99,12 @@ export function hydrateTranscriptHistory(
       refusal: message.refusal,
       reasoning: message.role === "assistant" ? message.reasoning : undefined,
     })),
-    ...toolActivity.map((activity, index) => ({
-      // The server deliberately withholds a canonical call id. This identity
-      // is therefore local to one snapshot and only supports React rendering;
-      // it is never used to resolve or replay a tool operation.
-      id: `tool-history:${activity.started_at}:${index}`,
+    ...toolActivity.map((activity) => ({
+      // The canonical call id, not a snapshot-local one: an MCP App card
+      // resolves its payload by this id, so inventing an identity here left
+      // every rehydrated app view fetching a payload the server rejected.
+      id: activity.call_id,
+      callId: activity.call_id,
       kind: "tool" as const,
       // Already an allowlisted renderer tool name, folded server-side, so the
       // same presentation the live stream uses applies directly.

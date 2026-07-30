@@ -47,7 +47,7 @@ export function presentChatTranscript(
           {
             id: entry.id,
             role: "tool",
-            callId: entry.id,
+            callId: entry.callId,
             name: entry.name,
             backgroundAgentRunId: entry.backgroundAgentRunId,
             status: entry.status,

@@ -22,6 +22,7 @@ describe("hydrateTranscriptHistory", () => {
       ],
       [
         {
+          call_id: "call-1",
           tool: "web_search",
           result_unreadable: false,
           status: "completed",
@@ -34,7 +35,8 @@ describe("hydrateTranscriptHistory", () => {
     expect(entries).toEqual([
       expect.objectContaining({ id: "user-1", kind: "message" }),
       expect.objectContaining({
-        id: "tool-history:2026-07-16T10:00:01Z:0",
+        id: "call-1",
+        callId: "call-1",
         kind: "tool",
         name: "web_search",
         status: "completed",
@@ -46,6 +48,7 @@ describe("hydrateTranscriptHistory", () => {
   it("hydrates background delegation and wait activity with fixed tool kinds", () => {
     const entries = hydrateTranscriptHistory([], [
       {
+        call_id: "call-2",
         tool: "spawn_sandbox_agent",
         result_unreadable: false,
         status: "completed",
@@ -53,6 +56,7 @@ describe("hydrateTranscriptHistory", () => {
         finished_at: "2026-07-16T10:00:00Z",
       },
       {
+        call_id: "call-3",
         tool: "wait_for_agents",
         result_unreadable: false,
         status: "completed",
@@ -71,6 +75,7 @@ describe("hydrateTranscriptHistory", () => {
   it("hydrates answered questions with a fixed presentation kind", () => {
     const entries = hydrateTranscriptHistory([], [
       {
+        call_id: "call-4",
         tool: "ask_user_questions",
         result_unreadable: false,
         status: "completed",
@@ -87,6 +92,7 @@ describe("hydrateTranscriptHistory", () => {
   it("hydrates delegated file reads as their fixed presentation kind", () => {
     const entries = hydrateTranscriptHistory([], [
       {
+        call_id: "call-5",
         tool: "read_delegated_file",
         result_unreadable: false,
         status: "completed",
@@ -104,6 +110,7 @@ describe("hydrateTranscriptHistory", () => {
   it("hydrates source discovery, direct reads, and semantic search distinctly", () => {
     const entries = hydrateTranscriptHistory([], [
       {
+        call_id: "call-6",
         tool: "list_sources",
         result_unreadable: false,
         status: "completed",
@@ -111,6 +118,7 @@ describe("hydrateTranscriptHistory", () => {
         finished_at: "2026-07-16T10:00:00Z",
       },
       {
+        call_id: "call-7",
         tool: "read_source",
         result_unreadable: false,
         status: "completed",
@@ -118,6 +126,7 @@ describe("hydrateTranscriptHistory", () => {
         finished_at: "2026-07-16T10:00:01Z",
       },
       {
+        call_id: "call-8",
         tool: "search",
         result_unreadable: false,
         status: "completed",
@@ -201,6 +210,7 @@ describe("hydrateTranscriptHistory", () => {
   it("folds an unrecognized historical tool to the generic card", () => {
     const [entry] = hydrateTranscriptHistory([], [
       {
+        call_id: "call-10",
         tool: "other",
         result_unreadable: false,
         status: "failed",
