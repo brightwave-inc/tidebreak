@@ -445,6 +445,7 @@ async fn delegated_file_routes_are_native_only_and_expose_only_exact_broker_auth
                     model_steps: 1,
                     usage: Usage::default(),
                 },
+                execution_location: openwave_core::AgentRunExecutionLocation::InProcess,
             },
             chrono::Utc::now(),
         )

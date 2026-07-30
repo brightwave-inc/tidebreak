@@ -15,7 +15,7 @@ use chrono::Utc;
 use futures::channel::mpsc::{unbounded, UnboundedReceiver};
 use futures::StreamExt;
 use openwave_core::{
-    Agent, AgentConfig, AgentError, AgentEvent, AgentRunWaitCondition,
+    Agent, AgentConfig, AgentError, AgentEvent, AgentRunExecutionLocation, AgentRunWaitCondition,
     AgentRunWaitSetCheckpointRequest, AgentTurnOutcome, BlobStore, CheckpointSandboxSpawnOutcome,
     ClaimedAgentEvent, CompleteTurnRunOutcome, ForegroundAgentWaitRequest, MessageId,
     ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome, RecordTurnFailureOutcome,
@@ -43,6 +43,9 @@ pub(crate) struct TurnWorkerConfig {
     pub(crate) failure_delay: Duration,
     pub(crate) retry: RetrySchedule,
     pub(crate) max_concurrency: usize,
+    /// Startup-resolved location for every background child admitted by this
+    /// worker. Capability detection never runs in the spawn path.
+    pub(crate) sandbox_spawn_execution_location: AgentRunExecutionLocation,
 }
 
 impl Default for TurnWorkerConfig {
@@ -63,6 +66,7 @@ impl Default for TurnWorkerConfig {
                 Duration::from_secs(600),
             ),
             max_concurrency: 4,
+            sandbox_spawn_execution_location: AgentRunExecutionLocation::InProcess,
         }
     }
 }
@@ -1450,6 +1454,7 @@ impl TurnWorker {
                         })?,
                         event_ordinal: ordinal,
                         progress,
+                        execution_location: self.config.sandbox_spawn_execution_location,
                     };
                     let mut checkpoint_heartbeat = AbortOnDrop(tokio::spawn(
                         self.clone()
