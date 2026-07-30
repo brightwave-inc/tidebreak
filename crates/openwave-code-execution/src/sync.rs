@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::host_paths::{try_resolve_scratch_directory, write_without_following, ScratchRefusal};
+use crate::host_paths::{try_resolve_scratch_directory, ScratchDir, ScratchRefusal};
 use crate::{
     CodeExecutionError, ExecutionWorkspaceId, WorkspaceFilePath, WorkspaceLifecycle,
     MAX_WORKSPACE_FILE_BYTES,
@@ -196,13 +196,7 @@ pub async fn pull_into_host_dir(
     if files.is_empty() {
         return Ok(report);
     }
-    // Every write below is bounded by the canonical host directory. macOS puts
-    // chat scratch under a symlinked `/var`, so comparing against the path as
-    // handed in would reject legitimate files.
     tokio::fs::create_dir_all(host_dir)
-        .await
-        .map_err(|_| unwritable_dir())?;
-    let host_root = tokio::fs::canonicalize(host_dir)
         .await
         .map_err(|_| unwritable_dir())?;
     for path in files {
@@ -221,20 +215,21 @@ pub async fn pull_into_host_dir(
                 continue;
             }
         };
-        let host_path = match host_file_path(&host_root, &path).await {
-            Ok(host_path) => host_path,
+        let parent = match host_parent_dir(host_dir, &path).await {
+            Ok(parent) => parent,
             Err(refusal) => {
                 refuse(&mut report, &path, refusal);
                 continue;
             }
         };
-        // Read for the equality shortcut only after the symlink check: reading
-        // by path follows a symlink at the final component, which would turn a
-        // planted link into a content-equality oracle on a host file.
-        if tokio::fs::symlink_metadata(&host_path)
-            .await
-            .is_ok_and(|metadata| metadata.is_symlink())
-        {
+        // Everything below addresses `name` inside the pinned parent, so the
+        // entry judged here is the entry written; nothing in between re-walks
+        // the scratch tree from `/`.
+        let name = path.file_name();
+        // Read for the equality shortcut only after the symlink check: a
+        // planted link should be reported as one rather than becoming a
+        // content-equality oracle on whatever it points at.
+        if parent.is_symlink(name).await {
             tracing::warn!(
                 "workspace pull refused: '{}' is a symlink on the host",
                 path.as_str()
@@ -245,12 +240,13 @@ pub async fn pull_into_host_dir(
             ));
             continue;
         }
-        if let Ok(existing) = tokio::fs::read(&host_path).await {
+        if let Ok(existing) = parent.read_file(name).await {
             if existing == content {
                 continue;
             }
         }
-        write_without_following(&host_path, &content)
+        parent
+            .write_file(name, &content)
             .await
             .map_err(|_| unwritable(path.as_str()))?;
         report.transferred += 1;
@@ -258,23 +254,25 @@ pub async fn pull_into_host_dir(
     Ok(report)
 }
 
-/// Where `path` lands under `host_root`, creating missing parent directories
-/// only through components already proven to be real directories.
+/// The pinned directory `path`'s file lands in under `host_dir`, creating
+/// missing parents only through components already proven to be real
+/// directories.
 ///
 /// Local exec is confined to this same scratch tree, so it can plant
 /// `<scratch>/out -> ~/.ssh` and wait for a pull: `create_dir_all` and a plain
 /// `write` both follow a symlinked *parent*, and the pull's host write is not
-/// sandboxed.
-async fn host_file_path(
-    host_root: &Path,
+/// sandboxed. Handing back a descriptor rather than a path also closes the
+/// window between the walk and the write, which a process still running in
+/// scratch could otherwise use to swap the verified directory for a symlink.
+async fn host_parent_dir(
+    host_dir: &Path,
     path: &WorkspaceFilePath,
-) -> Result<PathBuf, ScratchRefusal> {
+) -> Result<ScratchDir, ScratchRefusal> {
     let parent = path
         .as_str()
         .rsplit_once('/')
         .map_or("", |(parent, _)| parent);
-    let dir = try_resolve_scratch_directory(host_root, parent, true).await?;
-    Ok(dir.join(path.file_name()))
+    try_resolve_scratch_directory(host_dir, parent, true).await
 }
 
 /// Record a refused file in the report and, for the containment cases, on the

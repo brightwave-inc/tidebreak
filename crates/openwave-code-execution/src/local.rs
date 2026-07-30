@@ -19,7 +19,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 #[cfg(target_os = "macos")]
 use tokio::process::Command;
 
-use crate::host_paths::resolve_scratch_directory;
+use crate::host_paths::{resolve_scratch_directory, ScratchDir};
 #[cfg(target_os = "macos")]
 use crate::output::{Capture, StreamKind};
 use crate::receipt::{request_fingerprint, BeginExecution, ExecutionReceipt};
@@ -194,27 +194,27 @@ impl LocalExecutionProvider {
             .ok_or_else(|| CodeExecutionError::Sandbox("private workspace is unavailable".into()))
     }
 
-    /// Resolve `path`'s parent inside `workspace` and rejoin the final
-    /// component, so a symlinked intermediate directory cannot escape the
-    /// workspace. The final component's own type is checked separately.
+    /// Open `path`'s parent directory inside `workspace` as a pinned
+    /// descriptor, so a symlinked intermediate directory cannot escape the
+    /// workspace and cannot be swapped for one after the check. The final
+    /// component's own type is checked separately, against that descriptor.
     ///
     /// Resolution walks one component at a time and establishes containment
     /// before creating anything, so a write through a planted symlinked parent
     /// refuses without having made directories outside the workspace first.
     /// `None` means the parent did not resolve inside the workspace — a missing
     /// directory, a planted symlink, or a component that is not a directory.
-    async fn resolve_file(
+    async fn resolve_parent(
         workspace: &Path,
         path: &WorkspaceFilePath,
         create_parents: bool,
-    ) -> Option<PathBuf> {
+    ) -> Option<ScratchDir> {
         let relative = path.as_str();
         let parent = relative
             .rsplit_once('/')
             .map(|(parent, _)| parent)
             .unwrap_or("");
-        let parent = resolve_scratch_directory(workspace, parent, create_parents).await?;
-        Some(parent.join(path.file_name()))
+        resolve_scratch_directory(workspace, parent, create_parents).await
     }
 }
 
@@ -339,41 +339,21 @@ impl WorkspaceLifecycle for LocalExecutionProvider {
             return Err(CodeExecutionError::WorkspaceFileTooLarge);
         }
         let workspace = self.ensured_workspace(workspace)?;
-        let target = Self::resolve_file(&workspace, path, true)
+        let parent = Self::resolve_parent(&workspace, path, true)
             .await
             .ok_or_else(|| {
                 CodeExecutionError::Sandbox("workspace directories are unavailable".into())
             })?;
-        // The final `target` is written by an atomic rename, so its own type is
-        // not load-bearing for containment — the temp file below is what we
-        // actually write into, and it must not be a pre-planted symlink. A
-        // process with write access to chat scratch (an exec-tool command runs
-        // Seatbelt-confined to this same root) could otherwise plant a symlink
-        // at a guessable temp path and redirect the unsandboxed host write onto
-        // an arbitrary host file. Two defenses close that: an unpredictable
-        // temp name, and an exclusive, no-follow create that fails rather than
-        // following anything that already exists at the path.
-        let parent = target
-            .parent()
-            .ok_or_else(|| CodeExecutionError::Sandbox("workspace path has no parent".into()))?;
-        let temporary = parent.join(format!(".workspace-put.{}", uuid::Uuid::new_v4()));
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            options.mode(0o600);
-            options.custom_flags(libc::O_NOFOLLOW);
-        }
-        let mut file = options.open(&temporary).map_err(|_| {
-            CodeExecutionError::Sandbox("could not write the workspace file".into())
-        })?;
-        file.write_all(content)
-            .and_then(|()| file.sync_all())
-            .and_then(|()| fs::rename(&temporary, &target))
-            .map_err(|_| {
-                let _ = fs::remove_file(&temporary);
-                CodeExecutionError::Sandbox("could not write the workspace file".into())
-            })
+        // The write goes to an unpredictable temp name created exclusively and
+        // without following, then renamed into place — both relative to the
+        // pinned parent. A process with write access to chat scratch (an
+        // exec-tool command runs Seatbelt-confined to this same root) can
+        // neither pre-plant a symlink at the temp path nor swap the parent
+        // directory itself for one after it was resolved.
+        parent
+            .write_file(path.file_name(), content)
+            .await
+            .map_err(|_| CodeExecutionError::Sandbox("could not write the workspace file".into()))
     }
 
     async fn get_workspace_file(
@@ -387,57 +367,30 @@ impl WorkspaceLifecycle for LocalExecutionProvider {
         let Some(workspace) = Self::workspace_in(&root, workspace, false)? else {
             return Err(CodeExecutionError::WorkspaceFileNotFound);
         };
-        let Some(target) = Self::resolve_file(&workspace, path, false).await else {
+        let Some(parent) = Self::resolve_parent(&workspace, path, false).await else {
             return Err(CodeExecutionError::WorkspaceFileNotFound);
         };
-        // Open without following the final component, then judge the opened
-        // descriptor — never a path stat'd separately from the open. A
-        // lstat-then-open read races a writer that keeps the path a regular
-        // file at the check and swaps in a symlink to a host secret before the
-        // open, so on unix containment comes from the descriptor we actually
-        // read (O_NOFOLLOW + fstat below).
-        //
-        // Without O_NOFOLLOW we cannot refuse a final symlink at open time, so
-        // restore the prior cross-platform guard: reject a symlinked final
-        // component with a pre-open lstat. This is the same lstat-then-open
-        // shape the unix path deliberately abandons, kept here only to preserve
-        // the earlier refusal rather than to defend against a local race the
-        // platform cannot express away.
-        #[cfg(not(unix))]
-        match fs::symlink_metadata(&target) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(CodeExecutionError::InvalidRequest(
-                    "workspace path is not a regular file".into(),
-                ));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(CodeExecutionError::WorkspaceFileNotFound);
-            }
-            Err(_) => {
-                return Err(CodeExecutionError::Sandbox(
-                    "could not read the workspace file".into(),
-                ));
-            }
-        }
-        let mut open = OpenOptions::new();
-        open.read(true);
-        #[cfg(unix)]
-        open.custom_flags(libc::O_NOFOLLOW);
-        let file = match open.open(&target) {
+        // Open relative to the pinned parent without following the final
+        // component, then judge the opened descriptor — never a path stat'd
+        // separately from the open. A resolve-then-open-by-path read races a
+        // writer that keeps the path a regular file at the check and swaps in a
+        // symlink to a host secret before the open; containment here comes from
+        // the descriptors actually used.
+        let file = match parent.open_file(path.file_name()).await {
             Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(CodeExecutionError::WorkspaceFileNotFound);
-            }
-            // A final symlink fails the no-follow open with ELOOP; report it as
-            // an invalid path rather than a missing file so a planted symlink
-            // is not silently indistinguishable from absence.
-            Err(error) if is_symlink_loop(&error) => {
-                return Err(CodeExecutionError::InvalidRequest(
-                    "workspace path is not a regular file".into(),
-                ));
-            }
-            Err(_) => {
+            Err(error) => {
+                // A planted symlink fails the no-follow open. Label it as an
+                // invalid path rather than a missing file so it is not silently
+                // indistinguishable from absence; the stat explains the refusal
+                // and is not what enforced it.
+                if parent.is_symlink(path.file_name()).await {
+                    return Err(CodeExecutionError::InvalidRequest(
+                        "workspace path is not a regular file".into(),
+                    ));
+                }
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    return Err(CodeExecutionError::WorkspaceFileNotFound);
+                }
                 return Err(CodeExecutionError::Sandbox(
                     "could not read the workspace file".into(),
                 ));
@@ -640,17 +593,6 @@ fn finish_execution(path: &Path, receipt: &ExecutionReceipt) -> Result<(), CodeE
 
 fn sync_dir(path: &Path) -> std::io::Result<()> {
     fs::File::open(path)?.sync_all()
-}
-
-/// Whether an open error is the no-follow refusal of a final symlink.
-#[cfg(unix)]
-fn is_symlink_loop(error: &std::io::Error) -> bool {
-    error.raw_os_error() == Some(libc::ELOOP)
-}
-
-#[cfg(not(unix))]
-fn is_symlink_loop(_error: &std::io::Error) -> bool {
-    false
 }
 
 fn secure_dir(path: &Path) -> Result<(), CodeExecutionError> {

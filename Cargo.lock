@@ -3844,6 +3844,8 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.23.0",
+ "cap-fs-ext",
+ "cap-std",
  "futures",
  "image",
  "libc",
