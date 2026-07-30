@@ -219,6 +219,14 @@ impl ToolRegistry {
         }
     }
 
+    /// Whether any tool is registered under `name`, whatever its execution
+    /// surface. Callers registering names they do not control use this to avoid
+    /// replacing an existing registration.
+    #[must_use]
+    pub fn contains(&self, name: &str) -> bool {
+        self.tools.contains_key(name)
+    }
+
     /// Resolve the trusted execution surface for a registered tool name.
     #[must_use]
     pub fn execution(&self, name: &str) -> Option<ToolCallExecution> {

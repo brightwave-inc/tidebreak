@@ -831,9 +831,16 @@ impl McpRuntime {
 
     fn registry_for(&self, servers: &HashMap<String, ManagedServer>) -> ToolRegistry {
         let mut registry = self.base_tools.clone();
-        for server in servers.values() {
+        for (name, server) in servers {
             if let Some(client) = &server.client {
-                client.mount(&mut registry);
+                let refused = client.mount(&mut registry);
+                if !refused.is_empty() {
+                    tracing::warn!(
+                        server = %name,
+                        tools = %refused.join(", "),
+                        "MCP tools were not mounted because the names are already registered"
+                    );
+                }
             }
         }
         registry
