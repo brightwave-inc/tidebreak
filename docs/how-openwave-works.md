@@ -598,32 +598,29 @@ but never became referenced because a later catalog transaction failed.
 
 ## How grounded sources reach a chat answer
 
-Source-tool results and assistant citations are related, but they are not the
-same record. When a source tool returns private evidence, each passage receives
-a random opaque reference that the model may place in its answer. That reference
-is an internal protocol token, not a URL and not Markdown.
+A citation is written by the model itself: an inline directive wrapping the
+cited phrase and naming a document id plus a human-scale locator — a page or
+page range, a line range, or a workbook sheet optionally narrowed to a cell
+range. The model cites the position it saw when it read the source; there is
+no server-side span resolution, no evidence store, and no opaque token
+protocol. The loop validates only shape and bounds before committing the
+message and its ordered citation records together, and exact retries reuse the
+same message and citation identities, so an ambiguous database response cannot
+create a second historical answer.
 
-Before publishing assistant text, the agent loop removes those internal tokens,
-resolves only references produced by a tool from the same chat and turn, and
-commits the clean message and its ordered citations together. The same rule
-applies to an assistant message that precedes another tool call, to a message
-accepted at a steering boundary, and to the final answer. Exact retries reuse
-the same message and citation identities, so an ambiguous database response
-cannot create a second historical answer.
+The transcript API exposes each citation as a small record: ordinal, document
+id, and locator. Clicking a citation opens the document viewer at that
+locator. The precision is deliberately coarse — the reader lands on the page
+or lines, not a highlighted span — and a locator the model gets slightly wrong
+still opens the right document. Deleting or replacing a document leaves older
+citations pointing at a source that may no longer exist; the viewer says so
+rather than rewriting history.
 
-The transcript API exposes a deliberately smaller source card: a bounded
-excerpt, optional heading, and page numbers. It does not expose paths, source
-URIs, document revisions, chunk IDs, search arguments, tool results, or the
-opaque model token. Replacing or deleting the current document does not rewrite
-an older answer's source card because the card comes from the immutable evidence
-snapshot captured when the answer was produced.
-
-During generation, an incremental filter recognizes references even when a
-provider splits them across many streaming events. Valid internal references
-never enter the live or durable renderer event stream; malformed or incomplete
-marker-like prose remains ordinary text. After a terminal event, the desktop
-rehydrates the authoritative transcript and attaches the structured source cards
-to the completed assistant message.
+During generation, an incremental filter recognizes directives even when a
+provider splits them across many streaming events, so partially streamed
+directive syntax never flashes through the live renderer stream; malformed or
+incomplete marker-like prose remains ordinary text. Messages written before
+this grammar render their historical directives as plain cited text.
 
 ## The different ways to run OpenWave
 
@@ -635,10 +632,12 @@ The browser-facing API is not exposed on a public network interface.
 
 The current UI is a workspace-style conversation shell, not the complete
 product. It reopens durable chats and supports conversation create/list/switch/
-rename/delete, transcript hydration, Markdown messages, live and historical
-tool-call rendering, reconnectable streaming, provider and web-search setup,
-model selection, a foreground-turn stop control, approval prompts, and native
-connected-folder pick/list/revoke. The foreground stop control sends
+rename/delete, transcript hydration, Markdown messages, file and photo
+attachments on messages with a document viewer, inline citation chips that
+open the viewer at the cited position, live and historical tool-call rendering
+including exec preview images, reconnectable streaming, provider and
+web-search setup, model selection, a foreground-turn stop control, approval
+prompts, and native connected-folder attach/list/revoke from the chat. The foreground stop control sends
 cancellation for the exact active turn, prevents duplicate requests, and stays
 in a pending state until an authoritative terminal event arrives; it never
 treats a request as a locally completed cancellation.
