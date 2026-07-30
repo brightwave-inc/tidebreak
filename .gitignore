@@ -19,6 +19,10 @@ node_modules/
 dist/
 .vite/
 
+# Python helper bytecode
+__pycache__/
+*.py[cod]
+
 # Tauri codegen (regenerated on build)
 crates/openwave-desktop/gen/
 crates/openwave-desktop/binaries/openwave-host-broker-*

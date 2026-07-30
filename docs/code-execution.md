@@ -157,6 +157,29 @@ code, stdout, stderr, timeout and truncation flags, and duration. Provider-nativ
 responses, credentials, absolute host paths, and unbounded logs do not cross
 the contract.
 
+## Document helpers
+
+Desktop builds ship a network-free Python helper library into every exec
+workspace at `.openwave/exec-scripts`. The sandbox container includes the same
+library at `/opt/openwave/exec-scripts`, exposed through
+`OPENWAVE_EXEC_SCRIPTS`. The helpers print short summaries and write visual
+review images into `preview/`, using priority names such as
+`overview-grid.png` before per-page or per-sheet images.
+
+Examples:
+
+```text
+python3 .openwave/exec-scripts/render_pdf.py documents/report.pdf --pages 1-2
+python3 .openwave/exec-scripts/extract_pdf_figures.py documents/report.pdf
+python3 .openwave/exec-scripts/analyze_xlsx.py documents/model.xlsx
+```
+
+PDF rendering uses pypdfium2 or pdf2image with Poppler, figure extraction uses
+Poppler, DOCX/PPTX rendering uses LibreOffice, and XLSX analysis uses openpyxl
+and Pillow. The sandbox image includes these tools. Local execution reports a
+concise command error when the host lacks Python or an underlying renderer; it
+does not download tooling or use an unconfined fallback.
+
 ## Workspace lifecycle
 
 Beside `execute`, a provider may offer an optional durable-workspace

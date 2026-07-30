@@ -16,7 +16,7 @@ use openwave_code_execution::{
     CodeExecutionRequest, CodeExecutionResponse, DaytonaCredential, DaytonaExecutionProvider,
     E2BCredential, E2BExecutionProvider, ExecutionWorkspaceId, LocalExecutionProvider, PreviewScan,
     RemoteSessionPool, WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing,
-    DAYTONA_CREDENTIAL_KEY, E2B_CREDENTIAL_KEY,
+    DAYTONA_CREDENTIAL_KEY, DOCUMENT_SCRIPTS_DIR, DOCUMENT_SCRIPT_FILES, E2B_CREDENTIAL_KEY,
 };
 use openwave_core::{Result, SecretProvider, Store};
 use openwave_egress::{
@@ -547,6 +547,7 @@ pub struct ConfiguredCodeExecutionProvider {
     store: Arc<dyn Store>,
     secrets: Arc<dyn SecretProvider>,
     scratch_root: PathBuf,
+    document_scripts_source: Option<PathBuf>,
     remote_sessions: RemoteSessionPool,
 }
 
@@ -561,8 +562,16 @@ impl ConfiguredCodeExecutionProvider {
             store,
             secrets,
             scratch_root: scratch_root.into(),
+            document_scripts_source: None,
             remote_sessions: RemoteSessionPool::default(),
         }
+    }
+
+    /// Install a trusted bundled helper directory into every exec workspace.
+    #[must_use]
+    pub fn with_document_scripts(mut self, source: Option<PathBuf>) -> Self {
+        self.document_scripts_source = source;
+        self
     }
 
     /// Resolve the currently selected adapter at the last boundary before use.
@@ -579,10 +588,13 @@ impl ConfiguredCodeExecutionProvider {
             return Err(CodeExecutionError::NotConfigured);
         };
         let resolved: Box<dyn CodeExecutionProvider> = match provider {
-            CodeExecutionProviderKind::Local => Box::new(LocalExecutionProvider::new(
-                &self.scratch_root,
-                Duration::from_millis(config.timeout_ms),
-            )?),
+            CodeExecutionProviderKind::Local => Box::new(
+                LocalExecutionProvider::new(
+                    &self.scratch_root,
+                    Duration::from_millis(config.timeout_ms),
+                )?
+                .with_document_scripts(self.document_scripts_source.clone()),
+            ),
             CodeExecutionProviderKind::E2b => {
                 let credential = E2BCredential::load(&*self.secrets)
                     .await?
@@ -643,7 +655,12 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
     ) -> std::result::Result<CodeExecutionResponse, CodeExecutionError> {
         let (kind, provider) = self.resolve().await?;
         let host_dir = self.scratch_root.join(request.workspace_id.as_str());
-        prepare_execution_directories(&host_dir, kind != CodeExecutionProviderKind::Local).await?;
+        prepare_execution_directories(
+            &host_dir,
+            kind != CodeExecutionProviderKind::Local,
+            self.document_scripts_source.as_deref(),
+        )
+        .await?;
         // A remote sandbox has its own filesystem, but the model is shown one
         // path vocabulary across the file tools and exec. Mirror the chat's
         // private scratch into the workspace before the command and back out
@@ -696,6 +713,7 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
 async fn prepare_execution_directories(
     host_dir: &std::path::Path,
     mirrored: bool,
+    document_scripts_source: Option<&std::path::Path>,
 ) -> std::result::Result<(), CodeExecutionError> {
     for name in ["output", "preview", "documents"] {
         let directory = host_dir.join(name);
@@ -716,6 +734,52 @@ async fn prepare_execution_directories(
                     ))
                 })?;
         }
+    }
+    if let Some(source) = document_scripts_source {
+        install_document_scripts(source, host_dir).await?;
+    }
+    Ok(())
+}
+
+async fn install_document_scripts(
+    source: &std::path::Path,
+    host_dir: &std::path::Path,
+) -> std::result::Result<(), CodeExecutionError> {
+    let destination = host_dir.join(DOCUMENT_SCRIPTS_DIR);
+    tokio::fs::create_dir_all(&destination).await.map_err(|_| {
+        CodeExecutionError::Sandbox("document helper directory is unavailable".into())
+    })?;
+    for name in DOCUMENT_SCRIPT_FILES {
+        let source_file = source.join(name);
+        let metadata = tokio::fs::symlink_metadata(&source_file)
+            .await
+            .map_err(|_| {
+                CodeExecutionError::Sandbox(format!(
+                    "bundled document helper '{name}' is unavailable"
+                ))
+            })?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(CodeExecutionError::Sandbox(format!(
+                "bundled document helper '{name}' is not a regular file"
+            )));
+        }
+        let content = tokio::fs::read(&source_file).await.map_err(|_| {
+            CodeExecutionError::Sandbox(format!(
+                "bundled document helper '{name}' could not be read"
+            ))
+        })?;
+        if content.len() > openwave_code_execution::MAX_WORKSPACE_FILE_BYTES {
+            return Err(CodeExecutionError::Sandbox(format!(
+                "bundled document helper '{name}' exceeds the workspace file limit"
+            )));
+        }
+        tokio::fs::write(destination.join(name), content)
+            .await
+            .map_err(|_| {
+                CodeExecutionError::Sandbox(format!(
+                    "bundled document helper '{name}' could not be installed"
+                ))
+            })?;
     }
     Ok(())
 }
@@ -824,13 +888,34 @@ mod tests {
     #[tokio::test]
     async fn exec_workspace_conventions_exist_before_a_command_runs() {
         let dir = tempfile::tempdir().unwrap();
-        prepare_execution_directories(dir.path(), true)
+        prepare_execution_directories(dir.path(), true, None)
             .await
             .unwrap();
 
         for name in ["output", "preview", "documents"] {
             assert!(dir.path().join(name).is_dir());
             assert!(dir.path().join(name).join(".openwave-directory").is_file());
+        }
+    }
+
+    #[tokio::test]
+    async fn bundled_document_helpers_are_installed_as_one_library() {
+        let source = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        for name in DOCUMENT_SCRIPT_FILES {
+            std::fs::write(source.path().join(name), format!("helper:{name}")).unwrap();
+        }
+
+        prepare_execution_directories(workspace.path(), false, Some(source.path()))
+            .await
+            .unwrap();
+
+        for name in DOCUMENT_SCRIPT_FILES {
+            let installed = workspace.path().join(DOCUMENT_SCRIPTS_DIR).join(name);
+            assert_eq!(
+                std::fs::read_to_string(installed).unwrap(),
+                format!("helper:{name}")
+            );
         }
     }
 

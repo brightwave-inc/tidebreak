@@ -36,3 +36,16 @@ pub use types::{
     MAX_CAPTURE_BYTES, MAX_COMMAND_BYTES, MAX_CWD_BYTES, MAX_WORKSPACE_FILE_BYTES,
     MAX_WORKSPACE_LIST_ENTRIES, MAX_WORKSPACE_PATH_BYTES,
 };
+
+/// Stable workspace-relative location populated by hosts that ship the
+/// document helper library.
+pub const DOCUMENT_SCRIPTS_DIR: &str = ".openwave/exec-scripts";
+
+/// Files copied as one indivisible helper library into an exec workspace.
+pub const DOCUMENT_SCRIPT_FILES: [&str; 5] = [
+    "_openwave_preview.py",
+    "render_pdf.py",
+    "extract_pdf_figures.py",
+    "render_office.py",
+    "analyze_xlsx.py",
+];

@@ -53,6 +53,11 @@ pub struct Config {
     /// the Windows and Linux readers are machine-scoped and ignore it.
     #[serde(default)]
     pub bundle_id: Option<String>,
+    /// Trusted source directory for helper scripts copied into isolated exec
+    /// workspaces. Desktop resolves this from its signed application resources;
+    /// other embeddings leave it absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_scripts_dir: Option<PathBuf>,
 }
 
 impl Config {
@@ -63,6 +68,7 @@ impl Config {
             data_dir: data_dir.into(),
             keychain_service: None,
             bundle_id: None,
+            exec_scripts_dir: None,
         }
     }
 
@@ -101,6 +107,7 @@ impl Config {
             data_dir,
             keychain_service: None,
             bundle_id: None,
+            exec_scripts_dir: None,
         })
     }
 
@@ -180,5 +187,6 @@ mod tests {
     fn legacy_config_without_keychain_service_defaults_to_none() {
         let config = serde_json::from_str::<Config>(r#"{"data_dir":"/data"}"#).unwrap();
         assert_eq!(config.keychain_service, None);
+        assert_eq!(config.exec_scripts_dir, None);
     }
 }

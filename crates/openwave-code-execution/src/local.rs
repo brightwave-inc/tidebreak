@@ -46,6 +46,7 @@ const MAX_OPEN_FILES: u64 = 64;
 pub struct LocalExecutionProvider {
     scratch_root: PathBuf,
     timeout: Duration,
+    document_scripts_dir: Option<PathBuf>,
 }
 
 impl LocalExecutionProvider {
@@ -61,7 +62,15 @@ impl LocalExecutionProvider {
         Ok(Self {
             scratch_root: scratch_root.into(),
             timeout,
+            document_scripts_dir: None,
         })
+    }
+
+    /// Expose the trusted bundled document helpers as a read-only subtree.
+    #[must_use]
+    pub fn with_document_scripts(mut self, directory: Option<PathBuf>) -> Self {
+        self.document_scripts_dir = directory;
+        self
     }
 
     /// Whether the mandatory native confinement primitive exists on this host.
@@ -230,7 +239,25 @@ impl CodeExecutionProvider for LocalExecutionProvider {
             BeginExecution::Started => {}
         }
 
-        let result = run_native(&request, &workspace, &cwd, self.timeout).await;
+        let document_scripts_dir = self
+            .document_scripts_dir
+            .as_ref()
+            .map(|path| {
+                fs::canonicalize(path).map_err(|_| {
+                    CodeExecutionError::Sandbox(
+                        "bundled document helper directory is unavailable".into(),
+                    )
+                })
+            })
+            .transpose()?;
+        let result = run_native(
+            &request,
+            &workspace,
+            &cwd,
+            self.timeout,
+            document_scripts_dir.as_deref(),
+        )
+        .await;
         match result {
             Ok(response) => {
                 finish_execution(
@@ -640,9 +667,10 @@ async fn run_native(
     workspace: &Path,
     cwd: &Path,
     timeout: Duration,
+    document_scripts_dir: Option<&Path>,
 ) -> Result<CodeExecutionResponse, CodeExecutionError> {
     let developer_dir = macos_developer_dir();
-    let profile = macos_profile(workspace, developer_dir.as_deref())?;
+    let profile = macos_profile(workspace, developer_dir.as_deref(), document_scripts_dir)?;
     let mut command = Command::new(SANDBOX_EXEC);
     command
         .args(["-p", &profile, "--", &request.command])
@@ -665,6 +693,9 @@ async fn run_native(
         );
     } else {
         command.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+    }
+    if let Some(directory) = document_scripts_dir {
+        command.env("OPENWAVE_EXEC_SCRIPTS", directory);
     }
     configure_unix_limits(&mut command, timeout);
 
@@ -731,6 +762,7 @@ async fn run_native(
     _workspace: &Path,
     _cwd: &Path,
     _timeout: Duration,
+    _document_scripts_dir: Option<&Path>,
 ) -> Result<CodeExecutionResponse, CodeExecutionError> {
     Err(CodeExecutionError::Unavailable(
         "native local sandboxing is not supported on this host".into(),
@@ -808,6 +840,7 @@ async fn finish_reader(mut reader: tokio::task::JoinHandle<()>) {
 fn macos_profile(
     workspace: &Path,
     developer_dir: Option<&Path>,
+    document_scripts_dir: Option<&Path>,
 ) -> Result<String, CodeExecutionError> {
     const DENIED_READS: &[&str] = &[
         "/Applications",
@@ -894,6 +927,10 @@ fn macos_profile(
         .map(sandbox_subpath)
         .transpose()?
         .unwrap_or_default();
+    let document_scripts = document_scripts_dir
+        .map(sandbox_subpath)
+        .transpose()?
+        .unwrap_or_default();
     let workspace = sandbox_subpath(workspace)?;
     Ok(format!(
         "(version 1)\n\
@@ -904,7 +941,7 @@ fn macos_profile(
          (allow file-read*)\n\
          (deny file-read*\n  {denied})\n\
          (allow file-read-metadata\n  {runtime_metadata})\n\
-         (allow file-read*\n  {literals}\n  {runtimes}\n  {selected_runtime}\n  {workspace})\n\
+         (allow file-read*\n  {literals}\n  {runtimes}\n  {selected_runtime}\n  {document_scripts}\n  {workspace})\n\
          (allow file-write*\n  {workspace}\n  (literal \"/dev/null\"))\n"
     ))
 }
@@ -1255,7 +1292,14 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn profile_denies_network_and_escapes_workspace_paths() {
-        let profile = macos_profile(Path::new("/Users/test/we\"ird\\workspace"), None).unwrap();
+        let profile = macos_profile(
+            Path::new("/Users/test/we\"ird\\workspace"),
+            None,
+            Some(Path::new(
+                "/Applications/OpenWave.app/Contents/Resources/exec-scripts",
+            )),
+        )
+        .unwrap();
         assert!(profile.contains("(deny default)"));
         assert!(!profile.contains("allow network"));
         assert!(!profile.contains("mach-lookup"));
@@ -1263,6 +1307,12 @@ mod tests {
         assert!(profile.contains("(allow process-exec)"));
         assert!(profile.contains("(allow process-fork)"));
         assert!(profile.contains("we\\\"ird\\\\workspace"));
-        assert!(macos_profile(Path::new("/Users/test/control\nworkspace"), None).is_err());
+        assert!(profile.contains("Resources/exec-scripts"));
+        let write_rule = profile
+            .split("(allow file-write*")
+            .nth(1)
+            .expect("profile has a write rule");
+        assert!(!write_rule.contains("Resources/exec-scripts"));
+        assert!(macos_profile(Path::new("/Users/test/control\nworkspace"), None, None).is_err());
     }
 }

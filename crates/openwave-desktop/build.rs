@@ -7,6 +7,7 @@ fn main() {
     };
     let sidecar = format!("binaries/openwave-host-broker-{target}{extension}");
     println!("cargo:rerun-if-changed={sidecar}");
+    println!("cargo:rerun-if-changed=../../scripts/exec-documents");
 
     // Plain `cargo check` and `cargo test` do not run Tauri's before-build
     // hook. Keep those workflows usable from a clean checkout; Tauri dev/build
