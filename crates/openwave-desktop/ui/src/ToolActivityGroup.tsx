@@ -55,6 +55,8 @@ export function ToolActivityGroup({
   groupIndex,
   children,
 }: ToolActivityGroupProps) {
+  // Total by construction: an activity that throws while being read costs its
+  // own row, leaving the rail and the cards below it standing.
   const safeActivities = normalizeActivities(activities);
 
   // The rail reads model-shaped data through several defensive parsers; the
@@ -107,12 +109,18 @@ function ToolActivityRail({
   activities: safeActivities,
   groupIndex,
 }: {
-  activities: ToolActivity[];
+  activities: (ToolActivity | null)[];
   groupIndex: number;
 }) {
   const [expanded, setExpanded] = useState(false);
   const contentId = `tool-activity-group-${groupIndex}`;
-  const summary = toolActivityGroupPresentation(safeActivities);
+  // The phase line speaks only for the rows that could be read; an unreadable
+  // one is a gap in the rail, not a claim about what the agent did.
+  const summary = toolActivityGroupPresentation(
+    safeActivities.filter(
+      (activity): activity is ToolActivity => activity !== null,
+    ),
+  );
   // The phase line types itself out once when the phase first goes live, then
   // updates instantly as calls settle and nudge the wording — re-typing on
   // every change reads as a stutter, and a settled phase should never animate.
@@ -156,15 +164,25 @@ function ToolActivityRail({
           {/* One boundary per row, not one per phase: a result this build
               cannot render should cost its own line and leave the rest of the
               rail — and the cards under it — standing. */}
-          {safeActivities.map((activity, index) => (
-            <ErrorBoundary
-              key={activity.id ?? `position:${index}`}
-              resetKey={rowSignature(activity)}
-              fallback={<ToolActivityUnavailable role="listitem" />}
-            >
-              <ToolActivityRow activity={activity} />
-            </ErrorBoundary>
-          ))}
+          {safeActivities.map((activity, index) =>
+            activity === null ? (
+              // An activity that could not even be read. It says so in place
+              // rather than leaving a gap, which would read as a step that
+              // never happened — a different and untrue claim.
+              <ToolActivityUnavailable
+                key={`position:${index}`}
+                role="listitem"
+              />
+            ) : (
+              <ErrorBoundary
+                key={activity.id ?? `position:${index}`}
+                resetKey={rowSignature(activity)}
+                fallback={<ToolActivityUnavailable role="listitem" />}
+              >
+                <ToolActivityRow activity={activity} />
+              </ErrorBoundary>
+            ),
+          )}
         </div>
       )}
     </>
@@ -194,19 +212,32 @@ export function ToolActivityUnavailable({
  *
  * A row that threw is retried when its call moves on or its result arrives,
  * and left alone while the transcript re-renders around it.
+ *
+ * Total: the rail's signature is computed in the group's own body, outside
+ * the rail's boundary, and the preview and result an activity carries are
+ * still the projection's own references — a read that throws there costs the
+ * row's place in the signature, not the phase.
  */
 function rowSignature(activity: ToolActivity): string {
-  return [
-    activity.name,
-    activity.status,
-    activity.resultUnreadable === true ? "unreadable" : "",
-    activity.preview?.tool ?? "",
-    activity.result?.tool ?? "",
-  ].join(" ");
+  try {
+    return [
+      activity.name,
+      activity.status,
+      activity.resultUnreadable === true ? "unreadable" : "",
+      activity.preview?.tool ?? "",
+      activity.result?.tool ?? "",
+    ].join(" ");
+  } catch {
+    return "unreadable";
+  }
 }
 
-function railSignature(activities: readonly ToolActivity[]): string {
-  return activities.map(rowSignature).join("|");
+function railSignature(activities: readonly (ToolActivity | null)[]): string {
+  return activities
+    .map((activity) =>
+      activity === null ? "unreadable" : rowSignature(activity),
+    )
+    .join("|");
 }
 
 function ToolActivityRow({ activity }: { activity: ToolActivity }) {
@@ -403,40 +434,60 @@ function joinWithOxford(lead: string, appendages: string[]): string {
   return `${lead}, ${head}, and ${appendages[appendages.length - 1]}`;
 }
 
-function normalizeActivities(activities: unknown): ToolActivity[] {
+/**
+ * The activities, reduced to plain data the rail can read without throwing.
+ *
+ * `null` marks one that threw while being read — retained projections can
+ * carry getters this build no longer agrees with. It stays in the list as a
+ * placeholder row rather than being dropped: a gap reads as a step that never
+ * happened, which is a different and untrue claim. Reading happens here, in
+ * the group's own body outside the rail's boundary, so a throw that escaped
+ * would fall to the phase's backstop and take the phase's cards down with it;
+ * per activity, the damage stops at the row.
+ */
+function normalizeActivities(activities: unknown): (ToolActivity | null)[] {
   if (!Array.isArray(activities)) return [];
   return activities.flatMap((activity) => {
-    const candidate = activity as Record<string, unknown> | null;
-    if (
-      candidate === null ||
-      typeof candidate !== "object" ||
-      typeof candidate.name !== "string" ||
-      typeof candidate.status !== "string"
-    ) {
-      return [];
+    try {
+      const normalized = normalizeActivity(activity);
+      return normalized === null ? [] : [normalized];
+    } catch (error) {
+      console.error("tool activity could not be read", error);
+      return [null];
     }
-    return [
-      {
-        // Carried through rather than dropped: it is what keys the row.
-        ...(typeof candidate.id === "string" && candidate.id.length > 0
-          ? { id: candidate.id }
-          : {}),
-        name: candidate.name,
-        status: candidate.status as ToolCallStatus,
-        // Already validated field by field at the API boundary; carried here
-        // so the expanded row can say what the call did and what it found.
-        ...(typeof candidate.preview === "object"
-          ? { preview: candidate.preview as ToolActionPreview | null }
-          : {}),
-        ...(typeof candidate.result === "object"
-          ? { result: candidate.result as ToolResultPreview | null }
-          : {}),
-        ...(typeof candidate.resultUnreadable === "boolean"
-          ? { resultUnreadable: candidate.resultUnreadable }
-          : {}),
-      },
-    ];
   });
+}
+
+/** One activity as plain data, or `null` when it is not shaped like one. */
+function normalizeActivity(activity: unknown): ToolActivity | null {
+  const candidate = activity as Record<string, unknown> | null;
+  if (
+    candidate === null ||
+    typeof candidate !== "object" ||
+    typeof candidate.name !== "string" ||
+    typeof candidate.status !== "string"
+  ) {
+    return null;
+  }
+  return {
+    // Carried through rather than dropped: it is what keys the row.
+    ...(typeof candidate.id === "string" && candidate.id.length > 0
+      ? { id: candidate.id }
+      : {}),
+    name: candidate.name,
+    status: candidate.status as ToolCallStatus,
+    // Already validated field by field at the API boundary; carried here
+    // so the expanded row can say what the call did and what it found.
+    ...(typeof candidate.preview === "object"
+      ? { preview: candidate.preview as ToolActionPreview | null }
+      : {}),
+    ...(typeof candidate.result === "object"
+      ? { result: candidate.result as ToolResultPreview | null }
+      : {}),
+    ...(typeof candidate.resultUnreadable === "boolean"
+      ? { resultUnreadable: candidate.resultUnreadable }
+      : {}),
+  };
 }
 
 function lowercaseFirst(value: string): string {
