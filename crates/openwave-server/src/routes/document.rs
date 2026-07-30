@@ -2,7 +2,7 @@
 
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
+use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use futures::StreamExt;
@@ -755,6 +755,121 @@ pub async fn get_chat_document_file_content(
     serve_document_file_content(&state, document_id, Some(chat_id), None, method, &headers).await
 }
 
+/// The policy every original-bytes response carries.
+///
+/// The route serves reader-supplied bytes from the API's own origin, so a
+/// response that a browser ever renders must be unable to reach back into that
+/// origin. `sandbox` drops the response into an opaque origin with scripting
+/// off, and `default-src 'none'` denies it every subresource and every
+/// outbound request.
+const DOCUMENT_CONTENT_POLICY: &str =
+    "default-src 'none'; sandbox; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+
+/// How one response names and offers a document's original bytes.
+struct ServedMediaType {
+    content_type: &'static str,
+    disposition: &'static str,
+}
+
+/// Media types the route will name back to the client.
+///
+/// Ingest records whatever type its caller declared — the desktop sniffs the
+/// bytes, but the HTTP API takes the header at its word — so the stored type is
+/// reader-controlled and must not decide, unchecked, how a browser treats the
+/// response. Serving is where that is settled: a type on this list is named
+/// verbatim, everything else is named `application/octet-stream`.
+///
+/// The second column is whether a browser may draw the bytes in place. Only
+/// formats that are inert when rendered are `inline`; markup and container
+/// formats are still named honestly, because callers key off the type, but are
+/// offered as a download so that naming them can never mean executing them.
+///
+/// Nothing is refused. A format missing from this table still serves its bytes,
+/// which matters because the set of types the desktop's content sniffer can
+/// produce is open-ended — anything `infer` recognizes — and a reader's file
+/// should not stop opening because its type is unfamiliar here.
+const SERVED_MEDIA_TYPES: &[(&str, &str)] = &[
+    // Inert renderable formats.
+    ("application/pdf", "inline"),
+    ("image/avif", "inline"),
+    ("image/bmp", "inline"),
+    ("image/gif", "inline"),
+    ("image/heic", "inline"),
+    ("image/heif", "inline"),
+    ("image/jpeg", "inline"),
+    ("image/png", "inline"),
+    ("image/tiff", "inline"),
+    ("image/webp", "inline"),
+    ("text/csv", "inline"),
+    ("text/markdown", "inline"),
+    ("text/plain", "inline"),
+    ("text/tab-separated-values", "inline"),
+    // Named, never rendered in place: markup a browser would treat as active,
+    // and the office/container formats the viewers parse for themselves.
+    ("application/epub+zip", "attachment"),
+    ("application/json", "attachment"),
+    ("application/msword", "attachment"),
+    ("application/rtf", "attachment"),
+    ("application/vnd.ms-excel", "attachment"),
+    ("application/vnd.ms-powerpoint", "attachment"),
+    (
+        "application/vnd.oasis.opendocument.presentation",
+        "attachment",
+    ),
+    (
+        "application/vnd.oasis.opendocument.spreadsheet",
+        "attachment",
+    ),
+    ("application/vnd.oasis.opendocument.text", "attachment"),
+    (
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "attachment",
+    ),
+    (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "attachment",
+    ),
+    (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "attachment",
+    ),
+    ("application/xml", "attachment"),
+    ("application/yaml", "attachment"),
+    ("application/zip", "attachment"),
+    ("image/svg+xml", "attachment"),
+    ("text/html", "attachment"),
+    ("text/xml", "attachment"),
+];
+
+impl ServedMediaType {
+    /// Resolve a stored media type against [`SERVED_MEDIA_TYPES`].
+    ///
+    /// Parameters are dropped rather than echoed: a stored `charset` is a guess
+    /// made at ingest about bytes nobody re-decoded, and passing arbitrary
+    /// parameters through would hand the reader a second lever on the header.
+    fn for_stored(stored: &str) -> Self {
+        let base = stored
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        match SERVED_MEDIA_TYPES
+            .iter()
+            .find(|(media_type, _)| *media_type == base)
+        {
+            Some((content_type, disposition)) => Self {
+                content_type,
+                disposition,
+            },
+            None => Self {
+                content_type: "application/octet-stream",
+                disposition: "attachment",
+            },
+        }
+    }
+}
+
 async fn serve_document_file_content(
     state: &AppState,
     document_id: DocumentId,
@@ -789,11 +904,7 @@ async fn serve_document_file_content(
             "original byte length for document {document_id} does not match its descriptor"
         )));
     }
-    let content_type = HeaderValue::from_str(&document.media_type).map_err(|_| {
-        ServerError::internal(format!(
-            "document {document_id} has an invalid stored media type"
-        ))
-    })?;
+    let served = ServedMediaType::for_stored(&document.media_type);
 
     let requested_range = match requested_byte_range(headers, actual_len) {
         Ok(range) => range,
@@ -831,7 +942,11 @@ async fn serve_document_file_content(
 
     let mut response = Response::builder()
         .status(status)
-        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_TYPE, served.content_type)
+        .header(header::CONTENT_DISPOSITION, served.disposition)
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(header::CONTENT_SECURITY_POLICY, DOCUMENT_CONTENT_POLICY)
+        .header(header::REFERRER_POLICY, "no-referrer")
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_LENGTH, body_len.to_string());
     if let Some(content_range) = content_range {
@@ -910,6 +1025,8 @@ fn range_not_satisfiable_response(full_len: u64) -> Response {
 
 #[cfg(test)]
 mod byte_range_tests {
+    use axum::http::HeaderValue;
+
     use super::*;
 
     fn parse(value: &str, full_len: u64) -> Result<Option<ByteRange>, ()> {
