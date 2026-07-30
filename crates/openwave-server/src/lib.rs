@@ -54,6 +54,7 @@ pub mod secret_rehome;
 mod source_tools;
 mod state;
 mod turn_worker;
+mod view_frames;
 /// Host-owned, inert web-search configuration and provider selection.
 pub mod web_search;
 mod wire_types;
@@ -311,6 +312,10 @@ pub fn app(state: AppState) -> Router {
             post(routes::post_mcp_view_session),
         )
         .route(
+            "/apps/{id}/view-session",
+            post(routes::post_app_view_session),
+        )
+        .route(
             "/chats/{chat_id}/calls/{call_id}/mcp-app-payload",
             get(routes::get_mcp_app_payload),
         )
@@ -456,9 +461,11 @@ pub fn app(state: AppState) -> Router {
         ]);
 
     // Reached by capability (single-use token), not by bearer: iframes send
-    // no headers. See `routes::get_mcp_view_frame`.
+    // no headers. See `routes::get_mcp_view_frame` and
+    // `routes::get_app_view_frame`.
     let view_frames = Router::new()
         .route("/mcp/view-frames/{token}", get(routes::get_mcp_view_frame))
+        .route("/apps/view-frames/{token}", get(routes::get_app_view_frame))
         .with_state(frame_state);
 
     Router::new()

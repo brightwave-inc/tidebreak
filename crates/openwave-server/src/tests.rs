@@ -2058,3 +2058,127 @@ async fn mcp_view_frames_are_single_use_capabilities_with_their_own_csp() {
         .unwrap();
     assert_eq!(replay.status(), StatusCode::NOT_FOUND);
 }
+
+/// Stored local-app revisions ride the same frame contract as MCP views:
+/// bearer-guarded minting, unauthenticated single-use redemption, the same
+/// strict CSP — with the document loaded from the revision's write-once
+/// profile bytes instead of a live MCP session, and a soft-deleted app
+/// minting nothing.
+#[tokio::test]
+async fn app_view_frames_serve_stored_revisions_under_the_same_contract() {
+    use openwave_core::id::{AppId, AppRevisionId};
+    use openwave_core::local_app::{
+        app_revision_relative_path, AppManifest, CreateApp, NewAppRevision,
+    };
+
+    let (router, token, store, dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+
+    let app_id = AppId::new();
+    let revision_id = AppRevisionId::new();
+    let bundle = b"<html><script>renderApp()</script></html>".to_vec();
+    store
+        .create_app(&CreateApp {
+            id: app_id,
+            revision: NewAppRevision {
+                id: revision_id,
+                manifest: AppManifest {
+                    name: "Fixture app".into(),
+                    bindings: Vec::new(),
+                },
+                byte_len: bundle.len() as u64,
+                sha256: [7u8; 32],
+                turn_id: None,
+                producing_run_id: None,
+                chat_id: None,
+                created_at: chrono::Utc::now(),
+            },
+        })
+        .await
+        .unwrap();
+    let bundle_path = dir
+        .path()
+        .join(app_revision_relative_path(app_id, revision_id));
+    std::fs::create_dir_all(bundle_path.parent().unwrap()).unwrap();
+    std::fs::write(&bundle_path, &bundle).unwrap();
+
+    let mint = |id: AppId, authorization: Option<&str>| {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(format!("/apps/{id}/view-session"))
+            .header("content-type", "application/json");
+        if let Some(authorization) = authorization {
+            request = request.header("authorization", authorization);
+        }
+        request.body(Body::from("{}")).unwrap()
+    };
+
+    // Minting requires the bearer and an existing app.
+    let unauthenticated = router.clone().oneshot(mint(app_id, None)).await.unwrap();
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+    let unknown = router
+        .clone()
+        .oneshot(mint(AppId::new(), Some(&bearer)))
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+
+    let minted = router
+        .clone()
+        .oneshot(mint(app_id, Some(&bearer)))
+        .await
+        .unwrap();
+    assert_eq!(minted.status(), StatusCode::OK);
+    let session: serde_json::Value = json_body(minted).await;
+    let frame_path = session["frame_path"].as_str().unwrap().to_string();
+    assert!(frame_path.starts_with("/apps/view-frames/"));
+
+    // The frame redeems once, without auth, under the same strict policy the
+    // MCP view frame carries.
+    let frame = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&frame_path)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(frame.status(), StatusCode::OK);
+    let csp = frame
+        .headers()
+        .get("content-security-policy")
+        .and_then(|value| value.to_str().ok())
+        .unwrap();
+    assert!(csp.contains("default-src 'none'"));
+    assert!(csp.contains("script-src 'unsafe-inline'"));
+    assert!(csp.contains("connect-src 'none'"));
+    assert_eq!(
+        frame
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("text/html; charset=utf-8")
+    );
+    let body = to_bytes(frame.into_body(), 2 * 1024 * 1024).await.unwrap();
+    assert_eq!(body.as_ref(), bundle.as_slice());
+
+    // Replay is refused: the capability is spent.
+    let replay = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&frame_path)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::NOT_FOUND);
+
+    // A soft-deleted app mints nothing until restored.
+    assert!(store.delete_app(app_id, chrono::Utc::now()).await.unwrap());
+    let deleted = router.oneshot(mint(app_id, Some(&bearer))).await.unwrap();
+    assert_eq!(deleted.status(), StatusCode::NOT_FOUND);
+}

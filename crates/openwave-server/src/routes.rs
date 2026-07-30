@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 use std::path::Path as FsPath;
 use tokio::sync::broadcast::error::RecvError;
 
+use openwave_core::id::{AppId, AppRevisionId};
+use openwave_core::local_app::app_revision_relative_path;
 use openwave_core::{
     AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentError, AgentRun, AgentRunExecutionLocation,
     AgentRunStatus, AgentRunTier, ApprovalDecision, CallId, Chat, ChatId, DeleteChatOutcome,
@@ -36,6 +38,7 @@ use crate::mcp_config::{McpServersConfig, McpServersInfo};
 use crate::model_roles::{self, ModelRole};
 use crate::providers::{self, ProviderCredential, ProviderInfo, ProviderKind, ProviderUpdate};
 use crate::state::AppState;
+use crate::view_frames::ViewFrameSource;
 use crate::web_search::{
     self, WebSearchConfigInfo, WebSearchConfigUpdate, WebSearchCredentialReadiness,
     WebSearchCredentialsInfo,
@@ -276,9 +279,15 @@ pub async fn post_mcp_view_session(
     Path(name): Path<String>,
     Json(body): Json<McpViewSessionRequest>,
 ) -> Result<Json<McpViewSession>, ServerError> {
+    if state.mcp.ui_view_document(&name, &body.uri).await.is_none() {
+        return Err(ServerError::not_found("no such MCP App view"));
+    }
     let token = state
-        .mcp
-        .mint_view_frame(&name, &body.uri)
+        .view_frames
+        .mint(ViewFrameSource::McpView {
+            server: name,
+            uri: body.uri,
+        })
         .await
         .ok_or_else(|| ServerError::not_found("no such MCP App view"))?;
     Ok(Json(McpViewSession {
@@ -313,9 +322,20 @@ pub async fn get_mcp_view_frame(
     State(state): State<AppState>,
     Path(token): Path<uuid::Uuid>,
 ) -> Response {
-    let Some(document) = state.mcp.take_view_frame(token).await else {
+    let Some(ViewFrameSource::McpView { server, uri }) = state.view_frames.take(token).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    let Some(document) = state.mcp.ui_view_document(&server, &uri).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    view_frame_response(document.html)
+}
+
+/// The one response shape every sandboxed view frame is served with,
+/// whatever its source: the document's own strict Content-Security-Policy
+/// (inline script and style may run; every network direction is shut) plus
+/// the no-sniff/no-referrer/no-store envelope.
+fn view_frame_response(body: impl Into<axum::body::Body>) -> Response {
     (
         [
             ("content-type", "text/html; charset=utf-8"),
@@ -331,9 +351,98 @@ pub async fn get_mcp_view_frame(
             ("referrer-policy", "no-referrer"),
             ("cache-control", "no-store"),
         ],
-        document.html,
+        body.into(),
     )
         .into_response()
+}
+
+/// `POST /apps/{id}/view-session` — trade the API bearer for a single-use
+/// frame token addressing one stored local-app revision.
+///
+/// The same capability trade as [`post_mcp_view_session`], for the same
+/// reason: the sandboxed iframe cannot carry the bearer. Serves the app's
+/// current revision unless the body pins one, which must belong to the app.
+/// A soft-deleted app mints nothing until it is restored — deletion removes
+/// the open affordance, not just the library row.
+pub async fn post_app_view_session(
+    State(state): State<AppState>,
+    Path(id): Path<AppId>,
+    Json(body): Json<AppViewSessionRequest>,
+) -> Result<Json<AppViewSession>, ServerError> {
+    let app = state
+        .store
+        .get_app(id)
+        .await?
+        .filter(|app| app.deleted_at.is_none())
+        .ok_or_else(|| ServerError::not_found(format!("app {id} not found")))?;
+    let revision_id = match body.revision {
+        Some(revision_id) => {
+            state
+                .store
+                .get_app_revision(revision_id)
+                .await?
+                .filter(|revision| revision.app_id == id)
+                .ok_or_else(|| {
+                    ServerError::not_found(format!("app revision {revision_id} not found"))
+                })?
+                .id
+        }
+        None => app.current_revision,
+    };
+    let token = state
+        .view_frames
+        .mint(ViewFrameSource::AppRevision {
+            app_id: id,
+            revision_id,
+        })
+        .await
+        .ok_or_else(|| {
+            ServerError::conflict("too many outstanding view frames; retry in a moment")
+        })?;
+    Ok(Json(AppViewSession {
+        frame_path: format!("/apps/view-frames/{token}"),
+    }))
+}
+
+#[derive(Deserialize, ts_rs::TS)]
+pub struct AppViewSessionRequest {
+    /// Revision to serve; the app's current revision when omitted.
+    revision: Option<AppRevisionId>,
+}
+
+/// Where the sandboxed iframe should load one app revision from, valid once.
+#[derive(Serialize, ts_rs::TS)]
+pub struct AppViewSession {
+    frame_path: String,
+}
+
+/// `GET /apps/view-frames/{token}` — redeem a frame token for one stored
+/// app revision's bundle.
+///
+/// The exact contract of [`get_mcp_view_frame`] — unauthenticated, reached
+/// only by an unguessable single-use token, served under the same strict
+/// policy — differing only in where the document comes from: app bundles are
+/// write-once bytes under the profile data directory, loaded by durable
+/// identity instead of re-resolved against a live MCP session.
+pub async fn get_app_view_frame(
+    State(state): State<AppState>,
+    Path(token): Path<uuid::Uuid>,
+) -> Response {
+    let Some(ViewFrameSource::AppRevision {
+        app_id,
+        revision_id,
+    }) = state.view_frames.take(token).await
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let path = state
+        .config
+        .data_dir
+        .join(app_revision_relative_path(app_id, revision_id));
+    match tokio::fs::read(&path).await {
+        Ok(bundle) => view_frame_response(bundle),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 /// `POST /mcp/servers/{name}/reconnect` — explicitly establish a fresh session,
