@@ -305,6 +305,12 @@ describe("MessageBubble", () => {
         createdAt: "2026-07-20T10:00:01Z",
       },
       {
+        id: "user-2",
+        role: "user",
+        text: "Follow-up question",
+        createdAt: "2026-07-20T10:00:30Z",
+      },
+      {
         id: "assistant-streaming",
         role: "assistant",
         text: "Partial answer",
@@ -332,9 +338,63 @@ describe("MessageBubble", () => {
     );
 
     expect(markup.match(/aria-label="Copy"/g)).toHaveLength(1);
-    expect(markup.match(/class="message-footer"/g)).toHaveLength(2);
+    expect(markup.match(/class="message-footer"/g)).toHaveLength(3);
     expect(markup).toContain('class="message-user-frame"');
     expect(markup).not.toContain('dateTime="2026-07-20T10:01:00Z"');
+  });
+
+  it("carries the copy action and timestamp only on the turn's closing assistant bubble", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "user-1",
+        role: "user",
+        text: "Question",
+        createdAt: "2026-07-20T10:00:00Z",
+      },
+      {
+        id: "assistant-interim",
+        role: "assistant",
+        text: "Let me check.",
+        sources: [],
+        createdAt: "2026-07-20T10:00:05Z",
+      },
+      {
+        id: "tool-1",
+        role: "tool",
+        callId: "call-1",
+        name: "read_file",
+        status: "completed",
+      },
+      {
+        id: "assistant-closing",
+        role: "assistant",
+        text: "Here is the answer.",
+        sources: [],
+        createdAt: "2026-07-20T10:00:20Z",
+      },
+    ];
+    const markup = renderToStaticMarkup(
+      <MessageList
+        messages={messages}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
+        busy={false}
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+
+    expect(markup.match(/aria-label="Copy"/g)).toHaveLength(1);
+    expect(markup).not.toContain('dateTime="2026-07-20T10:00:05Z"');
+    expect(markup).toContain('dateTime="2026-07-20T10:00:20Z"');
   });
 
   it("does not add message actions to tool, system, or error rows", () => {

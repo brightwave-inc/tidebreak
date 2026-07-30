@@ -6,6 +6,10 @@ type MessageFooterProps = {
   text: string;
   createdAt?: string;
   settled?: boolean;
+  /** A turn's assistant prose is split into one bubble per activity phase;
+   *  the copy action and timestamp belong to the turn, so only the bubble
+   *  that closes it carries them. */
+  sequenceEnd?: boolean;
 };
 
 export function MessageFooter({
@@ -13,7 +17,9 @@ export function MessageFooter({
   text,
   createdAt,
   settled = true,
+  sequenceEnd = true,
 }: MessageFooterProps) {
+  if (role === "assistant" && !sequenceEnd) return null;
   const hasContent = text.trim().length > 0;
   const timestamp = createdAt && (role === "user" || (settled && hasContent))
     ? formatMessageTimestamp(createdAt, new Date())
