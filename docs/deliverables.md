@@ -137,24 +137,27 @@ versioned, revertible output rather than from a human gate.
   failure to publish never fails a run whose result the parent can already
   consume.
 
-## Versioning and revert
+## Versioning, restore, and delete
 
-Auto-merge is safe because every merged output is a durable, reversible version,
-so the host can always undo it:
+Auto-merge and the exec `output/` scan are safe because every published output
+is a durable, append-only version history the user can always walk back:
 
-- **Revert to a prior revision.** An output's current-revision pointer is
-  independent of its newest revision, so republishing an earlier revision is a
-  pointer move that appends and destroys nothing. Every superseded revision
-  stays addressable, so a revert can be followed forward again.
-- **Retract the merge.** An auto-merged output that has only its initial
-  revision has no earlier version to fall back to, so reverting it retracts the
-  merge — a soft delete that hides the output while retaining its revision. The
-  desktop offers an inline undo, and restoring is the exact inverse of the
-  retraction, so nothing about the history changes.
+- **Version history.** Each output's detail panel lists its versions once there
+  is more than one — who produced each (a turn, a background run, or the user)
+  and when. Viewing an old version is a preview; the current version stays
+  current.
+- **Restore is append-only.** Restoring an old version republishes its content
+  as a *new* head version (restoring v2 while at v5 produces v6), so nothing is
+  rewound, renumbered, or lost, and a restore can itself be undone by another
+  restore. Restoring content that is already current is a no-op. The appended
+  revision carries no producer, which durably marks it as a user action.
+- **Delete is explicit and soft.** Deleting an output hides it from the catalog
+  while retaining every revision; the catalog offers an inline Undo that
+  restores it exactly.
 
-Both operations are host actions the model cannot perform, and neither is
-destructive: the revision history is insert-only, so a revert or a retract only
-moves pointers a person can move back.
+All three are host actions the model cannot perform, and none is destructive:
+the revision history is insert-only, so restore and delete only move pointers a
+person can move back.
 
 ## Deliberate limits
 

@@ -8,7 +8,6 @@ import {
   parseDeliverablePreview,
   parseDeliverablesCatalog,
   parseOutputExportResult,
-  parseOutputRevertResult,
 } from "./deliverables";
 
 const outputId = "550062d4-2528-5cc6-90f8-a788e119bf36";
@@ -82,26 +81,6 @@ describe("deliverable renderer projections", () => {
         truncated: false,
       }),
     ).toThrow("Invalid output response");
-  });
-
-  it("accepts both revert outcomes and rejects a mismatched output", () => {
-    expect(
-      parseOutputRevertResult(
-        { status: "reverted", outputId, revisionId },
-        outputId,
-      ),
-    ).toEqual({ status: "reverted", outputId, revisionId });
-    expect(
-      parseOutputRevertResult({ status: "retracted", outputId }, outputId),
-    ).toEqual({ status: "retracted", outputId });
-    // A reverted outcome must carry the revision it republished.
-    expect(() =>
-      parseOutputRevertResult({ status: "reverted", outputId }, outputId),
-    ).toThrow("Invalid output revert response");
-    // The response must be for the output the caller reverted.
-    expect(() =>
-      parseOutputRevertResult({ status: "retracted", outputId }, revisionId),
-    ).toThrow("Invalid output revert response");
   });
 
   it("accepts a binary artifact at its wider size ceiling and bounds it there", () => {
