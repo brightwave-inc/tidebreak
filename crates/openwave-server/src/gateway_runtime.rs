@@ -26,6 +26,18 @@ use crate::providers::{self, CustomModelConfig};
 /// How long a browser sign-in may stay pending before it fails.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// How often the background loop refreshes the entitled-model snapshot while
+/// a session is connected. Entitlement changes are admin-driven and rare, and
+/// the gateway stays the live authority at inference time, so the snapshot
+/// only has to keep the picker and model policy from drifting for long; the
+/// settings page keeps the immediate manual refresh.
+const MODEL_SYNC_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+/// Retry cadence after a failed background sync — short enough that a boot
+/// racing the network coming up doesn't stay stale for a whole interval,
+/// long enough not to hammer an unreachable gateway.
+const MODEL_SYNC_RETRY: Duration = Duration::from_secs(5 * 60);
+
 pub(crate) struct GatewayRuntime {
     store: Arc<dyn Store>,
     secrets: Arc<dyn SecretProvider>,
@@ -517,6 +529,60 @@ impl GatewayRuntime {
         .await?;
         Ok(count)
     }
+
+    /// Keep the entitled-model snapshot fresh without a manual refresh: sync
+    /// once immediately (the boot case) and then on a long interval, for as
+    /// long as the process runs. Every state where a sync cannot run —
+    /// unmanaged profile, misconfigured policy, no session for the policy's
+    /// deployment — is "nothing to do", not an error: the loop waits for the
+    /// state to change rather than exiting, because sign-in, pairing, and MDM
+    /// pushes can all happen at any time.
+    pub(crate) async fn sync_models_periodically(self: Arc<Self>) {
+        // One warning per outage, not one per retry: the failure state can
+        // legitimately persist for hours on an offline laptop.
+        let mut warned = false;
+        loop {
+            let delay = match self.sync_models_if_connected().await {
+                Ok(synced) => {
+                    if let Some(count) = synced {
+                        tracing::debug!("background gateway model sync: {count} models entitled");
+                    }
+                    warned = false;
+                    MODEL_SYNC_INTERVAL
+                }
+                Err(error) => {
+                    let message = error.message();
+                    if warned {
+                        tracing::debug!("background gateway model sync still failing: {message}");
+                    } else {
+                        tracing::warn!(
+                            "background gateway model sync failed (will retry): {message}"
+                        );
+                        warned = true;
+                    }
+                    MODEL_SYNC_RETRY
+                }
+            };
+            tokio::time::sleep(delay).await;
+        }
+    }
+
+    /// One background sync attempt: `Ok(None)` when there is nothing to sync,
+    /// `Ok(Some(count))` after a successful sync. The connected check mirrors
+    /// [`status`](Self::status): a stored session counts only when it belongs
+    /// to the policy's deployment.
+    async fn sync_models_if_connected(
+        &self,
+    ) -> std::result::Result<Option<usize>, crate::error::ServerError> {
+        let policy = self.policy().await?;
+        let Some(connection) = self.connection_for(&policy).await? else {
+            return Ok(None);
+        };
+        if connection.stored_credentials().await?.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(self.sync_models().await?))
+    }
 }
 
 #[async_trait]
@@ -888,6 +954,31 @@ mod tests {
             crate::providers::ProviderKind::ModelGateway
         );
         assert_eq!(policy.display_name, "Sample Claude");
+    }
+
+    /// The background loop's first attempt is immediate — the boot case it
+    /// exists for: a signed-in profile gets a fresh snapshot without anyone
+    /// pressing Refresh.
+    #[tokio::test]
+    async fn the_background_sync_populates_the_snapshot_without_a_manual_refresh() {
+        let address = serve(Arc::new(FakeGateway::default())).await;
+        let base = format!("http://{address}");
+        let (runtime, store, _directory) = signed_in_runtime(&base).await;
+
+        let task = tokio::spawn(runtime.clone().sync_models_periodically());
+        let synced = async {
+            loop {
+                if let Some(snapshot) = providers::read_gateway_snapshot(&*store).await.unwrap() {
+                    break snapshot;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        let snapshot = tokio::time::timeout(Duration::from_secs(5), synced)
+            .await
+            .expect("the boot-time sync lands without a manual refresh");
+        task.abort();
+        assert_eq!(snapshot.models.len(), 2);
     }
 
     #[tokio::test]

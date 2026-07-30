@@ -473,6 +473,7 @@ pub struct Server {
     _blob_orphan_auditor: AbortTask,
     _approval_judge_worker: AbortTask,
     _mcp_supervisor: AbortTask,
+    _gateway_model_sync: AbortTask,
     _instance_lock: InstanceLock,
 }
 
@@ -835,6 +836,7 @@ async fn bind_inner(
     let blob_orphan_auditor = tokio::spawn(blob_orphan_auditor.run());
     let approval_judge_worker = tokio::spawn(approval_judge_worker.run());
     let mcp_supervisor = tokio::spawn(mcp_runtime.clone().supervise());
+    let gateway_model_sync = tokio::spawn(gateway_runtime.clone().sync_models_periodically());
 
     Ok(Server {
         local_addr,
@@ -852,6 +854,7 @@ async fn bind_inner(
         _blob_orphan_auditor: AbortTask(blob_orphan_auditor),
         _approval_judge_worker: AbortTask(approval_judge_worker),
         _mcp_supervisor: AbortTask(mcp_supervisor),
+        _gateway_model_sync: AbortTask(gateway_model_sync),
         _instance_lock: instance_lock,
     })
 }
