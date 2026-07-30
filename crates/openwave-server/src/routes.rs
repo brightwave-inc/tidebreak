@@ -56,6 +56,20 @@ pub use plans::*;
 pub use root_attachment::*;
 pub use user_questions::*;
 
+/// The policy every stored-bytes response carries.
+///
+/// Both byte-serving routes hand back content that originated outside OpenWave
+/// — a reader's file, or an image an agent produced — from the API's own
+/// origin, so a response a browser ever renders must be unable to reach back
+/// into that origin. `sandbox` drops the response into an opaque origin with
+/// scripting off, and `default-src 'none'` denies it every subresource and
+/// every outbound request.
+///
+/// It is shared rather than duplicated so the two routes cannot drift into
+/// serving comparable bytes under different rules.
+pub(crate) const SERVED_BYTES_CONTENT_POLICY: &str =
+    "default-src 'none'; sandbox; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+
 /// `GET /mcp/servers` — renderer-safe definitions and current connection health.
 pub async fn get_mcp_servers(
     State(state): State<AppState>,

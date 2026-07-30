@@ -409,6 +409,15 @@ async fn transcript_projects_image_identity_and_fetches_pixels_with_the_chat_bea
     assert_eq!(pixels.status(), StatusCode::OK);
     assert_eq!(pixels.headers()[header::CONTENT_TYPE], "image/png");
     assert_eq!(pixels.headers()[header::CACHE_CONTROL], "no-store");
+    // Hardening a browser applies but nothing in the app surfaces. The exact
+    // content type matters beyond correctness: the renderer refuses to draw a
+    // blob whose type disagrees with the transcript's record.
+    assert_eq!(pixels.headers()[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+    assert_eq!(pixels.headers()[header::CONTENT_DISPOSITION], "inline");
+    assert_eq!(pixels.headers()[header::REFERRER_POLICY], "no-referrer");
+    assert!(pixels
+        .headers()
+        .contains_key(header::CONTENT_SECURITY_POLICY));
     assert_eq!(
         pixels.headers()[header::CONTENT_LENGTH],
         bytes.len().to_string()
