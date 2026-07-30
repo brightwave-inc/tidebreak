@@ -597,3 +597,232 @@ async fn acceptance_enforces_the_binary_cap_and_rejects_empty_artifacts() {
     .await
     .is_ok());
 }
+
+#[cfg(feature = "tools")]
+mod output_scan {
+    use super::*;
+    use crate::deliverable::{output_revision_relative_path, RevisionProducer};
+    use crate::id::CallId;
+    use crate::output_scan::{sync_output_directory, OutputSyncStatus, EXEC_OUTPUT_DIRECTORY};
+
+    async fn sync(
+        store: &DbStore,
+        scratch: &cap_std::fs::Dir,
+        chat_id: ChatId,
+        call_id: CallId,
+        second: i64,
+    ) -> crate::output_scan::OutputDirectorySync {
+        sync_output_directory(
+            store,
+            scratch,
+            chat_id,
+            call_id,
+            RevisionProducer::Turn(TurnId::new()),
+            at(second),
+        )
+        .await
+        .unwrap()
+    }
+
+    fn write_output_file(scratch: &std::path::Path, name: &str, content: &[u8]) {
+        let directory = scratch.join(EXEC_OUTPUT_DIRECTORY);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join(name), content).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_scan_creates_updates_and_matches_by_filename() {
+        let (_dir, store, chat) = store_with_chat().await;
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = open_scratch(scratch.path());
+
+        // First call: a text report and an oversized-for-text binary chart.
+        write_output_file(scratch.path(), "report.md", b"# Draft");
+        let mut pixels = b"\x89PNG\r\n\x1a\n".to_vec();
+        pixels.resize(700 * 1024, 7);
+        write_output_file(scratch.path(), "chart.png", &pixels);
+
+        let first = sync(&store, &dir, chat.id, CallId::new(), 0).await;
+        assert!(first.notes.is_empty(), "{:?}", first.notes);
+        assert_eq!(first.entries.len(), 2);
+        assert!(first
+            .entries
+            .iter()
+            .all(|entry| entry.status == OutputSyncStatus::Created && entry.ordinal == 1));
+        let report = first
+            .entries
+            .iter()
+            .find(|entry| entry.filename == "report.md")
+            .unwrap();
+        let chart = first
+            .entries
+            .iter()
+            .find(|entry| entry.filename == "chart.png")
+            .unwrap();
+        let chart_record = store.get_output(chart.output_id).await.unwrap().unwrap();
+        assert_eq!(chart_record.media_type, "image/png");
+        // The bytes landed at the write-once revision path the desktop reads.
+        let published = scratch.path().join(output_revision_relative_path(
+            chart_record.id,
+            chart_record.current_revision,
+        ));
+        assert_eq!(std::fs::read(&published).unwrap(), pixels);
+        // The revision is attributed to the producing turn.
+        let revision = store
+            .get_output_revision(chart_record.current_revision)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(revision.turn_id.is_some());
+
+        // Second call, nothing rewritten: both files match their current
+        // revisions and nothing is minted.
+        let second = sync(&store, &dir, chat.id, CallId::new(), 30).await;
+        assert!(second
+            .entries
+            .iter()
+            .all(|entry| entry.status == OutputSyncStatus::Unchanged));
+        assert_eq!(
+            store
+                .get_output(report.output_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .revision_count,
+            1
+        );
+
+        // Third call: same filename, new bytes — a revision on the same output,
+        // never a second record.
+        write_output_file(scratch.path(), "report.md", b"# Final");
+        let third = sync(&store, &dir, chat.id, CallId::new(), 60).await;
+        let updated = third
+            .entries
+            .iter()
+            .find(|entry| entry.filename == "report.md")
+            .unwrap();
+        assert_eq!(updated.status, OutputSyncStatus::Updated);
+        assert_eq!(updated.output_id, report.output_id);
+        assert_eq!(updated.ordinal, 2);
+
+        // Deleting a file from output/ never deletes the durable record, and a
+        // renamed file is a new output rather than a revision.
+        std::fs::remove_file(scratch.path().join(EXEC_OUTPUT_DIRECTORY).join("report.md")).unwrap();
+        write_output_file(scratch.path(), "summary.md", b"# Summary");
+        let fourth = sync(&store, &dir, chat.id, CallId::new(), 90).await;
+        let summary = fourth
+            .entries
+            .iter()
+            .find(|entry| entry.filename == "summary.md")
+            .unwrap();
+        assert_eq!(summary.status, OutputSyncStatus::Created);
+        assert_ne!(summary.output_id, report.output_id);
+        let report_record = store.get_output(report.output_id).await.unwrap().unwrap();
+        assert!(report_record.deleted_at.is_none());
+        assert_eq!(report_record.revision_count, 2);
+        assert_eq!(store.list_outputs(chat.id, 10).await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn an_exact_scan_retry_is_idempotent() {
+        let (_dir, store, chat) = store_with_chat().await;
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = open_scratch(scratch.path());
+        write_output_file(scratch.path(), "report.md", b"# Draft");
+
+        let call_id = CallId::new();
+        let first = sync(&store, &dir, chat.id, call_id, 0).await;
+        let retried = sync(&store, &dir, chat.id, call_id, 0).await;
+
+        assert_eq!(first.entries[0].output_id, retried.entries[0].output_id);
+        assert_eq!(retried.entries[0].status, OutputSyncStatus::Unchanged);
+        assert_eq!(store.list_outputs(chat.id, 10).await.unwrap().len(), 1);
+        assert_eq!(
+            store
+                .list_output_revisions(first.entries[0].output_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn unacceptable_files_become_notes_without_failing_the_scan() {
+        let (_dir, store, chat) = store_with_chat().await;
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = open_scratch(scratch.path());
+
+        write_output_file(scratch.path(), "good.md", b"# Fine");
+        write_output_file(scratch.path(), "empty.md", b"");
+        write_output_file(
+            scratch.path(),
+            "huge.csv",
+            &vec![b'x'; MAX_DELIVERABLE_BYTES + 1],
+        );
+        write_output_file(scratch.path(), "binary.md", b"text\xff\xfe");
+        write_output_file(scratch.path(), ".hidden.md", b"# Plumbing");
+
+        let scan = sync(&store, &dir, chat.id, CallId::new(), 0).await;
+
+        assert_eq!(scan.entries.len(), 1);
+        assert_eq!(scan.entries[0].filename, "good.md");
+        assert!(scan.notes.iter().any(|note| note.contains("empty.md")));
+        assert!(scan
+            .notes
+            .iter()
+            .any(|note| note.contains("huge.csv") && note.contains("binary format")));
+        assert!(scan
+            .notes
+            .iter()
+            .any(|note| note.contains("binary.md") && note.contains("UTF-8")));
+        assert!(!scan.notes.iter().any(|note| note.contains(".hidden.md")));
+    }
+
+    #[tokio::test]
+    async fn the_revision_cap_is_a_note_and_other_files_still_land() {
+        let (_dir, store, chat) = store_with_chat().await;
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = open_scratch(scratch.path());
+
+        let capped = store
+            .create_output(&create_request(chat.id, "capped.md", 1))
+            .await
+            .unwrap();
+        for ordinal in 2..=MAX_OUTPUT_REVISIONS {
+            store
+                .append_output_revision(capped.id, &revision(2, i64::from(ordinal)))
+                .await
+                .unwrap();
+        }
+
+        write_output_file(scratch.path(), "capped.md", b"# One too many");
+        write_output_file(scratch.path(), "fresh.md", b"# Lands anyway");
+        let scan = sync(&store, &dir, chat.id, CallId::new(), 500).await;
+
+        assert!(scan.notes.iter().any(|note| note.contains("capped.md")));
+        assert_eq!(scan.entries.len(), 1);
+        assert_eq!(scan.entries[0].filename, "fresh.md");
+        assert_eq!(scan.entries[0].status, OutputSyncStatus::Created);
+    }
+
+    /// A symlinked `output/` planted by local exec must not hand arbitrary host
+    /// files to the catalog.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_output_directory_is_refused_rather_than_followed() {
+        let (_dir, store, chat) = store_with_chat().await;
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::fs::write(elsewhere.path().join("private.md"), b"# Private").unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), scratch.path().join(EXEC_OUTPUT_DIRECTORY))
+            .unwrap();
+        let dir = open_scratch(scratch.path());
+
+        let scan = sync(&store, &dir, chat.id, CallId::new(), 0).await;
+
+        assert!(scan.entries.is_empty());
+        assert!(scan.notes[0].contains("not a private workspace directory"));
+        assert!(store.list_outputs(chat.id, 10).await.unwrap().is_empty());
+    }
+}

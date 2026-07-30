@@ -48,6 +48,8 @@ pub mod image;
 #[cfg(feature = "keychain")]
 pub mod keychain;
 pub mod model;
+#[cfg(feature = "tools")]
+pub mod output_scan;
 pub mod preview;
 pub mod provider;
 mod renderer_tool;
@@ -109,12 +111,13 @@ pub use config::{Config, Profile};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use db::DbStore;
 pub use deliverable::{
-    deliverable_media_type, media_type_is_text, output_revision_relative_path,
-    revision_byte_ceiling, validate_binary_deliverable, validate_deliverable_media_type,
-    validate_deliverable_name, validate_portable_filename, CreateOutput, DeliverableKind,
-    NewOutputRevision, OutputRecord, OutputRevision, RevisionProducer, DELIVERABLES_DIRECTORY,
-    MAX_BINARY_DELIVERABLE_BYTES, MAX_DELIVERABLE_BYTES, MAX_DELIVERABLE_MEDIA_TYPE_CHARS,
-    MAX_DELIVERABLE_NAME_CHARS, MAX_OUTPUT_REVISIONS, OUTPUTS_DIRECTORY,
+    binary_media_type_for_extension, deliverable_media_type, media_type_is_text,
+    output_revision_relative_path, revision_byte_ceiling, validate_binary_deliverable,
+    validate_deliverable_media_type, validate_deliverable_name, validate_portable_filename,
+    CreateOutput, DeliverableKind, NewOutputRevision, OutputRecord, OutputRevision,
+    RevisionProducer, DELIVERABLES_DIRECTORY, MAX_BINARY_DELIVERABLE_BYTES, MAX_DELIVERABLE_BYTES,
+    MAX_DELIVERABLE_MEDIA_TYPE_CHARS, MAX_DELIVERABLE_NAME_CHARS, MAX_OUTPUT_REVISIONS,
+    OUTPUTS_DIRECTORY,
 };
 #[cfg(feature = "tools")]
 pub use deliverable_acceptance::{
@@ -151,6 +154,11 @@ pub use model::{
     TurnCheckpointProgress, TurnClientWait, TurnClientWaitStatus, TurnFailureReceipt,
     TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer, TurnSteerStatus, MAX_ATTACHMENT_REVISION,
     MAX_EXEC_WORKSPACE_FILE_BYTES, MAX_MESSAGE_ATTACHMENTS, MAX_ROOT_ATTACHMENTS,
+};
+#[cfg(feature = "tools")]
+pub use output_scan::{
+    sync_output_directory, OutputDirectorySync, OutputSyncEntry, OutputSyncStatus,
+    EXEC_OUTPUT_DIRECTORY, MAX_OUTPUT_SCAN_FILES,
 };
 pub use preview::{
     format_bytes, ResultEntry, ResultEntryKind, ResultFailure, ToolActionPreview,
