@@ -9,10 +9,11 @@ destination through the native **Save As…** dialog.
 ## Product flow
 
 1. The user asks for a report, plan, table, data file, or simple web page.
-2. The foreground agent calls `create_deliverable` with a portable filename and
-   complete text content.
-3. OpenWave atomically creates or replaces that filename under the exact
-   conversation's private output directory.
+2. The foreground agent produces the file with code execution, saving it under
+   the workspace's `output/` directory.
+3. After each command, OpenWave scans `output/` and publishes what it finds as
+   durable outputs: a new filename creates an output, and the same filename with
+   changed bytes appends a new version of the same output.
 4. The native Outputs view lists safe metadata and returns a bounded preview.
 5. **Save As…** snapshots the complete file and writes it only to the path the
    user selects.
@@ -25,7 +26,9 @@ symlinks rather than following them.
 
 ## Closed first-slice contract
 
-- Supported formats: Markdown, plain text, CSV, JSON, and HTML.
+- Curated text formats — Markdown, plain text, CSV, JSON, and HTML — publish as
+  text outputs; any other extension publishes as a binary artifact with a
+  media type derived from its extension, bounded at 16 MiB.
 - Filenames are one portable ASCII component, at most 120 characters.
 - Content is valid UTF-8, non-empty, and at most 512 KiB.
 - The catalog returns the newest 100 valid output files.
@@ -78,11 +81,9 @@ identical content returns the original record, so an ambiguous store response
 can be retried without creating a second output or a second revision; reusing
 one with different content is rejected.
 
-This layer is the foundation the model-facing and native surfaces move onto. It
-is not yet wired to `create_deliverable`, which still writes a filename into
-`artifacts/`. Files already in `artifacts/` predate the record and are not
-adopted into it: they stay on disk and remain listed by the current catalog
-until that surface moves to the record.
+This layer is what the exec `output/` scan writes into. Files created before
+the record existed under the legacy `artifacts/` directory predate the record
+and are not adopted into it.
 
 ## Accepting binary workspace artifacts
 
@@ -158,10 +159,7 @@ moves pointers a person can move back.
 ## Deliberate limits
 
 An export is a synchronous user action, so it is not automatically retried and
-does not yet have a durable export receipt. Binary artifacts enter the record
-only through host acceptance of a workspace file, described above;
-`create_deliverable` itself still authors text only, so model-authored binary
-generation is not part of this contract. Office document generation,
+does not yet have a durable export receipt. Office document generation,
 transcript-inline artifact cards, per-revision source references, and writing
 directly into connected folders remain later slices. Those additions should
 preserve the same rule: the model names a logical output, while a person or

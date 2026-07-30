@@ -77,8 +77,8 @@ use openwave_core::{
     validate_list_folder_arguments, validate_read_connected_file_arguments,
     validate_request_folder_access_arguments, validate_write_output_to_connected_folder_arguments,
     write_output_to_connected_folder_tool_spec, AgentConfig, AgentError, ApprovalClass, BlobStore,
-    CachingSecretProvider, Config, CreateDeliverable, FsBlobStore, KeychainSecretProvider, ListDir,
-    Profile, ReadFile, Result, SecretProvider, Store, Tool, ToolRegistry, WriteFile,
+    CachingSecretProvider, Config, FsBlobStore, KeychainSecretProvider, ListDir, Profile, ReadFile,
+    Result, SecretProvider, Store, Tool, ToolRegistry, WriteFile,
 };
 use resolver::KeyedResolver;
 
@@ -876,7 +876,6 @@ fn agent_deps(
         .with(Box::new(ReadFile))
         .with(Box::new(ListDir))
         .with(Box::new(WriteFile))
-        .with(Box::new(CreateDeliverable::new(source_store.clone())))
         .with(Box::new(ExecTool::new(code_execution)))
         .with(Box::new(source_tools::ListSourcesTool::new(
             source_store.clone(),

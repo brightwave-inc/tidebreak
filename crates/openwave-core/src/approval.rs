@@ -106,7 +106,7 @@ impl ToolApprovalKind {
             "web_search" => Self::WebSearchMayShareQuery,
             "web_extract" => Self::WebExtractMayFetchUrl,
             "exec" => Self::ExecMayRunNetworkedCommand,
-            "write_file" | "create_deliverable" => Self::WorkspaceMayModifyFiles,
+            "write_file" => Self::WorkspaceMayModifyFiles,
             name if name.starts_with("mcp__") => Self::ExternalMcpMayCallServer,
             _ => Self::Unsupported,
         }

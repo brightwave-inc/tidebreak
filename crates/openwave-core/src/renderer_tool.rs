@@ -35,7 +35,6 @@ pub enum RendererToolName {
     ReadFile,
     ListDir,
     WriteFile,
-    CreateDeliverable,
     RequestFolderAccess,
     ConnectFolder,
     ListConnectedFolders,
@@ -70,7 +69,6 @@ impl From<&str> for RendererToolName {
             "read_file" => Self::ReadFile,
             "list_dir" => Self::ListDir,
             "write_file" => Self::WriteFile,
-            "create_deliverable" => Self::CreateDeliverable,
             "request_folder_access" => Self::RequestFolderAccess,
             "connect_folder" => Self::ConnectFolder,
             "list_connected_folders" => Self::ListConnectedFolders,
@@ -116,7 +114,6 @@ mod tests {
             "read_file",
             "list_dir",
             "write_file",
-            "create_deliverable",
             "request_folder_access",
             "connect_folder",
             "list_connected_folders",
@@ -151,6 +148,10 @@ mod tests {
             "",
             "SEARCH",
             "other",
+            // Removed 2026-07: journals recorded before the files-first outputs
+            // migration still carry these calls and must render as generic
+            // tools rather than fail the fold.
+            "create_deliverable",
         ] {
             assert_eq!(RendererToolName::from(name), RendererToolName::Other);
         }

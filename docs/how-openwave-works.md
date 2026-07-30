@@ -238,8 +238,6 @@ The built-in server registry currently contains:
 - `read_file` and `list_dir`, which are read-only;
 - `write_file`, which is confined to private per-chat scratch and runs without a
   prompt;
-- `create_deliverable`, which atomically writes one bounded text output into the
-  current chat's private Outputs catalog;
 - `search`, which queries the indexed corpus and always requires approval because
   matching excerpts are returned to the selected chat model, which may be remote;
 - `request_folder_access`, a client-owned consent proposal with a bounded
@@ -264,7 +262,7 @@ named one exact attached root and relative path. The tool accepts no arguments;
 it cannot browse, choose a path, open a picker, write, or run commands. The
 headless server does not advertise it.
 
-The built-in `read_file`, `list_dir`, `write_file`, and `create_deliverable`
+The built-in `read_file`, `list_dir`, and `write_file`
 tools operate only inside a server-derived, pinned per-chat scratch capability.
 Its path is neither persisted on the chat nor returned by the product API. The
 desktop can approve multiple folders through a native picker and a
@@ -705,10 +703,12 @@ cursor. The desktop then replays and follows later events, so durable history
 and the live stream meet at an explicit sequence boundary instead of relying on
 transient renderer state.
 
-The native **Outputs** surface completes a narrow deliverable loop. The
-foreground `create_deliverable` tool writes only a portable, bounded UTF-8 file
-below the exact chat's private output directory. The renderer receives a closed
-catalog and bounded text preview, never the scratch path. A native **Save As…**
+The native **Outputs** surface completes a narrow deliverable loop. Files the
+agent saves under `output/` during code execution are published by the host as
+durable, versioned outputs below the exact chat's private output directory;
+identity is the filename within the conversation, so saving to the same name
+updates the same output in place. The renderer receives a closed catalog and
+bounded text preview, never the scratch path. A native **Save As…**
 action snapshots the complete output and atomically writes it only to the
 user-selected destination; HTML is previewed as text and Markdown uses the same
 remote-load-blocking renderer as assistant messages. See

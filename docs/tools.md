@@ -7,14 +7,13 @@ identity.
 
 ## What exists today
 
-The current foreground agent surface contains nineteen tools:
+The current foreground agent surface contains eighteen tools:
 
 | Tool | Purpose | Execution boundary |
 | --- | --- | --- |
 | `read_file` | Read UTF-8 text from private per-chat scratch | Server, read-only |
 | `list_dir` | List a private-scratch directory | Server, read-only |
 | `write_file` | Atomically write private-scratch text | Server, workspace |
-| `create_deliverable` | Create or update a bounded user-visible text output | Server, workspace |
 | `exec` | Run a bounded command through the configured execution provider | Server, sensitive native sandbox |
 | `list_sources` | List bounded metadata for sources in this exact conversation | Server, read-only |
 | `read_source` | Read a bounded canonical-text range from one source | Server, read-only |
@@ -111,7 +110,6 @@ tools/
 ├── definitions.rs       model-facing names, descriptions, and JSON Schemas
 ├── arguments.rs         typed argument decoding
 ├── private_scratch.rs   confined filesystem primitives and limits
-├── create_deliverable.rs bounded user-visible text output
 ├── read_file.rs         one Tool implementation
 ├── list_dir.rs          one Tool implementation
 ├── write_file.rs        one Tool implementation

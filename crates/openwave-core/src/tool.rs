@@ -118,7 +118,7 @@ impl ToolSpec {
 ///
 /// A meaningful `default` is kept. Most optional tool arguments are
 /// `#[serde(default)]` fields whose absent value is a real decision — `exec`
-/// runs in `"."`, `create_deliverable` writes Markdown — and the model cannot
+/// runs in `"."` — and the model cannot
 /// infer any of that from the type alone. A null default is dropped: it is what
 /// an `Option` field emits, and "omitting this omits it" is not information
 /// worth spending tokens on. The strict conversion drops the keyword entirely,
