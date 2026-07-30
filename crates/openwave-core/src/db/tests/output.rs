@@ -826,3 +826,147 @@ mod output_scan {
         assert!(store.list_outputs(chat.id, 10).await.unwrap().is_empty());
     }
 }
+
+#[cfg(feature = "tools")]
+mod restore {
+    use super::*;
+    use crate::deliverable::{output_revision_relative_path, RevisionProducer};
+    use crate::deliverable_acceptance::restore_output_to_revision;
+    use crate::id::CallId;
+    use crate::output_scan::sync_output_directory;
+
+    /// Build an output with two real published revisions by running the
+    /// production scan twice, so restore reads bytes that actually exist.
+    async fn output_with_history(
+        store: &DbStore,
+        scratch: &std::path::Path,
+        chat_id: ChatId,
+    ) -> OutputRecord {
+        let dir = open_scratch(scratch);
+        for (second, content) in [(0, "# Draft"), (30, "# Final")] {
+            let directory = scratch.join(crate::output_scan::EXEC_OUTPUT_DIRECTORY);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("report.md"), content).unwrap();
+            sync_output_directory(
+                store,
+                &dir,
+                chat_id,
+                CallId::new(),
+                RevisionProducer::Turn(TurnId::new()),
+                at(second),
+            )
+            .await
+            .unwrap();
+        }
+        let outputs = store.list_outputs(chat_id, 10).await.unwrap();
+        assert_eq!(outputs[0].revision_count, 2);
+        outputs[0].clone()
+    }
+
+    #[tokio::test]
+    async fn restoring_appends_a_user_revision_with_the_target_content() {
+        let (_dir, store, chat) = store_with_chat().await;
+        let scratch = tempfile::tempdir().unwrap();
+        let output = output_with_history(&store, scratch.path(), chat.id).await;
+        let dir = open_scratch(scratch.path());
+        let revisions = store.list_output_revisions(output.id).await.unwrap();
+        let first = revisions.iter().find(|r| r.ordinal == 1).unwrap().clone();
+
+        let restored =
+            restore_output_to_revision(&store, &dir, chat.id, output.id, first.id, at(60))
+                .await
+                .unwrap();
+
+        // Google-Docs style: v3 appended with v1's content, nothing rewound.
+        assert_eq!(restored.revision_count, 3);
+        let head = store
+            .get_output_revision(restored.current_revision)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(head.ordinal, 3);
+        assert_eq!(head.sha256, first.sha256);
+        assert_eq!(head.byte_len, first.byte_len);
+        // Both-absent producer durably marks the user action.
+        assert_eq!(head.turn_id, None);
+        assert_eq!(head.producing_run_id, None);
+        // The restored bytes are published at the new revision's own path.
+        let published = scratch
+            .path()
+            .join(output_revision_relative_path(output.id, head.id));
+        assert_eq!(std::fs::read(&published).unwrap(), b"# Draft");
+        assert_eq!(
+            store.list_output_revisions(output.id).await.unwrap().len(),
+            3
+        );
+
+        // An ambiguous retry of the same restore observes the target content
+        // already at the head and appends nothing.
+        let retried =
+            restore_output_to_revision(&store, &dir, chat.id, output.id, first.id, at(60))
+                .await
+                .unwrap();
+        assert_eq!(retried.revision_count, 3);
+        assert_eq!(retried.current_revision, restored.current_revision);
+    }
+
+    #[tokio::test]
+    async fn restoring_the_current_revision_is_a_no_op() {
+        let (_dir, store, chat) = store_with_chat().await;
+        let scratch = tempfile::tempdir().unwrap();
+        let output = output_with_history(&store, scratch.path(), chat.id).await;
+        let dir = open_scratch(scratch.path());
+
+        let unchanged = restore_output_to_revision(
+            &store,
+            &dir,
+            chat.id,
+            output.id,
+            output.current_revision,
+            at(90),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(unchanged.revision_count, 2);
+        assert_eq!(unchanged.current_revision, output.current_revision);
+    }
+
+    #[tokio::test]
+    async fn restore_refuses_deleted_outputs_and_foreign_revisions() {
+        let (_dir, store, chat) = store_with_chat().await;
+        let scratch = tempfile::tempdir().unwrap();
+        let output = output_with_history(&store, scratch.path(), chat.id).await;
+        let dir = open_scratch(scratch.path());
+        let first = store
+            .list_output_revisions(output.id)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        // A revision of a different output is refused.
+        let other = store
+            .create_output(&create_request(chat.id, "other.md", 9))
+            .await
+            .unwrap();
+        assert!(restore_output_to_revision(
+            &store,
+            &dir,
+            chat.id,
+            output.id,
+            other.current_revision,
+            at(90)
+        )
+        .await
+        .is_err());
+
+        // A deleted output is refused.
+        store.delete_output(output.id, at(120)).await.unwrap();
+        assert!(
+            restore_output_to_revision(&store, &dir, chat.id, output.id, first.id, at(150))
+                .await
+                .is_err()
+        );
+    }
+}

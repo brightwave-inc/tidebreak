@@ -11,13 +11,17 @@
 //! and Save As… export) treats an accepted binary artifact exactly like any
 //! other output.
 
-use cap_std::fs::Dir;
+use std::io::Read as _;
+
+use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt as _};
+use cap_std::fs::{Dir, OpenOptions};
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
 use crate::deliverable::{
-    output_revision_relative_path, CreateOutput, DeliverableKind, NewOutputRevision,
-    RevisionProducer, MAX_BINARY_DELIVERABLE_BYTES, MAX_DELIVERABLE_BYTES,
+    output_revision_relative_path, revision_byte_ceiling, CreateOutput, DeliverableKind,
+    NewOutputRevision, OutputRevision, RevisionProducer, MAX_BINARY_DELIVERABLE_BYTES,
+    MAX_DELIVERABLE_BYTES, OUTPUTS_DIRECTORY,
 };
 use crate::error::{AgentError, Result};
 use crate::id::{AgentRunId, ChatId, OutputId, OutputRevisionId};
@@ -211,4 +215,134 @@ pub async fn merge_agent_run_result(
             revision,
         })
         .await
+}
+
+/// Restore an output to the content of one of its earlier revisions.
+///
+/// Restoring is append-only, Google-Docs style: the target revision's bytes are
+/// republished as a **new** revision at the head of the history, so nothing is
+/// rewound, renumbered, or lost, and the step can itself be undone by another
+/// restore. Restoring the revision that is already current is a no-op that
+/// returns the record unchanged.
+///
+/// The appended revision carries no producer — neither a turn nor a run — which
+/// durably marks it as a user action. Its identity derives from the (target
+/// revision, new ordinal) pair, so retrying an ambiguous restore lands on the
+/// same revision instead of appending twice.
+pub async fn restore_output_to_revision(
+    store: &dyn Store,
+    scratch: &Dir,
+    chat_id: ChatId,
+    output_id: OutputId,
+    target_revision_id: OutputRevisionId,
+    now: DateTime<Utc>,
+) -> Result<OutputRecord> {
+    let output = store
+        .get_output(output_id)
+        .await?
+        .filter(|output| output.chat_id == chat_id && output.deleted_at.is_none())
+        .ok_or_else(|| AgentError::Store("output not found in this conversation".into()))?;
+    let target = store
+        .get_output_revision(target_revision_id)
+        .await?
+        .filter(|revision| revision.output_id == output.id)
+        .ok_or_else(|| AgentError::Store("that version does not belong to this output".into()))?;
+    if output.current_revision == target.id {
+        return Ok(output);
+    }
+    // Also a no-op when the head already carries the target's exact content —
+    // which is what a retried restore observes after its first attempt
+    // committed. Comparing content rather than identity makes the retry
+    // idempotent without a caller-threaded expected ordinal.
+    let current = store
+        .get_output_revision(output.current_revision)
+        .await?
+        .ok_or_else(|| AgentError::Store("current revision is missing".into()))?;
+    if current.sha256 == target.sha256 && current.byte_len == target.byte_len {
+        return Ok(output);
+    }
+
+    let content = read_revision_bytes(scratch, &output, &target).await?;
+    let revision_id = OutputRevisionId::for_restore(target.id, output.revision_count + 1);
+    let relative_path = output_revision_relative_path(output.id, revision_id);
+    let publish_scratch = scratch
+        .try_clone()
+        .map_err(|error| AgentError::Store(format!("could not open private scratch: {error}")))?;
+    let publish_content = content.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::tools::private_scratch::publish_immutable_file(
+            &publish_scratch,
+            &relative_path,
+            &publish_content,
+        )
+    })
+    .await
+    .map_err(|error| AgentError::Store(format!("restore publication task failed: {error}")))?
+    .map_err(|error| AgentError::Store(format!("could not publish restored revision: {error}")))?;
+
+    store
+        .append_output_revision(
+            output.id,
+            &NewOutputRevision {
+                id: revision_id,
+                byte_len: target.byte_len,
+                sha256: target.sha256,
+                // No producer: both-absent durably marks a user action.
+                turn_id: None,
+                producing_run_id: None,
+                created_at: now,
+            },
+        )
+        .await
+}
+
+/// Read and verify one revision's bytes from the conversation's private
+/// scratch, refusing symlinks at every component.
+async fn read_revision_bytes(
+    scratch: &Dir,
+    output: &OutputRecord,
+    revision: &OutputRevision,
+) -> Result<Vec<u8>> {
+    let scratch = scratch
+        .try_clone()
+        .map_err(|error| AgentError::Store(format!("could not open private scratch: {error}")))?;
+    let output = output.clone();
+    let revision = revision.clone();
+    tokio::task::spawn_blocking(move || {
+        let unavailable = || AgentError::Store("that version's content is unavailable".into());
+        let ceiling = revision_byte_ceiling(&output.media_type);
+        if revision.byte_len > ceiling as u64 {
+            return Err(unavailable());
+        }
+        let open_child = |parent: &Dir, name: &str| -> Result<Dir> {
+            let metadata = parent.symlink_metadata(name).map_err(|_| unavailable())?;
+            if !metadata.is_dir() {
+                return Err(unavailable());
+            }
+            parent.open_dir_nofollow(name).map_err(|_| unavailable())
+        };
+        let outputs = open_child(&scratch, OUTPUTS_DIRECTORY)?;
+        let revisions = open_child(&outputs, &output.id.to_string())?;
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        let file = revisions
+            .open_with(revision.id.to_string(), &options)
+            .map_err(|_| unavailable())?;
+        let metadata = file.metadata().map_err(|_| unavailable())?;
+        if !metadata.is_file() || metadata.len() != revision.byte_len {
+            return Err(unavailable());
+        }
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        file.take(ceiling as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| unavailable())?;
+        if bytes.len() as u64 != revision.byte_len
+            || <[u8; 32]>::from(Sha256::digest(&bytes)) != revision.sha256
+        {
+            return Err(unavailable());
+        }
+        Ok(bytes)
+    })
+    .await
+    .map_err(|error| AgentError::Store(format!("revision read task failed: {error}")))?
 }
