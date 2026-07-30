@@ -908,7 +908,12 @@ action?: ToolActionPreview,
  * withholding it leaves the transcript asserting that something
  * happened without ever showing what.
  */
-result?: ToolResultPreview, } | { "type": "turn_completed" } | { "type": "turn_refused", refusal: RendererRefusal, } | { "type": "turn_failed" } | { "type": "turn_cancelled" } | { "type": "user_steered", message_id: MessageId, text: string, } | { "type": "context_truncated" } | { "type": "event_omitted" };
+result?: ToolResultPreview, } | { "type": "turn_completed" } | { "type": "turn_refused", refusal: RendererRefusal, } | { "type": "turn_failed", 
+/**
+ * Why the turn failed, at the only resolution a client can act on.
+ * The failure's `kind` and `message` stay internal.
+ */
+category: TurnFailureCategory, } | { "type": "turn_cancelled" } | { "type": "user_steered", message_id: MessageId, text: string, } | { "type": "context_truncated" } | { "type": "event_omitted" };
 
 /**
  * One frame on a chat's event socket.
@@ -1203,6 +1208,23 @@ width: number, height: number, };
  * something that silently appears in the transcript.
  */
 export type TranscriptRole = "user" | "assistant";
+
+/**
+ * Why a turn failed, closed and coarse enough to be stable.
+ *
+ * A failure's `kind` is an internal diagnostic vocabulary: it grows with the
+ * server, and its `message` can carry provider diagnostics and host paths, so
+ * neither crosses to the renderer. What a client actually needs is narrower —
+ * what to tell the person, and whether running the same turn again could
+ * plausibly do anything different. This enum is exactly that, and nothing is
+ * worth a variant here unless a client would say or do something different
+ * for it.
+ *
+ * It is also the worker's own retry taxonomy: [`Self::retries_may_succeed`]
+ * decides whether a failed turn is rescheduled, so the category a client sees
+ * and the category the scheduler acted on cannot drift apart.
+ */
+export type TurnFailureCategory = "rate_limited" | "auth" | "transient" | "unknown";
 
 /**
  * Identifies one turn: a single user input through to the final answer.

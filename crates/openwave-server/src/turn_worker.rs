@@ -2230,11 +2230,8 @@ impl TurnWorker {
         detail: &str,
         retry_after: Option<Duration>,
     ) -> Result<TurnWorkerOutcome> {
-        let retryable = matches!(
-            code,
-            "provider" | "rate_limited" | "overloaded" | "store" | "secret"
-        );
-        let retry = retryable
+        let retry = crate::event_projection::TurnFailureCategory::from_kind(code)
+            .retries_may_succeed()
             .then(|| {
                 self.config
                     .retry
