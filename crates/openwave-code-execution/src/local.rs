@@ -147,9 +147,7 @@ impl LocalExecutionProvider {
         // be mirrored into remote sandboxes. Like receipts, it is a dotted
         // sibling of the workspace directories at the scratch root, so file
         // tools and provider sync never see it.
-        let env_home = root
-            .join(ENV_HOME_DIR)
-            .join(request.workspace_id.as_str());
+        let env_home = root.join(ENV_HOME_DIR).join(request.workspace_id.as_str());
         secure_dir(&env_home)?;
         Ok(ResolvedExecutionPaths {
             workspace,
