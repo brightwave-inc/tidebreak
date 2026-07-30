@@ -19,12 +19,12 @@ use openwave_code_execution::{
     DaytonaExecutionProvider, E2BCredential, E2BExecutionProvider, ExecFolderAccess,
     ExecFolderGrant, ExecutionId, ExecutionWorkspaceId, LocalExecutionProvider,
     OutputArtifactEntry, OutputArtifactScan, OutputArtifactStatus, PreviewScan, RemoteSessionPool,
-    WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing, WriteOverlay, DAYTONA_CREDENTIAL_KEY,
-    DOCUMENT_SCRIPTS_DIR, DOCUMENT_SCRIPT_FILES, E2B_CREDENTIAL_KEY,
+    WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing, WriteOverlay, WriteSnapshotSink,
+    DAYTONA_CREDENTIAL_KEY, DOCUMENT_SCRIPTS_DIR, DOCUMENT_SCRIPT_FILES, E2B_CREDENTIAL_KEY,
 };
 use openwave_core::{
     exec_attachment_file_name, BlobStore, CallId, Chat, ChatId, HostRootId,
-    MessageDocumentAttachment, ProjectId, Result, RevisionProducer, SecretProvider, Store,
+    MessageDocumentAttachment, ProjectId, Result, RevisionProducer, SecretProvider, Store, TurnId,
     MAX_EXEC_WORKSPACE_FILE_BYTES,
 };
 use openwave_egress::{
@@ -33,6 +33,8 @@ use openwave_egress::{
 use serde::{Deserialize, Serialize};
 
 use crate::error::ServerError;
+use crate::exec_write_snapshot::TurnSnapshotSink;
+use crate::state::BlobWriteGuard;
 
 const CODE_EXECUTION_SETTING: &str = "code_execution";
 pub const DEFAULT_TIMEOUT_MS: u64 = 20_000;
@@ -591,6 +593,8 @@ pub struct ConfiguredCodeExecutionProvider {
     scratch_root: PathBuf,
     document_scripts_source: Option<PathBuf>,
     folder_grant_resolver: Option<Arc<dyn ExecFolderGrantResolver>>,
+    /// Cross-process exclusion for the blobs a write-back snapshot publishes.
+    blob_writes: Option<Arc<BlobWriteGuard>>,
     remote_sessions: RemoteSessionPool,
     /// The write overlay each chat's current turn is staging into.
     ///
@@ -607,6 +611,10 @@ pub struct ConfiguredCodeExecutionProvider {
 /// staging is also indexed that way rather than making every caller re-resolve
 /// a path through the broker to find it.
 struct StagedTurn {
+    /// The turn that opened this staging. The journal written at close belongs
+    /// to the turn that staged the changes, not to whatever is running when the
+    /// write-back applies them.
+    turn: TurnId,
     overlay: WriteOverlay,
     staged_roots: HashMap<HostRootId, PathBuf>,
 }
@@ -657,9 +665,20 @@ impl ConfiguredCodeExecutionProvider {
             scratch_root: scratch_root.into(),
             document_scripts_source: None,
             folder_grant_resolver: None,
+            blob_writes: None,
             remote_sessions: RemoteSessionPool::default(),
             write_overlays: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Install the blob lifecycle lock the write-back snapshot publishes under.
+    ///
+    /// Without it — and without a blob store — staged writes are applied with no
+    /// snapshot, which is the behavior granted folders had before this existed.
+    #[must_use]
+    pub(crate) fn with_blob_write_locks(mut self, blob_writes: Arc<BlobWriteGuard>) -> Self {
+        self.blob_writes = Some(blob_writes);
+        self
     }
 
     /// Install the blob store used to backfill attached documents before exec.
@@ -695,6 +714,7 @@ impl ConfiguredCodeExecutionProvider {
     pub(crate) async fn folder_grants_for_chat(
         &self,
         chat: &Chat,
+        turn: TurnId,
     ) -> std::result::Result<Vec<ResolvedExecFolderGrant>, CodeExecutionError> {
         let config = read_config(&*self.store).await.map_err(|_| {
             CodeExecutionError::Unavailable("configuration storage is unavailable".into())
@@ -703,7 +723,7 @@ impl ConfiguredCodeExecutionProvider {
             return Ok(Vec::new());
         }
         let mut grants = self.resolve_chat_folder_grants(chat).await?;
-        self.open_write_overlay(chat.id, &mut grants).await;
+        self.open_write_overlay(chat.id, turn, &mut grants).await;
         Ok(grants)
     }
 
@@ -712,7 +732,12 @@ impl ConfiguredCodeExecutionProvider {
     /// Called once, when the turn resolves the grants it will show the model.
     /// A folder that cannot be staged keeps direct write access, which is the
     /// behavior it had before staging existed.
-    async fn open_write_overlay(&self, chat: ChatId, grants: &mut [ResolvedExecFolderGrant]) {
+    async fn open_write_overlay(
+        &self,
+        chat: ChatId,
+        turn: TurnId,
+        grants: &mut [ResolvedExecFolderGrant],
+    ) {
         self.close_write_overlay(chat).await;
         let writable = grants
             .iter()
@@ -740,6 +765,7 @@ impl ConfiguredCodeExecutionProvider {
             .insert(
                 chat,
                 StagedTurn {
+                    turn,
                     overlay,
                     staged_roots,
                 },
@@ -748,23 +774,52 @@ impl ConfiguredCodeExecutionProvider {
 
     /// Apply this turn's staged writes to the user's folders and end staging.
     ///
-    /// A turn that never staged anything finds nothing to do. A turn that is
-    /// abandoned rather than finished never reaches here, and its staged writes
-    /// are discarded when the next turn sweeps them: applying them later would
-    /// write a folder that has since moved on.
+    /// Every file the write-back replaces has its prior bytes retained first
+    /// and journaled against `turn`, so the change summary and undo have
+    /// something to work from. A turn that never staged anything finds nothing
+    /// to do. A turn that is abandoned rather than finished never reaches here,
+    /// and its staged writes are discarded when the next turn sweeps them:
+    /// applying them later would write a folder that has since moved on.
     pub(crate) async fn close_write_overlay(&self, chat: ChatId) {
-        let overlay = self
+        let staged = self
             .write_overlays
             .lock()
             .expect("write overlay registry is not poisoned")
             .remove(&chat);
-        let Some(staged) = overlay else {
+        let Some(StagedTurn { turn, overlay, .. }) = staged else {
             return;
         };
-        let outcome = staged.overlay.materialize().await;
+        let snapshots =
+            self.blobs
+                .as_ref()
+                .zip(self.blob_writes.as_ref())
+                .map(|(blobs, blob_writes)| {
+                    TurnSnapshotSink::new(self.store.clone(), blobs.clone(), blob_writes.clone())
+                });
+        let outcome = overlay
+            .materialize(
+                snapshots
+                    .as_ref()
+                    .map(|sink| sink as &dyn WriteSnapshotSink),
+            )
+            .await;
+        // The journal commits after the folders are written, not before: the
+        // bytes it points at are already published, and a row for a write that
+        // was refused would offer an undo for a change that never happened.
+        if let Some(sink) = snapshots {
+            if let Err(error) = sink.commit(chat, turn).await {
+                tracing::error!(
+                    chat = %chat,
+                    turn = %turn,
+                    %error,
+                    "could not journal this turn's changes to granted folders; undo is unavailable for them"
+                );
+            }
+        }
         if outcome.written > 0 || outcome.deleted > 0 || outcome.refused > 0 {
             tracing::info!(
                 chat = %chat,
+                turn = %turn,
                 written = outcome.written,
                 deleted = outcome.deleted,
                 refused = outcome.refused,

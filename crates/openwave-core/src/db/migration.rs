@@ -95,7 +95,136 @@ impl MigratorTrait for Migrator {
             Box::new(AddSandboxProvision),
             Box::new(AddLateResultEvidence),
             Box::new(AddPlanRequests),
+            Box::new(AddExecFileSnapshots),
         ]
+    }
+}
+
+/// Adds the journal of file changes a turn applied to a granted folder (issue
+/// #1075), one row per file, carrying the content address of the bytes the
+/// folder held beforehand.
+///
+/// `prior_blob_id` is the schema's third class of live blob reference, after
+/// `document.source_blob_id` and `message_attachment.blob_id`, and the index on
+/// it exists for the same reason theirs do: every retirement decision asks
+/// whether any table still references the blob, and that question must not
+/// scan. A snapshot the auditor cannot see is a user file we promised to be
+/// able to restore and then deleted the only copy of.
+///
+/// `undo_state` is explicit rather than derived from a null blob id because a
+/// file with no prior bytes (a creation) and a file whose prior bytes were too
+/// large to keep are both blob-less and mean opposite things to the user.
+/// Purely additive (a new table), with a symmetric `down`.
+struct AddExecFileSnapshots;
+
+impl MigrationName for AddExecFileSnapshots {
+    fn name(&self) -> &str {
+        "m20260730_000036_add_exec_file_snapshots"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddExecFileSnapshots {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(ExecFileSnapshot::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(ExecFileSnapshot::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(ExecFileSnapshot::ChatId).uuid().not_null())
+                    .col(ColumnDef::new(ExecFileSnapshot::TurnId).uuid().not_null())
+                    .col(
+                        ColumnDef::new(ExecFileSnapshot::FolderPath)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ExecFileSnapshot::RelativePath)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ExecFileSnapshot::ChangeKind)
+                            .string_len(32)
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(ExecFileSnapshot::PriorBlobId).uuid().null())
+                    .col(
+                        ColumnDef::new(ExecFileSnapshot::PriorByteLen)
+                            .big_integer()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(ExecFileSnapshot::NewSha256)
+                            .string_len(64)
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(ExecFileSnapshot::UndoState)
+                            .string_len(32)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ExecFileSnapshot::RecordedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_exec_file_snapshot_chat")
+                            .from(ExecFileSnapshot::Table, ExecFileSnapshot::ChatId)
+                            .to(Chat::Table, Chat::Id)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .check(Expr::col(ExecFileSnapshot::PriorBlobId).ne(uuid::Uuid::nil()))
+                    .check(Expr::col(ExecFileSnapshot::PriorByteLen).gte(0))
+                    .check(Expr::col(ExecFileSnapshot::ChangeKind).is_in([
+                        crate::model::ExecFileChange::Created.as_str(),
+                        crate::model::ExecFileChange::Overwritten.as_str(),
+                        crate::model::ExecFileChange::Deleted.as_str(),
+                    ]))
+                    .check(Expr::col(ExecFileSnapshot::UndoState).is_in([
+                        crate::model::ExecUndoState::Available.as_str(),
+                        crate::model::ExecUndoState::PriorTooLarge.as_str(),
+                        crate::model::ExecUndoState::PriorUnreadable.as_str(),
+                    ]))
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_exec_file_snapshot_blob")
+                    .table(ExecFileSnapshot::Table)
+                    .col(ExecFileSnapshot::PriorBlobId)
+                    .to_owned(),
+            )
+            .await?;
+        // Retention prunes the oldest turns of one chat, and undo reads the
+        // newest; both walk this index rather than the whole journal.
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_exec_file_snapshot_chat_turn")
+                    .table(ExecFileSnapshot::Table)
+                    .col(ExecFileSnapshot::ChatId)
+                    .col(ExecFileSnapshot::RecordedAt)
+                    .col(ExecFileSnapshot::TurnId)
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(ExecFileSnapshot::Table).to_owned())
+            .await
     }
 }
 
@@ -9358,6 +9487,22 @@ enum ContextCheckpoint {
     CacheReadInputTokens,
     CacheCreationInputTokens,
     CreatedAt,
+}
+
+#[derive(DeriveIden)]
+enum ExecFileSnapshot {
+    Table,
+    Id,
+    ChatId,
+    TurnId,
+    FolderPath,
+    RelativePath,
+    ChangeKind,
+    PriorBlobId,
+    PriorByteLen,
+    NewSha256,
+    UndoState,
+    RecordedAt,
 }
 
 #[derive(DeriveIden)]

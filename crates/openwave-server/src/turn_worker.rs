@@ -532,7 +532,7 @@ impl TurnWorker {
                 .await;
         };
         let exec_folders = match self.exec_folder_context.as_ref() {
-            Some(provider) => match provider.folder_grants_for_chat(&chat).await {
+            Some(provider) => match provider.folder_grants_for_chat(&chat, turn.id).await {
                 Ok(folders) => folders,
                 Err(error) => {
                     // Prompt enrichment is not an authority boundary. A broker

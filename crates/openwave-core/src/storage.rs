@@ -37,11 +37,11 @@ use crate::model::{
     AgentRun, AgentRunInboxEntry, AgentRunResult, AgentRunTier, AgentRunWaitSetCandidate,
     BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus, Chat, ClientToolCallRequest,
     DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert,
-    DocumentSummaryRecord, DocumentUpsert, Message, MessageAttachment, MessageDocumentAttachment,
-    PermissionMode, Project, ReasoningEffort, RootAttachmentChange, RootAttachmentChangeTerminal,
-    ToolCallRecord, ToolCallResolution, TurnAgentRunWait, TurnAgentRunWaitSet,
-    TurnCheckpointProgress, TurnClientWait, TurnFailureReceipt, TurnFailureRetry, TurnRun,
-    TurnSteer,
+    DocumentSummaryRecord, DocumentUpsert, ExecFileSnapshot, ExecFileSnapshotRecord, Message,
+    MessageAttachment, MessageDocumentAttachment, PermissionMode, Project, ReasoningEffort,
+    RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord, ToolCallResolution,
+    TurnAgentRunWait, TurnAgentRunWaitSet, TurnCheckpointProgress, TurnClientWait,
+    TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnSteer,
 };
 use crate::provider::{RefusalOutcome, StopReason, Usage};
 use crate::semantic_checkpoint::{ContextCheckpoint, SaveContextCheckpointOutcome};
@@ -1205,6 +1205,28 @@ pub trait Store: Send + Sync {
             .into_iter()
             .map(|document| document.id)
             .collect())
+    }
+
+    /// Journal one turn's changes to granted folders and prune the chat's
+    /// history back to its undo window.
+    ///
+    /// The prior bytes each record names must already be published to the blob
+    /// store: the row is what makes them live, so a row committed ahead of its
+    /// bytes points at nothing. Committing the rows cancels any retirement
+    /// queued for those blobs, and drops the journal for turns outside the
+    /// window, enqueueing whatever that frees.
+    async fn record_exec_file_snapshots(
+        &self,
+        _chat_id: ChatId,
+        _turn_id: TurnId,
+        _files: &[ExecFileSnapshotRecord],
+    ) -> Result<()> {
+        document_storage_unavailable()
+    }
+
+    /// This chat's journaled file changes, newest first.
+    async fn list_exec_file_snapshots(&self, _chat_id: ChatId) -> Result<Vec<ExecFileSnapshot>> {
+        document_storage_unavailable()
     }
 
     /// Read the coalesced retirement state for one source blob.

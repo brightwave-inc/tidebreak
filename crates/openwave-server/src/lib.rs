@@ -26,6 +26,7 @@ mod document_decode;
 mod durable_oplog;
 mod error;
 mod event_projection;
+mod exec_write_snapshot;
 mod extract;
 mod foreground_prompt;
 mod gateway_runtime;
@@ -748,6 +749,12 @@ async fn bind_inner(
         os_policy.clone(),
     ));
     let blobs: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(config.data_dir.join("blobs")));
+    // The same lock root `AppState` uses. `BlobWriteGuard` rendezvouses through
+    // permanent lock files, so a second handle over the directory excludes
+    // against the first rather than shadowing it.
+    let exec_blob_writes = Arc::new(state::BlobWriteGuard::new(
+        config.data_dir.join("blob-locks"),
+    ));
     let code_execution = Arc::new(
         code_execution::ConfiguredCodeExecutionProvider::new(
             store.clone(),
@@ -755,6 +762,7 @@ async fn bind_inner(
             config.data_dir.join("scratch"),
         )
         .with_blobs(blobs.clone())
+        .with_blob_write_locks(exec_blob_writes)
         .with_document_scripts(config.exec_scripts_dir.clone())
         .with_folder_grant_resolver(folder_grant_resolver),
     );

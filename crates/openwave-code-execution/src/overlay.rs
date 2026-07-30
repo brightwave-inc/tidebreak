@@ -50,6 +50,8 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use openwave_core::MAX_EXEC_SNAPSHOT_BYTES;
+
 use crate::host_paths::{
     resolve_scratch_directory, FileStamp, ScratchDir, ScratchEntry, ScratchEntryKind,
 };
@@ -127,6 +129,50 @@ pub struct OverlayOutcome {
     pub refused: usize,
 }
 
+/// The bytes a granted folder held immediately before one staged change.
+///
+/// The distinction between "there was nothing" and "there was something we
+/// could not keep" is the whole point of this type. Both leave no blob behind,
+/// and only one of them means the change cannot be reverted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PriorContents {
+    /// The folder had no such file. Reverting means removing what was written.
+    Absent,
+    /// The prior bytes, small enough to retain.
+    Bytes(Vec<u8>),
+    /// The file exceeded [`MAX_EXEC_SNAPSHOT_BYTES`]. It is still written; the
+    /// caller records that this one change cannot be undone.
+    TooLarge { byte_len: u64 },
+    /// The file existed but could not be read.
+    Unreadable,
+}
+
+/// One file a turn's write-back is about to change, and what it is replacing.
+#[derive(Debug)]
+pub struct StagedChange<'a> {
+    /// The granted folder, as the user attached it.
+    pub folder: &'a Path,
+    /// The changed file's path relative to that folder.
+    pub relative: &'a str,
+    /// What the folder held beforehand.
+    pub prior: PriorContents,
+    /// The bytes about to be written; absent when the file is being removed.
+    pub next: Option<&'a [u8]>,
+}
+
+/// Where a turn's file changes are journaled before they are materialized.
+///
+/// The sink runs *before* the folder is touched and may refuse: a change whose
+/// prior bytes could not be retained is not applied, because an irreversible
+/// overwrite is exactly what this whole path exists to prevent. Recording is
+/// per file so the prior bytes never all sit in memory at once; the caller
+/// commits the accumulated journal once the overlay is applied.
+#[async_trait::async_trait]
+pub trait WriteSnapshotSink: Send + Sync {
+    /// Retain `change`'s prior bytes and journal it, or refuse the change.
+    async fn record(&self, change: StagedChange<'_>) -> Result<(), String>;
+}
+
 impl WriteOverlay {
     /// Stage `sources` under a fresh per-turn home inside `scratch_root`.
     ///
@@ -177,15 +223,28 @@ impl WriteOverlay {
 
     /// Apply every staged change to the real folders and drop the overlay.
     ///
+    /// Every change passes through `snapshots` first, so the bytes it replaces
+    /// are retained before they stop existing. A sink that refuses one file
+    /// leaves that file untouched and counts it refused.
+    ///
     /// Errors are per file: one refused write does not abandon the rest, since
     /// leaving the remainder unapplied would strand work the agent believes it
     /// finished.
-    pub async fn materialize(self) -> OverlayOutcome {
+    pub async fn materialize(self, snapshots: Option<&dyn WriteSnapshotSink>) -> OverlayOutcome {
         let mut outcome = OverlayOutcome::default();
         for slot in &self.slots {
             let mut seen = Vec::new();
-            apply_directory(slot, "", &slot.overlay_dir, &mut seen, 0, &mut outcome).await;
-            apply_deletions(slot, &seen, &mut outcome).await;
+            apply_directory(
+                slot,
+                "",
+                &slot.overlay_dir,
+                snapshots,
+                &mut seen,
+                0,
+                &mut outcome,
+            )
+            .await;
+            apply_deletions(slot, snapshots, &seen, &mut outcome).await;
         }
         self.discard().await;
         outcome
@@ -286,6 +345,7 @@ async fn apply_directory(
     slot: &OverlaySlot,
     prefix: &str,
     directory: &ScratchDir,
+    snapshots: Option<&dyn WriteSnapshotSink>,
     seen: &mut Vec<String>,
     depth: usize,
     outcome: &mut OverlayOutcome,
@@ -310,7 +370,8 @@ async fn apply_directory(
                     outcome.refused += 1;
                     continue;
                 }
-                match write_back(slot, prefix, &name, directory, stamp).await {
+                match write_back(slot, prefix, &relative, &name, directory, snapshots, stamp).await
+                {
                     Ok(()) => outcome.written += 1,
                     Err(_) => outcome.refused += 1,
                 }
@@ -321,6 +382,7 @@ async fn apply_directory(
                         slot,
                         &relative,
                         &child,
+                        snapshots,
                         seen,
                         depth + 1,
                         outcome,
@@ -337,12 +399,26 @@ async fn apply_directory(
 async fn write_back(
     slot: &OverlaySlot,
     prefix: &str,
+    relative: &str,
     name: &str,
     directory: &ScratchDir,
+    snapshots: Option<&dyn WriteSnapshotSink>,
     stamp: Option<FileStamp>,
 ) -> io::Result<()> {
     let content = directory.read_file(name).await?;
     let target = descend(&slot.source_dir, prefix, true).await?;
+    if let Some(snapshots) = snapshots {
+        let prior = read_prior(&target, name).await;
+        snapshots
+            .record(StagedChange {
+                folder: &slot.source,
+                relative,
+                prior,
+                next: Some(&content),
+            })
+            .await
+            .map_err(io::Error::other)?;
+    }
     // The staged file carries the mode the folder's copy had, so writing it
     // back does not turn a script into a non-executable file or narrow who can
     // read a document the user shares.
@@ -356,11 +432,34 @@ async fn write_back(
     target.write_file_with_mode(name, &content, mode).await
 }
 
+/// Read what the user's folder holds for `name`, within the snapshot budget.
+///
+/// A file too large to retain is reported as such rather than read, so nothing
+/// here loads an arbitrarily large file into memory to then discard it.
+async fn read_prior(target: &ScratchDir, name: &str) -> PriorContents {
+    match target.file_stamp(name).await {
+        None => PriorContents::Absent,
+        Some(stamp) if stamp.len > MAX_EXEC_SNAPSHOT_BYTES => PriorContents::TooLarge {
+            byte_len: stamp.len,
+        },
+        Some(_) => match target.read_file(name).await {
+            Ok(bytes) => PriorContents::Bytes(bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => PriorContents::Absent,
+            Err(_) => PriorContents::Unreadable,
+        },
+    }
+}
+
 /// Remove from the real folder every file the overlay started with and no
 /// longer has. This is the only place anything is deleted, and it consults the
 /// manifest rather than the folder, so a file that was never staged is never a
 /// candidate.
-async fn apply_deletions(slot: &OverlaySlot, seen: &[String], outcome: &mut OverlayOutcome) {
+async fn apply_deletions(
+    slot: &OverlaySlot,
+    snapshots: Option<&dyn WriteSnapshotSink>,
+    seen: &[String],
+    outcome: &mut OverlayOutcome,
+) {
     let seen = seen.iter().collect::<std::collections::HashSet<_>>();
     for relative in slot.manifest.keys() {
         if seen.contains(relative) {
@@ -371,6 +470,27 @@ async fn apply_deletions(slot: &OverlaySlot, seen: &[String], outcome: &mut Over
             outcome.refused += 1;
             continue;
         };
+        if let Some(snapshots) = snapshots {
+            let prior = read_prior(&target, name).await;
+            // Nothing to delete and nothing to keep: the file the manifest
+            // named is already gone, which is the outcome this pass wanted.
+            if prior == PriorContents::Absent {
+                continue;
+            }
+            if snapshots
+                .record(StagedChange {
+                    folder: &slot.source,
+                    relative,
+                    prior,
+                    next: None,
+                })
+                .await
+                .is_err()
+            {
+                outcome.refused += 1;
+                continue;
+            }
+        }
         match target.remove(name, ScratchEntryKind::File).await {
             Ok(()) => outcome.deleted += 1,
             // Already gone is the outcome we wanted, not a refusal.
@@ -546,7 +666,7 @@ mod tests {
         );
         assert!(granted.path().join("nested/data.csv").exists());
 
-        let outcome = overlay.materialize().await;
+        let outcome = overlay.materialize(None).await;
         assert_eq!(
             outcome,
             OverlayOutcome {
@@ -588,7 +708,7 @@ mod tests {
         let (_scratch, overlay) = overlay_for(granted.path()).await;
         std::fs::write(granted.path().join("arrived-later.txt"), "user").unwrap();
 
-        let outcome = overlay.materialize().await;
+        let outcome = overlay.materialize(None).await;
         assert_eq!(outcome, OverlayOutcome::default());
         assert_eq!(
             std::fs::read_to_string(granted.path().join("arrived-later.txt")).unwrap(),
@@ -597,6 +717,96 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(granted.path().join("kept.txt")).unwrap(),
             "kept"
+        );
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct Recorded {
+        relative: String,
+        prior: PriorContents,
+        next: Option<Vec<u8>>,
+    }
+
+    /// A sink that records everything, and can be told to refuse one path.
+    struct RecordingSink {
+        refuse: Option<String>,
+        seen: std::sync::Mutex<Vec<Recorded>>,
+    }
+
+    #[async_trait::async_trait]
+    impl WriteSnapshotSink for RecordingSink {
+        async fn record(&self, change: StagedChange<'_>) -> Result<(), String> {
+            if self.refuse.as_deref() == Some(change.relative) {
+                return Err("cannot retain".into());
+            }
+            self.seen.lock().unwrap().push(Recorded {
+                relative: change.relative.to_owned(),
+                prior: change.prior.clone(),
+                next: change.next.map(<[u8]>::to_vec),
+            });
+            Ok(())
+        }
+    }
+
+    /// The bytes a change destroys reach the journal before the folder is
+    /// touched, and a change whose prior bytes could not be kept is not applied
+    /// at all. An overwrite we cannot reverse is the failure this path exists to
+    /// prevent, so refusing it has to beat completing it.
+    #[tokio::test]
+    async fn prior_bytes_are_offered_before_each_change_and_a_refusal_blocks_it() {
+        let granted = tempfile::tempdir().unwrap();
+        std::fs::write(granted.path().join("notes.md"), "original").unwrap();
+        std::fs::write(granted.path().join("gone.txt"), "doomed").unwrap();
+        std::fs::write(granted.path().join("precious.md"), "irreplaceable").unwrap();
+
+        let (_scratch, overlay) = overlay_for(granted.path()).await;
+        let staged = overlay.slots()[0].overlay().to_path_buf();
+        std::fs::write(staged.join("notes.md"), "revised").unwrap();
+        std::fs::write(staged.join("fresh.txt"), "new").unwrap();
+        std::fs::write(staged.join("precious.md"), "clobbered").unwrap();
+        std::fs::remove_file(staged.join("gone.txt")).unwrap();
+
+        let sink = RecordingSink {
+            refuse: Some("precious.md".into()),
+            seen: std::sync::Mutex::new(Vec::new()),
+        };
+        let outcome = overlay.materialize(Some(&sink)).await;
+        assert_eq!(
+            outcome,
+            OverlayOutcome {
+                written: 2,
+                deleted: 1,
+                refused: 1
+            }
+        );
+
+        let mut seen = sink.seen.into_inner().unwrap();
+        seen.sort_by(|left, right| left.relative.cmp(&right.relative));
+        assert_eq!(
+            seen,
+            vec![
+                Recorded {
+                    relative: "fresh.txt".to_owned(),
+                    prior: PriorContents::Absent,
+                    next: Some(b"new".to_vec()),
+                },
+                Recorded {
+                    relative: "gone.txt".to_owned(),
+                    prior: PriorContents::Bytes(b"doomed".to_vec()),
+                    next: None,
+                },
+                Recorded {
+                    relative: "notes.md".to_owned(),
+                    prior: PriorContents::Bytes(b"original".to_vec()),
+                    next: Some(b"revised".to_vec()),
+                },
+            ]
+        );
+
+        // The refused file keeps the bytes the user had.
+        assert_eq!(
+            std::fs::read_to_string(granted.path().join("precious.md")).unwrap(),
+            "irreplaceable"
         );
     }
 }
