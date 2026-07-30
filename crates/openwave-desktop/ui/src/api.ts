@@ -49,6 +49,7 @@ import {
   type PendingUserQuestions as WirePendingUserQuestions,
   type UserQuestion as WireUserQuestion,
   type UserQuestionOption as WireUserQuestionOption,
+  type ChatCancellationSnapshot,
   type ChatToolActivitySnapshot,
   type ChatToolActivityStatus,
   type RendererAgentEvent,
@@ -252,6 +253,9 @@ export type ChatMessageImageAttachment = WireTranscriptImageAttachment;
  * silently broke hydration.
  */
 export type ChatToolActivity = ChatToolActivitySnapshot;
+
+/** One turn the user stopped, as the durable transcript records it. */
+export type ChatCancellation = ChatCancellationSnapshot;
 
 export type ChatTranscript = WireChatTranscript;
 

@@ -2,6 +2,7 @@ import type { SequencedEvent } from "./api";
 import { parseToolActionPreview, parseToolResultPreview } from "./api";
 import { AssistantSourceMarkerStreamScrubber } from "./AssistantSourceMarkerStream";
 import type { ChatMessage } from "./MessageList";
+import { TURN_CANCELLED_NOTICE } from "./MessageList";
 import type { ToolCallStatus } from "./ToolCallCard";
 import { toolApprovalPresentation } from "./ToolCallCard";
 import { upsertPendingApprovalCard } from "./ApprovalHistory";
@@ -404,7 +405,11 @@ export function reduceChatSessionEvent(
           provisionalToolCallIds: new Set(),
           messages: [
             ...settleActiveToolCalls(state.messages, "cancelled"),
-            { id: deps.nextId(), role: "system", text: "turn cancelled" },
+            {
+              id: deps.nextId(),
+              role: "system",
+              text: TURN_CANCELLED_NOTICE,
+            },
           ],
         },
         effects,

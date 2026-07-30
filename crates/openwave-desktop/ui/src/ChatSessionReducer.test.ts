@@ -9,6 +9,7 @@ import {
   type ChatSessionTransition,
 } from "./ChatSessionReducer";
 import type { ChatMessage } from "./MessageList";
+import { TURN_CANCELLED_NOTICE } from "./MessageList";
 
 const NOW = "2026-07-23T12:00:00.000Z";
 
@@ -490,7 +491,7 @@ describe("terminal events", () => {
     });
     expect(state.messages[state.messages.length - 1]).toMatchObject({
       role: "system",
-      text: "turn cancelled",
+      text: TURN_CANCELLED_NOTICE,
     });
     expect(effects).toEqual([
       { type: "invalidate_terminal_hydration" },

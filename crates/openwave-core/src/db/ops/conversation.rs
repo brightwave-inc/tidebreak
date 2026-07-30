@@ -16,8 +16,8 @@ use crate::model::{
     ToolCallRecord, TurnRunStatus, MAX_ROOT_ATTACHMENTS,
 };
 use crate::storage::{
-    ChatRefusalSnapshot, ChatToolActivitySnapshot, ChatToolActivityStatus, ChatTranscriptSnapshot,
-    DeleteChatOutcome,
+    ChatCancellationSnapshot, ChatRefusalSnapshot, ChatToolActivitySnapshot,
+    ChatToolActivityStatus, ChatTranscriptSnapshot, DeleteChatOutcome,
 };
 
 use super::super::{entities, project_from_models, store_err, DbStore};
@@ -669,6 +669,7 @@ pub(in crate::db) async fn get_chat_transcript(
     let refusals = list_terminal_refusals_on(&transaction, chat_id).await?;
     let citations = super::citation::list_snapshots_on(&transaction, chat_id).await?;
     let tool_activity = list_terminal_tool_activity_on(&transaction, chat_id).await?;
+    let cancellations = list_cancellations_on(&transaction, chat_id).await?;
     let last_event_seq = terminal_event_cursor_on(&transaction, chat_id).await?;
     transaction.commit().await.map_err(store_err)?;
     Ok(Some(ChatTranscriptSnapshot {
@@ -678,8 +679,45 @@ pub(in crate::db) async fn get_chat_transcript(
         refusals,
         citations,
         tool_activity,
+        cancellations,
         last_event_seq,
     }))
+}
+
+/// Read the turns this conversation stopped on cancellation.
+///
+/// Cancellation is already durable — the turn run holds `cancelled` and the
+/// journal holds a terminal `TurnCancelled` — but it commits no assistant
+/// message, so it is the one terminal outcome with nothing in the transcript to
+/// hang off. Reading the turn rows directly avoids deserializing the journal
+/// for a fact the run status already states.
+async fn list_cancellations_on<C>(
+    conn: &C,
+    chat_id: ChatId,
+) -> Result<Vec<ChatCancellationSnapshot>>
+where
+    C: ConnectionTrait,
+{
+    Ok(entities::turn_run::Entity::find()
+        .filter(entities::turn_run::Column::ChatId.eq(chat_id.0))
+        .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Cancelled.as_str()))
+        .order_by_asc(entities::turn_run::Column::FinishedAt)
+        .order_by_asc(entities::turn_run::Column::Id)
+        .all(conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .filter_map(|turn| {
+            // A cancelled turn always has a finish time. One without it is a row
+            // this projection cannot place in transcript order, and a notice in
+            // the wrong place reads worse than none.
+            turn.finished_at
+                .map(|cancelled_at| ChatCancellationSnapshot {
+                    turn_id: TurnId(turn.id),
+                    cancelled_at,
+                })
+        })
+        .collect())
 }
 
 /// Join refused terminal events to the exact assistant message committed in

@@ -194,6 +194,16 @@ root_attachments: Array<ChatRootAttachment>,
 created_at: string, };
 
 /**
+ * One turn that reached its terminal state by cancellation.
+ *
+ * Carries when the turn stopped and nothing else: the renderer places the
+ * notice in transcript order and owns its wording. The turn identity is here
+ * so the entry has a stable key across hydrations, not so a client can address
+ * the turn.
+ */
+export type ChatCancellationSnapshot = { turn_id: TurnId, cancelled_at: string, };
+
+/**
  * Identifies a persistent conversation.
  */
 export type ChatId = string;
@@ -287,7 +297,13 @@ export type ChatTranscript = { messages: Array<ChatMessageSnapshot>,
  * Finished tool activity from terminal turns, projected through a fixed
  * renderer-safe allowlist. Canonical tool records never cross this API.
  */
-tool_activity: Array<ChatToolActivitySnapshot>, last_event_seq: number, };
+tool_activity: Array<ChatToolActivitySnapshot>, 
+/**
+ * Turns the user stopped. A cancelled turn writes no assistant message, so
+ * this is the only durable trace of it the transcript can carry — without
+ * it a reopened conversation reads as though the response had finished.
+ */
+cancellations: Array<ChatCancellationSnapshot>, last_event_seq: number, };
 
 /**
  * A small, human-scale position inside a cited document.

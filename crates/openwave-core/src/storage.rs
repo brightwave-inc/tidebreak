@@ -79,6 +79,10 @@ pub struct ChatTranscriptSnapshot {
     /// closed previews and lifecycle timestamps only; canonical tool records
     /// never leave storage.
     pub tool_activity: Vec<ChatToolActivitySnapshot>,
+    /// Turns the user stopped, in the order they were stopped. A cancelled turn
+    /// commits no assistant message, so without this the transcript loses the
+    /// fact that a response was interrupted rather than finished.
+    pub cancellations: Vec<ChatCancellationSnapshot>,
     pub last_event_seq: i64,
 }
 
@@ -90,6 +94,18 @@ pub struct ChatTranscriptSnapshot {
 pub struct ChatCitationSnapshot {
     pub message_id: MessageId,
     pub citation: crate::AssistantCitationSnapshot,
+}
+
+/// One turn that reached its terminal state by cancellation.
+///
+/// Carries when the turn stopped and nothing else: the renderer places the
+/// notice in transcript order and owns its wording. The turn identity is here
+/// so the entry has a stable key across hydrations, not so a client can address
+/// the turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+pub struct ChatCancellationSnapshot {
+    pub turn_id: TurnId,
+    pub cancelled_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// One refused terminal outcome attached to its durable assistant output.

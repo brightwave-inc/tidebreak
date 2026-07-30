@@ -1,5 +1,6 @@
 import { parseToolActionPreview, parseToolResultPreview } from "./api";
 import type {
+  ChatCancellation,
   ChatMessage,
   ChatToolActivity,
   RendererRefusal,
@@ -35,12 +36,18 @@ export type HydratedTranscriptEntry =
       resultUnreadable?: boolean;
       status: ToolCallStatus;
       createdAt: string;
+    }
+  | {
+      id: string;
+      kind: "cancellation";
+      createdAt: string;
     };
 
 /** Build a stable, presentation-only transcript from one durable snapshot. */
 export function hydrateTranscriptHistory(
   messages: ChatMessage[],
   toolActivity: ChatToolActivity[],
+  cancellations: ChatCancellation[] = [],
 ): HydratedTranscriptEntry[] {
   const entries: HydratedTranscriptEntry[] = [
     ...messages.map((message) => ({
@@ -107,6 +114,14 @@ export function hydrateTranscriptHistory(
       // rather than silently showing no result at all.
       resultUnreadable: activity.result_unreadable,
       createdAt: activity.started_at,
+    })),
+    // A stopped turn leaves no assistant message behind, so the notice is its
+    // own entry placed by when the turn stopped. Keyed on the turn so the same
+    // snapshot hydrates to the same React identity every time.
+    ...cancellations.map((cancellation) => ({
+      id: `cancellation:${cancellation.turn_id}`,
+      kind: "cancellation" as const,
+      createdAt: cancellation.cancelled_at,
     })),
   ];
 
