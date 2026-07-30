@@ -355,6 +355,8 @@ pub enum ToolErrorCategory {
     UserDeclined,
     /// The model named a tool this turn does not advertise.
     NotFound,
+    /// The call's arguments did not parse as JSON, so nothing ran.
+    InvalidArguments,
     /// The capability is available after the reader configures it.
     ConfigurationRequired,
     /// The tool ran and reported a failure of its own.
@@ -369,6 +371,7 @@ impl ToolErrorCategory {
             Self::UserCancelled => "user_cancelled",
             Self::UserDeclined => "user_declined",
             Self::NotFound => "not_found",
+            Self::InvalidArguments => "invalid_arguments",
             Self::ConfigurationRequired => "configuration_required",
             Self::ToolFailed => "tool_failed",
         }
@@ -382,7 +385,8 @@ impl ToolErrorCategory {
             Self::UserCancelled
             | Self::UserDeclined
             | Self::NotFound
-            | Self::ConfigurationRequired => false,
+            | Self::ConfigurationRequired
+            | Self::InvalidArguments => false,
             Self::ToolFailed => true,
         }
     }
