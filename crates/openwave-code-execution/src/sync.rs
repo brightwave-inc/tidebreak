@@ -45,6 +45,11 @@ impl SyncReport {
 /// Push every eligible file under `host_dir` into the workspace.
 ///
 /// A missing `host_dir` pushes nothing: the chat simply has no scratch yet.
+///
+/// Every host-side failure — an unreadable file, a directory the walk cannot
+/// list — is reported against the entry it belongs to and the push continues.
+/// One permission-denied file in an attached folder should cost the agent that
+/// file, not the whole workspace.
 pub async fn push_host_dir(
     lifecycle: &dyn WorkspaceLifecycle,
     workspace: &ExecutionWorkspaceId,
@@ -57,14 +62,33 @@ pub async fn push_host_dir(
     let mut stack: Vec<(PathBuf, String)> = vec![(host_dir.to_path_buf(), String::new())];
     let mut files: Vec<(WorkspaceFilePath, PathBuf)> = Vec::new();
     while let Some((dir, prefix)) = stack.pop() {
-        let mut entries = tokio::fs::read_dir(&dir)
-            .await
-            .map_err(|_| unreadable(&prefix))?;
-        while let Some(entry) = entries
-            .next_entry()
-            .await
-            .map_err(|_| unreadable(&prefix))?
-        {
+        let listed = if prefix.is_empty() {
+            "the private scratch root".to_owned()
+        } else {
+            format!("{prefix}/")
+        };
+        let mut entries = match tokio::fs::read_dir(&dir).await {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::warn!("private scratch directory '{listed}' could not be listed: {error}");
+                report.skip(format!(
+                    "not pushed: {listed} could not be listed ({error})"
+                ));
+                continue;
+            }
+        };
+        loop {
+            let entry = match entries.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(error) => {
+                    tracing::warn!("listing of private scratch '{listed}' ended early: {error}");
+                    report.skip(format!(
+                        "not pushed: the listing of {listed} ended early ({error})"
+                    ));
+                    break;
+                }
+            };
             let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
                 report.skip(format!(
                     "not pushed: an entry under '{prefix}/' has a non-UTF-8 name"
@@ -76,9 +100,18 @@ pub async fn push_host_dir(
             } else {
                 format!("{prefix}/{name}")
             };
-            let metadata = tokio::fs::symlink_metadata(entry.path())
-                .await
-                .map_err(|_| unreadable(&relative))?;
+            let metadata = match tokio::fs::symlink_metadata(entry.path()).await {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    tracing::debug!(
+                        "private scratch entry '{relative}' vanished or is unreadable: {error}"
+                    );
+                    report.skip(format!(
+                        "not pushed: {relative} could not be inspected ({error})"
+                    ));
+                    continue;
+                }
+            };
             if metadata.is_symlink() {
                 report.skip(format!("not pushed: {relative} is a symlink"));
                 continue;
@@ -117,13 +150,37 @@ pub async fn push_host_dir(
         ));
     }
     for (path, host_path) in files.into_iter().take(MAX_SYNC_FILES) {
-        let content = tokio::fs::read(&host_path)
-            .await
-            .map_err(|_| unreadable(path.as_str()))?;
-        lifecycle
+        let content = match tokio::fs::read(&host_path).await {
+            Ok(content) => content,
+            Err(error) => {
+                tracing::debug!(
+                    "private scratch file '{}' could not be read: {error}",
+                    path.as_str()
+                );
+                report.skip(format!(
+                    "not pushed: {} could not be read from the host ({error})",
+                    path.as_str()
+                ));
+                continue;
+            }
+        };
+        match lifecycle
             .put_workspace_file(workspace, &path, &content)
-            .await?;
-        report.transferred += 1;
+            .await
+        {
+            Ok(()) => report.transferred += 1,
+            Err(error) if aborts_the_sync(&error) => return Err(error),
+            Err(error) => {
+                tracing::warn!(
+                    "private scratch file '{}' was rejected by the workspace: {error}",
+                    path.as_str()
+                );
+                report.skip(format!(
+                    "not pushed: {} was rejected by the workspace ({error})",
+                    path.as_str()
+                ));
+            }
+        }
     }
     Ok(report)
 }
@@ -208,7 +265,7 @@ pub async fn pull_into_host_dir(
     for path in files {
         let content = match lifecycle.get_workspace_file(workspace, &path).await {
             Ok(content) => content,
-            Err(error) if aborts_the_pull(&error) => return Err(error),
+            Err(error) if aborts_the_sync(&error) => return Err(error),
             Err(error) => {
                 tracing::warn!(
                     "workspace file '{}' could not be pulled: {error}",
@@ -300,14 +357,19 @@ fn refuse(report: &mut SyncReport, path: &WorkspaceFilePath, refusal: ScratchRef
     report.skip(format!("not pulled: {} {reason}", path.as_str()));
 }
 
-/// Whether one file's failure should end the whole pull.
+/// Whether one file's provider-side failure should end the whole sync.
 ///
-/// A file that is missing, oversized, or unreadable is this file's problem:
-/// the pull reports it and keeps going, which is what the module promises. A
-/// provider that is unreachable or misconfigured is every remaining file's
-/// problem too, and degrading it into a few hundred identical notes would hide
-/// a real failure from the caller.
-fn aborts_the_pull(error: &CodeExecutionError) -> bool {
+/// A file that is missing, oversized, or rejected on its own merits is this
+/// file's problem: the sync reports it and keeps going, which is what the
+/// module promises. A provider that is unreachable or misconfigured is every
+/// remaining file's problem too, and degrading it into a few hundred identical
+/// notes would hide a real failure from the caller.
+///
+/// Only provider-side errors reach here. The push's other failures are
+/// host-side — an unreadable file, a directory that vanished mid-walk — and
+/// those are per-entry by nature: the next entry has every chance of
+/// succeeding, so none of them are ever fatal.
+fn aborts_the_sync(error: &CodeExecutionError) -> bool {
     match error {
         CodeExecutionError::WorkspaceFileNotFound
         | CodeExecutionError::WorkspaceFileTooLarge
@@ -319,10 +381,6 @@ fn aborts_the_pull(error: &CodeExecutionError) -> bool {
         | CodeExecutionError::IdentityConflict
         | CodeExecutionError::AmbiguousExecution => true,
     }
-}
-
-fn unreadable(path: &str) -> CodeExecutionError {
-    CodeExecutionError::Sandbox(format!("private scratch entry '{path}' is unreadable"))
 }
 
 fn unwritable(path: &str) -> CodeExecutionError {
@@ -625,6 +683,31 @@ mod tests {
         assert!(pushed.notes.iter().any(|note| {
             note.contains("documents/oversized.pdf") && note.contains("file limit")
         }));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn push_reports_an_unreadable_file_and_keeps_going() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let host = tempfile::tempdir().unwrap();
+        std::fs::write(host.path().join("readable.txt"), b"attached brief").unwrap();
+        let denied = host.path().join("denied.txt");
+        std::fs::write(&denied, b"secret").unwrap();
+        std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let fake = FakeWorkspace::default();
+
+        let pushed = push_host_dir(&fake, &workspace_id(), host.path())
+            .await
+            .unwrap();
+
+        assert_eq!(pushed.transferred, 1, "{:?}", pushed.notes);
+        assert_eq!(fake.get("readable.txt").unwrap(), b"attached brief");
+        assert!(fake.get("denied.txt").is_none());
+        assert!(pushed
+            .notes
+            .iter()
+            .any(|note| note.contains("denied.txt") && note.contains("could not be read")));
     }
 
     #[tokio::test]

@@ -860,8 +860,11 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
         let Some(lifecycle) = lifecycle else {
             return provider.execute(request).await;
         };
-        // A failed push fails the execution: running against files the model
-        // believes are present would answer with misleading not-found errors.
+        // A push that fails outright fails the execution: if the workspace is
+        // unreachable, running against files the model believes are present
+        // would answer with misleading not-found errors. Files the push had to
+        // leave behind individually ride along as notes instead, so the model
+        // learns its workspace is incomplete rather than starting with nothing.
         let mut notes = sync::push_host_dir(lifecycle, &request.workspace_id, &host_dir)
             .await?
             .notes;
