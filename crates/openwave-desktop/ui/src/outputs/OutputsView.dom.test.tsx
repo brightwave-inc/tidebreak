@@ -37,10 +37,7 @@ function outputApis(deliverables: DeliverableSummary[]): OutputsApis {
       revisionId,
       status: "completed" as const,
     }),
-    revert: vi.fn().mockResolvedValue({
-      status: "retracted" as const,
-      outputId: ids.brief,
-    }),
+    delete: vi.fn().mockResolvedValue(output()),
     restore: vi.fn().mockResolvedValue(output()),
   };
 }
@@ -93,7 +90,7 @@ describe("OutputsView", () => {
     expect(await screen.findByText("Research brief.md was saved.")).toBeVisible();
   });
 
-  it("retracts a merged output and offers an undo that restores it", async () => {
+  it("deletes an output and offers an undo that restores it", async () => {
     const apis = outputApis([output({ producingRunId: ids.sheet })]);
     const user = userEvent.setup();
 
@@ -104,14 +101,14 @@ describe("OutputsView", () => {
     await user.click(
       await screen.findByRole("button", { name: "More options for Research brief.md" }),
     );
-    await user.click(await screen.findByRole("menuitem", { name: "Revert" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
 
-    await waitFor(() => expect(apis.revert).toHaveBeenCalledWith("chat-1", ids.brief));
+    await waitFor(() => expect(apis.delete).toHaveBeenCalledWith("chat-1", ids.brief));
     expect(
-      await screen.findByText("Research brief.md was retracted from this conversation."),
+      await screen.findByText("Research brief.md was deleted from this conversation."),
     ).toBeVisible();
 
-    // The retract is reversible: Undo restores the exact output.
+    // The delete is reversible: Undo restores the exact output.
     await user.click(screen.getByRole("button", { name: "Undo" }));
     await waitFor(() => expect(apis.restore).toHaveBeenCalledWith("chat-1", ids.brief));
     expect(await screen.findByText("Research brief.md was restored.")).toBeVisible();

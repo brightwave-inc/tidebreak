@@ -113,6 +113,116 @@ export async function restoreOutput(
   );
 }
 
+export type OutputRevisionInfo = {
+  revisionId: string;
+  ordinal: number;
+  sizeBytes: number;
+  createdAt: string;
+  producedBy: "agent" | "backgroundAgent" | "user";
+  isCurrent: boolean;
+};
+
+export type OutputRevisionsCatalog = {
+  outputId: string;
+  revisions: OutputRevisionInfo[];
+};
+
+export async function listOutputRevisions(
+  chatId: string,
+  outputId: string,
+): Promise<OutputRevisionsCatalog> {
+  return parseOutputRevisionsCatalog(
+    await invoke("list_output_revisions", { request: { chatId, outputId } }),
+    outputId,
+  );
+}
+
+export async function readOutputRevision(
+  chatId: string,
+  outputId: string,
+  revisionId: string,
+): Promise<DeliverablePreview> {
+  return parseDeliverablePreview(
+    await invoke("read_output_revision", {
+      request: { chatId, outputId, revisionId },
+    }),
+  );
+}
+
+export async function restoreOutputRevision(
+  chatId: string,
+  outputId: string,
+  revisionId: string,
+): Promise<DeliverableSummary> {
+  return parseDeliverableSummary(
+    await invoke("restore_output_revision", {
+      request: { chatId, outputId, revisionId },
+    }),
+  );
+}
+
+export async function deleteOutput(
+  chatId: string,
+  outputId: string,
+): Promise<DeliverableSummary> {
+  return parseDeliverableSummary(
+    await invoke("delete_output", { request: { chatId, outputId } }),
+  );
+}
+
+export function parseOutputRevisionsCatalog(
+  value: unknown,
+  expectedOutputId?: string,
+): OutputRevisionsCatalog {
+  if (
+    !isExactRecord(value, ["outputId", "revisions"]) ||
+    !isOpaqueId(value.outputId) ||
+    (expectedOutputId !== undefined && value.outputId !== expectedOutputId) ||
+    !Array.isArray(value.revisions) ||
+    value.revisions.length < 1 ||
+    value.revisions.length > MAX_OUTPUT_REVISIONS
+  ) {
+    throw new Error("Invalid output versions response");
+  }
+  const revisions = value.revisions.map((row): OutputRevisionInfo => {
+    if (
+      !isExactRecord(row, [
+        "revisionId",
+        "ordinal",
+        "sizeBytes",
+        "createdAt",
+        "producedBy",
+        "isCurrent",
+      ]) ||
+      !isOpaqueId(row.revisionId) ||
+      typeof row.ordinal !== "number" ||
+      !Number.isSafeInteger(row.ordinal) ||
+      row.ordinal < 1 ||
+      row.ordinal > MAX_OUTPUT_REVISIONS ||
+      typeof row.sizeBytes !== "number" ||
+      !Number.isSafeInteger(row.sizeBytes) ||
+      row.sizeBytes < 0 ||
+      typeof row.createdAt !== "string" ||
+      !Number.isFinite(Date.parse(row.createdAt)) ||
+      (row.producedBy !== "agent" &&
+        row.producedBy !== "backgroundAgent" &&
+        row.producedBy !== "user") ||
+      typeof row.isCurrent !== "boolean"
+    ) {
+      throw new Error("Invalid output versions response");
+    }
+    return {
+      revisionId: row.revisionId,
+      ordinal: row.ordinal,
+      sizeBytes: row.sizeBytes,
+      createdAt: row.createdAt,
+      producedBy: row.producedBy,
+      isCurrent: row.isCurrent,
+    };
+  });
+  return { outputId: value.outputId, revisions };
+}
+
 export async function exportDeliverable(
   chatId: string,
   outputId: string,
