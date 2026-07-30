@@ -7,6 +7,7 @@
 
 use std::collections::HashSet;
 
+use openwave_code_execution::host_paths::{resolve_scratch_directory, ScratchEntryKind};
 use openwave_core::{
     validate_import_connected_file_arguments, validate_list_connected_folders_arguments,
     validate_list_folder_arguments, validate_read_connected_file_arguments, CallId, ListFolderArgs,
@@ -15,8 +16,8 @@ use openwave_core::{
     READ_CONNECTED_FILE_TOOL,
 };
 use openwave_host_broker::{
-    OperationEnvelope, OperationRequest, OperationResult, PathRequest, RelativePath, RootId,
-    PROTOCOL_VERSION,
+    DirectoryEntry, EntryKind, OperationEnvelope, OperationRequest, OperationResult, PathRequest,
+    ReadFileResult, RelativePath, RootId, PROTOCOL_VERSION,
 };
 use tauri::Manager;
 
@@ -31,6 +32,10 @@ const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 const MAX_DIRECTORY_ENTRIES: usize = 128;
 const MAX_RESULT_CONTENT_BYTES: usize = 60 * 1024;
 const MAX_FILE_CONTENT_BYTES: usize = 56 * 1024;
+/// Ceiling on a file read out of a staged folder, before the result is trimmed
+/// to [`MAX_FILE_CONTENT_BYTES`]. It exists so a large file the agent staged is
+/// refused rather than buffered whole to be thrown away.
+const MAX_STAGED_READ_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Recover persisted outcomes, then discover new matching client calls. The
 /// loop is deliberately native-owned: no renderer event or user action is an
@@ -270,6 +275,16 @@ async fn execute_operation(
         Ok(request) => request,
         Err(()) => return unavailable("invalid_request", "The folder request was not available."),
     };
+    match staged_outcome(state, context, &request).await {
+        StagedOutcome::Unstaged => {}
+        StagedOutcome::Result(result) => return serialize_result(call, result),
+        StagedOutcome::Missing => {
+            return unavailable(
+                "path_not_found",
+                "That path is not in the connected folder.",
+            )
+        }
+    }
     let result = state
         .broker
         .operation(OperationEnvelope {
@@ -287,6 +302,151 @@ async fn execute_operation(
             "folder_unavailable",
             "That connected folder is no longer available to this conversation. You can ask the user to connect a folder again.",
         ),
+    }
+}
+
+/// What the staged copy of a granted folder has to say about one read.
+enum StagedOutcome {
+    /// The folder is not staged for this turn, so the user's folder is still
+    /// the only view and the broker answers as it always has.
+    Unstaged,
+    /// The staged copy's answer, in the shape the broker would have returned.
+    Result(OperationResult),
+    /// The folder is staged and the path is not in the staged tree — because
+    /// the agent deleted it this turn, or because it never existed. Answering
+    /// from the user's folder here would show the model a file the shell it is
+    /// driving cannot see.
+    Missing,
+}
+
+/// Answer a folder read from this turn's staged copy when the folder has one.
+///
+/// Exec writes into a per-turn copy of every writable granted folder rather
+/// than the folder itself, so inside a turn the user's folder is the stale
+/// view: a file the agent has just written is not in it, and one the agent has
+/// deleted is still there. A `list_folder` that disagreed with the shell in the
+/// same turn is worse than either view alone, because nothing tells the model
+/// which one is lying — so the folder tools read the staged copy too.
+///
+/// Only reads are redirected. A folder the turn does not stage — no exec grant,
+/// a read-only grant, a folder the overlay could not copy, or a managed
+/// execution provider that mounts nothing — takes the broker path unchanged.
+///
+/// Authority stays with the broker. The staged copy is served only after the
+/// broker confirms this conversation may read that root *now*, which is what
+/// keeps a grant revoked mid-turn from being answered out of staging. The
+/// probe is a root listing rather than the request itself because the request
+/// may name a path that exists only in the staged tree.
+async fn staged_outcome(
+    state: &HostAccess,
+    context: AuthoritativeContext,
+    request: &OperationRequest,
+) -> StagedOutcome {
+    let (root_id, path, read_file) = match request {
+        OperationRequest::ListDirectory(PathRequest { root_id, path }) => (root_id, path, false),
+        OperationRequest::ReadFile(PathRequest { root_id, path }) => (root_id, path, true),
+        _ => return StagedOutcome::Unstaged,
+    };
+    let Some(staged) = state.staged_folders() else {
+        return StagedOutcome::Unstaged;
+    };
+    let Ok(root) = openwave_core::HostRootId::from_uuid(root_id.as_uuid()) else {
+        return StagedOutcome::Unstaged;
+    };
+    let Some(overlay) = staged.staged_root(openwave_core::ChatId::from(context.chat_id), root)
+    else {
+        return StagedOutcome::Unstaged;
+    };
+    if !may_read_root(state, context, *root_id).await {
+        return StagedOutcome::Unstaged;
+    }
+    let staged = if read_file {
+        staged_file(&overlay, path).await
+    } else {
+        staged_directory(&overlay, path).await
+    };
+    staged.map_or(StagedOutcome::Missing, StagedOutcome::Result)
+}
+
+/// Whether the broker would allow this conversation to read `root_id` right now.
+///
+/// `list_roots` filters its answer through the same `ReadFiles` authorization
+/// call that gates a read of the folder, so a root appearing in it is the
+/// broker's live judgement rather than a cached one. It is asked instead of the
+/// caller's own request because it does not depend on the requested path
+/// existing in the user's folder.
+async fn may_read_root(state: &HostAccess, context: AuthoritativeContext, root_id: RootId) -> bool {
+    let result = state
+        .broker
+        .operation(OperationEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: openwave_host_broker::RequestId::new(),
+            context: context.execution,
+            request: OperationRequest::ListRoots,
+        })
+        .await;
+    matches!(
+        result,
+        Ok(OperationResult::ListRoots { roots })
+            if roots.iter().any(|root| root.root_id == root_id)
+    )
+}
+
+/// List one directory inside a staged folder, in the broker's own result shape.
+async fn staged_directory(
+    overlay: &std::path::Path,
+    path: &RelativePath,
+) -> Option<OperationResult> {
+    let directory = resolve_scratch_directory(overlay, staged_relative(path), false).await?;
+    let entries = directory
+        .entries()
+        .await
+        .ok()?
+        .into_iter()
+        // A name the protocol cannot address is one no follow-up call could
+        // name, and the broker drops it from a listing for the same reason.
+        .filter(|entry| RelativePath::parse(&entry.name).is_ok())
+        .map(|entry| DirectoryEntry {
+            name: entry.name,
+            kind: match entry.kind {
+                ScratchEntryKind::File => EntryKind::File,
+                ScratchEntryKind::Directory => EntryKind::Directory,
+                ScratchEntryKind::Other => EntryKind::Other,
+            },
+        })
+        .take(MAX_DIRECTORY_ENTRIES)
+        .collect();
+    Some(OperationResult::ListDirectory { entries })
+}
+
+/// Read one file inside a staged folder, in the broker's own result shape.
+async fn staged_file(overlay: &std::path::Path, path: &RelativePath) -> Option<OperationResult> {
+    let (prefix, name) = staged_relative(path).rsplit_once('/').map_or_else(
+        || ("", staged_relative(path)),
+        |(prefix, name)| (prefix, name),
+    );
+    if name.is_empty() {
+        return None;
+    }
+    let directory = resolve_scratch_directory(overlay, prefix, false).await?;
+    if directory.file_stamp(name).await?.len > MAX_STAGED_READ_BYTES {
+        return None;
+    }
+    let bytes = directory.read_file(name).await.ok()?;
+    let bytes_read = bytes.len();
+    Some(OperationResult::ReadFile(ReadFileResult {
+        content: String::from_utf8(bytes).ok()?,
+        bytes: bytes_read,
+    }))
+}
+
+/// The overlay-relative form of a protocol path. The protocol spells the root
+/// itself `.`, which the pinned scratch walk refuses rather than resolves.
+fn staged_relative(path: &RelativePath) -> &str {
+    if path.is_root() {
+        ""
+    } else {
+        path.as_str()
     }
 }
 
@@ -501,6 +661,60 @@ fn read_file_name(path: &str) -> String {
 mod tests {
     use super::*;
     use openwave_core::ChatId;
+
+    /// The confusion this exists to prevent: the agent writes a file with
+    /// `exec`, calls `list_folder` to confirm it, and is shown a folder that
+    /// does not have it. Exec works in the turn's staged copy, so the folder
+    /// tools read that copy too — including a file that only exists there, and
+    /// excluding one the agent deleted — while the user's folder is left
+    /// untouched until the turn ends.
+    #[tokio::test]
+    async fn a_folder_listing_shows_what_exec_wrote_in_the_same_turn() {
+        let granted = tempfile::tempdir().unwrap();
+        std::fs::write(granted.path().join("notes.md"), "original").unwrap();
+
+        let scratch = tempfile::tempdir().unwrap();
+        let overlay = openwave_code_execution::WriteOverlay::prepare(
+            scratch.path(),
+            "chat",
+            &[granted.path().to_path_buf()],
+        )
+        .await
+        .expect("a readable granted folder stages");
+        let staged = overlay.slots()[0].overlay().to_path_buf();
+
+        // What exec does mid-turn.
+        std::fs::write(staged.join("report.md"), "draft").unwrap();
+        std::fs::remove_file(staged.join("notes.md")).unwrap();
+
+        let Some(OperationResult::ListDirectory { entries }) =
+            staged_directory(&staged, &RelativePath::root()).await
+        else {
+            panic!("a staged folder lists from its staged copy");
+        };
+        let names: Vec<_> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(names, ["report.md"]);
+
+        let Some(OperationResult::ReadFile(file)) =
+            staged_file(&staged, &RelativePath::parse("report.md").unwrap()).await
+        else {
+            panic!("a staged folder reads from its staged copy");
+        };
+        assert_eq!(file.content, "draft");
+
+        // A file the agent deleted this turn is gone from the tool's view too,
+        // rather than being served from the folder the shell cannot see.
+        assert!(
+            staged_file(&staged, &RelativePath::parse("notes.md").unwrap())
+                .await
+                .is_none()
+        );
+
+        // None of it has reached the user's folder: the tools report the turn's
+        // view, they do not apply it.
+        assert!(granted.path().join("notes.md").exists());
+        assert!(!granted.path().join("report.md").exists());
+    }
 
     #[test]
     fn results_are_bounded_and_do_not_include_host_error_detail() {

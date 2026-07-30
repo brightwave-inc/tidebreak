@@ -287,6 +287,8 @@ async fn boot_server(
     .map_err(|e| e.to_string())?;
     app.state::<host_access::HostAccess>()
         .initialize_store(server.store())?;
+    app.state::<host_access::HostAccess>()
+        .initialize_staged_folders(server.staged_folders())?;
     // Unblock any pairing task parked on a deep link that arrived pre-boot.
     let _ = store_tx.send(Some(server.pairing_handle()));
     let base_url = format!("http://{}", server.local_addr());
