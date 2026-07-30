@@ -115,6 +115,14 @@ impl ToolSpec {
 }
 
 /// Generate the compact provider-facing JSON Schema for one argument type.
+///
+/// A meaningful `default` is kept. Most optional tool arguments are
+/// `#[serde(default)]` fields whose absent value is a real decision — `exec`
+/// runs in `"."`, `create_deliverable` writes Markdown — and the model cannot
+/// infer any of that from the type alone. A null default is dropped: it is what
+/// an `Option` field emits, and "omitting this omits it" is not information
+/// worth spending tokens on. The strict conversion drops the keyword entirely,
+/// since there every property is required and a default can never apply.
 #[must_use]
 pub fn input_schema_for<Args: JsonSchema>() -> Value {
     let schema = SchemaSettings::draft2020_12()
@@ -135,21 +143,23 @@ pub fn input_schema_for<Args: JsonSchema>() -> Value {
         root.entry("properties")
             .or_insert_with(|| Value::Object(serde_json::Map::new()));
     }
-    remove_schema_defaults(&mut schema);
+    remove_null_schema_defaults(&mut schema);
     schema
 }
 
-fn remove_schema_defaults(schema: &mut Value) {
+fn remove_null_schema_defaults(schema: &mut Value) {
     match schema {
         Value::Object(object) => {
-            object.remove("default");
+            if object.get("default") == Some(&Value::Null) {
+                object.remove("default");
+            }
             for value in object.values_mut() {
-                remove_schema_defaults(value);
+                remove_null_schema_defaults(value);
             }
         }
         Value::Array(values) => {
             for value in values {
-                remove_schema_defaults(value);
+                remove_null_schema_defaults(value);
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
@@ -235,7 +245,9 @@ pub fn strict_json_schema(schema: &Value, optional: OptionalProperties) -> Optio
             // Handled structurally below.
             "type" | "properties" | "required" | "items" | "additionalProperties" | "anyOf" => {}
             // Not a constraint on the value, so it neither survives nor blocks.
-            "title" => {}
+            // Strict mode requires every property, so an absent-value default
+            // can never apply and providers reject the keyword outright.
+            "title" | "default" => {}
             "format" => {
                 if value.as_str().is_some_and(|f| STRICT_FORMATS.contains(&f)) {
                     strict.insert(keyword.clone(), value.clone());
@@ -697,6 +709,13 @@ mod tests {
         #[serde(default)]
         #[schemars(with = "String", description = "Optional text.")]
         optional: Option<String>,
+        #[serde(default = "defaulted")]
+        #[schemars(description = "Text with a default.")]
+        defaulted: String,
+    }
+
+    fn defaulted() -> String {
+        ".".to_owned()
     }
 
     #[test]
@@ -709,6 +728,11 @@ mod tests {
                     "optional": {
                         "type": "string",
                         "description": "Optional text."
+                    },
+                    "defaulted": {
+                        "type": "string",
+                        "description": "Text with a default.",
+                        "default": "."
                     }
                 },
                 "additionalProperties": false
@@ -718,8 +742,10 @@ mod tests {
 
     #[test]
     fn strict_mode_requires_every_property_or_refuses_to_convert() {
-        // The case the post-processor exists for: schemars leaves an `Option`
+        // The case the post-processor exists for: schemars leaves a defaulted
         // field out of `required`, and strict mode has no optional properties.
+        // The advertised `default` goes with it — every property is required
+        // here, so no default could ever apply.
         let schema = input_schema_for::<DerivedArguments>();
         assert_eq!(
             strict_json_schema(&schema, OptionalProperties::AcceptNull).unwrap(),
@@ -729,9 +755,13 @@ mod tests {
                     "optional": {
                         "type": ["string", "null"],
                         "description": "Optional text."
+                    },
+                    "defaulted": {
+                        "type": ["string", "null"],
+                        "description": "Text with a default."
                     }
                 },
-                "required": ["optional"],
+                "required": ["defaulted", "optional"],
                 "additionalProperties": false
             })
         );

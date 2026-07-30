@@ -289,7 +289,12 @@ mod tests {
             option["properties"]["description"]["maxLength"],
             MAX_QUESTION_OPTION_DESCRIPTION_CHARS
         );
-        assert!(!schema.to_string().contains("\"default\""));
+        // What omitting an optional field means is part of the contract.
+        assert_eq!(question["properties"]["allow_free_form"]["default"], false);
+        assert_eq!(
+            question["properties"]["options"]["default"],
+            serde_json::json!([])
+        );
     }
 
     #[test]

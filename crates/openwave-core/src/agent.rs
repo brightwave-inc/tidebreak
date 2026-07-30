@@ -16,7 +16,7 @@
 //! - context reduction is deterministic floor+restore (no LLM summarization);
 //!   retries with progressive reduction on provider prompt-too-long errors.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -74,9 +74,18 @@ const MAX_ANNOUNCED_FILES: usize = 8;
 const MAX_ANNOUNCED_IMAGES: usize = 8;
 
 /// A name-keyed registry of the tools available to the agent.
+///
+/// The map is ordered by name so that [advertisement](Self::specs) is a pure
+/// function of *which* tools are registered, never of how or when they got
+/// there. A `HashMap` reordered the advertised block between turns, which
+/// invalidates the provider-side prompt-prefix cache and makes a run harder to
+/// reproduce. Registration order would be stable within one process but is not
+/// set-determined: MCP servers mount and unmount mid-session, so unmounting a
+/// server and remounting it would advertise the same tools in a new order.
+/// Sorting by name has neither problem.
 #[derive(Clone, Default)]
 pub struct ToolRegistry {
-    tools: HashMap<String, RegisteredTool>,
+    tools: BTreeMap<String, RegisteredTool>,
 }
 
 #[derive(Clone)]
@@ -3929,7 +3938,7 @@ mod tests {
     use crate::id::{ChatId, ProjectId};
     use crate::model::Project;
     use crate::provider::ProviderId;
-    use crate::tools::{ReadFile, WriteFile};
+    use crate::tools::{ListDir, ReadFile, WriteFile};
 
     fn tool_scratch(path: &std::path::Path) -> ToolScratch {
         ToolScratch::from_dir(
@@ -3947,6 +3956,27 @@ mod tests {
                 ClaimedAgentEvent::Flush(_) => panic!("unhandled claimed-event flush"),
             })
             .collect()
+    }
+
+    /// Advertisement order has to depend only on which tools are registered.
+    /// A regression here is invisible in behavior — it shows up as prompt-cache
+    /// misses and irreproducible runs, so nothing else would catch it.
+    #[test]
+    fn advertised_tools_are_ordered_by_name_whatever_the_registration_order() {
+        let forwards = ToolRegistry::default()
+            .with(Box::new(ListDir))
+            .with(Box::new(ReadFile))
+            .with(Box::new(WriteFile));
+        let backwards = ToolRegistry::default()
+            .with(Box::new(WriteFile))
+            .with(Box::new(ReadFile))
+            .with(Box::new(ListDir));
+
+        let names = |registry: &ToolRegistry| -> Vec<String> {
+            registry.specs().into_iter().map(|spec| spec.name).collect()
+        };
+        assert_eq!(names(&forwards), ["list_dir", "read_file", "write_file"]);
+        assert_eq!(names(&forwards), names(&backwards));
     }
 
     #[test]
