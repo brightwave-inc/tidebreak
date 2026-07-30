@@ -7,21 +7,19 @@
 
 use std::collections::HashSet;
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use openwave_code_execution::{
+    MaterializationPrecondition, MaterializedChangeKind, RejectedChangeReason,
+};
 use openwave_core::{
     CallId, ChatId, HostRootId, OutputWriteMode, ToolCallRecord, WriteOutputToConnectedFolderArgs,
     WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
 };
-use openwave_host_broker::{
-    ErrorCode, OperationEnvelope, OperationRequest, OperationResult, RelativePath, RootId,
-    WriteApproval, WriteFileMode, WriteFileRequest, PROTOCOL_VERSION,
-};
+use openwave_host_broker::RelativePath;
 use serde::Deserialize;
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
 use crate::{
-    broker::BrokerClientError,
     deliverables::{read_output_revision_bytes, require_exact_revision, require_live_output},
     host_access::HostAccess,
 };
@@ -295,17 +293,6 @@ async fn execute_receipt(
     {
         return Err("local control plane returned a stale write-back claim".to_owned());
     }
-    let context = match state.context(receipt.chat_id.0).await {
-        Ok(context) => context,
-        Err(_) => {
-            return terminalize(
-                state,
-                &mut receipt,
-                unavailable("output_writeback_authority_unavailable"),
-            )
-            .await;
-        }
-    };
     let store = state
         .store()
         .ok_or_else(|| "OpenWave is still starting".to_owned())?;
@@ -338,6 +325,33 @@ async fn execute_receipt(
         )
         .await;
     }
+    let Some(materializer) = state.staged_folders() else {
+        return terminalize(
+            state,
+            &mut receipt,
+            unavailable("output_writeback_authority_unavailable"),
+        )
+        .await;
+    };
+    let path = RelativePath::parse(&receipt.relative_path)
+        .map_err(|_| "invalid output write-back destination".to_owned())?;
+    if receipt.phase == FolderOperationPhase::DispatchStarted {
+        let resolution = if materializer
+            .connected_file_matches(
+                receipt.chat_id,
+                receipt.root_id,
+                path.as_str(),
+                receipt.byte_len,
+                receipt.sha256,
+            )
+            .await
+        {
+            completed(&receipt)
+        } else {
+            unavailable("output_writeback_ambiguous_native_failure")
+        };
+        return terminalize(state, &mut receipt, resolution).await;
+    }
 
     let scratch_root = crate::data_dir(app)?.join("scratch");
     let (output, revision) =
@@ -359,17 +373,6 @@ async fn execute_receipt(
         .await
         .map_err(|_| "could not read immutable output revision".to_owned())??
     };
-    let root_id = RootId::from_uuid(*receipt.root_id.as_uuid())
-        .map_err(|_| "invalid connected-root identity".to_owned())?;
-    let path = RelativePath::parse(&receipt.relative_path)
-        .map_err(|_| "invalid output write-back destination".to_owned())?;
-    let mode = match receipt.mode {
-        OutputWriteMode::Create => WriteFileMode::Create,
-        OutputWriteMode::Replace => WriteFileMode::Replace,
-    };
-    let approval = receipt
-        .approval_id
-        .map(|approval_id| WriteApproval { approval_id });
 
     client
         .heartbeat(receipt.chat_id, receipt.call_id, receipt.lease_token)
@@ -380,44 +383,28 @@ async fn execute_receipt(
         .receipts
         .save_output_writeback(&receipt)
         .map_err(private_receipt_error)?;
-    let operation = OperationEnvelope {
-        protocol_version: PROTOCOL_VERSION,
-        request_id: openwave_host_broker::RequestId::new(),
-        context: context.execution,
-        request: OperationRequest::WriteFile(WriteFileRequest {
-            operation_id: receipt.operation_id,
-            root_id,
-            path,
-            mode,
-            approval,
-            content_base64: BASE64.encode(&bytes),
-            bytes: bytes.len(),
-            sha256: receipt.sha256,
-        }),
+    let expected = match receipt.mode {
+        OutputWriteMode::Create => MaterializationPrecondition::Absent,
+        OutputWriteMode::Replace => MaterializationPrecondition::Existing,
     };
-    let resolution = match state.broker.operation(operation).await {
-        Ok(OperationResult::WriteFile(result))
-            if result.operation_id == receipt.operation_id
-                && result.bytes as u64 == receipt.byte_len
-                && result.replaced == matches!(receipt.mode, OutputWriteMode::Replace) =>
-        {
-            StoredResolution::Completed {
-                result: format!(
-                    "Published output {} revision {} to the connected folder.",
-                    receipt.output_id, receipt.revision_id
-                ),
-                rows: Some(serde_json::json!({
-                    "entries": [openwave_core::ResultEntry::new(
-                        openwave_core::ResultEntryKind::Output,
-                        file_name(&receipt.relative_path),
-                    )
-                    .with_detail(receipt.relative_path.clone())
-                    .with_meta(openwave_core::format_bytes(receipt.byte_len))],
-                })),
-            }
-        }
-        Ok(_) => unavailable("output_writeback_broker_protocol"),
-        Err(error) => broker_resolution(&error),
+    let expected_change = match receipt.mode {
+        OutputWriteMode::Create => MaterializedChangeKind::Created,
+        OutputWriteMode::Replace => MaterializedChangeKind::Overwritten,
+    };
+    let resolution = match materializer
+        .materialize_connected_file(
+            receipt.chat_id,
+            claim.call.turn_id,
+            receipt.root_id,
+            path.as_str(),
+            &bytes,
+            expected,
+        )
+        .await
+    {
+        Ok(change) if change == expected_change => completed(&receipt),
+        Ok(_) => unavailable("output_writeback_materialization_protocol"),
+        Err(reason) => materialization_resolution(receipt.mode, reason),
     };
     terminalize(state, &mut receipt, resolution).await
 }
@@ -502,21 +489,37 @@ fn unavailable(code: &str) -> StoredResolution {
     }
 }
 
-fn broker_resolution(error: &BrokerClientError) -> StoredResolution {
-    let code = match error {
-        BrokerClientError::Broker {
-            code: ErrorCode::AlreadyExists,
-            ..
-        } => "output_writeback_destination_exists",
-        BrokerClientError::Broker {
-            code: ErrorCode::Denied | ErrorCode::InvalidRoot,
-            ..
-        } => "output_writeback_authority_unavailable",
-        BrokerClientError::Broker {
-            code: ErrorCode::AmbiguousWrite,
-            ..
-        } => "output_writeback_ambiguous_native_failure",
-        _ => "output_writeback_unavailable",
+fn completed(receipt: &OutputWritebackReceipt) -> StoredResolution {
+    StoredResolution::Completed {
+        result: format!(
+            "Published output {} revision {} to the connected folder.",
+            receipt.output_id, receipt.revision_id
+        ),
+        rows: Some(serde_json::json!({
+            "entries": [openwave_core::ResultEntry::new(
+                openwave_core::ResultEntryKind::Output,
+                file_name(&receipt.relative_path),
+            )
+            .with_detail(receipt.relative_path.clone())
+            .with_meta(openwave_core::format_bytes(receipt.byte_len))],
+        })),
+    }
+}
+
+fn materialization_resolution(
+    mode: OutputWriteMode,
+    reason: RejectedChangeReason,
+) -> StoredResolution {
+    let code = match (mode, reason) {
+        (OutputWriteMode::Create, RejectedChangeReason::Stale) => {
+            "output_writeback_destination_exists"
+        }
+        (OutputWriteMode::Replace, RejectedChangeReason::Stale) => {
+            "output_writeback_destination_changed"
+        }
+        (_, RejectedChangeReason::SnapshotUnavailable) => "output_writeback_snapshot_unavailable",
+        (_, RejectedChangeReason::StagedFileTooLarge) => "output_writeback_source_unavailable",
+        (_, RejectedChangeReason::Unavailable) => "output_writeback_unavailable",
     };
     unavailable(code)
 }

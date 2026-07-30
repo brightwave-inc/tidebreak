@@ -18,10 +18,11 @@ use openwave_code_execution::{
     CodeExecutionProviderKind, CodeExecutionRequest, CodeExecutionResponse, DaytonaCredential,
     DaytonaExecutionProvider, E2BCredential, E2BExecutionProvider, ExecFolderAccess,
     ExecFolderGrant, ExecutionId, ExecutionWorkspaceId, LocalExecutionProvider,
-    OutputArtifactEntry, OutputArtifactScan, OutputArtifactStatus, PreviewScan, RemoteSessionPool,
-    StagedUpload, WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing, WriteOverlay,
-    WriteSnapshotSink, DAYTONA_CREDENTIAL_KEY, DOCUMENT_SCRIPTS_DIR, DOCUMENT_SCRIPT_FILES,
-    E2B_CREDENTIAL_KEY, PACKAGE_MANAGER_DOMAINS,
+    MaterializationPrecondition, MaterializedChangeKind, OutputArtifactEntry, OutputArtifactScan,
+    OutputArtifactStatus, PreviewScan, RejectedChangeReason, RemoteSessionPool, StagedUpload,
+    WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing, WriteOverlay, WriteSnapshotSink,
+    DAYTONA_CREDENTIAL_KEY, DOCUMENT_SCRIPTS_DIR, DOCUMENT_SCRIPT_FILES, E2B_CREDENTIAL_KEY,
+    PACKAGE_MANAGER_DOMAINS,
 };
 use openwave_core::{
     exec_attachment_file_name, BlobStore, CallId, Chat, ChatId, HostRootId,
@@ -709,17 +710,41 @@ struct StagedTurn {
 /// the same turn consults this first, so the model is never shown two versions
 /// of one folder.
 ///
-/// The broker is deliberately not involved. Staging is a property of the turn,
-/// and the broker knows nothing about turns; it stays the authority on whether
-/// a folder may be read at all.
+/// The broker knows nothing about turn staging, but remains the live authority
+/// behind every root resolution. Structured publications resolve that
+/// authority again immediately before entering the shared materializer.
+#[async_trait]
 pub trait StagedFolders: Send + Sync {
     /// The staged copy of `root_id` for this chat's current turn, if the turn
     /// stages that folder. `None` covers every case where the user's folder is
     /// still the only view — no turn in flight, a read-only grant, or a folder
     /// the overlay could not stage.
     fn staged_root(&self, chat: ChatId, root_id: HostRootId) -> Option<PathBuf>;
+
+    /// Publish one trusted file through the same conditional materializer and
+    /// turn journal as an overlay write.
+    async fn materialize_connected_file(
+        &self,
+        chat: ChatId,
+        turn: TurnId,
+        root_id: HostRootId,
+        relative: &str,
+        content: &[u8],
+        expected: MaterializationPrecondition,
+    ) -> std::result::Result<MaterializedChangeKind, RejectedChangeReason>;
+
+    /// Reconcile an interrupted publication against its exact content.
+    async fn connected_file_matches(
+        &self,
+        chat: ChatId,
+        root_id: HostRootId,
+        relative: &str,
+        byte_len: u64,
+        sha256: [u8; 32],
+    ) -> bool;
 }
 
+#[async_trait]
 impl StagedFolders for ConfiguredCodeExecutionProvider {
     fn staged_root(&self, chat: ChatId, root_id: HostRootId) -> Option<PathBuf> {
         self.write_overlays
@@ -729,6 +754,63 @@ impl StagedFolders for ConfiguredCodeExecutionProvider {
             .staged_roots
             .get(&root_id)
             .cloned()
+    }
+
+    async fn materialize_connected_file(
+        &self,
+        chat: ChatId,
+        turn: TurnId,
+        root_id: HostRootId,
+        relative: &str,
+        content: &[u8],
+        expected: MaterializationPrecondition,
+    ) -> std::result::Result<MaterializedChangeKind, RejectedChangeReason> {
+        let folder = self.writable_connected_root(chat, root_id).await?;
+        let snapshots =
+            self.blobs
+                .as_ref()
+                .zip(self.blob_writes.as_ref())
+                .map(|(blobs, blob_writes)| {
+                    TurnSnapshotSink::new(self.store.clone(), blobs.clone(), blob_writes.clone())
+                });
+        let result = openwave_code_execution::materialize_file(
+            &folder,
+            relative,
+            content,
+            expected,
+            snapshots
+                .as_ref()
+                .map(|sink| sink as &dyn WriteSnapshotSink),
+        )
+        .await;
+        if result.is_ok() {
+            if let Some(sink) = snapshots {
+                if let Err(error) = sink.commit(chat, turn).await {
+                    tracing::error!(
+                        chat = %chat,
+                        turn = %turn,
+                        %error,
+                        "could not journal a connected-folder publication; undo is unavailable"
+                    );
+                }
+            }
+        }
+        result
+    }
+
+    async fn connected_file_matches(
+        &self,
+        chat: ChatId,
+        root_id: HostRootId,
+        relative: &str,
+        byte_len: u64,
+        sha256: [u8; 32],
+    ) -> bool {
+        let Ok(folder) = self.writable_connected_root(chat, root_id).await else {
+            return false;
+        };
+        openwave_code_execution::materialized_file_matches(&folder, relative, byte_len, sha256)
+            .await
     }
 }
 
@@ -1010,6 +1092,26 @@ impl ConfiguredCodeExecutionProvider {
             }
         }
         Ok(ordered)
+    }
+
+    async fn writable_connected_root(
+        &self,
+        chat_id: ChatId,
+        root_id: HostRootId,
+    ) -> std::result::Result<PathBuf, RejectedChangeReason> {
+        let chat = self
+            .store
+            .get_chat(chat_id)
+            .await
+            .map_err(|_| RejectedChangeReason::Unavailable)?
+            .ok_or(RejectedChangeReason::Unavailable)?;
+        self.resolve_chat_folder_grants(&chat)
+            .await
+            .map_err(|_| RejectedChangeReason::Unavailable)?
+            .into_iter()
+            .find(|grant| grant.root_id == root_id && grant.writable)
+            .map(|grant| grant.path)
+            .ok_or(RejectedChangeReason::Unavailable)
     }
 
     /// Resolve the currently selected adapter at the last boundary before use.

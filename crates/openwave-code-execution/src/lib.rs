@@ -35,7 +35,8 @@ pub use host_paths::{
 };
 pub use local::LocalExecutionProvider;
 pub use overlay::{
-    sweep_abandoned_overlays, MaterializedChange, MaterializedChangeKind, OverlayInspector,
+    materialize_file, materialized_file_matches, sweep_abandoned_overlays,
+    MaterializationPrecondition, MaterializedChange, MaterializedChangeKind, OverlayInspector,
     OverlayOutcome, OverlaySlot, PreparedWriteSnapshot, PriorContents, RejectedChange,
     RejectedChangeReason, StagedChange, WriteOverlay, WriteSnapshotSink, OVERLAY_DIR,
 };

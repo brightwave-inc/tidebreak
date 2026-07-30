@@ -200,6 +200,18 @@ pub enum RejectedChangeReason {
     Unavailable,
 }
 
+/// What the destination must contain when one file is materialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaterializationPrecondition {
+    /// No entry may occupy the destination.
+    Absent,
+    /// Any existing regular file may be replaced, with its exact digest
+    /// derived immediately before the conditional mutation.
+    Existing,
+    /// The destination must still contain these exact bytes.
+    Sha256([u8; 32]),
+}
+
 /// Per-file result of applying one overlay.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct OverlayOutcome {
@@ -283,6 +295,66 @@ pub trait WriteSnapshotSink: Send + Sync {
         &self,
         change: StagedChange<'_>,
     ) -> Result<Box<dyn PreparedWriteSnapshot>, String>;
+}
+
+/// Materialize one bounded file through the same conditional write and
+/// snapshot protocol used by a turn's overlay.
+///
+/// This is the structured path for trusted callers that already hold a live
+/// grant to `folder` but did not originate from shell edits in an overlay.
+/// `relative` remains root-relative, and every component is opened without
+/// following symlinks.
+pub async fn materialize_file(
+    folder: &Path,
+    relative: &str,
+    content: &[u8],
+    expected: MaterializationPrecondition,
+    snapshots: Option<&dyn WriteSnapshotSink>,
+) -> Result<MaterializedChangeKind, RejectedChangeReason> {
+    if content.len() as u64 > MAX_STAGED_FILE_BYTES {
+        return Err(RejectedChangeReason::StagedFileTooLarge);
+    }
+    let source_dir = resolve_scratch_directory(folder, "", false)
+        .await
+        .ok_or(RejectedChangeReason::Unavailable)?;
+    materialize_file_in(
+        folder,
+        &source_dir,
+        relative,
+        content,
+        expected,
+        snapshots,
+        None,
+    )
+    .await
+}
+
+/// Whether one materialized destination contains the exact expected bytes.
+///
+/// Recovery uses this after a dispatch may have crossed the native boundary.
+/// A missing, non-regular, symlinked, or otherwise unavailable destination is
+/// simply not a match.
+pub async fn materialized_file_matches(
+    folder: &Path,
+    relative: &str,
+    byte_len: u64,
+    sha256: [u8; 32],
+) -> bool {
+    let Some(source_dir) = resolve_scratch_directory(folder, "", false).await else {
+        return false;
+    };
+    let (prefix, name) = split_relative(relative);
+    let Ok(target) = descend(&source_dir, prefix, false).await else {
+        return false;
+    };
+    target
+        .file_stamp(name)
+        .await
+        .is_some_and(|stamp| stamp.len == byte_len)
+        && target
+            .file_sha256(name)
+            .await
+            .is_ok_and(|digest| digest == sha256)
 }
 
 impl WriteOverlay {
@@ -798,30 +870,9 @@ async fn write_back(
     content: &[u8],
 ) -> Result<MaterializedChangeKind, RejectedChangeReason> {
     let relative = join_relative(prefix, name);
-    let target = descend(&slot.source_dir, prefix, true)
-        .await
-        .map_err(|_| RejectedChangeReason::Unavailable)?;
     let expected = manifest.map_or(FilePrecondition::Absent, |entry| {
         FilePrecondition::Sha256(entry.sha256)
     });
-    let observed = observe_prior(&target, name).await?;
-    if observed.precondition != expected {
-        return Err(RejectedChangeReason::Stale);
-    }
-    let snapshot = match snapshots {
-        Some(snapshots) => Some(
-            snapshots
-                .prepare(StagedChange {
-                    folder: &slot.source,
-                    relative: &relative,
-                    prior: observed.prior,
-                    next: Some(content),
-                })
-                .await
-                .map_err(|_| RejectedChangeReason::SnapshotUnavailable)?,
-        ),
-        None => None,
-    };
     // The staged file carries the mode the folder's copy had, so writing it
     // back does not turn a script into a non-executable file or narrow who can
     // read a document the user shares.
@@ -832,6 +883,78 @@ async fn write_back(
         let _ = stamp;
         None
     };
+    materialize_file_in(
+        &slot.source,
+        &slot.source_dir,
+        &relative,
+        content,
+        match expected {
+            FilePrecondition::Absent => MaterializationPrecondition::Absent,
+            FilePrecondition::Sha256(digest) => MaterializationPrecondition::Sha256(digest),
+        },
+        snapshots,
+        mode,
+    )
+    .await
+}
+
+struct ObservedPrior {
+    prior: PriorContents,
+    precondition: FilePrecondition,
+    #[cfg(unix)]
+    mode: Option<u32>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_file_in(
+    folder: &Path,
+    source_dir: &ScratchDir,
+    relative: &str,
+    content: &[u8],
+    expected: MaterializationPrecondition,
+    snapshots: Option<&dyn WriteSnapshotSink>,
+    mode: Option<u32>,
+) -> Result<MaterializedChangeKind, RejectedChangeReason> {
+    let (prefix, name) = split_relative(relative);
+    if name.is_empty() {
+        return Err(RejectedChangeReason::Unavailable);
+    }
+    let target = descend(source_dir, prefix, true)
+        .await
+        .map_err(|_| RejectedChangeReason::Unavailable)?;
+    let observed = observe_prior(&target, name).await?;
+    let expected = match expected {
+        MaterializationPrecondition::Absent => FilePrecondition::Absent,
+        MaterializationPrecondition::Existing => match observed.precondition {
+            FilePrecondition::Absent => return Err(RejectedChangeReason::Stale),
+            FilePrecondition::Sha256(digest) => FilePrecondition::Sha256(digest),
+        },
+        MaterializationPrecondition::Sha256(digest) => FilePrecondition::Sha256(digest),
+    };
+    if observed.precondition != expected {
+        return Err(RejectedChangeReason::Stale);
+    }
+    let change = if expected == FilePrecondition::Absent {
+        MaterializedChangeKind::Created
+    } else {
+        MaterializedChangeKind::Overwritten
+    };
+    let snapshot = match snapshots {
+        Some(snapshots) => Some(
+            snapshots
+                .prepare(StagedChange {
+                    folder,
+                    relative,
+                    prior: observed.prior,
+                    next: Some(content),
+                })
+                .await
+                .map_err(|_| RejectedChangeReason::SnapshotUnavailable)?,
+        ),
+        None => None,
+    };
+    #[cfg(unix)]
+    let mode = mode.or(observed.mode);
     let applied = target
         .write_file_with_mode_if_matches(name, content, mode, expected)
         .await
@@ -842,16 +965,7 @@ async fn write_back(
     if let Some(snapshot) = snapshot {
         snapshot.applied();
     }
-    Ok(if manifest.is_some() {
-        MaterializedChangeKind::Overwritten
-    } else {
-        MaterializedChangeKind::Created
-    })
-}
-
-struct ObservedPrior {
-    prior: PriorContents,
-    precondition: FilePrecondition,
+    Ok(change)
 }
 
 /// Read what the user's folder holds for `name` and derive the exact
@@ -865,6 +979,8 @@ async fn observe_prior(
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(ObservedPrior {
                 prior: PriorContents::Absent,
                 precondition: FilePrecondition::Absent,
+                #[cfg(unix)]
+                mode: None,
             }),
             _ => Err(RejectedChangeReason::SnapshotUnavailable),
         },
@@ -878,15 +994,19 @@ async fn observe_prior(
                     byte_len: stamp.len,
                 },
                 precondition: FilePrecondition::Sha256(sha256),
+                #[cfg(unix)]
+                mode: Some(stamp.mode),
             })
         }
-        Some(_) => {
+        Some(stamp) => {
             let bytes = match target.read_file(name).await {
                 Ok(bytes) => bytes,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
                     return Ok(ObservedPrior {
                         prior: PriorContents::Absent,
                         precondition: FilePrecondition::Absent,
+                        #[cfg(unix)]
+                        mode: None,
                     });
                 }
                 Err(_) => return Err(RejectedChangeReason::SnapshotUnavailable),
@@ -895,6 +1015,8 @@ async fn observe_prior(
             Ok(ObservedPrior {
                 prior: PriorContents::Bytes(bytes),
                 precondition: FilePrecondition::Sha256(sha256),
+                #[cfg(unix)]
+                mode: Some(stamp.mode),
             })
         }
     }
@@ -1268,6 +1390,66 @@ mod tests {
                 },
             }))
         }
+    }
+
+    /// Trusted structured writes use the same prior-byte snapshot, conditional
+    /// publication, and recovery digest as overlay changes.
+    #[tokio::test]
+    async fn direct_materialization_shares_the_overlay_write_contract() {
+        let granted = tempfile::tempdir().unwrap();
+        std::fs::create_dir(granted.path().join("published")).unwrap();
+        std::fs::write(granted.path().join("published/report.txt"), "original").unwrap();
+        let sink = RecordingSink {
+            refuse: None,
+            seen: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        };
+
+        assert_eq!(
+            materialize_file(
+                granted.path(),
+                "published/report.txt",
+                b"revision",
+                MaterializationPrecondition::Existing,
+                Some(&sink),
+            )
+            .await,
+            Ok(MaterializedChangeKind::Overwritten)
+        );
+        assert_eq!(
+            *sink.seen.lock().unwrap(),
+            vec![Recorded {
+                relative: "published/report.txt".to_owned(),
+                prior: PriorContents::Bytes(b"original".to_vec()),
+                next: Some(b"revision".to_vec()),
+            }]
+        );
+        let digest: [u8; 32] = Sha256::digest(b"revision").into();
+        assert!(
+            materialized_file_matches(
+                granted.path(),
+                "published/report.txt",
+                b"revision".len() as u64,
+                digest,
+            )
+            .await
+        );
+
+        assert_eq!(
+            materialize_file(
+                granted.path(),
+                "published/report.txt",
+                b"must-not-clobber",
+                MaterializationPrecondition::Absent,
+                Some(&sink),
+            )
+            .await,
+            Err(RejectedChangeReason::Stale)
+        );
+        assert_eq!(
+            std::fs::read(granted.path().join("published/report.txt")).unwrap(),
+            b"revision"
+        );
+        assert_eq!(sink.seen.lock().unwrap().len(), 1);
     }
 
     /// The bytes a change destroys reach the journal before the folder is
