@@ -369,6 +369,7 @@ fn fast_config() -> SandboxContainerRunConfig {
         reattach_attempts: 2,
         reattach_backoff: Duration::from_millis(10),
         provision_window: Duration::from_secs(120),
+        max_concurrent_containers: 4,
         max_inference_operations: 24,
     }
 }
@@ -634,7 +635,7 @@ async fn the_in_process_reaper_leaves_an_expired_container_lease_alone() {
         // the moment it is claimed).
         let lease = Uuid::new_v4();
         store
-            .claim_container_agent_run(run_id, lease, chrono::Duration::milliseconds(1))
+            .claim_container_agent_run(run_id, lease, chrono::Duration::milliseconds(1), 4)
             .await
             .unwrap()
             .expect("the container claim should pick up the queued run");
@@ -788,7 +789,7 @@ async fn admission_routes_to_the_container_location_not_the_in_process_scheduler
         // The container claim transitions it to running under a lease.
         let lease = Uuid::new_v4();
         let claimed = store
-            .claim_container_agent_run(run_id, lease, chrono::Duration::minutes(5))
+            .claim_container_agent_run(run_id, lease, chrono::Duration::minutes(5), 4)
             .await
             .unwrap()
             .expect("the container claim should pick up the queued run");
@@ -799,7 +800,7 @@ async fn admission_routes_to_the_container_location_not_the_in_process_scheduler
         // Re-claiming with the same token recovers the same live claim, never a
         // second attempt.
         let reclaimed = store
-            .claim_container_agent_run(run_id, lease, chrono::Duration::minutes(5))
+            .claim_container_agent_run(run_id, lease, chrono::Duration::minutes(5), 4)
             .await
             .unwrap()
             .expect("reusing the token recovers the live claim");
@@ -996,7 +997,7 @@ async fn a_dead_drivers_container_run_is_recovered_to_completion() {
         // its handle — then vanished, leaving the lease to expire.
         let dead_token = Uuid::new_v4();
         store
-            .claim_container_agent_run(run_id, dead_token, chrono::Duration::milliseconds(50))
+            .claim_container_agent_run(run_id, dead_token, chrono::Duration::milliseconds(50), 4)
             .await
             .unwrap()
             .expect("the dead driver's claim succeeds");
@@ -1054,7 +1055,7 @@ async fn a_terminal_container_failure_enqueues_its_teardown() {
     let run_uuid = *run_id.as_uuid();
     let token = Uuid::new_v4();
     store
-        .claim_container_agent_run(run_id, token, chrono::Duration::seconds(30))
+        .claim_container_agent_run(run_id, token, chrono::Duration::seconds(30), 4)
         .await
         .unwrap()
         .expect("the claim succeeds");
@@ -1088,6 +1089,56 @@ async fn a_terminal_container_failure_enqueues_its_teardown() {
     assert_eq!(teardowns.len(), 1);
     assert_eq!(teardowns[0].run_id, run_uuid);
     assert_eq!(teardowns[0].handle.as_deref(), Some("doomed-container"));
+}
+
+/// Container runs bypass the in-process scheduler's caps, so their own bound is
+/// enforced at the claim: a second claim past the cap is refused and the run
+/// stays queued, becoming claimable once a slot frees.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_container_claim_refuses_past_the_concurrency_cap() {
+    let (_dir, store, chat) = store().await;
+    // The cap is global across chats, so give each run its own chat (a chat
+    // runs one turn at a time, and the admit helper claims the chat's turn).
+    let other = Chat {
+        id: ChatId::new(),
+        title: Some("second container chat".into()),
+        ..chat.clone()
+    };
+    store.create_chat(&other).await.unwrap();
+    let first = admit_container_run(&store, chat.id, "occupies the only slot").await;
+    let second = admit_container_run(&store, other.id, "waits for the slot").await;
+
+    let first_token = Uuid::new_v4();
+    store
+        .claim_container_agent_run(first, first_token, chrono::Duration::seconds(30), 1)
+        .await
+        .unwrap()
+        .expect("the first claim takes the only slot");
+    assert!(
+        store
+            .claim_container_agent_run(second, Uuid::new_v4(), chrono::Duration::seconds(30), 1)
+            .await
+            .unwrap()
+            .is_none(),
+        "a claim past the cap must be refused, not queued into a second container"
+    );
+    // The refused run is still queued, not damaged: it claims once a slot frees.
+    store
+        .fail_agent_run(
+            first,
+            first_token,
+            "sandbox_agent_failed",
+            "released its slot",
+            chrono::Duration::seconds(1),
+        )
+        .await
+        .unwrap()
+        .expect("the first run fails terminally");
+    store
+        .claim_container_agent_run(second, Uuid::new_v4(), chrono::Duration::seconds(30), 1)
+        .await
+        .unwrap()
+        .expect("the freed slot admits the queued run");
 }
 
 // --- Docker end-to-end (gated on a container runtime + the agent image) -------

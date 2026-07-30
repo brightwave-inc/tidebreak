@@ -95,6 +95,12 @@ pub struct SandboxContainerRunConfig {
     /// tag sweep, and a handle commit that arrives after the lapse finds the
     /// record already disowned and destroys its own container.
     pub provision_window: Duration,
+    /// How many container runs may be `running` at once.
+    ///
+    /// Container runs bypass the in-process scheduler's global and per-chat
+    /// caps, so the claim enforces this bound instead; a run refused by it
+    /// stays queued for a later pass.
+    pub max_concurrent_containers: u32,
     /// How many model-inference operations the host will answer for one run.
     ///
     /// The sandbox's own step limit runs inside the untrusted container, so it
@@ -118,6 +124,10 @@ impl Default for SandboxContainerRunConfig {
             // Ample for `docker run` against a present image; an image pull on
             // a cold machine is paid at build/install time, not here.
             provision_window: Duration::from_secs(120),
+            // Containers are heavier than in-process runs (a full agent image
+            // each); a small bound keeps a burst of spawns from exhausting the
+            // local machine.
+            max_concurrent_containers: 4,
             // Three times the in-container loop's own step limit: a well-behaved
             // run never approaches it even with retried provider failures, and a
             // hostile one is cut off within one order of magnitude of legitimate
@@ -281,7 +291,12 @@ impl SandboxContainerRunner {
         let lease_token = Uuid::new_v4();
         let Some(run) = self
             .store
-            .claim_container_agent_run(run_id, lease_token, chrono_duration(self.config.lease)?)
+            .claim_container_agent_run(
+                run_id,
+                lease_token,
+                chrono_duration(self.config.lease)?,
+                self.config.max_concurrent_containers,
+            )
             .await?
         else {
             return Ok(None);

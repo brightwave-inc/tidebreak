@@ -707,8 +707,16 @@ impl Store for DbStore {
         id: AgentRunId,
         lease_token: uuid::Uuid,
         lease_duration: chrono::Duration,
+        max_running_containers: u32,
     ) -> Result<Option<AgentRun>> {
-        ops::agent_run::claim_container_agent_run(self, id, lease_token, lease_duration).await
+        ops::agent_run::claim_container_agent_run(
+            self,
+            id,
+            lease_token,
+            lease_duration,
+            max_running_containers,
+        )
+        .await
     }
 
     async fn list_reclaimable_container_agent_runs(
