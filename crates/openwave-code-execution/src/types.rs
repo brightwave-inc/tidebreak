@@ -258,6 +258,14 @@ pub enum ExecFolderAccess {
 pub struct ExecFolderGrant {
     pub path: PathBuf,
     pub access: ExecFolderAccess,
+    /// Where this turn's writes are staged, when the folder is staged at all.
+    ///
+    /// Present only for a read-write grant. When it is set the sandbox makes
+    /// the overlay writable and leaves `path` read-only, so a command that
+    /// edits the folder edits the staged copy and the real folder is updated
+    /// once, at the end of the turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay: Option<PathBuf>,
 }
 
 impl ExecFolderGrant {
@@ -268,9 +276,26 @@ impl ExecFolderGrant {
         let grant = Self {
             path: path.into(),
             access,
+            overlay: None,
         };
         validate_folder_grant(&grant)?;
         Ok(grant)
+    }
+
+    /// Stage this grant's writes at `overlay`. Host-set, like the grant itself.
+    pub fn staged_at(mut self, overlay: impl Into<PathBuf>) -> Result<Self, CodeExecutionError> {
+        self.overlay = Some(overlay.into());
+        validate_folder_grant(&self)?;
+        Ok(self)
+    }
+
+    /// Where a command in this turn may write for this folder.
+    #[must_use]
+    pub fn writable_path(&self) -> Option<&Path> {
+        if self.access != ExecFolderAccess::ReadWrite {
+            return None;
+        }
+        Some(self.overlay.as_deref().unwrap_or(&self.path))
     }
 }
 
@@ -364,14 +389,29 @@ fn default_cwd() -> String {
 }
 
 fn validate_folder_grant(grant: &ExecFolderGrant) -> Result<(), CodeExecutionError> {
-    let Some(path) = grant.path.to_str() else {
+    validate_folder_path(&grant.path)?;
+    match &grant.overlay {
+        None => Ok(()),
+        // A read-only folder with a write overlay would be a contradiction the
+        // profile builder would have to resolve, so it is rejected here.
+        Some(_) if grant.access != ExecFolderAccess::ReadWrite => {
+            Err(CodeExecutionError::InvalidRequest(
+                "a read-only execution folder cannot stage writes".into(),
+            ))
+        }
+        Some(overlay) => validate_folder_path(overlay),
+    }
+}
+
+fn validate_folder_path(path: &Path) -> Result<(), CodeExecutionError> {
+    let Some(rendered) = path.to_str() else {
         return Err(CodeExecutionError::InvalidRequest(
             "execution folder path must be valid UTF-8".into(),
         ));
     };
-    if !grant.path.is_absolute()
-        || path.len() > MAX_EXEC_FOLDER_PATH_BYTES
-        || path.chars().any(char::is_control)
+    if !path.is_absolute()
+        || rendered.len() > MAX_EXEC_FOLDER_PATH_BYTES
+        || rendered.chars().any(char::is_control)
     {
         return Err(CodeExecutionError::InvalidRequest(
             "invalid execution folder path".into(),

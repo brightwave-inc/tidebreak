@@ -56,6 +56,13 @@ pub(crate) fn compose(specs: &[ToolSpec]) -> String {
     compose_for_surface(specs, &[], false)
 }
 
+/// Render a host path as a quoted JSON string, so a path carrying a quote or a
+/// newline cannot forge a prompt line.
+fn quoted(path: &std::path::Path) -> String {
+    serde_json::to_string(&path.to_string_lossy())
+        .expect("serializing a folder path string cannot fail")
+}
+
 /// Compose the prompt for one exact tool surface, with a bounded snapshot of
 /// host-resolved local-exec folders, in the chat's current permission
 /// posture. The sandbox profile resolves the folders again per invocation.
@@ -269,15 +276,30 @@ pub(crate) fn compose_for_surface(
                 "- Local exec can use only the following host-resolved folder grants; managed execution providers cannot access these host paths."
                     .to_owned(),
             );
+            let mut any_staged = false;
             for folder in exec_folders.iter().take(MAX_LISTED_EXEC_FOLDER_GRANTS) {
-                let access = if folder.writable {
-                    "read-write"
-                } else {
-                    "read-only"
-                };
-                let path = serde_json::to_string(&folder.path.to_string_lossy())
-                    .expect("serializing a folder path string cannot fail");
-                lines.push(format!("- {access} folder: {path}"));
+                let path = quoted(&folder.path);
+                match (&folder.overlay, folder.writable) {
+                    (Some(overlay), true) => {
+                        any_staged = true;
+                        lines.push(format!(
+                            "- read-write folder: {path}, staged at {}",
+                            quoted(overlay)
+                        ));
+                    }
+                    (_, true) => lines.push(format!("- read-write folder: {path}")),
+                    (_, false) => lines.push(format!("- read-only folder: {path}")),
+                }
+            }
+            if any_staged {
+                lines.push(
+                    "- A staged folder is writable only at its staged path, which holds a complete copy of the folder made for this turn. Read and edit the copy exactly as you would the folder itself; the changes are applied to the real folder when the turn ends."
+                        .to_owned(),
+                );
+                lines.push(
+                    "- When you tell the user about a file in a staged folder, name it by the folder's own path, not the staged path."
+                        .to_owned(),
+                );
             }
             let omitted = exec_folders
                 .len()
@@ -511,13 +533,18 @@ mod tests {
             .map(|index| ResolvedExecFolderGrant {
                 root_id: openwave_core::HostRootId::from_uuid(Uuid::new_v4()).unwrap(),
                 path: format!("/Users/example/grant-{index}").into(),
-                writable: index == 0,
+                writable: index < 2,
+                overlay: (index == 0).then(|| "/scratch/.exec-overlays/chat/staged".into()),
             })
             .collect::<Vec<_>>();
         let prompt = compose_for_surface(&[spec("exec")], &folders, false);
 
-        assert!(prompt.contains("read-write folder: \"/Users/example/grant-0\""));
-        assert!(prompt.contains("read-only folder: \"/Users/example/grant-1\""));
+        assert!(prompt.contains(
+            "read-write folder: \"/Users/example/grant-0\", staged at \"/scratch/.exec-overlays/chat/staged\""
+        ));
+        // An unstaged writable grant must not be described as staged.
+        assert!(prompt.contains("read-write folder: \"/Users/example/grant-1\"\n"));
+        assert!(prompt.contains("read-only folder: \"/Users/example/grant-2\""));
         assert!(prompt.contains("2 additional granted folder(s) are omitted"));
         assert!(!prompt.contains("/Users/example/grant-12"));
         assert!(prompt.contains("Revocation applies to the next invocation"));

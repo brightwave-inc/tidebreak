@@ -155,6 +155,10 @@ impl openwave_server::code_execution::ExecFolderGrantResolver for DesktopExecFol
                     root_id,
                     path: root.path,
                     writable: root.writable,
+                    // Staging is a property of the turn, decided by the server
+                    // once it knows which folders it will stage. The broker
+                    // answers about authority and nothing else.
+                    overlay: None,
                 })
             })
             .collect()

@@ -78,6 +78,34 @@ impl std::fmt::Debug for ScratchDir {
     }
 }
 
+/// What one entry inside a pinned directory is, judged without following a
+/// symlink. Anything that is neither a regular file nor a directory —
+/// including every symlink — is `Other`, because nothing here should traverse
+/// or copy it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScratchEntryKind {
+    File,
+    Directory,
+    Other,
+}
+
+/// One entry inside a pinned directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScratchEntry {
+    pub name: String,
+    pub kind: ScratchEntryKind,
+}
+
+/// The cheap identity of a regular file: enough to notice a change without
+/// reading the bytes back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileStamp {
+    pub len: u64,
+    pub modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    pub mode: u32,
+}
+
 /// Resolve `relative` as a directory under `root` without walking through a
 /// symlink at any component, discarding why a refusal happened.
 ///
@@ -161,9 +189,24 @@ impl ScratchDir {
     /// temp name opened with an exclusive no-follow create, then a rename puts
     /// them in place. Both operations are relative to the pinned descriptor.
     pub async fn write_file(&self, name: &str, content: &[u8]) -> io::Result<()> {
+        self.write_file_with_mode(name, content, None).await
+    }
+
+    /// Write `content` at `name` and give the result `mode`.
+    ///
+    /// The default is the private `0o600` every host-authored scratch file
+    /// wants. A caller replacing a file the user owns passes the mode that file
+    /// already had, so writing it back does not quietly strip its execute bit
+    /// or narrow who can read it.
+    pub async fn write_file_with_mode(
+        &self,
+        name: &str,
+        content: &[u8],
+        mode: Option<u32>,
+    ) -> io::Result<()> {
         let name = single_component(name)?;
         let content = content.to_vec();
-        self.blocking(move |directory| write_blocking(directory, &name, &content))
+        self.blocking(move |directory| write_blocking(directory, &name, &content, mode))
             .await
     }
 
@@ -211,6 +254,104 @@ impl ScratchDir {
         .unwrap_or(false)
     }
 
+    /// Open `name` as a child directory, refusing a symlink at that component.
+    ///
+    /// The child is pinned the same way its parent is, so a recursive walk
+    /// built from repeated calls never consults a path and never re-enters the
+    /// filesystem from `/`.
+    pub async fn open_dir(&self, name: &str) -> io::Result<Self> {
+        let name = single_component(name)?;
+        let directory = self
+            .blocking(move |directory| directory.open_dir_nofollow(&name))
+            .await?;
+        Ok(Self {
+            directory: Arc::new(directory),
+        })
+    }
+
+    /// Create `name` as a child directory if it is not already one, then open
+    /// it. An existing symlink at that name refuses rather than being adopted.
+    pub async fn create_dir(&self, name: &str) -> io::Result<Self> {
+        let name = single_component(name)?;
+        let directory = self
+            .blocking(move |directory| match directory.open_dir_nofollow(&name) {
+                Ok(child) => Ok(child),
+                Err(_) => {
+                    // A racing writer that lands the name first makes the
+                    // create fail; the open below then decides whether what is
+                    // there is a directory we may use or something we refuse.
+                    let _ = directory.create_dir(&name);
+                    directory.open_dir_nofollow(&name)
+                }
+            })
+            .await?;
+        Ok(Self {
+            directory: Arc::new(directory),
+        })
+    }
+
+    /// The entries directly inside this directory, classified without following
+    /// a symlink. Names that are not valid UTF-8 are dropped: every path this
+    /// crate carries is UTF-8, and a name that cannot be represented is a name
+    /// no later operation could address.
+    pub async fn entries(&self) -> io::Result<Vec<ScratchEntry>> {
+        self.blocking(|directory| {
+            let mut entries = Vec::new();
+            for entry in directory.entries()? {
+                let entry = entry?;
+                let Ok(name) = entry.file_name().into_string() else {
+                    continue;
+                };
+                let kind = match directory.symlink_metadata(&name) {
+                    Ok(metadata) if metadata.is_symlink() => ScratchEntryKind::Other,
+                    Ok(metadata) if metadata.is_dir() => ScratchEntryKind::Directory,
+                    Ok(metadata) if metadata.is_file() => ScratchEntryKind::File,
+                    Ok(_) => ScratchEntryKind::Other,
+                    Err(_) => continue,
+                };
+                entries.push(ScratchEntry { name, kind });
+            }
+            entries.sort_by(|left, right| left.name.cmp(&right.name));
+            Ok(entries)
+        })
+        .await
+    }
+
+    /// The length and modification time of `name`, judged without following a
+    /// symlink. `None` covers every reason the answer is unavailable, because
+    /// the callers use it only to decide whether a file looks untouched.
+    pub async fn file_stamp(&self, name: &str) -> Option<FileStamp> {
+        let name = single_component(name).ok()?;
+        self.blocking(move |directory| {
+            let metadata = directory.symlink_metadata(&name)?;
+            if !metadata.is_file() {
+                return Err(io::Error::other("not a regular file"));
+            }
+            Ok(FileStamp {
+                len: metadata.len(),
+                modified: metadata.modified().ok().map(|time| time.into_std()),
+                #[cfg(unix)]
+                mode: {
+                    use cap_std::fs::MetadataExt as _;
+                    metadata.mode()
+                },
+            })
+        })
+        .await
+        .ok()
+    }
+
+    /// Remove `name` from this directory. A symlink is unlinked rather than
+    /// followed, and a directory is removed only when it is already empty.
+    pub async fn remove(&self, name: &str, kind: ScratchEntryKind) -> io::Result<()> {
+        let name = single_component(name)?;
+        self.blocking(move |directory| match kind {
+            ScratchEntryKind::Directory => directory.remove_dir(&name),
+            _ => directory.remove_file(&name),
+        })
+        .await
+    }
+
     async fn blocking<T, F>(&self, work: F) -> io::Result<T>
     where
         F: FnOnce(&Dir) -> io::Result<T> + Send + 'static,
@@ -223,7 +364,12 @@ impl ScratchDir {
     }
 }
 
-fn write_blocking(directory: &Dir, name: &str, content: &[u8]) -> io::Result<()> {
+fn write_blocking(
+    directory: &Dir,
+    name: &str,
+    content: &[u8],
+    mode: Option<u32>,
+) -> io::Result<()> {
     use std::io::Write as _;
 
     // A process with write access to chat scratch could plant a symlink at a
@@ -239,12 +385,24 @@ fn write_blocking(directory: &Dir, name: &str, content: &[u8]) -> io::Result<()>
     #[cfg(unix)]
     {
         use cap_std::fs::OpenOptionsExt as _;
+        // The temp name is created private regardless; a wider mode is applied
+        // only once the bytes are all there, so nothing observes a
+        // world-readable half-written file.
         options.mode(0o600);
     }
+    let _ = &mode;
     let mut file = directory.open_with(&temporary, &options)?;
     let write = file
         .write_all(content)
         .and_then(|()| file.sync_all())
+        .and_then(|()| {
+            #[cfg(unix)]
+            if let Some(mode) = mode {
+                use cap_std::fs::PermissionsExt as _;
+                file.set_permissions(cap_std::fs::Permissions::from_mode(mode))?;
+            }
+            Ok(())
+        })
         .and_then(|()| directory.rename(&temporary, directory, name));
     if write.is_err() {
         let _ = directory.remove_file(&temporary);
