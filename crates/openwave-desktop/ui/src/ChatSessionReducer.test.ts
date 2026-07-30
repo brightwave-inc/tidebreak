@@ -95,6 +95,39 @@ describe("turn_started", () => {
       startsDifferentTurn: false,
     });
   });
+
+  it("drops unadmitted parallel calls when an approved turn resumes", () => {
+    const { state } = play([
+      TURN,
+      {
+        type: "tool_call_started",
+        call_id: "call-approved",
+        name: "web_search",
+      },
+      {
+        type: "tool_call_started",
+        call_id: "call-unadmitted",
+        name: "web_search",
+      },
+      {
+        type: "approval_required",
+        auto_judging: false,
+        prefix_rungs: [],
+        call_id: "call-approved",
+        action: "search",
+        approval: "search_may_share_query_and_excerpts",
+        class: "sensitive",
+      },
+      TURN,
+    ]);
+
+    expect(
+      state.messages.flatMap((message) =>
+        message.role === "tool" ? [message.callId] : [],
+      ),
+    ).toEqual(["call-approved"]);
+    expect(state.provisionalToolCallIds.size).toBe(0);
+  });
 });
 
 describe("text_delta", () => {

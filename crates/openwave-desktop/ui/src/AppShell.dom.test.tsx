@@ -88,6 +88,7 @@ vi.mock("./host", () => ({
   hasNativeHost: () => false,
   hasMacOverlayTitlebar: () => false,
   requestUserAttention,
+  onPairingChanged: () => () => undefined,
 }));
 
 vi.mock("./updates", () => ({
@@ -98,9 +99,23 @@ vi.mock("./updates", () => ({
   }),
 }));
 
-vi.mock("./ChatView", () => ({
-  ChatView: () => <div data-testid="transcript">transcript</div>,
-}));
+vi.mock("./ChatView", async () => {
+  const { useChatSessionStore } = await import("./ChatSessionStore");
+  return {
+    ChatView: () => {
+      const messages = useChatSessionStore((session) => session.messages);
+      return (
+        <div data-testid="transcript">
+          {messages.flatMap((message) =>
+            "text" in message
+              ? [<span key={message.id}>{message.text}</span>]
+              : [],
+          )}
+        </div>
+      );
+    },
+  };
+});
 
 vi.mock("./outputs/OutputsView", () => ({
   OutputsView: () => <div data-testid="outputs">outputs</div>,
@@ -118,7 +133,10 @@ vi.mock("./settings/ProvidersPanel", () => ({
 }));
 
 vi.mock("./ChatApprovalHydration", () => ({
-  loadChatApprovalHydration: vi.fn(async () => null),
+  loadChatApprovalHydration: vi.fn(async () => ({
+    transcript: { messages: [], tool_activity: [], last_event_seq: 0 },
+    pendingApprovals: [],
+  })),
 }));
 
 // The resize library lays out from real element measurements, which jsdom does
@@ -244,6 +262,9 @@ describe("app shell", () => {
         [],
       ),
     );
+    expect(
+      await screen.findByText("summarise the filing"),
+    ).toBeInTheDocument();
   });
 
   it("opens a conversation from the sidebar", async () => {

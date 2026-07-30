@@ -120,13 +120,16 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   }, [chatsLoaded, chat, navigate]);
 
   // A conversation opened from the home composer arrives with its first message
-  // already written. `take` clears it, so a re-render cannot send it twice.
+  // already written. Wait for the empty chat's authoritative snapshot before
+  // appending it: hydration replaces the session transcript, so sending during
+  // the first mount pass would let the reset below erase the optimistic bubble.
+  // `take` clears it, so a re-render cannot send it twice.
   useEffect(() => {
-    if (!chat) return;
+    if (!chat || !hydrated) return;
     const pending = firstMessageActions.take(chatId);
     if (pending) void sendMessage(pending.text, pending.images, pending.files);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chat, chatId]);
+  }, [chat, chatId, hydrated]);
 
   useEffect(() => {
     let cancelled = false;
