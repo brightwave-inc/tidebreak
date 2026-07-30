@@ -2685,17 +2685,32 @@ impl Agent {
         // fact sent correctly. Refuse before the approval gate so the reader
         // is never asked about a call whose arguments could not be read, and
         // return the advertised schema so the model can re-emit the call.
+        let spec = tool.spec();
         let Some(arguments) = parse_tool_args(&call.args) else {
             return ToolOutput::failed(
                 ToolErrorCategory::InvalidArguments,
                 format!(
                     "arguments for {} were not valid JSON; re-send the call with arguments \
                      matching this schema: {}",
-                    call.name,
-                    tool.spec().input_schema
+                    call.name, spec.input_schema
                 ),
             );
         };
+        // Well-formed JSON can still be the wrong call: enforcement used to be
+        // whatever each tool's deserializer happened to do, and a mounted MCP
+        // server's advertised contract was decorative. Hold every call to the
+        // schema the model was shown, at the same refusal point, so the model
+        // can re-emit the call instead of debugging a tool it never reached.
+        if let Some(mismatch) = crate::tool::schema_mismatch(&spec.input_schema, &arguments) {
+            return ToolOutput::failed(
+                ToolErrorCategory::InvalidArguments,
+                format!(
+                    "arguments for {} do not satisfy its schema: {mismatch}; re-send the call \
+                     with arguments matching this schema: {}",
+                    call.name, spec.input_schema
+                ),
+            );
+        }
         // Policy, decided in order: a standing grant the reader already made
         // covers its calls in every mode; otherwise the chat's permission mode
         // says which classes park on the gate. ReadOnly never parks; Workspace
@@ -6199,6 +6214,149 @@ mod tests {
         assert!(!output.is_error);
         assert!(output.content.len() < 10_000, "result should be capped");
         assert!(output.content.contains("[truncated:"));
+    }
+
+    /// Streams `counter` calls whose arguments are well-formed JSON: first a
+    /// shape the advertised schema forbids, then a conforming one.
+    struct SchemaArgsProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ModelProvider for SchemaArgsProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("schema-args")
+        }
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            let events = match self.calls.fetch_add(1, Ordering::SeqCst) {
+                0 => vec![
+                    ProviderEvent::ToolCallStarted {
+                        index: 0,
+                        id: "call_wrong".into(),
+                        name: "strict_counter".into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 0,
+                        fragment: r#"{"path": 42}"#.into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::ToolUse,
+                    },
+                ],
+                1 => vec![
+                    ProviderEvent::ToolCallStarted {
+                        index: 0,
+                        id: "call_right".into(),
+                        name: "strict_counter".into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 0,
+                        fragment: r#"{"path": "note"}"#.into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::ToolUse,
+                    },
+                ],
+                _ => vec![
+                    ProviderEvent::TextDelta { text: "ok".into() },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ],
+            };
+            Ok(stream::iter(events).boxed())
+        }
+    }
+
+    /// A read-only tool with a required, typed argument.
+    struct StrictCountingTool {
+        ran: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for StrictCountingTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "strict_counter".into(),
+                description: "a read-only tool".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                    "additionalProperties": false
+                }),
+            }
+        }
+        fn approval_class(&self) -> ApprovalClass {
+            ApprovalClass::ReadOnly
+        }
+        async fn execute(&self, _ctx: &ToolCtx, _args: Value) -> Result<ToolOutput> {
+            self.ran.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolOutput::text("counted"))
+        }
+    }
+
+    #[tokio::test]
+    async fn arguments_violating_the_advertised_schema_are_refused_before_the_tool_runs() {
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            reasoning_effort: None,
+            permission_mode: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let ran = Arc::new(AtomicUsize::new(0));
+
+        let agent = Agent::new(
+            Arc::new(SchemaArgsProvider {
+                calls: AtomicUsize::new(0),
+            }),
+            Arc::new(ToolRegistry::new().with(Box::new(StrictCountingTool { ran: ran.clone() }))),
+            store,
+            AgentConfig {
+                model: "fake".into(),
+                ..Default::default()
+            },
+        );
+
+        let (tx, rx) = unbounded();
+        agent.run_turn(&chat, "count something", &tx).await.unwrap();
+        drop(tx);
+        let events: Vec<AgentEvent> = rx.collect().await;
+
+        // Only the conforming call reached the tool.
+        assert_eq!(ran.load(Ordering::SeqCst), 1, "exactly one call ran");
+        let outputs: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolCallCompleted { output, .. } => Some(output),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outputs.len(), 2);
+        let refused = outputs[0];
+        assert!(refused.is_error);
+        assert_eq!(
+            refused.error_category,
+            Some(ToolErrorCategory::InvalidArguments)
+        );
+        // The mismatch and the schema ride along so the model can re-emit.
+        assert!(refused.content.contains("\"path\""), "{}", refused.content);
+        assert!(!outputs[1].is_error);
     }
 
     /// A read-only tool that records whether it ran.
