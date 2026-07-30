@@ -481,13 +481,15 @@ jobs:
       # the test skip silently and report a green lane that exercised nothing.
       - name: The container runtime must be present
         run: docker version --format '{{.Server.Version}}'
-      # `--ignored` runs exactly the gated end-to-end test, which builds the
-      # agent image itself from the workspace root.
-      - name: Drive a sandbox-resident run on a real container
+      # `--ignored` runs the gated Docker tests: the end-to-end drive and the
+      # transport-boundary conformance checks against the packaged image. Both
+      # build the same image tag; one test thread serializes them so the second
+      # build is a cache hit and the containers never race.
+      - name: Drive a sandbox-resident run and conformance checks on a real container
         run: >-
           cargo test -p openwave-server --locked
-          sandbox_container_run::tests::docker_end_to_end_drives_a_real_container
-          -- --ignored --exact --nocapture
+          sandbox_container_run::tests::docker
+          -- --ignored --nocapture --test-threads=1
 
   ui:
     name: desktop UI
