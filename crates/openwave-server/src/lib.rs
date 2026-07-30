@@ -64,6 +64,7 @@ use axum::routing::{delete, get, post};
 use axum::Router;
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::limit::RequestBodyLimitLayer;
 use uuid::Uuid;
 
 use openwave_code_execution::ExecTool;
@@ -90,7 +91,7 @@ pub use pairing::{
 };
 pub use state::AppState;
 
-const MAX_RAW_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_RAW_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_WEB_SEARCH_CREDENTIAL_BODY_BYTES: usize = 16 * 1024;
 const MAX_CODE_EXECUTION_CONFIG_BODY_BYTES: usize = 1_024;
 const MAX_CODE_EXECUTION_CREDENTIAL_BODY_BYTES: usize = 16 * 1024;
@@ -111,7 +112,14 @@ pub fn app(state: AppState) -> Router {
         )
         .route(
             "/chats/{chat_id}/documents/raw-stream",
-            post(routes::ingest_streamed_raw_chat_document),
+            // `DefaultBodyLimit` only binds extractors that buffer the body,
+            // and this handler takes the raw `Body` so it can write straight
+            // to the blob store — hence the transport-level limit instead.
+            // The cap is the same 16 MiB the buffered routes use: the handler
+            // reads the finished blob back to decode it, so streaming saves
+            // the upload from being buffered twice, not from being large.
+            post(routes::ingest_streamed_raw_chat_document)
+                .layer(RequestBodyLimitLayer::new(MAX_RAW_DOCUMENT_BYTES)),
         )
         .route(
             "/chats/{chat_id}/documents/{document_id}",

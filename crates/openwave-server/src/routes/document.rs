@@ -18,6 +18,7 @@ use crate::document_decode::decode_document;
 use crate::error::ServerError;
 use crate::extract::{Json, Path, Query, RawBytes};
 use crate::state::AppState;
+use crate::MAX_RAW_DOCUMENT_BYTES;
 
 /// Body of `POST /documents`.
 #[derive(Debug, Deserialize)]
@@ -524,6 +525,14 @@ fn streamed_source_blob(
 ) -> Result<DocumentSourceBlob, ServerError> {
     if query.byte_len == 0 {
         return Err(ServerError::bad_request("content must not be empty"));
+    }
+    // The blob writer stops a stream at its declared length, so refusing an
+    // over-large declaration up front turns a doomed upload into an immediate
+    // answer instead of 16 MiB written to disk and then discarded.
+    if query.byte_len > MAX_RAW_DOCUMENT_BYTES as u64 {
+        return Err(ServerError::payload_too_large(
+            "document must be 16 MiB or smaller",
+        ));
     }
     let sha256 = decode_sha256(&query.sha256).ok_or_else(|| {
         ServerError::bad_request("sha256 must be a 64-character hexadecimal digest")

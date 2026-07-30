@@ -676,13 +676,14 @@ async fn raw_ingest_retains_exact_bytes_and_decodes_before_responding() {
 }
 
 #[tokio::test]
-async fn streamed_raw_ingest_accepts_large_chunked_sources_and_deduplicates_by_content() {
+async fn streamed_raw_ingest_accepts_full_size_chunked_sources_and_deduplicates_by_content() {
     let (router, token, store, dir) = test_app().await;
     let bearer = format!("Bearer {token}");
     let chat = make_chat(&router, &bearer).await;
-    // One byte over the legacy raw route's limit proves this endpoint is not
-    // collected by Axum's buffered-body extractor before blob publication.
-    let raw = vec![b'x'; MAX_RAW_DOCUMENT_BYTES + 1];
+    // A body at the full raw-document limit, delivered in chunks, proves this
+    // endpoint publishes the blob from the stream rather than collecting it
+    // through Axum's buffered-body extractor first.
+    let raw = vec![b'x'; MAX_RAW_DOCUMENT_BYTES];
     let source_blob = openwave_core::DocumentSourceBlob::from_bytes(&raw);
     let sha256: String = source_blob
         .sha256
@@ -733,6 +734,30 @@ async fn streamed_raw_ingest_accepts_large_chunked_sources_and_deduplicates_by_c
             .unwrap(),
         vec![document_id]
     );
+}
+
+#[tokio::test]
+async fn streamed_raw_ingest_refuses_a_source_declared_over_the_document_limit() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let uri = format!(
+        "/chats/{}/documents/raw-stream?title=huge.md&sha256={}&byte_len={}",
+        chat.id,
+        "a".repeat(64),
+        MAX_RAW_DOCUMENT_BYTES + 1
+    );
+
+    // The declaration alone is enough to refuse: nothing of the body is read,
+    // so the answer arrives without a partial blob ever reaching disk.
+    let response =
+        post_streamed_raw(&router, &bearer, &uri, "text/markdown", vec![b"x".to_vec()]).await;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(store
+        .list_document_ids(openwave_core::DocumentScope::Chat(chat.id))
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
