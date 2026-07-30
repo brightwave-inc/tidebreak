@@ -46,6 +46,7 @@ use crate::web_search::{
 
 mod app_grant;
 mod app_invoke;
+mod app_library;
 pub(crate) mod client_execution;
 mod delegated_file_execution;
 mod document;
@@ -55,6 +56,7 @@ mod root_attachment;
 mod user_questions;
 pub use app_grant::*;
 pub use app_invoke::*;
+pub use app_library::*;
 pub use client_execution::*;
 pub use delegated_file_execution::*;
 pub use document::*;

@@ -150,8 +150,9 @@ async fn current_live_app(
 ///
 /// The same three checks the invoke gate applies, evaluated for the whole
 /// manifest: `granted` is true exactly when every pinned tool would pass the
-/// gate right now.
-fn grant_state(
+/// gate right now. Shared with the library listing so its granted badge is
+/// this verdict rather than a reimplementation of it.
+pub(crate) fn grant_state(
     manifest: &AppManifest,
     grant: Option<&AppGrant>,
     current: &std::collections::BTreeMap<String, [u8; 32]>,

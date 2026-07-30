@@ -19,6 +19,8 @@ import {
  *   outputs
  *   outputs.{outputId}
  *   folders
+ *   apps
+ *   apps.{appId}
  *
  * Only the first separator picks the panel type; what follows is read by that
  * panel and nothing else. Output navigation carries the durable opaque output
@@ -43,6 +45,8 @@ export function parsePanelSegment(segment: string): PanelContent | null {
       return id ? parseDocumentTarget(id) : null;
     case "outputs":
       return id ? { type: "outputs", outputId: id } : { type: "outputs" };
+    case "apps":
+      return id ? { type: "apps", appId: id } : { type: "apps" };
     default:
       return null;
   }
@@ -73,6 +77,8 @@ export function encodePanelSegment(panel: PanelContent): string {
         : `document.${panel.documentId}`;
     case "outputs":
       return panel.outputId ? `outputs.${panel.outputId}` : "outputs";
+    case "apps":
+      return panel.appId ? `apps.${panel.appId}` : "apps";
   }
 }
 

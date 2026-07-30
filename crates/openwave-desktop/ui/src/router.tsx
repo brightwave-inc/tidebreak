@@ -23,6 +23,14 @@ const rootRoute = createRootRoute({ component: AppShell });
 const homeRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
+  // Home hosts panels the way a conversation does — the Apps library opens
+  // beside the composer — so it reads the same layout params. Which panel
+  // types home actually accepts is decided by HomeRoute, not the URL parser.
+  validateSearch: (search: Record<string, unknown>): PanelSearch => ({
+    left: typeof search.left === "string" ? search.left : undefined,
+    right: typeof search.right === "string" ? search.right : undefined,
+    fullscreen: typeof search.fullscreen === "string" ? search.fullscreen : undefined,
+  }),
   component: HomeRoute,
 });
 

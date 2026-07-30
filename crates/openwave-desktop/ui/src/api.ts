@@ -1,5 +1,11 @@
 import {
   RENDERER_TOOL_NAMES,
+  type AppDetail as WireAppDetail,
+  type AppGrantState as WireAppGrantState,
+  type AppInvokeRefusalKind,
+  type AppLibrary as WireAppLibrary,
+  type AppSummary as WireAppSummary,
+  type AppViewSession,
   type ApprovalGrantRung,
   type ApprovalClass,
   type AssistantCitationSnapshot,
@@ -395,6 +401,58 @@ export type McpAppPayload = {
   structured_content?: unknown;
   is_error: boolean;
 };
+
+/** The Apps library listing: every live local app, newest activity first. */
+export type AppLibrary = WireAppLibrary;
+
+/** One Apps library row. */
+export type AppSummary = WireAppSummary;
+
+/** One app's detail: summary fields plus its revision history. */
+export type AppDetail = WireAppDetail;
+
+/** Renderer-safe grant state for one app: the consent sheet's whole input. */
+export type AppGrantState = WireAppGrantState;
+
+/** A single-use frame address for one stored app revision. */
+export type AppViewSessionInfo = AppViewSession;
+
+/**
+ * Result of a granted app invoke, forwarded verbatim to the sandboxed frame.
+ *
+ * Hand-written on purpose, like [`McpAppPayload`] and for the same reason:
+ * `structured_content` is opaque passthrough the renderer never interprets,
+ * which the wire-type generator's precision guard refuses.
+ */
+export type AppInvokeResult = {
+  content: string;
+  structured_content?: unknown;
+  is_error: boolean;
+};
+
+export type { AppInvokeRefusalKind };
+
+const APP_INVOKE_REFUSAL_KINDS: readonly AppInvokeRefusalKind[] = [
+  "app_not_found",
+  "not_pinned",
+  "consent_required",
+  "unknown_tool",
+];
+
+/**
+ * A typed refusal from `POST /apps/{id}/invoke`: the one invoke failure the
+ * renderer branches on (`consent_required` re-opens the grant sheet) rather
+ * than merely reporting.
+ */
+export class AppInvokeRefusalError extends Error {
+  constructor(
+    readonly kind: AppInvokeRefusalKind,
+    message: string,
+  ) {
+    super(message);
+    this.name = "AppInvokeRefusalError";
+  }
+}
 
 
 /** Approval kinds a human may approve from the renderer. */
@@ -850,6 +908,100 @@ export class ApiClient {
       `/chats/${encodeURIComponent(chatId)}/calls/${encodeURIComponent(callId)}/mcp-app-payload`,
       { headers: this.headers() },
     );
+  }
+
+  listApps(): Promise<AppLibrary> {
+    return this.json("/apps", { headers: this.headers() });
+  }
+
+  getApp(appId: string): Promise<AppDetail> {
+    return this.json(`/apps/${encodeURIComponent(appId)}`, {
+      headers: this.headers(),
+    });
+  }
+
+  deleteApp(appId: string): Promise<void> {
+    return this.json(`/apps/${encodeURIComponent(appId)}`, {
+      method: "DELETE",
+      headers: this.headers(),
+    });
+  }
+
+  getAppGrant(appId: string): Promise<AppGrantState> {
+    return this.json(`/apps/${encodeURIComponent(appId)}/grant`, {
+      headers: this.headers(),
+    });
+  }
+
+  /**
+   * Record consent. Deliberately body-less: consent is only ever "yes to what
+   * the server shows right now" — the server recomputes the grant from the
+   * current manifest and definitions, so a stale sheet can never widen it.
+   */
+  consentAppGrant(appId: string): Promise<AppGrantState> {
+    return this.json(`/apps/${encodeURIComponent(appId)}/grant`, {
+      method: "POST",
+      headers: this.headers(),
+    });
+  }
+
+  revokeAppGrant(appId: string): Promise<void> {
+    return this.json(`/apps/${encodeURIComponent(appId)}/grant`, {
+      method: "DELETE",
+      headers: this.headers(),
+    });
+  }
+
+  /** Trade the bearer for a single-use iframe address for one app revision. */
+  createAppViewFrame(appId: string): Promise<AppViewSession> {
+    return this.json(`/apps/${encodeURIComponent(appId)}/view-session`, {
+      method: "POST",
+      headers: this.headers(true),
+      body: JSON.stringify({}),
+    });
+  }
+
+  /**
+   * Execute one of an app's pinned tools outside any turn. `args` and the
+   * result are opaque passthrough between the sandboxed frame and the server;
+   * a typed refusal surfaces as {@link AppInvokeRefusalError} so the caller
+   * can branch on `consent_required` without string-matching prose.
+   */
+  async invokeApp(
+    appId: string,
+    tool: string,
+    args: unknown,
+  ): Promise<AppInvokeResult> {
+    const response = await fetch(
+      `${this.baseUrl}/apps/${encodeURIComponent(appId)}/invoke`,
+      {
+        method: "POST",
+        headers: this.headers(true),
+        body: JSON.stringify({ tool, arguments: args }),
+      },
+    );
+    if (!response.ok) {
+      let refusal: unknown;
+      try {
+        refusal = await response.clone().json();
+      } catch {
+        /* not a typed refusal; fall through to the generic error */
+      }
+      if (
+        typeof refusal === "object" &&
+        refusal !== null &&
+        "kind" in refusal &&
+        "message" in refusal &&
+        APP_INVOKE_REFUSAL_KINDS.includes(
+          (refusal as { kind: AppInvokeRefusalKind }).kind,
+        )
+      ) {
+        const typed = refusal as { kind: AppInvokeRefusalKind; message: string };
+        throw new AppInvokeRefusalError(typed.kind, String(typed.message));
+      }
+      await throwIfNotOk(response);
+    }
+    return (await response.json()) as AppInvokeResult;
   }
 
   createProject(title: string): Promise<Project> {

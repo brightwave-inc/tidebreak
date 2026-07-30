@@ -12,7 +12,10 @@ const PAYLOAD: McpAppPayload = {
   is_error: false,
 };
 
-function harness(theme: "light" | "dark" = "dark") {
+function harness(
+  theme: "light" | "dark" = "dark",
+  invokeTool?: Parameters<typeof createMcpAppBridge>[0]["invokeTool"],
+) {
   const postMessage = vi.fn();
   const frame = { postMessage } as unknown as Window;
   const onHeight = vi.fn();
@@ -21,6 +24,7 @@ function harness(theme: "light" | "dark" = "dark") {
     frame: () => frame,
     theme: () => currentTheme,
     onHeight,
+    invokeTool,
   });
   const fromView = (data: unknown, source: unknown = frame) =>
     bridge.handleMessage({ data, source } as MessageEvent);
@@ -117,6 +121,31 @@ describe("createMcpAppBridge", () => {
     fromView({ jsonrpc: "2.0", method: "notifications/message", params: { level: "info" } });
     fromView({ jsonrpc: "2.0", method: "ui/notifications/request-teardown" });
     expect(sent()).toHaveLength(1);
+  });
+
+  it("refuses tools/call without an invoker, and undeclared methods with one", () => {
+    // The transcript card wires no invoker: tools/call stays method-not-found
+    // there, exactly as before the app-open flow existed.
+    const bare = harness();
+    bare.fromView({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "mcp__cmd__doit", arguments: {} },
+    });
+    expect(bare.sent()).toEqual([
+      { jsonrpc: "2.0", id: 1, error: { code: -32601, message: "Method not found" } },
+    ]);
+
+    // Wiring the invoker declares tools/call and nothing else: any other
+    // method still fails closed rather than acquiring a handler by accident.
+    const invokeTool = vi.fn();
+    const wired = harness("dark", invokeTool);
+    wired.fromView({ jsonrpc: "2.0", id: 2, method: "resources/read", params: {} });
+    expect(wired.sent()).toEqual([
+      { jsonrpc: "2.0", id: 2, error: { code: -32601, message: "Method not found" } },
+    ]);
+    expect(invokeTool).not.toHaveBeenCalled();
   });
 
   it("answers ping and clamps size-changed heights", () => {

@@ -13,6 +13,8 @@ describe("panel URLs", () => {
     expect(parsePanelSegment("chat")).toEqual({ type: "chat" });
     expect(parsePanelSegment("outputs")).toEqual({ type: "outputs" });
     expect(parsePanelSegment("folders")).toEqual({ type: "folders" });
+    expect(parsePanelSegment("apps")).toEqual({ type: "apps" });
+    expect(parsePanelSegment("apps.app-1")).toEqual({ type: "apps", appId: "app-1" });
     expect(parsePanelSegment("document.doc-1")).toEqual({
       type: "document",
       documentId: "doc-1",

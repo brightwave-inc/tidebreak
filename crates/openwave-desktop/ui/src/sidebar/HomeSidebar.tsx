@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { useNavigate, useRouterState } from "@tanstack/react-router";
-import { History, MessagesSquare } from "lucide-react";
+import { useNavigate, useRouterState, useSearch } from "@tanstack/react-router";
+import { History, LayoutGrid, MessagesSquare } from "lucide-react";
 
 import { useApp } from "@/AppContext";
 import { useChatAttention } from "@/ChatAttention";
@@ -40,7 +40,15 @@ export function HomeSidebar() {
   );
   const isCompact = useSidebarWidth() === "compact";
   const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const search = useSearch({ strict: false }) as { left?: string; right?: string };
   const [recentCollapsed, setRecentCollapsed] = useState(false);
+
+  // The Apps library lives on home; the entry is "current" when either slot
+  // holds it, list or detail alike.
+  const holdsApps = (segment: string | undefined) =>
+    segment === "apps" || segment?.startsWith("apps.") === true;
+  const appsOpen =
+    pathname === "/" && (holdsApps(search.left) || holdsApps(search.right));
 
   const recentChats = chats.slice(0, RECENT_CHAT_LIMIT);
   const showRecent = !recentCollapsed && !isCompact && recentChats.length > 0;
@@ -109,6 +117,19 @@ export function HomeSidebar() {
           </div>
         )}
       </div>
+
+      {/* Apps are profile-scoped — they outlive every conversation — so their
+          library belongs on the chat-free rail, opening as a panel on home. */}
+      <SidebarSectionTitle className="mt-4">Library</SidebarSectionTitle>
+      <SidebarButton
+        aria-current={appsOpen ? "page" : undefined}
+        data-active={appsOpen || undefined}
+        className="data-[active]:bg-muted"
+        onClick={() => void navigate({ to: "/", search: { left: "apps" } })}
+      >
+        <LayoutGrid />
+        <span>Apps</span>
+      </SidebarButton>
     </SidebarFrame>
   );
 }
