@@ -13,11 +13,18 @@ impl AuditSink for CollectingAudit {
     }
 }
 
-struct FailingAudit;
+/// An audit sink whose storage can be taken away mid-session.
+#[derive(Default)]
+struct BreakableAudit {
+    broken: AtomicBool,
+}
 
-impl AuditSink for FailingAudit {
+impl AuditSink for BreakableAudit {
     fn record(&self, _event: &AuditEvent) -> Result<(), AuditError> {
-        Err(AuditError::Io(io::Error::other("injected audit failure")))
+        if self.broken.load(Ordering::SeqCst) {
+            return Err(AuditError::Io(io::Error::other("injected audit failure")));
+        }
+        Ok(())
     }
 }
 
@@ -1067,53 +1074,109 @@ fn broker_audits_control_reads_denials_and_authorizing_grants() {
     ));
 
     let events = audit.events.lock().unwrap();
-    assert_eq!(events.len(), 3);
+    assert_eq!(events.len(), 4);
+    // Registration is a mutation, so it is recorded as an intent before it runs
+    // and as a completion afterwards, correlated by request identity.
     assert_eq!(events[0].operation, AuditOperation::RegisterRoot);
+    assert_eq!(events[0].outcome, AuditOutcome::Attempted);
+    assert_eq!(events[1].operation, AuditOperation::RegisterRoot);
+    assert_eq!(events[1].outcome, AuditOutcome::Allowed);
+    assert_eq!(events[0].request_id, events[1].request_id);
     assert!(matches!(
         &events[0].target,
         AuditTarget::SelectedFolder { display_name } if display_name.as_str() == "Documents"
     ));
-    assert_eq!(events[1].operation, AuditOperation::ReadFile);
-    assert_eq!(events[1].outcome, AuditOutcome::Allowed);
-    assert!(events[1].grant_id.is_some());
-    assert_eq!(events[1].bytes, Some(17));
+    assert_eq!(events[2].operation, AuditOperation::ReadFile);
+    assert_eq!(events[2].outcome, AuditOutcome::Allowed);
+    assert!(events[2].grant_id.is_some());
+    assert_eq!(events[2].bytes, Some(17));
     assert!(matches!(
-        &events[1].target,
+        &events[2].target,
         AuditTarget::Path { root_id, relative }
             if *root_id == registered.root.root_id && relative.as_str() == "note.txt"
     ));
-    assert_eq!(events[2].outcome, AuditOutcome::Denied);
-    assert_eq!(events[2].error_code, Some(ErrorCode::Denied));
-    assert!(events[2].grant_id.is_none());
+    assert_eq!(events[3].outcome, AuditOutcome::Denied);
+    assert_eq!(events[3].error_code, Some(ErrorCode::Denied));
+    assert!(events[3].grant_id.is_none());
     let encoded = serde_json::to_string(&*events).unwrap();
     assert!(!encoded.contains("home/Documents"));
     assert!(!encoded.contains("hello from broker"));
 }
 
 #[test]
-fn read_tier_audit_failure_does_not_block_user_access() {
+fn an_unrecordable_mutation_is_refused_while_reads_still_work() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("home/Documents");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("note.txt"), "hello from broker").unwrap();
-    let broker = Broker::with_audit_sink(test_policy(&temp), Arc::new(FailingAudit));
+    let audit = Arc::new(BreakableAudit::default());
+    let broker = Broker::with_audit_sink(test_policy(&temp), audit.clone());
     let conversation = Uuid::new_v4();
+    let context = ExecutionContext::standalone(conversation).unwrap();
     let registered = register(
         &broker.controller(),
         GrantSubject::conversation(conversation).unwrap(),
         conversation,
-        root,
+        root.clone(),
         OperationId::new(),
     );
-    let result = operate(
+    audit.broken.store(true, Ordering::SeqCst);
+
+    let refused = operate(
         &broker.operator(),
-        ExecutionContext::standalone(conversation).unwrap(),
+        context,
+        write_request(
+            OperationId::new(),
+            registered.root.root_id,
+            "unrecorded.txt",
+            WriteFileMode::Create,
+            None,
+            b"never written",
+        ),
+    )
+    .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::AuditUnavailable);
+    assert!(!root.join("unrecorded.txt").exists());
+
+    let refused = unwrap_response(broker.controller().handle(ControlEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: crate::RequestId::new(),
+        request: ControlRequest::RevokeRoot(RevokeRootRequest {
+            operation_id: OperationId::new(),
+            subject: GrantSubject::conversation(conversation).unwrap(),
+            root_id: registered.root.root_id,
+        }),
+    }))
+    .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::AuditUnavailable);
+
+    // Losing the audit log must not cost the user access to folders they
+    // already approved; an unrecorded read is the lesser failure.
+    assert!(operate(
+        &broker.operator(),
+        context,
         OperationRequest::ReadFile(PathRequest {
             root_id: registered.root.root_id,
             path: RelativePath::parse("note.txt").unwrap(),
         }),
-    );
-    assert!(result.is_ok());
+    )
+    .is_ok());
+
+    // Recovery needs no restart: the next mutation goes through.
+    audit.broken.store(false, Ordering::SeqCst);
+    assert!(operate(
+        &broker.operator(),
+        context,
+        write_request(
+            OperationId::new(),
+            registered.root.root_id,
+            "recorded.txt",
+            WriteFileMode::Create,
+            None,
+            b"written",
+        ),
+    )
+    .is_ok());
 }
 
 #[test]

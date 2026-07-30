@@ -3,6 +3,13 @@
 //! Audit targets contain opaque root identities and bounded root-relative paths,
 //! never absolute host paths or file contents. The durable sink appends one
 //! fsync'd JSON record at a time and rotates within a fixed local retention bound.
+//!
+//! Recording is a precondition for mutating the host, not a report about it: the
+//! broker writes an [`AuditOutcome::Attempted`] record before it touches
+//! anything and refuses the operation if that record cannot be made durable. The
+//! sink therefore never reports success it did not achieve, and never disables
+//! itself — a host that cannot hold the log right now blocks mutations until it
+//! can, and resumes on its own once the failure clears.
 
 use std::{
     collections::VecDeque,
@@ -50,9 +57,7 @@ pub enum AuditError {
     Io(#[from] io::Error),
     #[error("audit writer lock was poisoned")]
     Poisoned,
-    #[error("audit storage is unavailable until restart")]
-    Unavailable,
-    #[error("audit publication is ambiguous; restart is required")]
+    #[error("audit publication is ambiguous; the record may not have been retained")]
     PublicationAmbiguous,
 }
 
@@ -80,6 +85,12 @@ pub enum AuditOperation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditOutcome {
+    /// The broker is about to attempt a host mutation. Written and made durable
+    /// before anything is touched, and paired with a later record carrying the
+    /// same `request_id`. An `Attempted` record with no pair means the broker
+    /// died mid-operation: the effect may or may not have landed, which is
+    /// exactly what the trail should say rather than omitting the operation.
+    Attempted,
     Allowed,
     Denied,
     Failed,
@@ -214,7 +225,12 @@ pub(crate) struct JsonlAuditSink {
 }
 
 struct WriterState {
-    available: bool,
+    /// The on-disk layout has not been established, or was left in an unknown
+    /// shape by a failure. Rebuilt on the next record rather than latching the
+    /// sink off: a full disk or a temporarily missing directory is a condition
+    /// that clears, and an audit trail that stays dead until the next restart
+    /// is worse than one that pauses.
+    needs_recovery: bool,
     #[cfg(test)]
     fail_after_write_once: bool,
     #[cfg(test)]
@@ -222,24 +238,48 @@ struct WriterState {
 }
 
 impl JsonlAuditSink {
-    pub(crate) fn open(data_dir: &Path) -> Result<Self, AuditError> {
-        fs::create_dir_all(data_dir)?;
-        #[cfg(unix)]
-        fs::set_permissions(data_dir, fs::Permissions::from_mode(0o700))?;
+    /// Prepare local audit storage under `data_dir`.
+    ///
+    /// Preparation failure is deliberately not fatal. The sink comes back
+    /// needing recovery: it refuses every record until the layout is in place,
+    /// which is what makes the broker refuse mutations, and it retries the
+    /// preparation on each subsequent record so access resumes by itself.
+    pub(crate) fn open(data_dir: &Path) -> Self {
         let sink = Self {
             path: data_dir.join(AUDIT_FILE_NAME),
             archive: data_dir.join(AUDIT_ARCHIVE_NAME),
             max_file_bytes: MAX_AUDIT_FILE_BYTES,
             writer: Mutex::new(WriterState {
-                available: true,
+                needs_recovery: true,
                 #[cfg(test)]
                 fail_after_write_once: false,
                 #[cfg(test)]
                 fail_rotation_after_archive_once: false,
             }),
         };
-        sink.recover()?;
-        Ok(sink)
+        match sink.writer.lock() {
+            Ok(mut writer) => {
+                if let Err(error) = sink.prepare(&mut writer) {
+                    eprintln!("openwave host broker audit storage is not ready: {error}");
+                }
+            }
+            Err(_) => unreachable!("a freshly created audit writer lock cannot be poisoned"),
+        }
+        sink
+    }
+
+    /// Establish the on-disk layout if it is not known to be intact.
+    fn prepare(&self, writer: &mut WriterState) -> Result<(), AuditError> {
+        if !writer.needs_recovery {
+            return Ok(());
+        }
+        let directory = self.path.parent().expect("audit file has a parent");
+        fs::create_dir_all(directory)?;
+        #[cfg(unix)]
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
+        self.recover()?;
+        writer.needs_recovery = false;
+        Ok(())
     }
 
     fn recover(&self) -> io::Result<()> {
@@ -406,9 +446,7 @@ impl AuditSink for JsonlAuditSink {
             return Err(AuditError::RecordTooLarge);
         }
         let mut writer = self.writer.lock().map_err(|_| AuditError::Poisoned)?;
-        if !writer.available {
-            return Err(AuditError::Unavailable);
-        }
+        self.prepare(&mut writer)?;
         let mut last_error = None;
         for attempt in 0..AUDIT_WRITE_ATTEMPTS {
             match self.append_once(&line, &mut writer) {
@@ -422,7 +460,11 @@ impl AuditSink for JsonlAuditSink {
                     thread::sleep(AUDIT_RETRY_BACKOFF);
                 }
                 Err(_) => {
-                    writer.available = false;
+                    // Rotation failed part-way, so both the record's fate and
+                    // the file layout are unknown. Report the ambiguity to the
+                    // caller — which refuses the operation it was gating — and
+                    // rebuild the layout on the next record.
+                    writer.needs_recovery = true;
                     return Err(AuditError::PublicationAmbiguous);
                 }
             }
@@ -451,14 +493,6 @@ impl AppendFailure {
             source,
             safe_to_retry: false,
         }
-    }
-}
-
-pub(crate) struct UnavailableAuditSink;
-
-impl AuditSink for UnavailableAuditSink {
-    fn record(&self, _event: &AuditEvent) -> Result<(), AuditError> {
-        Err(AuditError::Unavailable)
     }
 }
 
@@ -604,7 +638,7 @@ mod tests {
     #[test]
     fn jsonl_sink_appends_private_records() {
         let temp = tempfile::tempdir().unwrap();
-        let sink = JsonlAuditSink::open(temp.path()).unwrap();
+        let sink = JsonlAuditSink::open(temp.path());
         let first = event(AuditTarget::Subject);
         let second = event(AuditTarget::Root {
             root_id: RootId::new(),
@@ -641,7 +675,6 @@ mod tests {
     fn jsonl_sink_rotates_with_bounded_retention() {
         let temp = tempfile::tempdir().unwrap();
         let sink = JsonlAuditSink::open(temp.path())
-            .unwrap()
             .with_max_file_bytes((MAX_AUDIT_RECORD_BYTES + 100) as u64);
         for _ in 0..20 {
             sink.record(&event(AuditTarget::Subject)).unwrap();
@@ -659,7 +692,7 @@ mod tests {
     #[test]
     fn transient_post_write_failure_rolls_back_before_retry() {
         let temp = tempfile::tempdir().unwrap();
-        let sink = JsonlAuditSink::open(temp.path()).unwrap();
+        let sink = JsonlAuditSink::open(temp.path());
         sink.writer.lock().unwrap().fail_after_write_once = true;
         let expected = event(AuditTarget::Subject);
         sink.record(&expected).unwrap();
@@ -677,7 +710,7 @@ mod tests {
     fn startup_repairs_an_incomplete_jsonl_tail() {
         let temp = tempfile::tempdir().unwrap();
         let first = event(AuditTarget::Subject);
-        let sink = JsonlAuditSink::open(temp.path()).unwrap();
+        let sink = JsonlAuditSink::open(temp.path());
         sink.record(&first).unwrap();
         drop(sink);
         let mut file = OpenOptions::new()
@@ -688,7 +721,7 @@ mod tests {
         file.sync_all().unwrap();
         drop(file);
 
-        let sink = JsonlAuditSink::open(temp.path()).unwrap();
+        let sink = JsonlAuditSink::open(temp.path());
         let second = event(AuditTarget::Subject);
         sink.record(&second).unwrap();
         let decoded = fs::read_to_string(temp.path().join(AUDIT_FILE_NAME))
@@ -700,26 +733,18 @@ mod tests {
     }
 
     #[test]
-    fn interrupted_rotation_degrades_until_restart_then_recovers() {
+    fn interrupted_rotation_reports_the_ambiguity_then_recovers_in_place() {
         let temp = tempfile::tempdir().unwrap();
         let first = event(AuditTarget::Subject);
         let line_bytes = serde_json::to_vec(&first).unwrap().len() as u64 + 1;
-        let sink = JsonlAuditSink::open(temp.path())
-            .unwrap()
-            .with_max_file_bytes(line_bytes);
+        let sink = JsonlAuditSink::open(temp.path()).with_max_file_bytes(line_bytes);
         sink.record(&first).unwrap();
         sink.writer.lock().unwrap().fail_rotation_after_archive_once = true;
         assert!(matches!(
             sink.record(&event(AuditTarget::Subject)),
             Err(AuditError::PublicationAmbiguous)
         ));
-        assert!(matches!(
-            sink.record(&event(AuditTarget::Subject)),
-            Err(AuditError::Unavailable)
-        ));
-        drop(sink);
 
-        let sink = JsonlAuditSink::open(temp.path()).unwrap();
         let second = event(AuditTarget::Subject);
         sink.record(&second).unwrap();
         let archive = fs::read_to_string(temp.path().join(AUDIT_ARCHIVE_NAME)).unwrap();
