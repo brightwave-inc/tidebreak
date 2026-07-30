@@ -365,10 +365,24 @@ impl SandboxRun {
         matches!(&*self.inner.conn.borrow(), Some(current) if Arc::ptr_eq(&current.closed, closed))
     }
 
-    /// Advance the un-acknowledged buffer to the host's committed cursor.
+    /// Advance the un-acknowledged buffer to the host's committed cursor,
+    /// pruning the events that cursor commits.
+    ///
+    /// Acknowledgement is the signal that the host has committed those events,
+    /// so entries at or below the cursor are dropped here rather than held for
+    /// the life of the run. The acknowledged cursor — not the emitted head — is
+    /// the safe watermark: a reconnecting host resumes from its own committed
+    /// position, which attach takes as an acknowledgement, so it can never ask
+    /// to replay anything at or below what has been acknowledged.
     fn acknowledge(&self, cursor: EventCursor) {
         let mut buffer = self.inner.events.lock().expect("event buffer lock");
         buffer.acked_through = buffer.acked_through.max(cursor.get());
+        // Events are buffered in ascending sequence order, so the acknowledged
+        // prefix is contiguous.
+        let committed = buffer
+            .events
+            .partition_point(|event| event.sequence.get() <= buffer.acked_through);
+        buffer.events.drain(..committed);
         let unacked = (buffer.next_seq - 1).saturating_sub(buffer.acked_through);
         if unacked < buffer.buffer_cap as u64 {
             buffer.overflowed = false;
@@ -685,6 +699,104 @@ mod tests {
             acked,
             EventCursor::START.get(),
             "a superseded peer advanced the acknowledged cursor"
+        );
+    }
+
+    /// An acknowledgement prunes the events the host has committed, and the
+    /// prune watermark is the acknowledged cursor — not the emitted head — so
+    /// a host that reconnects from its committed position still replays every
+    /// event it has not acknowledged.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn acknowledgement_prunes_committed_events_but_keeps_the_replay_tail() {
+        let secret = TransportSecret::new("prune-test");
+        let run = run_with(&secret);
+
+        // Emitted unattached, so all three sit in the buffer for replay.
+        for _ in 0..3 {
+            run.emit_progress("line").await.expect("emit");
+        }
+
+        let (first_host, first_sandbox) = tokio::io::duplex(4096);
+        tokio::spawn(super::serve_connection(first_sandbox, run.clone()));
+        let (mut first_reader, mut first_writer) =
+            attach(first_host, &secret, EventCursor::START).await;
+
+        // The resume replay delivers all three; the host commits the first two.
+        for expected in 1..=3 {
+            let frame = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                read_frame(&mut first_reader),
+            )
+            .await
+            .expect("the resume replay is served")
+            .expect("replayed event");
+            assert!(
+                matches!(frame, WireFrame::Event(ref event) if event.sequence.get() == expected),
+                "the resume replay delivered events out of order"
+            );
+        }
+        write_frame(
+            &mut first_writer,
+            &WireFrame::EventAck {
+                cursor: EventCursor::committed(Sequence::new(2)),
+            },
+        )
+        .await
+        .expect("send ack");
+        // A ping answered behind the ack proves the ack was processed.
+        write_frame(
+            &mut first_writer,
+            &WireFrame::Control(ControlFrame::Ping { nonce: 0 }),
+        )
+        .await
+        .expect("send ping");
+        let pong = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            read_frame(&mut first_reader),
+        )
+        .await
+        .expect("the live connection is served")
+        .expect("pong");
+        assert!(matches!(
+            pong,
+            WireFrame::Control(ControlFrame::Pong { nonce: 0 })
+        ));
+
+        {
+            let buffer = run.inner.events.lock().expect("event buffer lock");
+            assert!(
+                buffer.events.iter().all(|event| event.sequence.get() > 2),
+                "acknowledged events must be pruned from the buffer"
+            );
+            assert_eq!(
+                buffer.events.len(),
+                1,
+                "the un-acknowledged tail stays buffered"
+            );
+        }
+
+        // The host reconnects from its committed position; the tail it never
+        // acknowledged still replays.
+        drop(first_reader);
+        drop(first_writer);
+        let (second_host, second_sandbox) = tokio::io::duplex(4096);
+        tokio::spawn(super::serve_connection(second_sandbox, run.clone()));
+        let (mut second_reader, _second_writer) = attach(
+            second_host,
+            &secret,
+            EventCursor::committed(Sequence::new(2)),
+        )
+        .await;
+        let replayed = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            read_frame(&mut second_reader),
+        )
+        .await
+        .expect("the replay after resume is served")
+        .expect("replayed event");
+        assert!(
+            matches!(replayed, WireFrame::Event(ref event) if event.sequence.get() == 3),
+            "a reconnect must still replay the un-acknowledged tail"
         );
     }
 }
