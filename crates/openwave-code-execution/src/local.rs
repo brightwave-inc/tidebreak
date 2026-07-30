@@ -35,6 +35,7 @@ use crate::{ExecFolderAccess, ExecFolderGrant};
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 const RECEIPT_DIR: &str = ".code-execution-receipts";
+const ENV_HOME_DIR: &str = ".code-execution-env-homes";
 const MAX_RECEIPT_BYTES: u64 = 96 * 1_024;
 #[cfg(target_os = "macos")]
 const OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(1);
@@ -50,6 +51,15 @@ pub struct LocalExecutionProvider {
     scratch_root: PathBuf,
     timeout: Duration,
     document_scripts_dir: Option<PathBuf>,
+}
+
+/// Host paths resolved for one execution: the model-visible workspace and cwd,
+/// the per-chat non-model-visible home for `HOME`/`TMPDIR`, and receipt storage.
+struct ResolvedExecutionPaths {
+    workspace: PathBuf,
+    cwd: PathBuf,
+    env_home: PathBuf,
+    receipts: PathBuf,
 }
 
 #[cfg(target_os = "macos")]
@@ -102,7 +112,7 @@ impl LocalExecutionProvider {
     fn resolve_paths(
         &self,
         request: &CodeExecutionRequest,
-    ) -> Result<(PathBuf, PathBuf, PathBuf), CodeExecutionError> {
+    ) -> Result<ResolvedExecutionPaths, CodeExecutionError> {
         let root = fs::canonicalize(&self.scratch_root).map_err(|_| {
             CodeExecutionError::Sandbox("private scratch root is unavailable".into())
         })?;
@@ -130,7 +140,21 @@ impl LocalExecutionProvider {
         }
         let receipts = root.join(RECEIPT_DIR);
         secure_dir(&receipts)?;
-        Ok((workspace, cwd, receipts))
+        // A per-chat home for the sandboxed process's HOME/TMPDIR, deliberately
+        // outside the model-visible workspace: interpreters drop caches under
+        // $HOME (system Python writes ~/Library/Caches/com.apple.python), and
+        // anything landing inside the workspace would surface as chat files and
+        // be mirrored into remote sandboxes. Like receipts, it is a dotted
+        // sibling of the workspace directories at the scratch root, so file
+        // tools and provider sync never see it.
+        let env_home = root.join(ENV_HOME_DIR).join(request.workspace_id.as_str());
+        secure_dir(&env_home)?;
+        Ok(ResolvedExecutionPaths {
+            workspace,
+            cwd,
+            env_home,
+            receipts,
+        })
     }
 
     fn ensured_root(&self) -> Result<PathBuf, CodeExecutionError> {
@@ -260,7 +284,12 @@ impl CodeExecutionProvider for LocalExecutionProvider {
                 "native local sandboxing is not supported on this host".into(),
             ));
         }
-        let (workspace, cwd, receipts) = self.resolve_paths(&request)?;
+        let ResolvedExecutionPaths {
+            workspace,
+            cwd,
+            env_home,
+            receipts,
+        } = self.resolve_paths(&request)?;
         // Folder paths are host state injected by the configured provider, not
         // tool arguments. Revalidate them for every new invocation before any
         // path becomes a Seatbelt allowance. Revocation changes the next
@@ -292,6 +321,7 @@ impl CodeExecutionProvider for LocalExecutionProvider {
             &request,
             &workspace,
             &cwd,
+            &env_home,
             self.timeout,
             document_scripts_dir.as_deref(),
             &folder_grants,
@@ -353,6 +383,26 @@ impl WorkspaceLifecycle for LocalExecutionProvider {
             return Ok(());
         };
         let root = Self::root_dir(&root).await?;
+        // Drop the chat's non-model-visible env home (the sandbox process's
+        // HOME/TMPDIR) alongside its workspace, so destroyed chats leave no
+        // interpreter caches behind. Absence of either is not a failure.
+        match root.open_dir(ENV_HOME_DIR).await {
+            Ok(env_homes) => match env_homes.remove_dir_all(workspace.as_str()).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => {
+                    return Err(CodeExecutionError::Sandbox(
+                        "could not remove private execution storage".into(),
+                    ))
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(CodeExecutionError::Sandbox(
+                    "could not remove private execution storage".into(),
+                ))
+            }
+        }
         if Self::workspace_under(&root, workspace, false)
             .await?
             .is_none()
@@ -649,19 +699,19 @@ fn sync_dir(path: &Path) -> std::io::Result<()> {
 
 fn secure_dir(path: &Path) -> Result<(), CodeExecutionError> {
     fs::create_dir_all(path).map_err(|_| {
-        CodeExecutionError::Sandbox("could not create private receipt storage".into())
+        CodeExecutionError::Sandbox("could not create private execution storage".into())
     })?;
     let metadata = fs::symlink_metadata(path).map_err(|_| {
-        CodeExecutionError::Sandbox("could not inspect private receipt storage".into())
+        CodeExecutionError::Sandbox("could not inspect private execution storage".into())
     })?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(CodeExecutionError::Sandbox(
-            "private receipt storage is not a regular directory".into(),
+            "private execution storage is not a regular directory".into(),
         ));
     }
     #[cfg(unix)]
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|_| {
-        CodeExecutionError::Sandbox("could not secure private receipt storage".into())
+        CodeExecutionError::Sandbox("could not secure private execution storage".into())
     })?;
     Ok(())
 }
@@ -671,6 +721,7 @@ async fn run_native(
     request: &CodeExecutionRequest,
     workspace: &Path,
     cwd: &Path,
+    env_home: &Path,
     timeout: Duration,
     document_scripts_dir: Option<&Path>,
     folder_grants: &[CanonicalExecFolderGrant],
@@ -678,6 +729,7 @@ async fn run_native(
     let developer_dir = macos_developer_dir();
     let profile = macos_profile(
         workspace,
+        env_home,
         developer_dir.as_deref(),
         document_scripts_dir,
         folder_grants,
@@ -688,8 +740,8 @@ async fn run_native(
         .args(&request.arguments)
         .current_dir(cwd)
         .env_clear()
-        .env("HOME", workspace)
-        .env("TMPDIR", workspace)
+        .env("HOME", env_home)
+        .env("TMPDIR", env_home)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -772,6 +824,7 @@ async fn run_native(
     _request: &CodeExecutionRequest,
     _workspace: &Path,
     _cwd: &Path,
+    _env_home: &Path,
     _timeout: Duration,
     _document_scripts_dir: Option<&Path>,
     _folder_grants: &[()],
@@ -851,6 +904,7 @@ async fn finish_reader(mut reader: tokio::task::JoinHandle<()>) {
 #[cfg(target_os = "macos")]
 fn macos_profile(
     workspace: &Path,
+    env_home: &Path,
     developer_dir: Option<&Path>,
     document_scripts_dir: Option<&Path>,
     folder_grants: &[CanonicalExecFolderGrant],
@@ -977,6 +1031,10 @@ fn macos_profile(
         .collect::<Result<Vec<_>, _>>()?
         .join("\n  ");
     let workspace = sandbox_subpath(workspace)?;
+    // The per-chat env home backs the sandboxed process's HOME/TMPDIR. It is
+    // writable like the workspace but lives outside the model-visible tree, so
+    // interpreter caches never surface as chat files.
+    let env_home = sandbox_subpath(env_home)?;
     Ok(format!(
         "(version 1)\n\
          (deny default)\n\
@@ -986,8 +1044,8 @@ fn macos_profile(
          (allow file-read*)\n\
          (deny file-read*\n  {denied})\n\
          (allow file-read-metadata\n  {runtime_metadata}\n  {grant_metadata})\n\
-         (allow file-read*\n  {literals}\n  {runtimes}\n  {selected_runtime}\n  {document_scripts}\n  {granted_reads}\n  {workspace})\n\
-         (allow file-write*\n  {granted_writes}\n  {workspace}\n  (literal \"/dev/null\"))\n"
+         (allow file-read*\n  {literals}\n  {runtimes}\n  {selected_runtime}\n  {document_scripts}\n  {granted_reads}\n  {workspace}\n  {env_home})\n\
+         (allow file-write*\n  {granted_writes}\n  {workspace}\n  {env_home}\n  (literal \"/dev/null\"))\n"
     ))
 }
 
@@ -1199,6 +1257,47 @@ mod tests {
             );
             assert_eq!(python.stdout.trim(), "42");
         }
+    }
+
+    /// The production regression this pins: a sandboxed interpreter writing
+    /// under `$HOME` (system Python drops hundreds of bytecode caches there)
+    /// must land outside the model-visible workspace, or the junk becomes chat
+    /// files and is mirrored into remote sandboxes. `HOME` and `TMPDIR` must
+    /// stay writable, just disjoint from the workspace tree.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn sandbox_home_and_tmpdir_are_writable_outside_the_workspace() {
+        let (root, provider, workspace) = fixture(Duration::from_secs(3));
+        let script = "printf home > \"$HOME/home-marker\" && \
+                      printf tmp > \"$TMPDIR/tmp-marker\" && \
+                      printf '%s' \"$HOME\"";
+        let response = provider
+            .execute(request(&workspace, "call-env-home", script))
+            .await
+            .unwrap();
+        assert_eq!(response.exit_code, Some(0), "stderr: {}", response.stderr);
+
+        let workspace_dir = fs::canonicalize(root.path().join(&workspace)).unwrap();
+        let home = PathBuf::from(response.stdout.trim());
+        assert!(
+            !home.starts_with(&workspace_dir),
+            "HOME must resolve outside the model-visible workspace, got {}",
+            home.display()
+        );
+        assert!(home.join("home-marker").is_file());
+        assert!(home.join("tmp-marker").is_file());
+        assert!(!workspace_dir.join("home-marker").exists());
+        assert!(!workspace_dir.join("tmp-marker").exists());
+
+        let listed = provider
+            .list_workspace_files(&ExecutionWorkspaceId::parse(&workspace).unwrap(), None)
+            .await
+            .unwrap();
+        assert!(
+            listed.entries.is_empty(),
+            "env-home writes must not surface as chat files: {:?}",
+            listed.entries
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -1432,6 +1531,7 @@ mod tests {
     fn profile_denies_network_and_escapes_workspace_paths() {
         let profile = macos_profile(
             Path::new("/Users/test/we\"ird\\workspace"),
+            Path::new("/Users/test/env-home"),
             None,
             Some(Path::new(
                 "/Applications/OpenWave.app/Contents/Resources/exec-scripts",
@@ -1452,9 +1552,14 @@ mod tests {
             .nth(1)
             .expect("profile has a write rule");
         assert!(!write_rule.contains("Resources/exec-scripts"));
-        assert!(
-            macos_profile(Path::new("/Users/test/control\nworkspace"), None, None, &[]).is_err()
-        );
+        assert!(macos_profile(
+            Path::new("/Users/test/control\nworkspace"),
+            Path::new("/Users/test/env-home"),
+            None,
+            None,
+            &[]
+        )
+        .is_err());
     }
 
     #[cfg(target_os = "macos")]
@@ -1470,8 +1575,14 @@ mod tests {
             ExecFolderGrant::new(&read_write, ExecFolderAccess::ReadWrite).unwrap(),
         ])
         .unwrap();
-        let profile =
-            macos_profile(Path::new("/Users/test/workspace"), None, None, &grants).unwrap();
+        let profile = macos_profile(
+            Path::new("/Users/test/workspace"),
+            Path::new("/Users/test/env-home"),
+            None,
+            None,
+            &grants,
+        )
+        .unwrap();
         let canonical_read = fs::canonicalize(read_only).unwrap();
         let canonical_write = fs::canonicalize(read_write).unwrap();
 

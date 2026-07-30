@@ -241,7 +241,9 @@ The initial adapter is deliberately fail-closed and macOS-first:
   denied for reads, while system executables and runtime libraries remain
   usable;
 - the parent environment is cleared; only fixed `HOME`, `TMPDIR`, and `PATH`
-  values are supplied;
+  values are supplied, with `HOME` and `TMPDIR` pointing at a writable per-chat
+  directory outside the model-visible scratch so interpreter caches never
+  surface as chat files;
 - stdin is `/dev/null`;
 - the process runs in its own process group;
 - wall time, CPU time, open files, per-file writes, arguments, and captured
