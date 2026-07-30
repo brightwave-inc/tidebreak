@@ -341,6 +341,16 @@ impl ScratchDir {
         .ok()
     }
 
+    /// Remove `name` and everything beneath it, relative to this directory.
+    /// A symlink at `name` is unlinked rather than followed, so a name swapped
+    /// for a symlink after the caller checked it cannot turn the removal loose
+    /// on the symlink's target.
+    pub async fn remove_dir_all(&self, name: &str) -> io::Result<()> {
+        let name = single_component(name)?;
+        self.blocking(move |directory| directory.remove_dir_all(&name))
+            .await
+    }
+
     /// Remove `name` from this directory. A symlink is unlinked rather than
     /// followed, and a directory is removed only when it is already empty.
     pub async fn remove(&self, name: &str, kind: ScratchEntryKind) -> io::Result<()> {

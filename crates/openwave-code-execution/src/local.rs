@@ -19,7 +19,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 #[cfg(target_os = "macos")]
 use tokio::process::Command;
 
-use crate::host_paths::{resolve_scratch_directory, ScratchDir};
+use crate::host_paths::{resolve_scratch_directory, ScratchDir, ScratchEntryKind};
 #[cfg(target_os = "macos")]
 use crate::output::{Capture, StreamKind};
 use crate::receipt::{request_fingerprint, BeginExecution, ExecutionReceipt};
@@ -151,47 +151,66 @@ impl LocalExecutionProvider {
         }
     }
 
-    fn workspace_in(
+    /// Open the host-owned scratch `root` as a pinned descriptor. The root is
+    /// canonicalized by the caller and is not sandbox-writable, so ambient
+    /// resolution of it carries no containment question.
+    async fn root_dir(root: &Path) -> Result<ScratchDir, CodeExecutionError> {
+        resolve_scratch_directory(root, "", false)
+            .await
+            .ok_or_else(|| {
+                CodeExecutionError::Sandbox("private scratch root is unavailable".into())
+            })
+    }
+
+    /// Open the workspace directory one level under `root` as a pinned
+    /// descriptor, creating it when `create` is set. A symlink or
+    /// non-directory at the workspace name refuses rather than being adopted
+    /// or followed.
+    async fn workspace_under(
+        root: &ScratchDir,
+        workspace: &ExecutionWorkspaceId,
+        create: bool,
+    ) -> Result<Option<ScratchDir>, CodeExecutionError> {
+        let name = workspace.as_str();
+        let opened = if create {
+            root.create_dir(name).await
+        } else {
+            root.open_dir(name).await
+        };
+        match opened {
+            Ok(directory) => Ok(Some(directory)),
+            Err(error) if !create && error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(_) => {
+                // The no-follow open is what refused; the stats only label the
+                // refusal and are not what enforced it.
+                if root.is_symlink(name).await || root.file_stamp(name).await.is_some() {
+                    return Err(CodeExecutionError::Sandbox(
+                        "private workspace is not a regular directory".into(),
+                    ));
+                }
+                Err(CodeExecutionError::Sandbox(
+                    "private workspace is unavailable".into(),
+                ))
+            }
+        }
+    }
+
+    async fn workspace_in(
         root: &Path,
         workspace: &ExecutionWorkspaceId,
         create: bool,
-    ) -> Result<Option<PathBuf>, CodeExecutionError> {
-        let candidate = root.join(workspace.as_str());
-        if create {
-            fs::create_dir_all(&candidate).map_err(|_| {
-                CodeExecutionError::Sandbox("private workspace is unavailable".into())
-            })?;
-        }
-        let metadata = match fs::symlink_metadata(&candidate) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => {
-                return Err(CodeExecutionError::Sandbox(
-                    "private workspace is unavailable".into(),
-                ));
-            }
-        };
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            return Err(CodeExecutionError::Sandbox(
-                "private workspace is not a regular directory".into(),
-            ));
-        }
-        let workspace = fs::canonicalize(&candidate)
-            .map_err(|_| CodeExecutionError::Sandbox("private workspace is unavailable".into()))?;
-        if !workspace.starts_with(root) {
-            return Err(CodeExecutionError::Sandbox(
-                "private workspace escaped its root".into(),
-            ));
-        }
-        Ok(Some(workspace))
+    ) -> Result<Option<ScratchDir>, CodeExecutionError> {
+        let root = Self::root_dir(root).await?;
+        Self::workspace_under(&root, workspace, create).await
     }
 
-    fn ensured_workspace(
+    async fn ensured_workspace(
         &self,
         workspace: &ExecutionWorkspaceId,
-    ) -> Result<PathBuf, CodeExecutionError> {
+    ) -> Result<ScratchDir, CodeExecutionError> {
         let root = self.ensured_root()?;
-        Self::workspace_in(&root, workspace, true)?
+        Self::workspace_in(&root, workspace, true)
+            .await?
             .ok_or_else(|| CodeExecutionError::Sandbox("private workspace is unavailable".into()))
     }
 
@@ -200,13 +219,14 @@ impl LocalExecutionProvider {
     /// workspace and cannot be swapped for one after the check. The final
     /// component's own type is checked separately, against that descriptor.
     ///
-    /// Resolution walks one component at a time and establishes containment
-    /// before creating anything, so a write through a planted symlinked parent
-    /// refuses without having made directories outside the workspace first.
-    /// `None` means the parent did not resolve inside the workspace — a missing
-    /// directory, a planted symlink, or a component that is not a directory.
+    /// The walk descends one pinned child descriptor at a time and establishes
+    /// containment before creating anything, so a write through a planted
+    /// symlinked parent refuses without having made directories outside the
+    /// workspace first. `None` means the parent did not resolve inside the
+    /// workspace — a missing directory, a planted symlink, or a component that
+    /// is not a directory.
     async fn resolve_parent(
-        workspace: &Path,
+        workspace: &ScratchDir,
         path: &WorkspaceFilePath,
         create_parents: bool,
     ) -> Option<ScratchDir> {
@@ -215,7 +235,16 @@ impl LocalExecutionProvider {
             .rsplit_once('/')
             .map(|(parent, _)| parent)
             .unwrap_or("");
-        resolve_scratch_directory(workspace, parent, create_parents).await
+        let mut directory = workspace.clone();
+        for component in parent.split('/').filter(|part| !part.is_empty()) {
+            directory = if create_parents {
+                directory.create_dir(component).await
+            } else {
+                directory.open_dir(component).await
+            }
+            .ok()?;
+        }
+        Some(directory)
     }
 }
 
@@ -303,7 +332,7 @@ impl WorkspaceLifecycle for LocalExecutionProvider {
         &self,
         workspace: &ExecutionWorkspaceId,
     ) -> Result<(), CodeExecutionError> {
-        self.ensured_workspace(workspace).map(|_| ())
+        self.ensured_workspace(workspace).await.map(|_| ())
     }
 
     async fn connect_workspace(
@@ -313,7 +342,7 @@ impl WorkspaceLifecycle for LocalExecutionProvider {
         let Some(root) = self.existing_root()? else {
             return Ok(false);
         };
-        Ok(Self::workspace_in(&root, workspace, false)?.is_some())
+        Ok(Self::workspace_in(&root, workspace, false).await?.is_some())
     }
 
     async fn destroy_workspace(
@@ -323,10 +352,15 @@ impl WorkspaceLifecycle for LocalExecutionProvider {
         let Some(root) = self.existing_root()? else {
             return Ok(());
         };
-        let Some(workspace) = Self::workspace_in(&root, workspace, false)? else {
+        let root = Self::root_dir(&root).await?;
+        if Self::workspace_under(&root, workspace, false)
+            .await?
+            .is_none()
+        {
             return Ok(());
-        };
-        fs::remove_dir_all(&workspace)
+        }
+        root.remove_dir_all(workspace.as_str())
+            .await
             .map_err(|_| CodeExecutionError::Sandbox("could not remove private workspace".into()))
     }
 
@@ -339,7 +373,7 @@ impl WorkspaceLifecycle for LocalExecutionProvider {
         if content.len() > MAX_WORKSPACE_FILE_BYTES {
             return Err(CodeExecutionError::WorkspaceFileTooLarge);
         }
-        let workspace = self.ensured_workspace(workspace)?;
+        let workspace = self.ensured_workspace(workspace).await?;
         let parent = Self::resolve_parent(&workspace, path, true)
             .await
             .ok_or_else(|| {
@@ -365,7 +399,7 @@ impl WorkspaceLifecycle for LocalExecutionProvider {
         let Some(root) = self.existing_root()? else {
             return Err(CodeExecutionError::WorkspaceFileNotFound);
         };
-        let Some(workspace) = Self::workspace_in(&root, workspace, false)? else {
+        let Some(workspace) = Self::workspace_in(&root, workspace, false).await? else {
             return Err(CodeExecutionError::WorkspaceFileNotFound);
         };
         let Some(parent) = Self::resolve_parent(&workspace, path, false).await else {
@@ -423,58 +457,75 @@ impl WorkspaceLifecycle for LocalExecutionProvider {
         workspace: &ExecutionWorkspaceId,
         path: Option<&WorkspaceFilePath>,
     ) -> Result<WorkspaceListing, CodeExecutionError> {
-        let workspace = self.ensured_workspace(workspace)?;
+        let workspace = self.ensured_workspace(workspace).await?;
         let base = match path {
-            None => workspace.clone(),
+            None => workspace,
             Some(path) => {
-                let candidate = workspace.join(path.as_str());
-                let base = match fs::canonicalize(&candidate) {
-                    Ok(base) => base,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        return Err(CodeExecutionError::WorkspaceFileNotFound);
-                    }
-                    Err(_) => {
-                        return Err(CodeExecutionError::Sandbox(
-                            "could not list the workspace".into(),
-                        ));
-                    }
-                };
-                if !base.starts_with(&workspace) {
-                    return Err(CodeExecutionError::Sandbox(
-                        "workspace path escaped the private workspace".into(),
-                    ));
-                }
-                if !base.is_dir() {
-                    return Err(CodeExecutionError::InvalidRequest(
-                        "workspace path is not a directory".into(),
-                    ));
+                // Descend one pinned descriptor at a time; the no-follow open
+                // is what refuses, and a directory swapped out from under the
+                // walk is one a descriptor no longer refers to.
+                let components = path
+                    .as_str()
+                    .split('/')
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>();
+                let mut base = workspace;
+                for (index, component) in components.iter().enumerate() {
+                    base = match base.open_dir(component).await {
+                        Ok(child) => child,
+                        Err(error) => {
+                            // The stats below only label the refusal; they are
+                            // not what enforced it.
+                            if error.kind() == std::io::ErrorKind::NotFound {
+                                return Err(CodeExecutionError::WorkspaceFileNotFound);
+                            }
+                            if base.is_symlink(component).await {
+                                return Err(CodeExecutionError::Sandbox(
+                                    "workspace path escaped the private workspace".into(),
+                                ));
+                            }
+                            if index + 1 == components.len()
+                                && base.file_stamp(component).await.is_some()
+                            {
+                                return Err(CodeExecutionError::InvalidRequest(
+                                    "workspace path is not a directory".into(),
+                                ));
+                            }
+                            return Err(CodeExecutionError::Sandbox(
+                                "could not list the workspace".into(),
+                            ));
+                        }
+                    };
                 }
                 base
             }
         };
-        let reader = fs::read_dir(&base)
-            .map_err(|_| CodeExecutionError::Sandbox("could not list the workspace".into()))?;
         let mut entries = Vec::new();
-        for entry in reader {
-            let entry = entry
-                .map_err(|_| CodeExecutionError::Sandbox("could not list the workspace".into()))?;
-            let Ok(name) = entry.file_name().into_string() else {
-                continue;
+        for entry in base
+            .entries()
+            .await
+            .map_err(|_| CodeExecutionError::Sandbox("could not list the workspace".into()))?
+        {
+            let (directory, size_bytes) = match entry.kind {
+                ScratchEntryKind::Directory => (true, None),
+                ScratchEntryKind::File => {
+                    // A file whose stamp cannot be read is skipped, as one
+                    // whose metadata could not be read was before.
+                    let Some(stamp) = base.file_stamp(&entry.name).await else {
+                        continue;
+                    };
+                    (false, Some(stamp.len))
+                }
+                ScratchEntryKind::Other => continue,
             };
-            let Ok(metadata) = entry.metadata() else {
-                continue;
-            };
-            if metadata.file_type().is_symlink() || (!metadata.is_dir() && !metadata.is_file()) {
-                continue;
-            }
             let relative = match path {
-                None => name,
-                Some(path) => format!("{}/{name}", path.as_str()),
+                None => entry.name,
+                Some(path) => format!("{}/{}", path.as_str(), entry.name),
             };
             entries.push(WorkspaceFileEntry {
                 path: relative,
-                directory: metadata.is_dir(),
-                size_bytes: metadata.is_file().then_some(metadata.len()),
+                directory,
+                size_bytes,
             });
         }
         entries.sort_by(|left, right| left.path.cmp(&right.path));
