@@ -48,7 +48,7 @@ impl OpenAiCompatProvider {
     /// Build a provider hitting OpenAI's Chat Completions API.
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::http::streaming_client(),
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
             provider_id: "openai".to_string(),
@@ -58,7 +58,7 @@ impl OpenAiCompatProvider {
     /// Build a provider for a custom OpenAI-compatible gateway.
     pub fn compatible(api_key: impl Into<String>, base_url: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::http::streaming_client(),
             api_key: api_key.into(),
             base_url: base_url.into(),
             provider_id: "openai_compatible".to_string(),
@@ -118,8 +118,10 @@ impl ModelProvider for OpenAiCompatProvider {
             ));
         }
 
+        let ceiling = crate::http::timeouts().total_stream;
         let stream = async_stream::stream! {
-            let mut bytes = response.bytes_stream();
+            let bytes = crate::http::with_stream_deadline(response.bytes_stream(), ceiling);
+            futures::pin_mut!(bytes);
             let mut buffer: Vec<u8> = Vec::new();
             let mut state = StreamState::default();
             while let Some(chunk) = bytes.next().await {

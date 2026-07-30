@@ -190,7 +190,7 @@ impl GoogleServiceAccountTokenSource {
     pub fn new(account: GoogleServiceAccount) -> Self {
         Self {
             account,
-            client: reqwest::Client::new(),
+            client: crate::http::request_client(),
             token_uri: GOOGLE_TOKEN_URI.to_string(),
             cached: Mutex::new(None),
             #[cfg(test)]

@@ -69,7 +69,7 @@ impl GeminiProvider {
     /// Build a provider using a Gemini Developer API key.
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::http::streaming_client(),
             auth: GeminiAuth::ApiKey(api_key.into()),
             endpoint_family: EndpointFamily::DeveloperApi,
             base_url: DEFAULT_BASE_URL.to_string(),
@@ -97,7 +97,7 @@ impl GeminiProvider {
             format!("https://{location}-aiplatform.googleapis.com")
         };
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: crate::http::streaming_client(),
             auth: GeminiAuth::Bearer(token_source),
             endpoint_family: EndpointFamily::VertexAi {
                 project_id,
@@ -199,16 +199,29 @@ impl ModelProvider for GeminiProvider {
             return Err(classify_gemini_error(status.as_u16(), &body));
         }
 
+        let ceiling = crate::http::timeouts().total_stream;
         let stream = async_stream::stream! {
-            let mut bytes = response.bytes_stream();
+            let bytes = crate::http::with_stream_deadline(response.bytes_stream(), ceiling);
+            futures::pin_mut!(bytes);
             let mut buffer = Vec::new();
             let mut state = StreamState::default();
             while let Some(chunk) = bytes.next().await {
                 let chunk = match chunk {
                     Ok(chunk) => chunk,
-                    Err(_) => {
+                    // The transport error's own text stays suppressed — reqwest's
+                    // display includes the URL, and a Vertex URL carries the
+                    // project id from the secret key file. Our own deadline text
+                    // carries no such thing and is worth surfacing.
+                    Err(error) => {
                         yield ProviderEvent::Failed {
-                            message: "gemini stream ended early".to_string(),
+                            message: match error {
+                                crate::http::StreamFailure::Deadline(_) => {
+                                    format!("gemini stream ended early: {error}")
+                                }
+                                crate::http::StreamFailure::Transport(_) => {
+                                    "gemini stream ended early".to_string()
+                                }
+                            },
                         };
                         return;
                     }

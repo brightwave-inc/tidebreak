@@ -13,11 +13,14 @@ workspace = true
 [features]
 default = ["anthropic", "openai-compat", "gemini"]
 # The Anthropic (Messages API) provider adapter.
-anthropic = ["dep:reqwest", "dep:async-stream"]
+anthropic = ["_http"]
 # OpenAI-compatible Chat Completions adapter (OpenAI, OpenRouter, vLLM, …).
-openai-compat = ["dep:reqwest", "dep:async-stream"]
+openai-compat = ["_http"]
 # Google Gemini Developer API adapter (native GenerateContent protocol).
-gemini = ["dep:reqwest", "dep:async-stream", "dep:ring", "dep:uuid"]
+gemini = ["_http", "dep:ring", "dep:uuid"]
+# Internal: the shared HTTP transport every adapter is built on. Not meant to
+# be enabled directly.
+_http = ["dep:reqwest", "dep:async-stream", "dep:tokio"]
 
 [dependencies]
 openwave-core = { path = "../openwave-core", default-features = false }
@@ -29,8 +32,9 @@ serde_json = { workspace = true }
 reqwest = { workspace = true, optional = true }
 ring = { workspace = true, optional = true }
 async-stream = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["time"], optional = true }
 uuid = { workspace = true, optional = true }
 
 [dev-dependencies]
 axum = { workspace = true }
-tokio = { workspace = true, features = ["net", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["net", "rt-multi-thread", "test-util"] }
