@@ -24,6 +24,14 @@ use crate::{
 /// should degrade into a bounded transfer plus a note, not an unbounded copy.
 pub const MAX_SYNC_FILES: usize = 256;
 
+/// The most notes one direction of a sync will carry before collapsing
+/// repeats into a summary line. Notes are rendered into the model-facing tool
+/// result, so a tree full of skipped entries must not push unbounded prose
+/// into the model's context: the first note of each distinct reason is always
+/// kept, and anything past the limit with an already-shown reason becomes a
+/// count.
+pub const MAX_SYNC_NOTES: usize = 32;
+
 /// Directory names never mirrored in either direction: version control and
 /// dependency trees that are large, regenerable, and meaningless to copy
 /// between the host and a sandbox.
@@ -34,11 +42,37 @@ const SKIPPED_DIRS: &[&str] = &[".git", ".venv", "__pycache__", "node_modules"];
 pub struct SyncReport {
     pub transferred: usize,
     pub notes: Vec<String>,
+    /// Distinct note reasons already shown, in first-seen order.
+    note_reasons: Vec<&'static str>,
+    /// Notes collapsed into the summary line [`SyncReport::finish`] appends.
+    notes_overflow: usize,
 }
 
 impl SyncReport {
-    fn skip(&mut self, note: impl Into<String>) {
+    /// Record one skipped entry, bounding the report for the model: the first
+    /// note of each distinct `reason` is always kept, while notes past
+    /// [`MAX_SYNC_NOTES`] with an already-shown reason collapse into the
+    /// overflow count [`SyncReport::finish`] summarizes.
+    fn skip(&mut self, reason: &'static str, note: impl Into<String>) {
+        if self.notes.len() >= MAX_SYNC_NOTES && self.note_reasons.contains(&reason) {
+            self.notes_overflow += 1;
+            return;
+        }
+        if !self.note_reasons.contains(&reason) {
+            self.note_reasons.push(reason);
+        }
         self.notes.push(note.into());
+    }
+
+    /// Append the overflow summary, if any, and hand the report back.
+    fn finish(mut self, verb: &str) -> Self {
+        if self.notes_overflow > 0 {
+            self.notes.push(format!(
+                "not {verb}: {} more note(s) beyond the {MAX_SYNC_NOTES}-note sync limit",
+                self.notes_overflow
+            ));
+        }
+        self
     }
 }
 
@@ -71,9 +105,10 @@ pub async fn push_host_dir(
             Ok(entries) => entries,
             Err(error) => {
                 tracing::warn!("private scratch directory '{listed}' could not be listed: {error}");
-                report.skip(format!(
-                    "not pushed: {listed} could not be listed ({error})"
-                ));
+                report.skip(
+                    "could not be listed",
+                    format!("not pushed: {listed} could not be listed ({error})"),
+                );
                 continue;
             }
         };
@@ -83,16 +118,18 @@ pub async fn push_host_dir(
                 Ok(None) => break,
                 Err(error) => {
                     tracing::warn!("listing of private scratch '{listed}' ended early: {error}");
-                    report.skip(format!(
-                        "not pushed: the listing of {listed} ended early ({error})"
-                    ));
+                    report.skip(
+                        "listing ended early",
+                        format!("not pushed: the listing of {listed} ended early ({error})"),
+                    );
                     break;
                 }
             };
             let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-                report.skip(format!(
-                    "not pushed: an entry under '{prefix}/' has a non-UTF-8 name"
-                ));
+                report.skip(
+                    "non-UTF-8 name",
+                    format!("not pushed: an entry under '{prefix}/' has a non-UTF-8 name"),
+                );
                 continue;
             };
             let relative = if prefix.is_empty() {
@@ -106,19 +143,26 @@ pub async fn push_host_dir(
                     tracing::debug!(
                         "private scratch entry '{relative}' vanished or is unreadable: {error}"
                     );
-                    report.skip(format!(
-                        "not pushed: {relative} could not be inspected ({error})"
-                    ));
+                    report.skip(
+                        "could not be inspected",
+                        format!("not pushed: {relative} could not be inspected ({error})"),
+                    );
                     continue;
                 }
             };
             if metadata.is_symlink() {
-                report.skip(format!("not pushed: {relative} is a symlink"));
+                report.skip(
+                    "is a symlink",
+                    format!("not pushed: {relative} is a symlink"),
+                );
                 continue;
             }
             if metadata.is_dir() {
                 if SKIPPED_DIRS.contains(&name.as_str()) {
-                    report.skip(format!("not pushed: {relative}/ (dependency or VCS tree)"));
+                    report.skip(
+                        "dependency or VCS tree",
+                        format!("not pushed: {relative}/ (dependency or VCS tree)"),
+                    );
                 } else {
                     stack.push((entry.path(), relative));
                 }
@@ -128,15 +172,19 @@ pub async fn push_host_dir(
                 continue;
             }
             if metadata.len() > MAX_WORKSPACE_FILE_BYTES as u64 {
-                report.skip(format!(
-                    "not pushed: {relative} exceeds the {MAX_WORKSPACE_FILE_BYTES}-byte file limit"
-                ));
+                report.skip(
+                    "exceeds the file limit",
+                    format!(
+                        "not pushed: {relative} exceeds the {MAX_WORKSPACE_FILE_BYTES}-byte file limit"
+                    ),
+                );
                 continue;
             }
             let Ok(path) = WorkspaceFilePath::parse(&relative) else {
-                report.skip(format!(
-                    "not pushed: {relative} is not a valid workspace path"
-                ));
+                report.skip(
+                    "not a valid workspace path",
+                    format!("not pushed: {relative} is not a valid workspace path"),
+                );
                 continue;
             };
             files.push((path, entry.path()));
@@ -145,9 +193,12 @@ pub async fn push_host_dir(
     files.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
     let overflow = files.len().saturating_sub(MAX_SYNC_FILES);
     if overflow > 0 {
-        report.skip(format!(
-            "not pushed: {overflow} more file(s) beyond the {MAX_SYNC_FILES}-file sync limit"
-        ));
+        report.skip(
+            "beyond the file sync limit",
+            format!(
+                "not pushed: {overflow} more file(s) beyond the {MAX_SYNC_FILES}-file sync limit"
+            ),
+        );
     }
     for (path, host_path) in files.into_iter().take(MAX_SYNC_FILES) {
         let content = match tokio::fs::read(&host_path).await {
@@ -157,10 +208,13 @@ pub async fn push_host_dir(
                     "private scratch file '{}' could not be read: {error}",
                     path.as_str()
                 );
-                report.skip(format!(
-                    "not pushed: {} could not be read from the host ({error})",
-                    path.as_str()
-                ));
+                report.skip(
+                    "could not be read from the host",
+                    format!(
+                        "not pushed: {} could not be read from the host ({error})",
+                        path.as_str()
+                    ),
+                );
                 continue;
             }
         };
@@ -175,14 +229,17 @@ pub async fn push_host_dir(
                     "private scratch file '{}' was rejected by the workspace: {error}",
                     path.as_str()
                 );
-                report.skip(format!(
-                    "not pushed: {} was rejected by the workspace ({error})",
-                    path.as_str()
-                ));
+                report.skip(
+                    "rejected by the workspace",
+                    format!(
+                        "not pushed: {} was rejected by the workspace ({error})",
+                        path.as_str()
+                    ),
+                );
             }
         }
     }
-    Ok(report)
+    Ok(report.finish("pushed"))
 }
 
 /// Pull every eligible workspace file into `host_dir`, writing only files
@@ -203,27 +260,28 @@ pub async fn pull_into_host_dir(
             let shown = dir
                 .as_ref()
                 .map_or("the workspace root", WorkspaceFilePath::as_str);
-            report.skip(format!(
-                "not fully pulled: the listing of {shown} was truncated"
-            ));
+            report.skip(
+                "listing was truncated",
+                format!("not fully pulled: the listing of {shown} was truncated"),
+            );
         }
         for entry in listing.entries {
             // The path comes back from the sandbox; re-validate it so a
             // hostile or confused backend cannot steer a write outside the
             // chat's scratch directory.
             let Ok(path) = WorkspaceFilePath::parse(&entry.path) else {
-                report.skip(format!(
-                    "not pulled: '{}' is not a valid workspace path",
-                    entry.path
-                ));
+                report.skip(
+                    "not a valid workspace path",
+                    format!("not pulled: '{}' is not a valid workspace path", entry.path),
+                );
                 continue;
             };
             if entry.directory {
                 if SKIPPED_DIRS.contains(&path.file_name()) {
-                    report.skip(format!(
-                        "not pulled: {}/ (dependency or VCS tree)",
-                        path.as_str()
-                    ));
+                    report.skip(
+                        "dependency or VCS tree",
+                        format!("not pulled: {}/ (dependency or VCS tree)", path.as_str()),
+                    );
                 } else {
                     stack.push(Some(path));
                 }
@@ -233,10 +291,13 @@ pub async fn pull_into_host_dir(
                 .size_bytes
                 .is_some_and(|size| size > MAX_WORKSPACE_FILE_BYTES as u64)
             {
-                report.skip(format!(
-                    "not pulled: {} exceeds the {MAX_WORKSPACE_FILE_BYTES}-byte file limit",
-                    path.as_str()
-                ));
+                report.skip(
+                    "exceeds the file limit",
+                    format!(
+                        "not pulled: {} exceeds the {MAX_WORKSPACE_FILE_BYTES}-byte file limit",
+                        path.as_str()
+                    ),
+                );
                 continue;
             }
             files.push(path);
@@ -245,13 +306,16 @@ pub async fn pull_into_host_dir(
     files.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     let overflow = files.len().saturating_sub(MAX_SYNC_FILES);
     if overflow > 0 {
-        report.skip(format!(
-            "not pulled: {overflow} more file(s) beyond the {MAX_SYNC_FILES}-file sync limit"
-        ));
+        report.skip(
+            "beyond the file sync limit",
+            format!(
+                "not pulled: {overflow} more file(s) beyond the {MAX_SYNC_FILES}-file sync limit"
+            ),
+        );
     }
     let files: Vec<WorkspaceFilePath> = files.into_iter().take(MAX_SYNC_FILES).collect();
     if files.is_empty() {
-        return Ok(report);
+        return Ok(report.finish("pulled"));
     }
     tokio::fs::create_dir_all(host_dir)
         .await
@@ -265,10 +329,13 @@ pub async fn pull_into_host_dir(
                     "workspace file '{}' could not be pulled: {error}",
                     path.as_str()
                 );
-                report.skip(format!(
-                    "not pulled: {} could not be read from the workspace ({error})",
-                    path.as_str()
-                ));
+                report.skip(
+                    "could not be read from the workspace",
+                    format!(
+                        "not pulled: {} could not be read from the workspace ({error})",
+                        path.as_str()
+                    ),
+                );
                 continue;
             }
         };
@@ -291,10 +358,10 @@ pub async fn pull_into_host_dir(
                 "workspace pull refused: '{}' is a symlink on the host",
                 path.as_str()
             );
-            report.skip(format!(
-                "not pulled: {} is a symlink on the host",
-                path.as_str()
-            ));
+            report.skip(
+                "is a symlink on the host",
+                format!("not pulled: {} is a symlink on the host", path.as_str()),
+            );
             continue;
         }
         if let Ok(existing) = parent.read_file(name).await {
@@ -308,7 +375,7 @@ pub async fn pull_into_host_dir(
             .map_err(|_| unwritable(path.as_str()))?;
         report.transferred += 1;
     }
-    Ok(report)
+    Ok(report.finish("pulled"))
 }
 
 /// The pinned directory `path`'s file lands in under `host_dir`, creating
@@ -352,7 +419,7 @@ fn refuse(report: &mut SyncReport, path: &WorkspaceFilePath, refusal: ScratchRef
             path.as_str()
         );
     }
-    report.skip(format!("not pulled: {} {reason}", path.as_str()));
+    report.skip(reason, format!("not pulled: {} {reason}", path.as_str()));
 }
 
 /// Whether one file's provider-side failure should end the whole sync.
@@ -706,6 +773,45 @@ mod tests {
             .notes
             .iter()
             .any(|note| note.contains("denied.txt") && note.contains("could not be read")));
+    }
+
+    #[tokio::test]
+    async fn pull_caps_sync_notes_and_preserves_distinct_reasons() {
+        let host = tempfile::tempdir().unwrap();
+        let fake = FakeWorkspace::default();
+        fake.insert("kept.txt", b"sandbox output");
+        // A hostile listing can produce a skip note per entry; the report must
+        // stay bounded without losing a reason that only appears late.
+        for i in 0..40 {
+            fake.planted.lock().unwrap().push(WorkspaceFileEntry {
+                path: format!("../evil-{i}.txt"),
+                directory: false,
+                size_bytes: Some(4),
+            });
+        }
+        for i in 0..2 {
+            fake.planted.lock().unwrap().push(WorkspaceFileEntry {
+                path: format!("big-{i}.bin"),
+                directory: false,
+                size_bytes: Some(MAX_WORKSPACE_FILE_BYTES as u64 + 1),
+            });
+        }
+
+        let pulled = pull_into_host_dir(&fake, &workspace_id(), host.path())
+            .await
+            .unwrap();
+
+        assert_eq!(pulled.transferred, 1, "{:?}", pulled.notes);
+        assert!(pulled.notes.len() < 42, "{:?}", pulled.notes);
+        assert!(pulled.notes[0].contains("../evil-0.txt"));
+        assert!(pulled
+            .notes
+            .iter()
+            .any(|note| note.contains("big-0.bin") && note.contains("file limit")));
+        assert_eq!(
+            pulled.notes.last().unwrap(),
+            &format!("not pulled: 9 more note(s) beyond the {MAX_SYNC_NOTES}-note sync limit")
+        );
     }
 
     #[tokio::test]
