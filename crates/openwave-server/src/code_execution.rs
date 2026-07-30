@@ -14,10 +14,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use openwave_code_execution::{
-    resolve_scratch_directory, sync, write_without_following, CodeExecutionError,
-    CodeExecutionProvider, CodeExecutionProviderKind, CodeExecutionRequest, CodeExecutionResponse,
-    DaytonaCredential, DaytonaExecutionProvider, E2BCredential, E2BExecutionProvider,
-    ExecFolderAccess, ExecFolderGrant, ExecutionId, ExecutionWorkspaceId, LocalExecutionProvider,
+    resolve_scratch_directory, sync, CodeExecutionError, CodeExecutionProvider,
+    CodeExecutionProviderKind, CodeExecutionRequest, CodeExecutionResponse, DaytonaCredential,
+    DaytonaExecutionProvider, E2BCredential, E2BExecutionProvider, ExecFolderAccess,
+    ExecFolderGrant, ExecutionId, ExecutionWorkspaceId, LocalExecutionProvider,
     OutputArtifactEntry, OutputArtifactScan, OutputArtifactStatus, PreviewScan, RemoteSessionPool,
     WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing, DAYTONA_CREDENTIAL_KEY,
     DOCUMENT_SCRIPTS_DIR, DOCUMENT_SCRIPT_FILES, E2B_CREDENTIAL_KEY,
@@ -1062,8 +1062,9 @@ async fn prepare_execution_directories(
     // everything inside it is writable by local exec, which can plant
     // `<scratch>/output -> /any/dir` between two runs. `create_dir_all` and a
     // plain `write` both follow a symlinked parent, so each conventional
-    // directory is resolved a component at a time and the marker is written
-    // without following a link at the final component either.
+    // directory is resolved a component at a time into an open descriptor and
+    // the marker is written relative to that descriptor, without following a
+    // link at the final component either.
     tokio::fs::create_dir_all(host_dir).await.map_err(|_| {
         CodeExecutionError::Sandbox("the private workspace directory is unavailable".into())
     })?;
@@ -1080,7 +1081,8 @@ async fn prepare_execution_directories(
             // The sync protocol mirrors files rather than empty directories.
             // A hidden zero-byte marker makes the conventional directories
             // exist in managed workspaces without becoming a user artifact.
-            write_without_following(&directory.join(".openwave-directory"), &[])
+            directory
+                .write_file(".openwave-directory", &[])
                 .await
                 .map_err(|_| unavailable())?;
         }
@@ -1097,7 +1099,9 @@ async fn install_document_scripts(
 ) -> std::result::Result<(), CodeExecutionError> {
     // `.openwave/` sits inside the scratch directory local exec writes to, so
     // a planted `.openwave -> /elsewhere` would relocate the helper install
-    // and truncate known filenames there. Resolve it a component at a time.
+    // and truncate known filenames there. Resolve it a component at a time and
+    // keep the descriptor, so the helpers land in the directory the walk proved
+    // rather than whatever the name points at by the time we write.
     let destination = resolve_scratch_directory(host_dir, DOCUMENT_SCRIPTS_DIR, true)
         .await
         .ok_or_else(|| {
@@ -1127,13 +1131,11 @@ async fn install_document_scripts(
                 "bundled document helper '{name}' exceeds the workspace file limit"
             )));
         }
-        write_without_following(&destination.join(name), &content)
-            .await
-            .map_err(|_| {
-                CodeExecutionError::Sandbox(format!(
-                    "bundled document helper '{name}' could not be installed"
-                ))
-            })?;
+        destination.write_file(name, &content).await.map_err(|_| {
+            CodeExecutionError::Sandbox(format!(
+                "bundled document helper '{name}' could not be installed"
+            ))
+        })?;
     }
     Ok(())
 }
