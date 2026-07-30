@@ -10,6 +10,8 @@ import {
 } from "react";
 import {
   ArrowUpRight,
+  FolderOpen,
+  FolderPlus,
   Image as ImageIcon,
   LoaderCircle,
   Paperclip,
@@ -26,10 +28,13 @@ import {
   type ImageAttachment,
 } from "./ImageAttachments";
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { documentIcon } from "@/documentIcon";
 import type { ImportedDocument } from "@/documents";
+import { folderAccessLabel } from "./FolderAccess";
+import type { ConnectedFolderAccess } from "./host";
 
 const MIN_COMPOSER_LINES = 1;
 export const MAX_COMPOSER_LINES = 6;
@@ -120,6 +125,14 @@ export type ComposerFiles = {
   onRemove: (documentId: string) => void;
 };
 
+export type ComposerFolders = {
+  items: ConnectedFolderAccess[];
+  working: boolean;
+  error: string | null;
+  onAttach?: () => void;
+  onRemove: (rootId: string) => void;
+};
+
 /** Whether attached images stop this turn from being sent, and why. */
 export function imageSendBlocker(images: ComposerImages | undefined): string | null {
   if (!images || images.items.length === 0) return null;
@@ -143,6 +156,7 @@ export type ComposerProps = {
   modelMenu?: ReactNode;
   images?: ComposerImages;
   files?: ComposerFiles;
+  folders?: ComposerFolders;
   nativeDropTarget?: ReactNode;
   attachError?: string | null;
   onDraftChange: (draft: string) => void;
@@ -165,6 +179,7 @@ export function Composer({
   modelMenu,
   images,
   files,
+  folders,
   nativeDropTarget,
   attachError = null,
   onDraftChange,
@@ -183,6 +198,7 @@ export function Composer({
   // boolean flickers the drop hint on and off while the file is held still.
   const dragDepthRef = useRef(0);
   const [dragging, setDragging] = useState(false);
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const inputDisabled = disabled;
   const active = busy && activeTurnId !== null;
   const hasDraft = Boolean(draft.trim());
@@ -262,6 +278,16 @@ export function Composer({
     if (acceptTransfer(event.clipboardData)) event.preventDefault();
   }
 
+  async function removeFolder(folder: ConnectedFolderAccess) {
+    const accepted = await confirm({
+      title: `Disconnect ${folder.displayName}?`,
+      description: "The agent loses access to this folder.",
+      confirmLabel: "Disconnect",
+      destructive: true,
+    });
+    if (accepted) folders?.onRemove(folder.rootId);
+  }
+
   return (
     <form
       className={cn(
@@ -326,6 +352,21 @@ export function Composer({
           ))}
         </ul>
       )}
+      {folders && folders.items.length > 0 && (
+        <ul
+          className="m-0 flex list-none flex-wrap gap-2 p-0"
+          aria-label="Attached folders"
+        >
+          {folders.items.map((folder) => (
+            <FolderAttachmentChip
+              key={folder.rootId}
+              folder={folder}
+              disabled={folders.working}
+              onRemove={() => void removeFolder(folder)}
+            />
+          ))}
+        </ul>
+      )}
       <textarea
         ref={textareaRef}
         className="w-full resize-none border-none bg-transparent px-1 text-base placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-0"
@@ -362,6 +403,28 @@ export function Composer({
                   <LoaderCircle className="animate-spin" size={15} />
                 ) : (
                   <Paperclip size={15} />
+                )}
+              </Button>
+            </WithTooltip>
+          )}
+          {folders?.onAttach && (
+            <WithTooltip
+              label={folders.working ? "Updating folders…" : "Attach folder"}
+            >
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-8"
+                aria-label={
+                  folders.working ? "Updating attached folders" : "Attach folder"
+                }
+                disabled={inputDisabled || folders.working}
+                onClick={folders.onAttach}
+              >
+                {folders.working ? (
+                  <LoaderCircle className="animate-spin" size={15} />
+                ) : (
+                  <FolderPlus size={15} />
                 )}
               </Button>
             </WithTooltip>
@@ -446,6 +509,11 @@ export function Composer({
           {"Couldn’t attach: "}{attachError}
         </span>
       )}
+      {folders?.error && (
+        <span className="text-xs text-destructive" role="alert">
+          {"Couldn’t update folders: "}{folders.error}
+        </span>
+      )}
       {images?.error && (
         <span className="text-xs text-destructive" role="alert">
           {"Couldn’t attach image: "}{images.error}
@@ -457,7 +525,46 @@ export function Composer({
           {" can’t read images. Choose a model that accepts image input, or remove the attached image."}
         </span>
       )}
+      {confirmDialog}
     </form>
+  );
+}
+
+function FolderAttachmentChip({
+  folder,
+  disabled,
+  onRemove,
+}: {
+  folder: ConnectedFolderAccess;
+  disabled: boolean;
+  onRemove: () => void;
+}) {
+  return (
+    <li className="relative flex min-w-0 max-w-full items-center gap-2 rounded-lg border border-border bg-muted/50 py-1.5 pl-2 pr-7 text-muted-foreground">
+      <span className="inline-flex size-9 shrink-0 items-center justify-center rounded-md bg-background">
+        <FolderOpen size={16} aria-hidden="true" />
+      </span>
+      <span className="grid min-w-0 gap-px">
+        <strong
+          className="max-w-[12rem] truncate text-xs font-semibold text-foreground"
+          title={folder.displayName}
+        >
+          {folder.displayName}
+        </strong>
+        <small className="text-[0.68rem]">
+          {folderAccessLabel(folder.capabilities)}
+        </small>
+      </span>
+      <button
+        type="button"
+        className="absolute right-0.5 top-0.5 inline-flex items-center justify-center rounded-full border-0 bg-transparent p-0.5 text-inherit hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+        aria-label={`Disconnect ${folder.displayName}`}
+        disabled={disabled}
+        onClick={onRemove}
+      >
+        <X size={14} aria-hidden="true" />
+      </button>
+    </li>
   );
 }
 
