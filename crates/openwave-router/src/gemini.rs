@@ -981,6 +981,7 @@ mod tests {
                         input: json!({"path": "two"}),
                     },
                 ],
+                reasoning: Vec::new(),
             },
             ChatMessage {
                 role: Role::User,
@@ -989,6 +990,7 @@ mod tests {
                     content: "one".into(),
                     is_error: false,
                 }],
+                reasoning: Vec::new(),
             },
             ChatMessage {
                 role: Role::User,
@@ -997,6 +999,7 @@ mod tests {
                     content: "two".into(),
                     is_error: false,
                 }],
+                reasoning: Vec::new(),
             },
         ];
         let body = build_request_json(&request(messages)).unwrap();
@@ -1038,6 +1041,7 @@ mod tests {
                 },
                 ContentBlock::Image { image },
             ],
+            reasoning: Vec::new(),
         }]);
         req.images.insert(
             image.blob_id,
@@ -1056,6 +1060,7 @@ mod tests {
         let req = request(vec![ChatMessage {
             role: Role::User,
             content: vec![ContentBlock::Image { image: png_ref(9) }],
+            reasoning: Vec::new(),
         }]);
         let err = build_request_json(&req).unwrap_err();
         assert!(err.to_string().contains("no hydrated bytes"), "{err}");

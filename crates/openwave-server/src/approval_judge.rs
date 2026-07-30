@@ -401,7 +401,9 @@ async fn request_verdict(
                     return Err(AgentError::msg("judge completion exceeded its bound"));
                 }
             }
-            ProviderEvent::ReasoningDelta { .. } | ProviderEvent::Usage(_) => {}
+            ProviderEvent::ReasoningDelta { .. }
+            | ProviderEvent::ReasoningBlock { .. }
+            | ProviderEvent::Usage(_) => {}
             ProviderEvent::Stop {
                 reason: StopReason::EndTurn | StopReason::MaxTokens | StopReason::StopSequence,
             } => completed = true,
