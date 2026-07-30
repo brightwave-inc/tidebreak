@@ -655,10 +655,7 @@ mod tests {
             .handle(request(2, "initialize", initialize_params()))
             .await
             .unwrap();
-        assert_eq!(
-            retried.result.unwrap()["protocolVersion"],
-            PROTOCOL_VERSION
-        );
+        assert_eq!(retried.result.unwrap()["protocolVersion"], PROTOCOL_VERSION);
     }
 
     #[tokio::test]
