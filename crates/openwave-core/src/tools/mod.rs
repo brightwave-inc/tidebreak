@@ -5,12 +5,14 @@
 //! [`private_scratch`] owns the capability-confined filesystem primitives.
 
 mod arguments;
+mod create_app;
 mod definitions;
 mod list_dir;
 pub(crate) mod private_scratch;
 mod read_file;
 mod write_file;
 
+pub use create_app::CreateAppTool;
 pub use list_dir::ListDir;
 pub use read_file::ReadFile;
 pub use write_file::WriteFile;

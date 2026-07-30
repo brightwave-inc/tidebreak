@@ -83,8 +83,8 @@ use openwave_core::{
     validate_read_connected_file_arguments, validate_request_folder_access_arguments,
     validate_write_output_to_connected_folder_arguments,
     write_output_to_connected_folder_tool_spec, AgentConfig, AgentError, ApprovalClass, BlobStore,
-    CachingSecretProvider, Config, FsBlobStore, KeychainSecretProvider, ListDir, Profile, ReadFile,
-    Result, SecretProvider, Store, Tool, ToolRegistry, WriteFile,
+    CachingSecretProvider, Config, CreateAppTool, FsBlobStore, KeychainSecretProvider, ListDir,
+    Profile, ReadFile, Result, SecretProvider, Store, Tool, ToolRegistry, WriteFile,
 };
 use resolver::KeyedResolver;
 
@@ -777,6 +777,7 @@ async fn bind_inner(
         foreground_web_search,
         web_extract,
         store.clone(),
+        config.data_dir.clone(),
     );
     let tools = Arc::new(tools);
     let mut state = match client_executor_id {
@@ -934,6 +935,7 @@ fn agent_deps(
     web_search: Box<dyn Tool>,
     web_extract: Box<dyn Tool>,
     source_store: Arc<dyn Store>,
+    profile_data_dir: std::path::PathBuf,
 ) -> (ToolRegistry, AgentConfig) {
     let mut tools = ToolRegistry::new()
         .with(Box::new(ReadFile))
@@ -947,8 +949,9 @@ fn agent_deps(
             source_store.clone(),
         )))
         .with(Box::new(source_tools::ReadToolResultTool::new(
-            source_store,
+            source_store.clone(),
         )))
+        .with(Box::new(CreateAppTool::new(source_store, profile_data_dir)))
         .with(web_search)
         .with(web_extract);
     tools.register_validated_client(

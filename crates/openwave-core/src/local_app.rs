@@ -18,6 +18,13 @@ use serde::{Deserialize, Serialize};
 use crate::deliverable::RevisionProducer;
 use crate::id::{AgentRunId, AppId, AppRevisionId, ChatId, TurnId};
 
+/// Stable name of the foreground tool that creates and revises local apps.
+///
+/// Lives beside the record contract rather than in the feature-gated tool
+/// module because the renderer projection allowlist needs the name without
+/// pulling in the capability filesystem.
+pub const CREATE_APP_TOOL: &str = "create_app";
+
 /// Profile-data directory holding immutable app bundle bytes.
 ///
 /// Deliberately a profile-level root rather than any conversation's private
@@ -188,7 +195,10 @@ pub struct CreateApp {
 /// The manifest — not the bundle — is what the user consents to and what the
 /// host enforces per call, so its shape is closed (`deny_unknown_fields`) and
 /// validated structurally before anything is stored.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `JsonSchema` because the `create_app` tool takes the manifest as a typed
+/// argument, so the model sees the exact structural contract the store will
+/// validate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AppManifest {
     /// Display name shown in the transcript card and the Apps library.
@@ -198,7 +208,7 @@ pub struct AppManifest {
 }
 
 /// The mounted tools one server namespace contributes to an app.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AppBinding {
     /// Configured server namespace the tools are mounted under.

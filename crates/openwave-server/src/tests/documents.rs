@@ -1579,6 +1579,7 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() 
             Arc::new(MemSecrets::default()),
         )),
         store,
+        dir.path().join("profile-data"),
     );
     assert!(
         config.system_prompt.is_none(),
@@ -1627,6 +1628,10 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() 
     assert!(
         !names.iter().any(|n| n == "create_deliverable"),
         "the removed deliverable tool must not reappear; exec's output/ is the creation path"
+    );
+    assert!(
+        names.iter().any(|n| n == "create_app"),
+        "local-app creation tool registered"
     );
     assert!(
         names

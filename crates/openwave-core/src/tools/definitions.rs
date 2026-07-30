@@ -3,7 +3,8 @@
 use crate::tool::ToolSpec;
 
 use super::{
-    list_dir as list_dir_tool, read_file as read_file_tool, write_file as write_file_tool,
+    create_app as create_app_tool, list_dir as list_dir_tool, read_file as read_file_tool,
+    write_file as write_file_tool,
 };
 
 pub(super) const READ_FILE: &str = "read_file";
@@ -29,5 +30,18 @@ pub(super) fn write_file() -> ToolSpec {
         WRITE_FILE,
         "Write a UTF-8 text file into private scratch, creating parent directories. \
          Overwrites an existing file.",
+    )
+}
+
+pub(super) fn create_app() -> ToolSpec {
+    ToolSpec::for_args::<create_app_tool::Arguments>(
+        crate::local_app::CREATE_APP_TOOL,
+        "Publish a local mini-app the user can reopen from their Apps library: a \
+         complete self-contained HTML document plus a manifest naming the app and \
+         pinning the exact mounted MCP tools (`mcp__{server}__{tool}` names) it may \
+         call through the host. The app renders in a sandboxed frame with no network \
+         access; pinned tools run only after the user grants them. Pass the app_id \
+         from an earlier create_app result to publish a new revision of that app — \
+         revisions append, never overwrite.",
     )
 }

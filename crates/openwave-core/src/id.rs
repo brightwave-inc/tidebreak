@@ -479,10 +479,37 @@ id_type!(
     AppId
 );
 
+impl AppId {
+    const NAMESPACE: Uuid = Uuid::from_u128(0xffa3_faf3_1345_4d93_a843_5f92_c996_7331);
+
+    /// Derive the retry-stable app identity for one canonical tool call.
+    ///
+    /// `create_app` mints identity the way the output tools do: from the
+    /// durable call id, so an ambiguous store response retried by the model
+    /// lands on the same app rather than forking a second record.
+    #[must_use]
+    pub fn for_call(call_id: CallId) -> Self {
+        Self(Uuid::new_v5(&Self::NAMESPACE, call_id.as_uuid().as_bytes()))
+    }
+}
+
 id_type!(
     /// Identifies one immutable revision of a local app.
     AppRevisionId
 );
+
+impl AppRevisionId {
+    const NAMESPACE: Uuid = Uuid::from_u128(0xb60b_2034_fb5a_4651_b284_646f_f59b_a069);
+
+    /// Derive the retry-stable revision identity for one canonical tool call.
+    ///
+    /// One call publishes exactly one revision — of a new app or of the app it
+    /// appends to — so the call id alone is the whole identity.
+    #[must_use]
+    pub fn for_call(call_id: CallId) -> Self {
+        Self(Uuid::new_v5(&Self::NAMESPACE, call_id.as_uuid().as_bytes()))
+    }
+}
 
 #[cfg(test)]
 mod tests {
