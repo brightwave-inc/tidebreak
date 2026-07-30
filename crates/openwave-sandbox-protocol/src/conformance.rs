@@ -126,7 +126,6 @@ fn provision_request() -> ProvisionRequest {
         run_id: RunId::new(),
         tag: crate::ids::SandboxTag::new(),
         lifetime_cap_secs: None,
-        task: Some("the delegated task".to_owned()),
     }
 }
 

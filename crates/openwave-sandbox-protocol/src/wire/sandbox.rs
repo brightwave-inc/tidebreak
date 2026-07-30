@@ -94,6 +94,9 @@ struct RunInner {
     request_lane_capacity: usize,
     events: Mutex<EventBuffer>,
     conn: watch::Sender<Option<ConnHandle>>,
+    /// The run init the host delivers after attach. First delivery wins; a
+    /// redelivery on reattach is ignored.
+    init: watch::Sender<Option<crate::init::RunInit>>,
 }
 
 /// One run-scoped, cloneable sandbox. Every clone shares one event buffer and one
@@ -136,6 +139,7 @@ impl SandboxRun {
         expected_secret: Option<TransportSecret>,
     ) -> Self {
         let (conn, _) = watch::channel(None);
+        let (init, _) = watch::channel(None);
         Self {
             inner: Arc::new(RunInner {
                 protocol_version,
@@ -150,8 +154,39 @@ impl SandboxRun {
                     overflowed: false,
                 }),
                 conn,
+                init,
             }),
         }
+    }
+
+    /// Wait for the host to deliver the run init — the task, policy snapshot,
+    /// and (for a detached run) the scoped token. Delivered after the attach
+    /// handshake, once the handle has committed on the host; the agent loop
+    /// must not start before it arrives.
+    pub async fn init(&self) -> crate::init::RunInit {
+        let mut watcher = self.inner.init.subscribe();
+        loop {
+            if let Some(init) = watcher.borrow_and_update().clone() {
+                return init;
+            }
+            if watcher.changed().await.is_err() {
+                // The sender lives inside this run, so this is unreachable
+                // while the run exists; park rather than fabricate an init.
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+
+    /// Record the host-delivered init. First delivery wins: a redelivery on
+    /// reattach — or from a superseded connection still draining — is ignored.
+    fn deliver_init(&self, init: crate::init::RunInit) {
+        self.inner.init.send_if_modified(|slot| {
+            if slot.is_some() {
+                return false;
+            }
+            *slot = Some(init);
+            true
+        });
     }
 
     /// Emit a bounded progress line, returning its assigned sequence.
@@ -470,6 +505,10 @@ where
                     run.acknowledge(cursor);
                 }
             }
+            // The run init: task, policy, and token, delivered only over an
+            // authenticated connection (an unauthenticated dial never reaches
+            // this loop). First delivery wins.
+            WireFrame::Init(init) => run.deliver_init(init),
             // The sandbox originates cancels and requests; it never receives
             // them. Pong is liveness only. Ignore rather than trust peer input.
             WireFrame::Control(ControlFrame::Pong { .. } | ControlFrame::Cancel { .. })

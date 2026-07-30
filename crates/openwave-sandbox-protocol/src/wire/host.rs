@@ -210,6 +210,15 @@ impl HostConnection {
         self.events.recv().await
     }
 
+    /// Deliver the run init — task, policy snapshot, and (for a detached run)
+    /// the scoped token — to the sandbox. Sent after the handle has committed
+    /// on the host, and on every attach: the sandbox keeps the first delivery
+    /// and ignores the rest. Best-effort: a closed connection drops it, and the
+    /// reattach redelivers.
+    pub async fn send_init(&self, init: crate::init::RunInit) {
+        let _ = self.outbound.data.send(WireFrame::Init(init)).await;
+    }
+
     /// Acknowledge the event stream through `cursor`, letting the sandbox advance
     /// its un-acknowledged buffer. Best-effort: a closed connection drops it.
     pub async fn acknowledge(&self, cursor: EventCursor) {
@@ -310,7 +319,8 @@ async fn read_loop<R>(
             WireFrame::Request(RequestFrame::Response(_))
             | WireFrame::Attach(_)
             | WireFrame::Handshake(_)
-            | WireFrame::EventAck { .. } => {}
+            | WireFrame::EventAck { .. }
+            | WireFrame::Init(_) => {}
         }
     }
 }

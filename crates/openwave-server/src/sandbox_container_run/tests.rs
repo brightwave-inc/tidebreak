@@ -144,11 +144,11 @@ impl ProviderResolver for FixedResolver {
 /// A [`SandboxBackend`] that stands in for Docker.
 ///
 /// `provision` starts the real in-container agent on a loopback listener with
-/// **the task the driver asked to be delivered** — the same relationship Docker
-/// has to the container's `OPENWAVE_SANDBOX_TASK` environment. That is what makes
-/// task delivery genuinely testable here: if the driver failed to pass the run's
-/// task, the sandbox would run the image's default task and the committed result
-/// would answer the wrong question.
+/// no task — exactly as the image starts. The task only ever arrives in the
+/// run-init frame the driver sends after attach, so task delivery is genuinely
+/// testable: a driver that failed to send init leaves the agent parked and the
+/// test times out, and the prompt the agent asks the host to complete proves
+/// which task it actually received.
 struct MockBackend {
     /// When set, `address` resolves here instead of the provisioned sandbox —
     /// used to point the driver at an unreachable port, or at a sandbox the
@@ -163,7 +163,6 @@ struct MockBackend {
     /// Every live-tag set `reclaim_orphans` was asked to preserve.
     reclaim_live_sets:
         Mutex<Vec<std::collections::HashSet<openwave_sandbox_protocol::ids::SandboxTag>>>,
-    delivered_task: Mutex<Option<String>>,
 }
 
 impl MockBackend {
@@ -177,7 +176,6 @@ impl MockBackend {
             destroys: AtomicUsize::new(0),
             failing_destroys: std::sync::atomic::AtomicBool::new(false),
             reclaim_live_sets: Mutex::new(Vec::new()),
-            delivered_task: Mutex::new(None),
         })
     }
 
@@ -190,12 +188,7 @@ impl MockBackend {
             destroys: AtomicUsize::new(0),
             failing_destroys: std::sync::atomic::AtomicBool::new(false),
             reclaim_live_sets: Mutex::new(Vec::new()),
-            delivered_task: Mutex::new(None),
         })
-    }
-
-    fn task_delivered(&self) -> Option<String> {
-        self.delivered_task.lock().unwrap().clone()
     }
 }
 
@@ -206,16 +199,12 @@ impl SandboxBackend for MockBackend {
         request: ProvisionRequest,
     ) -> std::result::Result<SandboxHandle, BackendError> {
         self.provisions.fetch_add(1, Ordering::SeqCst);
-        *self.delivered_task.lock().unwrap() = request.task.clone();
         if self.address_override.is_none() {
-            // Start the sandbox on the delivered task, exactly as the image does
-            // from its environment. A driver that delivered nothing gets the
-            // image's default task, which is the failure this models.
-            let task = request
-                .task
-                .clone()
-                .unwrap_or_else(|| "Summarize what this sandbox agent can do.".to_owned());
-            *self.address.lock().unwrap() = Some(spawn_sandbox_agent(&task).await);
+            // Start the sandbox exactly as the image does: with no task at all.
+            // The agent waits for the run-init frame, so a driver that never
+            // delivers one leaves the loop parked and the test times out — the
+            // failure this models.
+            *self.address.lock().unwrap() = Some(spawn_sandbox_agent().await);
         }
         Ok(SandboxHandle {
             reference: format!("mock-{}", request.run_id),
@@ -331,7 +320,7 @@ async fn admit_container_run(store: &Arc<dyn Store>, chat_id: ChatId, task: &str
 /// transport server against a fresh [`SandboxRun`], plus the agent loop that
 /// dials model completions back over the reverse channel. Returns the bound
 /// `http://` base URL.
-async fn spawn_sandbox_agent(task: &str) -> String {
+async fn spawn_sandbox_agent() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
     // The supervisor expects the same per-run secret the MockBackend hands the
@@ -341,14 +330,16 @@ async fn spawn_sandbox_agent(task: &str) -> String {
         Some(TransportSecret::new("test-secret")),
     );
     let agent_run = run.clone();
-    let task = task.to_owned();
     // The in-container tool surface is rooted at a workspace directory; give the
     // loop a private temp one that lives as long as the run.
     let workspace = tempfile::tempdir().unwrap();
     let workspace_path = workspace.path().to_path_buf();
     tokio::spawn(async move {
         let _workspace = workspace;
-        let _ = run_agent(agent_run, task, workspace_path).await;
+        // As in the image's entrypoint: the loop starts only once the host
+        // delivers the run init.
+        let init = agent_run.init().await;
+        let _ = run_agent(agent_run, init.task, workspace_path).await;
     });
     tokio::spawn(async move {
         while let Ok((stream, _peer)) = listener.accept().await {
@@ -420,9 +411,9 @@ async fn drives_a_container_run_end_to_end_over_loopback() {
             "each model step should proxy through the host exactly once"
         );
 
-        // The run's ACTUAL delegated task reached the container — not the image's
-        // default — and is what the container asked the host to reason about.
-        assert_eq!(backend.task_delivered().as_deref(), Some(task));
+        // The run's ACTUAL delegated task reached the container over the
+        // run-init frame and is what the container asked the host to reason
+        // about.
         assert!(
             provider.first_prompt().contains(task),
             "the container must work on the delegated task, got prompt: {}",
@@ -944,7 +935,7 @@ async fn a_committed_handle_is_reconciled_not_reprovisioned() {
         // The sandbox already exists — a prior attempt provisioned it and
         // committed its handle before losing its own commit — so the backend
         // can only address it, never create it.
-        let base_url = spawn_sandbox_agent(task).await;
+        let base_url = spawn_sandbox_agent().await;
         let backend = MockBackend::unreachable(base_url);
         let tag = SandboxTag::new();
         store
@@ -1001,7 +992,7 @@ async fn a_dead_drivers_container_run_is_recovered_to_completion() {
             .await
             .unwrap()
             .expect("the dead driver's claim succeeds");
-        let base_url = spawn_sandbox_agent(task).await;
+        let base_url = spawn_sandbox_agent().await;
         let backend = MockBackend::unreachable(base_url);
         let tag = SandboxTag::new();
         store
@@ -1485,7 +1476,6 @@ async fn docker_container_conforms_at_the_transport_boundary() {
             run_id,
             tag: SandboxTag::new(),
             lifetime_cap_secs: None,
-            task: Some("answer briefly".to_owned()),
         })
         .await
         .expect("provisioning a conformance container succeeds");
@@ -1578,6 +1568,23 @@ async fn docker_container_conforms_at_the_transport_boundary() {
         )
         .await
         .expect("an authenticated attach is accepted");
+        // The packaged agent starts nothing until the run init arrives.
+        conn.send_init(openwave_sandbox_protocol::init::RunInit {
+            run_id,
+            provenance: RunProvenance {
+                run_id,
+                provider: "local-container".to_owned(),
+            },
+            task: "answer briefly".to_owned(),
+            deadline_unix_secs: 4_102_444_800,
+            admission: openwave_sandbox_protocol::init::AdmissionMode::AttachedOnly,
+            policy: openwave_sandbox_protocol::init::PolicySnapshot {
+                egress_allowlist: Vec::new(),
+                granted_capabilities: vec![Capability::ModelInference],
+            },
+            scoped_token: None,
+        })
+        .await;
         let first = conn.next_event().await.expect("the agent's first event");
         let mut committed = EventCursor::committed(first.sequence);
         conn.acknowledge(committed).await;

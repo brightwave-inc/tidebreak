@@ -109,6 +109,11 @@ pub enum WireFrame {
         /// The host's committed cursor.
         cursor: EventCursor,
     },
+    /// Host -> sandbox: the run init — task, policy snapshot, and (for a
+    /// detached run) the scoped token — delivered after the attach handshake,
+    /// once the handle has committed on the host. Redelivered on every attach;
+    /// the sandbox keeps the first and ignores the rest.
+    Init(crate::init::RunInit),
 }
 
 /// Why a framed read or write stopped.
