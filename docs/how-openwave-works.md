@@ -783,7 +783,7 @@ a gate in #853, which any shared-deployment work should be blocked on.
 | Desktop | `crates/openwave-desktop/src/`, `crates/openwave-desktop/ui/src/` | Tauri host and current React shell |
 | Host access | `crates/openwave-host-broker/src/`, `docs/host-access.md` | Broker trust boundary, connected-root model, and reconciliation plan |
 | MCP | `crates/openwave-mcp/src/`, `crates/openwave-cli/src/main.rs` | MCP protocol server and stdio command |
-| Connectors and Slack | `crates/openwave-connectors`, `crates/openwave-slack` | Placeholders, not working product surfaces yet |
+| Connectors | `crates/openwave-connectors` | Placeholder, not a working product surface yet |
 
 The dependency direction is intentionally simple: clients compose libraries,
 and libraries point down toward `openwave-core`. Core defines the contracts; it
