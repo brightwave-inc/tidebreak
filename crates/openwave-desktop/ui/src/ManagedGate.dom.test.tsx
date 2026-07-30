@@ -215,7 +215,7 @@ describe("ManagedGate", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("https://new-gw.example/")).toBeInTheDocument();
     expect(
-      screen.getByText(/cannot be undone from within OpenWave/),
+      screen.getByText(/which will manage this device/),
     ).toBeInTheDocument();
     expect(screen.queryByText("the open product")).not.toBeInTheDocument();
 
