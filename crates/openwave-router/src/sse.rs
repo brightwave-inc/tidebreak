@@ -5,6 +5,8 @@
 //! extract the `data:` JSON payload — the same shape Anthropic and OpenAI-compat
 //! both speak.
 
+use std::time::Duration;
+
 use futures::{Stream, StreamExt};
 
 /// Maximum provider error bytes inspected for classification.
@@ -158,14 +160,53 @@ fn safe_error_code(code: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_')
 }
 
+/// Longest provider-requested wait taken at face value.
+///
+/// The header is untrusted; a gateway that asks for a day-long wait would park
+/// a turn indefinitely. The retry scheduler applies its own wall-clock envelope
+/// on top of this — the clamp only keeps the value in a sane range.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(3600);
+
+/// Read the `Retry-After` hint from a provider's error response.
+///
+/// Returns `None` when the header is absent, unparseable, or not a form we
+/// understand; a missing hint just leaves the caller on its own backoff.
+#[cfg(any(feature = "anthropic", feature = "openai-compat", feature = "gemini"))]
+pub fn retry_after_hint(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    parse_retry_after(headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?)
+}
+
+/// Parse a `Retry-After` header value into a wait.
+///
+/// RFC 9110 permits two forms. Delay-seconds is what model providers send and
+/// is parsed exactly. The HTTP-date form is accepted and resolved against the
+/// current clock; a date already in the past yields a zero wait rather than an
+/// error, since the condition it described has passed. Anything else is
+/// `None`.
+#[must_use]
+pub fn parse_retry_after(value: &str) -> Option<Duration> {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds).min(MAX_RETRY_AFTER));
+    }
+    let deadline = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+    let wait = deadline.signed_duration_since(chrono::Utc::now());
+    Some(wait.to_std().unwrap_or(Duration::ZERO).min(MAX_RETRY_AFTER))
+}
+
 /// Classify a provider HTTP error, detecting prompt-too-long patterns that the
 /// agent loop can retry with a tighter context budget.
+///
+/// `retry_after` is the response's parsed `Retry-After`, which rides along on
+/// the throttling variants so the turn's retry schedule can honor it instead of
+/// guessing.
 pub fn classify_provider_error(
     provider: &str,
     status: u16,
     body: &str,
+    retry_after: Option<Duration>,
 ) -> openwave_core::error::AgentError {
-    use openwave_core::error::AgentError;
+    use openwave_core::error::{AgentError, ProviderFailure};
 
     let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
     let error = parsed
@@ -190,12 +231,12 @@ pub fn classify_provider_error(
         return AgentError::Authentication(safe());
     }
     if status == 429 || code == "rate_limit_error" {
-        return AgentError::RateLimited(safe());
+        return AgentError::RateLimited(ProviderFailure::new(safe(), retry_after));
     }
     if matches!(status, 502 | 503 | 504 | 529)
         || matches!(code, "overloaded_error" | "server_overloaded")
     {
-        return AgentError::Overloaded(safe());
+        return AgentError::Overloaded(ProviderFailure::new(safe(), retry_after));
     }
     if matches!(
         code,
@@ -265,7 +306,7 @@ mod tests {
     fn classify_detects_anthropic_prompt_too_long() {
         use openwave_core::error::AgentError;
         let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 250000 tokens > 200000 maximum"}}"#;
-        let err = classify_provider_error("anthropic", 400, body);
+        let err = classify_provider_error("anthropic", 400, body, None);
         assert!(
             matches!(err, AgentError::PromptTooLong(_)),
             "expected PromptTooLong, got {err:?}"
@@ -276,7 +317,7 @@ mod tests {
     fn classify_detects_openai_context_length_exceeded() {
         use openwave_core::error::AgentError;
         let body = r#"{"error":{"message":"maximum context length","type":"invalid_request_error","code":"context_length_exceeded"}}"#;
-        let err = classify_provider_error("openai-compat", 400, body);
+        let err = classify_provider_error("openai-compat", 400, body, None);
         assert!(
             matches!(err, AgentError::PromptTooLong(_)),
             "expected PromptTooLong, got {err:?}"
@@ -287,7 +328,7 @@ mod tests {
     fn classify_returns_invalid_request_for_other_400s() {
         use openwave_core::error::AgentError;
         let body = r#"{"error":{"type":"invalid_request_error","message":"invalid api key"}}"#;
-        let err = classify_provider_error("anthropic", 400, body);
+        let err = classify_provider_error("anthropic", 400, body, None);
         assert!(
             matches!(err, AgentError::InvalidRequest(_)),
             "expected InvalidRequest, got {err:?}"
@@ -298,19 +339,29 @@ mod tests {
     fn classify_distinguishes_auth_rate_limit_overload_and_refusal() {
         use openwave_core::error::AgentError;
         assert!(matches!(
-            classify_provider_error("provider", 401, "{}"),
+            classify_provider_error("provider", 401, "{}", None),
             AgentError::Authentication(_)
         ));
         assert!(matches!(
-            classify_provider_error("provider", 429, "{}"),
+            classify_provider_error("provider", 429, "{}", None),
             AgentError::RateLimited(_)
         ));
         assert!(matches!(
-            classify_provider_error("anthropic", 529, r#"{"error":{"type":"overloaded_error"}}"#),
+            classify_provider_error(
+                "anthropic",
+                529,
+                r#"{"error":{"type":"overloaded_error"}}"#,
+                None
+            ),
             AgentError::Overloaded(_)
         ));
         assert!(matches!(
-            classify_provider_error("provider", 400, r#"{"error":{"code":"content_filter"}}"#),
+            classify_provider_error(
+                "provider",
+                400,
+                r#"{"error":{"code":"content_filter"}}"#,
+                None
+            ),
             AgentError::Refusal(_)
         ));
     }

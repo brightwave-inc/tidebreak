@@ -121,7 +121,7 @@ pub use deliverable_acceptance::{
     accept_workspace_artifact, merge_agent_run_result, AgentResultOutputMerge,
     WorkspaceArtifactProposal,
 };
-pub use error::{AgentError, AgentErrorInfo, Result};
+pub use error::{AgentError, AgentErrorInfo, ProviderFailure, Result};
 pub use event::{AgentEvent, SequencedEvent};
 pub use id::{
     AgentRunId, AssistantCitationId, CallId, ChatId, ChunkId, DocumentId, HostRootId,

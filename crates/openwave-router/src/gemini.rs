@@ -195,8 +195,9 @@ impl ModelProvider for GeminiProvider {
 
         let status = response.status();
         if !status.is_success() {
+            let retry_after = crate::sse::retry_after_hint(response.headers());
             let body = read_bounded_error_body(response.bytes_stream()).await;
-            return Err(classify_gemini_error(status.as_u16(), &body));
+            return Err(classify_gemini_error(status.as_u16(), &body, retry_after));
         }
 
         let ceiling = crate::http::timeouts().total_stream;
@@ -847,7 +848,11 @@ fn refusal_details(reason: &str) -> RefusalDetails {
     RefusalDetails::from_category(Some(&category))
 }
 
-fn classify_gemini_error(status: u16, body: &str) -> AgentError {
+fn classify_gemini_error(
+    status: u16,
+    body: &str,
+    retry_after: Option<std::time::Duration>,
+) -> AgentError {
     let prompt_too_long = serde_json::from_str::<Value>(body)
         .ok()
         .and_then(|value| value.get("error").cloned().or(Some(value)))
@@ -866,7 +871,7 @@ fn classify_gemini_error(status: u16, body: &str) -> AgentError {
     if prompt_too_long {
         return AgentError::PromptTooLong(crate::sse::safe_http_error("gemini", status, body));
     }
-    classify_provider_error("gemini", status, body)
+    classify_provider_error("gemini", status, body, retry_after)
 }
 
 #[cfg(test)]

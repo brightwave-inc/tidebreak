@@ -121,8 +121,14 @@ impl ModelProvider for AnthropicProvider {
         // stable error type/code when present) is enough for classification.
         let status = response.status();
         if !status.is_success() {
+            let retry_after = crate::sse::retry_after_hint(response.headers());
             let body = read_bounded_error_body(response.bytes_stream()).await;
-            return Err(classify_provider_error("anthropic", status.as_u16(), &body));
+            return Err(classify_provider_error(
+                "anthropic",
+                status.as_u16(),
+                &body,
+                retry_after,
+            ));
         }
 
         let ceiling = crate::http::timeouts().total_stream;

@@ -110,11 +110,13 @@ impl ModelProvider for OpenAiCompatProvider {
         if !status.is_success() {
             // Never forward the raw body — gateways sometimes echo key material
             // or request fragments, and `AgentError` strings reach the client.
+            let retry_after = crate::sse::retry_after_hint(response.headers());
             let body = read_bounded_error_body(response.bytes_stream()).await;
             return Err(classify_provider_error(
                 "openai-compat",
                 status.as_u16(),
                 &body,
+                retry_after,
             ));
         }
 
