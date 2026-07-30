@@ -56,8 +56,8 @@ There is no unmanaged gateway settings surface: the hand-typed gateway URL
 field and the additive "use model gateway" toggle are retired, and policy is
 the only way a profile becomes gateway-connected. To exercise the real
 managed path against a local gateway without an MDM profile, write the same
-sticky provisioned state that deep-link pairing writes — the
-`managed_policy_v1` row in the profile database:
+sticky provisioned state that deep-link pairing commits when its sign-in
+completes — the `managed_policy_v1` row in the profile database:
 
 ```sh
 sqlite3 "<data dir>/openwave.db" \

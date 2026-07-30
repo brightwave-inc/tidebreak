@@ -811,6 +811,14 @@ export class ApiClient {
     });
   }
 
+  /** Decline the pending deep-link pairing; returns the policy to render. */
+  dismissGatewayPairing(): Promise<ManagedPolicy> {
+    return this.json("/gateway/pairing/dismiss", {
+      method: "POST",
+      headers: this.headers(),
+    });
+  }
+
   getGatewayApps(): Promise<GatewayApps> {
     return this.json("/gateway/apps", { headers: this.headers() });
   }

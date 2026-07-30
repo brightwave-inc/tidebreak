@@ -54,6 +54,14 @@ pub(crate) struct ManagedPolicy {
     /// fail closed — and surfaces can name the authority that needs repair
     /// instead of showing an opaque error.
     pub(crate) misconfigured: bool,
+    /// A deep-link pairing awaiting the sign-in that is its consent. Runtime
+    /// state merged in by the `/policy` route from [`GatewayRuntime`]
+    /// (crate::gateway_runtime), never part of the durable resolution —
+    /// [`resolve`] always leaves it `None` — and only ever present while the
+    /// profile is unmanaged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub(crate) pending_gateway_url: Option<String>,
 }
 
 impl ManagedPolicy {
@@ -65,6 +73,7 @@ impl ManagedPolicy {
             gateway_url: None,
             source,
             misconfigured: true,
+            pending_gateway_url: None,
         }
     }
 }
@@ -477,6 +486,7 @@ pub(crate) async fn resolve(
         gateway_url: None,
         source: ManagedPolicySource::Unmanaged,
         misconfigured: false,
+        pending_gateway_url: None,
     })
 }
 
@@ -489,6 +499,7 @@ fn asserted(source: ManagedPolicySource, gateway_url: &str) -> ManagedPolicy {
             gateway_url: Some(gateway_url),
             source,
             misconfigured: false,
+            pending_gateway_url: None,
         },
         Err(error) => {
             tracing::warn!("{source:?}-asserted gateway URL fails the contract: {error}");

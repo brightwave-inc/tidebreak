@@ -1,16 +1,20 @@
-//! Deep-link pairing: validate a gateway, then provision this profile.
+//! Deep-link pairing: park a gateway, and provision only when a sign-in
+//! consents to it.
 //!
-//! The desktop shell's `openwave://provision` handler lands here. The gateway
-//! is probed (`GET /api/v1/meta`) before anything is written, so a mistyped
-//! or unreachable URL never becomes durable policy; only then does the
-//! managed-policy write path run. Policy is the only gateway source — there
-//! is no provider row to point — so provisioning is the whole write. This
-//! function is exported for native embedders only — pairing changes policy,
-//! and policy must never be reachable from a renderer-writable route.
+//! The desktop shell's `openwave://provision` handler lands here. A valid
+//! link is *registered*, not honored: the gateway URL is parked
+//! process-ephemerally and the sign-in gate presents it, and only a
+//! completed browser sign-in against that gateway — the user's consent —
+//! runs the managed-policy write path, from the sign-in exchange task.
+//! Policy is the only gateway source — there is no provider row to point —
+//! so provisioning is the whole write. Registration is exported for native
+//! embedders only — pairing changes policy, and policy must never be
+//! reachable from a renderer-writable route; the renderer's influence is
+//! limited to completing or dismissing the sign-in it can already perform.
 
 use std::sync::Arc;
 
-use openwave_connectors::{GatewayAuth, GatewayAuthConfig};
+use openwave_connectors::GatewayAuthConfig;
 use openwave_core::{AgentError, Result, Store};
 use tokio::sync::Mutex;
 
@@ -38,24 +42,29 @@ static PAIRING: Mutex<()> = Mutex::const_new(());
 pub struct PairingHandle {
     store: Arc<dyn Store>,
     mcp: Arc<McpRuntime>,
+    /// The one process-wide gateway runtime: the pending pairing parks there
+    /// so the sign-in surface and the `/policy` projection see the same slot
+    /// the shell registered into.
+    gateway: Arc<crate::gateway_runtime::GatewayRuntime>,
 }
 
 impl PairingHandle {
-    pub(crate) fn new(store: Arc<dyn Store>, mcp: Arc<McpRuntime>) -> Self {
-        Self { store, mcp }
+    pub(crate) fn new(
+        store: Arc<dyn Store>,
+        mcp: Arc<McpRuntime>,
+        gateway: Arc<crate::gateway_runtime::GatewayRuntime>,
+    ) -> Self {
+        Self {
+            store,
+            mcp,
+            gateway,
+        }
     }
 
     /// The durable store this profile pairs against.
     pub fn store(&self) -> Arc<dyn Store> {
         self.store.clone()
     }
-}
-
-/// What a successful pairing did, beyond the writes themselves.
-#[derive(Debug)]
-pub struct PairingOutcome {
-    /// The normalized gateway base URL now on record.
-    pub base_url: String,
 }
 
 /// Why a pairing did not provision this profile.
@@ -78,11 +87,7 @@ pub enum PairingError {
         /// The normalized base URL this profile is provisioned to.
         provisioned_url: String,
     },
-    /// Any other failure. No policy was written — though the provider
-    /// configuration may already be repointed: it is deliberately written
-    /// first, so a failure between the writes fails into a still-unmanaged
-    /// profile recoverable from settings (see the ordering comment in
-    /// [`pair_with_gateway`]).
+    /// Any other failure. No policy was written and nothing is pending.
     Other(AgentError),
 }
 
@@ -113,60 +118,100 @@ impl From<AgentError> for PairingError {
     }
 }
 
-/// Validate `gateway_url`, probe the gateway, and provision this profile.
+/// What registering a provision link decided.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PendingRegistration {
+    /// The pairing is parked and awaiting the sign-in that is its consent;
+    /// the sign-in gate presents it on its next policy poll.
+    Registered,
+    /// This gateway already manages the profile — nothing to do. The gate
+    /// already presents itself if no session exists.
+    AlreadyManaged,
+}
+
+/// Validate a provision link's gateway URL and park it until a sign-in
+/// consents to it.
 ///
-/// Returns the normalized gateway base URL on success. Nothing is written
-/// unless the URL passes the gateway contract and the deployment
-/// answers `GET /api/v1/meta`; a conflicting re-provision is refused as the
-/// typed [`PairingError::Conflict`] before the write, leaving the policy
-/// untouched — the desktop shell surfaces that refusal instead of treating
-/// it as a generic fault. Provisioning is the only durable write: the model
-/// snapshot is stamped with the deployment it was synced from, so one left
-/// behind by any earlier configuration is simply never honored for this
-/// gateway — sign-in resyncs the entitled set.
+/// Nothing durable is written here, and the gateway is not probed: a deep
+/// link is an unauthenticated remote trigger, so before the user acts it
+/// must neither change policy nor cause this process to issue requests to
+/// an attacker-chosen URL. The commit happens in the sign-in exchange task
+/// ([`commit_signed_in_pairing`]) only after the user completes a browser
+/// sign-in against this gateway. A link for a gateway other than the one
+/// that manages this profile is refused as the typed
+/// [`PairingError::Conflict`] — the shell surfaces that refusal, naming the
+/// managing gateway.
+pub async fn register_pending_pairing(
+    handle: &PairingHandle,
+    gateway_url: &str,
+) -> Result<PendingRegistration, PairingError> {
+    let config = GatewayAuthConfig::new(gateway_url)?;
+    let base_url = config.base_url().to_string();
+    let _guard = PAIRING.lock().await;
+    let policy = handle.gateway.policy().await?;
+    if policy.managed {
+        return match policy.gateway_url {
+            Some(existing) if existing == base_url => Ok(PendingRegistration::AlreadyManaged),
+            Some(existing) => Err(PairingError::Conflict {
+                provisioned_url: existing,
+            }),
+            None => Err(PairingError::Other(AgentError::config(
+                "this device's managed policy is misconfigured; contact your administrator",
+            ))),
+        };
+    }
+    handle
+        .gateway
+        .register_pending_pairing(base_url, handle.mcp.clone())
+        .await;
+    Ok(PendingRegistration::Registered)
+}
+
+/// Provision the profile a finished sign-in consented to.
+///
+/// Called from the sign-in exchange task with a session already minted for
+/// `base_url`. Policy is re-resolved under the pairing lock: an authority
+/// that claimed the profile while the browser flow ran (an MDM push) wins,
+/// and the pairing is refused rather than written under it. Provisioning is
+/// the only durable write — the model snapshot is stamped with the
+/// deployment it was synced from, so one left behind by any earlier
+/// configuration is simply never honored for this gateway.
 ///
 /// The new policy is applied to this process before returning: manual MCP
 /// servers running under the previously open profile are taken down here
 /// rather than at the supervisor's next sweep, so no locked child keeps
 /// serving tools across the window in between.
-pub async fn pair_with_gateway(
-    handle: &PairingHandle,
-    gateway_url: &str,
-) -> Result<PairingOutcome, PairingError> {
-    let store = &*handle.store;
-    let config = GatewayAuthConfig::new(gateway_url)?;
-    let base_url = config.base_url().to_string();
-    GatewayAuth::new(config)?.meta().await?;
+pub(crate) async fn commit_signed_in_pairing(
+    store: &dyn Store,
+    os_policy: &dyn crate::managed_policy::OsPolicySource,
+    mcp: &McpRuntime,
+    base_url: &str,
+) -> openwave_core::Result<()> {
+    // PAIRING makes the policy re-read and the write atomic against another
+    // pairing path; no gateway-state lock, for the same reason the old
+    // probe-then-provision path took none — the snapshot stamp is the guard.
     let _guard = PAIRING.lock().await;
-    // No gateway-state lock here, deliberately. Pairing writes only the
-    // policy now, and the model snapshot is stamped with the deployment it
-    // was fetched from — so a sync racing this pairing cannot corrupt
-    // anything: whichever order the two land in, a snapshot stamped by the
-    // old gateway is simply never honored once policy names the new one
-    // (`gateway_models` filters on the stamp). The stamp is the guard, and
-    // taking a lock that guards nothing would only claim protection this
-    // path does not actually depend on. PAIRING alone still makes the
-    // conflict check and the policy write atomic against another pairing.
-    match managed_policy::provisioned_url(store).await? {
-        Some(existing) if existing != base_url => {
-            return Err(PairingError::Conflict {
-                provisioned_url: existing,
-            });
-        }
-        _ => {}
+    let policy = managed_policy::resolve(store, os_policy).await?;
+    if policy.managed && policy.gateway_url.as_deref() != Some(base_url) {
+        let authority = policy
+            .gateway_url
+            .unwrap_or_else(|| "another authority".to_string());
+        return Err(AgentError::config(format!(
+            "this device became managed by {authority} during sign-in; the pairing was not applied"
+        )));
     }
-    managed_policy::provision(store, &base_url).await?;
-    handle.mcp.enforce_manual_lockdown().await;
-    Ok(PairingOutcome { base_url })
+    managed_policy::provision(store, base_url).await?;
+    mcp.enforce_manual_lockdown().await;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use axum::routing::get;
-    use axum::Json;
-    use openwave_core::DbStore;
+    use std::collections::HashMap;
+
+    use openwave_core::{DbStore, SecretProvider};
     use serde_json::json;
 
     use openwave_core::ToolRegistry;
@@ -189,20 +234,49 @@ mod tests {
         }
     }
 
-    /// The handle plus the runtime behind it, for the assertions that are
+    #[derive(Default)]
+    struct TestSecrets(std::sync::Mutex<HashMap<String, String>>);
+
+    #[async_trait::async_trait]
+    impl SecretProvider for TestSecrets {
+        async fn get_secret(&self, key: &str) -> Result<Option<String>> {
+            Ok(self.0.lock().unwrap().get(key).cloned())
+        }
+        async fn set_secret(&self, key: &str, value: &str) -> Result<()> {
+            self.0.lock().unwrap().insert(key.into(), value.into());
+            Ok(())
+        }
+        async fn delete_secret(&self, key: &str) -> Result<()> {
+            self.0.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
+
+    /// The handle plus the runtimes behind it, for the assertions that are
     /// about what pairing *did* to this process rather than what it wrote.
-    fn test_handle_with_runtime(store: &Arc<dyn Store>) -> (PairingHandle, Arc<McpRuntime>) {
+    fn test_handle_with_runtimes(
+        store: &Arc<dyn Store>,
+    ) -> (
+        PairingHandle,
+        Arc<McpRuntime>,
+        Arc<crate::gateway_runtime::GatewayRuntime>,
+    ) {
         let mcp = Arc::new(McpRuntime::new(
             Arc::new(ToolRegistry::new()),
             store.clone(),
             Arc::new(NoGateway),
             Arc::new(NoOsPolicy),
         ));
-        (PairingHandle::new(store.clone(), mcp.clone()), mcp)
-    }
-
-    fn test_handle(store: &Arc<dyn Store>) -> PairingHandle {
-        test_handle_with_runtime(store).0
+        let gateway = crate::gateway_runtime::GatewayRuntime::new(
+            store.clone(),
+            Arc::new(TestSecrets::default()),
+            Arc::new(NoOsPolicy),
+        );
+        (
+            PairingHandle::new(store.clone(), mcp.clone(), gateway.clone()),
+            mcp,
+            gateway,
+        )
     }
 
     /// A minimal Streamable HTTP MCP server, standing in for a manual server
@@ -254,41 +328,82 @@ mod tests {
         (store, directory)
     }
 
-    /// An address nothing listens on: bound to reserve an ephemeral port,
-    /// then dropped, so the probe fails fast and deterministically.
-    async fn unreachable_base() -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        drop(listener);
-        format!("http://{address}")
+    /// The write-path guard the retired confirmation dialog used to be:
+    /// registering a link parks it and changes nothing durable — no policy
+    /// write, and no request to the link's URL (the bases here resolve to
+    /// nothing servable). The latest link wins the slot, and a dismissal
+    /// empties it.
+    #[tokio::test]
+    async fn a_registered_pairing_writes_nothing_until_sign_in() {
+        let (store, _directory) = test_store().await;
+        let (handle, _mcp, gateway) = test_handle_with_runtimes(&store);
+
+        let outcome = register_pending_pairing(&handle, "http://gw.invalid")
+            .await
+            .unwrap();
+        assert_eq!(outcome, PendingRegistration::Registered);
+        assert!(!resolve(&*store, &NoOsPolicy).await.unwrap().managed);
+        assert_eq!(
+            gateway.pending_pairing_url().await.as_deref(),
+            Some("http://gw.invalid/"),
+            "the parked URL is the normalized one the commit will write"
+        );
+
+        let outcome = register_pending_pairing(&handle, "http://other.invalid")
+            .await
+            .unwrap();
+        assert_eq!(outcome, PendingRegistration::Registered);
+        assert_eq!(
+            gateway.pending_pairing_url().await.as_deref(),
+            Some("http://other.invalid/")
+        );
+
+        gateway.dismiss_pending_pairing().await;
+        assert_eq!(gateway.pending_pairing_url().await, None);
+        assert!(!resolve(&*store, &NoOsPolicy).await.unwrap().managed);
     }
 
-    /// A gateway that answers only the unauthenticated identity probe.
-    async fn serve_meta() -> String {
-        let app = axum::Router::new().route(
-            "/api/v1/meta",
-            get(|| async {
-                Json(json!({
-                    "api_version": "v1",
-                    "installation_id": "install-1",
-                    "gateway_version": "1.0.0",
-                    "public_url": "http://gateway.test",
-                    "auth_mode": "oidc",
-                }))
-            }),
+    /// A link for a gateway other than the managing one is the typed
+    /// refusal, and parks nothing; the managing gateway's own link is a
+    /// no-op rather than a second pending prompt.
+    #[tokio::test]
+    async fn registration_refuses_a_gateway_other_than_the_managing_one() {
+        let (store, _directory) = test_store().await;
+        managed_policy::provision(&*store, "http://managed.invalid/")
+            .await
+            .unwrap();
+        let (handle, _mcp, gateway) = test_handle_with_runtimes(&store);
+
+        let error = register_pending_pairing(&handle, "http://other.invalid")
+            .await
+            .err()
+            .unwrap();
+        match &error {
+            PairingError::Conflict { provisioned_url } => {
+                assert_eq!(provisioned_url, "http://managed.invalid/")
+            }
+            other => panic!("expected the typed conflict, got {other:?}"),
+        }
+        assert!(error.to_string().contains("already provisioned"));
+        assert_eq!(gateway.pending_pairing_url().await, None);
+
+        let outcome = register_pending_pairing(&handle, "http://managed.invalid")
+            .await
+            .unwrap();
+        assert_eq!(outcome, PendingRegistration::AlreadyManaged);
+        assert_eq!(gateway.pending_pairing_url().await, None);
+
+        let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
+        assert_eq!(
+            policy.gateway_url.as_deref(),
+            Some("http://managed.invalid/")
         );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        format!("http://{address}")
     }
 
     #[tokio::test]
-    async fn pairing_provisions_policy_and_a_stale_snapshot_is_never_honored() {
+    async fn a_commit_provisions_policy_and_a_stale_snapshot_is_never_honored() {
         let (store, _directory) = test_store().await;
-        let base = serve_meta().await;
+        let (_handle, mcp, _gateway) = test_handle_with_runtimes(&store);
 
         // A model snapshot synced from some earlier deployment must not
         // survive as this gateway's model set.
@@ -307,15 +422,16 @@ mod tests {
         .await
         .unwrap();
 
-        let outcome = pair_with_gateway(&test_handle(&store), &base)
+        commit_signed_in_pairing(&*store, &NoOsPolicy, &mcp, "http://gateway-a.invalid/")
             .await
             .unwrap();
-        let normalized = outcome.base_url;
-        assert_eq!(normalized, format!("{base}/"));
 
         let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
         assert!(policy.managed);
-        assert_eq!(policy.gateway_url.as_deref(), Some(normalized.as_str()));
+        assert_eq!(
+            policy.gateway_url.as_deref(),
+            Some("http://gateway-a.invalid/")
+        );
 
         // The stale snapshot carries the old deployment's stamp, so the new
         // policy reads no models until sign-in resyncs the entitled set.
@@ -324,20 +440,43 @@ mod tests {
             .unwrap()
             .is_empty());
 
-        // Re-pairing the same gateway is idempotent.
-        pair_with_gateway(&test_handle(&store), &base)
+        // A later sign-in against the same gateway re-commits harmlessly.
+        commit_signed_in_pairing(&*store, &NoOsPolicy, &mcp, "http://gateway-a.invalid/")
             .await
             .unwrap();
     }
 
-    /// Pairing applies the policy it writes, not just persists it: a manual
-    /// MCP server this process was already running when the link arrived must
-    /// stop serving tools before `pair_with_gateway` returns, rather than at
-    /// the supervisor's next sweep. Dropping the enforcement call fails here.
+    /// An authority that claimed the profile while the browser flow ran
+    /// wins: the commit refuses rather than writing under it, and the
+    /// refusal names the authority.
     #[tokio::test]
-    async fn pairing_takes_down_a_manual_mcp_server_this_process_is_running() {
+    async fn a_commit_refuses_a_profile_claimed_mid_flow() {
         let (store, _directory) = test_store().await;
-        let (handle, mcp) = test_handle_with_runtime(&store);
+        let (_handle, mcp, _gateway) = test_handle_with_runtimes(&store);
+        managed_policy::provision(&*store, "http://mdm.invalid/")
+            .await
+            .unwrap();
+
+        let error = commit_signed_in_pairing(&*store, &NoOsPolicy, &mcp, "http://pending.invalid/")
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("http://mdm.invalid/"));
+        assert!(!error.to_string().contains("pending.invalid"));
+
+        let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
+        assert_eq!(policy.gateway_url.as_deref(), Some("http://mdm.invalid/"));
+    }
+
+    /// The commit applies the policy it writes, not just persists it: a
+    /// manual MCP server this process was already running when the sign-in
+    /// finished must stop serving tools before `commit_signed_in_pairing`
+    /// returns, rather than at the supervisor's next sweep. Dropping the
+    /// enforcement call fails here.
+    #[tokio::test]
+    async fn a_commit_takes_down_a_manual_mcp_server_this_process_is_running() {
+        let (store, _directory) = test_store().await;
+        let (_handle, mcp, _gateway) = test_handle_with_runtimes(&store);
 
         // A real connection, established while the profile was still open.
         mcp.replace(McpServersConfig {
@@ -360,7 +499,7 @@ mod tests {
         assert_eq!(mcp.info().await.servers[0].health, McpHealth::Healthy);
         assert!(mcp.snapshot().get("mcp__private_docs__lookup").is_some());
 
-        pair_with_gateway(&handle, &serve_meta().await)
+        commit_signed_in_pairing(&*store, &NoOsPolicy, &mcp, "http://gateway.invalid/")
             .await
             .unwrap();
 
@@ -374,44 +513,5 @@ mod tests {
             info.servers[0].diagnostic.as_deref(),
             Some(MANAGED_DISABLED_DIAGNOSTIC)
         );
-    }
-
-    #[tokio::test]
-    async fn a_failed_pairing_changes_nothing() {
-        let (store, _directory) = test_store().await;
-
-        // Unreachable gateway: the probe fails before any write, and the
-        // failure is a fault, not the typed conflict refusal.
-        let dead = unreachable_base().await;
-        let error = pair_with_gateway(&test_handle(&store), &dead)
-            .await
-            .err()
-            .unwrap();
-        assert!(matches!(error, PairingError::Other(_)));
-        assert!(!resolve(&*store, &NoOsPolicy).await.unwrap().managed);
-
-        // A reachable but conflicting gateway: refused after the probe, and
-        // the original pairing survives in policy.
-        let first = serve_meta().await;
-        let second = serve_meta().await;
-        let normalized = pair_with_gateway(&test_handle(&store), &first)
-            .await
-            .unwrap()
-            .base_url;
-        // The refusal is typed — the desktop dialog keys off the variant,
-        // not the message — and names the gateway actually on record.
-        let error = pair_with_gateway(&test_handle(&store), &second)
-            .await
-            .err()
-            .unwrap();
-        match &error {
-            PairingError::Conflict { provisioned_url } => {
-                assert_eq!(provisioned_url, &normalized)
-            }
-            other => panic!("expected the typed conflict, got {other:?}"),
-        }
-        assert!(error.to_string().contains("already provisioned"));
-        let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
-        assert_eq!(policy.gateway_url.as_deref(), Some(normalized.as_str()));
     }
 }
