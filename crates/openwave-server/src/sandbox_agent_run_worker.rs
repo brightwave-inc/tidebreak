@@ -29,6 +29,7 @@ use tokio::sync::Notify;
 
 use crate::bus::EventBus;
 use crate::resolver::ProviderResolver;
+use crate::retry::{RetryAttempt, RetrySchedule};
 use crate::state::SandboxAttemptGuard;
 
 /// Fixed instruction set for the initial isolated executor.
@@ -47,6 +48,7 @@ pub(crate) struct SandboxAgentRunWorkerConfig {
     idle_min: Duration,
     idle_cap: Duration,
     failure_delay: Duration,
+    retry: RetrySchedule,
     max_concurrency: usize,
     max_running_global: u32,
     max_running_per_chat: u32,
@@ -63,6 +65,18 @@ impl Default for SandboxAgentRunWorkerConfig {
             idle_min: Duration::from_millis(250),
             idle_cap: Duration::from_secs(5),
             failure_delay: Duration::from_secs(1),
+            // A parent turn may be waiting on this run, but nothing it retries
+            // recovers in milliseconds: a sandbox that is still provisioning,
+            // a provider that just refused, a delegated resource that has not
+            // appeared yet. Retrying inside a second only spends one of three
+            // attempts on the same unfinished state, so the first wait is five
+            // seconds. The envelope matches the run's own wall-clock deadline,
+            // which the database already enforces.
+            retry: RetrySchedule::new(
+                Duration::from_secs(5),
+                Duration::from_secs(60),
+                Duration::from_secs(60 * 60),
+            ),
             max_concurrency: 4,
             max_running_global: 4,
             max_running_per_chat: 2,
@@ -585,7 +599,7 @@ impl SandboxAgentRunWorker {
                 self.park_delegated_file_read(run, lease_token, provider_id, arguments)
                     .await
             }
-            Err(error) => self.record_failure(run.id, lease_token, error).await,
+            Err(error) => self.record_failure(&run, lease_token, error).await,
         }
     }
 
@@ -619,10 +633,29 @@ impl SandboxAgentRunWorker {
 
     async fn record_failure(
         &self,
-        id: openwave_core::AgentRunId,
+        run: &AgentRun,
         lease_token: uuid::Uuid,
         error: AgentError,
     ) -> Result<SandboxAgentRunWorkerOutcome> {
+        let id = run.id;
+        // `fail_agent_run` owns the terminal decision — it compares the run's
+        // own attempt budget under the claim lock — so the schedule's refusals
+        // arrive here only as a wait that no longer matters. The deadline sweep
+        // settles a run whose retry lands past its deadline.
+        let delay = self
+            .config
+            .retry
+            .delay(
+                RetryAttempt {
+                    id: *id.as_uuid(),
+                    attempt_count: run.attempt_count,
+                    max_attempts: run.max_attempts,
+                    first_attempt_at: run.started_at.unwrap_or(run.created_at),
+                },
+                error.retry_after(),
+                chrono::Utc::now(),
+            )
+            .unwrap_or_else(|| self.config.retry.max_delay());
         let detail = error.to_string();
         let detail = detail
             .chars()
@@ -635,7 +668,7 @@ impl SandboxAgentRunWorker {
                 lease_token,
                 "sandbox_execution_failed",
                 &detail,
-                chrono_duration(self.config.failure_delay)?,
+                chrono_duration(delay)?,
             )
             .await?
         {
@@ -807,7 +840,7 @@ impl SandboxAgentRunWorker {
             }
             ParkSandboxToolCallOutcome::IdentityConflict => {
                 self.record_failure(
-                    run.id,
+                    &run,
                     lease_token,
                     AgentError::msg("sandbox web-search checkpoint identity conflict"),
                 )
@@ -815,7 +848,7 @@ impl SandboxAgentRunWorker {
             }
             ParkSandboxToolCallOutcome::DelegatedResourceUnavailable => {
                 self.record_failure(
-                    run.id,
+                    &run,
                     lease_token,
                     AgentError::msg("sandbox delegated resource is unavailable"),
                 )
@@ -876,7 +909,7 @@ impl SandboxAgentRunWorker {
             }
             ParkSandboxToolCallOutcome::IdentityConflict => {
                 self.record_failure(
-                    run.id,
+                    &run,
                     lease_token,
                     AgentError::msg("sandbox delegated-file checkpoint identity conflict"),
                 )
@@ -884,7 +917,7 @@ impl SandboxAgentRunWorker {
             }
             ParkSandboxToolCallOutcome::DelegatedResourceUnavailable => {
                 self.record_failure(
-                    run.id,
+                    &run,
                     lease_token,
                     AgentError::msg("sandbox delegated resource is unavailable"),
                 )
@@ -2489,6 +2522,13 @@ mod tests {
             None,
             SandboxAgentRunWorkerConfig {
                 failure_delay: Duration::from_secs(1),
+                // Shrink the production backoff so the test observes each
+                // retry becoming claimable without waiting seconds for it.
+                retry: RetrySchedule::new(
+                    Duration::from_millis(100),
+                    Duration::from_millis(200),
+                    Duration::from_secs(60),
+                ),
                 max_concurrency: 1,
                 max_running_global: 1,
                 max_running_per_chat: 1,
@@ -2516,12 +2556,12 @@ mod tests {
             .finish_agent_run_cancellation(second, claimed.lease_token.unwrap())
             .await
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(
             worker.run_once().await.unwrap(),
             SandboxAgentRunWorkerOutcome::RetryScheduled(first)
         );
-        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(
             worker.run_once().await.unwrap(),
             SandboxAgentRunWorkerOutcome::Failed(first)

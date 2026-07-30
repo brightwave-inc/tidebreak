@@ -37,6 +37,7 @@ mod pairing;
 mod provider;
 mod providers;
 mod resolver;
+mod retry;
 mod routes;
 mod sandbox_agent_run_worker;
 pub mod sandbox_container_run;
