@@ -392,11 +392,12 @@ export function ManagedGate({
           <a
             className="underline"
             href={pendingUrl}
-            target="_blank"
             rel="noreferrer noopener"
             onClick={(event) => {
-              // The webview swallows target="_blank"; route through the
-              // native opener and keep the href for hover/copy.
+              // No target="_blank": the shell plugin's injected click handler
+              // opens such links itself without honoring preventDefault,
+              // which doubled this one. Route through the native opener and
+              // keep the href for hover/copy.
               event.preventDefault();
               void openSignInPage(pendingUrl);
             }}
