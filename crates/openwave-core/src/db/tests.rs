@@ -4540,14 +4540,41 @@ async fn user_questions_survive_reconnect_and_answer_exactly_once() {
         answers: sample_user_answers(),
     };
     let answered_at = parked_at + chrono::Duration::seconds(1);
-    assert!(matches!(
-        restarted
-            .answer_user_questions(&answer_request, answered_at)
-            .await
-            .unwrap(),
-        crate::AnswerUserQuestionsOutcome::Answered(turn)
-            if turn.id == turn_id && turn.status == TurnRunStatus::Resuming
-    ));
+    let answered = restarted
+        .answer_user_questions(&answer_request, answered_at)
+        .await
+        .unwrap();
+    let crate::AnswerUserQuestionsOutcome::Answered {
+        turn,
+        completion_event,
+    } = answered
+    else {
+        panic!("unexpected answer outcome: {answered:?}");
+    };
+    assert_eq!(turn.id, turn_id);
+    assert_eq!(turn.status, TurnRunStatus::Resuming);
+    // The answer announces the call's completion itself: the renderer settles
+    // the card from this event rather than waiting for the turn to end.
+    let crate::AgentEvent::ToolCallCompleted {
+        call_id, output, ..
+    } = &completion_event.event
+    else {
+        panic!("unexpected completion event: {completion_event:?}");
+    };
+    assert_eq!(*call_id, request.id);
+    assert!(!output.is_error);
+    assert_eq!(
+        serde_json::from_str::<crate::AnswerUserQuestions>(&output.content).unwrap(),
+        sample_user_answers()
+    );
+    let journaled_completions = restarted
+        .list_events(chat.id, 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| matches!(event.event, crate::AgentEvent::ToolCallCompleted { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(journaled_completions, vec![*completion_event]);
     assert!(restarted
         .list_pending_user_questions(chat.id)
         .await
@@ -4589,6 +4616,18 @@ async fn user_questions_survive_reconnect_and_answer_exactly_once() {
         crate::AnswerUserQuestionsOutcome::Existing(turn)
             if turn.id == turn_id
     ));
+    // The exact retry recovered the committed answers without announcing the
+    // completion a second time.
+    assert_eq!(
+        restarted
+            .list_events(chat.id, 0)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| matches!(event.event, crate::AgentEvent::ToolCallCompleted { .. }))
+            .count(),
+        1
+    );
     let contradictory = crate::AnswerUserQuestionsRequest {
         answers: crate::AnswerUserQuestions {
             answers: vec![
@@ -4765,7 +4804,7 @@ async fn user_question_answer_and_cancel_race_has_one_serial_outcome() {
     let cancel = cancel.await.unwrap();
     assert!(matches!(
         answer,
-        crate::AnswerUserQuestionsOutcome::Answered(_)
+        crate::AnswerUserQuestionsOutcome::Answered { .. }
             | crate::AnswerUserQuestionsOutcome::Unavailable
     ));
     assert!(matches!(
@@ -4827,7 +4866,7 @@ async fn pending_question_projection_serializes_with_answer() {
     );
     assert!(matches!(
         answer.await.unwrap().unwrap(),
-        crate::AnswerUserQuestionsOutcome::Answered(_)
+        crate::AnswerUserQuestionsOutcome::Answered { .. }
     ));
     assert!(store
         .list_pending_user_questions(chat.id)
@@ -4876,7 +4915,7 @@ async fn user_question_answer_and_worker_claim_race_is_recoverable() {
     });
     assert!(matches!(
         answer.await.unwrap(),
-        crate::AnswerUserQuestionsOutcome::Answered(turn)
+        crate::AnswerUserQuestionsOutcome::Answered { turn, .. }
             if turn.id == turn_id && turn.status == TurnRunStatus::Resuming
     ));
     let first_claim = claim.await.unwrap();

@@ -1303,6 +1303,73 @@ async fn user_question_api_is_renderer_safe_exact_and_not_native_claimable() {
 }
 
 #[tokio::test]
+async fn user_question_answer_announces_the_completion_live_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let token = state.token.clone();
+    let router = app(state.clone());
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let (_turn_id, call) = park_user_questions_for_route_test(&*store, chat.id).await;
+
+    // The answer resolves the call outside the agent loop, so this live frame
+    // is the only thing settling the renderer's card before the turn ends.
+    let mut live = state.events.subscribe(chat.id);
+    let answer_uri = format!("/chats/{}/questions/{}/answer", chat.id, call.id);
+    let answer = serde_json::json!({
+        "answers": [{"question_id": "target", "option_id": "staging"}]
+    });
+    let answered = post_json(&router, &bearer, &answer_uri, answer.clone()).await;
+    assert_eq!(answered.status(), StatusCode::OK);
+    let announced = tokio::time::timeout(Duration::from_secs(1), live.recv())
+        .await
+        .expect("the answer must publish its completion live")
+        .unwrap();
+    let AgentEvent::ToolCallCompleted {
+        call_id, output, ..
+    } = &announced.event
+    else {
+        panic!("unexpected live event: {announced:?}");
+    };
+    assert_eq!(*call_id, call.id);
+    assert!(!output.is_error);
+    assert_eq!(
+        store.list_events(chat.id, 0).await.unwrap().last(),
+        Some(&announced)
+    );
+
+    // An exact retry recovers the committed answers without announcing twice.
+    let retry = post_json(&router, &bearer, &answer_uri, answer).await;
+    assert_eq!(retry.status(), StatusCode::OK);
+    assert_eq!(
+        json_body::<serde_json::Value>(retry).await["disposition"],
+        "existing"
+    );
+    assert!(matches!(
+        live.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+}
+
+#[tokio::test]
 async fn client_execution_api_polls_claims_heartbeats_and_resolves_idempotently() {
     let (router, token, store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");

@@ -66,7 +66,15 @@ pub async fn answer_user_questions(
         )
         .await?;
     let (disposition, turn) = match outcome {
-        AnswerUserQuestionsOutcome::Answered(turn) => (AnswerDisposition::Answered, turn),
+        AnswerUserQuestionsOutcome::Answered {
+            turn,
+            completion_event,
+        } => {
+            // Live delivery of the journaled completion; replay covers anyone
+            // not connected, so a missed send is not a correctness gap.
+            let _ = state.events.sender(chat_id).send(*completion_event);
+            (AnswerDisposition::Answered, turn)
+        }
         AnswerUserQuestionsOutcome::Existing(turn) => (AnswerDisposition::Existing, turn),
         AnswerUserQuestionsOutcome::AnswerConflict => {
             return Err(ServerError::conflict(format!(

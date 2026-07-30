@@ -341,6 +341,39 @@ pub(in crate::db) async fn answer(
     active_call.error_detail = Set(None);
     active_call.resolved_at = Set(Some(answered_at));
     let resolved = active_call.update(&transaction).await.map_err(store_err)?;
+    // The question call resolves outside the agent loop, so nothing else ever
+    // announces that it finished: the resumed worker reads the committed
+    // result straight into the model transcript and never revisits the call.
+    // Without this event the renderer showed the card waiting from
+    // `ToolCallStarted` until the turn's terminal hydration finally settled
+    // it — the answer looked lost exactly when it had committed.
+    //
+    // Journaled here, in the transaction that makes the row terminal, so the
+    // event cannot disagree with the row it describes. An exact retry returns
+    // above as `Existing` without reaching this, so the call announces itself
+    // once. Chat-scoped like its `UserQuestionsAsked`: the turn is parked
+    // with no lease, so no attempt owns this event.
+    let completion_event = AgentEvent::ToolCallCompleted {
+        call_id: request.call_id,
+        output: crate::ToolOutput::text(resolved.result.clone().ok_or_else(|| {
+            AgentError::Store(format!(
+                "answered question {} committed no result",
+                request.call_id
+            ))
+        })?),
+        action: crate::ToolActionPreview::build(&resolved.name, &resolved.arguments),
+        result: None,
+    };
+    let seq = super::conversation::append_event_on(
+        &transaction,
+        ChatId(resolved.chat_id),
+        None,
+        None,
+        None,
+        None,
+        &completion_event,
+    )
+    .await?;
     let transition =
         super::turn::advance_turn_after_client_resolution_on(&transaction, &resolved, answered_at)
             .await?
@@ -351,7 +384,13 @@ pub(in crate::db) async fn answer(
                 ))
             })?;
     transaction.commit().await.map_err(store_err)?;
-    Ok(AnswerUserQuestionsOutcome::Answered(transition.turn))
+    Ok(AnswerUserQuestionsOutcome::Answered {
+        turn: transition.turn,
+        completion_event: Box::new(SequencedEvent {
+            seq,
+            event: completion_event,
+        }),
+    })
 }
 
 /// Close presentation state when cancellation terminalizes the unclaimed
