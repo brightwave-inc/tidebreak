@@ -118,9 +118,9 @@ tools/
 └── tests.rs             shared confinement and behavior coverage
 ```
 
-Provider-backed tools do not belong in core. Retrieval, web search, connectors,
-and sandbox execution should each supply tools from their owning crate behind
-the common `Tool` interface.
+Provider-backed tools do not belong in core. Web search, connectors, and sandbox
+execution supply tools from their owning crates behind the common `Tool`
+interface; server-owned source tools use it too.
 
 ## Code execution
 

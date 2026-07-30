@@ -11,8 +11,8 @@ libraries.
                                │                 │
                                └────── openwave-server
                                             │
-      libraries          openwave-mcp          openwave-retrieval
-                         openwave-router       openwave-web-search
+      libraries          openwave-mcp          openwave-web-search
+                         openwave-router
                          openwave-host-broker  openwave-code-execution
                          openwave-egress       openwave-sandbox-protocol
                                             │
@@ -129,14 +129,6 @@ See [Execution providers and sandbox-resident agent runs](sandbox-providers.md).
 
 **Depends on:** no OpenWave crate (standalone wire contract).
 
-## `openwave-retrieval` — canonical document parsing 🟢
-
-Asynchronous parser selection, stable parser fingerprints, canonical text, and
-validated source-region mappings. The server's durable parse worker uses this
-crate to turn retained source bytes into directly readable document records.
-
-**Depends on:** `openwave-core`.
-
 ## `openwave-web-search` — provider-neutral web search 🟢
 
 The bounded request/result contract, direct HTTP adapters for Exa and Tavily,
@@ -249,7 +241,7 @@ file delegation. Native-only pending/claim/heartbeat/resolve routes drive it;
 the headless profile does not advertise the tool because it has no embedded
 executor.
 
-**Depends on:** `openwave-core`, `openwave-router`, `openwave-retrieval`.
+**Depends on:** `openwave-core`, `openwave-router`.
 
 ## `openwave-cli` — headless daemon + CLI 🟡
 

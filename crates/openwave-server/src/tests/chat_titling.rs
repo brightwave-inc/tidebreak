@@ -117,7 +117,6 @@ async fn titling_app(
     )
     .await
     .unwrap();
-    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -133,7 +132,6 @@ async fn titling_app(
         )),
         secrets,
         Arc::new(ToolRegistry::new()),
-        retrieval,
         AgentConfig {
             model: format!("openai::{CHAT_MODEL}"),
             ..AgentConfig::default()

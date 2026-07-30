@@ -567,7 +567,6 @@ async fn a_turn_carrying_images_against_a_text_only_model_is_refused() {
     )
     .await
     .unwrap();
-    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -583,7 +582,6 @@ async fn a_turn_carrying_images_against_a_text_only_model_is_refused() {
         )),
         secrets,
         Arc::new(ToolRegistry::new()),
-        retrieval,
         AgentConfig {
             model: "openai_compatible::vendor/model".into(),
             ..AgentConfig::default()
@@ -677,7 +675,6 @@ async fn a_curated_openai_model_answers_after_receiving_png_and_jpeg_attachments
     )
     .await
     .unwrap();
-    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -693,7 +690,6 @@ async fn a_curated_openai_model_answers_after_receiving_png_and_jpeg_attachments
         )),
         secrets,
         Arc::new(ToolRegistry::new()),
-        retrieval,
         AgentConfig {
             model: "openai::gpt-5.6-sol".into(),
             ..AgentConfig::default()

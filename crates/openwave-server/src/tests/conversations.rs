@@ -333,9 +333,7 @@ async fn chat_creation_reports_not_found_when_project_deletion_wins_after_prefli
     ));
     injected.do_not_pause_terminal();
     injected.delete_project_after_next_get();
-    let retrieval = build_retrieval();
-    let (router, token, _store, _dir) =
-        test_app_from_parts(Arc::new(FakeProvider), retrieval, injected, dir);
+    let (router, token, _store, _dir) = test_app_from_parts(Arc::new(FakeProvider), injected, dir);
 
     let response = router
         .oneshot(

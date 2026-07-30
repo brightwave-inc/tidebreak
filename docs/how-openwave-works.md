@@ -13,9 +13,9 @@ change.
 
 OpenWave is a local agent runtime. A user chooses a model and starts a chat,
 which is the current product's single workspace. Sources, connected folders,
-scratch, retrieval, messages, and tool activity are all resolved through that
+scratch, messages, and tool activity are all resolved through that
 exact conversation. The runtime can ask the model for an answer, call tools over
-folders connected to the chat, search sources indexed for the chat, pause for
+folders connected to the chat, read sources attached to the chat, pause for
 approval before a sensitive action, and stream progress back to the client.
 
 Standalone chats never share a fallback source corpus. Projects remain in the
@@ -777,7 +777,7 @@ a gate in #853, which any shared-deployment work should be blocked on.
 | Local API | `crates/openwave-server/src/lib.rs`, `routes.rs`, `routes/client_execution.rs` | Authentication, API assembly, chat, turn, and leased client-execution routes |
 | Turn execution | `crates/openwave-server/src/turn_worker.rs` | Claiming, heartbeats, event journaling, terminal resolution |
 | Documents | `crates/openwave-server/src/routes/document.rs` | Synchronous upload, canonical decoding, and source-file access |
-| Retrieval | `crates/openwave-retrieval/src/` | Plain-text and fallback parser selection |
+| Document decoding | `crates/openwave-server/src/document_decode.rs` | Media-type-routed UTF-8 decoding with a binary fallback |
 | Desktop | `crates/openwave-desktop/src/`, `crates/openwave-desktop/ui/src/` | Tauri host and current React shell |
 | Host access | `crates/openwave-host-broker/src/`, `docs/host-access.md` | Broker trust boundary, connected-root model, and reconciliation plan |
 | MCP | `crates/openwave-mcp/src/`, `crates/openwave-cli/src/main.rs` | MCP protocol server and stdio command |
@@ -879,7 +879,7 @@ steps; the migrations should be condensed into a clean baseline before v1.
 ## Glossary
 
 - **Chat:** the current user-facing workspace and exact boundary for messages,
-  sources, retrieval, scratch, and connected-root projection; it does not own an
+  sources, scratch, and connected-root projection; it does not own an
   arbitrary absolute workspace path.
 - **Project:** a dormant data/API concept that is not surfaced in the current
   desktop. It is reserved for a possible completely optional future inheritance

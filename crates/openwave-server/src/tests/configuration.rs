@@ -1267,7 +1267,6 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
     )
     .await
     .unwrap();
-    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -1283,7 +1282,6 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
         )),
         secrets,
         Arc::new(ToolRegistry::new()),
-        retrieval,
         AgentConfig {
             model: "gpt-5.6-sol".into(),
             ..AgentConfig::default()
@@ -1415,7 +1413,6 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         .unwrap(),
     );
     let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
-    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -1431,7 +1428,6 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         )),
         secrets.clone(),
         Arc::new(ToolRegistry::new()),
-        retrieval,
         AgentConfig {
             model: "gpt-5.6-sol".into(),
             ..AgentConfig::default()
@@ -2246,7 +2242,6 @@ async fn a_misconfigured_policy_gates_the_renderer_and_refuses_a_turn() {
     )
     .await
     .unwrap();
-    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -2262,7 +2257,6 @@ async fn a_misconfigured_policy_gates_the_renderer_and_refuses_a_turn() {
         )),
         secrets.clone(),
         Arc::new(ToolRegistry::new()),
-        retrieval,
         AgentConfig {
             model: "claude-opus-5".into(),
             ..AgentConfig::default()

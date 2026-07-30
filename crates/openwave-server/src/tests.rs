@@ -1441,28 +1441,18 @@ impl Store for PauseTerminalStore {
 async fn test_app_with(
     provider: Arc<dyn ModelProvider>,
 ) -> (Router, Arc<str>, Arc<dyn Store>, tempfile::TempDir) {
-    let retrieval = build_retrieval();
-    test_app_with_retrieval(provider, retrieval).await
-}
-
-async fn test_app_with_retrieval(
-    provider: Arc<dyn ModelProvider>,
-    retrieval: Arc<Retriever>,
-) -> (Router, Arc<str>, Arc<dyn Store>, tempfile::TempDir) {
     let (dir, store) = temp_db_store("t.db").await;
     let store: Arc<dyn Store> = Arc::new(store);
-    test_app_from_parts(provider, retrieval, store, dir)
+    test_app_from_parts(provider, store, dir)
 }
 
 fn test_app_from_parts(
     provider: Arc<dyn ModelProvider>,
-    retrieval: Arc<Retriever>,
     store: Arc<dyn Store>,
     dir: tempfile::TempDir,
 ) -> (Router, Arc<str>, Arc<dyn Store>, tempfile::TempDir) {
     test_app_from_parts_with_worker_config(
         provider,
-        retrieval,
         store,
         dir,
         turn_worker::TurnWorkerConfig::default(),
@@ -1471,7 +1461,6 @@ fn test_app_from_parts(
 
 fn test_app_from_parts_with_worker_config(
     provider: Arc<dyn ModelProvider>,
-    retrieval: Arc<Retriever>,
     store: Arc<dyn Store>,
     dir: tempfile::TempDir,
     worker_config: turn_worker::TurnWorkerConfig,
@@ -1482,7 +1471,6 @@ fn test_app_from_parts_with_worker_config(
         Arc::new(FixedResolver(provider)),
         Arc::new(MemSecrets::default()),
         Arc::new(ToolRegistry::new()),
-        retrieval,
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
@@ -1507,14 +1495,12 @@ async fn test_app_with_scanner_resolution_race(
     injected.do_not_pause_terminal();
     configure(&injected);
     let store: Arc<dyn Store> = injected;
-    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
         Arc::new(FixedResolver(provider)),
         Arc::new(MemSecrets::default()),
         Arc::new(ToolRegistry::new()),
-        retrieval,
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
@@ -1567,14 +1553,12 @@ async fn test_app_with_state() -> (
 ) {
     let (dir, store) = temp_db_store("stateful-test.db").await;
     let store: Arc<dyn Store> = Arc::new(store);
-    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
         Arc::new(FixedResolver(Arc::new(FakeProvider))),
         Arc::new(MemSecrets::default()),
         Arc::new(ToolRegistry::new()),
-        retrieval,
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
@@ -1631,7 +1615,6 @@ async fn admit_sandbox_for_test(
 async fn test_app_with_secrets() -> (Router, Arc<str>, Arc<MemSecrets>, tempfile::TempDir) {
     let (dir, store) = temp_db_store("t.db").await;
     let store: Arc<dyn Store> = Arc::new(store);
-    let retrieval = build_retrieval();
     let secrets = Arc::new(MemSecrets::default());
     let state = AppState::new(
         Config::desktop(dir.path()),
@@ -1639,7 +1622,6 @@ async fn test_app_with_secrets() -> (Router, Arc<str>, Arc<MemSecrets>, tempfile
         Arc::new(FixedResolver(Arc::new(FakeProvider))),
         secrets.clone(),
         Arc::new(ToolRegistry::new()),
-        retrieval,
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
@@ -1654,14 +1636,12 @@ async fn test_app_with_secrets() -> (Router, Arc<str>, Arc<MemSecrets>, tempfile
 async fn app_state_roots_blob_storage_under_the_data_directory() {
     let (dir, store) = temp_db_store("t.db").await;
     let store: Arc<dyn Store> = Arc::new(store);
-    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store,
         Arc::new(FixedResolver(Arc::new(FakeProvider))),
         Arc::new(MemSecrets::default()),
         Arc::new(ToolRegistry::new()),
-        retrieval,
         AgentConfig::default(),
     );
     let id = uuid::Uuid::new_v4();

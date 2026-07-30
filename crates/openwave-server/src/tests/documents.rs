@@ -1,6 +1,4 @@
 use super::*;
-use openwave_retrieval::PlainTextParser;
-
 #[tokio::test]
 async fn document_file_content_supports_full_head_and_single_range_responses() {
     let (router, token, _store, _dir) = test_app().await;
@@ -832,9 +830,7 @@ async fn project_document_routes_enforce_corpus_identity_and_ownership() {
 
 #[tokio::test]
 async fn chat_document_routes_isolate_sources_and_delete_lifecycle() {
-    let retrieval = build_retrieval();
-    let (router, token, store, _dir) =
-        test_app_with_retrieval(Arc::new(FakeProvider), retrieval).await;
+    let (router, token, store, _dir) = test_app_with(Arc::new(FakeProvider)).await;
     let bearer = format!("Bearer {token}");
     let first = make_chat(&router, &bearer).await;
     let second = make_chat(&router, &bearer).await;
@@ -1160,7 +1156,6 @@ async fn concurrent_same_document_ingests_are_last_write_wins() {
         .await
         .unwrap(),
     );
-    let retrieval = build_retrieval();
     let blobs = Arc::new(FirstPutGatedBlobStore {
         inner: openwave_core::FsBlobStore::new(dir.path().join("blobs")),
         calls: AtomicUsize::new(0),
@@ -1173,7 +1168,6 @@ async fn concurrent_same_document_ingests_are_last_write_wins() {
         Arc::new(FixedResolver(Arc::new(FakeProvider))),
         Arc::new(MemSecrets::default()),
         Arc::new(ToolRegistry::new()),
-        retrieval,
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
@@ -1389,18 +1383,16 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() 
         .unwrap(),
     );
     let extract_store = store.clone();
-    let (_retrieval, mut tools, config) = agent_deps(
+    let (mut tools, config) = agent_deps(
         Arc::new(UnavailableCodeExecution),
         Box::new(web_search::foreground_tool(
             store.clone(),
             Arc::new(MemSecrets::default()),
         )),
-        |_| {
-            Box::new(web_search::foreground_extract_tool(
-                extract_store,
-                Arc::new(MemSecrets::default()),
-            ))
-        },
+        Box::new(web_search::foreground_extract_tool(
+            extract_store,
+            Arc::new(MemSecrets::default()),
+        )),
         store,
     );
     assert!(
@@ -1563,9 +1555,8 @@ async fn catalog_delete_failure_leaves_source_stale_and_repairable() {
         Arc::new(Notify::new()),
         Arc::new(Notify::new()),
     ));
-    let retrieval = Arc::new(Retriever::new(Box::new(PlainTextParser::new())));
     let (router, token, store_view, _dir) =
-        test_app_from_parts(Arc::new(FakeProvider), retrieval, store.clone(), dir);
+        test_app_from_parts(Arc::new(FakeProvider), store.clone(), dir);
     let bearer = format!("Bearer {token}");
     let uri = "file:///delete-failure.txt";
     let ingested: serde_json::Value = json_body(
