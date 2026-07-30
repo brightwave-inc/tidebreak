@@ -151,19 +151,13 @@ test("Rust CI requires the same PostgreSQL lane on pull requests and main", () =
   assert.doesNotMatch(desktopCargo, /document-parsers/);
 });
 
-test("UI tests and production build run as fixed parallel jobs", () => {
+test("UI tests and production build run as a single parallel step", () => {
   const ci = workflows["ci.yml"];
-  const uiTest = workflowJob(ci, "ui-test");
-  const uiBuild = workflowJob(ci, "ui-build");
+  const ui = workflowJob(ci, "ui");
 
-  for (const job of [uiTest, uiBuild]) {
-    assert.match(job, /if:.*needs\.changes\.outputs\.ui == 'true'/);
-    assert.match(job, /run: pnpm install --frozen-lockfile/);
-  }
-  assert.match(uiTest, /name: desktop UI · test/);
-  assert.match(uiTest, /run: pnpm test/);
-  assert.match(uiBuild, /name: desktop UI · build/);
-  assert.match(uiBuild, /run: pnpm build/);
+  assert.match(ui, /if:.*needs\.changes\.outputs\.ui == 'true'/);
+  assert.match(ui, /run: pnpm install --frozen-lockfile/);
+  assert.match(ui, /pnpm test & pnpm build & wait/);
   assert.doesNotMatch(ci, /matrix\.task/);
 });
 
