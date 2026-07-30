@@ -1313,6 +1313,13 @@ impl Agent {
             if refused {
                 // A refusal terminalizes the candidate. Tool arguments emitted
                 // before it are incomplete and must never execute.
+                if !calls.is_empty() {
+                    // Those calls were already journaled as they streamed, so
+                    // clearing them silently would leave replay and live
+                    // clients holding calls that never resolve. Mark them
+                    // discarded the way the steer and stream-failure paths do.
+                    events.send(AgentEvent::StreamInterrupted);
+                }
                 calls.clear();
             }
 
@@ -6870,7 +6877,9 @@ mod tests {
         }
     }
 
-    async fn run_claimed_refusal(events: Vec<ProviderEvent>) -> AgentTurnOutcome {
+    async fn run_claimed_refusal(
+        events: Vec<ProviderEvent>,
+    ) -> (AgentTurnOutcome, Vec<AgentEvent>) {
         let db = tempfile::tempdir().unwrap();
         let store: Arc<dyn Store> = Arc::new(
             DbStore::connect(&format!(
@@ -6928,13 +6937,21 @@ mod tests {
             .await
             .unwrap();
         drop(tx);
-        let _ = rx.collect::<Vec<_>>().await;
-        outcome
+        let journaled = rx
+            .filter_map(|item| async move {
+                match item {
+                    ClaimedAgentEvent::Pending { event, .. } => Some(event),
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>()
+            .await;
+        (outcome, journaled)
     }
 
     #[tokio::test]
     async fn foreground_refusal_distinguishes_empty_partial_and_bare_events() {
-        let empty = run_claimed_refusal(vec![ProviderEvent::Refusal {
+        let (empty, empty_events) = run_claimed_refusal(vec![ProviderEvent::Refusal {
             details: RefusalDetails::from_category(Some("cyber")),
         }])
         .await;
@@ -6950,8 +6967,14 @@ mod tests {
         assert_eq!(output.content, "");
         assert_eq!(refusal.category(), Some("cyber"));
         assert!(!refusal.partial_output());
+        assert!(
+            !empty_events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::StreamInterrupted)),
+            "a refusal with no started tool calls has nothing to discard"
+        );
 
-        let partial = run_claimed_refusal(vec![
+        let (partial, _) = run_claimed_refusal(vec![
             ProviderEvent::TextDelta {
                 text: "A partial answer".into(),
             },
@@ -6973,7 +6996,7 @@ mod tests {
         assert_eq!(refusal.category(), Some("general_harms"));
         assert!(refusal.partial_output());
 
-        let bare = run_claimed_refusal(vec![ProviderEvent::Stop {
+        let (bare, _) = run_claimed_refusal(vec![ProviderEvent::Stop {
             reason: StopReason::Refusal,
         }])
         .await;
@@ -6989,6 +7012,45 @@ mod tests {
         assert_eq!(output.content, "");
         assert_eq!(refusal.category(), None);
         assert!(!refusal.partial_output());
+
+        // Calls that started before the refusal were already journaled, so the
+        // refusal has to mark them discarded or replay is left holding a call
+        // that never resolves.
+        let (with_calls, call_events) = run_claimed_refusal(vec![
+            ProviderEvent::ToolCallStarted {
+                index: 0,
+                id: "call-0".into(),
+                name: "echo".into(),
+            },
+            ProviderEvent::ToolCallArgsDelta {
+                index: 0,
+                fragment: "{\"text\"".into(),
+            },
+            ProviderEvent::Refusal {
+                details: RefusalDetails::from_category(Some("cyber")),
+            },
+        ])
+        .await;
+        assert!(
+            matches!(
+                with_calls,
+                AgentTurnOutcome::Completed {
+                    stop_reason: StopReason::Refusal,
+                    ..
+                }
+            ),
+            "a refusal mid tool call still completes as refused"
+        );
+        let started = call_events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::ToolCallStarted { .. }));
+        let interrupted = call_events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::StreamInterrupted));
+        assert!(
+            matches!((started, interrupted), (Some(a), Some(b)) if a < b),
+            "the started call is marked discarded by the refusal"
+        );
     }
 
     #[tokio::test]
