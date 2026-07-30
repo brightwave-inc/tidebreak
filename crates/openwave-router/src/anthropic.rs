@@ -56,7 +56,7 @@ impl AnthropicProvider {
     /// Build a provider with the given API key, hitting api.anthropic.com.
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::http::streaming_client(),
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
             token_source: None,
@@ -125,8 +125,10 @@ impl ModelProvider for AnthropicProvider {
             return Err(classify_provider_error("anthropic", status.as_u16(), &body));
         }
 
+        let ceiling = crate::http::timeouts().total_stream;
         let stream = async_stream::stream! {
-            let mut bytes = response.bytes_stream();
+            let bytes = crate::http::with_stream_deadline(response.bytes_stream(), ceiling);
+            futures::pin_mut!(bytes);
             // Accumulate raw BYTES, not a String: a chunk may split a multi-byte
             // UTF-8 character, so we only decode once a whole frame is buffered.
             let mut buffer: Vec<u8> = Vec::new();

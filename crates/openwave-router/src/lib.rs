@@ -11,6 +11,9 @@
 pub mod router;
 mod sse;
 
+#[cfg(feature = "_http")]
+pub mod http;
+
 #[cfg(feature = "anthropic")]
 pub mod anthropic;
 
