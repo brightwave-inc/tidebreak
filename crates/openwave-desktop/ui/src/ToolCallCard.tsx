@@ -139,12 +139,6 @@ const TOOL_PRESENTATIONS: Record<
     complete: "File update complete",
     settled: "Updated a file",
   },
-  create_deliverable: {
-    label: "Create an output",
-    active: "Creating an output",
-    complete: "Output ready",
-    settled: "Created an output",
-  },
   write_output_to_connected_folder: {
     label: "Publish an output",
     active: "Publishing an output",

@@ -11,17 +11,6 @@ use chrono::{DateTime, Utc};
 
 use crate::id::{AgentRunId, ChatId, OutputId, OutputRevisionId, TurnId};
 
-/// Private-scratch directory holding legacy filename-addressed output files.
-///
-/// The desktop catalog still reads this compatibility surface.
-/// `create_deliverable` writes it first, validates those bytes at the
-/// publication boundary, then snapshots them under [`OUTPUTS_DIRECTORY`].
-/// Identity here is the filename, and rewriting a file destroys the bytes it
-/// replaced.
-///
-/// The durable record layer below is the intended replacement; see
-/// [`OUTPUTS_DIRECTORY`].
-pub const DELIVERABLES_DIRECTORY: &str = "artifacts";
 /// Private-scratch directory holding immutable revision bytes.
 ///
 /// Paired with the `output` and `output_revision` tables. The store layer is

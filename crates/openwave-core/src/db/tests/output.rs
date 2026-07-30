@@ -806,6 +806,30 @@ mod output_scan {
         assert_eq!(scan.entries[0].status, OutputSyncStatus::Created);
     }
 
+    /// The write-once publication boundary must not follow a symlinked
+    /// revision directory out of the conversation's private scratch. (Ported
+    /// from the removed create_deliverable tool tests; sync_output_directory
+    /// is now the production writer on this path.)
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn publication_refuses_a_symlinked_revision_directory() {
+        use crate::deliverable::OUTPUTS_DIRECTORY;
+
+        let (_dir, store, chat) = store_with_chat().await;
+        let outside = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), scratch.path().join(OUTPUTS_DIRECTORY)).unwrap();
+        write_output_file(scratch.path(), "brief.md", b"must stay private");
+        let dir = open_scratch(scratch.path());
+
+        let scan = sync(&store, &dir, chat.id, CallId::new(), 0).await;
+
+        assert!(scan.entries.is_empty());
+        assert!(scan.notes[0].contains("could not be published"));
+        assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
+        assert!(store.list_outputs(chat.id, 10).await.unwrap().is_empty());
+    }
+
     /// A symlinked `output/` planted by local exec must not hand arbitrary host
     /// files to the catalog.
     #[cfg(unix)]

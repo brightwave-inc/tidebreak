@@ -681,10 +681,6 @@ mod tests {
             RendererToolName::from(crate::source_tools::READ_SOURCE_TOOL),
             RendererToolName::ReadSource
         );
-        assert_eq!(
-            RendererToolName::from("create_deliverable"),
-            RendererToolName::CreateDeliverable
-        );
     }
 
     #[test]

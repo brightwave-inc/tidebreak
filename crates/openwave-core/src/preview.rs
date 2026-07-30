@@ -408,7 +408,6 @@ const ENTRY_TOOLS: &[&str] = &[
     "read_file",
     "list_dir",
     "write_file",
-    "create_deliverable",
     // Executed on the desktop, which authors their rows and posts them back.
     // The allowlist is checked against the *stored* call name rather than
     // anything the client asserts, so a client cannot grant itself a card for a
@@ -1012,15 +1011,13 @@ mod tests {
     fn a_listed_result_carries_only_the_three_fields_a_row_reads_as() {
         // The projection is closed the same way every other variant is: the
         // tool's output text and its other structured data stay behind it.
-        let output = ToolOutput::text("Published output 41ff revision 3 (900 bytes).")
+        let output = ToolOutput::text("Wrote q3.md (900 bytes).")
             .with_data(serde_json::json!({ "output_id": "41ff", "revision_count": 3 }))
             .with_entries(vec![
                 ResultEntry::new(ResultEntryKind::Output, "q3.md").with_meta(format_bytes(900))
             ]);
-        let json = serde_json::to_string(
-            &ToolResultPreview::build("create_deliverable", &output).unwrap(),
-        )
-        .unwrap();
+        let json = serde_json::to_string(&ToolResultPreview::build("write_file", &output).unwrap())
+            .unwrap();
         assert!(json.contains(r#""label":"q3.md""#));
         assert!(json.contains(r#""meta":"900 B""#));
         assert!(!json.contains("41ff"));

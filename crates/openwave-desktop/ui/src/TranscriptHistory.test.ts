@@ -133,22 +133,6 @@ describe("hydrateTranscriptHistory", () => {
     ]);
   });
 
-  it("hydrates generated outputs with fixed renderer copy", () => {
-    const entries = hydrateTranscriptHistory([], [
-      {
-        tool: "create_deliverable",
-        result_unreadable: false,
-        status: "completed",
-        started_at: "2026-07-16T10:00:00Z",
-        finished_at: "2026-07-16T10:00:01Z",
-      },
-    ]);
-
-    expect(entries).toEqual([
-      expect.objectContaining({ name: "create_deliverable" }),
-    ]);
-  });
-
   // The payload here matches the wire exactly: the server groups citations by
   // message and nests them, so `message_id` is skipped during serialization.
   // The previous fixture invented that field, which made this suite pass while

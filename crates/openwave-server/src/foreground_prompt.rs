@@ -120,9 +120,9 @@ pub(crate) fn compose_for_surface(
                 "- Use `write_file` for intermediate text that helps complete the task; scratch files are not user-visible outputs.",
             );
         }
-        if has("create_deliverable") {
+        if has("exec") {
             lines.push(
-                "- When the user needs a file they can preview or save, create a user-visible output instead of leaving it only in scratch.",
+                "- When the user needs a file they can preview or save, produce it in `output/` so it becomes a user-visible output instead of leaving it only in scratch.",
             );
         }
         push_section(&mut prompt, PRIVATE_SCRATCH_HEADING, &lines);
@@ -240,14 +240,14 @@ pub(crate) fn compose_for_surface(
         push_section(&mut prompt, CONNECTED_FOLDERS_HEADING, &lines);
     }
 
-    if has("create_deliverable") {
+    if has("exec") {
         push_section(
             &mut prompt,
             OUTPUTS_HEADING,
             &[
-                "- Use `create_deliverable` when the user explicitly wants a report, plan, table, data file, web page, or another file to preview or save.",
+                "- Files you save in `output/` during `exec` are published to the user automatically as durable outputs; use them when the user explicitly wants a report, plan, table, data file, web page, or another file to preview or save.",
                 "- Prefer a normal conversational answer when a separate file would add no value.",
-                "- Make each output self-contained and use a clear portable filename. Updating the same filename replaces that conversation output, so preserve useful content intentionally.",
+                "- Make each output self-contained and use a clear portable filename. Saving to the same filename updates that output in place as a new version, so preserve useful content intentionally.",
             ],
         );
     }
@@ -399,7 +399,6 @@ mod tests {
             "`search`",
             "`ask_user_questions`",
             "`request_folder_access`",
-            "`create_deliverable`",
             "`spawn_sandbox_agent`",
             "`web_extract`",
         ] {
@@ -422,7 +421,6 @@ mod tests {
             spec("web_extract"),
             spec("list_connected_folders"),
             spec("read_connected_file"),
-            spec("create_deliverable"),
             spec("exec"),
             spec("spawn_sandbox_agent"),
             spec("wait_for_agents"),
@@ -449,7 +447,6 @@ mod tests {
             "`web_extract`",
             "`list_connected_folders`",
             "`read_connected_file`",
-            "`create_deliverable`",
             "`exec`",
             "`spawn_sandbox_agent`",
             "`wait_for_agents`",
@@ -496,7 +493,7 @@ mod tests {
         let forward = vec![
             spec("read_source"),
             spec("search"),
-            spec("create_deliverable"),
+            spec("exec"),
             spec("spawn_sandbox_agent"),
             spec("wait_for_agents"),
         ];
@@ -588,7 +585,6 @@ mod tests {
             spec("list_connected_folders"),
             spec("list_folder"),
             spec("read_connected_file"),
-            spec("create_deliverable"),
             spec("exec"),
             spec("spawn_sandbox_agent"),
             spec("wait_for_agents"),
@@ -597,7 +593,7 @@ mod tests {
 
         assert_eq!(
             identity(&prompt),
-            "foreground-v2:sha256:69cb66297149a3ddaa4516ff891330d330d70daf80fcb1fdd40ba25e37f90e0b"
+            "foreground-v2:sha256:f6f9233a7d6899a7d459630c32b532fef3b086681b2be62028ee06b18b274790"
         );
     }
 }

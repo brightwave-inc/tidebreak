@@ -115,7 +115,7 @@ pub use deliverable::{
     output_revision_relative_path, revision_byte_ceiling, validate_binary_deliverable,
     validate_deliverable_media_type, validate_deliverable_name, validate_portable_filename,
     CreateOutput, DeliverableKind, NewOutputRevision, OutputRecord, OutputRevision,
-    RevisionProducer, DELIVERABLES_DIRECTORY, MAX_BINARY_DELIVERABLE_BYTES, MAX_DELIVERABLE_BYTES,
+    RevisionProducer, MAX_BINARY_DELIVERABLE_BYTES, MAX_DELIVERABLE_BYTES,
     MAX_DELIVERABLE_MEDIA_TYPE_CHARS, MAX_DELIVERABLE_NAME_CHARS, MAX_OUTPUT_REVISIONS,
     OUTPUTS_DIRECTORY,
 };
@@ -204,7 +204,7 @@ pub use tool::{
     ToolErrorCategory, ToolOutput, ToolScratch, ToolSpec, ToolUiView,
 };
 #[cfg(feature = "tools")]
-pub use tools::{CreateDeliverable, ListDir, ReadFile, WriteFile};
+pub use tools::{ListDir, ReadFile, WriteFile};
 pub use user_questions::{
     ask_user_questions_tool_spec, validate_ask_user_questions_arguments, AnswerUserQuestions,
     AnswerUserQuestionsRequest, AskUserQuestionsArgs, PendingUserQuestions, UserQuestion,

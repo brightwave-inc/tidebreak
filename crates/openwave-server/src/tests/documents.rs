@@ -1600,8 +1600,8 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() 
         "file tools still present"
     );
     assert!(
-        names.iter().any(|n| n == "create_deliverable"),
-        "deliverable tool registered"
+        !names.iter().any(|n| n == "create_deliverable"),
+        "the removed deliverable tool must not reappear; exec's output/ is the creation path"
     );
     assert!(
         names

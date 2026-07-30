@@ -946,7 +946,7 @@ export type RendererSequencedEvent = { seq: number, event: RendererAgentEvent, }
  * are all generated from this enum, so a variant added here cannot leave one of
  * them behind — see `docs/wire-types.md`.
  */
-export type RendererToolName = "search" | "list_sources" | "read_source" | "read_tool_result" | "web_search" | "web_extract" | "read_delegated_file" | "read_file" | "list_dir" | "write_file" | "create_deliverable" | "request_folder_access" | "connect_folder" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file" | "write_output_to_connected_folder" | "spawn_sandbox_agent" | "wait_for_agents" | "ask_user_questions" | "exec" | "other";
+export type RendererToolName = "search" | "list_sources" | "read_source" | "read_tool_result" | "web_search" | "web_extract" | "read_delegated_file" | "read_file" | "list_dir" | "write_file" | "request_folder_access" | "connect_folder" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file" | "write_output_to_connected_folder" | "spawn_sandbox_agent" | "wait_for_agents" | "ask_user_questions" | "exec" | "other";
 
 export type RendererToolStatus = "completed" | "failed";
 
@@ -1298,7 +1298,6 @@ export const RENDERER_TOOL_NAMES = [
   "read_file",
   "list_dir",
   "write_file",
-  "create_deliverable",
   "request_folder_access",
   "connect_folder",
   "list_connected_folders",
