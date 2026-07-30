@@ -932,6 +932,21 @@ mod restore {
                 .unwrap();
         assert_eq!(retried.revision_count, 3);
         assert_eq!(retried.current_revision, restored.current_revision);
+
+        // The restore leaves the model a durable host note — a System message
+        // the next turn's transcript picks up — and the no-op retry does not
+        // repeat it.
+        let notes: Vec<_> = store
+            .list_messages(chat.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|message| message.role == crate::model::Role::System)
+            .collect();
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].content.contains("restored output 'report.md'"));
+        assert!(notes[0].content.contains("version 1"));
+        assert!(notes[0].content.contains("v3"));
     }
 
     #[tokio::test]

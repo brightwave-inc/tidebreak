@@ -280,7 +280,7 @@ pub async fn restore_output_to_revision(
     .map_err(|error| AgentError::Store(format!("restore publication task failed: {error}")))?
     .map_err(|error| AgentError::Store(format!("could not publish restored revision: {error}")))?;
 
-    store
+    let restored = store
         .append_output_revision(
             output.id,
             &NewOutputRevision {
@@ -293,7 +293,31 @@ pub async fn restore_output_to_revision(
                 created_at: now,
             },
         )
-        .await
+        .await?;
+
+    // A host note tells the model what the user did between turns, so its next
+    // turn re-reads the file instead of overwriting the restore with stale
+    // context. The next `load_transcript` picks the `System` message up; the
+    // adapters serialize it as ordinary user-context text. Best-effort: the
+    // restore has already committed, and a lost note must not fail it.
+    let _ = store
+        .append_message(&crate::model::Message {
+            id: crate::id::MessageId::new(),
+            chat_id,
+            // No turn produced this; messages carry no turn foreign key, so a
+            // fresh id is an inert marker rather than a claim on turn state.
+            turn_id: crate::id::TurnId::new(),
+            role: crate::model::Role::System,
+            content: format!(
+                "User restored output '{}' to the content of version {} \
+                 (now the latest version, v{}). Re-read output/{} before \
+                 relying on or changing it.",
+                output.filename, target.ordinal, restored.revision_count, output.filename
+            ),
+            created_at: now,
+        })
+        .await;
+    Ok(restored)
 }
 
 /// Read and verify one revision's bytes from the conversation's private

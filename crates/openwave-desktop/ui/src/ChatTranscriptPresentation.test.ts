@@ -29,6 +29,32 @@ const transcript: ChatTranscript = {
 };
 
 describe("terminal transcript presentation", () => {
+  // A durable host note — "User restored output …" — renders as the subtle
+  // inline system notice, never as a user or assistant bubble.
+  it("presents a host-authored system note as an inline notice", () => {
+    const presented = presentChatTranscript({
+      messages: [
+        {
+          id: "host-note-1",
+          role: "system",
+          content: "User restored output 'report.md' to the content of version 1.",
+          created_at: "2026-07-30T12:00:00Z",
+        },
+      ],
+      tool_activity: [],
+      cancellations: [],
+      last_event_seq: 2,
+    });
+
+    expect(presented.messages).toEqual([
+      {
+        id: "host-note-1",
+        role: "system",
+        text: "User restored output 'report.md' to the content of version 1.",
+      },
+    ]);
+  });
+
   it("keeps a historical spawn bound to its durable child", () => {
     const presented = presentChatTranscript({
       messages: [],

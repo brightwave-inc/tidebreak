@@ -57,6 +57,18 @@ export function presentChatTranscript(
           } satisfies ChatMessage,
         ];
       }
+      // A durable host-authored note — "User restored output 'report.md'…" —
+      // written for the model between turns. Shown as the same subtle inline
+      // notice a cancellation uses, never as a user or assistant bubble.
+      if (entry.role === "system") {
+        return [
+          {
+            id: entry.id,
+            role: "system",
+            text: entry.text,
+          } satisfies ChatMessage,
+        ];
+      }
       if (entry.role === "assistant") {
         const assistant = {
           id: entry.id,
