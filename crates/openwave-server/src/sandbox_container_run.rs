@@ -747,7 +747,26 @@ impl SandboxContainerRunner {
             Some(SubmitAgentRunResultOutcome::Existing(_)) => {
                 Ok(SandboxContainerRunOutcome::AlreadyCompleted(run_id))
             }
-            None => Ok(SandboxContainerRunOutcome::LeaseLost(run_id)),
+            None => {
+                // The fenced commit refused: the run is already terminal or the
+                // lease is gone. The container it truly ran in still produced a
+                // well-formed result — retain it as non-authoritative evidence
+                // on the provisioning record, never commit it.
+                match self
+                    .store
+                    .record_late_container_result_evidence(*run_id.as_uuid(), text)
+                    .await
+                {
+                    Ok(true) => eprintln!(
+                        "openwave: retained a late container result for run {run_id} as evidence"
+                    ),
+                    Ok(false) => {}
+                    Err(error) => eprintln!(
+                        "openwave: could not retain a late container result for run {run_id}: {error}"
+                    ),
+                }
+                Ok(SandboxContainerRunOutcome::LeaseLost(run_id))
+            }
         }
     }
 

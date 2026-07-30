@@ -1141,6 +1141,71 @@ async fn the_container_claim_refuses_past_the_concurrency_cap() {
         .expect("the freed slot admits the queued run");
 }
 
+/// A well-formed result that arrives after the run is already terminal fails
+/// the fenced commit predicate and is retained as evidence instead — first
+/// writer wins, and nothing is ever committed from it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_late_result_is_retained_as_evidence_not_committed() {
+    let (_dir, store, chat) = store().await;
+    let run_id = admit_container_run(&store, chat.id, "finishes too late").await;
+    let run_uuid = *run_id.as_uuid();
+    let token = Uuid::new_v4();
+    store
+        .claim_container_agent_run(run_id, token, chrono::Duration::seconds(30), 4)
+        .await
+        .unwrap()
+        .expect("the claim succeeds");
+    store
+        .begin_sandbox_provision(
+            run_uuid,
+            &SandboxTag::new().to_string(),
+            chrono::Utc::now() + chrono::Duration::seconds(600),
+        )
+        .await
+        .unwrap();
+
+    // The run goes terminal (the deadline scan, a cancellation) while the
+    // container still works; its result then arrives and must not commit.
+    store
+        .fail_agent_run(
+            run_id,
+            token,
+            "deadline_exceeded",
+            "went terminal before the result arrived",
+            chrono::Duration::seconds(1),
+        )
+        .await
+        .unwrap()
+        .expect("the terminal failure commits");
+    assert!(store
+        .submit_agent_run_result(run_id, token, "the late answer")
+        .await
+        .unwrap()
+        .is_none());
+
+    assert!(store
+        .record_late_container_result_evidence(run_uuid, "the late answer")
+        .await
+        .unwrap());
+    // A redelivery is a no-op, not an overwrite.
+    assert!(!store
+        .record_late_container_result_evidence(run_uuid, "a different answer")
+        .await
+        .unwrap());
+    let record = store
+        .get_sandbox_provision(run_uuid)
+        .await
+        .unwrap()
+        .expect("the provisioning record exists");
+    assert_eq!(
+        record.late_result_evidence.as_deref(),
+        Some("the late answer")
+    );
+    // The run's authoritative outcome is still the failure.
+    let run = store.get_agent_run(run_id).await.unwrap().unwrap();
+    assert_eq!(run.status, AgentRunStatus::Failed);
+}
+
 // --- Docker end-to-end (gated on a container runtime + the agent image) -------
 
 /// Build the sandbox-agent image for the Docker-gated tests, returning its tag,

@@ -44,6 +44,7 @@ fn from_model(model: sandbox_provision::Model) -> SandboxProvision {
         tag: model.tag,
         state: state_from_str(&model.state),
         handle: model.handle,
+        late_result_evidence: model.late_result_evidence,
         window_expires_at: model.window_expires_at,
     }
 }
@@ -65,6 +66,7 @@ pub(in crate::db) async fn begin(
         tag: Set(tag.to_owned()),
         state: Set(STATE_INTENDED.to_owned()),
         handle: Set(None),
+        late_result_evidence: Set(None),
         window_expires_at: Set(window_expires_at),
         created_at: Set(now),
         updated_at: Set(now),
@@ -275,4 +277,39 @@ pub(in crate::db) async fn live_tags(store: &DbStore) -> Result<Vec<String>> {
         .into_iter()
         .map(|row| row.tag)
         .collect())
+}
+
+pub(in crate::db) async fn get(
+    store: &DbStore,
+    run_id: uuid::Uuid,
+) -> Result<Option<SandboxProvision>> {
+    Ok(entities::sandbox_provision::Entity::find_by_id(run_id)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+        .map(from_model))
+}
+
+pub(in crate::db) async fn record_late_result_evidence(
+    store: &DbStore,
+    run_id: uuid::Uuid,
+    text: &str,
+) -> Result<bool> {
+    // First writer wins: the NULL predicate makes a redelivered late result a
+    // no-op rather than an overwrite.
+    let updated = entities::sandbox_provision::Entity::update_many()
+        .col_expr(
+            sandbox_provision::Column::LateResultEvidence,
+            Expr::value(text),
+        )
+        .col_expr(
+            sandbox_provision::Column::UpdatedAt,
+            Expr::value(Utc::now()),
+        )
+        .filter(sandbox_provision::Column::RunId.eq(run_id))
+        .filter(sandbox_provision::Column::LateResultEvidence.is_null())
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(updated.rows_affected == 1)
 }
