@@ -407,24 +407,31 @@ impl crate::mcp_config::GatewayEndpoints for GatewayRuntime {
     }
 }
 
-/// Complete the legacy hard cut for the session, not just the configuration.
+/// Retire a stored gateway session the resolved policy no longer stands
+/// behind.
 ///
-/// An unmanaged profile can carry a gateway session signed in under the
-/// retired additive mode. Nothing reaches it any more — the whole sign-in
-/// surface is managed-only, and the renderer has no gateway page — so
-/// without this the refresh token would sit in the keychain forever with no
-/// path to revoke it. Boot owns that cleanup instead.
+/// Two ways a session ends up superseded. An unmanaged profile can carry one
+/// signed in under the retired additive mode: nothing reaches it any more —
+/// the whole sign-in surface is managed-only, and the renderer has no
+/// gateway page. And a managed profile's policy authority can re-point the
+/// deployment (an MDM push): the old deployment's session is filtered out
+/// of every route and token path, but its refresh token stays live at the
+/// old gateway. Either way no surface will ever revoke it, so boot owns
+/// that cleanup.
 ///
 /// Revocation is best-effort and bounded: an unreachable gateway can no more
 /// hold this hostage than it can a normal sign-out (the server-side session
 /// still dies at refresh-token expiry), and boot must not stall on it. The
 /// local clear afterwards is unconditional, so the session is gone locally
 /// whether or not the gateway ever answered — and because it is gone, this
-/// whole step runs at most once per profile.
+/// whole step runs at most once per superseded session.
 ///
 /// An unreadable stored blob is left alone: it carries no usable refresh
-/// token, so it is not the live zombie this exists to kill.
-pub(crate) async fn retire_unmanaged_gateway_session(
+/// token, so it is not the live zombie this exists to kill. So is the
+/// session under a managed policy with no usable URL — that is a
+/// misconfigured policy to repair, not a supersession, and the session may
+/// well match it once repaired.
+pub(crate) async fn retire_superseded_gateway_session(
     secrets: Arc<dyn SecretProvider>,
     policy: &crate::managed_policy::ManagedPolicy,
 ) -> Result<()> {
@@ -432,18 +439,29 @@ pub(crate) async fn retire_unmanaged_gateway_session(
     /// that a dead one is a hiccup at boot rather than a hang.
     const REVOKE_TIMEOUT: Duration = Duration::from_secs(5);
 
-    if policy.managed {
-        return Ok(());
-    }
     let vault = CredentialVault::new(secrets.clone());
     let Ok(Some(credentials)) = vault.load().await else {
         return Ok(());
     };
-    tracing::warn!(
-        "clearing a model-gateway session left by the retired additive \
-         configuration ({}); pair via your gateway's page to sign in again",
-        credentials.base_url
-    );
+    if policy.managed {
+        let Some(gateway_url) = policy.gateway_url.as_deref() else {
+            return Ok(());
+        };
+        if credentials.matches_base_url(gateway_url) {
+            return Ok(());
+        }
+        tracing::warn!(
+            "retiring the model-gateway session for {}: the managed policy \
+             now resolves {gateway_url}; sign in there to connect",
+            credentials.base_url
+        );
+    } else {
+        tracing::warn!(
+            "clearing a model-gateway session left by the retired additive \
+             configuration ({}); pair via your gateway's page to sign in again",
+            credentials.base_url
+        );
+    }
     // The connection owns revoke-then-clear (the refresh token never leaves
     // the connectors crate), so the session is retired through the same path
     // an explicit sign-out takes.
@@ -529,6 +547,8 @@ mod tests {
     #[derive(Default)]
     struct FakeGateway {
         refreshes: AtomicUsize,
+        /// Every refresh token posted to `/oauth/revoke`, in order.
+        revoked: std::sync::Mutex<Vec<String>>,
     }
 
     async fn token(
@@ -616,9 +636,22 @@ mod tests {
         Json(json!({"jsonrpc": "2.0", "id": id, "result": result})).into_response()
     }
 
+    async fn revoke(
+        State(gateway): State<Arc<FakeGateway>>,
+        Form(form): Form<HashMap<String, String>>,
+    ) -> Json<Value> {
+        gateway
+            .revoked
+            .lock()
+            .unwrap()
+            .push(form.get("token").cloned().unwrap_or_default());
+        Json(json!({}))
+    }
+
     async fn serve(gateway: Arc<FakeGateway>) -> std::net::SocketAddr {
         let app = AxumRouter::new()
             .route("/oauth/token", post(token))
+            .route("/oauth/revoke", post(revoke))
             .route("/api/v1/cli/models", get(models))
             .route("/mcp/{slug}", post(mcp_endpoint))
             .with_state(gateway);
@@ -1459,7 +1492,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!policy.managed);
-        retire_unmanaged_gateway_session(secrets.clone(), &policy)
+        retire_superseded_gateway_session(secrets.clone(), &policy)
             .await
             .unwrap();
         assert!(
@@ -1471,7 +1504,7 @@ mod tests {
         // no connection to revoke through, so only the unconditional clear
         // can retire it. Drop that clear and the credential survives here.
         seed(secrets.clone(), "http://user:pw@stale.example").await;
-        retire_unmanaged_gateway_session(secrets.clone(), &policy)
+        retire_superseded_gateway_session(secrets.clone(), &policy)
             .await
             .unwrap();
         assert!(
@@ -1488,9 +1521,135 @@ mod tests {
         let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
             .await
             .unwrap();
-        retire_unmanaged_gateway_session(secrets.clone(), &policy)
+        retire_superseded_gateway_session(secrets.clone(), &policy)
             .await
             .unwrap();
         assert!(openwave_connectors::has_stored_credentials(&*secrets).await);
+    }
+
+    /// The managed analogue of the legacy hard cut: an MDM re-point
+    /// supersedes the stored session, and boot is the only surface that will
+    /// ever revoke it at the old deployment.
+    #[tokio::test]
+    async fn boot_retires_the_session_an_mdm_repoint_superseded() {
+        let directory = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                directory.path().join("gateway.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let secrets: Arc<dyn SecretProvider> = Arc::new(MockSecrets::default());
+        let old_gateway = Arc::new(FakeGateway::default());
+        let old_base = format!("http://{}", serve(old_gateway.clone()).await);
+        let credentials: openwave_connectors::GatewayCredentials = serde_json::from_value(json!({
+            "base_url": old_base,
+            "installation_id": "install-1",
+            "user_id": "user-1",
+            "refresh_token": "mg_rt_zombie",
+            "access_tokens": {}
+        }))
+        .unwrap();
+        CredentialVault::new(secrets.clone())
+            .save(&credentials)
+            .await
+            .unwrap();
+        crate::managed_policy::provision(&*store, "https://corp-new.gateway")
+            .await
+            .unwrap();
+        let mut policy =
+            crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+                .await
+                .unwrap();
+        assert!(policy.managed);
+
+        // A managed policy with no usable URL is misconfiguration, not a
+        // re-point: the session is left for the repaired policy to judge.
+        policy.gateway_url = None;
+        retire_superseded_gateway_session(secrets.clone(), &policy)
+            .await
+            .unwrap();
+        assert!(openwave_connectors::has_stored_credentials(&*secrets).await);
+
+        policy.gateway_url = Some("https://corp-new.gateway".into());
+        retire_superseded_gateway_session(secrets.clone(), &policy)
+            .await
+            .unwrap();
+        assert!(
+            !openwave_connectors::has_stored_credentials(&*secrets).await,
+            "the superseded session must not survive the re-point"
+        );
+        // Revoked at the old deployment, with the superseded refresh token.
+        assert_eq!(
+            old_gateway.revoked.lock().unwrap().as_slice(),
+            ["mg_rt_zombie"]
+        );
+    }
+
+    /// A completed sign-in supersedes whatever session is stored — possibly
+    /// one minted at a different deployment, after a re-point. Its refresh
+    /// token is revoked at its own gateway before the overwrite orphans it.
+    #[tokio::test]
+    async fn signing_in_revokes_the_superseded_session_at_its_own_gateway() {
+        let old_gateway = Arc::new(FakeGateway::default());
+        let old_base = format!("http://{}", serve(old_gateway.clone()).await);
+        let new_gateway = Arc::new(FakeGateway::default());
+        let new_base = format!("http://{}", serve(new_gateway.clone()).await);
+        let secrets: Arc<dyn SecretProvider> = Arc::new(MockSecrets::default());
+        let superseded: openwave_connectors::GatewayCredentials = serde_json::from_value(json!({
+            "base_url": old_base,
+            "installation_id": "install-1",
+            "user_id": "user-1",
+            "refresh_token": "mg_rt_zombie",
+            "access_tokens": {}
+        }))
+        .unwrap();
+        CredentialVault::new(secrets.clone())
+            .save(&superseded)
+            .await
+            .unwrap();
+
+        let connection = GatewayConnection::new(
+            GatewayAuth::new(GatewayAuthConfig::new(&new_base).unwrap()).unwrap(),
+            CredentialVault::new(secrets.clone()),
+        );
+        connection
+            .store_session(&openwave_connectors::AuthorizedSession {
+                meta: openwave_connectors::GatewayMeta {
+                    api_version: "1".into(),
+                    installation_id: "install-2".into(),
+                    gateway_version: "1".into(),
+                    public_url: new_base.clone(),
+                    auth_mode: "oauth".into(),
+                },
+                identity: openwave_connectors::GatewayIdentity {
+                    user_id: "user-2".into(),
+                    email: Some("user@example.test".into()),
+                    display_name: None,
+                    session_id: "session-2".into(),
+                    installation_id: "install-2".into(),
+                },
+                tokens: openwave_connectors::TokenSet {
+                    access_token: "mg_at_fresh".into(),
+                    refresh_token: "mg_rt_fresh".into(),
+                    expires_at_unix: u64::MAX,
+                    scope: "models:read inference:invoke".into(),
+                    resource: "control".into(),
+                    installation_id: "install-2".into(),
+                },
+            })
+            .await
+            .unwrap();
+
+        // The revoke went to the superseded session's own deployment — not
+        // the connection's — and the new session is stored for the new one.
+        assert_eq!(
+            old_gateway.revoked.lock().unwrap().as_slice(),
+            ["mg_rt_zombie"]
+        );
+        assert!(new_gateway.revoked.lock().unwrap().is_empty());
+        assert!(openwave_connectors::has_stored_credentials_for(&*secrets, &new_base).await);
     }
 }
