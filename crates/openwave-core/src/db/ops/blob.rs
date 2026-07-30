@@ -80,7 +80,13 @@ where
         .await
         .map_err(store_err)?
         .is_some();
-    Ok(by_attachment)
+    if by_attachment {
+        return Ok(true);
+    }
+    // The file-change journal keeps the only surviving copy of bytes the agent
+    // overwrote in a user's folder. Reaping one of these deletes the thing undo
+    // restores, so it belongs in the union like any other referrer.
+    super::exec_file_snapshot::references_blob_on(conn, blob_id).await
 }
 
 pub(in crate::db) async fn ensure_orphan(store: &DbStore, blob_id: uuid::Uuid) -> Result<bool> {

@@ -384,6 +384,22 @@ impl Store for DbStore {
             .collect())
     }
 
+    async fn record_exec_file_snapshots(
+        &self,
+        chat_id: ChatId,
+        turn_id: TurnId,
+        files: &[crate::model::ExecFileSnapshotRecord],
+    ) -> Result<()> {
+        ops::exec_file_snapshot::record(self, chat_id, turn_id, files).await
+    }
+
+    async fn list_exec_file_snapshots(
+        &self,
+        chat_id: ChatId,
+    ) -> Result<Vec<crate::model::ExecFileSnapshot>> {
+        ops::exec_file_snapshot::list_for_chat(self, chat_id).await
+    }
+
     async fn get_blob_retirement(&self, blob_id: uuid::Uuid) -> Result<Option<BlobRetirement>> {
         ops::blob::get(self, blob_id).await
     }

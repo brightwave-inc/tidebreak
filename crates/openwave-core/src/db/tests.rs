@@ -1366,6 +1366,65 @@ async fn blob_retirement_constraints_reject_impossible_delivery_state() {
     assert!(exhausted_retry.insert(&store.conn).await.is_err());
 }
 
+/// The undo window is a bounded number of turns, and the bound is what keeps
+/// snapshot storage from growing with editing activity. Falling out of the
+/// window has to release the retained bytes too: a row deleted without
+/// enqueueing its blob leaves the file behind forever with nothing pointing at
+/// it, which is the leak this bound exists to avoid.
+#[tokio::test]
+async fn the_file_change_journal_keeps_only_the_newest_retained_turns() {
+    use crate::model::{
+        ExecFileChange, ExecFileSnapshotRecord, ExecUndoState, EXEC_SNAPSHOT_RETAINED_TURNS,
+    };
+
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+
+    let mut turns = Vec::new();
+    for index in 0..(EXEC_SNAPSHOT_RETAINED_TURNS + 1) {
+        let blob = DocumentSourceBlob::from_bytes(format!("revision {index}").as_bytes());
+        let turn_id = TurnId::new();
+        store
+            .record_exec_file_snapshots(
+                chat.id,
+                turn_id,
+                &[ExecFileSnapshotRecord {
+                    folder_path: "/Users/someone/Documents".into(),
+                    relative_path: "notes.md".into(),
+                    change: ExecFileChange::Overwritten,
+                    prior_blob_id: Some(blob.id),
+                    prior_byte_len: Some(blob.byte_len),
+                    new_sha256: None,
+                    undo: ExecUndoState::Available,
+                }],
+            )
+            .await
+            .unwrap();
+        turns.push((turn_id, blob.id));
+    }
+
+    let retained = store.list_exec_file_snapshots(chat.id).await.unwrap();
+    assert_eq!(retained.len(), EXEC_SNAPSHOT_RETAINED_TURNS);
+    let (oldest_turn, oldest_blob) = turns[0];
+    assert!(
+        retained.iter().all(|row| row.turn_id != oldest_turn),
+        "the turn that fell out of the window is still journaled"
+    );
+    assert_eq!(
+        store
+            .get_blob_retirement(oldest_blob)
+            .await
+            .unwrap()
+            .map(|retirement| retirement.status),
+        Some(BlobRetirementStatus::Queued),
+        "its retained bytes were dropped without being released"
+    );
+    let (newest_turn, newest_blob) = *turns.last().unwrap();
+    assert_eq!(retained.first().unwrap().turn_id, newest_turn);
+    assert_eq!(store.get_blob_retirement(newest_blob).await.unwrap(), None);
+}
+
 #[tokio::test]
 async fn orphan_blob_retirement_only_queues_missing_or_completed_episodes() {
     let (_dir, store) = temp_store().await;

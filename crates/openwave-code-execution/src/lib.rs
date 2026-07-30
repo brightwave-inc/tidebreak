@@ -33,7 +33,8 @@ pub use host_paths::{
 };
 pub use local::LocalExecutionProvider;
 pub use overlay::{
-    sweep_abandoned_overlays, OverlayOutcome, OverlaySlot, WriteOverlay, OVERLAY_DIR,
+    sweep_abandoned_overlays, OverlayOutcome, OverlaySlot, PriorContents, StagedChange,
+    WriteOverlay, WriteSnapshotSink, OVERLAY_DIR,
 };
 pub use preview::{scan_preview_directory, PreviewScan};
 pub use remote::RemoteSessionPool;

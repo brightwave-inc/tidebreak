@@ -413,6 +413,64 @@ mod tests {
             .expect("retirement worker was not notified");
     }
 
+    /// The bytes retained for undo are the only surviving copy of a file the
+    /// agent overwrote in the user's folder. Nothing else in the product points
+    /// at them, so if the sweep does not recognise the journal as a reference it
+    /// deletes them — quietly, a day later, long after the change looked fine.
+    #[tokio::test]
+    async fn a_journaled_prior_copy_survives_the_orphan_sweep() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("blobs");
+        let store = store(&dir).await;
+        let chat = openwave_core::Chat {
+            id: openwave_core::ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            reasoning_effort: None,
+            permission_mode: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: chrono::Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+
+        let blobs = FsBlobStore::new(&root);
+        let prior = DocumentSourceBlob::from_bytes(b"the user's original notes");
+        blobs
+            .put(prior.id, b"the user's original notes".to_vec())
+            .await
+            .unwrap();
+        age_blob(&root, prior.id, Duration::from_secs(2 * 60 * 60));
+        store
+            .record_exec_file_snapshots(
+                chat.id,
+                openwave_core::TurnId::new(),
+                &[openwave_core::ExecFileSnapshotRecord {
+                    folder_path: "/Users/someone/Documents".into(),
+                    relative_path: "notes.md".into(),
+                    change: openwave_core::ExecFileChange::Overwritten,
+                    prior_blob_id: Some(prior.id),
+                    prior_byte_len: Some(prior.byte_len),
+                    new_sha256: Some("0".repeat(64)),
+                    undo: openwave_core::ExecUndoState::Available,
+                }],
+            )
+            .await
+            .unwrap();
+
+        let auditor = auditor(store.clone(), &root, Arc::new(Notify::new()), 16);
+        let report = auditor.audit_once().await.unwrap();
+        assert_eq!(report.eligible, 1, "the blob is old enough to be swept");
+        assert_eq!(report.enqueued, 0);
+        assert_eq!(report.skipped, 1);
+        assert_eq!(store.get_blob_retirement(prior.id).await.unwrap(), None);
+        assert_eq!(
+            blobs.get(prior.id).await.unwrap().as_deref(),
+            Some(&b"the user's original notes"[..])
+        );
+    }
+
     #[tokio::test]
     async fn bounded_audits_rotate_across_all_old_blobs() {
         let dir = tempfile::tempdir().unwrap();

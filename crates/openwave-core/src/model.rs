@@ -631,6 +631,137 @@ impl BlobRetirementStatus {
     }
 }
 
+/// What a turn's staged write-back did to one file in a granted folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecFileChange {
+    /// The folder had no such file before the turn.
+    Created,
+    /// The folder held different bytes, retained as this row's prior blob.
+    Overwritten,
+    /// The folder held the file and the turn removed it.
+    Deleted,
+}
+
+impl ExecFileChange {
+    /// Stable database and wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Overwritten => "overwritten",
+            Self::Deleted => "deleted",
+        }
+    }
+
+    /// Parse the stable representation written to the database.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "created" => Some(Self::Created),
+            "overwritten" => Some(Self::Overwritten),
+            "deleted" => Some(Self::Deleted),
+            _ => None,
+        }
+    }
+}
+
+/// Whether the prior bytes for one journaled change are actually recoverable.
+///
+/// This is recorded rather than inferred because "we did not snapshot" and "we
+/// snapshotted nothing because nothing was there" are different answers to the
+/// user. A file too big to stash is written anyway — refusing the agent's work
+/// over a storage bound would be worse — but it is marked here so the change
+/// summary can say plainly that this one cannot be reverted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecUndoState {
+    /// The prior bytes are in the blob store, or there were none to keep.
+    Available,
+    /// The prior file exceeded [`MAX_EXEC_SNAPSHOT_BYTES`]; no undo for it.
+    PriorTooLarge,
+    /// The prior file existed but could not be read; no undo for it.
+    PriorUnreadable,
+}
+
+impl ExecUndoState {
+    /// Stable database and wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::PriorTooLarge => "prior_too_large",
+            Self::PriorUnreadable => "prior_unreadable",
+        }
+    }
+
+    /// Parse the stable representation written to the database.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "available" => Some(Self::Available),
+            "prior_too_large" => Some(Self::PriorTooLarge),
+            "prior_unreadable" => Some(Self::PriorUnreadable),
+            _ => None,
+        }
+    }
+}
+
+/// Ceiling on the prior bytes retained for one file.
+///
+/// A snapshot is a whole second copy of the file in the blob store, so it is
+/// capped tighter than what the overlay is willing to write back. A larger file
+/// is still written; its row records [`ExecUndoState::PriorTooLarge`].
+pub const MAX_EXEC_SNAPSHOT_BYTES: u64 = 32 * 1_024 * 1_024;
+
+/// Turns of file-change history one chat retains.
+///
+/// This bound *is* the undo window, so it is deliberately a count of turns
+/// rather than an age: a chat left alone for a month should still offer undo on
+/// its last exchange, and a chat that has run a hundred turns since is one whose
+/// early changes the user has long stopped thinking of as undoable. Snapshot
+/// blobs for turns past this bound lose their last reference and are reclaimed
+/// by the ordinary retirement path.
+pub const EXEC_SNAPSHOT_RETAINED_TURNS: usize = 20;
+
+/// One journaled file change from a turn's staged write-back.
+///
+/// `prior_blob_id` doubles as the prior digest: blob ids are content-derived, so
+/// the id both addresses the retained bytes and identifies them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecFileSnapshotRecord {
+    /// Absolute path of the granted folder the change landed in.
+    pub folder_path: String,
+    /// Path of the changed file relative to that folder.
+    pub relative_path: String,
+    /// What the write-back did.
+    pub change: ExecFileChange,
+    /// Content address of the bytes the folder held before the change, absent
+    /// when there were none or when they could not be retained.
+    pub prior_blob_id: Option<Uuid>,
+    /// Length of those prior bytes, recorded even when they were not retained.
+    pub prior_byte_len: Option<u64>,
+    /// Lowercase hex SHA-256 of the bytes written, absent for a deletion.
+    pub new_sha256: Option<String>,
+    /// Whether this change can be reverted.
+    pub undo: ExecUndoState,
+}
+
+/// One persisted [`ExecFileSnapshotRecord`] with its journal identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecFileSnapshot {
+    /// Row identity.
+    pub id: Uuid,
+    /// Conversation whose turn made the change.
+    pub chat_id: ChatId,
+    /// Turn that made the change.
+    pub turn_id: TurnId,
+    /// When the write-back journaled it.
+    pub recorded_at: DateTime<Utc>,
+    /// The change itself.
+    pub file: ExecFileSnapshotRecord,
+}
+
 /// Metadata returned by bounded document listings.
 ///
 /// This deliberately excludes canonical content so list callers cannot

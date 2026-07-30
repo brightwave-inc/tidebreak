@@ -405,6 +405,47 @@ pub mod message_attachment {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod exec_file_snapshot {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "exec_file_snapshot")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub chat_id: Uuid,
+        pub turn_id: Uuid,
+        pub folder_path: String,
+        pub relative_path: String,
+        pub change_kind: String,
+        pub prior_blob_id: Option<Uuid>,
+        pub prior_byte_len: Option<i64>,
+        pub new_sha256: Option<String>,
+        pub undo_state: String,
+        pub recorded_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {
+        #[sea_orm(
+            belongs_to = "super::chat::Entity",
+            from = "Column::ChatId",
+            to = "super::chat::Column::Id",
+            on_update = "NoAction",
+            on_delete = "Restrict"
+        )]
+        Chat,
+    }
+
+    impl Related<super::chat::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::Chat.def()
+        }
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod message_document_attachment {
     use sea_orm::entity::prelude::*;
 

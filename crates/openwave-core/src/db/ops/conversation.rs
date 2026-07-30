@@ -22,6 +22,7 @@ use crate::storage::{
 
 use super::super::{entities, project_from_models, store_err, DbStore};
 use super::blob as blob_ops;
+use super::exec_file_snapshot as exec_file_snapshot_ops;
 use super::message_attachment as message_attachment_ops;
 use super::turn::canonical_db_timestamp;
 use super::{
@@ -460,6 +461,16 @@ pub(in crate::db) async fn delete_chat(
         message_attachment_ops::list_chat_blob_ids_on(&transaction, chat_id).await?;
     message_attachment_ops::delete_for_chat_on(&transaction, chat_id).await?;
     for blob_id in attachment_blob_ids {
+        blob_ops::enqueue_on(&transaction, blob_id).await?;
+    }
+
+    // The file-change journal is the third, on the same terms: deleting the
+    // conversation retracts the undo it offered, so the prior copies it was
+    // holding become retirement candidates.
+    let snapshot_blob_ids =
+        exec_file_snapshot_ops::list_chat_blob_ids_on(&transaction, chat_id).await?;
+    exec_file_snapshot_ops::delete_for_chat_on(&transaction, chat_id).await?;
+    for blob_id in snapshot_blob_ids {
         blob_ops::enqueue_on(&transaction, blob_id).await?;
     }
 
