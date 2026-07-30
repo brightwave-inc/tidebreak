@@ -597,7 +597,50 @@ pub struct ConfiguredCodeExecutionProvider {
     /// A turn opens one entry when it resolves its folder grants and closes it
     /// when the turn ends; every `exec` in between finds it here and points the
     /// sandbox at the staged copy instead of the user's folder.
-    write_overlays: Mutex<HashMap<ChatId, WriteOverlay>>,
+    write_overlays: Mutex<HashMap<ChatId, StagedTurn>>,
+}
+
+/// One turn's staging for one chat.
+///
+/// The overlay itself is addressed by folder path, which is what exec needs.
+/// The host folder tools arrive with a product root id instead, so the same
+/// staging is also indexed that way rather than making every caller re-resolve
+/// a path through the broker to find it.
+struct StagedTurn {
+    overlay: WriteOverlay,
+    staged_roots: HashMap<HostRootId, PathBuf>,
+}
+
+/// Where a chat's current turn stages writes for one granted folder.
+///
+/// For the length of a turn, exec addresses a private copy of each writable
+/// granted folder rather than the folder itself, so the user's folder is the
+/// stale view: a file the agent has just written is not in it yet, and one the
+/// agent has deleted is still there. A host tool that reads the same folder in
+/// the same turn consults this first, so the model is never shown two versions
+/// of one folder.
+///
+/// The broker is deliberately not involved. Staging is a property of the turn,
+/// and the broker knows nothing about turns; it stays the authority on whether
+/// a folder may be read at all.
+pub trait StagedFolders: Send + Sync {
+    /// The staged copy of `root_id` for this chat's current turn, if the turn
+    /// stages that folder. `None` covers every case where the user's folder is
+    /// still the only view — no turn in flight, a read-only grant, or a folder
+    /// the overlay could not stage.
+    fn staged_root(&self, chat: ChatId, root_id: HostRootId) -> Option<PathBuf>;
+}
+
+impl StagedFolders for ConfiguredCodeExecutionProvider {
+    fn staged_root(&self, chat: ChatId, root_id: HostRootId) -> Option<PathBuf> {
+        self.write_overlays
+            .lock()
+            .expect("write overlay registry is not poisoned")
+            .get(&chat)?
+            .staged_roots
+            .get(&root_id)
+            .cloned()
+    }
 }
 
 impl ConfiguredCodeExecutionProvider {
@@ -681,18 +724,26 @@ impl ConfiguredCodeExecutionProvider {
         else {
             return;
         };
+        let mut staged_roots = HashMap::new();
         for slot in overlay.slots() {
             for grant in grants
                 .iter_mut()
                 .filter(|grant| grant.path == slot.source())
             {
                 grant.overlay = Some(slot.overlay().to_path_buf());
+                staged_roots.insert(grant.root_id, slot.overlay().to_path_buf());
             }
         }
         self.write_overlays
             .lock()
             .expect("write overlay registry is not poisoned")
-            .insert(chat, overlay);
+            .insert(
+                chat,
+                StagedTurn {
+                    overlay,
+                    staged_roots,
+                },
+            );
     }
 
     /// Apply this turn's staged writes to the user's folders and end staging.
@@ -707,10 +758,10 @@ impl ConfiguredCodeExecutionProvider {
             .lock()
             .expect("write overlay registry is not poisoned")
             .remove(&chat);
-        let Some(overlay) = overlay else {
+        let Some(staged) = overlay else {
             return;
         };
-        let outcome = overlay.materialize().await;
+        let outcome = staged.overlay.materialize().await;
         if outcome.written > 0 || outcome.deleted > 0 || outcome.refused > 0 {
             tracing::info!(
                 chat = %chat,
@@ -733,8 +784,9 @@ impl ConfiguredCodeExecutionProvider {
             .lock()
             .expect("write overlay registry is not poisoned")
             .get(&chat)
-            .map(|overlay| {
-                overlay
+            .map(|staged| {
+                staged
+                    .overlay
                     .slots()
                     .iter()
                     .map(|slot| (slot.source().to_path_buf(), slot.overlay().to_path_buf()))

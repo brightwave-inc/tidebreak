@@ -3917,6 +3917,7 @@ dependencies = [
  "chrono",
  "futures",
  "infer 0.22.0",
+ "openwave-code-execution",
  "openwave-core",
  "openwave-host-broker",
  "openwave-server",

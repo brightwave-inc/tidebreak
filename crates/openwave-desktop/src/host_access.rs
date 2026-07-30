@@ -26,6 +26,7 @@ pub(crate) struct HostAccess {
     store: OnceCell<std::sync::Arc<dyn Store>>,
     pub(super) control_plane: OnceCell<ControlPlaneClient>,
     pub(super) receipts: ReceiptStore,
+    staged_folders: OnceCell<std::sync::Arc<dyn openwave_server::code_execution::StagedFolders>>,
 }
 
 impl HostAccess {
@@ -45,7 +46,29 @@ impl HostAccess {
             store: OnceCell::new(),
             control_plane: OnceCell::new(),
             receipts,
+            staged_folders: OnceCell::new(),
         })
+    }
+
+    /// Install the server's per-turn exec staging registry.
+    ///
+    /// The folder tools run here, in the desktop process, while the overlay
+    /// they have to agree with is owned by the server's execution provider.
+    /// Handing the lookup across is what lets a folder listing answer from the
+    /// tree exec is writing into without the broker learning about turns.
+    pub(crate) fn initialize_staged_folders(
+        &self,
+        staged: std::sync::Arc<dyn openwave_server::code_execution::StagedFolders>,
+    ) -> Result<(), String> {
+        self.staged_folders
+            .set(staged)
+            .map_err(|_| "exec staging lookup was initialized more than once".to_owned())
+    }
+
+    pub(super) fn staged_folders(
+        &self,
+    ) -> Option<&std::sync::Arc<dyn openwave_server::code_execution::StagedFolders>> {
+        self.staged_folders.get()
     }
 
     pub(crate) fn initialize_store(&self, store: std::sync::Arc<dyn Store>) -> Result<(), String> {

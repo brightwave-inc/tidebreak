@@ -36,6 +36,7 @@ cap-fs-ext.workspace = true
 cap-std.workspace = true
 futures.workspace = true
 infer = { version = "=0.22.0", default-features = false }
+openwave-code-execution = { path = "../openwave-code-execution" }
 openwave-core = { path = "../openwave-core", default-features = false }
 openwave-host-broker = { path = "../openwave-host-broker" }
 openwave-server = { path = "../openwave-server" }

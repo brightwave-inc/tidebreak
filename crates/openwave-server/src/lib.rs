@@ -477,6 +477,9 @@ pub struct Server {
     token: Arc<str>,
     client_executor_token: Arc<str>,
     store: Arc<dyn Store>,
+    /// The live exec staging registry, handed to native embedders so the host
+    /// folder tools answer from the same per-turn copy exec writes into.
+    code_execution: Arc<code_execution::ConfiguredCodeExecutionProvider>,
     /// The live MCP runtime, handed to pairing so a profile that becomes
     /// managed mid-session takes its manual servers down immediately.
     mcp: Arc<mcp_config::McpRuntime>,
@@ -558,6 +561,15 @@ impl Server {
     /// to server-owned records before granting host capabilities.
     pub fn store(&self) -> Arc<dyn Store> {
         self.store.clone()
+    }
+
+    /// Where this server stages a turn's exec writes for granted folders.
+    ///
+    /// Native embedders execute the host folder tools themselves, and those
+    /// tools must not show the model the pre-turn folder while exec is working
+    /// in a staged copy of it. See [`code_execution::StagedFolders`].
+    pub fn staged_folders(&self) -> Arc<dyn code_execution::StagedFolders> {
+        self.code_execution.clone()
     }
 
     /// The handles the native deep-link pairing flow needs.
@@ -814,7 +826,7 @@ async fn bind_inner(
     )
     .with_blobs(state.blobs.clone())
     .with_mcp_runtime(state.mcp.clone())
-    .with_exec_folder_context(code_execution);
+    .with_exec_folder_context(code_execution.clone());
     let sandbox_worker_config = sandbox_agent_run_worker::SandboxAgentRunWorkerConfig::default()
         .with_delegated_file_executor(client_executor_id.is_some());
     let sandbox_agent_run_worker = sandbox_agent_run_worker::SandboxAgentRunWorker::with_attempts(
@@ -862,6 +874,7 @@ async fn bind_inner(
         token,
         client_executor_token,
         store: server_store,
+        code_execution,
         mcp: mcp_runtime,
         gateway: gateway_runtime,
         listener,
