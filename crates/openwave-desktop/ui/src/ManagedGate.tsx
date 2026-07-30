@@ -5,6 +5,7 @@ import type { ApiClient, GatewayStatus, ManagedPolicy } from "./api";
 import { Button } from "@/components/ui/button";
 import { Logomark } from "./Logomark";
 import { ManagedPolicyContext } from "./managedPolicy";
+import { onPairingChanged } from "./host";
 import { openSignInPage } from "./openSignInPage";
 import { WindowDragStrip } from "./WindowDragStrip";
 
@@ -176,29 +177,41 @@ export function ManagedGate({
   // that had already started refusing them. `/policy` is a local read, so the
   // session cadence is affordable.
   const watching = policyState.kind === "resolved";
+  const refreshPolicy = useCallback(() => {
+    void client
+      .getPolicy()
+      .then((next) => {
+        setPolicyState((current) =>
+          current.kind === "resolved" && samePolicy(current.policy, next)
+            ? current
+            : { kind: "resolved", policy: next },
+        );
+      })
+      .catch((err) => {
+        // An error *response* means the server says the policy is
+        // unreadable, which fails closed exactly as it does on first read.
+        // A transport failure says nothing, so the last answer stands.
+        if (httpStatusOf(err) !== null && httpStatusOf(err) !== 404) {
+          setPolicyState({ kind: "blocked" });
+        }
+      });
+  }, [client]);
   useEffect(() => {
     if (!watching) return;
-    const timer = window.setInterval(() => {
-      void client
-        .getPolicy()
-        .then((next) => {
-          setPolicyState((current) =>
-            current.kind === "resolved" && samePolicy(current.policy, next)
-              ? current
-              : { kind: "resolved", policy: next },
-          );
-        })
-        .catch((err) => {
-          // An error *response* means the server says the policy is
-          // unreadable, which fails closed exactly as it does on first read.
-          // A transport failure says nothing, so the last answer stands.
-          if (httpStatusOf(err) !== null && httpStatusOf(err) !== 404) {
-            setPolicyState({ kind: "blocked" });
-          }
-        });
-    }, SESSION_WATCH_MS);
+    const timer = window.setInterval(refreshPolicy, SESSION_WATCH_MS);
     return () => window.clearInterval(timer);
-  }, [client, watching]);
+  }, [watching, refreshPolicy]);
+
+  // The shell nudges when a provision link parks a pending pairing or a
+  // confirmed re-pair replaces one; refetching now instead of on the next
+  // tick is what makes the gate appear promptly after the user clicks a
+  // link or confirms the native dialog. The poll above stays the fallback —
+  // it still covers MDM flips and a nudge that fired before this
+  // subscription existed (cold start by link).
+  useEffect(() => {
+    if (!watching) return;
+    return onPairingChanged(refreshPolicy);
+  }, [watching, refreshPolicy]);
 
   const reload = useCallback(async () => {
     const next = await client.getGatewayStatus();

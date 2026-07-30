@@ -1,4 +1,5 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type { Chat } from "./api";
 
 export type ConnectedFolder = {
@@ -105,4 +106,20 @@ export async function openExternal(url: string): Promise<boolean> {
   if (!isTauri()) return false;
   await invoke("plugin:shell|open", { path: url });
   return true;
+}
+
+/**
+ * Subscribe to the shell's nudge that a pending gateway pairing was parked or
+ * replaced (a provision link, or a re-pair the user confirmed in the native
+ * dialog). The sign-in gate refetches policy on it instead of waiting out a
+ * poll tick. Returns an unsubscribe; no-op outside the native host, where no
+ * deep link can land. The emitter is `PAIRING_CHANGED_EVENT` in
+ * `crates/openwave-desktop/src/deep_link.rs`.
+ */
+export function onPairingChanged(handler: () => void): () => void {
+  if (!isTauri()) return () => {};
+  const subscription = listen("gateway:pairing-changed", () => handler());
+  return () => {
+    void subscription.then((unlisten) => unlisten());
+  };
 }

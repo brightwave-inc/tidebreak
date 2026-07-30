@@ -29,9 +29,12 @@
 //! policy write path. The webview cannot reach it either: the main window's
 //! capability denies `core:event:emit`, so a compromised renderer cannot
 //! forge the plugin's open-URL event; its influence stops at completing or
-//! dismissing the sign-in it can already perform.
+//! dismissing the sign-in it can already perform. Events flow the other
+//! direction only: after a registration parks a pairing, the shell emits a
+//! best-effort [`PAIRING_CHANGED_EVENT`] nudge so the gate refetches policy
+//! immediately instead of waiting out its poll tick.
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tokio::sync::{oneshot, watch};
@@ -183,6 +186,18 @@ fn provision_link(url: &tauri::Url) -> Result<ProvisionLink, String> {
     })
 }
 
+/// Renderer nudge emitted after a pending pairing is parked or replaced: the
+/// sign-in gate refetches `/policy` on it instead of waiting out a poll tick,
+/// which is what makes the gate appear promptly after a provision link or a
+/// confirmed re-pair. Best-effort — a webview that has not subscribed yet
+/// (cold start by link) is covered by the gate's polling fallback. The
+/// listener is `onPairingChanged` in `ui/src/host.ts`.
+const PAIRING_CHANGED_EVENT: &str = "gateway:pairing-changed";
+
+fn notify_pairing_changed(app: &tauri::AppHandle) {
+    let _ = app.emit(PAIRING_CHANGED_EVENT, ());
+}
+
 fn spawn_pairing(app: tauri::AppHandle, link: ProvisionLink) {
     tauri::async_runtime::spawn(async move {
         let origin = link.origin.clone();
@@ -203,6 +218,7 @@ fn spawn_pairing(app: tauri::AppHandle, link: ProvisionLink) {
         match openwave_server::register_pending_pairing(&handle, &link.gateway_url).await {
             Ok(PendingRegistration::Registered) => {
                 log_pairing(&app, &format!("pairing with {origin} awaits sign-in"));
+                notify_pairing_changed(&app);
             }
             Ok(PendingRegistration::AlreadyManaged) => {
                 log_pairing(&app, &format!("{origin} already manages this device"));
@@ -262,6 +278,7 @@ async fn confirm_and_replace(
                 app,
                 &format!("re-pairing with {} awaits sign-in", link.origin),
             );
+            notify_pairing_changed(app);
         }
         Ok(PendingRegistration::AlreadyManaged) => {
             log_pairing(app, &format!("{} already manages this device", link.origin));

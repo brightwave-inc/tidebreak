@@ -42,6 +42,23 @@ function api(overrides: Partial<Record<keyof ApiClient, unknown>> = {}) {
   } as unknown as ApiClient;
 }
 
+/** Captures the gate's subscription to the shell's pairing nudge so a test
+ * can fire it. Only `onPairingChanged` is replaced — everything else in the
+ * host module keeps its real plain-browser behavior. */
+const pairingNudge: { fire: (() => void) | null } = { fire: null };
+vi.mock("./host", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./host")>();
+  return {
+    ...actual,
+    onPairingChanged: (handler: () => void) => {
+      pairingNudge.fire = handler;
+      return () => {
+        pairingNudge.fire = null;
+      };
+    },
+  };
+});
+
 function mount(client: ApiClient) {
   return render(
     <ManagedGate client={client}>
@@ -451,5 +468,35 @@ describe("ManagedGate", () => {
       await screen.findByText(/browser authorization timed out/),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Connect/ })).toBeEnabled();
+  });
+
+  it("the shell's pairing nudge surfaces the gate without waiting out a poll tick", async () => {
+    const unmanaged: ManagedPolicy = {
+      managed: false,
+      source: "unmanaged",
+      misconfigured: false,
+    };
+    const client = api({
+      getPolicy: vi
+        .fn()
+        .mockResolvedValueOnce(unmanaged)
+        .mockResolvedValue({
+          ...unmanaged,
+          pending_gateway_url: "https://next-gateway.example/",
+        }),
+    });
+    mount(client);
+    expect(await screen.findByText("the open product")).toBeInTheDocument();
+
+    // No timer advance: the nudge alone must refetch and lower the gate.
+    await act(async () => {
+      pairingNudge.fire?.();
+    });
+    expect(
+      await screen.findByText("Connect to your model gateway"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("https://next-gateway.example/"),
+    ).toBeInTheDocument();
   });
 });
