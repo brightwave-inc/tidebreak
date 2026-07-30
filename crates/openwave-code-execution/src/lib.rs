@@ -16,6 +16,7 @@ mod e2b;
 mod http;
 mod local;
 mod output;
+mod preview;
 mod receipt;
 mod remote;
 pub mod sync;
@@ -25,6 +26,7 @@ mod types;
 pub use daytona::{DaytonaCredential, DaytonaExecutionProvider, DAYTONA_CREDENTIAL_KEY};
 pub use e2b::{E2BCredential, E2BExecutionProvider, E2B_CREDENTIAL_KEY};
 pub use local::LocalExecutionProvider;
+pub use preview::{scan_preview_directory, PreviewScan};
 pub use remote::RemoteSessionPool;
 pub use tool::{ExecTool, EXEC_TOOL_NAME};
 pub use types::{

@@ -54,6 +54,7 @@ async fn accept_deliverable_call(store: &DbStore, chat_id: ChatId, call_id: Call
             execution: ToolCallExecution::Server,
             status: ToolCallStatus::Pending,
             result: None,
+            result_preview: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,

@@ -749,6 +749,7 @@ async fn a_retained_result_projection_survives_reopening_the_chat() {
             execution: ToolCallExecution::Server,
             status: ToolCallStatus::Pending,
             result: None,
+            result_preview: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -779,6 +780,10 @@ async fn a_retained_result_projection_survives_reopening_the_chat() {
             .await
             .unwrap(),
         openwave_core::ResolveToolCallOutcome::Resolved
+    );
+    assert_eq!(
+        store.list_tool_calls(chat.id).await.unwrap()[0].result_preview,
+        Some(preview.clone())
     );
 
     let response = router
@@ -850,6 +855,7 @@ async fn transcript_tool_activity_is_allowlisted_and_redacts_canonical_tool_data
             execution: ToolCallExecution::Server,
             status: ToolCallStatus::Pending,
             result: None,
+            result_preview: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -890,6 +896,7 @@ async fn transcript_tool_activity_is_allowlisted_and_redacts_canonical_tool_data
             execution: ToolCallExecution::Server,
             status: ToolCallStatus::Pending,
             result: None,
+            result_preview: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -928,6 +935,7 @@ async fn transcript_tool_activity_is_allowlisted_and_redacts_canonical_tool_data
             execution: ToolCallExecution::Server,
             status: ToolCallStatus::Pending,
             result: None,
+            result_preview: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -968,6 +976,7 @@ async fn transcript_tool_activity_is_allowlisted_and_redacts_canonical_tool_data
             execution: ToolCallExecution::Server,
             status: ToolCallStatus::Pending,
             result: None,
+            result_preview: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -990,6 +999,7 @@ async fn transcript_tool_activity_is_allowlisted_and_redacts_canonical_tool_data
             execution: ToolCallExecution::Server,
             status: ToolCallStatus::Pending,
             result: None,
+            result_preview: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,

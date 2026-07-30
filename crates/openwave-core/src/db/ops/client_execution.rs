@@ -602,6 +602,8 @@ async fn resolve_tool_call(
                 is_error: resolution.status() != ToolCallStatus::Completed,
                 error_category: None,
                 ui_view: None,
+                images: Vec::new(),
+                image_data: crate::ImageAttachments::new(),
             },
         )
     });
@@ -687,6 +689,8 @@ fn client_completion_event(
             // guess about a category the resolution never named.
             error_category: None,
             ui_view: None,
+            images: Vec::new(),
+            image_data: crate::ImageAttachments::new(),
         },
         action: crate::ToolActionPreview::build(&resolved.name, &resolved.arguments),
         result: preview.cloned(),
@@ -951,6 +955,13 @@ pub(in crate::db) fn tool_call_from_model(
         execution: execution_from_db(&model.execution)?,
         status: status_from_db(&model.status)?,
         result: model.result,
+        result_preview: model
+            .result_preview
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| {
+                AgentError::Store(format!("invalid stored tool result preview: {error}"))
+            })?,
         error_code: model.error_code,
         error_detail: model.error_detail,
         client_executor_id: model.client_executor_id,

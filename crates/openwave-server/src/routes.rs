@@ -1982,6 +1982,7 @@ mod activity_tests {
             execution: ToolCallExecution::Client,
             status: ToolCallStatus::Pending,
             result: None,
+            result_preview: None,
             error_code: Some("private-error-code".into()),
             error_detail: Some("private error detail".into()),
             client_executor_id: Some(uuid::Uuid::new_v4()),

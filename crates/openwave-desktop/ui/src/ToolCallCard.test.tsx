@@ -122,6 +122,41 @@ describe("ToolCommandCard", () => {
       expect(visibleText(markup)).toContain(badge);
     }
   });
+
+  it("renders exec preview images inside the output surface", () => {
+    const markup = renderToStaticMarkup(
+      <ToolCommandCard
+        name="exec"
+        status="completed"
+        preview={preview}
+        result={{
+          tool: "exec",
+          exitCode: 0,
+          timedOut: false,
+          outputTruncated: false,
+          stdout: "",
+          stderr: "",
+          images: [
+            {
+              attachmentId: "preview-1",
+              mediaType: "image/png",
+              width: 800,
+              height: 600,
+            },
+          ],
+        }}
+        imageClient={{
+          getChatImageAttachment: async () => new Blob([], { type: "image/png" }),
+        }}
+        chatId="chat-1"
+      />,
+    );
+
+    expect(markup).toContain('aria-label="Command preview images"');
+    expect(markup).toContain(
+      'aria-label="Command preview 1: 800 by 600 pixels"',
+    );
+  });
 });
 
 describe("toolApprovalPresentation", () => {

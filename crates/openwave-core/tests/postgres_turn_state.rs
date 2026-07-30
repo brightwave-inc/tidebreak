@@ -2078,6 +2078,7 @@ async fn postgres_client_execution_claim_has_one_winner() {
         execution: ToolCallExecution::Client,
         status: ToolCallStatus::Pending,
         result: None,
+        result_preview: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,

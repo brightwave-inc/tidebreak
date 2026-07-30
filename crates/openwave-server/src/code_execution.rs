@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use openwave_code_execution::{
     sync, CodeExecutionError, CodeExecutionProvider, CodeExecutionProviderKind,
     CodeExecutionRequest, CodeExecutionResponse, DaytonaCredential, DaytonaExecutionProvider,
-    E2BCredential, E2BExecutionProvider, ExecutionWorkspaceId, LocalExecutionProvider,
+    E2BCredential, E2BExecutionProvider, ExecutionWorkspaceId, LocalExecutionProvider, PreviewScan,
     RemoteSessionPool, WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing,
     DAYTONA_CREDENTIAL_KEY, E2B_CREDENTIAL_KEY,
 };
@@ -642,6 +642,8 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
         request: CodeExecutionRequest,
     ) -> std::result::Result<CodeExecutionResponse, CodeExecutionError> {
         let (kind, provider) = self.resolve().await?;
+        let host_dir = self.scratch_root.join(request.workspace_id.as_str());
+        prepare_execution_directories(&host_dir, kind != CodeExecutionProviderKind::Local).await?;
         // A remote sandbox has its own filesystem, but the model is shown one
         // path vocabulary across the file tools and exec. Mirror the chat's
         // private scratch into the workspace before the command and back out
@@ -655,7 +657,6 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
         let Some(lifecycle) = lifecycle else {
             return provider.execute(request).await;
         };
-        let host_dir = self.scratch_root.join(request.workspace_id.as_str());
         // A failed push fails the execution: running against files the model
         // believes are present would answer with misleading not-found errors.
         let mut notes = sync::push_host_dir(lifecycle, &request.workspace_id, &host_dir)
@@ -674,10 +675,49 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
         Ok(response)
     }
 
+    async fn collect_preview_images(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+    ) -> std::result::Result<PreviewScan, CodeExecutionError> {
+        let preview_dir = self.scratch_root.join(workspace.as_str()).join("preview");
+        tokio::task::spawn_blocking(move || {
+            openwave_code_execution::scan_preview_directory(&preview_dir)
+        })
+        .await
+        .map_err(|_| CodeExecutionError::Sandbox("preview scan task failed".into()))
+    }
+
     // `workspace_lifecycle` stays `None` here on purpose: the capability of
     // this late-binding wrapper depends on the configuration read at call
     // time, which the synchronous trait flag cannot express. Host callers use
     // [`ConfiguredCodeExecutionProvider::workspace`] instead.
+}
+
+async fn prepare_execution_directories(
+    host_dir: &std::path::Path,
+    mirrored: bool,
+) -> std::result::Result<(), CodeExecutionError> {
+    for name in ["output", "preview", "documents"] {
+        let directory = host_dir.join(name);
+        tokio::fs::create_dir_all(&directory).await.map_err(|_| {
+            CodeExecutionError::Sandbox(format!(
+                "private workspace directory '{name}/' is unavailable"
+            ))
+        })?;
+        if mirrored {
+            // The sync protocol mirrors files rather than empty directories.
+            // A hidden zero-byte marker makes the conventional directories
+            // exist in managed workspaces without becoming a user artifact.
+            tokio::fs::write(directory.join(".openwave-directory"), [])
+                .await
+                .map_err(|_| {
+                    CodeExecutionError::Sandbox(format!(
+                        "private workspace directory '{name}/' is unavailable"
+                    ))
+                })?;
+        }
+    }
+    Ok(())
 }
 
 /// A resolved workspace-lifecycle handle over the currently selected provider.
@@ -779,6 +819,19 @@ mod tests {
         .await
         .unwrap();
         (store, dir)
+    }
+
+    #[tokio::test]
+    async fn exec_workspace_conventions_exist_before_a_command_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        prepare_execution_directories(dir.path(), true)
+            .await
+            .unwrap();
+
+        for name in ["output", "preview", "documents"] {
+            assert!(dir.path().join(name).is_dir());
+            assert!(dir.path().join(name).join(".openwave-directory").is_file());
+        }
     }
 
     #[test]

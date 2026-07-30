@@ -2263,6 +2263,10 @@ pub struct ToolCallRecord {
     pub status: ToolCallStatus,
     /// Result text fed back to the model once terminal.
     pub result: Option<String>,
+    /// Closed projection persisted with the call, including exec preview image
+    /// references. Absent for historical rows and tools without a rich result.
+    #[serde(default)]
+    pub result_preview: Option<crate::ToolResultPreview>,
     /// Stable machine-readable failure code, only for `failed`.
     pub error_code: Option<String>,
     /// Bounded diagnostic failure detail, only for `failed`.

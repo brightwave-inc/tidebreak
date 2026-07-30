@@ -332,6 +332,18 @@ pub trait CodeExecutionProvider: Send + Sync {
         request: CodeExecutionRequest,
     ) -> Result<CodeExecutionResponse, CodeExecutionError>;
 
+    /// Collect bounded visual previews after a successful execution.
+    ///
+    /// Providers without a host-visible durable workspace return an empty scan.
+    /// The configured server wrapper overrides this after mirroring a managed
+    /// workspace back into private scratch.
+    async fn collect_preview_images(
+        &self,
+        _workspace: &ExecutionWorkspaceId,
+    ) -> Result<crate::PreviewScan, CodeExecutionError> {
+        Ok(crate::PreviewScan::default())
+    }
+
     /// The provider's optional durable-workspace capability. `None` means the
     /// backend has no durable session surface; callers must degrade instead of
     /// treating the absence as an error.

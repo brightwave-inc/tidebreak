@@ -51,6 +51,26 @@ where
     if by_document {
         return Ok(true);
     }
+    let by_tool_preview = entities::tool_call::Entity::find()
+        .select_only()
+        .column(entities::tool_call::Column::ResultPreview)
+        .filter(entities::tool_call::Column::ResultPreview.is_not_null())
+        .into_tuple::<Option<serde_json::Value>>()
+        .all(conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .flatten()
+        .filter_map(|value| serde_json::from_value::<crate::ToolResultPreview>(value).ok())
+        .any(|preview| match preview {
+            crate::ToolResultPreview::Exec { images, .. } => {
+                images.iter().any(|image| image.blob_id == blob_id)
+            }
+            _ => false,
+        });
+    if by_tool_preview {
+        return Ok(true);
+    }
     let by_attachment = entities::message_attachment::Entity::find()
         .select_only()
         .column(entities::message_attachment::Column::MessageId)

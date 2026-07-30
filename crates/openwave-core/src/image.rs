@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 use uuid::Uuid;
 
 /// Largest attachment accepted in either dimension.
@@ -51,7 +52,7 @@ pub const MAX_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
 /// Vector and exotic raster formats are excluded rather than passed through:
 /// an unsupported type must fail at the trusted ingest boundary, where the user
 /// can still act on it, not deep inside a turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ImageMediaType {
     /// `image/png`
@@ -98,6 +99,26 @@ impl ImageMediaType {
             None
         }
     }
+
+    /// Identify a supported raster format from its file signature.
+    ///
+    /// This deliberately recognizes only the provider-safe formats represented
+    /// by this enum. Callers that accept a filename fallback can apply it after
+    /// this byte authority returns `None`.
+    #[must_use]
+    pub fn sniff(bytes: &[u8]) -> Option<Self> {
+        if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            Some(Self::Png)
+        } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+            Some(Self::Jpeg)
+        } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+            Some(Self::Webp)
+        } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+            Some(Self::Gif)
+        } else {
+            None
+        }
+    }
 }
 
 impl fmt::Display for ImageMediaType {
@@ -111,7 +132,7 @@ impl fmt::Display for ImageMediaType {
 /// Everything here is safe to persist, log, and expose to a renderer. The blob
 /// id is an opaque content-derived UUID, never a filesystem path, so it reveals
 /// nothing about where the bytes live on disk.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct ImageRef {
     /// Content-addressed blob holding the pixels.
     pub blob_id: Uuid,
