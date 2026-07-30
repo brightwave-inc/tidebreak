@@ -23,6 +23,7 @@ import { Logomark } from "./Logomark";
 import { ManagedGate } from "./ManagedGate";
 import { resolvedRoleKey } from "./ModelSelection";
 import { Titlebar } from "./Titlebar";
+import { WindowDragStrip } from "./WindowDragStrip";
 import { useActiveChatId } from "./useActiveChatId";
 import { useChatPromptWatcher } from "./useChatPromptWatcher";
 import { useShellShortcuts } from "./ShellShortcuts";
@@ -260,6 +261,7 @@ export function AppShell() {
   if (bootError) {
     return (
       <div className="boot">
+        <WindowDragStrip />
         <div className="boot-brand">
           <Logomark />
           <h1>OpenWave</h1>
@@ -272,6 +274,7 @@ export function AppShell() {
   if (!client) {
     return (
       <div className="boot">
+        <WindowDragStrip />
         <div className="boot-brand">
           <Logomark />
           <h1>OpenWave</h1>
