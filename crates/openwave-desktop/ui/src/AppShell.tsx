@@ -26,7 +26,7 @@ import { Titlebar } from "./Titlebar";
 import { WindowDragStrip } from "./WindowDragStrip";
 import { useActiveChatId } from "./useActiveChatId";
 import { useChatPromptWatcher } from "./useChatPromptWatcher";
-import { useShellShortcuts } from "./ShellShortcuts";
+import { useShellShortcuts, type ShellShortcutHandlers } from "./ShellShortcuts";
 import { ShortcutsDialog } from "./ShortcutsDialog";
 import { useUiStore } from "./UiStore";
 import { useDesktopUpdates } from "./updates";
@@ -41,6 +41,29 @@ function focusComposer(): void {
 // Store actions are stable for the store's lifetime; these handles are for
 // calling actions only — never read state fields from them.
 const chatListActions = useChatListStore.getState();
+
+/**
+ * The shell hooks that do work on their own — the parked-prompt poll and the
+ * shortcuts that create chats. Mounted as a child of the managed gate rather
+ * than in the shell itself, so that while the sign-in gate is up the app does
+ * none of it: the gate is a hard stop, not a curtain in front of a running
+ * app.
+ */
+function GatedShellHooks({
+  client,
+  chatId,
+  shortcuts,
+}: {
+  client: ApiClient;
+  chatId: string | null;
+  shortcuts: ShellShortcutHandlers;
+}) {
+  // Watched here rather than in the conversation, so that the agent parking a
+  // turn on a question is noticed whatever screen the reader is on.
+  useChatPromptWatcher(client, chatId);
+  useShellShortcuts(shortcuts);
+  return null;
+}
 
 /**
  * The frame every route hangs in: the titlebar, the window, and the connection
@@ -75,14 +98,11 @@ export function AppShell() {
   const desktopUpdates = useDesktopUpdates();
   const zoom = useInterfaceZoom();
 
-  // Watched here rather than in the conversation, so that the agent parking a
-  // turn on a question is noticed whatever screen the reader is on.
-  useChatPromptWatcher(client, openChatId);
-
-  // Shell shortcuts live here because these actions outlive any one route:
-  // toggling the frame, starting a chat, reaching the composer, and scaling the
-  // window all work wherever the reader is.
-  useShellShortcuts({
+  // Shell shortcuts are defined here because these actions outlive any one
+  // route: toggling the frame, starting a chat, reaching the composer, and
+  // scaling the window all work wherever the reader is. They are installed
+  // below the gate, by GatedShellHooks.
+  const shellShortcuts: ShellShortcutHandlers = {
     "toggle-sidebar": () => useUiStore.getState().toggleSidebar(),
     "new-chat": () => void onNewChat(),
     "focus-composer": focusComposer,
@@ -90,7 +110,7 @@ export function AppShell() {
     "zoom-out": zoom.zoomOut,
     "zoom-reset": zoom.resetZoom,
     "show-shortcuts": () => setShortcutsOpen(true),
-  });
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -286,6 +306,11 @@ export function AppShell() {
 
   return (
     <ManagedGate client={client}>
+      <GatedShellHooks
+        client={client}
+        chatId={openChatId}
+        shortcuts={shellShortcuts}
+      />
       <AppContextProvider
         value={{
           client,

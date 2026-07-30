@@ -40,7 +40,7 @@
   "plugins": {
     "deep-link": {
       "desktop": {
-        "schemes": ["openwave"]
+        "schemes": ["openwave", "openwave-dev"]
       }
     },
     "updater": {
