@@ -1070,6 +1070,9 @@ pub struct SandboxProvision {
     pub state: SandboxProvisionState,
     /// The backend's own reference for the sandbox, present once committed.
     pub handle: Option<String>,
+    /// A well-formed result that arrived after the run was already terminal:
+    /// retained as non-authoritative evidence, never committed.
+    pub late_result_evidence: Option<String>,
     /// When the provisioning window lapses: an `Intended` record older than
     /// this failed its admission whether or not a create ever reached the
     /// provider.
@@ -1667,6 +1670,23 @@ pub trait Store: Send + Sync {
 
     /// Every record currently owing a teardown.
     async fn list_sandbox_teardowns(&self) -> Result<Vec<SandboxProvision>> {
+        agent_run_storage_unavailable()
+    }
+
+    /// One run's provisioning record, if any.
+    async fn get_sandbox_provision(&self, _run_id: uuid::Uuid) -> Result<Option<SandboxProvision>> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Retain a well-formed result that failed the fenced commit predicate —
+    /// the run was already terminal or the lease was gone — as
+    /// non-authoritative evidence on the provisioning record. First writer
+    /// wins; returns whether this call retained it. Never commits anything.
+    async fn record_late_container_result_evidence(
+        &self,
+        _run_id: uuid::Uuid,
+        _text: &str,
+    ) -> Result<bool> {
         agent_run_storage_unavailable()
     }
 

@@ -93,7 +93,50 @@ impl MigratorTrait for Migrator {
             Box::new(RetireDocumentPipeline),
             Box::new(AddMessageDocumentAttachments),
             Box::new(AddSandboxProvision),
+            Box::new(AddLateResultEvidence),
         ]
+    }
+}
+
+/// Adds the late-result evidence column to the sandbox provisioning record
+/// (issue #920): a well-formed result that arrives after its container run is
+/// already terminal fails the fenced commit predicate — it must never commit —
+/// but it is still evidence of what the container produced, retained here for
+/// diagnosis. Purely additive nullable column with a symmetric `down`.
+struct AddLateResultEvidence;
+
+impl MigrationName for AddLateResultEvidence {
+    fn name(&self) -> &str {
+        "m20260730_000034_add_late_result_evidence"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddLateResultEvidence {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(SandboxProvision::Table)
+                    .add_column(
+                        ColumnDef::new(SandboxProvision::LateResultEvidence)
+                            .text()
+                            .null(),
+                    )
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(SandboxProvision::Table)
+                    .drop_column(SandboxProvision::LateResultEvidence)
+                    .to_owned(),
+            )
+            .await
     }
 }
 
@@ -8801,6 +8844,7 @@ enum SandboxProvision {
     Tag,
     State,
     Handle,
+    LateResultEvidence,
     WindowExpiresAt,
     CreatedAt,
     UpdatedAt,

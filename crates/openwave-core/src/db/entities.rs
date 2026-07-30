@@ -311,6 +311,9 @@ pub mod sandbox_provision {
         pub state: String,
         /// The backend's sandbox reference, `NULL` until committed.
         pub handle: Option<String>,
+        /// A well-formed result that arrived after the run was already
+        /// terminal: retained as non-authoritative evidence, never committed.
+        pub late_result_evidence: Option<String>,
         /// When the provisioning window lapses for an `intended` record.
         pub window_expires_at: DateTimeUtc,
         pub created_at: DateTimeUtc,

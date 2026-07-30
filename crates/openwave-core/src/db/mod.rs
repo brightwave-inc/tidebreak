@@ -774,6 +774,21 @@ impl Store for DbStore {
         ops::sandbox_provision::list_teardowns(self).await
     }
 
+    async fn get_sandbox_provision(
+        &self,
+        run_id: uuid::Uuid,
+    ) -> Result<Option<crate::storage::SandboxProvision>> {
+        ops::sandbox_provision::get(self, run_id).await
+    }
+
+    async fn record_late_container_result_evidence(
+        &self,
+        run_id: uuid::Uuid,
+        text: &str,
+    ) -> Result<bool> {
+        ops::sandbox_provision::record_late_result_evidence(self, run_id, text).await
+    }
+
     async fn live_sandbox_tags(&self) -> Result<Vec<String>> {
         ops::sandbox_provision::live_tags(self).await
     }
