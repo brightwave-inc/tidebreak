@@ -272,45 +272,56 @@ export function MessageList({
   // flight, so when the trailing turn is pinned they ride inside its wrapper.
   const trailing = (
     <>
-      {folderAccessRequests.map((request) => (
-        <FolderAccessCard
-          key={request.callId}
-          request={request}
-          nativeHost={nativeHost}
-          nativeBusy={nativeBusy}
-          working={resolvingFolderCalls.has(request.callId)}
-          error={folderAccessErrors[request.callId]}
-          onDecision={(decision) =>
-            onFolderAccessDecision(request.callId, decision)
-          }
-          onCancel={() => onFolderAccessCancel(request.callId, request.turnId)}
-        />
-      ))}
-      {outputWritebackRequests.map((request) => (
-        <OutputWritebackCard
-          key={request.callId}
-          request={request}
-          nativeHost={nativeHost}
-          working={resolvingOutputWritebackCalls.has(request.callId)}
-          error={outputWritebackErrors[request.callId]}
-          onDecision={(decision) =>
-            onOutputWritebackDecision(request.callId, decision)
-          }
-          onCancel={() =>
-            onOutputWritebackCancel(request.callId, request.turnId)
-          }
-        />
-      ))}
-      {userQuestionRequests.map((request) => (
-        <UserQuestionsCard
-          key={request.callId}
-          request={request}
-          working={answeringQuestionCalls.has(request.callId)}
-          error={userQuestionErrors[request.callId]}
-          onAnswer={(answers) => onAnswerUserQuestions(request.callId, answers)}
-          onCancel={() => onUserQuestionsCancel(request.turnId)}
-        />
-      ))}
+      {folderAccessRequests.map((request) =>
+        isolatedCard(
+          `folder-access-${request.callId}`,
+          `${resolvingFolderCalls.has(request.callId)} ${folderAccessErrors[request.callId] ?? ""}`,
+          <FolderAccessCard
+            request={request}
+            nativeHost={nativeHost}
+            nativeBusy={nativeBusy}
+            working={resolvingFolderCalls.has(request.callId)}
+            error={folderAccessErrors[request.callId]}
+            onDecision={(decision) =>
+              onFolderAccessDecision(request.callId, decision)
+            }
+            onCancel={() => onFolderAccessCancel(request.callId, request.turnId)}
+          />,
+        ),
+      )}
+      {outputWritebackRequests.map((request) =>
+        isolatedCard(
+          `output-writeback-${request.callId}`,
+          `${resolvingOutputWritebackCalls.has(request.callId)} ${outputWritebackErrors[request.callId] ?? ""}`,
+          <OutputWritebackCard
+            request={request}
+            nativeHost={nativeHost}
+            working={resolvingOutputWritebackCalls.has(request.callId)}
+            error={outputWritebackErrors[request.callId]}
+            onDecision={(decision) =>
+              onOutputWritebackDecision(request.callId, decision)
+            }
+            onCancel={() =>
+              onOutputWritebackCancel(request.callId, request.turnId)
+            }
+          />,
+        ),
+      )}
+      {userQuestionRequests.map((request) =>
+        isolatedCard(
+          `user-questions-${request.callId}`,
+          `${answeringQuestionCalls.has(request.callId)} ${userQuestionErrors[request.callId] ?? ""}`,
+          <UserQuestionsCard
+            request={request}
+            working={answeringQuestionCalls.has(request.callId)}
+            error={userQuestionErrors[request.callId]}
+            onAnswer={(answers) =>
+              onAnswerUserQuestions(request.callId, answers)
+            }
+            onCancel={() => onUserQuestionsCancel(request.turnId)}
+          />,
+        ),
+      )}
       {shouldShowAssistantWorking(
         messages,
         busy,
@@ -532,9 +543,11 @@ export function groupMessageItems(
  * One card, contained.
  *
  * Cards render model-influenced data through several defensive parsers, and one
- * of them being wrong must not cost the card next to it. The sibling that makes
- * this matter is the approval prompt: a phase parked on a decision that renders
- * as nothing leaves the reader with no way to answer and no explanation.
+ * of them being wrong must not cost the card next to it. The siblings that make
+ * this matter are the cards the turn is waiting on — an approval prompt, a
+ * folder-access request, a question put to the user. A pending decision that
+ * renders as nothing leaves the reader with no way to answer, no explanation,
+ * and a turn that cannot proceed.
  *
  * `signature` is the data the card draws on, reduced to what decides whether it
  * can render, so a card that threw mid-stream is retried when its call moves on
@@ -556,12 +569,37 @@ function isolatedCard(
   );
 }
 
+/** What deciding a card needs beyond the entry it is deciding about. */
+type CardContext = {
+  parked: Set<string>;
+  onApproval: (
+    callId: string,
+    decision: "approve" | "reject",
+    grant: ApprovalGrantRung | null,
+  ) => void;
+  approvalState?: {
+    decidingApprovalCalls: Set<string>;
+    approvalErrors: Record<string, string>;
+    grantScope?: GrantScopeName;
+  };
+  chatId?: string;
+  imageClient?: Pick<ApiClient, "getChatImageAttachment">;
+};
+
 /**
  * The cards that hang below a phase, always visible.
  *
  * A call earns one by having something a line of text can't carry: a command to
  * read, or a decision to make. Anything a card would show that the rail already
  * says stays in the rail.
+ *
+ * Total by construction. Each card's element is built inside its own `try`,
+ * because this runs during the transcript's render, where a throw is not caught
+ * by the boundaries the cards themselves carry — it escapes to the app-level
+ * boundary and blanks the window. Catching around the whole list would at least
+ * keep the app up, but it would still cost every card in the phase, including
+ * the pending decision the turn is waiting on; per entry, a result the renderer
+ * cannot make sense of costs only its own card.
  */
 function surfacedCards(
   phase: ChatMessage[],
@@ -579,87 +617,100 @@ function surfacedCards(
   chatId?: string,
   imageClient?: Pick<ApiClient, "getChatImageAttachment">,
 ): ReactNode[] {
+  const context: CardContext = {
+    parked,
+    onApproval,
+    approvalState,
+    chatId,
+    imageClient,
+  };
   const cards: ReactNode[] = [];
   // In the order the calls happened, so the cards read as a sequence rather
   // than as two piles sorted by what kind of card they are.
-  for (const entry of phase) {
-    if (entry.role === "approval") {
-      if (entry.resolved) continue;
-      cards.push(
-        isolatedCard(
-          entry.id,
-          `${entry.canApprove} ${approvalState?.approvalErrors[entry.callId] ?? ""}`,
-          <ApprovalCard
-            callId={entry.callId}
-            summary={entry.summary}
-            preview={entry.preview ?? null}
-            canApprove={entry.canApprove}
-            canRemember={entry.canRemember}
-            grantScope={approvalState?.grantScope ?? "chat"}
-            autoJudging={entry.autoJudging ?? false}
-            prefixRungs={entry.prefixRungs ?? []}
-            deciding={
-              approvalState?.decidingApprovalCalls.has(entry.callId) ?? false
-            }
-            error={approvalState?.approvalErrors[entry.callId]}
-            onDecide={onApproval}
-          />,
-        ),
-      );
-      continue;
+  phase.forEach((entry, entryIndex) => {
+    let card: ReactNode = null;
+    try {
+      card = surfacedCard(entry, context);
+    } catch (error) {
+      console.error("tool result card could not be built", error);
+      // The entry's own id may be the unreadable part, so the placeholder is
+      // keyed on its position in the phase.
+      card = <ToolActivityUnavailable key={`card-${entryIndex}`} />;
     }
-    if (entry.role !== "tool") continue;
-    if (
-      entry.result?.tool === "web_search_provider_required" &&
-      !parked.has(entry.callId)
-    ) {
-      cards.push(isolatedCard(entry.id, "", <WebSearchProviderRequiredCard />));
-      continue;
-    }
-    // An MCP App view is keyed on the *result*: the tool has no action
-    // preview, and its card exists to show what the server's declared view
-    // renders — inside the sandbox — not to restate arguments or output.
-    if (entry.result?.tool === "mcp_app" && !parked.has(entry.callId)) {
-      cards.push(
-        isolatedCard(
-          entry.id,
-          `${entry.result.server} ${entry.result.resourceUri}`,
-          <McpAppCard
-            server={entry.result.server}
-            resourceUri={entry.result.resourceUri}
-            chatId={chatId}
-            callId={entry.callId}
-          />,
-        ),
-      );
-      continue;
-    }
-    // What a call found, read, or wrote renders inside the expanded rail,
-    // under its own row — collapsed, a phase is one line, and a run of
-    // searches must not stack a column of standing cards.
-    // The approval card already shows this command and owns the decision.
-    if (!entry.preview || parked.has(entry.callId)) continue;
-    // A card earns its place by carrying something the rail cannot: a command
-    // and its output. A search's query is fully said by the rail line and by
-    // the approval card that asked about it, so it does not get an
-    // exec-shaped card with tabs and an exit code.
-    if (entry.preview.tool !== "exec") continue;
-    cards.push(
-      isolatedCard(
-        entry.id,
-        `${entry.status} ${entry.result?.tool ?? ""}`,
-        <ToolCommandCard
-          name={entry.name}
-          status={entry.status}
-          preview={entry.preview}
-          result={entry.result?.tool === "exec" ? entry.result : null}
-          imageClient={imageClient}
-          chatId={chatId}
-        />,
-      ),
+    if (card !== null) cards.push(card);
+  });
+  return cards;
+}
+
+/** The card one entry earns, or `null` when it earns none. */
+function surfacedCard(entry: ChatMessage, context: CardContext): ReactNode {
+  const { parked, onApproval, approvalState, chatId, imageClient } = context;
+  if (entry.role === "approval") {
+    if (entry.resolved) return null;
+    return isolatedCard(
+      entry.id,
+      `${entry.canApprove} ${approvalState?.approvalErrors[entry.callId] ?? ""}`,
+      <ApprovalCard
+        callId={entry.callId}
+        summary={entry.summary}
+        preview={entry.preview ?? null}
+        canApprove={entry.canApprove}
+        canRemember={entry.canRemember}
+        grantScope={approvalState?.grantScope ?? "chat"}
+        autoJudging={entry.autoJudging ?? false}
+        prefixRungs={entry.prefixRungs ?? []}
+        deciding={
+          approvalState?.decidingApprovalCalls.has(entry.callId) ?? false
+        }
+        error={approvalState?.approvalErrors[entry.callId]}
+        onDecide={onApproval}
+      />,
     );
   }
-  return cards;
+  if (entry.role !== "tool") return null;
+  if (
+    entry.result?.tool === "web_search_provider_required" &&
+    !parked.has(entry.callId)
+  ) {
+    return isolatedCard(entry.id, "", <WebSearchProviderRequiredCard />);
+  }
+  // An MCP App view is keyed on the *result*: the tool has no action
+  // preview, and its card exists to show what the server's declared view
+  // renders — inside the sandbox — not to restate arguments or output.
+  if (entry.result?.tool === "mcp_app" && !parked.has(entry.callId)) {
+    return isolatedCard(
+      entry.id,
+      `${entry.result.server} ${entry.result.resourceUri}`,
+      <McpAppCard
+        server={entry.result.server}
+        resourceUri={entry.result.resourceUri}
+        chatId={chatId}
+        callId={entry.callId}
+      />,
+    );
+  }
+  // What a call found, read, or wrote renders inside the expanded rail,
+  // under its own row — collapsed, a phase is one line, and a run of
+  // searches must not stack a column of standing cards.
+  // The approval card already shows this command and owns the decision.
+  if (!entry.preview || parked.has(entry.callId)) return null;
+  // A card earns its place by carrying something the rail cannot: a command
+  // and its output. A search's query is fully said by the rail line and by
+  // the approval card that asked about it, so it does not get an
+  // exec-shaped card with tabs and an exit code.
+  if (entry.preview.tool !== "exec") return null;
+  return isolatedCard(
+    entry.id,
+    `${entry.status} ${entry.result?.tool ?? ""}`,
+    <ToolCommandCard
+      name={entry.name}
+      status={entry.status}
+      preview={entry.preview}
+      result={entry.result?.tool === "exec" ? entry.result : null}
+      imageClient={imageClient}
+      chatId={chatId}
+    />,
+  );
 }
 
 /**
@@ -765,16 +816,26 @@ function MessageBubbleImpl({
     return (
       <div className="message-user-frame">
         <article className="message message-user" aria-label="You">
-          {message.images && message.images.length > 0 && imageClient && chatId && (
-            <TranscriptImageAttachments
-              client={imageClient}
-              chatId={chatId}
-              images={message.images}
-            />
-          )}
-          {message.files && message.files.length > 0 && (
-            <TranscriptFileAttachments files={message.files} />
-          )}
+          {message.images &&
+            message.images.length > 0 &&
+            imageClient &&
+            chatId &&
+            isolatedCard(
+              `${message.id}-images`,
+              message.images.map((image) => image.attachmentId).join(" "),
+              <TranscriptImageAttachments
+                client={imageClient}
+                chatId={chatId}
+                images={message.images}
+              />,
+            )}
+          {message.files &&
+            message.files.length > 0 &&
+            isolatedCard(
+              `${message.id}-files`,
+              message.files.map((file) => file.documentId).join(" "),
+              <TranscriptFileAttachments files={message.files} />,
+            )}
           <MessageMarkdown>{message.text}</MessageMarkdown>
         </article>
         <MessageFooter
