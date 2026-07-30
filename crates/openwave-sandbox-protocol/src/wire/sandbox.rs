@@ -621,11 +621,31 @@ mod tests {
             attach(first_host, &secret, EventCursor::START).await;
 
         // The host reconnects; the second connection becomes the live one while
-        // the first is still readable.
+        // the first is still readable. `attach` returning proves only that the
+        // handshake completed on the test side, so before touching the first
+        // connection, a ping-pong on the second proves its serve loop — which
+        // runs only after the connection is installed as live — is up.
         let (second_host, second_sandbox) = tokio::io::duplex(4096);
         tokio::spawn(super::serve_connection(second_sandbox, run.clone()));
-        let (_second_reader, _second_writer) =
+        let (mut second_reader, mut second_writer) =
             attach(second_host, &secret, EventCursor::START).await;
+        write_frame(
+            &mut second_writer,
+            &WireFrame::Control(ControlFrame::Ping { nonce: 0 }),
+        )
+        .await
+        .expect("send ping on the live connection");
+        let pong = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            read_frame(&mut second_reader),
+        )
+        .await
+        .expect("the live connection is served")
+        .expect("pong");
+        assert!(matches!(
+            pong,
+            WireFrame::Control(ControlFrame::Pong { nonce: 0 })
+        ));
 
         // The stale peer acknowledges. A ping behind it, answered on the same
         // connection, proves the ack was processed before we assert.
