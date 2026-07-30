@@ -719,6 +719,10 @@ impl Store for DbStore {
         .await
     }
 
+    async fn list_container_agent_run_candidates(&self, limit: u64) -> Result<Vec<AgentRunId>> {
+        ops::agent_run::list_container_agent_run_candidates(self, limit).await
+    }
+
     async fn list_reclaimable_container_agent_runs(
         &self,
         now: chrono::DateTime<Utc>,

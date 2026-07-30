@@ -38,6 +38,7 @@ use openwave_sandbox_protocol::{
     SandboxBackend, SandboxHandle, SandboxRun, TransportSecret,
 };
 use tokio::net::TcpListener;
+use tokio::sync::Notify;
 use uuid::Uuid;
 
 use super::{
@@ -45,6 +46,9 @@ use super::{
 };
 use crate::durable_oplog::DurableOperationStore;
 use crate::resolver::ProviderResolver;
+use crate::sandbox_container_run_worker::{
+    SandboxContainerRunWorker, SandboxContainerRunWorkerConfig,
+};
 
 // --- Mock host model (the resolver the driver proxies inference through) ------
 
@@ -365,7 +369,123 @@ fn fast_config() -> SandboxContainerRunConfig {
     }
 }
 
+fn fast_worker_config() -> SandboxContainerRunWorkerConfig {
+    SandboxContainerRunWorkerConfig {
+        idle_min: Duration::from_millis(10),
+        idle_cap: Duration::from_millis(20),
+        failure_delay: Duration::from_millis(10),
+        maintenance_interval: Duration::from_millis(25),
+        candidate_limit: 8,
+        max_concurrency: 2,
+    }
+}
+
 // --- Tests --------------------------------------------------------------------
+
+/// The production service seam finds a durable queued container run without
+/// being handed its id, claims it under the runner's cap, and drives the real
+/// sandbox agent over loopback to its committed result.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn container_worker_service_drives_queued_work_over_loopback() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (_dir, store, chat) = store().await;
+        let run_id = admit_container_run(&store, chat.id, "driven by the service").await;
+        let backend = MockBackend::spawning();
+        let provider = Arc::new(ScriptedProvider::new(vec!["service result".to_owned()]));
+        let worker = SandboxContainerRunWorker::new(
+            store.clone(),
+            backend.clone(),
+            Arc::new(FixedResolver(provider)),
+            Arc::new(Notify::new()),
+            true,
+            fast_config(),
+            fast_worker_config(),
+        )
+        .expect("the explicitly enabled service is constructed");
+        let task = tokio::spawn(worker.run());
+
+        loop {
+            let run = store.get_agent_run(run_id).await.unwrap().unwrap();
+            if run.status == AgentRunStatus::Completed
+                && backend.destroys.load(Ordering::SeqCst) == 1
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(backend.provisions.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.destroys.load(Ordering::SeqCst), 1);
+    })
+    .await
+    .expect("service drive completed within its time bound");
+}
+
+/// A teardown created after the service's startup pass is completed by a later
+/// maintenance cadence, proving teardown recovery is periodic rather than a
+/// one-shot boot action.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn container_worker_service_cadence_completes_pending_teardown() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (_dir, store, _chat) = store().await;
+        let backend = MockBackend::spawning();
+        let provider = Arc::new(ScriptedProvider::new(Vec::new()));
+        let worker = SandboxContainerRunWorker::new(
+            store.clone(),
+            backend.clone(),
+            Arc::new(FixedResolver(provider)),
+            Arc::new(Notify::new()),
+            true,
+            fast_config(),
+            fast_worker_config(),
+        )
+        .expect("the explicitly enabled service is constructed");
+        let task = tokio::spawn(worker.run());
+
+        // Let the immediate startup maintenance pass finish before creating the
+        // obligation, so only a subsequent cadence can observe it.
+        loop {
+            if !backend.reclaim_live_sets.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        let run_id = Uuid::new_v4();
+        store
+            .begin_sandbox_provision(
+                run_id,
+                &SandboxTag::new().to_string(),
+                chrono::Utc::now() + chrono::Duration::seconds(60),
+            )
+            .await
+            .unwrap();
+        assert!(store
+            .commit_sandbox_provision_handle(run_id, "pending-service-teardown")
+            .await
+            .unwrap());
+        store
+            .enqueue_sandbox_teardown(run_id)
+            .await
+            .unwrap()
+            .expect("the committed handle becomes a teardown obligation");
+
+        loop {
+            if store.list_sandbox_teardowns().await.unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(backend.destroys.load(Ordering::SeqCst), 1);
+    })
+    .await
+    .expect("maintenance cadence completed within its time bound");
+}
 
 /// The whole stack over loopback: admit a container run, drive it with the real
 /// in-container agent loop running a sandbox filesystem tool and dialing the host

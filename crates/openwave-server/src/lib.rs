@@ -41,6 +41,7 @@ mod retry;
 mod routes;
 mod sandbox_agent_run_worker;
 pub mod sandbox_container_run;
+mod sandbox_container_run_worker;
 /// A [`SandboxBackend`](openwave_sandbox_protocol::SandboxBackend) over the Docker
 /// CLI: container provision, loopback addressing, idempotent teardown, and a
 /// correlation-tag orphan sweep.
@@ -490,6 +491,7 @@ pub struct Server {
     router: Router,
     _turn_worker: AbortTask,
     _sandbox_agent_run_worker: AbortTask,
+    _sandbox_container_run_worker: Option<AbortTask>,
     _sandbox_web_search_worker: AbortTask,
     _blob_retirement_worker: AbortTask,
     _blob_orphan_auditor: AbortTask,
@@ -848,6 +850,23 @@ async fn bind_inner(
             state.sandbox_attempts.clone(),
             sandbox_web_search_worker::SandboxWebSearchWorkerConfig::default(),
         );
+    let sandbox_container_run_worker = {
+        // Issue #1230 replaces this constructor gate with the profile flag.
+        // Keep it false in this slice so admission routing and configuration
+        // remain independently reviewable.
+        let container_execution_enabled = false;
+        let backend = Arc::new(sandbox_docker::DockerSandboxBackend::with_defaults());
+        let enabled = container_execution_enabled && backend.is_available();
+        sandbox_container_run_worker::SandboxContainerRunWorker::new(
+            state.store.clone(),
+            backend,
+            state.resolver.clone(),
+            state.agent_run_wake.clone(),
+            enabled,
+            sandbox_container_run::SandboxContainerRunConfig::default(),
+            sandbox_container_run_worker::SandboxContainerRunWorkerConfig::default(),
+        )
+    };
     let server_store = state.store.clone();
     let mcp_runtime = state.mcp.clone();
     let gateway_runtime = state.gateway.clone();
@@ -862,6 +881,8 @@ async fn bind_inner(
 
     let turn_worker = tokio::spawn(turn_worker.run());
     let sandbox_agent_run_worker = tokio::spawn(sandbox_agent_run_worker.run());
+    let sandbox_container_run_worker =
+        sandbox_container_run_worker.map(|worker| tokio::spawn(worker.run()));
     let sandbox_web_search_worker = tokio::spawn(sandbox_web_search_worker.run());
     let blob_retirement_worker = tokio::spawn(blob_retirement_worker.run());
     let blob_orphan_auditor = tokio::spawn(blob_orphan_auditor.run());
@@ -881,6 +902,7 @@ async fn bind_inner(
         router,
         _turn_worker: AbortTask(turn_worker),
         _sandbox_agent_run_worker: AbortTask(sandbox_agent_run_worker),
+        _sandbox_container_run_worker: sandbox_container_run_worker.map(AbortTask),
         _sandbox_web_search_worker: AbortTask(sandbox_web_search_worker),
         _blob_retirement_worker: AbortTask(blob_retirement_worker),
         _blob_orphan_auditor: AbortTask(blob_orphan_auditor),
