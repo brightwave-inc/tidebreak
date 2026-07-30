@@ -787,31 +787,24 @@ async fn admission_routes_to_the_container_location_not_the_in_process_scheduler
 
 // --- Docker end-to-end (gated on a container runtime + the agent image) -------
 
-/// The full stack on a real Docker container: build the `openwave-sandbox-agent`
-/// image, admit a container run, and drive it end to end — provision a container
-/// from the image, attach over its published loopback port, answer its
-/// `exec`-then-final model steps from a mock host model (so the container really
-/// runs a shell command in its own boundary), and assert the result committed
-/// exactly once and the container was torn down.
+/// Build the sandbox-agent image for the Docker-gated tests, returning its tag,
+/// or `None` when no container runtime is present (there is none in the
+/// unit-test sandbox; CI runners have Docker). A present daemon that fails the
+/// build is a defect, not an environment to skip, so that panics.
 ///
-/// Skipped cleanly when no container runtime or daemon is present (there is none
-/// in the unit-test sandbox); CI runners have Docker. Building the image is heavy
-/// (it compiles the agent crate's slice of the workspace inside Docker), so this
-/// is the one place that pays for it, guarded behind daemon detection and a long
-/// timeout.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires a Docker daemon and builds the agent image; run explicitly or in the Docker CI lane"]
-async fn docker_end_to_end_drives_a_real_container() {
-    use crate::sandbox_docker::{DockerConfig, DockerSandboxBackend, RUN_TAG_LABEL};
+/// Both Docker tests build the same tag; the CI lane serializes them so the
+/// second build is a cache hit.
+async fn build_agent_image() -> Option<&'static str> {
+    use crate::sandbox_docker::DockerSandboxBackend;
 
     let backend_probe = DockerSandboxBackend::with_defaults();
     if !backend_probe.is_available() {
         eprintln!("skipping: no container runtime on PATH");
-        return;
+        return None;
     }
 
-    // Build the agent image from the workspace root (the Dockerfile's build
-    // context is the whole workspace, so Cargo.lock is visible to `--locked`).
+    // Build from the workspace root (the Dockerfile's build context is the
+    // whole workspace, so Cargo.lock is visible to `--locked`).
     let image = "openwave-sandbox-agent:it";
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -833,7 +826,7 @@ async fn docker_end_to_end_drives_a_real_container() {
     )
     .await;
     match build {
-        Ok(Ok(output)) if output.status.success() => {}
+        Ok(Ok(output)) if output.status.success() => Some(image),
         Ok(Ok(output)) => {
             panic!(
                 "building the agent image failed: {}",
@@ -842,10 +835,32 @@ async fn docker_end_to_end_drives_a_real_container() {
         }
         Ok(Err(error)) => {
             eprintln!("skipping: could not invoke docker build: {error}");
-            return;
+            None
         }
         Err(_) => panic!("building the agent image timed out"),
     }
+}
+
+/// The full stack on a real Docker container: build the `openwave-sandbox-agent`
+/// image, admit a container run, and drive it end to end — provision a container
+/// from the image, attach over its published loopback port, answer its
+/// `exec`-then-final model steps from a mock host model (so the container really
+/// runs a shell command in its own boundary), and assert the result committed
+/// exactly once and the container was torn down.
+///
+/// Skipped cleanly when no container runtime or daemon is present (there is none
+/// in the unit-test sandbox); CI runners have Docker. Building the image is heavy
+/// (it compiles the agent crate's slice of the workspace inside Docker), so this
+/// is the one place that pays for it, guarded behind daemon detection and a long
+/// timeout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a Docker daemon and builds the agent image; run explicitly or in the Docker CI lane"]
+async fn docker_end_to_end_drives_a_real_container() {
+    use crate::sandbox_docker::{DockerConfig, DockerSandboxBackend, RUN_TAG_LABEL};
+
+    let Some(image) = build_agent_image().await else {
+        return;
+    };
 
     let (_dir, store, chat) = store().await;
     let run_id = admit_container_run(&store, chat.id, "count these four words now").await;
@@ -901,4 +916,203 @@ async fn docker_end_to_end_drives_a_real_container() {
         String::from_utf8_lossy(&listed.stdout).trim().is_empty(),
         "the container should have been torn down"
     );
+}
+
+/// Dial the container's published loopback port, retrying while it starts up.
+async fn dial_container(authority: &str) -> tokio::net::TcpStream {
+    for _ in 0..60 {
+        if let Ok(Ok(stream)) = tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::net::TcpStream::connect(authority),
+        )
+        .await
+        {
+            return stream;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    panic!("could not dial the container at {authority}");
+}
+
+/// The packaged agent image conforms at the transport boundary.
+///
+/// This is the conformance slice #822 deferred until the container backend
+/// existed: the in-process suite proves the reference implementation, and this
+/// proves the supervisor actually shipped in the image, over a real published
+/// port. Three scenarios are the ones a third-party host would hit first, and
+/// the only ones the real (well-behaved) agent can exhibit:
+///
+/// 1. a version skew is answered with the sandbox's own version, then refused;
+/// 2. a wrong transport secret is refused before any capability is served;
+/// 3. the event stream resumes from a committed cursor across a reconnect,
+///    redelivering an unacknowledged terminal event with its original sequence.
+///
+/// Scenarios that script sandbox-side misbehavior (ungranted capabilities,
+/// over-bound frames, lane saturation) stay against the in-process reference —
+/// the shipped agent does not misbehave on demand.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a Docker daemon and builds the agent image; run explicitly or in the Docker CI lane"]
+async fn docker_container_conforms_at_the_transport_boundary() {
+    use crate::sandbox_docker::{DockerConfig, DockerSandboxBackend};
+    use openwave_sandbox_protocol::{
+        events::EventPayload, ids::EventCursor, protocol::AttachRequest, ConnectError, SandboxTag,
+        WireClient,
+    };
+
+    let Some(image) = build_agent_image().await else {
+        return;
+    };
+
+    let (_dir, store, _chat) = store().await;
+    let backend = DockerSandboxBackend::new(DockerConfig {
+        image: image.to_owned(),
+        ..DockerConfig::default()
+    });
+    let run_id = RunId::new();
+    let handle = backend
+        .provision(ProvisionRequest {
+            run_id,
+            tag: SandboxTag::new(),
+            lifetime_cap_secs: None,
+            task: Some("answer briefly".to_owned()),
+        })
+        .await
+        .expect("provisioning a conformance container succeeds");
+
+    // A failed assertion below leaks the container in a local run; the CI
+    // runner is ephemeral, and local reruns reclaim it through the tag sweep.
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let address = backend.address(&handle).await.expect("container address");
+        let authority = address
+            .base_url
+            .trim_start_matches("http://")
+            .to_owned();
+
+        let host = CapabilityHost::new(
+            GrantSet::new(
+                RunProvenance {
+                    run_id,
+                    provider: "local-container".to_owned(),
+                },
+                [Capability::ModelInference],
+            ),
+            Arc::new(HostModelProxy {
+                // No scripted directives: every completion defaults to a final
+                // answer, so the agent emits progress then a terminal result.
+                resolver: Arc::new(FixedResolver(Arc::new(ScriptedProvider::new(vec![])))),
+                config: AgentConfig::default(),
+                spent: AtomicU32::new(0),
+                budget: 24,
+            }),
+            Arc::new(DurableOperationStore::new(store.clone(), run_id)),
+        );
+
+        // 1. Version skew: answered with the sandbox's own version, refused,
+        //    and the connection is not established.
+        let Err(refusal) = WireClient::connect(
+            dial_container(&authority).await,
+            AttachRequest {
+                protocol_version: PROTOCOL_VERSION + 1,
+                run_id,
+                resume_from: EventCursor::START,
+                transport_secret: address.transport_secret.clone(),
+            },
+            host.clone(),
+        )
+        .await
+        else {
+            panic!("a version skew must be refused");
+        };
+        match refusal {
+            ConnectError::VersionRefused(refused) => {
+                assert_eq!(
+                    refused.protocol_version, PROTOCOL_VERSION,
+                    "the refusal must carry the sandbox's own version so the peer learns the mismatch"
+                );
+            }
+            other => panic!("expected a version refusal, got: {other}"),
+        }
+
+        // 2. Wrong transport secret: refused before anything is served.
+        let Err(refusal) = WireClient::connect(
+            dial_container(&authority).await,
+            AttachRequest {
+                protocol_version: PROTOCOL_VERSION,
+                run_id,
+                resume_from: EventCursor::START,
+                transport_secret: TransportSecret::new("not-the-minted-secret"),
+            },
+            host.clone(),
+        )
+        .await
+        else {
+            panic!("a wrong secret must be refused");
+        };
+        assert!(
+            matches!(refusal, ConnectError::Unauthenticated(_)),
+            "expected an authentication refusal, got: {refusal}"
+        );
+
+        // 3. Attach for real, take the stream to its terminal event, but leave
+        //    that terminal event unacknowledged.
+        let mut conn = WireClient::connect(
+            dial_container(&authority).await,
+            AttachRequest {
+                protocol_version: PROTOCOL_VERSION,
+                run_id,
+                resume_from: EventCursor::START,
+                transport_secret: address.transport_secret.clone(),
+            },
+            host.clone(),
+        )
+        .await
+        .expect("an authenticated attach is accepted");
+        let first = conn.next_event().await.expect("the agent's first event");
+        let mut committed = EventCursor::committed(first.sequence);
+        conn.acknowledge(committed).await;
+        let terminal = loop {
+            let event = conn.next_event().await.expect("the stream reaches a terminal event");
+            if matches!(
+                event.payload,
+                EventPayload::Result(_) | EventPayload::Failed(_)
+            ) {
+                break event;
+            }
+            committed = EventCursor::committed(event.sequence);
+            conn.acknowledge(committed).await;
+        };
+        assert!(
+            matches!(terminal.payload, EventPayload::Result(_)),
+            "a directive-free completion must end the run with a result"
+        );
+        drop(conn);
+
+        // Reattach from the last committed cursor: the sandbox must redeliver
+        // the unacknowledged terminal event, same sequence, same payload.
+        let mut conn = WireClient::connect(
+            dial_container(&authority).await,
+            AttachRequest {
+                protocol_version: PROTOCOL_VERSION,
+                run_id,
+                resume_from: committed,
+                transport_secret: address.transport_secret.clone(),
+            },
+            host.clone(),
+        )
+        .await
+        .expect("a reattach after a disconnect is accepted");
+        let redelivered = conn
+            .next_event()
+            .await
+            .expect("the unacknowledged event is redelivered");
+        assert_eq!(redelivered.sequence, terminal.sequence);
+        assert_eq!(redelivered.payload, terminal.payload);
+    })
+    .await
+    .expect("conformance checks completed within their bound");
+
+    backend
+        .destroy(&handle)
+        .await
+        .expect("tearing the conformance container down succeeds");
 }
