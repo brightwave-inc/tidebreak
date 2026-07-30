@@ -2250,33 +2250,80 @@ fn durable_state_uses_private_directory_and_file_permissions() {
 }
 
 #[test]
-fn restart_revalidates_every_persisted_root_before_advertising_state() {
-    let (temp, broker, path, state_dir) = durable_setup();
+fn an_unreachable_root_is_set_aside_rather_than_blocking_the_others() {
+    let (temp, broker, offline_path, state_dir) = durable_setup();
     let conversation = Uuid::new_v4();
-    register(
+    let subject = GrantSubject::conversation(conversation).unwrap();
+    let reachable_path = temp.path().join("home/Reports");
+    std::fs::create_dir_all(&reachable_path).unwrap();
+    let offline = register(
         &broker.controller(),
-        GrantSubject::conversation(conversation).unwrap(),
+        subject,
         conversation,
-        path.clone(),
+        offline_path.clone(),
+        OperationId::new(),
+    );
+    let reachable = register(
+        &broker.controller(),
+        subject,
+        conversation,
+        reachable_path,
         OperationId::new(),
     );
     drop(broker);
-    std::fs::remove_file(path.join("note.txt")).unwrap();
-    std::fs::remove_dir(path).unwrap();
+    // Renaming stands in for the volume going away: the directory keeps its
+    // host identity, so it is the same folder when it comes back.
+    let stashed = offline_path.with_file_name("Documents-offline");
+    std::fs::rename(&offline_path, &stashed).unwrap();
 
-    assert!(matches!(
-        Broker::open(test_policy(&temp), &state_dir),
-        Err(BrokerError::RootPolicy(_))
-    ));
+    let broker = Broker::open(test_policy(&temp), &state_dir).unwrap();
+    let context = ExecutionContext::standalone(conversation).unwrap();
+    assert_eq!(
+        operate(&broker.operator(), context, OperationRequest::ListRoots).unwrap(),
+        OperationResult::ListRoots {
+            roots: vec![read_write(reachable.root)]
+        }
+    );
+    assert!(
+        std::fs::read_to_string(state_dir.join("host-broker-audit.jsonl"))
+            .unwrap()
+            .contains("prune_unavailable_root")
+    );
+
+    // A later mutation rewrites the state file. The offline approval has to
+    // survive that, or an unplugged drive would silently cost the user their
+    // consent.
+    let another = temp.path().join("home/Archive");
+    std::fs::create_dir_all(&another).unwrap();
+    register(
+        &broker.controller(),
+        subject,
+        conversation,
+        another,
+        OperationId::new(),
+    );
+    drop(broker);
+    std::fs::rename(&stashed, &offline_path).unwrap();
+
+    let broker = Broker::open(test_policy(&temp), &state_dir).unwrap();
+    let OperationResult::ListRoots { roots } =
+        operate(&broker.operator(), context, OperationRequest::ListRoots).unwrap()
+    else {
+        panic!("unexpected operation result")
+    };
+    assert!(roots
+        .iter()
+        .any(|root| root.root_id == offline.root.root_id));
 }
 
 #[test]
 fn restart_refuses_to_rebind_a_grant_to_a_replaced_folder() {
     let (temp, broker, path, state_dir) = durable_setup();
     let conversation = Uuid::new_v4();
+    let subject = GrantSubject::conversation(conversation).unwrap();
     register(
         &broker.controller(),
-        GrantSubject::conversation(conversation).unwrap(),
+        subject,
         conversation,
         path.clone(),
         OperationId::new(),
@@ -2286,10 +2333,12 @@ fn restart_refuses_to_rebind_a_grant_to_a_replaced_folder() {
     std::fs::rename(&path, original).unwrap();
     std::fs::create_dir(&path).unwrap();
 
-    assert!(matches!(
-        Broker::open(test_policy(&temp), &state_dir),
-        Err(BrokerError::Io(error)) if error.kind() == io::ErrorKind::InvalidData
-    ));
+    let broker = Broker::open(test_policy(&temp), &state_dir).unwrap();
+    let context = ExecutionContext::standalone(conversation).unwrap();
+    assert_eq!(
+        operate(&broker.operator(), context, OperationRequest::ListRoots).unwrap(),
+        OperationResult::ListRoots { roots: Vec::new() }
+    );
 }
 
 #[test]

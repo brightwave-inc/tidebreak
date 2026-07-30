@@ -66,6 +66,7 @@ pub enum AuditOperation {
     DetachRoot,
     LookupRootAttachmentReceipt,
     RevokeRoot,
+    PruneUnavailableRoot,
     ResolveExecRoots,
     ListRoots,
     ListDirectory,

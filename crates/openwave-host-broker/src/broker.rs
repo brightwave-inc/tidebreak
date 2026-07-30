@@ -30,6 +30,7 @@ use crate::{
         AuditActor, AuditError, AuditEvent, AuditOperation, AuditOutcome, AuditSink, AuditTarget,
         JsonlAuditSink, MemoryAuditSink, UnavailableAuditSink,
     },
+    path_policy::RootIdentity,
     protocol::{
         ControlEnvelope, ControlRequest, ControlResponseEnvelope, ControlResult, DirectoryEntry,
         EntryKind, ErrorCode, ErrorResponse, HelloResult, LookupRegisterRootReceiptRequest,
@@ -43,8 +44,8 @@ use crate::{
         WriteFileRequest, WriteFileResult, MAX_READ_FILE_BINARY_BYTES, PROTOCOL_VERSION,
     },
     Capability, ConsentMethod, ConsentRecord, ExecutionContext, Grant, GrantError, GrantId,
-    GrantSubject, OperationId, RelativePath, RootAttachment, RootId, RootPolicy, RootPolicyError,
-    Scope, SubjectKind, ValidatedRoot,
+    GrantSubject, OperationId, RelativePath, RequestId, RootAttachment, RootId, RootPolicy,
+    RootPolicyError, Scope, SubjectKind, ValidatedRoot,
 };
 
 mod state_file;
@@ -154,6 +155,73 @@ struct State {
     attachments: Vec<RootAttachment>,
     mutations: HashMap<OperationId, MutationRecord>,
     active_mutations: HashSet<OperationId>,
+    /// Persisted roots whose directory could not be reopened at load. They are
+    /// held out of the live tables so the rest of the registry still works, and
+    /// written back verbatim so the approval survives the outage.
+    unavailable: Vec<UnavailableRoot>,
+}
+
+/// A registration that is dormant for the lifetime of this process.
+///
+/// The user approved this folder and nothing has withdrawn that approval; the
+/// host simply cannot produce a pinned handle for it right now. Its grants and
+/// attachments travel with it rather than being dropped, because the common
+/// cause — an external volume that is not mounted — resolves on its own, and
+/// re-consenting for a folder that was never disconnected is a poor trade for
+/// the small amount of state this holds.
+#[derive(Clone)]
+struct UnavailableRoot {
+    id: RootId,
+    owner: GrantSubject,
+    path: PathBuf,
+    identity: RootIdentity,
+    reason: UnavailableRootReason,
+    grants: Vec<Grant>,
+    attachments: Vec<RootAttachment>,
+}
+
+/// Why a persisted root could not be reopened.
+///
+/// The causes are recorded rather than acted on: an unmounted volume reports
+/// itself as missing on some hosts and as an I/O failure on others, so no cause
+/// here is reliable enough to justify destroying an approval on its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UnavailableRootReason {
+    /// Nothing exists at the approved path.
+    Missing,
+    /// The path exists but the broker may no longer open it.
+    PermissionDenied,
+    /// Host I/O failed for some other reason, including a device that is
+    /// present but not ready.
+    HostIo,
+    /// The path resolves to a directory the current policy would not approve.
+    Rejected,
+    /// A different directory now occupies the approved path. Consent named the
+    /// original directory, and rebinding it to whatever replaced it would hand
+    /// out authority the user never gave.
+    Replaced,
+}
+
+impl UnavailableRootReason {
+    fn from_policy_error(error: &RootPolicyError) -> Self {
+        match error {
+            RootPolicyError::Io(error) => match error.kind() {
+                io::ErrorKind::NotFound => Self::Missing,
+                io::ErrorKind::PermissionDenied => Self::PermissionDenied,
+                _ => Self::HostIo,
+            },
+            _ => Self::Rejected,
+        }
+    }
+
+    const fn error_code(self) -> ErrorCode {
+        match self {
+            Self::Missing => ErrorCode::NotFound,
+            Self::PermissionDenied => ErrorCode::Denied,
+            Self::HostIo => ErrorCode::HostIo,
+            Self::Rejected | Self::Replaced => ErrorCode::InvalidRoot,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -417,7 +485,12 @@ impl Broker {
                 Arc::new(UnavailableAuditSink)
             }
         };
-        Ok(Self {
+        let pruned = state
+            .unavailable
+            .iter()
+            .map(unavailable_root_event)
+            .collect::<Vec<_>>();
+        let broker = Self {
             shared: Arc::new(Shared {
                 policy,
                 state: Mutex::new(state),
@@ -425,7 +498,11 @@ impl Broker {
                 audit,
                 failed_closed: AtomicBool::new(false),
             }),
-        })
+        };
+        for event in &pruned {
+            broker.shared.record_audit(event);
+        }
+        Ok(broker)
     }
 
     /// Obtain the trusted host-only interface.
@@ -832,9 +909,16 @@ impl Controller {
         // deleting every alias would invalidate durable receipts and product
         // projections that still name those IDs. Preserve that legacy state
         // and report that no global revocation occurred.
-        let revoked = owned && !has_physical_root_alias(&next, request.root_id);
+        // Revocation is the one deliberate instruction to forget a root, so it
+        // reaches the set-aside registrations too. Nothing else deletes them.
+        let set_aside = next
+            .unavailable
+            .iter()
+            .any(|root| root.id == request.root_id && root.owner == request.subject);
+        let revoked = set_aside || (owned && !has_physical_root_alias(&next, request.root_id));
         if revoked {
             next.roots.remove(&request.root_id);
+            next.unavailable.retain(|root| root.id != request.root_id);
             next.grants
                 .retain(|grant| !scope_targets_root(grant.scope(), request.root_id));
             next.attachments
@@ -1796,7 +1880,20 @@ fn apply_root_attachment(
                 attachment.conversation_id() != request.conversation_id
                     || attachment.root_id() != request.root_id
             });
-            state.attachments.len() != before
+            let mut detached = state.attachments.len() != before;
+            // A conversation can detach a folder whose directory is currently
+            // out of reach. Without this the attachment would come back the
+            // moment the folder did.
+            for root in &mut state.unavailable {
+                if root.id != request.root_id {
+                    continue;
+                }
+                let before = root.attachments.len();
+                root.attachments
+                    .retain(|attachment| attachment.conversation_id() != request.conversation_id);
+                detached |= root.attachments.len() != before;
+            }
+            detached
         }
     };
     Ok(RootAttachmentMutationResult {
@@ -1913,6 +2010,28 @@ fn preferred_root_alias(state: &State, candidate: &RegisteredRoot) -> Option<(Ro
         // then use the opaque UUID as the host-wide deterministic tie-breaker.
         .min_by_key(|(root_id, root)| (root.owner != candidate.owner, root_id.as_uuid()))
         .map(|(root_id, root)| (*root_id, root.display_name.clone()))
+}
+
+/// Record that an approved folder went dark, without naming its host path.
+fn unavailable_root_event(root: &UnavailableRoot) -> AuditEvent {
+    AuditEvent {
+        event_id: Uuid::new_v4(),
+        timestamp: Utc::now(),
+        request_id: RequestId::new(),
+        operation_id: None,
+        actor: AuditActor::Control {
+            subject: root.owner,
+            conversation_id: None,
+        },
+        operation: AuditOperation::PruneUnavailableRoot,
+        target: AuditTarget::Root { root_id: root.id },
+        outcome: AuditOutcome::Failed,
+        capability: None,
+        grant_id: None,
+        error_code: Some(root.reason.error_code()),
+        item_count: None,
+        bytes: None,
+    }
 }
 
 fn has_physical_root_alias(state: &State, root_id: RootId) -> bool {
