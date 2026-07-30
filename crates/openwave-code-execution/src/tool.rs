@@ -52,9 +52,14 @@ impl Tool for ExecTool {
                           have the chat's private scratch mirrored in before the command runs and \
                           mirrored back after, so files from write_file are visible here and \
                           files this command writes are visible to read_file. Every provider \
-                          returns bounded stdout/stderr. For visual review, save up to three \
+                          returns bounded stdout/stderr. Files you save in output/ are published \
+                          to the user automatically as durable outputs. To update an output you \
+                          already published, save to the same filename in output/ — it becomes a \
+                          new version of the same output in place; you never track output ids. \
+                          For visual review, save up to three \
                           PNG, JPEG, or WebP images in preview/; overview, grid, thumbnail, page, \
-                          and slide filenames are prioritized. Use output/ for durable artifacts. \
+                          and slide filenames are prioritized; preview images are for your own \
+                          review and never become outputs. \
                           When bundled document helpers are present, invoke them directly from \
                           .openwave/exec-scripts. Examples: command python3 with args \
                           [\".openwave/exec-scripts/render_pdf.py\", \"documents/report.pdf\", \
@@ -121,7 +126,7 @@ impl Tool for ExecTool {
             Err(error) => return Ok(ToolOutput::error(error.to_string())),
         };
         let request = match CodeExecutionRequest::new(
-            execution_id,
+            execution_id.clone(),
             workspace_id.clone(),
             arguments.command,
             arguments.args,
@@ -133,6 +138,19 @@ impl Tool for ExecTool {
         let response = match self.provider.execute(request).await {
             Ok(response) => response,
             Err(error) => return Ok(ToolOutput::error(error.to_string())),
+        };
+        // Regardless of the exit code: a failing later step must not hide
+        // files the command already durably wrote to output/.
+        let artifacts = match self
+            .provider
+            .collect_output_artifacts(&workspace_id, &execution_id)
+            .await
+        {
+            Ok(artifacts) => artifacts,
+            Err(error) => crate::OutputArtifactScan {
+                entries: Vec::new(),
+                notes: vec![format!("outputs unavailable: {error}")],
+            },
         };
         let successful = !response.timed_out && response.exit_code == Some(0);
         let previews = if successful {
@@ -174,6 +192,29 @@ impl Tool for ExecTool {
                 content.push_str(note);
             }
         }
+        let published: Vec<String> = artifacts
+            .entries
+            .iter()
+            .filter_map(|entry| match entry.status {
+                crate::OutputArtifactStatus::Created => Some(format!(
+                    "created {} (version {})",
+                    entry.filename, entry.ordinal
+                )),
+                crate::OutputArtifactStatus::Updated => Some(format!(
+                    "updated {} (version {})",
+                    entry.filename, entry.ordinal
+                )),
+                // A file that still matches its published version is not news.
+                crate::OutputArtifactStatus::Unchanged => None,
+            })
+            .collect();
+        if !published.is_empty() || !artifacts.notes.is_empty() {
+            content.push_str("\n\noutputs:");
+            for line in published.iter().chain(&artifacts.notes) {
+                content.push('\n');
+                content.push_str(line);
+            }
+        }
         if !response.stdout.is_empty() {
             content.push_str("\n\nstdout:\n");
             content.push_str(&response.stdout);
@@ -196,6 +237,21 @@ impl Tool for ExecTool {
                 "stdout": response.stdout,
                 "stderr": response.stderr,
                 "sync_notes": response.sync_notes,
+                "outputs": artifacts
+                    .entries
+                    .iter()
+                    .map(|entry| {
+                        json!({
+                            "filename": entry.filename,
+                            "version": entry.ordinal,
+                            "status": match entry.status {
+                                crate::OutputArtifactStatus::Created => "created",
+                                crate::OutputArtifactStatus::Updated => "updated",
+                                crate::OutputArtifactStatus::Unchanged => "unchanged",
+                            },
+                        })
+                    })
+                    .collect::<Vec<_>>(),
             }))
             .with_images(previews.images);
         output.is_error = failed;
@@ -319,6 +375,85 @@ mod tests {
                 notes: Vec::new(),
             })
         }
+    }
+
+    struct ArtifactProvider {
+        exit_code: i32,
+        scans: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl CodeExecutionProvider for ArtifactProvider {
+        async fn execute(
+            &self,
+            _request: CodeExecutionRequest,
+        ) -> std::result::Result<CodeExecutionResponse, CodeExecutionError> {
+            Ok(CodeExecutionResponse {
+                provider: CodeExecutionProviderKind::Local,
+                exit_code: Some(self.exit_code),
+                stdout: String::new(),
+                stderr: String::new(),
+                timed_out: false,
+                output_truncated: false,
+                duration_ms: 1,
+                sync_notes: Vec::new(),
+            })
+        }
+
+        async fn collect_output_artifacts(
+            &self,
+            _workspace: &ExecutionWorkspaceId,
+            _execution: &ExecutionId,
+        ) -> std::result::Result<crate::OutputArtifactScan, CodeExecutionError> {
+            self.scans.fetch_add(1, Ordering::SeqCst);
+            Ok(crate::OutputArtifactScan {
+                entries: vec![
+                    crate::OutputArtifactEntry {
+                        filename: "report.md".into(),
+                        ordinal: 2,
+                        status: crate::OutputArtifactStatus::Updated,
+                    },
+                    crate::OutputArtifactEntry {
+                        filename: "data.csv".into(),
+                        ordinal: 1,
+                        status: crate::OutputArtifactStatus::Unchanged,
+                    },
+                ],
+                notes: vec!["output/huge.bin was not published: too large".into()],
+            })
+        }
+    }
+
+    /// The scan reports through the model-facing content and the structured
+    /// data, and runs even when the command failed — a failing later step must
+    /// not hide files that were already durably written.
+    #[tokio::test]
+    async fn published_outputs_are_reported_even_when_the_command_fails() {
+        let provider = Arc::new(ArtifactProvider {
+            exit_code: 2,
+            scans: AtomicUsize::new(0),
+        });
+        let tool = ExecTool::new(provider.clone());
+        let output = tool
+            .execute(
+                &ToolCtx::new_legacy_workspace(ChatId::new(), None, PathBuf::from("/tmp/unused"))
+                    .with_call_id(CallId::new()),
+                json!({"command": "/bin/false"}),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(provider.scans.load(Ordering::SeqCst), 1);
+        assert!(output.is_error);
+        assert!(output.content.contains("outputs:"));
+        assert!(output.content.contains("updated report.md (version 2)"));
+        // A file that still matches its published version is not news.
+        assert!(!output.content.contains("data.csv"));
+        assert!(output.content.contains("output/huge.bin was not published"));
+        let outputs = output.data.as_ref().unwrap()["outputs"].as_array().unwrap();
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0]["status"], "updated");
+        assert_eq!(outputs[1]["status"], "unchanged");
     }
 
     #[tokio::test]

@@ -404,6 +404,37 @@ pub struct CodeExecutionResponse {
     pub sync_notes: Vec<String>,
 }
 
+/// What one file under `output/` did to the durable output record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputArtifactStatus {
+    /// A new output was created at version 1.
+    Created,
+    /// An existing same-filename output gained a new version.
+    Updated,
+    /// The file matches the output's current version; nothing was written.
+    Unchanged,
+}
+
+/// One file under `output/` published or matched after an execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputArtifactEntry {
+    /// Display filename, equal to the file's name under `output/`.
+    pub filename: String,
+    /// The output's current version ordinal after the scan.
+    pub ordinal: u32,
+    /// Whether the file created, updated, or matched the output.
+    pub status: OutputArtifactStatus,
+}
+
+/// The outcome of publishing `output/` files as durable conversation outputs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OutputArtifactScan {
+    /// Published or matched files, in deterministic scan order.
+    pub entries: Vec<OutputArtifactEntry>,
+    /// Files that could not be published, with actionable reasons.
+    pub notes: Vec<String>,
+}
+
 /// A configured execution provider. Implementations must treat
 /// `request.execution_id` as an idempotency key and reject an identity reused
 /// with different canonical arguments.
@@ -424,6 +455,22 @@ pub trait CodeExecutionProvider: Send + Sync {
         _workspace: &ExecutionWorkspaceId,
     ) -> Result<crate::PreviewScan, CodeExecutionError> {
         Ok(crate::PreviewScan::default())
+    }
+
+    /// Publish files saved under the workspace's `output/` directory as durable
+    /// conversation outputs after an execution.
+    ///
+    /// Runs regardless of the command's exit code: a failing later step must
+    /// not hide files that were already durably written. Providers without a
+    /// host-visible durable record return an empty scan; the configured server
+    /// wrapper overrides this after mirroring a managed workspace back into
+    /// private scratch.
+    async fn collect_output_artifacts(
+        &self,
+        _workspace: &ExecutionWorkspaceId,
+        _execution: &ExecutionId,
+    ) -> Result<OutputArtifactScan, CodeExecutionError> {
+        Ok(OutputArtifactScan::default())
     }
 
     /// The provider's optional durable-workspace capability. `None` means the
