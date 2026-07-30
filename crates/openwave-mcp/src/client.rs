@@ -970,6 +970,8 @@ impl Tool for McpTool {
                     resource_uri: uri.clone(),
                 })
             }),
+            images: Vec::new(),
+            image_data: openwave_core::ImageAttachments::new(),
         })
     }
 }

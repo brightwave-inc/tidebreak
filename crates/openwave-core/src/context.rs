@@ -117,6 +117,31 @@ pub const MAX_HYDRATED_IMAGES: usize = 8;
 /// text of the transcript.
 pub const MAX_HYDRATED_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 
+/// Tool-result previews keep their pixels across this many recent provider
+/// messages. Older results retain a readable placeholder but no outbound bytes.
+pub const TOOL_RESULT_IMAGE_MESSAGE_WINDOW: usize = 10;
+
+/// Evict preview images from tool-result messages outside the recent window.
+pub fn evict_old_tool_result_images(messages: &mut [ChatMessage], keep_messages: usize) {
+    let cutoff = messages.len().saturating_sub(keep_messages);
+    for message in messages.iter_mut().take(cutoff) {
+        let is_tool_result = message
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ToolResult { .. }));
+        if !is_tool_result {
+            continue;
+        }
+        for block in &mut message.content {
+            if matches!(block, ContentBlock::Image { .. }) {
+                *block = ContentBlock::Text {
+                    text: "[preview image omitted from older tool result]".into(),
+                };
+            }
+        }
+    }
+}
+
 /// Keep pixels on only the newest `keep_last_n` image blocks, evicting older
 /// ones to text stand-ins.
 ///
@@ -1042,5 +1067,40 @@ mod tests {
                 .all(|b| !matches!(b, ContentBlock::Image { .. })),
             "evict_all_images must leave no image blocks"
         );
+    }
+
+    #[test]
+    fn old_tool_result_previews_lose_pixels_by_message_recency() {
+        let mut messages = vec![ChatMessage {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "old".into(),
+                    content: "old result".into(),
+                    is_error: false,
+                },
+                image_block(400, 300),
+            ],
+        }];
+        messages.extend((0..10).map(|index| assistant_msg(&format!("message {index}"))));
+        messages.push(ChatMessage {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "new".into(),
+                    content: "new result".into(),
+                    is_error: false,
+                },
+                image_block(800, 600),
+            ],
+        });
+
+        evict_old_tool_result_images(&mut messages, TOOL_RESULT_IMAGE_MESSAGE_WINDOW);
+
+        assert!(matches!(messages[0].content[1], ContentBlock::Text { .. }));
+        assert!(matches!(
+            messages.last().unwrap().content[1],
+            ContentBlock::Image { .. }
+        ));
     }
 }

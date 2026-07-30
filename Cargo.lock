@@ -3845,6 +3845,7 @@ dependencies = [
  "axum",
  "base64 0.23.0",
  "futures",
+ "image",
  "libc",
  "openwave-core",
  "openwave-egress",
@@ -3906,6 +3907,7 @@ dependencies = [
 name = "openwave-desktop"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
  "base64 0.23.0",
  "cap-fs-ext",
  "cap-std",
@@ -3973,27 +3975,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "openwave-retrieval"
-version = "0.0.0"
-dependencies = [
- "async-trait",
- "openwave-core",
- "thiserror 2.0.19",
- "tokio",
-]
-
-[[package]]
-name = "openwave-reverse-rpc-spike"
-version = "0.0.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 2.0.19",
- "tokio",
- "uuid",
-]
-
-[[package]]
 name = "openwave-router"
 version = "0.0.0"
 dependencies = [
@@ -4057,7 +4038,6 @@ dependencies = [
  "openwave-core",
  "openwave-egress",
  "openwave-mcp",
- "openwave-retrieval",
  "openwave-router",
  "openwave-sandbox-agent",
  "openwave-sandbox-protocol",
@@ -4090,10 +4070,6 @@ dependencies = [
  "brush-parser",
  "fancy-regex",
 ]
-
-[[package]]
-name = "openwave-slack"
-version = "0.0.0"
 
 [[package]]
 name = "openwave-web-search"

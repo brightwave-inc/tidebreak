@@ -10,6 +10,7 @@ export type CitationTarget = {
 
 export type SourceNav = {
   openCitation: (target: CitationTarget) => void;
+  openDocument: (documentId: string) => void;
 };
 
 const SourceNavContext = createContext<SourceNav | null>(null);
@@ -47,7 +48,9 @@ export function useStableSourceNav(
   return useMemo(
     () => ({
       openCitation: ({ documentId, citationId }: CitationTarget) =>
-        latest.current({ type: "sources", documentId, citationId }),
+        latest.current({ type: "document", documentId, citationId }),
+      openDocument: (documentId: string) =>
+        latest.current({ type: "document", documentId }),
     }),
     [],
   );

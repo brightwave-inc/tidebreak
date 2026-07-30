@@ -55,6 +55,9 @@ const SHELL: &str = "/bin/sh";
 /// on an inherited environment (which is cleared).
 const FIXED_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
+/// Stable location of the document helper scripts baked into the sandbox image.
+const DOCUMENT_SCRIPTS_DIR: &str = "/opt/openwave/exec-scripts";
+
 /// Arguments for [`ExecTool`].
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -93,7 +96,10 @@ impl Tool for ExecTool {
             "Run a shell command inside the sandbox workspace and return its \
              output. The command runs with the workspace as its working \
              directory; it is bounded by a wall-time limit and a captured-output \
-             cap.",
+             cap. Document helpers live at $OPENWAVE_EXEC_SCRIPTS and write visual \
+             results to preview/; overview/grid/thumbnail names are reviewed first. \
+             Examples: python3 $OPENWAVE_EXEC_SCRIPTS/render_pdf.py report.pdf \
+             --pages 1-2; python3 $OPENWAVE_EXEC_SCRIPTS/analyze_xlsx.py budget.xlsx.",
         )
     }
 
@@ -122,6 +128,13 @@ impl Tool for ExecTool {
             ));
         }
 
+        for directory in ["output", "preview", "documents"] {
+            if let Err(error) = tokio::fs::create_dir_all(self.workspace.join(directory)).await {
+                return Ok(ToolOutput::error(format!(
+                    "workspace directory '{directory}/' is unavailable: {error}"
+                )));
+            }
+        }
         let outcome = run_bounded(&args.command, &self.workspace, self.timeout).await;
         Ok(ToolOutput::text(outcome.render()))
     }
@@ -228,6 +241,7 @@ async fn run_bounded(command: &str, workspace: &Path, timeout: Duration) -> Exec
         .env("HOME", workspace)
         .env("TMPDIR", workspace)
         .env("PATH", FIXED_PATH)
+        .env("OPENWAVE_EXEC_SCRIPTS", DOCUMENT_SCRIPTS_DIR)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -394,6 +408,30 @@ mod tests {
             "ran in the workspace: {}",
             out.content
         );
+    }
+
+    #[tokio::test]
+    async fn exposes_document_helpers_and_workspace_conventions() {
+        let dir = workspace();
+        let tool = ExecTool::new(dir.path(), DEFAULT_EXEC_TIMEOUT);
+        let spec = tool.spec();
+        assert!(spec.description.contains("OPENWAVE_EXEC_SCRIPTS"));
+        assert!(spec.description.contains("render_pdf.py"));
+        assert!(spec.description.contains("analyze_xlsx.py"));
+
+        let out = tool
+            .execute(
+                &ctx(),
+                serde_json::json!({
+                    "command": "printf '%s' \"$OPENWAVE_EXEC_SCRIPTS\""
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(out.content.contains(DOCUMENT_SCRIPTS_DIR));
+        for directory in ["output", "preview", "documents"] {
+            assert!(dir.path().join(directory).is_dir());
+        }
     }
 
     #[tokio::test]

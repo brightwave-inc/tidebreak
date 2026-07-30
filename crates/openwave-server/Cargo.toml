@@ -18,7 +18,6 @@ openwave-connectors = { path = "../openwave-connectors" }
 openwave-egress = { path = "../openwave-egress" }
 openwave-mcp = { path = "../openwave-mcp" }
 openwave-router = { path = "../openwave-router" }
-openwave-retrieval = { path = "../openwave-retrieval" }
 openwave-web-search = { path = "../openwave-web-search", features = ["http", "extract-native"] }
 openwave-sandbox-protocol = { path = "../openwave-sandbox-protocol" }
 axum = { workspace = true }

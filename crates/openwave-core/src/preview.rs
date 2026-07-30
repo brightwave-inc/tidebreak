@@ -353,6 +353,9 @@ pub enum ToolResultPreview {
         output_truncated: bool,
         stdout: String,
         stderr: String,
+        /// Preview images emitted by the command, in model-facing priority order.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<crate::ImageRef>,
     },
     /// Web search is available after the reader chooses and configures a
     /// provider. Carries no model- or provider-authored text.
@@ -450,6 +453,7 @@ impl ToolResultPreview {
                         .unwrap_or(false),
                     stdout: stream(data.get("stdout")),
                     stderr: stream(data.get("stderr")),
+                    images: output.images.clone(),
                 })
             }
             // Only an external MCP proxy can carry a view declaration, and a
@@ -530,7 +534,12 @@ impl ToolResultPreview {
     #[must_use]
     pub fn has_output(&self) -> bool {
         match self {
-            Self::Exec { stdout, stderr, .. } => !stdout.is_empty() || !stderr.is_empty(),
+            Self::Exec {
+                stdout,
+                stderr,
+                images,
+                ..
+            } => !stdout.is_empty() || !stderr.is_empty() || !images.is_empty(),
             Self::WebSearchProviderRequired | Self::McpApp { .. } => true,
             // An empty list is still something to show, and saying so is the
             // point: the card reports that the call found nothing.
@@ -1166,6 +1175,7 @@ mod tests {
                 output_truncated: true,
                 stdout: "line one\nline two\n".into(),
                 stderr: "boom\n".into(),
+                images: Vec::new(),
             })
         );
         assert!(result.unwrap().has_output());
@@ -1187,6 +1197,7 @@ mod tests {
                 output_truncated: false,
                 stdout: String::new(),
                 stderr: String::new(),
+                images: Vec::new(),
             }
         );
         assert!(!result.has_output());

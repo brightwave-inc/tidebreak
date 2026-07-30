@@ -6,7 +6,11 @@ import { attachChatFiles } from "./attachments";
 import { ChatExplorer } from "./ChatExplorer";
 import { useChatListStore } from "./ChatListStore";
 import { Composer, type ComposerImages } from "./Composer";
-import type { LibraryImportSuccess } from "./documents";
+import {
+  type ImportedDocument,
+  type LibraryImportSuccess,
+} from "./documents";
+import { DocumentDropTarget } from "./DocumentDropTarget";
 import { useFirstMessage } from "./FirstMessage";
 import { hasNativeHost } from "./host";
 import {
@@ -20,7 +24,8 @@ import { useNewChatSettings } from "./NewChatSettings";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import { RouteFrame } from "./RouteFrame";
 import { HomeSidebar } from "./sidebar/HomeSidebar";
-import { ToolsMenu } from "./ToolsMenu";
+import type { AttachedFiles } from "./attachments";
+import { MAX_IMAGE_ATTACHMENTS } from "./ImageAttachments";
 
 const chatListActions = useChatListStore.getState();
 const firstMessageActions = useFirstMessage.getState();
@@ -46,7 +51,7 @@ export function HomeRoute() {
   // home page until they send.
   const [pendingChatId, setPendingChatId] = useState<string | null>(null);
   const [pendingImages, setPendingImages] = useState<ImageAttachment[]>([]);
-  const [pendingSourceName, setPendingSourceName] = useState<string | null>(null);
+  const [pendingFiles, setPendingFiles] = useState<ImportedDocument[]>([]);
   const [attaching, setAttaching] = useState(false);
   const [attachError, setAttachError] = useState<string | null>(null);
 
@@ -70,20 +75,7 @@ export function HomeRoute() {
       const chatId = await ensurePendingChat();
       const attached = await attachChatFiles(chatId);
       if (!attached) return;
-      if (attached.images.length > 0) {
-        setPendingImages((prev) => [
-          ...prev,
-          ...attached.images.map((img: PickedImage) =>
-            readyImageAttachment(crypto.randomUUID(), img),
-          ),
-        ]);
-      }
-      const source = attached.documents?.results.find(isImportedDocument);
-      if (source) setPendingSourceName(source.document.displayName);
-      const [firstFailure] = attached.failedImages;
-      if (firstFailure) {
-        setAttachError(`${firstFailure.fileName}: ${firstFailure.message}`);
-      }
+      adoptAttached(attached);
     } catch (err) {
       setAttachError(
         String(err).replace(/^Error:\s*/, "").trim() ||
@@ -91,6 +83,57 @@ export function HomeRoute() {
       );
     } finally {
       setAttaching(false);
+    }
+  }
+
+  function adoptAttached(attached: AttachedFiles) {
+    const seenDocumentIds = new Set(
+      pendingFiles.map((file) => file.documentId),
+    );
+    const imported =
+      attached.documents?.results
+        .filter(isImportedDocument)
+        .map((result) => result.document)
+        .filter((document) => {
+          if (seenDocumentIds.has(document.documentId)) return false;
+          seenDocumentIds.add(document.documentId);
+          return true;
+        }) ?? [];
+    const remaining =
+      MAX_IMAGE_ATTACHMENTS - pendingImages.length - pendingFiles.length;
+    const pickedImages = attached.images.slice(0, Math.max(0, remaining));
+    const pickedFiles = imported.slice(
+      0,
+      Math.max(0, remaining - pickedImages.length),
+    );
+    if (pickedImages.length > 0) {
+      setPendingImages((current) => [
+        ...current,
+        ...pickedImages.map((image: PickedImage) =>
+          readyImageAttachment(crypto.randomUUID(), image),
+        ),
+      ]);
+    }
+    if (pickedFiles.length > 0) {
+      setPendingFiles((current) => [...current, ...pickedFiles]);
+    }
+    if (
+      pickedImages.length + pickedFiles.length <
+      attached.images.length + imported.length
+    ) {
+      setAttachError(
+        `A message can carry at most ${MAX_IMAGE_ATTACHMENTS} attachments.`,
+      );
+    }
+    const failedDocument = attached.documents?.results.find(
+      (result) => result.status === "failed",
+    );
+    if (failedDocument?.status === "failed") {
+      setAttachError(`${failedDocument.displayName}: ${failedDocument.message}`);
+    }
+    const [failedImage] = attached.failedImages;
+    if (failedImage) {
+      setAttachError(`${failedImage.fileName}: ${failedImage.message}`);
     }
   }
 
@@ -116,11 +159,15 @@ export function HomeRoute() {
         chatListActions.setChatsError(null);
         chatId = created.id;
       }
-      firstMessageActions.hold(chatId, content);
+      firstMessageActions.hold(chatId, {
+        text: content,
+        images: pendingImages,
+        files: pendingFiles,
+      });
       setDraft("");
       setPendingChatId(null);
       setPendingImages([]);
-      setPendingSourceName(null);
+      setPendingFiles([]);
       setAttachError(null);
       await navigate({ to: "/c/$chatId", params: { chatId } });
     } catch (err) {
@@ -171,20 +218,36 @@ export function HomeRoute() {
             disabled={creatingChat}
             draft={draft}
             images={composerImages}
-            attachedSourceName={pendingSourceName}
+            files={{
+              items: pendingFiles,
+              attaching,
+              onAttach: hasNativeHost() ? onAttach : undefined,
+              onRemove: (documentId) =>
+                setPendingFiles((current) =>
+                  current.filter((file) => file.documentId !== documentId),
+                ),
+            }}
+            nativeDropTarget={
+              pendingChatId ? (
+                <DocumentDropTarget
+                  chatId={pendingChatId}
+                  onAttached={adoptAttached}
+                  onError={(caught) =>
+                    setAttachError(
+                      String(caught).replace(/^Error:\s*/, "").trim() ||
+                        "Could not attach that file.",
+                    )
+                  }
+                />
+              ) : undefined
+            }
             attachError={attachError}
-            onDismissAttachedSource={() => setPendingSourceName(null)}
             resetKey="home"
             steerError={null}
             steerPending={false}
             steerStatus={null}
             modelMenu={
               <>
-                <ToolsMenu
-                  disabled={creatingChat}
-                  onAttach={hasNativeHost() ? onAttach : undefined}
-                  attaching={attaching}
-                />
                 <ModelMenu
                   models={models}
                   value={newChat.model}

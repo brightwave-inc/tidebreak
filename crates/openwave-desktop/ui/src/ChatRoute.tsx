@@ -30,25 +30,21 @@ import { ChatView } from "./ChatView";
 import { OutputDetailRoot } from "./outputs/OutputDetailRoot";
 import { OutputsView } from "./outputs/OutputsView";
 import { DocumentDetailRoot } from "./document-detail/DocumentDetailRoot";
-import { SourcesView } from "./sources/SourcesView";
 import { FoldersView } from "./FoldersView";
 import { hasNativeHost } from "./host";
-import { attachChatFiles } from "./attachments";
-import {
-  type ImportedDocument,
-  type LibraryImportSuccess,
-} from "./documents";
+import { attachChatFiles, type AttachedFiles } from "./attachments";
+import { type ImportedDocument, type LibraryImportSuccess } from "./documents";
 import { DocumentDropTarget } from "./DocumentDropTarget";
-import { ImportQueue } from "./ImportQueue";
 import {
+  MAX_IMAGE_ATTACHMENTS,
   readyImageAttachmentIds,
   readyTranscriptImageAttachments,
+  type ImageAttachment,
 } from "./ImageAttachments";
 import { useImageAttachments } from "./useImageAttachments";
 import { modelForSelection } from "./ModelSelection";
 import { ModelMenu, ReasoningEffortMenu } from "./ModelMenu";
 import { PermissionModeMenu } from "./PermissionModeMenu";
-import { ToolsMenu } from "./ToolsMenu";
 import {
   PICKER_BUSY_MESSAGE,
   PICKER_HOLDERS,
@@ -64,6 +60,7 @@ import { ChatSidebar } from "./sidebar/ChatSidebar";
 import { useRefreshSignals } from "./RefreshSignals";
 import { TranscriptVisibilityProvider } from "./TranscriptVisibility";
 import { useTurnLifecycle } from "./TurnLifecycleSignals";
+import { useChatFolderAttachments } from "./useChatFolderAttachments";
 
 let msgSeq = 0;
 
@@ -101,7 +98,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   const [hydrated, setHydrated] = useState(false);
   const [draft, setDraft] = useState("");
   const [attaching, setAttaching] = useState(false);
-  const [recentSource, setRecentSource] = useState<ImportedDocument | null>(null);
+  const [files, setFiles] = useState<ImportedDocument[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
   const images = useImageAttachments(client, chatId);
   const handleEventRef = useRef<(event: SequencedEvent) => void>(() => {});
@@ -109,6 +106,8 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   const draftRef = useRef("");
 
   const chat = chats.find((candidate) => candidate.id === chatId) ?? null;
+  const nativeHost = hasNativeHost();
+  const folders = useChatFolderAttachments(chat, nativeHost);
 
   // A chat id that is not in the list — deleted in another window, or a stale
   // deep link — should land somewhere real rather than on an empty frame.
@@ -121,7 +120,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   useEffect(() => {
     if (!chat) return;
     const pending = firstMessageActions.take(chatId);
-    if (pending) void sendMessage(pending);
+    if (pending) void sendMessage(pending.text, pending.images, pending.files);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chat, chatId]);
 
@@ -261,10 +260,15 @@ export function ChatRoute({ chatId }: { chatId: string }) {
    * but does not post it, so this has to be reachable with text that was never
    * in this route's draft.
    */
-  async function sendMessage(content: string) {
+  async function sendMessage(
+    content: string,
+    imageItems: readonly ImageAttachment[] = images.attachments,
+    fileItems: readonly ImportedDocument[] = files,
+  ) {
     if (!chat || !content || busy || deletingChatId !== null) return;
-    const attachments = readyImageAttachmentIds(images.attachments);
-    const transcriptImages = readyTranscriptImageAttachments(images.attachments);
+    const attachments = readyImageAttachmentIds(imageItems);
+    const transcriptImages = readyTranscriptImageAttachments(imageItems);
+    const documentIds = fileItems.map((file) => file.documentId);
     const turnId = crypto.randomUUID();
     terminalHydrationGenerationRef.current += 1;
     setComposerDraft("");
@@ -279,18 +283,29 @@ export function ChatRoute({ chatId }: { chatId: string }) {
           role: "user",
           text: content,
           images: transcriptImages,
+          files: fileItems.map((file) => ({
+            documentId: file.documentId,
+            name: file.displayName,
+            mediaType: file.mediaType,
+          })),
           createdAt: new Date().toISOString(),
         },
       ],
     }));
     signalTurnLifecycle("submitted");
     try {
-      await client.postMessage(chatId, turnId, content, attachments);
-      setRecentSource(null);
+      await client.postMessage(
+        chatId,
+        turnId,
+        content,
+        attachments,
+        documentIds,
+      );
       // Only once the turn is durably accepted. A refused send — an image the
       // selected model cannot read, say — must leave the attachments where the
       // reader can fix the problem and try again.
       images.clear();
+      setFiles([]);
     } catch (err) {
       updateSession((session) => ({
         ...session,
@@ -320,20 +335,54 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     try {
       const attached = await attachChatFiles(chatId);
       if (!attached) return;
-      images.adopt(attached.images);
-      const source = attached.documents?.results.find(isImportedDocument);
-      if (source) setRecentSource(source.document);
-      // A file that could not be attached as an image is the reader's to fix,
-      // and saying nothing would read as a silent drop from the selection.
-      const [firstFailure] = attached.failedImages;
-      if (firstFailure) {
-        setAttachError(`${firstFailure.fileName}: ${firstFailure.message}`);
-      }
+      adoptAttached(attached);
     } catch (err) {
       setAttachError(friendlyAttachError(err));
     } finally {
       useNativePickerLatch.getState().release(PICKER_HOLDERS.importSource);
       setAttaching(false);
+    }
+  }
+
+  function adoptAttached(attached: AttachedFiles) {
+    const seenDocumentIds = new Set(files.map((file) => file.documentId));
+    const imported =
+      attached.documents?.results
+        .filter(isImportedDocument)
+        .map((result) => result.document)
+        .filter((document) => {
+          if (seenDocumentIds.has(document.documentId)) return false;
+          seenDocumentIds.add(document.documentId);
+          return true;
+        }) ?? [];
+    const remaining =
+      MAX_IMAGE_ATTACHMENTS - images.attachments.length - files.length;
+    const imagesToAdopt = attached.images.slice(0, Math.max(0, remaining));
+    const filesToAdopt = imported.slice(
+      0,
+      Math.max(0, remaining - imagesToAdopt.length),
+    );
+    images.adopt(imagesToAdopt);
+    if (filesToAdopt.length > 0) {
+      setFiles((current) => [...current, ...filesToAdopt]);
+    }
+    if (
+      imagesToAdopt.length + filesToAdopt.length <
+      attached.images.length + imported.length
+    ) {
+      setAttachError(
+        `A message can carry at most ${MAX_IMAGE_ATTACHMENTS} attachments.`,
+      );
+    }
+    const failedDocument = attached.documents?.results.find(
+      (result) => result.status === "failed",
+    );
+    if (failedDocument?.status === "failed") {
+      setAttachError(`${failedDocument.displayName}: ${failedDocument.message}`);
+    }
+    const [failedImage] = attached.failedImages;
+    if (failedImage) {
+      setAttachError(`${failedImage.fileName}: ${failedImage.message}`);
     }
   }
 
@@ -366,27 +415,55 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             client={client}
             chat={chat!}
             hydrated={hydrated}
-            nativeHost={hasNativeHost()}
+            nativeHost={nativeHost}
             deletingChat={deletingChatId !== null}
             draft={draft}
             draftRef={draftRef}
-            attachedSourceName={recentSource?.displayName ?? null}
             attachError={attachError}
+            files={{
+              items: files,
+              attaching,
+              onAttach: hasNativeHost() ? onAttach : undefined,
+              onRemove: (documentId) =>
+                setFiles((current) =>
+                  current.filter((file) => file.documentId !== documentId),
+                ),
+            }}
+            folders={{
+              items: folders.items,
+              working: folders.working,
+              error: folders.error,
+              onAttach: nativeHost ? folders.attach : undefined,
+              onRemove: folders.remove,
+            }}
+            nativeDropTarget={
+              <DocumentDropTarget
+                chatId={chatId}
+                onAttached={adoptAttached}
+                onError={(error) => setAttachError(friendlyAttachError(error))}
+              />
+            }
             composerImages={{
               items: images.attachments,
               error: images.error,
               unsupportedModel: textOnlyModelLabel(models, chat!.model),
-              onAttachFiles: images.attachFiles,
+              onAttachFiles: (selected) => {
+                if (
+                  images.attachments.length + files.length + selected.length >
+                  MAX_IMAGE_ATTACHMENTS
+                ) {
+                  setAttachError(
+                    `A message can carry at most ${MAX_IMAGE_ATTACHMENTS} attachments.`,
+                  );
+                  return;
+                }
+                images.attachFiles(selected);
+              },
               onRemove: images.remove,
               onRetry: images.retry,
             }}
             composerModelMenu={
               <>
-                <ToolsMenu
-                  disabled={deletingChatId !== null}
-                  onAttach={hasNativeHost() ? onAttach : undefined}
-                  attaching={attaching}
-                />
                 <ModelMenu
                   models={models}
                   value={chat!.model}
@@ -410,7 +487,6 @@ export function ChatRoute({ chatId }: { chatId: string }) {
               </>
             }
             onDraftChange={setComposerDraft}
-            onDismissAttachedSource={() => setRecentSource(null)}
             onSelectPrompt={setComposerDraft}
             onSend={onSend}
             onViewOutput={() => openPanel({ type: "outputs" })}
@@ -421,27 +497,17 @@ export function ChatRoute({ chatId }: { chatId: string }) {
 
     const side = position === "right" ? "right" : "left";
     switch (panel.type) {
-      case "sources":
-        // A document id turns the list into the reader for that one source; the
-        // breadcrumb's way back clears the id and lands on the catalog again.
-        return panel.documentId ? (
+      case "document":
+        return (
           <DocumentDetailRoot
             chatId={chatId}
             documentID={panel.documentId}
             citationId={panel.citationId}
             position={side}
           />
-        ) : (
-          <PanelFrame position={side} spaceBetween>
-            <SourcesView
-              chatId={chatId}
-              onOpen={(documentId) => openPanel({ type: "sources", documentId })}
-            />
-          </PanelFrame>
         );
       case "outputs":
-        // An output id turns the list into the reader for that one output, the
-        // same way a document id does for sources.
+        // An output id turns the list into the reader for that one output.
         return panel.outputId ? (
           <OutputDetailRoot
             chatId={chatId}
@@ -476,8 +542,6 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       <SourceNavProvider value={sourceNav}>
         <PanelLayout layout={layout} renderPanel={renderPanel} />
       </SourceNavProvider>
-      <ImportQueue />
-      <DocumentDropTarget chatId={chatId} />
     </div>
     </RouteFrame>
   );

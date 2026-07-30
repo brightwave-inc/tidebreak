@@ -33,6 +33,10 @@ import { WelcomeState } from "./WelcomeState";
 import { UserQuestionsCard } from "./UserQuestionsCard";
 import type { TranscriptImageAttachment } from "./ImageAttachments";
 import { TranscriptImageAttachments } from "./TranscriptImageAttachments";
+import {
+  TranscriptFileAttachments,
+  type TranscriptFileAttachment,
+} from "./TranscriptFileAttachments";
 import { BackgroundAgentList } from "./BackgroundAgentList";
 import { WebSearchProviderRequiredCard } from "./WebSearchProviderRequiredCard";
 import { useSourceNav } from "./panel/SourceNav";
@@ -45,6 +49,7 @@ export type ChatMessage =
       role: "user";
       text: string;
       images?: TranscriptImageAttachment[];
+      files?: TranscriptFileAttachment[];
       createdAt?: string;
     }
   | {
@@ -463,7 +468,14 @@ export function groupMessageItems(
       (entry): entry is ToolMessage =>
         entry.role === "tool" && !parked.has(entry.callId),
     );
-    const cards = surfacedCards(phase, parked, onApproval, approvalState, chatId);
+    const cards = surfacedCards(
+      phase,
+      parked,
+      onApproval,
+      approvalState,
+      chatId,
+      imageClient,
+    );
     const spawns = activities.flatMap((entry) =>
       entry.name === "spawn_sandbox_agent"
         ? [
@@ -536,6 +548,7 @@ function surfacedCards(
     grantScope?: GrantScopeName;
   },
   chatId?: string,
+  imageClient?: Pick<ApiClient, "getChatImageAttachment">,
 ): ReactNode[] {
   const cards: ReactNode[] = [];
   // In the order the calls happened, so the cards read as a sequence rather
@@ -603,6 +616,8 @@ function surfacedCards(
         status={entry.status}
         preview={entry.preview}
         result={entry.result?.tool === "exec" ? entry.result : null}
+        imageClient={imageClient}
+        chatId={chatId}
       />,
     );
   }
@@ -718,6 +733,9 @@ function MessageBubbleImpl({
               chatId={chatId}
               images={message.images}
             />
+          )}
+          {message.files && message.files.length > 0 && (
+            <TranscriptFileAttachments files={message.files} />
           )}
           <MessageMarkdown>{message.text}</MessageMarkdown>
         </article>

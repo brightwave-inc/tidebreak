@@ -29,6 +29,7 @@ tauri-build = { version = "=2.6.3", features = [] }
 serde_json = { workspace = true }
 
 [dependencies]
+async-trait.workspace = true
 base64.workspace = true
 chrono = { workspace = true }
 cap-fs-ext.workspace = true

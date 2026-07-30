@@ -2,10 +2,56 @@ use sea_orm::DatabaseBackend;
 use sea_orm_migration::prelude::*;
 
 use super::{
-    AgentRunStatus, BlobRetirementStatus, DocumentJobStatus, DocumentProcessingStatus,
-    TurnAgentRunWaitStatus, TurnClientWaitStatus, TurnRunStatus, TurnSteerStatus,
+    AgentRunStatus, BlobRetirementStatus, TurnAgentRunWaitStatus, TurnClientWaitStatus,
+    TurnRunStatus, TurnSteerStatus,
 };
 use crate::model::{AgentRunWaitCondition, SandboxToolCallStatus};
+
+const LEGACY_DOCUMENT_PIPELINE_FINGERPRINT_LEN: usize = 512;
+const LEGACY_DOCUMENT_JOB_ERROR_CODE_LEN: usize = 128;
+const LEGACY_DOCUMENT_JOB_ERROR_DETAIL_LEN: usize = 4096;
+
+#[derive(Clone, Copy)]
+enum DocumentProcessingStatus {
+    Queued,
+    Processing,
+    Ready,
+    Failed,
+}
+
+impl DocumentProcessingStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Processing => "processing",
+            Self::Ready => "ready",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum DocumentJobStatus {
+    Queued,
+    Running,
+    RetryWait,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+impl DocumentJobStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::RetryWait => "retry_wait",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
 
 pub struct Migrator;
 
@@ -44,6 +90,8 @@ impl MigratorTrait for Migrator {
             Box::new(WidenStandingGrantScope),
             Box::new(RetireDocumentIndexing),
             Box::new(LightweightCitations),
+            Box::new(RetireDocumentPipeline),
+            Box::new(AddMessageDocumentAttachments),
         ]
     }
 }
@@ -1968,6 +2016,136 @@ impl MigrationTrait for AddMessageAttachments {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .drop_table(Table::drop().table(MessageAttachment::Table).to_owned())
+            .await
+    }
+}
+
+/// Links imported source documents to the user message that introduced them.
+struct AddMessageDocumentAttachments;
+
+impl MigrationName for AddMessageDocumentAttachments {
+    fn name(&self) -> &str {
+        "m20260729_000032_add_message_document_attachments"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddMessageDocumentAttachments {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(MessageDocumentAttachment::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(MessageDocumentAttachment::MessageId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(MessageDocumentAttachment::Ordinal)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(MessageDocumentAttachment::ChatId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(MessageDocumentAttachment::DocumentId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(MessageDocumentAttachment::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .primary_key(
+                        Index::create()
+                            .col(MessageDocumentAttachment::MessageId)
+                            .col(MessageDocumentAttachment::Ordinal),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_message_document_attachment_message")
+                            .from(
+                                MessageDocumentAttachment::Table,
+                                MessageDocumentAttachment::MessageId,
+                            )
+                            .to(Message::Table, Message::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_message_document_attachment_document")
+                            .from(
+                                MessageDocumentAttachment::Table,
+                                MessageDocumentAttachment::DocumentId,
+                            )
+                            .to(Document::Table, Document::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_message_document_attachment_chat")
+                            .from(
+                                MessageDocumentAttachment::Table,
+                                MessageDocumentAttachment::ChatId,
+                            )
+                            .to(Chat::Table, Chat::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .check(Expr::col(MessageDocumentAttachment::DocumentId).ne(uuid::Uuid::nil()))
+                    .check(Expr::col(MessageDocumentAttachment::Ordinal).gte(0))
+                    .check(
+                        Expr::col(MessageDocumentAttachment::Ordinal)
+                            .lt(crate::model::MAX_MESSAGE_ATTACHMENTS as i32),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_message_document_attachment_chat")
+                    .table(MessageDocumentAttachment::Table)
+                    .col(MessageDocumentAttachment::ChatId)
+                    .col(MessageDocumentAttachment::MessageId)
+                    .col(MessageDocumentAttachment::Ordinal)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_message_document_attachment_document")
+                    .table(MessageDocumentAttachment::Table)
+                    .col(MessageDocumentAttachment::DocumentId)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_message_document_attachment_unique")
+                    .table(MessageDocumentAttachment::Table)
+                    .col(MessageDocumentAttachment::MessageId)
+                    .col(MessageDocumentAttachment::DocumentId)
+                    .unique()
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(MessageDocumentAttachment::Table)
+                    .to_owned(),
+            )
             .await
     }
 }
@@ -6206,12 +6384,12 @@ impl MigrationTrait for AddDocuments {
             .and(Expr::col(Document::IndexedAt).is_null());
         let watermark_present = Expr::col(Document::IndexedRevision)
             .is_not_null()
-            .and(Expr::col(Document::IndexFingerprint).is_not_null().and(
-                Func::char_length(Expr::col(Document::IndexFingerprint)).between(
-                    1,
-                    crate::model::DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN as i32,
+            .and(
+                Expr::col(Document::IndexFingerprint).is_not_null().and(
+                    Func::char_length(Expr::col(Document::IndexFingerprint))
+                        .between(1, LEGACY_DOCUMENT_PIPELINE_FINGERPRINT_LEN as i32),
                 ),
-            ))
+            )
             .and(Expr::col(Document::IndexedAt).is_not_null());
         let processing_watermark_consistent = Expr::col(Document::ProcessingStatus)
             .eq(DocumentProcessingStatus::Ready.as_str())
@@ -6353,12 +6531,12 @@ impl MigrationTrait for AddDocuments {
                             .is_null()
                             .or(Expr::col(Document::SourceUri).ne("")),
                     )
-                    .check(Expr::col(Document::CanonicalFingerprint).is_null().or(
-                        Func::char_length(Expr::col(Document::CanonicalFingerprint)).between(
-                            1,
-                            crate::model::DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN as i32,
-                        ),
-                    ))
+                    .check(
+                        Expr::col(Document::CanonicalFingerprint)
+                            .is_null()
+                            .or(Func::char_length(Expr::col(Document::CanonicalFingerprint))
+                                .between(1, LEGACY_DOCUMENT_PIPELINE_FINGERPRINT_LEN as i32)),
+                    )
                     .check(Expr::col(Document::ContentRevision).gte(1))
                     .check(Expr::col(Document::ProcessingStatus).is_in([
                         DocumentProcessingStatus::Queued.as_str(),
@@ -6685,11 +6863,11 @@ impl MigrationTrait for AddDocuments {
                     .col(ColumnDef::new(DocumentJob::FinishedAt).timestamp_with_time_zone())
                     .col(
                         ColumnDef::new(DocumentJob::LastErrorCode)
-                            .string_len(crate::model::DocumentJob::MAX_ERROR_CODE_LEN as u32),
+                            .string_len(LEGACY_DOCUMENT_JOB_ERROR_CODE_LEN as u32),
                     )
                     .col(
                         ColumnDef::new(DocumentJob::LastErrorDetail)
-                            .string_len(crate::model::DocumentJob::MAX_ERROR_DETAIL_LEN as u32),
+                            .string_len(LEGACY_DOCUMENT_JOB_ERROR_DETAIL_LEN as u32),
                     )
                     .col(
                         ColumnDef::new(DocumentJob::CreatedAt)
@@ -6715,24 +6893,20 @@ impl MigrationTrait for AddDocuments {
                             .lte(64)
                             .and(
                                 Func::char_length(Expr::col(DocumentJob::PipelineFingerprint))
-                                    .between(
-                                        1,
-                                        crate::model::DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN
-                                            as i32,
-                                    ),
+                                    .between(1, LEGACY_DOCUMENT_PIPELINE_FINGERPRINT_LEN as i32),
                             )
-                            .and(Expr::col(DocumentJob::LastErrorCode).is_null().or(
-                                Func::char_length(Expr::col(DocumentJob::LastErrorCode)).between(
-                                    1,
-                                    crate::model::DocumentJob::MAX_ERROR_CODE_LEN as i32,
-                                ),
-                            ))
-                            .and(Expr::col(DocumentJob::LastErrorDetail).is_null().or(
-                                Func::char_length(Expr::col(DocumentJob::LastErrorDetail)).between(
-                                    1,
-                                    crate::model::DocumentJob::MAX_ERROR_DETAIL_LEN as i32,
-                                ),
-                            )),
+                            .and(
+                                Expr::col(DocumentJob::LastErrorCode)
+                                    .is_null()
+                                    .or(Func::char_length(Expr::col(DocumentJob::LastErrorCode))
+                                        .between(1, LEGACY_DOCUMENT_JOB_ERROR_CODE_LEN as i32)),
+                            )
+                            .and(
+                                Expr::col(DocumentJob::LastErrorDetail)
+                                    .is_null()
+                                    .or(Func::char_length(Expr::col(DocumentJob::LastErrorDetail))
+                                        .between(1, LEGACY_DOCUMENT_JOB_ERROR_DETAIL_LEN as i32)),
+                            ),
                     )
                     .check(valid_job_status)
                     .check(
@@ -7176,12 +7350,12 @@ fn document_processing_watermark_check() -> SimpleExpr {
         .and(Expr::col(Document::IndexedAt).is_null());
     let watermark_present = Expr::col(Document::IndexedRevision)
         .is_not_null()
-        .and(Expr::col(Document::IndexFingerprint).is_not_null().and(
-            Func::char_length(Expr::col(Document::IndexFingerprint)).between(
-                1,
-                crate::model::DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN as i32,
+        .and(
+            Expr::col(Document::IndexFingerprint).is_not_null().and(
+                Func::char_length(Expr::col(Document::IndexFingerprint))
+                    .between(1, LEGACY_DOCUMENT_PIPELINE_FINGERPRINT_LEN as i32),
             ),
-        ))
+        )
         .and(Expr::col(Document::IndexedAt).is_not_null());
     Expr::col(Document::ProcessingStatus)
         .eq(DocumentProcessingStatus::Ready.as_str())
@@ -7273,12 +7447,12 @@ fn document_rebuild_table(indexed: bool) -> TableCreateStatement {
                 .is_null()
                 .or(Expr::col(Document::SourceUri).ne("")),
         )
-        .check(Expr::col(Document::CanonicalFingerprint).is_null().or(
-            Func::char_length(Expr::col(Document::CanonicalFingerprint)).between(
-                1,
-                crate::model::DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN as i32,
-            ),
-        ))
+        .check(
+            Expr::col(Document::CanonicalFingerprint)
+                .is_null()
+                .or(Func::char_length(Expr::col(Document::CanonicalFingerprint))
+                    .between(1, LEGACY_DOCUMENT_PIPELINE_FINGERPRINT_LEN as i32)),
+        )
         .check(Expr::col(Document::ContentRevision).gte(1))
         .check(Expr::col(Document::ProcessingStatus).is_in([
             DocumentProcessingStatus::Queued.as_str(),
@@ -7942,6 +8116,450 @@ impl MigrationTrait for LightweightCitations {
     }
 }
 
+/// Removes the durable work queue and revision clock now that document
+/// decoding completes in the accepting request.
+struct RetireDocumentPipeline;
+
+impl MigrationName for RetireDocumentPipeline {
+    fn name(&self) -> &str {
+        "m20260729_000031_retire_document_pipeline"
+    }
+}
+
+const DOCUMENT_PIPELINE_REBUILD: &str = "document_pipeline_rebuild";
+
+fn document_pipeline_table() -> TableCreateStatement {
+    let rebuild = Alias::new(DOCUMENT_PIPELINE_REBUILD);
+    Table::create()
+        .table(rebuild.clone())
+        .col(ColumnDef::new(Document::Id).uuid().not_null().primary_key())
+        .col(ColumnDef::new(Document::ChatId).uuid())
+        .col(ColumnDef::new(Document::ProjectId).uuid())
+        .col(ColumnDef::new(Document::SourceUri).text())
+        .col(ColumnDef::new(Document::MediaType).text().not_null())
+        .col(ColumnDef::new(Document::Title).text())
+        .col(ColumnDef::new(Document::SourceBlobId).uuid())
+        .col(ColumnDef::new(Document::SourceSha256).binary())
+        .col(ColumnDef::new(Document::SourceByteLen).big_integer())
+        .col(ColumnDef::new(Document::CanonicalText).text().not_null())
+        .col(
+            ColumnDef::new(Document::CreatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(Document::UpdatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_document_project")
+                .from(rebuild, Document::ProjectId)
+                .to(Project::Table, Project::Id)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .check(
+            Expr::col(Document::SourceBlobId)
+                .is_null()
+                .and(Expr::col(Document::SourceSha256).is_null())
+                .and(Expr::col(Document::SourceByteLen).is_null())
+                .or(Expr::col(Document::SourceBlobId)
+                    .is_not_null()
+                    .and(Expr::col(Document::SourceSha256).is_not_null())
+                    .and(Expr::col(Document::SourceByteLen).is_not_null())
+                    .and(Expr::cust("LENGTH(source_sha256) = 32"))
+                    .and(Expr::col(Document::SourceByteLen).gte(0))),
+        )
+        .check(Expr::col(Document::MediaType).ne(""))
+        .check(
+            Expr::col(Document::SourceUri)
+                .is_null()
+                .or(Expr::col(Document::SourceUri).ne("")),
+        )
+        .to_owned()
+}
+
+fn legacy_document_generation_table() -> TableCreateStatement {
+    Table::create()
+        .table(DocumentGeneration::Table)
+        .col(
+            ColumnDef::new(DocumentGeneration::DocumentId)
+                .uuid()
+                .not_null()
+                .primary_key(),
+        )
+        .col(
+            ColumnDef::new(DocumentGeneration::ContentRevision)
+                .big_integer()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(DocumentGeneration::RevisionToken)
+                .uuid()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(DocumentGeneration::Tombstone)
+                .boolean()
+                .not_null()
+                .default(false),
+        )
+        .check(Expr::col(DocumentGeneration::ContentRevision).gte(1))
+        .to_owned()
+}
+
+fn legacy_document_job_table() -> TableCreateStatement {
+    let valid_status = Expr::col(DocumentJob::Status).is_in([
+        DocumentJobStatus::Queued.as_str(),
+        DocumentJobStatus::Running.as_str(),
+        DocumentJobStatus::RetryWait.as_str(),
+        DocumentJobStatus::Succeeded.as_str(),
+        DocumentJobStatus::Failed.as_str(),
+        DocumentJobStatus::Cancelled.as_str(),
+    ]);
+    let running_lease = Expr::col(DocumentJob::Status)
+        .eq(DocumentJobStatus::Running.as_str())
+        .and(Expr::col(DocumentJob::LeaseToken).is_not_null())
+        .and(Expr::col(DocumentJob::LeaseExpiresAt).is_not_null());
+    let no_lease = Expr::col(DocumentJob::Status)
+        .ne(DocumentJobStatus::Running.as_str())
+        .and(Expr::col(DocumentJob::LeaseToken).is_null())
+        .and(Expr::col(DocumentJob::LeaseExpiresAt).is_null());
+    let terminal_finished = Expr::col(DocumentJob::Status)
+        .is_in([
+            DocumentJobStatus::Succeeded.as_str(),
+            DocumentJobStatus::Failed.as_str(),
+            DocumentJobStatus::Cancelled.as_str(),
+        ])
+        .and(Expr::col(DocumentJob::FinishedAt).is_not_null());
+    let nonterminal_unfinished = Expr::col(DocumentJob::Status)
+        .is_in([
+            DocumentJobStatus::Queued.as_str(),
+            DocumentJobStatus::Running.as_str(),
+            DocumentJobStatus::RetryWait.as_str(),
+        ])
+        .and(Expr::col(DocumentJob::FinishedAt).is_null());
+    let queued_attempt = Expr::col(DocumentJob::Status)
+        .eq(DocumentJobStatus::Queued.as_str())
+        .and(Expr::col(DocumentJob::AttemptCount).eq(0))
+        .and(Expr::col(DocumentJob::StartedAt).is_null());
+    let running_attempt = Expr::col(DocumentJob::Status)
+        .eq(DocumentJobStatus::Running.as_str())
+        .and(Expr::col(DocumentJob::AttemptCount).gte(1))
+        .and(Expr::col(DocumentJob::StartedAt).is_not_null());
+    let retryable_attempt = Expr::col(DocumentJob::Status)
+        .eq(DocumentJobStatus::RetryWait.as_str())
+        .and(Expr::col(DocumentJob::AttemptCount).gte(1))
+        .and(Expr::col(DocumentJob::AttemptCount).lt(Expr::col(DocumentJob::MaxAttempts)))
+        .and(Expr::col(DocumentJob::StartedAt).is_not_null());
+    let completed_attempt = Expr::col(DocumentJob::Status)
+        .is_in([
+            DocumentJobStatus::Succeeded.as_str(),
+            DocumentJobStatus::Failed.as_str(),
+        ])
+        .and(Expr::col(DocumentJob::AttemptCount).gte(1))
+        .and(Expr::col(DocumentJob::StartedAt).is_not_null());
+    let cancelled_attempt = Expr::col(DocumentJob::Status)
+        .eq(DocumentJobStatus::Cancelled.as_str())
+        .and(
+            Expr::col(DocumentJob::AttemptCount)
+                .eq(0)
+                .and(Expr::col(DocumentJob::StartedAt).is_null())
+                .or(Expr::col(DocumentJob::AttemptCount)
+                    .gte(1)
+                    .and(Expr::col(DocumentJob::StartedAt).is_not_null())),
+        );
+
+    Table::create()
+        .table(DocumentJob::Table)
+        .col(
+            ColumnDef::new(DocumentJob::Id)
+                .uuid()
+                .not_null()
+                .primary_key(),
+        )
+        .col(ColumnDef::new(DocumentJob::DocumentId).uuid().not_null())
+        .col(
+            ColumnDef::new(DocumentJob::ContentRevision)
+                .big_integer()
+                .not_null(),
+        )
+        .col(ColumnDef::new(DocumentJob::RevisionToken).uuid().not_null())
+        .col(ColumnDef::new(DocumentJob::Kind).string_len(64).not_null())
+        .col(
+            ColumnDef::new(DocumentJob::Status)
+                .string_len(32)
+                .not_null()
+                .default(DocumentJobStatus::Queued.as_str()),
+        )
+        .col(
+            ColumnDef::new(DocumentJob::PipelineFingerprint)
+                .string_len(LEGACY_DOCUMENT_PIPELINE_FINGERPRINT_LEN as u32)
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(DocumentJob::AttemptCount)
+                .integer()
+                .not_null()
+                .default(0),
+        )
+        .col(
+            ColumnDef::new(DocumentJob::MaxAttempts)
+                .integer()
+                .not_null()
+                .default(5),
+        )
+        .col(
+            ColumnDef::new(DocumentJob::AvailableAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .col(ColumnDef::new(DocumentJob::LeaseToken).uuid())
+        .col(ColumnDef::new(DocumentJob::LeaseExpiresAt).timestamp_with_time_zone())
+        .col(ColumnDef::new(DocumentJob::StartedAt).timestamp_with_time_zone())
+        .col(ColumnDef::new(DocumentJob::FinishedAt).timestamp_with_time_zone())
+        .col(
+            ColumnDef::new(DocumentJob::LastErrorCode)
+                .string_len(LEGACY_DOCUMENT_JOB_ERROR_CODE_LEN as u32),
+        )
+        .col(
+            ColumnDef::new(DocumentJob::LastErrorDetail)
+                .string_len(LEGACY_DOCUMENT_JOB_ERROR_DETAIL_LEN as u32),
+        )
+        .col(
+            ColumnDef::new(DocumentJob::CreatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(DocumentJob::UpdatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_document_job_document")
+                .from(DocumentJob::Table, DocumentJob::DocumentId)
+                .to(Document::Table, Document::Id)
+                .on_delete(ForeignKeyAction::Cascade),
+        )
+        .check(Expr::col(DocumentJob::ContentRevision).gte(1))
+        .check(Expr::col(DocumentJob::Kind).is_in(["parse"]))
+        .check(
+            Func::char_length(Expr::col(DocumentJob::Kind))
+                .lte(64)
+                .and(
+                    Func::char_length(Expr::col(DocumentJob::PipelineFingerprint))
+                        .between(1, LEGACY_DOCUMENT_PIPELINE_FINGERPRINT_LEN as i32),
+                )
+                .and(
+                    Expr::col(DocumentJob::LastErrorCode)
+                        .is_null()
+                        .or(Func::char_length(Expr::col(DocumentJob::LastErrorCode))
+                            .between(1, LEGACY_DOCUMENT_JOB_ERROR_CODE_LEN as i32)),
+                )
+                .and(
+                    Expr::col(DocumentJob::LastErrorDetail)
+                        .is_null()
+                        .or(Func::char_length(Expr::col(DocumentJob::LastErrorDetail))
+                            .between(1, LEGACY_DOCUMENT_JOB_ERROR_DETAIL_LEN as i32)),
+                ),
+        )
+        .check(valid_status)
+        .check(
+            Expr::col(DocumentJob::AttemptCount)
+                .gte(0)
+                .and(Expr::col(DocumentJob::MaxAttempts).gte(1))
+                .and(Expr::col(DocumentJob::AttemptCount).lte(Expr::col(DocumentJob::MaxAttempts))),
+        )
+        .check(running_lease.or(no_lease))
+        .check(terminal_finished.or(nonterminal_unfinished))
+        .check(
+            queued_attempt
+                .or(running_attempt)
+                .or(retryable_attempt)
+                .or(completed_attempt)
+                .or(cancelled_attempt),
+        )
+        .to_owned()
+}
+
+fn legacy_document_job_indexes() -> [IndexCreateStatement; 5] {
+    [
+        Index::create()
+            .name("idx_document_job_idempotency")
+            .table(DocumentJob::Table)
+            .col(DocumentJob::DocumentId)
+            .col(DocumentJob::RevisionToken)
+            .col(DocumentJob::Kind)
+            .col(DocumentJob::PipelineFingerprint)
+            .unique()
+            .to_owned(),
+        Index::create()
+            .name("idx_document_job_one_active")
+            .table(DocumentJob::Table)
+            .col(DocumentJob::DocumentId)
+            .unique()
+            .and_where(Expr::col(DocumentJob::Status).is_in([
+                DocumentJobStatus::Queued.as_str(),
+                DocumentJobStatus::Running.as_str(),
+                DocumentJobStatus::RetryWait.as_str(),
+            ]))
+            .to_owned(),
+        Index::create()
+            .name("idx_document_job_due")
+            .table(DocumentJob::Table)
+            .col(DocumentJob::Status)
+            .col(DocumentJob::AvailableAt)
+            .to_owned(),
+        Index::create()
+            .name("idx_document_job_stale_lease")
+            .table(DocumentJob::Table)
+            .col(DocumentJob::Status)
+            .col(DocumentJob::LeaseExpiresAt)
+            .to_owned(),
+        Index::create()
+            .name("idx_document_job_history")
+            .table(DocumentJob::Table)
+            .col(DocumentJob::DocumentId)
+            .col(DocumentJob::CreatedAt)
+            .to_owned(),
+    ]
+}
+
+async fn retire_document_pipeline_sqlite(
+    manager: &SchemaManager<'_>,
+    retired: bool,
+) -> Result<(), DbErr> {
+    let shared = "id, chat_id, project_id, source_uri, media_type, title, source_blob_id, \
+        source_sha256, source_byte_len, canonical_text, created_at, updated_at";
+    let mut statements = vec![
+        "PRAGMA foreign_keys=OFF".to_owned(),
+        "BEGIN IMMEDIATE".to_owned(),
+        format!("DROP TABLE IF EXISTS {DOCUMENT_PIPELINE_REBUILD}"),
+    ];
+    if retired {
+        statements.extend([
+            "DROP TABLE document_job".to_owned(),
+            "DROP TABLE document_generation".to_owned(),
+            document_pipeline_table().to_string(SqliteQueryBuilder),
+            format!(
+                "INSERT INTO {DOCUMENT_PIPELINE_REBUILD} ({shared}) \
+                 SELECT {shared} FROM document"
+            ),
+        ]);
+    } else {
+        statements.extend([
+            document_rebuild_table(false).to_string(SqliteQueryBuilder),
+            format!(
+                "INSERT INTO {DOCUMENT_REBUILD} ({shared}, canonical_fingerprint, source_regions, \
+                 content_revision, revision_token, processing_status) \
+                 SELECT {shared}, NULL, '[]', 1, id, \
+                 CASE WHEN canonical_text <> '' THEN 'ready' ELSE 'queued' END FROM document"
+            ),
+        ]);
+    }
+    statements.push("DROP TABLE document".to_owned());
+    statements.push(if retired {
+        format!("ALTER TABLE {DOCUMENT_PIPELINE_REBUILD} RENAME TO document")
+    } else {
+        format!("ALTER TABLE {DOCUMENT_REBUILD} RENAME TO document")
+    });
+    statements.extend(
+        document_rebuild_indexes()
+            .iter()
+            .map(|index| index.to_string(SqliteQueryBuilder)),
+    );
+    if !retired {
+        statements.extend([
+            legacy_document_generation_table().to_string(SqliteQueryBuilder),
+            "INSERT INTO document_generation \
+             (document_id, content_revision, revision_token, tombstone) \
+             SELECT id, 1, id, FALSE FROM document"
+                .to_owned(),
+            legacy_document_job_table().to_string(SqliteQueryBuilder),
+        ]);
+        statements.extend(
+            legacy_document_job_indexes()
+                .iter()
+                .map(|index| index.to_string(SqliteQueryBuilder)),
+        );
+    }
+    statements.extend(["COMMIT".to_owned(), "PRAGMA foreign_keys=ON".to_owned()]);
+    manager
+        .get_connection()
+        .execute_unprepared(&format!("{};", statements.join(";\n")))
+        .await?;
+    Ok(())
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for RetireDocumentPipeline {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if manager.get_database_backend() == DatabaseBackend::Sqlite {
+            return retire_document_pipeline_sqlite(manager, true).await;
+        }
+        manager
+            .get_connection()
+            .execute_unprepared(
+                "DROP TABLE document_job CASCADE; \
+                 DROP TABLE document_generation CASCADE; \
+                 ALTER TABLE document DROP COLUMN canonical_fingerprint CASCADE, \
+                    DROP COLUMN source_regions CASCADE, \
+                    DROP COLUMN content_revision CASCADE, \
+                    DROP COLUMN revision_token CASCADE, \
+                    DROP COLUMN processing_status CASCADE;",
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if manager.get_database_backend() == DatabaseBackend::Sqlite {
+            return retire_document_pipeline_sqlite(manager, false).await;
+        }
+        manager
+            .get_connection()
+            .execute_unprepared(
+                "ALTER TABLE document ADD COLUMN content_revision BIGINT NOT NULL DEFAULT 1; \
+                 ALTER TABLE document ADD COLUMN canonical_fingerprint TEXT; \
+                 ALTER TABLE document ADD COLUMN source_regions JSONB NOT NULL DEFAULT '[]'::jsonb; \
+                 ALTER TABLE document ADD COLUMN revision_token UUID; \
+                 UPDATE document SET revision_token = id; \
+                 ALTER TABLE document ALTER COLUMN revision_token SET NOT NULL; \
+                 ALTER TABLE document ADD COLUMN processing_status TEXT; \
+                 UPDATE document SET processing_status = CASE \
+                    WHEN canonical_text <> '' THEN 'ready' ELSE 'queued' END; \
+                 ALTER TABLE document ALTER COLUMN processing_status SET NOT NULL; \
+                 ALTER TABLE document ADD CONSTRAINT chk_document_content_revision \
+                    CHECK (content_revision >= 1); \
+                 ALTER TABLE document ADD CONSTRAINT chk_document_processing_status \
+                    CHECK (processing_status IN ('queued', 'processing', 'ready', 'failed')); \
+                 ALTER TABLE document ADD CONSTRAINT chk_document_canonical_fingerprint \
+                    CHECK (canonical_fingerprint IS NULL OR \
+                    char_length(canonical_fingerprint) BETWEEN 1 AND 512);",
+            )
+            .await?;
+        manager
+            .create_table(legacy_document_generation_table())
+            .await?;
+        manager
+            .get_connection()
+            .execute_unprepared(
+                "INSERT INTO document_generation \
+                 (document_id, content_revision, revision_token, tombstone) \
+                 SELECT id, 1, id, FALSE FROM document;",
+            )
+            .await?;
+        manager.create_table(legacy_document_job_table()).await?;
+        for index in legacy_document_job_indexes() {
+            manager.create_index(index).await?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(DeriveIden)]
 enum AssistantCitationLight {
     Table,
@@ -8455,6 +9073,16 @@ enum MessageAttachment {
     Width,
     Height,
     ByteLen,
+    CreatedAt,
+}
+
+#[derive(DeriveIden)]
+enum MessageDocumentAttachment {
+    Table,
+    MessageId,
+    Ordinal,
+    ChatId,
+    DocumentId,
     CreatedAt,
 }
 

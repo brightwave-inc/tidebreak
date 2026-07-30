@@ -11,7 +11,7 @@ use chrono::Utc;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, Database, DatabaseConnection, EntityTrait,
-    FromQueryResult, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait, TryInsertResult,
+    FromQueryResult, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 use sea_orm_migration::MigratorTrait;
 use serde_json::Value;
@@ -23,8 +23,8 @@ use crate::event::{AgentEvent, SequencedEvent};
 #[cfg(test)]
 use crate::id::MessageId;
 use crate::id::{
-    AgentRunId, CallId, ChatId, DocumentId, DocumentJobId, HostRootId, OutputId, OutputRevisionId,
-    ProjectId, RootAttachmentChangeId, TurnId, TurnSteerId,
+    AgentRunId, CallId, ChatId, DocumentId, HostRootId, OutputId, OutputRevisionId, ProjectId,
+    RootAttachmentChangeId, TurnId, TurnSteerId,
 };
 use crate::image::ImageRef;
 #[cfg(test)]
@@ -32,14 +32,13 @@ use crate::model::Role;
 use crate::model::{
     validate_project_root_projection, AgentRun, AgentRunInboxEntry, AgentRunStatus, AgentRunTier,
     AgentRunWaitSetCandidate, BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus,
-    Chat, DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
-    DocumentParseOutput, DocumentProcessingStatus, DocumentRecord, DocumentScope,
-    DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message,
-    MessageAttachment, PermissionMode, Project, ReasoningEffort, RootAttachmentChange,
+    Chat, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceBlob,
+    DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, MessageAttachment,
+    MessageDocumentAttachment, PermissionMode, Project, ReasoningEffort, RootAttachmentChange,
     RootAttachmentChangeTerminal, SandboxToolCall, SandboxToolCallReceipt, SandboxToolCallRequest,
-    SourceRegion, ToolCallRecord, ToolCallResolution, TurnAgentRunWaitStatus,
-    TurnCheckpointProgress, TurnClientWaitStatus, TurnFailureRetry, TurnRun, TurnRunStatus,
-    TurnSteerStatus, MAX_ROOT_ATTACHMENTS,
+    ToolCallRecord, ToolCallResolution, TurnAgentRunWaitStatus, TurnCheckpointProgress,
+    TurnClientWaitStatus, TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteerStatus,
+    MAX_ROOT_ATTACHMENTS,
 };
 use crate::provider::{StopReason, Usage};
 use crate::semantic_checkpoint::{ContextCheckpoint, SaveContextCheckpointOutcome};
@@ -50,16 +49,16 @@ use crate::storage::{
     ClaimAgentRunInboxOutcome, ClaimClientToolCallOutcome, ClaimDelegatedFileReadOutcome,
     ClaimSandboxToolCallOutcome, ClaimTurnRunOutcome, CompleteTurnRunOutcome,
     ConsumeAgentRunInboxAndResumeTurnOutcome, ConsumeAgentRunInboxOutcome,
-    DecideToolApprovalOutcome, DeleteChatOutcome, DeleteProjectOutcome,
-    EnsureDocumentParseJobOutcome, FailAgentRunOutcome, FinishAgentRunCancellationOutcome,
-    FinishRootAttachmentChangeOutcome, FinishTurnCancellationOutcome,
-    HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome, JournaledToolApprovalOutcome,
-    JournaledTurnOutcome, JournaledTurnSteerOutcome, OperationClaimOutcome, OperationLogEntry,
-    OperationLogWrite, ParkSandboxToolCallOutcome, ParkTurnForAgentRunInboxOutcome,
-    ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome, RecordTurnFailureOutcome,
-    RequestAgentRunCancellationOutcome, RequestToolApprovalOutcome, RequestTurnCancellationOutcome,
-    ResolveSandboxToolCallOutcome, ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome,
-    Store, SubmitAgentRunResultOutcome, TurnLeaseFence,
+    DecideToolApprovalOutcome, DeleteChatOutcome, DeleteProjectOutcome, FailAgentRunOutcome,
+    FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
+    FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
+    JournaledToolApprovalOutcome, JournaledTurnOutcome, JournaledTurnSteerOutcome,
+    OperationClaimOutcome, OperationLogEntry, OperationLogWrite, ParkSandboxToolCallOutcome,
+    ParkTurnForAgentRunInboxOutcome, ParkTurnForAgentRunWaitSetOutcome,
+    ParkTurnForClientCallOutcome, RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome,
+    RequestToolApprovalOutcome, RequestTurnCancellationOutcome, ResolveSandboxToolCallOutcome,
+    ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome, Store,
+    SubmitAgentRunResultOutcome, TurnLeaseFence,
 };
 
 mod ops;
@@ -77,7 +76,7 @@ pub struct DbStore {
 
 /// Projected row for metadata-only document listings. Keeping this distinct
 /// from the entity model makes it impossible for this query to select the
-/// canonical text or revision token by accident.
+/// canonical text by accident.
 #[derive(Debug, FromQueryResult)]
 struct DocumentSummaryRow {
     id: uuid::Uuid,
@@ -87,8 +86,6 @@ struct DocumentSummaryRow {
     media_type: String,
     title: Option<String>,
     source_byte_len: Option<i64>,
-    content_revision: i64,
-    processing_status: String,
     /// Emptiness of the canonical text, evaluated in the database so a listing
     /// still never transfers the text itself.
     has_canonical_text: bool,
@@ -235,7 +232,6 @@ impl Store for DbStore {
     }
 
     async fn create_document(&self, document: &DocumentRecord) -> Result<()> {
-        validate_document_source_regions(&document.canonical_text, &document.source_regions)?;
         let source_byte_len = document
             .source_blob
             .as_ref()
@@ -244,17 +240,6 @@ impl Store for DbStore {
         let transaction = self.conn.begin().await.map_err(store_err)?;
         ops::require_document_scope_write_lock(&transaction, document.chat_id, document.project_id)
             .await?;
-        acquire_document_write_lock(&transaction, document.id).await?;
-        let revision_token = uuid::Uuid::new_v4();
-        entities::document_generation::ActiveModel {
-            document_id: Set(document.id.0),
-            content_revision: Set(document.content_revision),
-            revision_token: Set(revision_token),
-            tombstone: Set(false),
-        }
-        .insert(&transaction)
-        .await
-        .map_err(store_err)?;
         entities::document::ActiveModel {
             id: Set(document.id.0),
             chat_id: Set(document.chat_id.map(|id| id.0)),
@@ -269,11 +254,6 @@ impl Store for DbStore {
                 .map(|blob| blob.sha256.to_vec())),
             source_byte_len: Set(source_byte_len),
             canonical_text: Set(document.canonical_text.clone()),
-            canonical_fingerprint: Set(document.canonical_fingerprint.clone()),
-            source_regions: Set(source_regions_to_db(&document.source_regions)),
-            content_revision: Set(document.content_revision),
-            revision_token: Set(revision_token),
-            processing_status: Set(document.processing_status.as_str().into()),
             created_at: Set(document.created_at),
             updated_at: Set(document.updated_at),
         }
@@ -357,8 +337,6 @@ impl Store for DbStore {
                 entities::document::Column::MediaType,
                 entities::document::Column::Title,
                 entities::document::Column::SourceByteLen,
-                entities::document::Column::ContentRevision,
-                entities::document::Column::ProcessingStatus,
                 entities::document::Column::CreatedAt,
                 entities::document::Column::UpdatedAt,
             ])
@@ -471,615 +449,39 @@ impl Store for DbStore {
         .await
     }
 
-    async fn get_document_generation(&self, id: DocumentId) -> Result<Option<DocumentGeneration>> {
-        Ok(entities::document_generation::Entity::find_by_id(id.0)
-            .one(&self.conn)
+    async fn delete_document(&self, id: DocumentId) -> Result<()> {
+        let transaction = self.conn.begin().await.map_err(store_err)?;
+        let document = entities::document::Entity::find_by_id(id.0)
+            .one(&transaction)
             .await
-            .map_err(store_err)?
-            .map(|generation| DocumentGeneration {
-                content_revision: generation.content_revision,
-                revision_token: generation.revision_token,
-            }))
-    }
-
-    async fn delete_document(&self, id: DocumentId) -> Result<DocumentGeneration> {
-        loop {
-            let transaction = self.conn.begin().await.map_err(store_err)?;
-            acquire_document_write_lock(&transaction, id).await?;
-            let document = entities::document::Entity::find_by_id(id.0)
-                .one(&transaction)
+            .map_err(store_err)?;
+        if let Some(document) = document {
+            entities::document::Entity::delete_by_id(id.0)
+                .exec(&transaction)
                 .await
                 .map_err(store_err)?;
-            let retained = entities::document_generation::Entity::find_by_id(id.0)
-                .one(&transaction)
-                .await
-                .map_err(store_err)?;
-            if document.is_none() && retained.as_ref().is_some_and(|row| row.tombstone) {
-                let retained = retained.unwrap();
-                transaction.commit().await.map_err(store_err)?;
-                return Ok(DocumentGeneration {
-                    content_revision: retained.content_revision,
-                    revision_token: retained.revision_token,
-                });
+            if let Some(blob_id) = document.source_blob_id {
+                ops::blob::enqueue_on(&transaction, blob_id).await?;
             }
-            if let Some(document) = document.as_ref() {
-                ensure_live_document_generation_on(&transaction, document).await?;
-            }
-
-            let Some(advanced) = try_advance_document_generation_on(&transaction, id, true).await?
-            else {
-                transaction.rollback().await.map_err(store_err)?;
-                continue;
-            };
-            if let Some(document) = document {
-                let live_generation = DocumentGeneration {
-                    content_revision: document.content_revision,
-                    revision_token: document.revision_token,
-                };
-                if advanced.previous != Some(live_generation) {
-                    return Err(AgentError::Store(format!(
-                        "document {id} does not match its retained generation clock"
-                    )));
-                }
-                let deleted = entities::document::Entity::delete_many()
-                    .filter(entities::document::Column::Id.eq(id.0))
-                    .filter(
-                        entities::document::Column::ContentRevision.eq(document.content_revision),
-                    )
-                    .filter(entities::document::Column::RevisionToken.eq(document.revision_token))
-                    .exec(&transaction)
-                    .await
-                    .map_err(store_err)?;
-                if deleted.rows_affected != 1 {
-                    transaction.rollback().await.map_err(store_err)?;
-                    continue;
-                }
-                if let Some(blob_id) = document.source_blob_id {
-                    ops::blob::enqueue_on(&transaction, blob_id).await?;
-                }
-            }
-            transaction.commit().await.map_err(store_err)?;
-            return Ok(advanced.current);
         }
+        transaction.commit().await.map_err(store_err)?;
+        Ok(())
     }
 
     async fn upsert_document(&self, document: &DocumentUpsert) -> Result<DocumentRecord> {
-        validate_document_upsert(document)?;
-        loop {
-            let transaction = self.conn.begin().await.map_err(store_err)?;
-            ops::require_document_scope_write_lock(
-                &transaction,
-                document.chat_id,
-                document.project_id,
-            )
+        let transaction = self.conn.begin().await.map_err(store_err)?;
+        ops::require_document_scope_write_lock(&transaction, document.chat_id, document.project_id)
             .await?;
-            acquire_document_write_lock(&transaction, document.id).await?;
-            match try_upsert_document_on(&transaction, document).await? {
-                Some(record) => {
-                    transaction.commit().await.map_err(store_err)?;
-                    return Ok(record);
-                }
-                None => {
-                    transaction.rollback().await.map_err(store_err)?;
-                }
-            }
-        }
+        let record = upsert_document_on(&transaction, document).await?;
+        transaction.commit().await.map_err(store_err)?;
+        Ok(record)
     }
 
-    async fn accept_document_source_and_enqueue_parse(
+    async fn accept_document_source(
         &self,
         document: &DocumentSourceUpsert,
-        parser_fingerprint: &str,
-        max_attempts: i32,
-    ) -> Result<(DocumentRecord, DocumentJob)> {
-        ops::document::accept_source_and_enqueue_parse(
-            self,
-            document,
-            parser_fingerprint,
-            max_attempts,
-        )
-        .await
-    }
-
-    async fn complete_document_parse_job(
-        &self,
-        id: DocumentJobId,
-        lease_token: uuid::Uuid,
-        completed_at: chrono::DateTime<Utc>,
-        output: &DocumentParseOutput,
-    ) -> Result<Option<DocumentRecord>> {
-        ops::document::complete_parse(self, id, lease_token, completed_at, output).await
-    }
-
-    async fn get_document_job(&self, id: DocumentJobId) -> Result<Option<DocumentJob>> {
-        entities::document_job::Entity::find_by_id(id.0)
-            .one(&self.conn)
-            .await
-            .map_err(store_err)?
-            .map(document_job_from_model)
-            .transpose()
-    }
-
-    async fn ensure_document_parse_job(
-        &self,
-        document_id: DocumentId,
-        expected_generation: DocumentGeneration,
-        pipeline_fingerprint: &str,
-        max_attempts: i32,
-    ) -> Result<EnsureDocumentParseJobOutcome> {
-        ops::document::ensure_parse_job(
-            self,
-            document_id,
-            expected_generation,
-            pipeline_fingerprint,
-            max_attempts,
-        )
-        .await
-    }
-
-    async fn list_document_jobs(&self, document_id: DocumentId) -> Result<Vec<DocumentJob>> {
-        entities::document_job::Entity::find()
-            .filter(entities::document_job::Column::DocumentId.eq(document_id.0))
-            .order_by_asc(entities::document_job::Column::ContentRevision)
-            .order_by_asc(entities::document_job::Column::CreatedAt)
-            .order_by_asc(entities::document_job::Column::Id)
-            .all(&self.conn)
-            .await
-            .map_err(store_err)?
-            .into_iter()
-            .map(document_job_from_model)
-            .collect()
-    }
-
-    async fn retry_document_job(
-        &self,
-        document_id: DocumentId,
-        expected_generation: DocumentGeneration,
-        kind: DocumentJobKind,
-        pipeline_fingerprint: &str,
-        max_attempts: i32,
-    ) -> Result<Option<DocumentJob>> {
-        ops::document::retry_document_job(
-            self,
-            document_id,
-            expected_generation,
-            kind,
-            pipeline_fingerprint,
-            max_attempts,
-        )
-        .await
-    }
-
-    async fn claim_document_job(
-        &self,
-        now: chrono::DateTime<Utc>,
-        lease_expires_at: chrono::DateTime<Utc>,
-    ) -> Result<Option<DocumentJob>> {
-        // Scoped here (not module-level) so the blanket `ExprTrait` impl does
-        // not leak into the test submodules' `use super::*` and make their
-        // `Ord::min`/`max` calls ambiguous.
-        use sea_orm::sea_query::ExprTrait;
-        if lease_expires_at <= now {
-            return Err(AgentError::Store(
-                "document job lease expiry must be after claim time".into(),
-            ));
-        }
-
-        loop {
-            let transaction = self.conn.begin().await.map_err(store_err)?;
-            acquire_document_job_write_lock(&transaction).await?;
-            let due = entities::document_job::Entity::find()
-                .filter(entities::document_job::Column::Status.is_in([
-                    DocumentJobStatus::Queued.as_str(),
-                    DocumentJobStatus::RetryWait.as_str(),
-                ]))
-                .filter(entities::document_job::Column::AvailableAt.lte(now))
-                .filter(
-                    sea_orm::sea_query::Expr::col(entities::document_job::Column::AttemptCount).lt(
-                        sea_orm::sea_query::Expr::col(entities::document_job::Column::MaxAttempts),
-                    ),
-                )
-                .order_by_asc(entities::document_job::Column::AvailableAt)
-                .order_by_asc(entities::document_job::Column::CreatedAt)
-                .order_by_asc(entities::document_job::Column::Id)
-                .one(&transaction)
-                .await
-                .map_err(store_err)?;
-            let expired = entities::document_job::Entity::find()
-                .filter(
-                    entities::document_job::Column::Status.eq(DocumentJobStatus::Running.as_str()),
-                )
-                .filter(entities::document_job::Column::LeaseExpiresAt.lte(now))
-                .order_by_asc(entities::document_job::Column::LeaseExpiresAt)
-                .order_by_asc(entities::document_job::Column::CreatedAt)
-                .order_by_asc(entities::document_job::Column::Id)
-                .one(&transaction)
-                .await
-                .map_err(store_err)?;
-            let candidate = match (due, expired) {
-                (Some(due), Some(expired)) => {
-                    if document_job_due_order(&due, &expired).is_le() {
-                        Some(due)
-                    } else {
-                        Some(expired)
-                    }
-                }
-                (candidate @ Some(_), None) | (None, candidate @ Some(_)) => candidate,
-                (None, None) => None,
-            };
-            let Some(candidate) = candidate else {
-                transaction.commit().await.map_err(store_err)?;
-                return Ok(None);
-            };
-
-            // Enqueue takes the document lock before mutating jobs. Claims use
-            // the same order to avoid a Postgres doc↔job deadlock, then reload
-            // the candidate because it may have changed while this lock waited.
-            acquire_document_write_lock(&transaction, DocumentId(candidate.document_id)).await?;
-            let candidate = entities::document_job::Entity::find_by_id(candidate.id)
-                .one(&transaction)
-                .await
-                .map_err(store_err)?;
-            let Some(candidate) = candidate.filter(|candidate| document_job_is_due(candidate, now))
-            else {
-                transaction.rollback().await.map_err(store_err)?;
-                continue;
-            };
-
-            let reclaiming = candidate.status == DocumentJobStatus::Running.as_str();
-            let expected_document_status = if reclaiming {
-                DocumentProcessingStatus::Processing
-            } else {
-                DocumentProcessingStatus::Queued
-            };
-            let current = entities::document::Entity::find_by_id(candidate.document_id)
-                .one(&transaction)
-                .await
-                .map_err(store_err)?;
-            let identity_matches = current.as_ref().is_some_and(|document| {
-                document.content_revision == candidate.content_revision
-                    && document.revision_token == candidate.revision_token
-            });
-            if !identity_matches {
-                cancel_document_job_on(&transaction, candidate.id, &candidate.status, now).await?;
-                transaction.commit().await.map_err(store_err)?;
-                continue;
-            }
-            let current_status = &current.as_ref().unwrap().processing_status;
-            if current_status != expected_document_status.as_str() {
-                return Err(AgentError::Store(format!(
-                    "document job {} is {} but exact document {} is unexpectedly {}",
-                    candidate.id, candidate.status, candidate.document_id, current_status
-                )));
-            }
-
-            if reclaiming && candidate.attempt_count >= candidate.max_attempts {
-                let failed = entities::document_job::Entity::update_many()
-                    .col_expr(
-                        entities::document_job::Column::Status,
-                        sea_orm::sea_query::Expr::value(DocumentJobStatus::Failed.as_str()),
-                    )
-                    .col_expr(
-                        entities::document_job::Column::LeaseToken,
-                        sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
-                    )
-                    .col_expr(
-                        entities::document_job::Column::LeaseExpiresAt,
-                        sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
-                    )
-                    .col_expr(
-                        entities::document_job::Column::FinishedAt,
-                        sea_orm::sea_query::Expr::value(Some(now)),
-                    )
-                    .col_expr(
-                        entities::document_job::Column::LastErrorCode,
-                        sea_orm::sea_query::Expr::value(Some("lease_expired".to_owned())),
-                    )
-                    .col_expr(
-                        entities::document_job::Column::LastErrorDetail,
-                        sea_orm::sea_query::Expr::value(Some(
-                            "final worker lease expired".to_owned(),
-                        )),
-                    )
-                    .col_expr(
-                        entities::document_job::Column::UpdatedAt,
-                        sea_orm::sea_query::Expr::value(now),
-                    )
-                    .filter(entities::document_job::Column::Id.eq(candidate.id))
-                    .filter(
-                        entities::document_job::Column::Status
-                            .eq(DocumentJobStatus::Running.as_str()),
-                    )
-                    .filter(
-                        entities::document_job::Column::AttemptCount.eq(candidate.attempt_count),
-                    )
-                    .filter(entities::document_job::Column::LeaseToken.eq(candidate.lease_token))
-                    .filter(
-                        entities::document_job::Column::LeaseExpiresAt
-                            .eq(candidate.lease_expires_at),
-                    )
-                    .exec(&transaction)
-                    .await
-                    .map_err(store_err)?;
-                let document_failed = entities::document::Entity::update_many()
-                    .col_expr(
-                        entities::document::Column::ProcessingStatus,
-                        sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Failed.as_str()),
-                    )
-                    .filter(entities::document::Column::Id.eq(candidate.document_id))
-                    .filter(
-                        entities::document::Column::ContentRevision.eq(candidate.content_revision),
-                    )
-                    .filter(entities::document::Column::RevisionToken.eq(candidate.revision_token))
-                    .filter(
-                        entities::document::Column::ProcessingStatus
-                            .eq(DocumentProcessingStatus::Processing.as_str()),
-                    )
-                    .exec(&transaction)
-                    .await
-                    .map_err(store_err)?;
-                if failed.rows_affected != 1 || document_failed.rows_affected != 1 {
-                    transaction.rollback().await.map_err(store_err)?;
-                    continue;
-                }
-                transaction.commit().await.map_err(store_err)?;
-                continue;
-            }
-
-            let lease_token = uuid::Uuid::new_v4();
-            let next_attempt = candidate.attempt_count.checked_add(1).ok_or_else(|| {
-                AgentError::Store(format!("document job {} attempt overflow", candidate.id))
-            })?;
-            let claim = entities::document_job::Entity::update_many()
-                .col_expr(
-                    entities::document_job::Column::Status,
-                    sea_orm::sea_query::Expr::value(DocumentJobStatus::Running.as_str()),
-                )
-                .col_expr(
-                    entities::document_job::Column::AttemptCount,
-                    sea_orm::sea_query::Expr::value(next_attempt),
-                )
-                .col_expr(
-                    entities::document_job::Column::LeaseToken,
-                    sea_orm::sea_query::Expr::value(Some(lease_token)),
-                )
-                .col_expr(
-                    entities::document_job::Column::LeaseExpiresAt,
-                    sea_orm::sea_query::Expr::value(Some(lease_expires_at)),
-                )
-                .col_expr(
-                    entities::document_job::Column::StartedAt,
-                    sea_orm::sea_query::Expr::value(Some(candidate.started_at.unwrap_or(now))),
-                )
-                .col_expr(
-                    entities::document_job::Column::UpdatedAt,
-                    sea_orm::sea_query::Expr::value(now),
-                )
-                .filter(entities::document_job::Column::Id.eq(candidate.id))
-                .filter(entities::document_job::Column::Status.eq(&candidate.status))
-                .filter(entities::document_job::Column::AttemptCount.eq(candidate.attempt_count));
-            let claim = if reclaiming {
-                claim
-                    .col_expr(
-                        entities::document_job::Column::LastErrorCode,
-                        sea_orm::sea_query::Expr::value(Some("lease_expired".to_owned())),
-                    )
-                    .col_expr(
-                        entities::document_job::Column::LastErrorDetail,
-                        sea_orm::sea_query::Expr::value(Some(
-                            "previous worker lease expired".to_owned(),
-                        )),
-                    )
-                    .filter(entities::document_job::Column::LeaseToken.eq(candidate.lease_token))
-                    .filter(
-                        entities::document_job::Column::LeaseExpiresAt
-                            .eq(candidate.lease_expires_at),
-                    )
-            } else {
-                claim.filter(entities::document_job::Column::AvailableAt.lte(now))
-            };
-            let claimed = claim.exec(&transaction).await.map_err(store_err)?;
-            if claimed.rows_affected != 1 {
-                transaction.rollback().await.map_err(store_err)?;
-                continue;
-            }
-
-            let document_claimed = entities::document::Entity::update_many()
-                .col_expr(
-                    entities::document::Column::ProcessingStatus,
-                    sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Processing.as_str()),
-                )
-                .filter(entities::document::Column::Id.eq(candidate.document_id))
-                .filter(entities::document::Column::ContentRevision.eq(candidate.content_revision))
-                .filter(entities::document::Column::RevisionToken.eq(candidate.revision_token))
-                .filter(
-                    entities::document::Column::ProcessingStatus
-                        .eq(expected_document_status.as_str()),
-                )
-                .exec(&transaction)
-                .await
-                .map_err(store_err)?;
-            if document_claimed.rows_affected != 1 {
-                transaction.rollback().await.map_err(store_err)?;
-                continue;
-            }
-
-            let job = entities::document_job::Entity::find_by_id(candidate.id)
-                .one(&transaction)
-                .await
-                .map_err(store_err)?
-                .ok_or_else(|| {
-                    AgentError::Store(format!("claimed job {} disappeared", candidate.id))
-                })
-                .and_then(document_job_from_model)?;
-            transaction.commit().await.map_err(store_err)?;
-            return Ok(Some(job));
-        }
-    }
-
-    async fn heartbeat_document_job(
-        &self,
-        id: DocumentJobId,
-        lease_token: uuid::Uuid,
-        now: chrono::DateTime<Utc>,
-        lease_expires_at: chrono::DateTime<Utc>,
-    ) -> Result<bool> {
-        if lease_expires_at <= now {
-            return Err(AgentError::Store(
-                "document job lease expiry must be after heartbeat time".into(),
-            ));
-        }
-        let result = entities::document_job::Entity::update_many()
-            .col_expr(
-                entities::document_job::Column::LeaseExpiresAt,
-                sea_orm::sea_query::Expr::value(Some(lease_expires_at)),
-            )
-            .col_expr(
-                entities::document_job::Column::UpdatedAt,
-                sea_orm::sea_query::Expr::value(now),
-            )
-            .filter(entities::document_job::Column::Id.eq(id.0))
-            .filter(entities::document_job::Column::Status.eq(DocumentJobStatus::Running.as_str()))
-            .filter(entities::document_job::Column::LeaseToken.eq(lease_token))
-            .filter(entities::document_job::Column::LeaseExpiresAt.gt(now))
-            .filter(entities::document_job::Column::LeaseExpiresAt.lt(lease_expires_at))
-            .filter(entities::document_job::Column::UpdatedAt.lte(now))
-            .exec(&self.conn)
-            .await
-            .map_err(store_err)?;
-        Ok(result.rows_affected == 1)
-    }
-
-    async fn record_document_job_failure(
-        &self,
-        id: DocumentJobId,
-        lease_token: uuid::Uuid,
-        failed_at: chrono::DateTime<Utc>,
-        retry_at: Option<chrono::DateTime<Utc>>,
-        error_code: &str,
-        error_detail: Option<&str>,
-    ) -> Result<Option<DocumentJobStatus>> {
-        validate_document_job_error(error_code, error_detail)?;
-        if retry_at.is_some_and(|retry_at| retry_at <= failed_at) {
-            return Err(AgentError::Store(
-                "document job retry time must be after failure time".into(),
-            ));
-        }
-
-        loop {
-            let transaction = self.conn.begin().await.map_err(store_err)?;
-            acquire_document_job_write_lock(&transaction).await?;
-            let candidate = entities::document_job::Entity::find_by_id(id.0)
-                .one(&transaction)
-                .await
-                .map_err(store_err)?;
-            let Some(candidate) = candidate else {
-                transaction.rollback().await.map_err(store_err)?;
-                return Ok(None);
-            };
-            acquire_document_write_lock(&transaction, DocumentId(candidate.document_id)).await?;
-            let candidate = entities::document_job::Entity::find_by_id(id.0)
-                .one(&transaction)
-                .await
-                .map_err(store_err)?;
-            let Some(candidate) =
-                candidate.filter(|job| document_job_lease_is_live(job, lease_token, failed_at))
-            else {
-                transaction.rollback().await.map_err(store_err)?;
-                return Ok(None);
-            };
-            ensure_resolution_document_matches(&transaction, &candidate).await?;
-
-            let will_retry = retry_at.is_some() && candidate.attempt_count < candidate.max_attempts;
-            let next_status = if will_retry {
-                DocumentJobStatus::RetryWait
-            } else {
-                DocumentJobStatus::Failed
-            };
-            let update = entities::document_job::Entity::update_many()
-                .col_expr(
-                    entities::document_job::Column::Status,
-                    sea_orm::sea_query::Expr::value(next_status.as_str()),
-                )
-                .col_expr(
-                    entities::document_job::Column::LeaseToken,
-                    sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
-                )
-                .col_expr(
-                    entities::document_job::Column::LeaseExpiresAt,
-                    sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
-                )
-                .col_expr(
-                    entities::document_job::Column::LastErrorCode,
-                    sea_orm::sea_query::Expr::value(Some(error_code.to_owned())),
-                )
-                .col_expr(
-                    entities::document_job::Column::LastErrorDetail,
-                    sea_orm::sea_query::Expr::value(error_detail.map(str::to_owned)),
-                )
-                .col_expr(
-                    entities::document_job::Column::UpdatedAt,
-                    sea_orm::sea_query::Expr::value(failed_at),
-                );
-            let update = if let Some(retry_at) = retry_at.filter(|_| will_retry) {
-                update.col_expr(
-                    entities::document_job::Column::AvailableAt,
-                    sea_orm::sea_query::Expr::value(retry_at),
-                )
-            } else {
-                update.col_expr(
-                    entities::document_job::Column::FinishedAt,
-                    sea_orm::sea_query::Expr::value(Some(failed_at)),
-                )
-            };
-            let resolved = update
-                .filter(entities::document_job::Column::Id.eq(candidate.id))
-                .filter(
-                    entities::document_job::Column::Status.eq(DocumentJobStatus::Running.as_str()),
-                )
-                .filter(entities::document_job::Column::LeaseToken.eq(Some(lease_token)))
-                .filter(
-                    entities::document_job::Column::LeaseExpiresAt.eq(candidate.lease_expires_at),
-                )
-                .filter(entities::document_job::Column::UpdatedAt.eq(candidate.updated_at))
-                .exec(&transaction)
-                .await
-                .map_err(store_err)?;
-            if resolved.rows_affected != 1 {
-                transaction.rollback().await.map_err(store_err)?;
-                continue;
-            }
-
-            let next_document_status = if will_retry {
-                DocumentProcessingStatus::Queued
-            } else {
-                DocumentProcessingStatus::Failed
-            };
-            let document_resolved = entities::document::Entity::update_many()
-                .col_expr(
-                    entities::document::Column::ProcessingStatus,
-                    sea_orm::sea_query::Expr::value(next_document_status.as_str()),
-                )
-                .filter(entities::document::Column::Id.eq(candidate.document_id))
-                .filter(entities::document::Column::ContentRevision.eq(candidate.content_revision))
-                .filter(entities::document::Column::RevisionToken.eq(candidate.revision_token))
-                .filter(
-                    entities::document::Column::ProcessingStatus
-                        .eq(DocumentProcessingStatus::Processing.as_str()),
-                )
-                .exec(&transaction)
-                .await
-                .map_err(store_err)?;
-            if document_resolved.rows_affected != 1 {
-                transaction.rollback().await.map_err(store_err)?;
-                return Err(AgentError::Store(format!(
-                    "document job {} lost its exact processing document during failure",
-                    candidate.id
-                )));
-            }
-            transaction.commit().await.map_err(store_err)?;
-            return Ok(Some(next_status));
-        }
+    ) -> Result<DocumentRecord> {
+        ops::document::accept_source(self, document).await
     }
 
     async fn create_chat(&self, chat: &Chat) -> Result<()> {
@@ -1634,7 +1036,7 @@ impl Store for DbStore {
         model: &str,
         content: &str,
     ) -> Result<AcceptTurnOutcome> {
-        ops::turn::accept_turn(self, id, chat_id, model, content, &[]).await
+        ops::turn::accept_turn(self, id, chat_id, model, content, &[], &[]).await
     }
 
     async fn accept_turn_with_attachments(
@@ -1644,8 +1046,9 @@ impl Store for DbStore {
         model: &str,
         content: &str,
         images: &[ImageRef],
+        documents: &[DocumentId],
     ) -> Result<AcceptTurnOutcome> {
-        ops::turn::accept_turn(self, id, chat_id, model, content, images).await
+        ops::turn::accept_turn(self, id, chat_id, model, content, images, documents).await
     }
 
     async fn claim_turn_run(
@@ -1977,6 +1380,13 @@ impl Store for DbStore {
 
     async fn list_message_attachments(&self, chat_id: ChatId) -> Result<Vec<MessageAttachment>> {
         ops::message_attachment::list_for_chat(self, chat_id).await
+    }
+
+    async fn list_message_document_attachments(
+        &self,
+        chat_id: ChatId,
+    ) -> Result<Vec<MessageDocumentAttachment>> {
+        ops::message_document_attachment::list_for_chat(self, chat_id).await
     }
 
     async fn accept_tool_call(&self, call: &ToolCallRecord) -> Result<AcceptToolCallOutcome> {
@@ -2466,313 +1876,21 @@ impl Store for DbStore {
         ops::operation_log::len(self, run_id).await
     }
 }
-async fn cancel_live_document_jobs_on<C>(
-    conn: &C,
-    document_id: DocumentId,
-    now: chrono::DateTime<Utc>,
-) -> Result<()>
+async fn upsert_document_on<C>(conn: &C, document: &DocumentUpsert) -> Result<DocumentRecord>
 where
     C: ConnectionTrait,
 {
-    entities::document_job::Entity::update_many()
-        .col_expr(
-            entities::document_job::Column::Status,
-            sea_orm::sea_query::Expr::value(DocumentJobStatus::Cancelled.as_str()),
-        )
-        .col_expr(
-            entities::document_job::Column::LeaseToken,
-            sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
-        )
-        .col_expr(
-            entities::document_job::Column::LeaseExpiresAt,
-            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
-        )
-        .col_expr(
-            entities::document_job::Column::FinishedAt,
-            sea_orm::sea_query::Expr::value(Some(now)),
-        )
-        .col_expr(
-            entities::document_job::Column::UpdatedAt,
-            sea_orm::sea_query::Expr::value(now),
-        )
-        .filter(entities::document_job::Column::DocumentId.eq(document_id.0))
-        .filter(entities::document_job::Column::Status.is_in([
-            DocumentJobStatus::Queued.as_str(),
-            DocumentJobStatus::Running.as_str(),
-            DocumentJobStatus::RetryWait.as_str(),
-        ]))
-        .exec(conn)
-        .await
-        .map_err(store_err)?;
-    Ok(())
-}
-
-/// Acquire the database writer/row lock before the enqueue transaction reads.
-///
-/// On SQLite, even a no-match UPDATE starts the transaction as a writer, so two
-/// enqueues cannot both establish read snapshots and later fail their read→write
-/// upgrade with `SQLITE_BUSY_SNAPSHOT`. On Postgres an existing document row is
-/// locked; first inserts remain protected by the unique-key/CAS loop.
-async fn acquire_document_write_lock<C>(conn: &C, id: DocumentId) -> Result<()>
-where
-    C: ConnectionTrait,
-{
-    entities::document::Entity::update_many()
-        .col_expr(
-            entities::document::Column::UpdatedAt,
-            sea_orm::sea_query::Expr::col(entities::document::Column::UpdatedAt),
-        )
-        .filter(entities::document::Column::Id.eq(id.0))
-        .exec(conn)
-        .await
-        .map_err(store_err)?;
-    Ok(())
-}
-
-/// Start SQLite's write transaction before claim candidate reads.
-///
-/// The impossible primary-key predicate deliberately locks no Postgres row;
-/// Postgres claims serialize on the selected document row instead.
-async fn acquire_document_job_write_lock<C>(conn: &C) -> Result<()>
-where
-    C: ConnectionTrait,
-{
-    entities::document_job::Entity::update_many()
-        .col_expr(
-            entities::document_job::Column::UpdatedAt,
-            sea_orm::sea_query::Expr::col(entities::document_job::Column::UpdatedAt),
-        )
-        .filter(entities::document_job::Column::Id.is_null())
-        .exec(conn)
-        .await
-        .map_err(store_err)?;
-    Ok(())
-}
-
-fn document_job_is_due(job: &entities::document_job::Model, now: chrono::DateTime<Utc>) -> bool {
-    match job.status.as_str() {
-        status
-            if status == DocumentJobStatus::Queued.as_str()
-                || status == DocumentJobStatus::RetryWait.as_str() =>
-        {
-            job.available_at <= now && job.attempt_count < job.max_attempts
-        }
-        status if status == DocumentJobStatus::Running.as_str() => {
-            job.lease_expires_at.is_some_and(|expiry| expiry <= now)
-        }
-        _ => false,
-    }
-}
-
-fn document_job_due_order(
-    left: &entities::document_job::Model,
-    right: &entities::document_job::Model,
-) -> std::cmp::Ordering {
-    let effective_due = |job: &entities::document_job::Model| {
-        if job.status == DocumentJobStatus::Running.as_str() {
-            job.lease_expires_at.unwrap_or(job.available_at)
-        } else {
-            job.available_at
-        }
-    };
-    effective_due(left)
-        .cmp(&effective_due(right))
-        .then_with(|| left.created_at.cmp(&right.created_at))
-        .then_with(|| left.id.cmp(&right.id))
-}
-
-fn document_job_lease_is_live(
-    job: &entities::document_job::Model,
-    lease_token: uuid::Uuid,
-    now: chrono::DateTime<Utc>,
-) -> bool {
-    job.status == DocumentJobStatus::Running.as_str()
-        && job.lease_token == Some(lease_token)
-        && job.lease_expires_at.is_some_and(|expiry| expiry > now)
-        && job.updated_at <= now
-}
-
-async fn ensure_resolution_document_matches<C>(
-    conn: &C,
-    job: &entities::document_job::Model,
-) -> Result<()>
-where
-    C: ConnectionTrait,
-{
-    let document = entities::document::Entity::find_by_id(job.document_id)
-        .one(conn)
-        .await
-        .map_err(store_err)?;
-    let Some(document) = document else {
-        return Err(AgentError::Store(format!(
-            "running document job {} has no source document",
-            job.id
-        )));
-    };
-    if document.content_revision != job.content_revision
-        || document.revision_token != job.revision_token
-        || document.processing_status != DocumentProcessingStatus::Processing.as_str()
-    {
-        return Err(AgentError::Store(format!(
-            "running document job {} does not match its exact processing document {}",
-            job.id, job.document_id
-        )));
-    }
-    Ok(())
-}
-
-fn validate_document_job_error(error_code: &str, error_detail: Option<&str>) -> Result<()> {
-    let code_len = error_code.chars().count();
-    if !(1..=DocumentJob::MAX_ERROR_CODE_LEN).contains(&code_len) {
-        return Err(AgentError::Store(
-            "document job error code must contain 1 to 128 characters".into(),
-        ));
-    }
-    if error_detail.is_some_and(|detail| {
-        !(1..=DocumentJob::MAX_ERROR_DETAIL_LEN).contains(&detail.chars().count())
-    }) {
-        return Err(AgentError::Store(
-            "document job error detail must contain 1 to 4096 characters".into(),
-        ));
-    }
-    Ok(())
-}
-
-struct AdvancedDocumentGeneration {
-    previous: Option<DocumentGeneration>,
-    current: DocumentGeneration,
-}
-
-async fn ensure_live_document_generation_on<C>(
-    conn: &C,
-    document: &entities::document::Model,
-) -> Result<()>
-where
-    C: ConnectionTrait,
-{
-    let generation = entities::document_generation::Entity::find_by_id(document.id)
-        .one(conn)
-        .await
-        .map_err(store_err)?;
-    if generation.as_ref().is_none_or(|generation| {
-        generation.tombstone
-            || generation.content_revision != document.content_revision
-            || generation.revision_token != document.revision_token
-    }) {
-        return Err(AgentError::Store(format!(
-            "document {} does not match its retained generation clock",
-            document.id
-        )));
-    }
-    Ok(())
-}
-
-async fn try_advance_document_generation_on<C>(
-    conn: &C,
-    id: DocumentId,
-    tombstone: bool,
-) -> Result<Option<AdvancedDocumentGeneration>>
-where
-    C: ConnectionTrait,
-{
-    let previous = entities::document_generation::Entity::find_by_id(id.0)
-        .one(conn)
-        .await
-        .map_err(store_err)?;
-    if let Some(previous) = previous {
-        let next_revision = previous
-            .content_revision
-            .checked_add(1)
-            .ok_or_else(|| AgentError::Store(format!("document {id} revision overflow")))?;
-        let revision_token = uuid::Uuid::new_v4();
-        let update = entities::document_generation::Entity::update_many()
-            .col_expr(
-                entities::document_generation::Column::ContentRevision,
-                sea_orm::sea_query::Expr::value(next_revision),
-            )
-            .col_expr(
-                entities::document_generation::Column::RevisionToken,
-                sea_orm::sea_query::Expr::value(revision_token),
-            )
-            .col_expr(
-                entities::document_generation::Column::Tombstone,
-                sea_orm::sea_query::Expr::value(tombstone),
-            );
-        let updated = update
-            .filter(entities::document_generation::Column::DocumentId.eq(id.0))
-            .filter(
-                entities::document_generation::Column::ContentRevision
-                    .eq(previous.content_revision),
-            )
-            .filter(
-                entities::document_generation::Column::RevisionToken.eq(previous.revision_token),
-            )
-            .exec(conn)
-            .await
-            .map_err(store_err)?;
-        if updated.rows_affected != 1 {
-            return Ok(None);
-        }
-        return Ok(Some(AdvancedDocumentGeneration {
-            previous: Some(DocumentGeneration {
-                content_revision: previous.content_revision,
-                revision_token: previous.revision_token,
-            }),
-            current: DocumentGeneration {
-                content_revision: next_revision,
-                revision_token,
-            },
-        }));
-    }
-
-    let current = DocumentGeneration {
-        content_revision: 1,
-        revision_token: uuid::Uuid::new_v4(),
-    };
-    let inserted =
-        entities::document_generation::Entity::insert(entities::document_generation::ActiveModel {
-            document_id: Set(id.0),
-            content_revision: Set(current.content_revision),
-            revision_token: Set(current.revision_token),
-            tombstone: Set(tombstone),
-        })
-        .on_conflict_do_nothing()
-        .exec_without_returning(conn)
-        .await
-        .map_err(store_err)?;
-    if !matches!(inserted, TryInsertResult::Inserted(1)) {
-        return Ok(None);
-    }
-    Ok(Some(AdvancedDocumentGeneration {
-        previous: None,
-        current,
-    }))
-}
-
-async fn try_upsert_document_on<C>(
-    conn: &C,
-    document: &DocumentUpsert,
-) -> Result<Option<DocumentRecord>>
-where
-    C: ConnectionTrait,
-{
-    // `None` means a concurrent writer won either generation or source CAS.
-    // Callers must roll back the outer transaction and repeat semantic checks.
     let existing = entities::document::Entity::find_by_id(document.id.0)
         .one(conn)
         .await
         .map_err(store_err)?;
     if let Some(existing) = existing.as_ref() {
-        // The retained blob is what makes a document a raw source, and reparsing
-        // one is the staged workflow's job. A canonical fingerprint alone does
-        // not: this path can carry one, and a caller who wrote text with a
-        // producer stamp must be able to write it again.
         if existing.source_blob_id.is_some()
             || existing.source_sha256.is_some()
             || existing.source_byte_len.is_some()
         {
             return Err(AgentError::Store(
-                "raw-source documents require the staged source workflow".into(),
+                "raw-source documents require the synchronous source workflow".into(),
             ));
         }
         if existing.chat_id != document.chat_id.map(|id| id.0)
@@ -2783,90 +1901,9 @@ where
                 document.id
             )));
         }
-        ensure_live_document_generation_on(conn, existing).await?;
-    }
-    let Some(advanced) = try_advance_document_generation_on(conn, document.id, false).await? else {
-        return Ok(None);
-    };
-
-    if let Some(existing) = existing {
-        let existing_generation = DocumentGeneration {
-            content_revision: existing.content_revision,
-            revision_token: existing.revision_token,
-        };
-        if advanced.previous != Some(existing_generation) {
-            return Err(AgentError::Store(format!(
-                "document {} does not match its retained generation clock",
-                document.id
-            )));
-        }
-        let result = entities::document::Entity::update_many()
-            .col_expr(
-                entities::document::Column::ChatId,
-                sea_orm::sea_query::Expr::value(document.chat_id.map(|id| id.0)),
-            )
-            .col_expr(
-                entities::document::Column::ProjectId,
-                sea_orm::sea_query::Expr::value(document.project_id.map(|id| id.0)),
-            )
-            .col_expr(
-                entities::document::Column::SourceUri,
-                sea_orm::sea_query::Expr::value(document.source_uri.clone()),
-            )
-            .col_expr(
-                entities::document::Column::MediaType,
-                sea_orm::sea_query::Expr::value(document.media_type.clone()),
-            )
-            .col_expr(
-                entities::document::Column::Title,
-                sea_orm::sea_query::Expr::value(document.title.clone()),
-            )
-            .col_expr(
-                entities::document::Column::CanonicalText,
-                sea_orm::sea_query::Expr::value(document.canonical_text.clone()),
-            )
-            .col_expr(
-                entities::document::Column::CanonicalFingerprint,
-                sea_orm::sea_query::Expr::value(document.canonical_fingerprint.clone()),
-            )
-            .col_expr(
-                entities::document::Column::SourceRegions,
-                sea_orm::sea_query::Expr::value(source_regions_to_db(&document.source_regions)),
-            )
-            .col_expr(
-                entities::document::Column::ContentRevision,
-                sea_orm::sea_query::Expr::value(advanced.current.content_revision),
-            )
-            .col_expr(
-                entities::document::Column::RevisionToken,
-                sea_orm::sea_query::Expr::value(advanced.current.revision_token),
-            )
-            .col_expr(
-                entities::document::Column::ProcessingStatus,
-                sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Ready.as_str()),
-            )
-            .col_expr(
-                entities::document::Column::UpdatedAt,
-                sea_orm::sea_query::Expr::value(document.updated_at),
-            )
-            .filter(entities::document::Column::Id.eq(document.id.0))
-            .filter(entities::document::Column::ContentRevision.eq(existing.content_revision))
-            .filter(entities::document::Column::RevisionToken.eq(existing.revision_token))
-            .exec(conn)
-            .await
-            .map_err(store_err)?;
-        if result.rows_affected != 1 {
-            return Ok(None);
-        }
-        return Ok(Some(document_from_upsert(
-            document,
-            existing.created_at,
-            advanced.current.content_revision,
-            advanced.current.revision_token,
-        )));
     }
 
-    let inserted = entities::document::Entity::insert(entities::document::ActiveModel {
+    let active = entities::document::ActiveModel {
         id: Set(document.id.0),
         chat_id: Set(document.chat_id.map(|id| id.0)),
         project_id: Set(document.project_id.map(|id| id.0)),
@@ -2877,65 +1914,23 @@ where
         source_sha256: Set(None),
         source_byte_len: Set(None),
         canonical_text: Set(document.canonical_text.clone()),
-        canonical_fingerprint: Set(document.canonical_fingerprint.clone()),
-        source_regions: Set(source_regions_to_db(&document.source_regions)),
-        content_revision: Set(advanced.current.content_revision),
-        revision_token: Set(advanced.current.revision_token),
-        processing_status: Set(DocumentProcessingStatus::Ready.as_str().into()),
-        created_at: Set(document.updated_at),
+        created_at: Set(existing
+            .as_ref()
+            .map_or(document.updated_at, |current| current.created_at)),
         updated_at: Set(document.updated_at),
-    })
-    .on_conflict_do_nothing()
-    .exec_without_returning(conn)
-    .await
-    .map_err(store_err)?;
-    if !matches!(inserted, TryInsertResult::Inserted(1)) {
-        return Ok(None);
+    };
+    if existing.is_some() {
+        active.update(conn).await.map_err(store_err)?;
+    } else {
+        active.insert(conn).await.map_err(store_err)?;
     }
-    Ok(Some(document_from_upsert(
-        document,
-        document.updated_at,
-        advanced.current.content_revision,
-        advanced.current.revision_token,
-    )))
-}
 
-async fn cancel_document_job_on<C>(
-    conn: &C,
-    id: uuid::Uuid,
-    expected_status: &str,
-    finished_at: chrono::DateTime<Utc>,
-) -> Result<()>
-where
-    C: ConnectionTrait,
-{
-    entities::document_job::Entity::update_many()
-        .col_expr(
-            entities::document_job::Column::Status,
-            sea_orm::sea_query::Expr::value(DocumentJobStatus::Cancelled.as_str()),
-        )
-        .col_expr(
-            entities::document_job::Column::LeaseToken,
-            sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
-        )
-        .col_expr(
-            entities::document_job::Column::LeaseExpiresAt,
-            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
-        )
-        .col_expr(
-            entities::document_job::Column::FinishedAt,
-            sea_orm::sea_query::Expr::value(Some(finished_at)),
-        )
-        .col_expr(
-            entities::document_job::Column::UpdatedAt,
-            sea_orm::sea_query::Expr::value(finished_at),
-        )
-        .filter(entities::document_job::Column::Id.eq(id))
-        .filter(entities::document_job::Column::Status.eq(expected_status))
-        .exec(conn)
+    entities::document::Entity::find_by_id(document.id.0)
+        .one(conn)
         .await
-        .map_err(store_err)?;
-    Ok(())
+        .map_err(store_err)?
+        .ok_or_else(|| AgentError::Store("upserted document disappeared".into()))
+        .and_then(document_from_model)
 }
 
 pub(in crate::db) fn project_from_models(
@@ -2984,30 +1979,6 @@ fn validate_project_attachments(project: &Project) -> Result<()> {
     validate_project_root_projection(project).map_err(|message| AgentError::Store(message.into()))
 }
 
-fn validate_document_source_regions(text: &str, regions: &[SourceRegion]) -> Result<()> {
-    crate::model::validate_source_regions(text, regions)
-        .map_err(|message| AgentError::Store(format!("invalid document source regions: {message}")))
-}
-
-/// Semantic checks a canonical-text upsert must pass before it can take a
-/// generation, so a rejected write never advances the revision clock.
-fn validate_document_upsert(document: &DocumentUpsert) -> Result<()> {
-    validate_document_source_regions(&document.canonical_text, &document.source_regions)?;
-    if document
-        .canonical_fingerprint
-        .as_deref()
-        .is_some_and(|value| {
-            value.is_empty()
-                || value.chars().count() > crate::model::DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN
-        })
-    {
-        return Err(AgentError::Store(
-            "document canonical fingerprint must contain 1 to 512 characters".into(),
-        ));
-    }
-    Ok(())
-}
-
 fn validate_document_source_blob(blob: &DocumentSourceBlob) -> Result<i64> {
     if !blob.has_content_addressed_id() {
         return Err(AgentError::Store(
@@ -3016,16 +1987,6 @@ fn validate_document_source_blob(blob: &DocumentSourceBlob) -> Result<i64> {
     }
     i64::try_from(blob.byte_len)
         .map_err(|_| AgentError::Store("document source is too large".into()))
-}
-
-fn source_regions_to_db(regions: &[SourceRegion]) -> Value {
-    serde_json::to_value(regions).expect("SourceRegion serialization is infallible")
-}
-
-fn source_regions_from_db(value: Value) -> Result<Vec<SourceRegion>> {
-    serde_json::from_value(value).map_err(|error| {
-        AgentError::Store(format!("invalid stored document source regions: {error}"))
-    })
 }
 
 fn source_blob_from_model(
@@ -3061,8 +2022,6 @@ fn source_blob_from_model(
 }
 
 fn document_from_model(model: entities::document::Model) -> Result<DocumentRecord> {
-    let source_regions = source_regions_from_db(model.source_regions)?;
-    validate_document_source_regions(&model.canonical_text, &source_regions)?;
     Ok(DocumentRecord {
         id: DocumentId(model.id),
         chat_id: model.chat_id.map(ChatId),
@@ -3076,18 +2035,12 @@ fn document_from_model(model: entities::document::Model) -> Result<DocumentRecor
             model.source_byte_len,
         )?,
         canonical_text: model.canonical_text,
-        canonical_fingerprint: model.canonical_fingerprint,
-        source_regions,
-        content_revision: model.content_revision,
-        revision_token: model.revision_token,
-        processing_status: document_processing_status_from_db(&model.processing_status)?,
         created_at: model.created_at,
         updated_at: model.updated_at,
     })
 }
 
 fn document_summary_from_row(row: DocumentSummaryRow) -> Result<DocumentSummaryRecord> {
-    let processing_status = document_processing_status_from_db(&row.processing_status)?;
     Ok(DocumentSummaryRecord {
         id: DocumentId(row.id),
         chat_id: row.chat_id.map(ChatId),
@@ -3102,113 +2055,9 @@ fn document_summary_from_row(row: DocumentSummaryRow) -> Result<DocumentSummaryR
             .map_err(|_| {
                 AgentError::Store("stored document source length must be nonnegative".into())
             })?,
-        content_revision: row.content_revision,
-        processing_status,
-        readable: processing_status == DocumentProcessingStatus::Ready && row.has_canonical_text,
+        readable: row.has_canonical_text,
         created_at: row.created_at,
         updated_at: row.updated_at,
-    })
-}
-
-fn document_from_upsert(
-    document: &DocumentUpsert,
-    created_at: chrono::DateTime<Utc>,
-    content_revision: i64,
-    revision_token: uuid::Uuid,
-) -> DocumentRecord {
-    DocumentRecord {
-        id: document.id,
-        chat_id: document.chat_id,
-        project_id: document.project_id,
-        source_uri: document.source_uri.clone(),
-        media_type: document.media_type.clone(),
-        title: document.title.clone(),
-        source_blob: None,
-        canonical_text: document.canonical_text.clone(),
-        canonical_fingerprint: document.canonical_fingerprint.clone(),
-        source_regions: document.source_regions.clone(),
-        content_revision,
-        revision_token,
-        processing_status: DocumentProcessingStatus::Ready,
-        created_at,
-        updated_at: document.updated_at,
-    }
-}
-
-fn document_processing_status_from_db(text: &str) -> Result<DocumentProcessingStatus> {
-    match text {
-        "queued" => Ok(DocumentProcessingStatus::Queued),
-        "processing" => Ok(DocumentProcessingStatus::Processing),
-        "ready" => Ok(DocumentProcessingStatus::Ready),
-        "failed" => Ok(DocumentProcessingStatus::Failed),
-        other => Err(AgentError::Store(format!(
-            "unknown document processing status: {other}"
-        ))),
-    }
-}
-
-fn document_job_active_model(job: &DocumentJob) -> entities::document_job::ActiveModel {
-    entities::document_job::ActiveModel {
-        id: Set(job.id.0),
-        document_id: Set(job.document_id.0),
-        content_revision: Set(job.content_revision),
-        revision_token: Set(job.revision_token),
-        kind: Set(job.kind.as_str().into()),
-        status: Set(job.status.as_str().into()),
-        pipeline_fingerprint: Set(job.pipeline_fingerprint.clone()),
-        attempt_count: Set(job.attempt_count),
-        max_attempts: Set(job.max_attempts),
-        available_at: Set(job.available_at),
-        lease_token: Set(job.lease_token),
-        lease_expires_at: Set(job.lease_expires_at),
-        started_at: Set(job.started_at),
-        finished_at: Set(job.finished_at),
-        last_error_code: Set(job.last_error_code.clone()),
-        last_error_detail: Set(job.last_error_detail.clone()),
-        created_at: Set(job.created_at),
-        updated_at: Set(job.updated_at),
-    }
-}
-
-fn document_job_from_model(model: entities::document_job::Model) -> Result<DocumentJob> {
-    Ok(DocumentJob {
-        id: DocumentJobId(model.id),
-        document_id: DocumentId(model.document_id),
-        content_revision: model.content_revision,
-        revision_token: model.revision_token,
-        kind: match model.kind.as_str() {
-            "parse" => DocumentJobKind::Parse,
-            other => {
-                return Err(AgentError::Store(format!(
-                    "unknown document job kind: {other}"
-                )))
-            }
-        },
-        status: match model.status.as_str() {
-            "queued" => DocumentJobStatus::Queued,
-            "running" => DocumentJobStatus::Running,
-            "retry_wait" => DocumentJobStatus::RetryWait,
-            "succeeded" => DocumentJobStatus::Succeeded,
-            "failed" => DocumentJobStatus::Failed,
-            "cancelled" => DocumentJobStatus::Cancelled,
-            other => {
-                return Err(AgentError::Store(format!(
-                    "unknown document job status: {other}"
-                )))
-            }
-        },
-        pipeline_fingerprint: model.pipeline_fingerprint,
-        attempt_count: model.attempt_count,
-        max_attempts: model.max_attempts,
-        available_at: model.available_at,
-        lease_token: model.lease_token,
-        lease_expires_at: model.lease_expires_at,
-        started_at: model.started_at,
-        finished_at: model.finished_at,
-        last_error_code: model.last_error_code,
-        last_error_detail: model.last_error_detail,
-        created_at: model.created_at,
-        updated_at: model.updated_at,
     })
 }
 

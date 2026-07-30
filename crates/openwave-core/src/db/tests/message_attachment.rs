@@ -22,7 +22,7 @@ async fn accept_turn_with_images(
     images: &[ImageRef],
 ) -> TurnRun {
     match store
-        .accept_turn_with_attachments(TurnId::new(), chat_id, "gpt-5", content, images)
+        .accept_turn_with_attachments(TurnId::new(), chat_id, "gpt-5", content, images, &[])
         .await
         .unwrap()
     {
@@ -156,6 +156,86 @@ async fn accepted_attachments_persist_identity_in_submission_order() {
 }
 
 #[tokio::test]
+async fn file_attachments_persist_with_the_message_and_join_its_idempotency_proof() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+
+    let mut first = sample_document(None);
+    first.chat_id = Some(chat.id);
+    first.title = Some("brief.pdf".into());
+    first.media_type = "application/pdf".into();
+    first.source_blob = Some(DocumentSourceBlob::from_bytes(b"pdf bytes"));
+    let mut second = sample_document(None);
+    second.chat_id = Some(chat.id);
+    second.title = Some("notes.txt".into());
+    second.media_type = "text/plain".into();
+    second.source_blob = Some(DocumentSourceBlob::from_bytes(b"notes"));
+    store.create_document(&first).await.unwrap();
+    store.create_document(&second).await.unwrap();
+
+    let turn_id = TurnId::new();
+    let documents = [first.id, second.id];
+    let accepted = store
+        .accept_turn_with_attachments(turn_id, chat.id, "gpt-5", "compare these", &[], &documents)
+        .await
+        .unwrap();
+    assert!(matches!(accepted, AcceptTurnOutcome::Accepted(_)));
+
+    let attachments = store
+        .list_message_document_attachments(chat.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        attachments
+            .iter()
+            .map(|attachment| (
+                attachment.ordinal,
+                attachment.document_id,
+                attachment.title.as_deref(),
+                attachment.media_type.as_str(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, first.id, Some("brief.pdf"), "application/pdf"),
+            (1, second.id, Some("notes.txt"), "text/plain"),
+        ]
+    );
+    assert!(attachments
+        .iter()
+        .all(|attachment| attachment.validate().is_ok()));
+
+    assert!(matches!(
+        store
+            .accept_turn_with_attachments(
+                turn_id,
+                chat.id,
+                "gpt-5",
+                "compare these",
+                &[],
+                &documents,
+            )
+            .await
+            .unwrap(),
+        AcceptTurnOutcome::Existing(_)
+    ));
+    assert!(matches!(
+        store
+            .accept_turn_with_attachments(
+                turn_id,
+                chat.id,
+                "gpt-5",
+                "compare these",
+                &[],
+                &[second.id, first.id],
+            )
+            .await
+            .unwrap(),
+        AcceptTurnOutcome::IdentityConflict
+    ));
+}
+
+#[tokio::test]
 async fn attachments_join_the_turn_idempotency_proof() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();
@@ -165,7 +245,7 @@ async fn attachments_join_the_turn_idempotency_proof() {
     let other = image_for(b"a different attachment", 640, 480);
 
     let accepted = match store
-        .accept_turn_with_attachments(turn_id, chat.id, "gpt-5", "describe", &[image])
+        .accept_turn_with_attachments(turn_id, chat.id, "gpt-5", "describe", &[image], &[])
         .await
         .unwrap()
     {
@@ -176,7 +256,7 @@ async fn attachments_join_the_turn_idempotency_proof() {
     // A byte-identical retry re-references the same blob instead of recording
     // the attachment twice.
     let existing = match store
-        .accept_turn_with_attachments(turn_id, chat.id, "gpt-5", "describe", &[image])
+        .accept_turn_with_attachments(turn_id, chat.id, "gpt-5", "describe", &[image], &[])
         .await
         .unwrap()
     {
@@ -193,14 +273,21 @@ async fn attachments_join_the_turn_idempotency_proof() {
     // acceptance of the first submission's attachments.
     assert!(matches!(
         store
-            .accept_turn_with_attachments(turn_id, chat.id, "gpt-5", "describe", &[other])
+            .accept_turn_with_attachments(turn_id, chat.id, "gpt-5", "describe", &[other], &[])
             .await
             .unwrap(),
         AcceptTurnOutcome::IdentityConflict
     ));
     assert!(matches!(
         store
-            .accept_turn_with_attachments(turn_id, chat.id, "gpt-5", "describe", &[image, other])
+            .accept_turn_with_attachments(
+                turn_id,
+                chat.id,
+                "gpt-5",
+                "describe",
+                &[image, other],
+                &[],
+            )
             .await
             .unwrap(),
         AcceptTurnOutcome::IdentityConflict
@@ -227,7 +314,7 @@ async fn attachment_bounds_are_rejected_before_any_row_is_written() {
         .map(|index| image_for(format!("attachment {index}").as_bytes(), 16, 16))
         .collect();
     assert!(store
-        .accept_turn_with_attachments(TurnId::new(), chat.id, "gpt-5", "too many", &oversized)
+        .accept_turn_with_attachments(TurnId::new(), chat.id, "gpt-5", "too many", &oversized, &[],)
         .await
         .is_err());
 
@@ -236,7 +323,14 @@ async fn attachment_bounds_are_rejected_before_any_row_is_written() {
         ..image_for(b"degenerate", 800, 600)
     };
     assert!(store
-        .accept_turn_with_attachments(TurnId::new(), chat.id, "gpt-5", "degenerate", &[degenerate])
+        .accept_turn_with_attachments(
+            TurnId::new(),
+            chat.id,
+            "gpt-5",
+            "degenerate",
+            &[degenerate],
+            &[],
+        )
         .await
         .is_err());
 
@@ -245,7 +339,14 @@ async fn attachment_bounds_are_rejected_before_any_row_is_written() {
         ..image_for(b"nil blob", 800, 600)
     };
     assert!(store
-        .accept_turn_with_attachments(TurnId::new(), chat.id, "gpt-5", "nil blob", &[nil_blob])
+        .accept_turn_with_attachments(
+            TurnId::new(),
+            chat.id,
+            "gpt-5",
+            "nil blob",
+            &[nil_blob],
+            &[],
+        )
         .await
         .is_err());
 
@@ -347,10 +448,7 @@ impl ReferenceClass {
                     "file:///reference-class.bin",
                     blob.clone(),
                 );
-                store
-                    .accept_document_source_and_enqueue_parse(&source, "parser-v1", 3)
-                    .await
-                    .unwrap();
+                store.accept_document_source(&source).await.unwrap();
             }
             Self::MessageAttachment => {
                 let chat = sample_chat();
@@ -586,10 +684,7 @@ async fn an_attachment_blob_shared_with_a_document_survives_either_owner() {
     };
 
     let source = sample_raw_source(DocumentId::new(), "file:///also-a-source.png", blob.clone());
-    store
-        .accept_document_source_and_enqueue_parse(&source, "parser-v1", 3)
-        .await
-        .unwrap();
+    store.accept_document_source(&source).await.unwrap();
 
     let chat = sample_chat();
     store.create_chat(&chat).await.unwrap();

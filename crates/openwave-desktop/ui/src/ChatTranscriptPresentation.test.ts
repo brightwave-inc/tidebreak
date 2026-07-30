@@ -219,7 +219,7 @@ describe("terminal transcript presentation", () => {
     ]);
   });
 
-  it("carries durable user-image identity and geometry into the message list", () => {
+  it("carries durable user attachments into the message list", () => {
     const presented = presentChatTranscript({
       messages: [
         {
@@ -234,6 +234,13 @@ describe("terminal transcript presentation", () => {
               media_type: "image/png",
               width: 320,
               height: 240,
+            },
+          ],
+          file_attachments: [
+            {
+              document_id: "document-opaque-id",
+              name: "brief.pdf",
+              media_type: "application/pdf",
             },
           ],
         },
@@ -253,6 +260,13 @@ describe("terminal transcript presentation", () => {
             mediaType: "image/png",
             width: 320,
             height: 240,
+          },
+        ],
+        files: [
+          {
+            documentId: "document-opaque-id",
+            name: "brief.pdf",
+            mediaType: "application/pdf",
           },
         ],
         createdAt: "2026-07-19T10:00:00Z",

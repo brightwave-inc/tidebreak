@@ -208,7 +208,12 @@ export type ChatMessageSnapshot = { id: MessageId, role: TranscriptRole, content
  * geometry only; image bytes remain behind a chat-scoped authenticated
  * endpoint and never enter the transcript payload.
  */
-image_attachments?: Array<TranscriptImageAttachment>, refusal?: RendererRefusal, };
+image_attachments?: Array<TranscriptImageAttachment>, 
+/**
+ * Files submitted with this user message. Their bytes remain behind the
+ * existing chat-scoped document endpoints.
+ */
+file_attachments?: Array<TranscriptFileAttachment>, refusal?: RendererRefusal, };
 
 /**
  * One pathless root in a conversation's exact ordered projection.
@@ -376,7 +381,7 @@ max_output_tokens: number, };
  * Identifies an authoritative source document.
  *
  * Usually minted fresh with [`DocumentId::new`], but [`DocumentId::derive`]
- * preserves the existing stable URI identity used by retrieval ingestion.
+ * preserves the existing stable URI identity used by source ingestion.
  */
 export type DocumentId = string;
 
@@ -468,6 +473,47 @@ export type GrantScope = { "scope": "exact_action" } & ToolActionPreview | { "sc
 export type HostRootId = string;
 
 /**
+ * Image formats OpenWave will send to a provider.
+ *
+ * Deliberately closed. Every variant here is accepted by both the Anthropic
+ * and OpenAI image APIs, so a value of this type can always be shaped for the
+ * selected provider — adapters never have to reject a media type at send time.
+ * Vector and exotic raster formats are excluded rather than passed through:
+ * an unsupported type must fail at the trusted ingest boundary, where the user
+ * can still act on it, not deep inside a turn.
+ */
+export type ImageMediaType = "png" | "jpeg" | "webp" | "gif";
+
+/**
+ * Durable identity of one image attachment.
+ *
+ * Everything here is safe to persist, log, and expose to a renderer. The blob
+ * id is an opaque content-derived UUID, never a filesystem path, so it reveals
+ * nothing about where the bytes live on disk.
+ */
+export type ImageRef = { 
+/**
+ * Content-addressed blob holding the pixels.
+ */
+blob_id: string, 
+/**
+ * Format the bytes were sniffed as at ingest.
+ */
+media_type: ImageMediaType, 
+/**
+ * Pixel width, read from the image header.
+ */
+width: number, 
+/**
+ * Pixel height, read from the image header.
+ */
+height: number, 
+/**
+ * Size of the stored bytes.
+ */
+byte_len: number, };
+
+/**
  * An input modality a model accepts.
  *
  * `snake_case` matches the strings `as_str` has always produced, so the enum
@@ -486,7 +532,15 @@ export type ManagedPolicy = { managed: boolean, gateway_url?: string, source: Ma
  * fail closed — and surfaces can name the authority that needs repair
  * instead of showing an opaque error.
  */
-misconfigured: boolean, };
+misconfigured: boolean, 
+/**
+ * A deep-link pairing awaiting the sign-in that is its consent. Runtime
+ * state merged in by the `/policy` route from [`GatewayRuntime`]
+ * (crate::gateway_runtime), never part of the durable resolution —
+ * [`resolve`] always leaves it `None` — and only ever present while the
+ * profile is unmanaged.
+ */
+pending_gateway_url?: string, };
 
 /**
  * Which authority asserted the active policy.
@@ -1069,7 +1123,11 @@ timed_out: boolean,
 /**
  * Whether the provider dropped output past its capture limit.
  */
-output_truncated: boolean, stdout: string, stderr: string, } | { "tool": "web_search_provider_required" } | { "tool": "mcp_app", 
+output_truncated: boolean, stdout: string, stderr: string, 
+/**
+ * Preview images emitted by the command, in model-facing priority order.
+ */
+images?: Array<ImageRef>, } | { "tool": "web_search_provider_required" } | { "tool": "mcp_app", 
 /**
  * The configured MCP server namespace that serves the view.
  */
@@ -1091,6 +1149,11 @@ failures: Array<ResultFailure>,
  * telling the reader something false.
  */
 elided: number, };
+
+/**
+ * One renderer-safe source document attached to a historical user message.
+ */
+export type TranscriptFileAttachment = { document_id: DocumentId, name: string, media_type: string, };
 
 /**
  * One renderer-safe image identity attached to a historical user message.

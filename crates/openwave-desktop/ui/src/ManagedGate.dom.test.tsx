@@ -188,6 +188,78 @@ describe("ManagedGate", () => {
     expect(screen.queryByText("the open product")).not.toBeInTheDocument();
   });
 
+  it("a pending pairing gates the app behind the consent sign-in", async () => {
+    const client = api({
+      getPolicy: vi.fn().mockResolvedValue({
+        managed: false,
+        source: "unmanaged",
+        misconfigured: false,
+        pending_gateway_url: "https://new-gw.example/",
+      } satisfies ManagedPolicy),
+      getGatewayStatus: vi.fn().mockResolvedValue({
+        signed_in: false,
+        model_count: 0,
+        sign_in: { state: "idle" },
+      } satisfies GatewayStatus),
+    });
+    const open = vi.fn();
+    vi.stubGlobal("open", open);
+    const user = userEvent.setup();
+    mount(client);
+
+    // The consent surface covers the app: the unmanaged product is never
+    // visible behind a pairing prompt, and the named gateway is the one the
+    // shell registered from the link.
+    expect(
+      await screen.findByText("Connect to your model gateway"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("https://new-gw.example/")).toBeInTheDocument();
+    expect(
+      screen.getByText(/cannot be undone from within OpenWave/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("the open product")).not.toBeInTheDocument();
+
+    // The consent is the sign-in itself.
+    await user.click(
+      screen.getByRole("button", { name: /Sign in and connect/ }),
+    );
+    await waitFor(() => expect(client.gatewaySignIn).toHaveBeenCalled());
+    expect(open).toHaveBeenCalledWith(
+      "http://gw/oauth/authorize?x=1",
+      "_blank",
+      "noreferrer,noopener",
+    );
+  });
+
+  it("Not now declines the pairing and returns the open product", async () => {
+    const client = api({
+      getPolicy: vi.fn().mockResolvedValue({
+        managed: false,
+        source: "unmanaged",
+        misconfigured: false,
+        pending_gateway_url: "https://new-gw.example/",
+      } satisfies ManagedPolicy),
+      getGatewayStatus: vi.fn().mockResolvedValue({
+        signed_in: false,
+        model_count: 0,
+        sign_in: { state: "idle" },
+      } satisfies GatewayStatus),
+      dismissGatewayPairing: vi.fn().mockResolvedValue({
+        managed: false,
+        source: "unmanaged",
+        misconfigured: false,
+      } satisfies ManagedPolicy),
+    });
+    const user = userEvent.setup();
+    mount(client);
+
+    await screen.findByText("Connect to your model gateway");
+    await user.click(screen.getByRole("button", { name: "Not now" }));
+    expect(await screen.findByText("the open product")).toBeInTheDocument();
+    expect(client.dismissGatewayPairing).toHaveBeenCalled();
+    expect(client.gatewaySignIn).not.toHaveBeenCalled();
+  });
+
   it("a session on the wrong gateway does not lift the gate", async () => {
     const client = api({
       getGatewayStatus: vi.fn().mockResolvedValue({

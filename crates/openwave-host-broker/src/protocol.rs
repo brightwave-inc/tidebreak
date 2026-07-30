@@ -15,7 +15,7 @@ use crate::{
 };
 
 /// Current pre-v1 broker protocol. Bump this for incompatible wire changes.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Largest file the broker returns as opaque bytes.
 ///
@@ -66,6 +66,12 @@ pub enum ControlRequest {
     /// This is a trusted-host management operation, not an agent operation.
     /// It exposes neither absolute paths nor attachment authority.
     ListApprovedRoots,
+    /// Resolve exact product-attached roots for one local-exec invocation.
+    ///
+    /// This trusted-host operation returns absolute paths and must never be
+    /// exposed as an agent-operation surface. The broker still intersects the
+    /// requested IDs with live attachment and capability state.
+    ResolveExecRoots(ResolveExecRootsRequest),
     /// Register the exact folder returned by a native picker and attach it to
     /// the conversation that initiated the trusted interaction.
     RegisterRoot(RegisterRootRequest),
@@ -92,6 +98,14 @@ pub struct RegisterRootRequest {
     pub conversation_id: Uuid,
     pub path: PathBuf,
     pub consent_method: ConsentMethod,
+}
+
+/// Trusted product projection to intersect with live broker authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolveExecRootsRequest {
+    pub context: ExecutionContext,
+    pub root_ids: Vec<RootId>,
 }
 
 /// Strict payload for recovery-only registration receipt lookup.
@@ -294,12 +308,26 @@ pub type OperationResponseEnvelope = ResponseEnvelope<OperationResult>;
 pub enum ControlResult {
     Hello(HelloResult),
     ListApprovedRoots { roots: Vec<RootSummary> },
+    ResolveExecRoots { roots: Vec<ResolvedExecRoot> },
     RegisterRoot(RegisterRootResult),
     LookupRegisterRootReceipt(LookupRegisterRootReceiptResult),
     AttachRoot(RootAttachmentMutationResult),
     DetachRoot(RootAttachmentMutationResult),
     LookupRootAttachmentReceipt(LookupRootAttachmentReceiptResult),
     RevokeRoot(RevokeRootResult),
+}
+
+/// One currently authorized host root for native local execution.
+///
+/// Absolute paths stay on the trusted control channel. The configured server
+/// wrapper carries them into the local sandbox profile; neither renderer nor
+/// model tool arguments can supply this shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedExecRoot {
+    pub root_id: RootId,
+    pub path: PathBuf,
+    pub writable: bool,
 }
 
 /// Successful response to an agent operation.

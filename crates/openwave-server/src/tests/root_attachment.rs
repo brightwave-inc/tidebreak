@@ -12,14 +12,12 @@ async fn test_app_with_executor_id(
         .await
         .unwrap(),
     );
-    let retrieval = build_retrieval();
     let state = AppState::new_with_client_executor_id(
         Config::desktop(dir.path()),
         store.clone(),
         Arc::new(FixedResolver(Arc::new(FakeProvider))),
         Arc::new(MemSecrets::default()),
         Arc::new(ToolRegistry::new()),
-        retrieval,
         AgentConfig::default(),
         executor_id,
     )
@@ -78,7 +76,7 @@ async fn embedded_renderer_bearer_cannot_reach_canonical_document_routes() {
         )
         .await
         .unwrap();
-    assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+    assert_eq!(accepted.status(), StatusCode::CREATED);
     let accepted: serde_json::Value = json_body(accepted).await;
     let document_id = accepted["document_id"].as_str().unwrap();
     let project_id = ProjectId::new();
@@ -128,7 +126,6 @@ async fn embedded_renderer_bearer_cannot_reach_canonical_document_routes() {
             "/Users/private",
             "review-sentinel",
             "private-content-sentinel",
-            "content_revision",
         ] {
             assert!(
                 !body.contains(sentinel),
@@ -144,7 +141,7 @@ async fn embedded_renderer_bearer_cannot_reach_canonical_document_routes() {
         native_detail["uri"],
         "file:///Users/private/review-sentinel.md"
     );
-    assert!(native_detail.get("content_revision").is_some());
+    assert_eq!(native_detail["content"], "private-content-sentinel");
 }
 
 fn root_attachment_begin_body(

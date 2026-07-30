@@ -326,6 +326,8 @@ mod tests {
                         server: "gateway".into(),
                         resource_uri: "ui://gateway/app.html".into(),
                     })),
+                    images: Vec::new(),
+                    image_data: crate::ImageAttachments::new(),
                 },
                 action: Some(crate::preview::ToolActionPreview::Exec {
                     command: "git".into(),
@@ -338,6 +340,7 @@ mod tests {
                     output_truncated: false,
                     stdout: "on branch main".into(),
                     stderr: String::new(),
+                    images: Vec::new(),
                 }),
             },
             AgentEvent::TurnCompleted {

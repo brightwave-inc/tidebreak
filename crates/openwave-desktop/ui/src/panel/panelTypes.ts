@@ -11,7 +11,7 @@ export type PanelContent =
    * carries the cited span and page. It only means anything alongside the
    * document it points into, so it is never set without `documentId`.
    */
-  | { type: "sources"; documentId?: string; citationId?: string }
+  | { type: "document"; documentId: string; citationId?: string }
   | { type: "outputs"; outputId?: string }
   | { type: "folders" };
 
@@ -46,9 +46,10 @@ export function areSamePanelType(a: PanelContent, b: PanelContent): boolean {
 export function isContentPanel(panel: PanelContent): boolean {
   switch (panel.type) {
     case "chat":
-    case "sources":
     case "outputs":
     case "folders":
       return false;
+    case "document":
+      return true;
   }
 }

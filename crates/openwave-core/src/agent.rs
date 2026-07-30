@@ -44,8 +44,8 @@ use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{AgentRunId, CallId, ChatId, MessageId, TurnId};
 use crate::image::{ImageAttachments, ImageData, ImageRef};
 use crate::model::{
-    Chat, Message, MessageAttachment, PermissionMode, Role, ToolCallExecution, ToolCallRecord,
-    ToolCallResolution, ToolCallStatus, TurnRunStatus,
+    Chat, Message, MessageAttachment, MessageDocumentAttachment, PermissionMode, Role,
+    ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnRunStatus,
 };
 use crate::preview::{ToolActionPreview, ToolResultPreview};
 use crate::provider::{
@@ -378,6 +378,8 @@ pub struct AgentConfig {
     pub model: String,
     /// Whether this model uses the provider's reasoning request shape.
     pub reasoning_model: bool,
+    /// Whether the resolved registry model accepts image input.
+    pub image_input: bool,
     /// Reasoning-effort hint for models that expose the control; ignored by the
     /// rest. `None` leaves the provider default in force.
     pub reasoning_effort: Option<crate::model::ReasoningEffort>,
@@ -413,6 +415,7 @@ impl Default for AgentConfig {
             provider: None,
             model: String::new(),
             reasoning_model: false,
+            image_input: false,
             reasoning_effort: None,
             system_prompt: None,
             max_tokens: None,
@@ -1149,6 +1152,10 @@ impl Agent {
                     checkpoint.as_ref(),
                     checkpoint_boundary,
                 );
+                context::evict_old_tool_result_images(
+                    &mut fitted,
+                    context::TOOL_RESULT_IMAGE_MESSAGE_WINDOW,
+                );
                 // Hydration can evict an image that no longer fits the outbound
                 // bound, so the token estimate is taken after it, not before.
                 let images = self.hydrate_images(&mut fitted).await?;
@@ -1672,11 +1679,15 @@ impl Agent {
                 content: calls
                     .iter()
                     .zip(outputs)
-                    .filter_map(|(call, output)| {
-                        output.map(|output| ContentBlock::ToolResult {
-                            tool_use_id: call.provider_id.clone(),
-                            content: self.tool_result_for_model(&output.content, call.call_id),
-                            is_error: output.is_error,
+                    .flat_map(|(call, output)| {
+                        output.map_or_else(Vec::new, |output| {
+                            tool_result_blocks(
+                                call.provider_id.clone(),
+                                self.tool_result_for_model(&output.content, call.call_id),
+                                output.is_error,
+                                &output.images,
+                                self.config.image_input,
+                            )
                         })
                     })
                     .collect(),
@@ -1767,6 +1778,7 @@ impl Agent {
             execution: ToolCallExecution::Server,
             status: ToolCallStatus::Pending,
             result: None,
+            result_preview: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -1777,6 +1789,12 @@ impl Agent {
         match self.accept_server_call_retry(&record).await? {
             AcceptedServerCall::Accepted => Ok(None),
             AcceptedServerCall::Existing(existing) if existing.status.is_terminal() => {
+                let images = existing
+                    .result_preview
+                    .as_ref()
+                    .and_then(exec_preview_images)
+                    .unwrap_or(&[])
+                    .to_vec();
                 let content = existing.result.ok_or_else(|| {
                     AgentError::Store(format!(
                         "terminal tool call {} is missing its result",
@@ -1791,6 +1809,8 @@ impl Agent {
                     // recorded there; re-deriving one here would be a guess.
                     error_category: None,
                     ui_view: None,
+                    images,
+                    image_data: ImageAttachments::new(),
                 }))
             }
             AcceptedServerCall::Existing(_) => Ok(None),
@@ -1814,7 +1834,7 @@ impl Agent {
         events: &EventSink<'_>,
         recovered: Option<ToolOutput>,
     ) -> Result<ToolOutput> {
-        let (output, needs_resolution) = match recovered {
+        let (mut output, needs_resolution) = match recovered {
             Some(output) => (output, false),
             None if self.cancel.is_cancelled() => (
                 ToolOutput::failed(
@@ -1828,6 +1848,9 @@ impl Agent {
                 (self.run_tool(chat, turn_id, call, events, None).await, true)
             }
         };
+        if needs_resolution {
+            self.publish_tool_images(&mut output).await?;
+        }
         let preview = ToolResultPreview::build(&call.name, &output);
         events.send(AgentEvent::ToolCallCompleted {
             call_id: call.call_id,
@@ -1871,6 +1894,42 @@ impl Agent {
             }
         }
         Ok(output)
+    }
+
+    async fn publish_tool_images(&self, output: &mut ToolOutput) -> Result<()> {
+        if output.images.is_empty() {
+            return Ok(());
+        }
+        let Some(blobs) = self.blobs.as_ref() else {
+            output.images.clear();
+            output.image_data.clear();
+            output.content.push_str(
+                "\n\nPreview images could not be retained because blob storage is unavailable.",
+            );
+            return Ok(());
+        };
+        for image in &output.images {
+            image
+                .validate()
+                .map_err(|reason| AgentError::Store(reason.into()))?;
+            let data = output.image_data.get(image.blob_id).ok_or_else(|| {
+                AgentError::Store(format!(
+                    "tool preview image {} is missing its bytes",
+                    image.blob_id
+                ))
+            })?;
+            if data.media_type() != image.media_type
+                || u64::try_from(data.len()).unwrap_or(u64::MAX) != image.byte_len
+            {
+                return Err(AgentError::Store(format!(
+                    "tool preview image {} does not match its descriptor",
+                    image.blob_id
+                )));
+            }
+            blobs.put(image.blob_id, data.bytes().to_vec()).await?;
+        }
+        output.image_data.clear();
+        Ok(())
     }
 
     /// Answer a call this step did not run.
@@ -2738,7 +2797,7 @@ impl Agent {
             }
             let tool_available = self.tools.get(&call.name).is_some();
             let cancelled_before_run = self.cancel.is_cancelled();
-            let output = if cancelled_before_run {
+            let mut output = if cancelled_before_run {
                 ToolOutput::failed(
                     ToolErrorCategory::UserCancelled,
                     "turn cancelled before recovered tool execution",
@@ -2747,6 +2806,8 @@ impl Agent {
                 self.run_tool(chat, turn_id, &call, events, durable_approval.as_ref())
                     .await
             };
+            self.publish_tool_images(&mut output).await?;
+            let preview = ToolResultPreview::build(&call.name, &output);
             let resolution = if output.is_error {
                 ToolCallResolution::Failed {
                     result: output.content.clone(),
@@ -2764,7 +2825,12 @@ impl Agent {
             };
             let outcome = self
                 .store
-                .resolve_server_tool_call(call.call_id, &resolution, Utc::now())
+                .resolve_server_tool_call_with_artifacts(
+                    call.call_id,
+                    &resolution,
+                    Utc::now(),
+                    preview.as_ref(),
+                )
                 .await?;
             if !matches!(
                 outcome,
@@ -2794,15 +2860,17 @@ impl Agent {
                 call_id: call.call_id,
                 output: self.tool_output_for_event(&output, call.call_id),
                 action: call_action_preview(&call),
-                result: ToolResultPreview::build(&call.name, &output),
+                result: preview,
             });
             transcript.push(ChatMessage {
                 role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: call.provider_id,
-                    content: output.content,
-                    is_error: output.is_error,
-                }],
+                content: tool_result_blocks(
+                    call.provider_id,
+                    self.tool_result_for_model(&output.content, call.call_id),
+                    output.is_error,
+                    &output.images,
+                    self.config.image_input,
+                ),
             });
         }
         Ok(())
@@ -2913,11 +2981,17 @@ impl Agent {
         let messages = self.store.list_messages(chat_id).await?;
         let tool_calls = self.store.list_tool_calls(chat_id).await?;
         let attachments = self.store.list_message_attachments(chat_id).await?;
+        let document_attachments = self
+            .store
+            .list_message_document_attachments(chat_id)
+            .await?;
         let (messages, checkpoint_boundary, source_boundaries) = rebuild_transcript_with_boundary(
             &messages,
             &tool_calls,
             &attachments,
+            &document_attachments,
             self.config.max_tool_result_bytes,
+            self.config.image_input,
             checkpoint_source,
         );
         Ok(LoadedTranscript {
@@ -3235,10 +3309,11 @@ impl Agent {
 /// message. Legacy `Role::Tool` rows are ignored.
 ///
 /// The block transcript is never stored, only reconstructed here, so this is
-/// also the single place history regains the images a message was submitted
-/// with: each non-assistant message's attachments become [`ContentBlock::Image`]
-/// blocks in their recorded order, ahead of the text they were sent with. A
-/// message with no attachments rebuilds exactly as before.
+/// also the single place history regains the attachments a message was
+/// submitted with: images become [`ContentBlock::Image`] blocks in their
+/// recorded order, while files become a compact manifest that teaches the
+/// model which document ids it can pass to `read_source`. A message with no
+/// attachments rebuilds exactly as before.
 #[cfg(test)]
 fn rebuild_transcript(
     messages: &[Message],
@@ -3246,7 +3321,16 @@ fn rebuild_transcript(
     attachments: &[MessageAttachment],
     max_result_bytes: usize,
 ) -> Vec<ChatMessage> {
-    rebuild_transcript_with_boundary(messages, tool_calls, attachments, max_result_bytes, None).0
+    rebuild_transcript_with_boundary(
+        messages,
+        tool_calls,
+        attachments,
+        &[],
+        max_result_bytes,
+        false,
+        None,
+    )
+    .0
 }
 
 /// Rebuild a provider transcript and locate the end of one durable-message
@@ -3260,7 +3344,9 @@ fn rebuild_transcript_with_boundary(
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
     attachments: &[MessageAttachment],
+    document_attachments: &[MessageDocumentAttachment],
     max_result_bytes: usize,
+    image_input: bool,
     checkpoint_source: Option<MessageId>,
 ) -> (
     Vec<ChatMessage>,
@@ -3272,6 +3358,7 @@ fn rebuild_transcript_with_boundary(
         .filter(|message| message.role != Role::Tool)
         .collect();
     let images = group_attachments(attachments);
+    let documents = group_document_attachments(document_attachments);
     let batches = batch_tool_calls(tool_calls);
     let mut batch_i = 0;
     let mut out: Vec<ChatMessage> = Vec::new();
@@ -3281,7 +3368,13 @@ fn rebuild_transcript_with_boundary(
     for (i, message) in messages.iter().enumerate() {
         // Batches that started before this message are prior tool-only steps.
         while batch_i < batches.len() && batches[batch_i][0].created_at < message.created_at {
-            push_tool_batch(&mut out, &batches[batch_i], None, max_result_bytes);
+            push_tool_batch(
+                &mut out,
+                &batches[batch_i],
+                None,
+                max_result_bytes,
+                image_input,
+            );
             batch_i += 1;
         }
 
@@ -3296,21 +3389,34 @@ fn rebuild_transcript_with_boundary(
             if batch_i < batches.len()
                 && next_ts.is_none_or(|end| batches[batch_i][0].created_at < end)
             {
-                push_tool_batch(&mut out, &batches[batch_i], text, max_result_bytes);
+                push_tool_batch(
+                    &mut out,
+                    &batches[batch_i],
+                    text,
+                    max_result_bytes,
+                    image_input,
+                );
                 batch_i += 1;
                 while batch_i < batches.len()
                     && next_ts.is_none_or(|end| batches[batch_i][0].created_at < end)
                 {
-                    push_tool_batch(&mut out, &batches[batch_i], None, max_result_bytes);
+                    push_tool_batch(
+                        &mut out,
+                        &batches[batch_i],
+                        None,
+                        max_result_bytes,
+                        image_input,
+                    );
                     batch_i += 1;
                 }
             } else if let Some(text) = text {
                 out.push(ChatMessage::text(Role::Assistant, text.to_string()));
             }
         } else {
-            out.push(user_message_with_images(
+            out.push(user_message_with_attachments(
                 message,
                 images.get(&message.id).map(Vec::as_slice).unwrap_or(&[]),
+                documents.get(&message.id).map(Vec::as_slice).unwrap_or(&[]),
             ));
             // Tool-only steps between this message and the next non-assistant
             // (e.g. user → tools → user steer). If the next message is
@@ -3323,7 +3429,13 @@ fn rebuild_transcript_with_boundary(
                 while batch_i < batches.len()
                     && next_ts.is_none_or(|end| batches[batch_i][0].created_at < end)
                 {
-                    push_tool_batch(&mut out, &batches[batch_i], None, max_result_bytes);
+                    push_tool_batch(
+                        &mut out,
+                        &batches[batch_i],
+                        None,
+                        max_result_bytes,
+                        image_input,
+                    );
                     batch_i += 1;
                 }
             }
@@ -3339,7 +3451,13 @@ fn rebuild_transcript_with_boundary(
     }
 
     while batch_i < batches.len() {
-        push_tool_batch(&mut out, &batches[batch_i], None, max_result_bytes);
+        push_tool_batch(
+            &mut out,
+            &batches[batch_i],
+            None,
+            max_result_bytes,
+            image_input,
+        );
         batch_i += 1;
     }
     if messages
@@ -3383,22 +3501,62 @@ fn group_attachments(
         .collect()
 }
 
-/// Rebuild one user-authored message, carrying its images alongside its text.
+fn group_document_attachments(
+    attachments: &[MessageDocumentAttachment],
+) -> std::collections::HashMap<crate::id::MessageId, Vec<MessageDocumentAttachment>> {
+    let mut grouped: std::collections::HashMap<
+        crate::id::MessageId,
+        Vec<MessageDocumentAttachment>,
+    > = std::collections::HashMap::new();
+    for attachment in attachments {
+        grouped
+            .entry(attachment.message_id)
+            .or_default()
+            .push(attachment.clone());
+    }
+    for attachments in grouped.values_mut() {
+        attachments.sort_by_key(|attachment| attachment.ordinal);
+    }
+    grouped
+}
+
+/// Rebuild one user-authored message, carrying its attachments with its text.
 ///
 /// Images lead the block list: both supported providers document better results
 /// when an image precedes the text that refers to it, and the user's prompt is
 /// almost always a question *about* the attachment.
-fn user_message_with_images(message: &Message, images: &[ImageRef]) -> ChatMessage {
-    if images.is_empty() {
+fn user_message_with_attachments(
+    message: &Message,
+    images: &[ImageRef],
+    documents: &[MessageDocumentAttachment],
+) -> ChatMessage {
+    if images.is_empty() && documents.is_empty() {
         return ChatMessage::text(message.role, message.content.clone());
     }
     let mut content: Vec<ContentBlock> = images
         .iter()
         .map(|image| ContentBlock::Image { image: *image })
         .collect();
-    content.push(ContentBlock::Text {
-        text: message.content.clone(),
-    });
+    let text = if documents.is_empty() {
+        message.content.clone()
+    } else {
+        let manifest = documents
+            .iter()
+            .map(|document| {
+                serde_json::json!({
+                    "document_id": document.document_id,
+                    "name": document.title.as_deref().unwrap_or("Attachment"),
+                    "media_type": document.media_type,
+                })
+            })
+            .collect::<Vec<_>>();
+        format!(
+            "Files attached to this message (use read_source with document_id to read them):\n{}\n\n{}",
+            serde_json::to_string(&manifest).expect("attachment manifest is serializable"),
+            message.content
+        )
+    };
+    content.push(ContentBlock::Text { text });
     ChatMessage {
         role: message.role,
         content,
@@ -3511,6 +3669,7 @@ fn push_tool_batch(
     batch: &[&ToolCallRecord],
     assistant_text: Option<&str>,
     max_result_bytes: usize,
+    image_input: bool,
 ) {
     let mut blocks: Vec<ContentBlock> = Vec::new();
     if let Some(text) = assistant_text.filter(|t| !t.is_empty()) {
@@ -3533,18 +3692,23 @@ fn push_tool_batch(
     }
     let results: Vec<ContentBlock> = batch
         .iter()
-        .filter_map(|call| {
-            call.result
+        .flat_map(|call| {
+            let Some(content) = call.result.as_ref() else {
+                return Vec::new();
+            };
+            let images = call
+                .result_preview
                 .as_ref()
-                .map(|content| ContentBlock::ToolResult {
-                    tool_use_id: call.provider_id.clone(),
-                    // The record may hold more than a turn can afford to
-                    // re-read, so a resumed transcript is bounded the same way
-                    // a live one is.
-                    content: truncate_to_bytes(content, max_result_bytes, Some(call.id))
-                        .unwrap_or_else(|| content.clone()),
-                    is_error: call.status != ToolCallStatus::Completed,
-                })
+                .and_then(exec_preview_images)
+                .unwrap_or(&[]);
+            tool_result_blocks(
+                call.provider_id.clone(),
+                truncate_to_bytes(content, max_result_bytes, Some(call.id))
+                    .unwrap_or_else(|| content.clone()),
+                call.status != ToolCallStatus::Completed,
+                images,
+                image_input,
+            )
         })
         .collect();
     if !results.is_empty() {
@@ -3553,6 +3717,54 @@ fn push_tool_batch(
             content: results,
         });
     }
+}
+
+fn exec_preview_images(preview: &ToolResultPreview) -> Option<&[ImageRef]> {
+    match preview {
+        ToolResultPreview::Exec { images, .. } => Some(images),
+        _ => None,
+    }
+}
+
+fn tool_result_blocks(
+    tool_use_id: String,
+    mut content: String,
+    is_error: bool,
+    images: &[ImageRef],
+    image_input: bool,
+) -> Vec<ContentBlock> {
+    if images.is_empty() {
+        return vec![ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        }];
+    }
+    if image_input {
+        content.push_str(&format!(
+            "\n\n{} preview image(s) attached below for your visual review.",
+            images.len()
+        ));
+    } else {
+        content.push_str(&format!(
+            "\n\n{} preview image(s) were produced, but previews are unavailable because the selected model does not accept image input.",
+            images.len()
+        ));
+    }
+    let mut blocks = vec![ContentBlock::ToolResult {
+        tool_use_id,
+        content,
+        is_error,
+    }];
+    if image_input {
+        blocks.extend(
+            images
+                .iter()
+                .copied()
+                .map(|image| ContentBlock::Image { image }),
+        );
+    }
+    blocks
 }
 
 /// Truncate `content` to at most `max_bytes` (on a UTF-8 char boundary) and
@@ -4556,6 +4768,7 @@ mod tests {
             execution: ToolCallExecution::Server,
             status: ToolCallStatus::Completed,
             result: Some(oversized.clone()),
+            result_preview: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -4573,6 +4786,32 @@ mod tests {
         let content = found.expect("the resumed transcript replays the result");
         assert!(content.len() < oversized.len());
         assert!(content.contains("[truncated:"));
+    }
+
+    #[test]
+    fn exec_preview_blocks_follow_result_text_and_respect_model_capability() {
+        let image = ImageRef {
+            blob_id: uuid::Uuid::from_u128(7),
+            media_type: crate::ImageMediaType::Png,
+            width: 400,
+            height: 300,
+            byte_len: 10,
+        };
+        let visual = tool_result_blocks("call".into(), "done".into(), false, &[image], true);
+        assert!(matches!(
+            &visual[..],
+            [
+                ContentBlock::ToolResult { content, .. },
+                ContentBlock::Image { image: attached }
+            ] if content.contains("attached below") && *attached == image
+        ));
+
+        let text_only = tool_result_blocks("call".into(), "done".into(), false, &[image], false);
+        assert!(matches!(
+            &text_only[..],
+            [ContentBlock::ToolResult { content, .. }]
+                if content.contains("selected model does not accept image input")
+        ));
     }
 
     /// The model narrates before it acts. Rejecting a client call for carrying
@@ -6812,6 +7051,7 @@ mod tests {
             execution: ToolCallExecution::Server,
             status: ToolCallStatus::Pending,
             result: None,
+            result_preview: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -8444,6 +8684,7 @@ mod tests {
             execution: ToolCallExecution::Server,
             status: ToolCallStatus::Pending,
             result: None,
+            result_preview: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -8632,6 +8873,7 @@ mod tests {
             execution: ToolCallExecution::Server,
             status: ToolCallStatus::Pending,
             result: None,
+            result_preview: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -9169,6 +9411,50 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_identifies_attached_files_for_read_source() {
+        let turn = TurnId::new();
+        let chat = ChatId::new();
+        let message_id = MessageId::new();
+        let document_id = crate::id::DocumentId::new();
+        let created_at = DateTime::<Utc>::from_timestamp(1_000, 0).unwrap();
+        let message = Message {
+            id: message_id,
+            chat_id: chat,
+            turn_id: turn,
+            role: Role::User,
+            content: "summarize this file".into(),
+            created_at,
+        };
+        let document = MessageDocumentAttachment {
+            message_id,
+            chat_id: chat,
+            ordinal: 0,
+            document_id,
+            title: Some("brief.pdf".into()),
+            media_type: "application/pdf".into(),
+            created_at,
+        };
+
+        let rebuilt = rebuild_transcript_with_boundary(
+            &[message],
+            &[],
+            &[],
+            &[document],
+            DEFAULT_MAX_TOOL_RESULT_BYTES,
+            false,
+            None,
+        )
+        .0;
+        let ContentBlock::Text { text } = &rebuilt[0].content[0] else {
+            panic!("file attachment should annotate the user text");
+        };
+        assert!(text.contains(&document_id.to_string()));
+        assert!(text.contains("\"name\":\"brief.pdf\""));
+        assert!(text.contains("\"media_type\":\"application/pdf\""));
+        assert!(text.ends_with("\n\nsummarize this file"));
+    }
+
+    #[test]
     fn rebuild_attaches_tools_to_assistant_text() {
         let turn = TurnId::new();
         let chat = ChatId::new();
@@ -9203,6 +9489,7 @@ mod tests {
             execution: ToolCallExecution::Server,
             status: ToolCallStatus::Completed,
             result: Some("ok".into()),
+            result_preview: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -9254,6 +9541,7 @@ mod tests {
             execution,
             status: ToolCallStatus::Completed,
             result: Some("ok".into()),
+            result_preview: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -9317,6 +9605,7 @@ mod tests {
             execution: ToolCallExecution::Orchestration,
             status: ToolCallStatus::Completed,
             result: Some(serde_json::to_string(&answer).unwrap()),
+            result_preview: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -9390,6 +9679,7 @@ mod tests {
             execution: ToolCallExecution::Server,
             status: ToolCallStatus::Completed,
             result: Some("data".into()),
+            result_preview: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -9696,6 +9986,7 @@ mod image_hydration_tests {
                 "fake",
                 "what is in this screenshot?",
                 &[image],
+                &[],
             )
             .await
             .unwrap();
@@ -9732,7 +10023,7 @@ mod image_hydration_tests {
         let pixels = b"pixels".to_vec();
         let image = image_ref(uuid::Uuid::from_u128(9), &pixels);
         store
-            .accept_turn_with_attachments(TurnId::new(), chat.id, "fake", "look", &[image])
+            .accept_turn_with_attachments(TurnId::new(), chat.id, "fake", "look", &[image], &[])
             .await
             .unwrap();
 
@@ -9769,6 +10060,7 @@ mod image_hydration_tests {
                     "fake",
                     &format!("image {index}"),
                     &[image_ref(blob_id, &pixels)],
+                    &[],
                 )
                 .await
                 .unwrap();

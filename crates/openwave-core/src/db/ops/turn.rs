@@ -6,7 +6,7 @@ use sea_orm::{
 
 use crate::error::{AgentError, AgentErrorInfo, Result};
 use crate::event::{AgentEvent, SequencedEvent};
-use crate::id::{AgentRunId, ChatId, MessageId, TurnId};
+use crate::id::{AgentRunId, ChatId, DocumentId, MessageId, TurnId};
 use crate::image::ImageRef;
 use crate::model::{AgentRunStatus, TurnRun, TurnRunStatus};
 use crate::provider::Usage;
@@ -14,6 +14,7 @@ use crate::storage::{AcceptTurnOutcome, ClaimScanTerminalEvent, ClaimTurnRunOutc
 
 use super::super::{entities, store_err, DbStore};
 use super::message_attachment as message_attachment_ops;
+use super::message_document_attachment as message_document_attachment_ops;
 use super::{
     acquire_chat_write_lock, acquire_turn_write_lock,
     agent_run::find_foreground_agent_run_on,
@@ -115,9 +116,11 @@ pub(in crate::db) async fn accept_turn(
     model: &str,
     content: &str,
     images: &[ImageRef],
+    documents: &[DocumentId],
 ) -> Result<AcceptTurnOutcome> {
     validate_turn_input(id, model, content)?;
     message_attachment_ops::validate(images)?;
+    message_document_attachment_ops::validate_count(images.len(), documents)?;
 
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_chat_write_lock(&transaction, chat_id).await? {
@@ -140,6 +143,7 @@ pub(in crate::db) async fn accept_turn(
             model,
             content,
             images,
+            documents,
         )
         .await?;
         transaction.commit().await.map_err(store_err)?;
@@ -200,6 +204,18 @@ pub(in crate::db) async fn accept_turn(
         transaction.rollback().await.map_err(store_err)?;
         return Err(error);
     }
+    if let Err(error) = message_document_attachment_ops::insert_on(
+        &transaction,
+        chat_id,
+        input_message_id,
+        documents,
+        now,
+    )
+    .await
+    {
+        transaction.rollback().await.map_err(store_err)?;
+        return Err(error);
+    }
 
     let run = entities::turn_run::ActiveModel {
         id: Set(id.0),
@@ -247,6 +263,7 @@ pub(in crate::db) async fn accept_turn(
                     model,
                     content,
                     images,
+                    documents,
                 )
                 .await;
             }
@@ -987,6 +1004,7 @@ async fn exact_accepted_turn_on<C>(
     model: &str,
     content: &str,
     images: &[ImageRef],
+    documents: &[DocumentId],
 ) -> Result<AcceptTurnOutcome>
 where
     C: ConnectionTrait,
@@ -1016,12 +1034,16 @@ where
     // history kept the first submission's images.
     let accepted_images =
         message_attachment_ops::list_for_message_on(conn, MessageId(message.id)).await?;
+    let accepted_documents =
+        message_document_attachment_ops::list_ids_for_message_on(conn, MessageId(message.id))
+            .await?;
     let exact = existing.chat_id == chat_id.0
         && existing.agent_run_id == agent_run_id.0
         && existing.agent_run_depth == 0
         && existing.model == model
         && message.content == content
-        && accepted_images == images;
+        && accepted_images == images
+        && accepted_documents == documents;
     Ok(if exact {
         AcceptTurnOutcome::Existing(turn_run_from_model(existing)?)
     } else {

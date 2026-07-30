@@ -10,7 +10,7 @@ import {
 
 const mocks = vi.hoisted(() => ({
   handler: undefined as ((event: { payload: unknown }) => void) | undefined,
-  importDropped: vi.fn(),
+  attachDropped: vi.fn(),
   stop: vi.fn(),
 }));
 
@@ -21,8 +21,8 @@ vi.mock("@tauri-apps/api/event", () => ({
   }),
 }));
 
-vi.mock("./documents", () => ({
-  importDroppedLibraryDocuments: mocks.importDropped,
+vi.mock("./attachments", () => ({
+  attachDroppedChatFiles: mocks.attachDropped,
 }));
 
 vi.mock("./host", () => ({
@@ -32,13 +32,24 @@ vi.mock("./host", () => ({
 describe("DocumentDropTarget", () => {
   beforeEach(() => {
     mocks.handler = undefined;
-    mocks.importDropped.mockReset();
-    mocks.importDropped.mockResolvedValue(null);
+    mocks.attachDropped.mockReset();
+    mocks.attachDropped.mockResolvedValue({
+      images: [],
+      documents: null,
+      failedImages: [],
+    });
     mocks.stop.mockReset();
   });
 
   it("offers native files and folders without claiming aliases", async () => {
-    render(<DocumentDropTarget chatId="chat-1" />);
+    const onAttached = vi.fn();
+    render(
+      <DocumentDropTarget
+        chatId="chat-1"
+        onAttached={onAttached}
+        onError={vi.fn()}
+      />,
+    );
     await waitFor(() => expect(mocks.handler).toBeTypeOf("function"));
 
     act(() => {
@@ -47,7 +58,7 @@ describe("DocumentDropTarget", () => {
       });
     });
     expect(
-      screen.getByText("Add this file or folder to this conversation"),
+      screen.getByText("Attach this file or folder"),
     ).toBeInTheDocument();
     expect(dropItemCountCopy(3)).toBe("3 files or folders");
 
@@ -56,11 +67,18 @@ describe("DocumentDropTarget", () => {
         payload: { phase: "dropped", accepted: true, fileCount: 1 },
       });
     });
-    expect(mocks.importDropped).toHaveBeenCalledWith("chat-1");
+    expect(mocks.attachDropped).toHaveBeenCalledWith("chat-1");
+    await waitFor(() => expect(onAttached).toHaveBeenCalledOnce());
   });
 
   it("cancels its native listener and ignores a stale drop after unmount", async () => {
-    const view = render(<DocumentDropTarget chatId="chat-1" />);
+    const view = render(
+      <DocumentDropTarget
+        chatId="chat-1"
+        onAttached={vi.fn()}
+        onError={vi.fn()}
+      />,
+    );
     await waitFor(() => expect(mocks.handler).toBeTypeOf("function"));
     view.unmount();
     expect(mocks.stop).toHaveBeenCalledOnce();
@@ -70,7 +88,7 @@ describe("DocumentDropTarget", () => {
         payload: { phase: "dropped", accepted: true, fileCount: 1 },
       });
     });
-    expect(mocks.importDropped).not.toHaveBeenCalled();
+    expect(mocks.attachDropped).not.toHaveBeenCalled();
   });
 
   it("rejects malformed drop projections", () => {

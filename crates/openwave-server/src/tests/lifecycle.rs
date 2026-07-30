@@ -83,7 +83,6 @@ async fn cancellation_drains_buffered_preassigned_event_ordinals() {
     injected.pause_next_nonterminal_event();
     let store: Arc<dyn Store> = injected;
     let second_yielded = Arc::new(Notify::new());
-    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -92,7 +91,6 @@ async fn cancellation_drains_buffered_preassigned_event_ordinals() {
         }))),
         Arc::new(MemSecrets::default()),
         Arc::new(ToolRegistry::new()),
-        retrieval,
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
@@ -705,7 +703,6 @@ async fn durable_steer_retries_heartbeat_races_and_ambiguous_application() {
     let store: Arc<dyn Store> = injected.clone();
     let calls = Arc::new(AtomicUsize::new(0));
     let provider_entered = Arc::new(Notify::new());
-    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -715,7 +712,6 @@ async fn durable_steer_retries_heartbeat_races_and_ambiguous_application() {
         }))),
         Arc::new(MemSecrets::default()),
         Arc::new(ToolRegistry::new()),
-        retrieval,
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
@@ -828,7 +824,6 @@ async fn committed_steer_event_recovers_when_cancellation_wins_ambiguous_respons
     let cancellation_committed = injected.cancel_after_next_apply_steer_commit();
     let store: Arc<dyn Store> = injected;
     let entered = Arc::new(Notify::new());
-    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -837,7 +832,6 @@ async fn committed_steer_event_recovers_when_cancellation_wins_ambiguous_respons
         }))),
         Arc::new(MemSecrets::default()),
         Arc::new(ToolRegistry::new()),
-        retrieval,
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
@@ -930,14 +924,12 @@ async fn queued_steer_is_applied_when_the_worker_claims_the_turn() {
         .await
         .unwrap(),
     );
-    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
         Arc::new(FixedResolver(Arc::new(FakeProvider))),
         Arc::new(MemSecrets::default()),
         Arc::new(ToolRegistry::new()),
-        retrieval,
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
@@ -1325,6 +1317,7 @@ async fn client_execution_api_polls_claims_heartbeats_and_resolves_idempotently(
         execution: ToolCallExecution::Client,
         status: ToolCallStatus::Pending,
         result: None,
+        result_preview: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,
@@ -1527,6 +1520,7 @@ async fn renderer_pending_client_executions_are_a_closed_folder_consent_projecti
         execution: ToolCallExecution::Client,
         status: ToolCallStatus::Pending,
         result: None,
+        result_preview: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,
@@ -1549,6 +1543,7 @@ async fn renderer_pending_client_executions_are_a_closed_folder_consent_projecti
         execution: ToolCallExecution::Client,
         status: ToolCallStatus::Pending,
         result: None,
+        result_preview: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,
@@ -1570,6 +1565,7 @@ async fn renderer_pending_client_executions_are_a_closed_folder_consent_projecti
         execution: ToolCallExecution::Client,
         status: ToolCallStatus::Pending,
         result: None,
+        result_preview: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,
@@ -1600,6 +1596,7 @@ async fn renderer_pending_client_executions_are_a_closed_folder_consent_projecti
             execution: ToolCallExecution::Client,
             status: ToolCallStatus::Pending,
             result: None,
+            result_preview: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -1717,6 +1714,7 @@ async fn pending_chat_prompts_are_cross_chat_opaque_summaries() {
         execution: ToolCallExecution::Client,
         status: ToolCallStatus::Pending,
         result: None,
+        result_preview: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,
@@ -1786,14 +1784,12 @@ async fn client_resolution_publishes_cancellation_and_wakes_resumable_turns() {
         .await
         .unwrap(),
     );
-    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
         Arc::new(FixedResolver(Arc::new(FakeProvider))),
         Arc::new(MemSecrets::default()),
         Arc::new(ToolRegistry::new()),
-        retrieval,
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
@@ -1952,7 +1948,6 @@ async fn resumed_worker_preserves_checkpoint_usage_and_step_budget() {
         .unwrap(),
     );
     let calls = Arc::new(AtomicUsize::new(0));
-    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -1961,7 +1956,6 @@ async fn resumed_worker_preserves_checkpoint_usage_and_step_budget() {
         }))),
         Arc::new(MemSecrets::default()),
         Arc::new(ToolRegistry::new()),
-        retrieval,
         AgentConfig {
             model: "fake".into(),
             max_steps: 2,
@@ -2079,7 +2073,6 @@ async fn worker_checkpoints_a_client_tool_and_resumes_after_its_result() {
     injected.fail_after_next_park_commit();
     let store: Arc<dyn Store> = injected;
     let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let retrieval = build_retrieval();
     let mut tools = ToolRegistry::new();
     tools.register_client(ToolSpec {
         name: "connect_folder".into(),
@@ -2094,7 +2087,6 @@ async fn worker_checkpoints_a_client_tool_and_resumes_after_its_result() {
         }))),
         Arc::new(MemSecrets::default()),
         Arc::new(tools),
-        retrieval,
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
@@ -2183,7 +2175,6 @@ async fn worker_checkpoints_a_client_tool_and_resumes_after_its_result() {
         .await
         .unwrap(),
     );
-    let exhausted_retrieval = build_retrieval();
     let mut exhausted_tools = ToolRegistry::new();
     exhausted_tools.register_client(ToolSpec {
         name: "connect_folder".into(),
@@ -2198,7 +2189,6 @@ async fn worker_checkpoints_a_client_tool_and_resumes_after_its_result() {
         }))),
         Arc::new(MemSecrets::default()),
         Arc::new(exhausted_tools),
-        exhausted_retrieval,
         AgentConfig {
             model: "fake".into(),
             max_steps: 1,
@@ -2257,6 +2247,7 @@ async fn client_execution_api_reconciles_a_known_result_after_exact_lease_expiry
         execution: ToolCallExecution::Client,
         status: ToolCallStatus::Pending,
         result: None,
+        result_preview: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,
@@ -2330,6 +2321,7 @@ async fn client_execution_api_validates_scope_identity_and_terminal_payloads() {
         execution: ToolCallExecution::Client,
         status: ToolCallStatus::Pending,
         result: None,
+        result_preview: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,

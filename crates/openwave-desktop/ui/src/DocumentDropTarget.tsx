@@ -1,6 +1,10 @@
 import { listen } from "@tauri-apps/api/event";
-import { useEffect, useState } from "react";
-import { importDroppedLibraryDocuments } from "./documents";
+import { useEffect, useRef, useState } from "react";
+
+import {
+  attachDroppedChatFiles,
+  type AttachedFiles,
+} from "./attachments";
 import { hasNativeHost } from "./host";
 
 type DropPhase = "enter" | "leave" | "dropped";
@@ -11,8 +15,25 @@ type DropState = {
   fileCount: number;
 };
 
-export function DocumentDropTarget({ chatId }: { chatId: string }) {
+/**
+ * Native file drops are intercepted by Tauri before the webview sees them.
+ * This listener lives inside the composer and sends the claimed paths through
+ * the same mixed attachment path as its paperclip button.
+ */
+export function DocumentDropTarget({
+  chatId,
+  onAttached,
+  onError,
+}: {
+  chatId: string;
+  onAttached: (attached: AttachedFiles) => void;
+  onError: (error: unknown) => void;
+}) {
   const [state, setState] = useState<DropState | null>(null);
+  const attachedRef = useRef(onAttached);
+  const errorRef = useRef(onError);
+  attachedRef.current = onAttached;
+  errorRef.current = onError;
 
   useEffect(() => {
     if (!hasNativeHost()) return;
@@ -27,7 +48,15 @@ export function DocumentDropTarget({ chatId }: { chatId: string }) {
       }
       if (next.phase === "dropped") {
         setState(null);
-        if (next.accepted) void importDroppedLibraryDocuments(chatId).catch(() => {});
+        if (next.accepted) {
+          void attachDroppedChatFiles(chatId)
+            .then((attached) => {
+              if (!cancelled && attached) attachedRef.current(attached);
+            })
+            .catch((error) => {
+              if (!cancelled) errorRef.current(error);
+            });
+        }
         return;
       }
       setState(next);
@@ -44,17 +73,17 @@ export function DocumentDropTarget({ chatId }: { chatId: string }) {
   if (!state) return null;
   return (
     <div
-      className={`document-drop-target ${state.accepted ? "accept" : "reject"}`}
+      className={`absolute inset-0 z-20 flex flex-col items-center justify-center rounded-xl border-2 border-dashed bg-background/95 px-4 text-center ${state.accepted ? "border-primary" : "border-destructive"}`}
       aria-live="assertive"
     >
       <strong>
         {state.accepted
-          ? `Add ${dropItemCountCopy(state.fileCount)} to this conversation`
-          : "Only files and folders can be added as sources"}
+          ? `Attach ${dropItemCountCopy(state.fileCount)}`
+          : "Only regular files and folders can be attached"}
       </strong>
-      <span>
+      <span className="text-xs text-muted-foreground">
         {state.accepted
-          ? "Release to add their documents in the background."
+          ? "Release to add them to this message."
           : "Aliases and unavailable items cannot be imported."}
       </span>
     </div>
@@ -62,7 +91,9 @@ export function DocumentDropTarget({ chatId }: { chatId: string }) {
 }
 
 export function parseDropState(value: unknown): DropState | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
   const state = value as Record<string, unknown>;
   if (
     !["enter", "leave", "dropped"].includes(String(state.phase)) ||

@@ -13,9 +13,9 @@ change.
 
 OpenWave is a local agent runtime. A user chooses a model and starts a chat,
 which is the current product's single workspace. Sources, connected folders,
-scratch, retrieval, messages, and tool activity are all resolved through that
+scratch, messages, and tool activity are all resolved through that
 exact conversation. The runtime can ask the model for an answer, call tools over
-folders connected to the chat, search sources indexed for the chat, pause for
+folders connected to the chat, read sources attached to the chat, pause for
 approval before a sensitive action, and stream progress back to the client.
 
 Standalone chats never share a fallback source corpus. Projects remain in the
@@ -537,95 +537,57 @@ Applying a steer commits its user message, application receipt, revision, and
 lost, the worker retries the same identity and recovers the exact existing
 result rather than applying the instruction twice.
 
-## What happens when a source is added
+## What happens when a file is attached
 
-Adding a source to a conversation does not crawl its connected roots. Source
-documents enter the system through an explicit upload scoped to the exact chat.
-A source URI is identity and provenance; OpenWave does not fetch that URI
-itself. The lower-level global and project document APIs remain as legacy
-surfaces, but the desktop does not use them as a fallback.
+Attaching a file does not crawl connected roots. Files enter through the
+composer, are scoped to the exact chat, and are linked to the user message that
+introduced them. They render as chips in the transcript; opening a chip uses the
+same document viewer as a citation. A source URI is identity and provenance;
+OpenWave does not fetch that URI itself. The lower-level global and project
+document APIs remain as legacy surfaces, but the desktop does not use them as a
+fallback or expose a standalone source catalog.
 
 > **Pre-1.0 upgrade note:** Sources created through the older shared or
 > project-scoped desktop flow are retained in their legacy corpus, but they are
 > not automatically attached to a conversation. Re-add any source you still
-> need from that conversation's composer or Sources view. An explicit legacy re-attachment
+> need from that conversation's composer. An explicit legacy re-attachment
 > flow can be added before compatibility guarantees begin.
 
 ### 1. Publish immutable source bytes
 
 The server hashes the upload and writes it to the blob store under a
 content-derived identifier. Identical bytes can therefore be shared safely by
-more than one document. Blob publication happens before the catalog transaction,
-so an accepted catalog record never points at bytes that were not written.
+more than one document. Blob publication happens before the document
+transaction, so an accepted document never points at bytes that were not
+written.
 
-### 2. Accept a new document generation
+### 2. Decode and accept the document
 
-The operational store creates or updates the stable document record and queues a
-`Parse` job in the same transaction. The API returns `202 Accepted`; parsing
-happens later.
+The request selects a parser, decodes canonical text, and then stores the blob
+descriptor and text on the stable document row in one transaction. Blob
+publication happens first, so the row never points at bytes that were not
+written. A successful request returns only after the document is usable.
 
-This is where “revision” and “generation” matter:
+`DocumentId` means “this logical document.” A URI gives it a stable identity;
+conversation scope is included so the same URI in different chats stays
+separate. Re-ingesting that identity is a last-write-wins replacement that keeps
+its original creation time. There is no background document job, generation
+clock, or status transition to poll.
 
-- `DocumentId` means “this logical document.” A URI gives it a stable identity;
-  conversation scope is included so the same URI in different chats stays
-  separate. Legacy global and project APIs retain their own identity scopes.
-- `content_revision` is a counter: first content is 1, replacement is 2, and so
-  on. Deletion also advances the clock.
-- `revision_token` is a random identity for that exact revision.
-- Together, the revision and token are a `DocumentGeneration`.
+### 3. Canonical text and readiness
 
-The retained integer clock says which version is newer and keeps increasing
-through deletion and recreation, preventing ordinary version reuse. The token
-adds exact identity, so even an unexpected equal revision cannot be mistaken for
-the generation a worker originally claimed.
-
-This model is more explicit than a simple mutable document row because parsing
-happens outside the database and may take time. Every worker completion needs
-to prove, “I processed exactly the generation that is still current.”
-
-### 3. Parse into canonical text
-
-A document worker claims the `Parse` job with a lease, verifies the retained
-byte length and SHA-256 digest, and parses it into:
-
-- canonical UTF-8 text, the text-of-record used by direct source reads;
-- source regions that map text byte ranges back to locations such as pages.
-
-The parse completion marks the document ready atomically. The configured
-registry parses JSON, XML, HTML, and `text/*` in process. A fallback keeps other
-media types storable by decoding valid UTF-8 and leaving binary content empty.
-The model can represent page provenance, but the parsers do not emit page
-regions today.
-
-Because that selection is by media type, the media type has to be right. The
-trusted native side decides it from the bytes rather than from the filename, so
-a document cannot be routed to a parser that cannot read it. PDF, Office,
-workbook, and raster image uploads currently reach the fallback and report
+The in-process registry decodes `text/*`, JSON, XML, and HTML as UTF-8 text.
+The fallback does the same for valid UTF-8 under other media types and stores
+binary or undecodable content with empty canonical text. PDF, Office, workbook,
+and raster image uploads therefore remain stored but currently report
 `stored_no_text`; richer extraction will move to an execution-based document
-path. Any parser that produces no text yields a ready source with no directly
-readable text.
+path.
 
-There is no document event stream yet. After receiving `202`, a client polls the
-document list or detail endpoint for `queued → processing → ready/failed`. The
-public record exposes the failed state but not the underlying job's error detail;
-operators currently rely on logs, and the retry endpoint revives only the current
-exact failed job when it is still compatible with the active pipeline.
-
-The durable job state machine is:
-
-```text
-queued --> running --> succeeded
-            |   |
-            |   +--> retry_wait --> running
-            |
-            +------> failed
-
-superseded work and deleted documents become cancelled instead of publishing.
-```
-
-An auditor periodically compares authoritative documents, parser fingerprints,
-and jobs. It can repair missing work or schedule reprocessing after a parser
-change.
+Readiness follows the row itself: non-empty canonical text is `readable`, and
+empty canonical text is `stored_no_text`. A real decode error fails the upload
+request instead of creating a failed background job. Source regions and parser
+fingerprints are not persisted because span citations and reparse decisions no
+longer consume them.
 
 ### 4. Retire unused blobs
 
@@ -636,32 +598,29 @@ but never became referenced because a later catalog transaction failed.
 
 ## How grounded sources reach a chat answer
 
-Source-tool results and assistant citations are related, but they are not the
-same record. When a source tool returns private evidence, each passage receives
-a random opaque reference that the model may place in its answer. That reference
-is an internal protocol token, not a URL and not Markdown.
+A citation is written by the model itself: an inline directive wrapping the
+cited phrase and naming a document id plus a human-scale locator — a page or
+page range, a line range, or a workbook sheet optionally narrowed to a cell
+range. The model cites the position it saw when it read the source; there is
+no server-side span resolution, no evidence store, and no opaque token
+protocol. The loop validates only shape and bounds before committing the
+message and its ordered citation records together, and exact retries reuse the
+same message and citation identities, so an ambiguous database response cannot
+create a second historical answer.
 
-Before publishing assistant text, the agent loop removes those internal tokens,
-resolves only references produced by a tool from the same chat and turn, and
-commits the clean message and its ordered citations together. The same rule
-applies to an assistant message that precedes another tool call, to a message
-accepted at a steering boundary, and to the final answer. Exact retries reuse
-the same message and citation identities, so an ambiguous database response
-cannot create a second historical answer.
+The transcript API exposes each citation as a small record: ordinal, document
+id, and locator. Clicking a citation opens the document viewer at that
+locator. The precision is deliberately coarse — the reader lands on the page
+or lines, not a highlighted span — and a locator the model gets slightly wrong
+still opens the right document. Deleting or replacing a document leaves older
+citations pointing at a source that may no longer exist; the viewer says so
+rather than rewriting history.
 
-The transcript API exposes a deliberately smaller source card: a bounded
-excerpt, optional heading, and page numbers. It does not expose paths, source
-URIs, document revisions, chunk IDs, search arguments, tool results, or the
-opaque model token. Replacing or deleting the current document does not rewrite
-an older answer's source card because the card comes from the immutable evidence
-snapshot captured when the answer was produced.
-
-During generation, an incremental filter recognizes references even when a
-provider splits them across many streaming events. Valid internal references
-never enter the live or durable renderer event stream; malformed or incomplete
-marker-like prose remains ordinary text. After a terminal event, the desktop
-rehydrates the authoritative transcript and attaches the structured source cards
-to the completed assistant message.
+During generation, an incremental filter recognizes directives even when a
+provider splits them across many streaming events, so partially streamed
+directive syntax never flashes through the live renderer stream; malformed or
+incomplete marker-like prose remains ordinary text. Messages written before
+this grammar render their historical directives as plain cited text.
 
 ## The different ways to run OpenWave
 
@@ -673,10 +632,12 @@ The browser-facing API is not exposed on a public network interface.
 
 The current UI is a workspace-style conversation shell, not the complete
 product. It reopens durable chats and supports conversation create/list/switch/
-rename/delete, transcript hydration, Markdown messages, live and historical
-tool-call rendering, reconnectable streaming, provider and web-search setup,
-model selection, a foreground-turn stop control, approval prompts, and native
-connected-folder pick/list/revoke. The foreground stop control sends
+rename/delete, transcript hydration, Markdown messages, file and photo
+attachments on messages with a document viewer, inline citation chips that
+open the viewer at the cited position, live and historical tool-call rendering
+including exec preview images, reconnectable streaming, provider and
+web-search setup, model selection, a foreground-turn stop control, approval
+prompts, and native connected-folder attach/list/revoke from the chat. The foreground stop control sends
 cancellation for the exact active turn, prevents duplicate requests, and stays
 in a pending state until an authoritative terminal event arrives; it never
 treats a request as a locally completed cancellation.
@@ -727,12 +688,12 @@ shares the same pathless source of truth.
 In the native embedding, canonical document routes require the second
 native-executor credential withheld from the renderer. Headless embeddings keep
 those routes on their primary bearer because they do not have a webview trust
-boundary. The native document bridge follows bounded catalog cursors and reports
-when it has intentionally stopped at the newest 1,000 records.
+boundary. The native bridge imports bytes for the composer and returns only the
+document identity and bounded chip metadata to the renderer.
 
 The chat's `list_sources` and `read_source` tools can see only documents owned by
-that exact conversation. Direct reads become available as soon as parsing
-publishes canonical text and produce durable grounded-citation evidence. A page
+that exact conversation. Direct reads become available as soon as decoding
+publishes canonical text and include lightweight positions the model can cite. A page
 fetched by `web_extract` becomes one of those documents, so a claim drawn from
 the public web is anchored and reopenable on the same terms as one drawn from an
 imported file; it arrives already parsed, so it is citable immediately.
@@ -817,12 +778,12 @@ a gate in #853, which any shared-deployment work should be blocked on.
 | Model providers | `crates/openwave-router/src/` | Anthropic/OpenAI adapters and model-to-provider routing |
 | Local API | `crates/openwave-server/src/lib.rs`, `routes.rs`, `routes/client_execution.rs` | Authentication, API assembly, chat, turn, and leased client-execution routes |
 | Turn execution | `crates/openwave-server/src/turn_worker.rs` | Claiming, heartbeats, event journaling, terminal resolution |
-| Documents | `crates/openwave-server/src/routes/document.rs`, `document_worker.rs` | Upload API and durable parse-worker orchestration |
-| Retrieval | `crates/openwave-retrieval/src/` | Parser selection, canonical text, and source-region mappings |
+| Documents | `crates/openwave-server/src/routes/document.rs` | Synchronous upload, canonical decoding, and source-file access |
+| Document decoding | `crates/openwave-server/src/document_decode.rs` | Media-type-routed UTF-8 decoding with a binary fallback |
 | Desktop | `crates/openwave-desktop/src/`, `crates/openwave-desktop/ui/src/` | Tauri host and current React shell |
 | Host access | `crates/openwave-host-broker/src/`, `docs/host-access.md` | Broker trust boundary, connected-root model, and reconciliation plan |
 | MCP | `crates/openwave-mcp/src/`, `crates/openwave-cli/src/main.rs` | MCP protocol server and stdio command |
-| Connectors and Slack | `crates/openwave-connectors`, `crates/openwave-slack` | Placeholders, not working product surfaces yet |
+| Connectors | `crates/openwave-connectors` | Placeholder, not a working product surface yet |
 
 The dependency direction is intentionally simple: clients compose libraries,
 and libraries point down toward `openwave-core`. Core defines the contracts; it
@@ -920,7 +881,7 @@ steps; the migrations should be condensed into a clean baseline before v1.
 ## Glossary
 
 - **Chat:** the current user-facing workspace and exact boundary for messages,
-  sources, retrieval, scratch, and connected-root projection; it does not own an
+  sources, scratch, and connected-root projection; it does not own an
   arbitrary absolute workspace path.
 - **Project:** a dormant data/API concept that is not surfaced in the current
   desktop. It is reserved for a possible completely optional future inheritance

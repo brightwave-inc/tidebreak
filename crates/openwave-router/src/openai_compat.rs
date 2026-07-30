@@ -307,21 +307,18 @@ fn extend_openai_messages(
         })
         .collect();
 
-    // Pure tool-result message(s): emit one OpenAI tool message per result.
-    if !tool_results.is_empty()
-        && tool_results.len()
-            == message
-                .content
-                .iter()
-                .filter(|b| matches!(b, ContentBlock::ToolResult { .. }))
-                .count()
-        && message
+    // OpenAI requires each tool result to be its own `role: tool` message.
+    // Preview images follow in a separate user message, preserving the
+    // provider-neutral order: result text first, pixels second.
+    if !tool_results.is_empty() {
+        out.extend(tool_results);
+        if message
             .content
             .iter()
-            .all(|b| matches!(b, ContentBlock::ToolResult { .. }))
-    {
-        out.extend(tool_results);
-        return Ok(());
+            .all(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        {
+            return Ok(());
+        }
     }
 
     let tool_calls: Vec<Value> = message
@@ -904,6 +901,36 @@ mod tests {
         let mut out = Vec::new();
         let err = extend_openai_messages(&mut out, &msg, &ImageAttachments::new()).unwrap_err();
         assert!(err.to_string().contains("no hydrated bytes"), "{err}");
+    }
+
+    #[test]
+    fn tool_result_text_precedes_its_preview_image() {
+        let image = png_ref(7);
+        let mut images = ImageAttachments::new();
+        images.insert(
+            image.blob_id,
+            openwave_core::ImageData::new(openwave_core::ImageMediaType::Png, vec![1, 2, 3]),
+        );
+        let msg = ChatMessage {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_1".into(),
+                    content: "one preview attached below".into(),
+                    is_error: false,
+                },
+                ContentBlock::Image { image },
+            ],
+        };
+
+        let mut out = Vec::new();
+        extend_openai_messages(&mut out, &msg, &images).unwrap();
+
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["role"], "tool");
+        assert_eq!(out[0]["content"], "one preview attached below");
+        assert_eq!(out[1]["role"], "user");
+        assert_eq!(out[1]["content"][0]["type"], "image_url");
     }
 
     #[test]

@@ -407,6 +407,16 @@ pub struct ToolOutput {
     /// still surface its view; never part of the model-facing content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_view: Option<Box<ToolUiView>>,
+    /// Durable references to images produced by this tool.
+    ///
+    /// Pixel bytes ride beside these references only until the agent publishes
+    /// them to blob storage. Journals, tool-call rows, and renderer events see
+    /// identity and geometry, never media bytes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<crate::ImageRef>,
+    /// Ephemeral pixels backing [`Self::images`] before publication.
+    #[serde(skip, default)]
+    pub image_data: crate::ImageAttachments,
 }
 
 /// A tool's declared MCP Apps view: which configured server can serve it and
@@ -433,6 +443,8 @@ impl ToolOutput {
             is_error: false,
             error_category: None,
             ui_view: None,
+            images: Vec::new(),
+            image_data: crate::ImageAttachments::new(),
         }
     }
 
@@ -453,6 +465,8 @@ impl ToolOutput {
             is_error: true,
             error_category: Some(category),
             ui_view: None,
+            images: Vec::new(),
+            image_data: crate::ImageAttachments::new(),
         }
     }
 
@@ -468,6 +482,19 @@ impl ToolOutput {
     #[must_use]
     pub fn with_data(mut self, data: Value) -> Self {
         self.data = Some(data);
+        self
+    }
+
+    /// Attach image references and their short-lived bytes.
+    #[must_use]
+    pub fn with_images(
+        mut self,
+        images: impl IntoIterator<Item = (crate::ImageRef, crate::ImageData)>,
+    ) -> Self {
+        for (image, data) in images {
+            self.image_data.insert(image.blob_id, data);
+            self.images.push(image);
+        }
         self
     }
 
@@ -813,6 +840,24 @@ mod tests {
 
         let with = ToolOutput::text("ok").with_data(serde_json::json!({"k": 1}));
         assert_eq!(with.data, Some(serde_json::json!({"k": 1})));
+    }
+
+    #[test]
+    fn tool_output_serializes_preview_identity_but_never_pixels() {
+        let bytes = vec![9, 8, 7];
+        let image = crate::ImageRef {
+            blob_id: uuid::Uuid::from_u128(9),
+            media_type: crate::ImageMediaType::Png,
+            width: 1,
+            height: 1,
+            byte_len: 3,
+        };
+        let output = ToolOutput::text("ok")
+            .with_images([(image, crate::ImageData::new(image.media_type, bytes))]);
+        let json = serde_json::to_value(output).unwrap();
+        assert_eq!(json["images"][0]["blob_id"], image.blob_id.to_string());
+        assert!(json.get("image_data").is_none());
+        assert!(json.get("bytes").is_none());
     }
 
     #[test]

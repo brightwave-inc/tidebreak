@@ -1,4 +1,4 @@
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,9 @@ pub const MAX_WORKSPACE_FILE_BYTES: usize = 16 * 1_024 * 1_024;
 pub const MAX_WORKSPACE_PATH_BYTES: usize = 1_024;
 /// Maximum entries returned by one workspace listing.
 pub const MAX_WORKSPACE_LIST_ENTRIES: usize = 256;
+/// Maximum host-resolved folder grants carried by one local execution.
+pub const MAX_EXEC_FOLDER_GRANTS: usize = 32;
+const MAX_EXEC_FOLDER_PATH_BYTES: usize = 4_096;
 const MAX_ID_BYTES: usize = 128;
 
 /// A configured code-execution backend.
@@ -233,6 +236,42 @@ pub struct CodeExecutionRequest {
     pub arguments: Vec<String>,
     #[serde(default = "default_cwd")]
     pub cwd: String,
+    /// Host-resolved folder authority for the local adapter.
+    ///
+    /// The model-facing tool always constructs this empty. The configured host
+    /// wrapper replaces it from current product attachments immediately before
+    /// a local invocation; managed providers never receive host paths.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folder_grants: Vec<ExecFolderGrant>,
+}
+
+/// Access scope for one host-resolved local-exec folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecFolderAccess {
+    ReadOnly,
+    ReadWrite,
+}
+
+/// One absolute folder path resolved from trusted host attachment state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecFolderGrant {
+    pub path: PathBuf,
+    pub access: ExecFolderAccess,
+}
+
+impl ExecFolderGrant {
+    pub fn new(
+        path: impl Into<PathBuf>,
+        access: ExecFolderAccess,
+    ) -> Result<Self, CodeExecutionError> {
+        let grant = Self {
+            path: path.into(),
+            access,
+        };
+        validate_folder_grant(&grant)?;
+        Ok(grant)
+    }
 }
 
 impl CodeExecutionRequest {
@@ -249,6 +288,7 @@ impl CodeExecutionRequest {
             command: command.into(),
             arguments,
             cwd: cwd.into(),
+            folder_grants: Vec::new(),
         };
         request.validate()?;
         Ok(request)
@@ -290,12 +330,54 @@ impl CodeExecutionRequest {
                 "invalid working directory".into(),
             ));
         }
+        if self.folder_grants.len() > MAX_EXEC_FOLDER_GRANTS {
+            return Err(CodeExecutionError::InvalidRequest(
+                "too many execution folder grants".into(),
+            ));
+        }
+        let mut unique_paths = std::collections::HashSet::new();
+        for grant in &self.folder_grants {
+            validate_folder_grant(grant)?;
+            if !unique_paths.insert(&grant.path) {
+                return Err(CodeExecutionError::InvalidRequest(
+                    "duplicate execution folder grant".into(),
+                ));
+            }
+        }
         Ok(())
+    }
+
+    /// Install current host-resolved grants at the configured-provider
+    /// boundary. Tool arguments have no route to this field.
+    pub fn with_folder_grants(
+        mut self,
+        folder_grants: Vec<ExecFolderGrant>,
+    ) -> Result<Self, CodeExecutionError> {
+        self.folder_grants = folder_grants;
+        self.validate()?;
+        Ok(self)
     }
 }
 
 fn default_cwd() -> String {
     ".".into()
+}
+
+fn validate_folder_grant(grant: &ExecFolderGrant) -> Result<(), CodeExecutionError> {
+    let Some(path) = grant.path.to_str() else {
+        return Err(CodeExecutionError::InvalidRequest(
+            "execution folder path must be valid UTF-8".into(),
+        ));
+    };
+    if !grant.path.is_absolute()
+        || path.len() > MAX_EXEC_FOLDER_PATH_BYTES
+        || path.chars().any(char::is_control)
+    {
+        return Err(CodeExecutionError::InvalidRequest(
+            "invalid execution folder path".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn is_safe_relative_path(path: &Path) -> bool {
@@ -331,6 +413,18 @@ pub trait CodeExecutionProvider: Send + Sync {
         &self,
         request: CodeExecutionRequest,
     ) -> Result<CodeExecutionResponse, CodeExecutionError>;
+
+    /// Collect bounded visual previews after a successful execution.
+    ///
+    /// Providers without a host-visible durable workspace return an empty scan.
+    /// The configured server wrapper overrides this after mirroring a managed
+    /// workspace back into private scratch.
+    async fn collect_preview_images(
+        &self,
+        _workspace: &ExecutionWorkspaceId,
+    ) -> Result<crate::PreviewScan, CodeExecutionError> {
+        Ok(crate::PreviewScan::default())
+    }
 
     /// The provider's optional durable-workspace capability. `None` means the
     /// backend has no durable session surface; callers must degrade instead of

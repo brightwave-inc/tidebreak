@@ -4,7 +4,6 @@ import { RouterProvider } from "@tanstack/react-router";
 import { Toaster } from "@/components/ui/sonner";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { refuseStrayFileDrops } from "./ImageAttachments";
-import { startImportQueue } from "./ImportQueueStore";
 import { router } from "./router";
 import { initTheme } from "./theme";
 import "katex/dist/katex.min.css";
@@ -12,7 +11,6 @@ import "./styles.css";
 
 initTheme();
 refuseStrayFileDrops(window);
-startImportQueue();
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

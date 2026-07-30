@@ -19,7 +19,7 @@ type(optional-scope)[!]: description
 
 CI validates the title, and squash merge makes it the commit title on `main`.
 Scopes are optional and descriptive; common examples are `core`, `server`,
-`desktop`, `retrieval`, `mcp`, `cli`, `deps`, and `release`.
+`desktop`, `mcp`, `cli`, `deps`, and `release`.
 
 | Title type                                          | Use for                                              | Release effect |
 | --------------------------------------------------- | ---------------------------------------------------- | -------------- |

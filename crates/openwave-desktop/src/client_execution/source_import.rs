@@ -6,9 +6,7 @@
 //! called, and which document the import belongs to. None of it is negotiable
 //! from the model side, and the imported bytes never travel back to it.
 
-use openwave_core::{
-    ChatId, ImportConnectedFileArgs, ImportConnectedFileResult, SourceReadiness, ToolCallRecord,
-};
+use openwave_core::{ChatId, ImportConnectedFileArgs, ImportConnectedFileResult, ToolCallRecord};
 use openwave_host_broker::{
     OperationEnvelope, OperationRequest, OperationResult, PathRequest, RelativePath, RootId,
     PROTOCOL_VERSION,
@@ -102,9 +100,7 @@ pub(super) async fn execute(
             title: request.title.clone(),
             media_type,
             bytes: byte_len,
-            // Ingest is asynchronous by design, so this is honest about the
-            // source not being usable yet rather than implying it is.
-            readiness: SourceReadiness::of(accepted.processing_status, false),
+            readiness: accepted.readiness,
         }),
         Err(()) => unavailable("That file could not be added to this conversation."),
     }
@@ -245,7 +241,7 @@ fn unavailable(message: &str) -> StoredResolution {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openwave_core::{CallId, ToolCallExecution, ToolCallStatus, TurnId};
+    use openwave_core::{CallId, SourceReadiness, ToolCallExecution, ToolCallStatus, TurnId};
 
     fn import_call(path: &str, root_id: uuid::Uuid) -> ToolCallRecord {
         ToolCallRecord {
@@ -258,6 +254,7 @@ mod tests {
             execution: ToolCallExecution::Client,
             status: ToolCallStatus::Pending,
             result: None,
+            result_preview: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -332,14 +329,14 @@ mod tests {
             title: "q3.pdf".into(),
             media_type: "application/pdf".into(),
             bytes: 1_024,
-            readiness: SourceReadiness::Processing,
+            readiness: SourceReadiness::StoredNoText,
         });
         let StoredResolution::Completed { result, .. } = imported else {
             panic!("a successful import completes");
         };
-        // The model learns the source exists and that it is not ready yet; it
-        // does not learn the contents or where the file lives.
-        assert!(result.contains("\"readiness\":\"processing\""));
+        // The model learns the source exists but has no readable text; it does
+        // not learn the contents or where the file lives.
+        assert!(result.contains("\"readiness\":\"stored_no_text\""));
         assert!(!result.contains("root_id"));
         assert!(!result.contains("path"));
     }

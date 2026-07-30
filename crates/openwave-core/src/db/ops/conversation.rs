@@ -9,21 +9,18 @@ use sea_orm::{
 
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
-use crate::id::{ChatId, DocumentId, HostRootId, MessageId, ProjectId, TurnId};
+use crate::id::{ChatId, HostRootId, MessageId, ProjectId, TurnId};
 use crate::model::{
     validate_chat_root_projection, validate_chat_root_projection_against_project, Chat,
-    ChatRootAttachment, DocumentGeneration, Message, PermissionMode, ReasoningEffort, Role,
-    RootAttachmentOrigin, ToolCallRecord, TurnRunStatus, MAX_ROOT_ATTACHMENTS,
+    ChatRootAttachment, Message, PermissionMode, ReasoningEffort, Role, RootAttachmentOrigin,
+    ToolCallRecord, TurnRunStatus, MAX_ROOT_ATTACHMENTS,
 };
 use crate::storage::{
     ChatRefusalSnapshot, ChatToolActivitySnapshot, ChatToolActivityStatus, ChatTranscriptSnapshot,
     DeleteChatOutcome,
 };
 
-use super::super::{
-    ensure_live_document_generation_on, entities, project_from_models, store_err,
-    try_advance_document_generation_on, DbStore,
-};
+use super::super::{entities, project_from_models, store_err, DbStore};
 use super::blob as blob_ops;
 use super::message_attachment as message_attachment_ops;
 use super::turn::canonical_db_timestamp;
@@ -426,45 +423,25 @@ pub(in crate::db) async fn delete_chat(
         return Ok(DeleteChatOutcome::ActiveWork);
     }
 
-    // Sources are product state owned by the conversation. Retire them through
-    // the same generation/tombstone protocol as an explicit document delete so
-    // the derived index and content-addressed blobs are cleaned asynchronously
-    // after this atomic operational transaction commits.
+    // Sources are product state owned by the conversation. Their
+    // content-addressed blobs are cleaned asynchronously after this atomic
+    // operational transaction commits.
     let documents = entities::document::Entity::find()
         .filter(entities::document::Column::ChatId.eq(chat_id.0))
         .all(&transaction)
         .await
         .map_err(store_err)?;
     for document in documents {
-        ensure_live_document_generation_on(&transaction, &document).await?;
-        let document_id = DocumentId(document.id);
-        let Some(advanced) =
-            try_advance_document_generation_on(&transaction, document_id, true).await?
-        else {
-            return Err(AgentError::Store(format!(
-                "document {document_id} changed while deleting chat {chat_id}"
-            )));
-        };
-        let live_generation = DocumentGeneration {
-            content_revision: document.content_revision,
-            revision_token: document.revision_token,
-        };
-        if advanced.previous != Some(live_generation) {
-            return Err(AgentError::Store(format!(
-                "document {document_id} does not match its retained generation clock"
-            )));
-        }
         let deleted = entities::document::Entity::delete_many()
             .filter(entities::document::Column::Id.eq(document.id))
             .filter(entities::document::Column::ChatId.eq(chat_id.0))
-            .filter(entities::document::Column::ContentRevision.eq(document.content_revision))
-            .filter(entities::document::Column::RevisionToken.eq(document.revision_token))
             .exec(&transaction)
             .await
             .map_err(store_err)?;
         if deleted.rows_affected != 1 {
             return Err(AgentError::Store(format!(
-                "document {document_id} changed while deleting chat {chat_id}"
+                "document {} changed while deleting chat {chat_id}",
+                document.id
             )));
         }
         if let Some(blob_id) = document.source_blob_id {
@@ -687,6 +664,8 @@ pub(in crate::db) async fn get_chat_transcript(
     let messages = list_messages_on(&transaction, chat_id).await?;
     let message_attachments =
         super::message_attachment::list_for_chat_on(&transaction, chat_id).await?;
+    let message_document_attachments =
+        super::message_document_attachment::list_for_chat_on(&transaction, chat_id).await?;
     let refusals = list_terminal_refusals_on(&transaction, chat_id).await?;
     let citations = super::citation::list_snapshots_on(&transaction, chat_id).await?;
     let tool_activity = list_terminal_tool_activity_on(&transaction, chat_id).await?;
@@ -695,6 +674,7 @@ pub(in crate::db) async fn get_chat_transcript(
     Ok(Some(ChatTranscriptSnapshot {
         messages,
         message_attachments,
+        message_document_attachments,
         refusals,
         citations,
         tool_activity,
@@ -1286,6 +1266,7 @@ mod tests {
             execution: crate::model::ToolCallExecution::Server,
             status: crate::model::ToolCallStatus::Completed,
             result: Some("model-facing text".into()),
+            result_preview: None,
             error_code: error_code.map(Into::into),
             error_detail: None,
             client_executor_id: None,

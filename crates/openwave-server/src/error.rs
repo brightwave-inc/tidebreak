@@ -97,7 +97,7 @@ impl ServerError {
     }
 
     /// A `500 Internal Server Error` for an unexpected server-side failure that
-    /// isn't an [`AgentError`] (e.g. a retrieval backend fault). Carries a stable
+    /// isn't an [`AgentError`] (for example, another subsystem fault). Carries a stable
     /// `kind` so a client sees the same `{ kind, message }` shape as any error.
     pub fn internal(message: impl Into<String>) -> Self {
         Self {

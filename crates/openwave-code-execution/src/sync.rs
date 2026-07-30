@@ -418,4 +418,53 @@ mod tests {
         assert!(pulled.notes[0].contains("not a valid workspace path"));
         assert!(pulled.notes[1].contains("file limit"));
     }
+
+    #[tokio::test]
+    async fn preview_files_are_mirrored_and_keep_the_per_file_cap() {
+        let host = tempfile::tempdir().unwrap();
+        let fake = FakeWorkspace::default();
+        fake.insert("preview/overview.png", b"pixels");
+        fake.planted.lock().unwrap().push(WorkspaceFileEntry {
+            path: "preview/too-large.png".into(),
+            directory: false,
+            size_bytes: Some(MAX_WORKSPACE_FILE_BYTES as u64 + 1),
+        });
+
+        let pulled = pull_into_host_dir(&fake, &workspace_id(), host.path())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(host.path().join("preview/overview.png")).unwrap(),
+            b"pixels"
+        );
+        assert_eq!(pulled.transferred, 1);
+        assert!(pulled
+            .notes
+            .iter()
+            .any(|note| { note.contains("preview/too-large.png") && note.contains("file limit") }));
+    }
+
+    #[tokio::test]
+    async fn bundled_document_helpers_are_not_on_the_sync_skip_list() {
+        let host = tempfile::tempdir().unwrap();
+        let helper = host
+            .path()
+            .join(crate::DOCUMENT_SCRIPTS_DIR)
+            .join("render_pdf.py");
+        std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
+        std::fs::write(&helper, b"print('render')").unwrap();
+        let fake = FakeWorkspace::default();
+
+        let pushed = push_host_dir(&fake, &workspace_id(), host.path())
+            .await
+            .unwrap();
+
+        assert_eq!(pushed.transferred, 1);
+        assert!(pushed.notes.is_empty());
+        assert_eq!(
+            fake.get(".openwave/exec-scripts/render_pdf.py").unwrap(),
+            b"print('render')"
+        );
+    }
 }

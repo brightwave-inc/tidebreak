@@ -1,4 +1,12 @@
 import { create } from "zustand";
+import type { ImageAttachment } from "./ImageAttachments";
+import type { ImportedDocument } from "./documents";
+
+export type PendingFirstMessage = {
+  text: string;
+  images: ImageAttachment[];
+  files: ImportedDocument[];
+};
 
 /**
  * A message written on the home screen, waiting for the conversation it will
@@ -12,22 +20,22 @@ import { create } from "zustand";
 export type FirstMessageStore = {
   /** The chat the pending text belongs to; null when there is nothing waiting. */
   chatId: string | null;
-  text: string;
-  hold: (chatId: string, text: string) => void;
+  pending: PendingFirstMessage | null;
+  hold: (chatId: string, pending: PendingFirstMessage) => void;
   /** Read and clear in one step, so a remount cannot send it twice. */
-  take: (chatId: string) => string | null;
+  take: (chatId: string) => PendingFirstMessage | null;
 };
 
 export function createFirstMessageStore() {
   return create<FirstMessageStore>()((set, get) => ({
     chatId: null,
-    text: "",
-    hold: (chatId, text) => set({ chatId, text }),
+    pending: null,
+    hold: (chatId, pending) => set({ chatId, pending }),
     take: (chatId) => {
-      const { chatId: heldFor, text } = get();
-      if (heldFor !== chatId || !text) return null;
-      set({ chatId: null, text: "" });
-      return text;
+      const { chatId: heldFor, pending } = get();
+      if (heldFor !== chatId || !pending?.text) return null;
+      set({ chatId: null, pending: null });
+      return pending;
     },
   }));
 }

@@ -16,12 +16,11 @@ The current foreground agent surface contains nineteen tools:
 | `write_file` | Atomically write private-scratch text | Server, workspace |
 | `create_deliverable` | Create or update a bounded user-visible text output | Server, workspace |
 | `exec` | Run a bounded command through the configured execution provider | Server, sensitive native sandbox |
-| `search` | Search sources indexed for this exact conversation | Server, read-only |
 | `list_sources` | List bounded metadata for sources in this exact conversation | Server, read-only |
-| `read_source` | Read a bounded canonical-text range from one source and create citable evidence | Server, read-only |
+| `read_source` | Read a bounded canonical-text range from one source | Server, read-only |
 | `read_tool_result` | Read past the point a large tool result was cut short for the turn | Server, read-only |
 | `web_search` | Search the public web through the configured provider (Exa, Tavily, Brave, or a self-hosted SearXNG) | Server, sensitive approval |
-| `web_extract` | Fetch one exact public page URL, return its readable content through the configured provider or the built-in engine, and keep it as a citable source of the conversation | Server, sensitive approval |
+| `web_extract` | Fetch one exact public page URL, return its readable content through the configured provider or the built-in engine, and keep it as a source of the conversation | Server, sensitive approval |
 | `request_folder_access` | Ask the trusted desktop host to connect another folder | Client continuation |
 | `list_connected_folders` | List roots already attached to this chat | Native client continuation |
 | `list_folder` | List one directory below an attached root | Native client continuation |
@@ -89,16 +88,17 @@ Sandbox agents never receive the definition. See
 [Durable user questions](user-questions.md).
 
 `list_sources` discovers the conversation's exact corpus without loading
-content. `read_source` reads one bounded Unicode-character range as soon as
-parser output exists and returns an opaque reference that produces a durable
-citation card.
+content. `read_source` reads one bounded Unicode-character range; the text is
+available the moment a source is stored, because ingestion decodes
+synchronously. The model cites what it reads inline, naming the document id
+and a coarse locator — a page or page range, a line range, or a workbook
+sheet — and no reference resolution happens server-side.
 
 `web_extract` joins that tier from the other direction: a page it fetches is
-stored as a source of the conversation, so it too returns opaque references and
-produces the same citation cards, and `read_source` can reach the page
-afterwards. Those two are the only server calls permitted to retain
-retrieval evidence at all, which is what keeps a citation traceable to a call
-that was allowed to make one. See [Web search](web-search.md#fetched-pages-as-sources).
+stored as an ordinary source of the conversation, so the model can cite the
+stored document the same way or put the page URL directly in prose, and
+`read_source` can reach the page afterwards. See
+[Web search](web-search.md#fetched-pages-as-sources).
 
 ## Core module layout
 
@@ -118,9 +118,9 @@ tools/
 └── tests.rs             shared confinement and behavior coverage
 ```
 
-Provider-backed tools do not belong in core. Retrieval, web search, connectors,
-and sandbox execution should each supply tools from their owning crate behind
-the common `Tool` interface.
+Provider-backed tools do not belong in core. Web search, connectors, and sandbox
+execution supply tools from their owning crates behind the common `Tool`
+interface; server-owned source tools use it too.
 
 ## Code execution
 
@@ -194,7 +194,7 @@ advertise every installed integration to every model call.
 
 The foreground coordinator needs tools for:
 
-- conversation-scoped source search plus source list/read;
+- conversation-scoped source list/read;
 - conversation-private deliverable creation for explicit native export;
 - web search and page retrieval;
 - connected-root list/read/import and explicit export;
@@ -290,7 +290,7 @@ WebSearchService
 WebSearchTool
 ├── model-facing schema
 ├── credential-free request
-├── bounded output and citations
+├── bounded normalized output
 └── optional durable web-document ingestion
 ```
 
@@ -310,7 +310,7 @@ only then resolves current host policy and credentials. `web_extract` sits
 beside it on the same terms: Sensitive, with the exact page URL on the
 approval card, and routed deterministically to the configured provider when it
 implements the extract contract or to the built-in native extraction engine
-otherwise. Each page it returns is also kept as a citable conversation source. Exa and Tavily both implement it, so a configured host extracts
+otherwise. Each page it returns is also kept as a conversation source the model can cite. Exa and Tavily both implement it, so a configured host extracts
 through the vendor and falls back to native — except on a rejected key, which
 surfaces for repair rather than degrading silently. Brave and SearXNG are
 search-only, so a host on either extracts natively. See
@@ -343,9 +343,9 @@ Sensitive server-tool approvals are durable. OpenWave commits the approval
 request and its journal event atomically, freezes a renderer-safe approval kind,
 and uses exact idempotent decisions. A reclaimed turn resumes persisted pending
 calls before requesting another model step, so restart recovery cannot silently
-skip an approval or execute a call under a newly relaxed tool policy. Search
-consent tells the user that the query and potentially matching source excerpts
-may leave OpenWave for the configured AI service.
+skip an approval or execute a call under a newly relaxed tool policy. Web
+search consent tells the user that the query may leave OpenWave for the
+configured search provider.
 
 ## Reliability rules
 

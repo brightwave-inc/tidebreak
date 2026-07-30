@@ -71,6 +71,7 @@ export function presentChatTranscript(
           role: "user",
           text: entry.text,
           images: entry.images,
+          files: entry.files,
           createdAt: entry.createdAt,
         } satisfies ChatMessage,
       ];

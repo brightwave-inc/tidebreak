@@ -10,9 +10,11 @@ import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import type { ToolTone } from "./ToolStatusIcon";
+import type { ApiClient } from "./api";
 import { ScrollableContainer } from "./ScrollableContainer";
 import { ToolCardShell } from "./ToolCardShell";
 import { toolPreviewPresentation } from "./ToolPreview";
+import { ChatImage } from "./TranscriptImageAttachments";
 
 export type ToolCallStatus =
   | "running"
@@ -34,6 +36,8 @@ type ToolCommandCardProps = {
   preview: Extract<ToolActionPreview, { tool: "exec" }>;
   /** What the command produced, once it has produced anything. */
   result: ExecResultPreview | null;
+  imageClient?: Pick<ApiClient, "getChatImageAttachment">;
+  chatId?: string;
 };
 
 type ToolPresentation = {
@@ -222,8 +226,8 @@ const FALLBACK_TOOL: ToolPresentation = {
  * The command is the title, in monospace: "Ran a command" is the same sentence
  * whether the agent listed a directory or rebuilt the workspace, so the only
  * useful headline is the command itself. It opens while the command is still
- * running — that is when someone is actually watching — and collapses back to
- * one line once there is an outcome to read in the badge.
+ * running and when a completed command has visual previews to review; otherwise
+ * it collapses back to one line once the badge carries the outcome.
  *
  * Only tools that project a preview get a card. Everything else lives in the
  * activity rail, where a line of text is the whole story the renderer has.
@@ -233,14 +237,17 @@ export function ToolCommandCard({
   status,
   preview,
   result,
+  imageClient,
+  chatId,
 }: ToolCommandCardProps) {
   const presentation = toolCallPresentation(name, status);
   const command = toolPreviewPresentation(preview, result);
   const running = presentation.tone === "running";
   const output = commandOutput(result);
+  const images = result?.images ?? [];
   // A command that finished silently has nothing to tab between, and a
   // "Command / Output → no output" pair reads as confusing noise.
-  const tabbed = running || output !== null;
+  const tabbed = running || output !== null || images.length > 0;
 
   return (
     <ToolCardShell
@@ -249,7 +256,7 @@ export function ToolCommandCard({
       title={command.headline}
       titleClassName="font-mono"
       badge={<ToolStatusBadge presentation={presentation} result={result} />}
-      defaultExpanded={running}
+      defaultExpanded={running || images.length > 0}
     >
       {tabbed ? (
         <Tabs defaultValue="output">
@@ -273,10 +280,31 @@ export function ToolCommandCard({
                   <Spinner className="size-3.5" aria-hidden="true" />
                   Waiting for output…
                 </p>
-              ) : (
+              ) : null}
+              {output !== null && (
                 <ScrollableContainer className="bg-muted text-muted-foreground rounded-md p-2 text-xs whitespace-pre-wrap">
                   {output}
                 </ScrollableContainer>
+              )}
+              {images.length > 0 && imageClient && chatId && (
+                <div
+                  className="message-image-grid mt-2"
+                  aria-label="Command preview images"
+                >
+                  {images.map((image, index) => (
+                    <ChatImage
+                      key={image.attachmentId}
+                      client={imageClient}
+                      chatId={chatId}
+                      attachmentId={image.attachmentId}
+                      mediaType={image.mediaType}
+                      width={image.width}
+                      height={image.height}
+                      label={`Command preview ${index + 1}: ${image.width} by ${image.height} pixels`}
+                      unavailableLabel="Command preview unavailable"
+                    />
+                  ))}
+                </div>
               )}
             </TabsContent>
           </div>

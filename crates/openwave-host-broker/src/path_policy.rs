@@ -84,6 +84,23 @@ impl ValidatedRoot {
     pub(crate) const fn identity(&self) -> RootIdentity {
         self.identity
     }
+
+    /// Re-open the registered canonical path without following links and
+    /// require it to still name the descriptor-pinned directory.
+    ///
+    /// Most broker operations use the pinned descriptor directly. Native exec
+    /// profiles require a path string, so this closes the rename-and-replace
+    /// gap before that path leaves the broker.
+    pub(crate) fn canonical_path_if_current(&self) -> io::Result<&Path> {
+        let current = open_canonical_dir_nofollow(&self._canonical_path)?;
+        if root_identity(&current)? != self.identity {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "registered root identity changed",
+            ));
+        }
+        Ok(&self._canonical_path)
+    }
 }
 
 /// Which canonical host folders the user may register at all.

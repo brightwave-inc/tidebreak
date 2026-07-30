@@ -113,6 +113,27 @@ fn home_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .map_err(|e| format!("resolve home dir: {e}"))
 }
 
+fn exec_scripts_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    const REQUIRED_HELPERS: [&str; 5] = [
+        "_openwave_preview.py",
+        "render_pdf.py",
+        "extract_pdf_figures.py",
+        "render_office.py",
+        "analyze_xlsx.py",
+    ];
+    let directory = app
+        .path()
+        .resource_dir()
+        .map_err(|error| format!("app resource dir: {error}"))?
+        .join("exec-scripts");
+    for name in REQUIRED_HELPERS {
+        if !directory.join(name).is_file() {
+            return Err(format!("bundled exec document helper is missing: {name}"));
+        }
+    }
+    Ok(directory)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg_attr(not(debug_assertions), allow(unused_mut))]
@@ -164,14 +185,8 @@ pub fn run() {
             server_info,
             request_user_attention,
             attachments::attach_chat_files,
+            attachments::attach_dropped_chat_files,
             image_attachments::publish_chat_image,
-            documents::import_library_document,
-            documents::import_library_documents,
-            documents::import_dropped_library_documents,
-            documents::list_library_documents,
-            documents::search_library_documents,
-            documents::delete_library_document,
-            documents::retry_library_document,
             documents::export_library_document,
             deliverables::list_deliverables,
             deliverables::read_deliverable,
@@ -245,6 +260,7 @@ async fn boot_server(
 ) -> Result<(), String> {
     let client_executor_id = app.state::<host_access::HostAccess>().client_executor_id();
     let mut config = Config::desktop(data_dir);
+    config.exec_scripts_dir = Some(exec_scripts_dir(&app)?);
     // The effective identifier — including the debug-build override — keys
     // the macOS managed-preferences (MDM) domain the server reads policy from.
     config.bundle_id = Some(app.config().identifier.clone());
@@ -256,9 +272,16 @@ async fn boot_server(
     {
         config.keychain_service = Some("openwave.dev".into());
     }
-    let server = openwave_server::bind_configured_with_desktop_executor(config, client_executor_id)
-        .await
-        .map_err(|e| e.to_string())?;
+    let folder_grants = Arc::new(host_access::DesktopExecFolderGrantResolver::new(
+        app.clone(),
+    ));
+    let server = openwave_server::bind_configured_with_desktop_executor_and_folder_grants(
+        config,
+        client_executor_id,
+        folder_grants,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     app.state::<host_access::HostAccess>()
         .initialize_store(server.store())?;
     // Unblock any pairing task parked on a deep link that arrived pre-boot.

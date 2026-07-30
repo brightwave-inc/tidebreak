@@ -14,11 +14,8 @@
 # issue #873); pinning-by-digest and host verification live on the host side in
 # #874, not in the image itself.
 #
-# Image build/verification for this slice is intentionally MANUAL, not a CI lane:
-# building it compiles the crate's slice of the workspace inside Docker, which is
-# far heavier than the cheap gates this foundational PR runs, and the container
-# runtime is a detected capability rather than a hard dependency. The command
-# above is the manual check.
+# The scoped post-merge sandbox-resident lane builds and drives this image on a
+# real container boundary.
 
 # ---- build stage -----------------------------------------------------------
 # Pinned to the workspace toolchain channel (stable) via the bookworm image; the
@@ -37,46 +34,38 @@ COPY . .
 # tools live in this crate and are the point of the image.)
 RUN cargo build --release --locked -p openwave-sandbox-agent
 
-# The sandbox-resident `exec` tool runs model-authored commands through /bin/sh
-# inside the container — in-container execution IS the containment. distroless/cc
-# ships no shell, so stage a static busybox (a shell plus the common coreutils
-# applets) and the workspace root the tools are scoped to, then copy just those
-# into the runtime. busybox is a deliberate, bounded surface for running the
-# model's commands, not a general package manager.
-#
-# The applet symlinks must resolve in the RUNTIME image, where this staging tree
-# lands at `/`. `busybox --install -s` would bake in the *build-time* absolute
-# path (`/rootfs/bin/busybox`), which does not exist after the copy — every
-# symlink would dangle and `/bin/sh -c` would fail for every exec. So create each
-# applet as a RELATIVE symlink to `busybox`: at runtime `/bin/sh -> busybox`
-# resolves to `/bin/busybox`, which is there. Correct by construction regardless
-# of where the staging tree was assembled.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends busybox-static \
-    && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /rootfs/bin /rootfs/workspace \
-    && cp /bin/busybox /rootfs/bin/busybox \
-    && for applet in $(/rootfs/bin/busybox --list); do \
-         [ "$applet" = busybox ] || ln -s busybox /rootfs/bin/"$applet"; \
-       done \
-    && test "$(readlink /rootfs/bin/sh)" = busybox
-
 # ---- runtime stage ---------------------------------------------------------
-# distroless/cc provides glibc and libgcc for the dynamically-linked binary; the
-# binary uses rustls (no OpenSSL) and opens no keychain, so cc is sufficient. It
-# ships no package manager — the only added surface is the staged busybox the
-# exec tool shells out to, in a container that runs untrusted model output.
-FROM gcr.io/distroless/cc-debian12 AS runtime
+# The document helpers need Python plus native renderers. The container remains
+# the isolation boundary; packages are installed at image-build time and no
+# helper performs a network request at runtime.
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       ca-certificates \
+       libreoffice-impress \
+       libreoffice-writer \
+       poppler-utils \
+       python3 \
+       python3-openpyxl \
+       python3-pil \
+       python3-pip \
+    && python3 -m pip install --break-system-packages --no-cache-dir pypdfium2==4.30.0 \
+    && rm -rf /var/lib/apt/lists/* /root/.cache \
+    && mkdir -p /workspace /opt/openwave/exec-scripts
 
 COPY --from=build /src/target/release/openwave-sandbox-agent /usr/local/bin/openwave-sandbox-agent
-# busybox (/bin/sh + coreutils applets) and the /workspace tool root.
-COPY --from=build /rootfs /
+COPY scripts/exec-documents/ /opt/openwave/exec-scripts/
+
+RUN python3 /opt/openwave/exec-scripts/render_pdf.py --help >/dev/null \
+    && python3 /opt/openwave/exec-scripts/analyze_xlsx.py --help >/dev/null
 
 # The listener address the supervisor binds; the host dials this port.
 ENV OPENWAVE_SANDBOX_LISTEN=0.0.0.0:8080
 # The in-container workspace root the exec and filesystem tools are scoped to.
 ENV OPENWAVE_SANDBOX_WORKSPACE=/workspace
+# The helper library path shown to the model-facing exec tool.
+ENV OPENWAVE_EXEC_SCRIPTS=/opt/openwave/exec-scripts
 EXPOSE 8080
 
-# distroless has no shell for a RUN, so use the exec form for the entrypoint.
 ENTRYPOINT ["/usr/local/bin/openwave-sandbox-agent"]

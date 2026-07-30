@@ -215,18 +215,7 @@ function ExtractedText({
   }, [cited]);
 
   if (info.content.length === 0) {
-    switch (info.processing_status) {
-      case "failed":
-        return <DocumentError>Failed to process document</DocumentError>;
-      case "ready":
-        return (
-          <DocumentError>
-            No text could be read out of this document
-          </DocumentError>
-        );
-      default:
-        return <DocumentError>This document is still being prepared</DocumentError>;
-    }
+    return <DocumentError>No text could be read out of this document</DocumentError>;
   }
 
   return (

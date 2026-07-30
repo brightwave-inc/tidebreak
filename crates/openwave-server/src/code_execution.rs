@@ -6,6 +6,7 @@
 //! Local and managed adapters implement the same provider contract without
 //! changing the tool schema or persisted tool-call arguments.
 
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,11 +15,12 @@ use async_trait::async_trait;
 use openwave_code_execution::{
     sync, CodeExecutionError, CodeExecutionProvider, CodeExecutionProviderKind,
     CodeExecutionRequest, CodeExecutionResponse, DaytonaCredential, DaytonaExecutionProvider,
-    E2BCredential, E2BExecutionProvider, ExecutionWorkspaceId, LocalExecutionProvider,
-    RemoteSessionPool, WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing,
-    DAYTONA_CREDENTIAL_KEY, E2B_CREDENTIAL_KEY,
+    E2BCredential, E2BExecutionProvider, ExecFolderAccess, ExecFolderGrant, ExecutionWorkspaceId,
+    LocalExecutionProvider, PreviewScan, RemoteSessionPool, WorkspaceFilePath, WorkspaceLifecycle,
+    WorkspaceListing, DAYTONA_CREDENTIAL_KEY, DOCUMENT_SCRIPTS_DIR, DOCUMENT_SCRIPT_FILES,
+    E2B_CREDENTIAL_KEY,
 };
-use openwave_core::{Result, SecretProvider, Store};
+use openwave_core::{Chat, ChatId, HostRootId, ProjectId, Result, SecretProvider, Store};
 use openwave_egress::{
     CidrBlock, DomainPattern, EgressAllowlist, EgressEnforcement, EgressError, EgressPolicy,
 };
@@ -30,6 +32,34 @@ const CODE_EXECUTION_SETTING: &str = "code_execution";
 pub const DEFAULT_TIMEOUT_MS: u64 = 20_000;
 pub const MIN_TIMEOUT_MS: u64 = 1_000;
 pub const MAX_TIMEOUT_MS: u64 = 120_000;
+
+/// Exact product attachment projection sent to the trusted desktop host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecFolderGrantQuery {
+    pub chat_id: ChatId,
+    pub project_id: Option<ProjectId>,
+    pub root_ids: Vec<HostRootId>,
+}
+
+/// One live broker-authorized folder returned to the server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedExecFolderGrant {
+    pub root_id: HostRootId,
+    pub path: PathBuf,
+    pub writable: bool,
+}
+
+/// Native-only bridge from product root attachments to live broker authority.
+///
+/// Implementations must intersect the supplied product IDs with current
+/// broker attachment and capability state. The model never calls this surface.
+#[async_trait]
+pub trait ExecFolderGrantResolver: Send + Sync {
+    async fn resolve(
+        &self,
+        query: ExecFolderGrantQuery,
+    ) -> std::result::Result<Vec<ResolvedExecFolderGrant>, String>;
+}
 
 /// The fixed managed providers this host can hold a credential for. Local needs
 /// none. Keeping the allow-list here means a local API route can never turn an
@@ -547,6 +577,8 @@ pub struct ConfiguredCodeExecutionProvider {
     store: Arc<dyn Store>,
     secrets: Arc<dyn SecretProvider>,
     scratch_root: PathBuf,
+    document_scripts_source: Option<PathBuf>,
+    folder_grant_resolver: Option<Arc<dyn ExecFolderGrantResolver>>,
     remote_sessions: RemoteSessionPool,
 }
 
@@ -561,8 +593,100 @@ impl ConfiguredCodeExecutionProvider {
             store,
             secrets,
             scratch_root: scratch_root.into(),
+            document_scripts_source: None,
+            folder_grant_resolver: None,
             remote_sessions: RemoteSessionPool::default(),
         }
+    }
+
+    /// Install a trusted bundled helper directory into every exec workspace.
+    #[must_use]
+    pub fn with_document_scripts(mut self, source: Option<PathBuf>) -> Self {
+        self.document_scripts_source = source;
+        self
+    }
+
+    /// Install the native bridge that resolves product root IDs through the
+    /// live host broker. Non-desktop embeddings leave this absent.
+    #[must_use]
+    pub fn with_folder_grant_resolver(
+        mut self,
+        resolver: Option<Arc<dyn ExecFolderGrantResolver>>,
+    ) -> Self {
+        self.folder_grant_resolver = resolver;
+        self
+    }
+
+    /// Resolve the local-exec roots visible in one turn's operating prompt.
+    ///
+    /// Managed providers cannot mount host folders, so they deliberately
+    /// receive an empty list. The execution boundary resolves again on every
+    /// invocation so a revocation after the prompt snapshot still fails closed.
+    pub(crate) async fn folder_grants_for_chat(
+        &self,
+        chat: &Chat,
+    ) -> std::result::Result<Vec<ResolvedExecFolderGrant>, CodeExecutionError> {
+        let config = read_config(&*self.store).await.map_err(|_| {
+            CodeExecutionError::Unavailable("configuration storage is unavailable".into())
+        })?;
+        if config.provider != Some(CodeExecutionProviderKind::Local) || !cfg!(target_os = "macos") {
+            return Ok(Vec::new());
+        }
+        self.resolve_chat_folder_grants(chat).await
+    }
+
+    async fn resolve_chat_folder_grants(
+        &self,
+        chat: &Chat,
+    ) -> std::result::Result<Vec<ResolvedExecFolderGrant>, CodeExecutionError> {
+        let Some(resolver) = self.folder_grant_resolver.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let root_ids = chat
+            .root_attachments
+            .iter()
+            .map(|attachment| attachment.root_id)
+            .collect::<Vec<_>>();
+        if root_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let allowed = root_ids.iter().copied().collect::<HashSet<_>>();
+        let resolved = resolver
+            .resolve(ExecFolderGrantQuery {
+                chat_id: chat.id,
+                project_id: chat.project_id,
+                root_ids: root_ids.clone(),
+            })
+            .await
+            .map_err(CodeExecutionError::Sandbox)?;
+        if resolved.len() > root_ids.len() {
+            return Err(CodeExecutionError::Sandbox(
+                "host returned too many execution folder grants".into(),
+            ));
+        }
+        let mut by_id = HashMap::new();
+        for grant in resolved {
+            if !allowed.contains(&grant.root_id) || by_id.insert(grant.root_id, grant).is_some() {
+                return Err(CodeExecutionError::Sandbox(
+                    "host returned an invalid execution folder grant".into(),
+                ));
+            }
+        }
+        let mut ordered = Vec::new();
+        for root_id in root_ids {
+            if let Some(grant) = by_id.remove(&root_id) {
+                ExecFolderGrant::new(
+                    &grant.path,
+                    if grant.writable {
+                        ExecFolderAccess::ReadWrite
+                    } else {
+                        ExecFolderAccess::ReadOnly
+                    },
+                )?;
+                ordered.push(grant);
+            }
+        }
+        Ok(ordered)
     }
 
     /// Resolve the currently selected adapter at the last boundary before use.
@@ -579,10 +703,13 @@ impl ConfiguredCodeExecutionProvider {
             return Err(CodeExecutionError::NotConfigured);
         };
         let resolved: Box<dyn CodeExecutionProvider> = match provider {
-            CodeExecutionProviderKind::Local => Box::new(LocalExecutionProvider::new(
-                &self.scratch_root,
-                Duration::from_millis(config.timeout_ms),
-            )?),
+            CodeExecutionProviderKind::Local => Box::new(
+                LocalExecutionProvider::new(
+                    &self.scratch_root,
+                    Duration::from_millis(config.timeout_ms),
+                )?
+                .with_document_scripts(self.document_scripts_source.clone()),
+            ),
             CodeExecutionProviderKind::E2b => {
                 let credential = E2BCredential::load(&*self.secrets)
                     .await?
@@ -639,9 +766,60 @@ impl ConfiguredCodeExecutionProvider {
 impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
     async fn execute(
         &self,
-        request: CodeExecutionRequest,
+        mut request: CodeExecutionRequest,
     ) -> std::result::Result<CodeExecutionResponse, CodeExecutionError> {
+        if !request.folder_grants.is_empty() {
+            return Err(CodeExecutionError::InvalidRequest(
+                "execution folder grants are host-resolved state".into(),
+            ));
+        }
         let (kind, provider) = self.resolve().await?;
+        if kind == CodeExecutionProviderKind::Local && cfg!(target_os = "macos") {
+            let chat_id = request
+                .workspace_id
+                .as_str()
+                .parse::<ChatId>()
+                .map_err(|_| {
+                    CodeExecutionError::InvalidRequest(
+                        "execution workspace does not identify a conversation".into(),
+                    )
+                })?;
+            let chat = self
+                .store
+                .get_chat(chat_id)
+                .await
+                .map_err(|_| {
+                    CodeExecutionError::Unavailable("conversation storage is unavailable".into())
+                })?
+                .ok_or_else(|| {
+                    CodeExecutionError::InvalidRequest(
+                        "execution conversation does not exist".into(),
+                    )
+                })?;
+            let grants = self
+                .resolve_chat_folder_grants(&chat)
+                .await?
+                .into_iter()
+                .map(|grant| {
+                    ExecFolderGrant::new(
+                        grant.path,
+                        if grant.writable {
+                            ExecFolderAccess::ReadWrite
+                        } else {
+                            ExecFolderAccess::ReadOnly
+                        },
+                    )
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            request = request.with_folder_grants(grants)?;
+        }
+        let host_dir = self.scratch_root.join(request.workspace_id.as_str());
+        prepare_execution_directories(
+            &host_dir,
+            kind != CodeExecutionProviderKind::Local,
+            self.document_scripts_source.as_deref(),
+        )
+        .await?;
         // A remote sandbox has its own filesystem, but the model is shown one
         // path vocabulary across the file tools and exec. Mirror the chat's
         // private scratch into the workspace before the command and back out
@@ -655,7 +833,6 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
         let Some(lifecycle) = lifecycle else {
             return provider.execute(request).await;
         };
-        let host_dir = self.scratch_root.join(request.workspace_id.as_str());
         // A failed push fails the execution: running against files the model
         // believes are present would answer with misleading not-found errors.
         let mut notes = sync::push_host_dir(lifecycle, &request.workspace_id, &host_dir)
@@ -674,10 +851,96 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
         Ok(response)
     }
 
+    async fn collect_preview_images(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+    ) -> std::result::Result<PreviewScan, CodeExecutionError> {
+        let preview_dir = self.scratch_root.join(workspace.as_str()).join("preview");
+        tokio::task::spawn_blocking(move || {
+            openwave_code_execution::scan_preview_directory(&preview_dir)
+        })
+        .await
+        .map_err(|_| CodeExecutionError::Sandbox("preview scan task failed".into()))
+    }
+
     // `workspace_lifecycle` stays `None` here on purpose: the capability of
     // this late-binding wrapper depends on the configuration read at call
     // time, which the synchronous trait flag cannot express. Host callers use
     // [`ConfiguredCodeExecutionProvider::workspace`] instead.
+}
+
+async fn prepare_execution_directories(
+    host_dir: &std::path::Path,
+    mirrored: bool,
+    document_scripts_source: Option<&std::path::Path>,
+) -> std::result::Result<(), CodeExecutionError> {
+    for name in ["output", "preview", "documents"] {
+        let directory = host_dir.join(name);
+        tokio::fs::create_dir_all(&directory).await.map_err(|_| {
+            CodeExecutionError::Sandbox(format!(
+                "private workspace directory '{name}/' is unavailable"
+            ))
+        })?;
+        if mirrored {
+            // The sync protocol mirrors files rather than empty directories.
+            // A hidden zero-byte marker makes the conventional directories
+            // exist in managed workspaces without becoming a user artifact.
+            tokio::fs::write(directory.join(".openwave-directory"), [])
+                .await
+                .map_err(|_| {
+                    CodeExecutionError::Sandbox(format!(
+                        "private workspace directory '{name}/' is unavailable"
+                    ))
+                })?;
+        }
+    }
+    if let Some(source) = document_scripts_source {
+        install_document_scripts(source, host_dir).await?;
+    }
+    Ok(())
+}
+
+async fn install_document_scripts(
+    source: &std::path::Path,
+    host_dir: &std::path::Path,
+) -> std::result::Result<(), CodeExecutionError> {
+    let destination = host_dir.join(DOCUMENT_SCRIPTS_DIR);
+    tokio::fs::create_dir_all(&destination).await.map_err(|_| {
+        CodeExecutionError::Sandbox("document helper directory is unavailable".into())
+    })?;
+    for name in DOCUMENT_SCRIPT_FILES {
+        let source_file = source.join(name);
+        let metadata = tokio::fs::symlink_metadata(&source_file)
+            .await
+            .map_err(|_| {
+                CodeExecutionError::Sandbox(format!(
+                    "bundled document helper '{name}' is unavailable"
+                ))
+            })?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(CodeExecutionError::Sandbox(format!(
+                "bundled document helper '{name}' is not a regular file"
+            )));
+        }
+        let content = tokio::fs::read(&source_file).await.map_err(|_| {
+            CodeExecutionError::Sandbox(format!(
+                "bundled document helper '{name}' could not be read"
+            ))
+        })?;
+        if content.len() > openwave_code_execution::MAX_WORKSPACE_FILE_BYTES {
+            return Err(CodeExecutionError::Sandbox(format!(
+                "bundled document helper '{name}' exceeds the workspace file limit"
+            )));
+        }
+        tokio::fs::write(destination.join(name), content)
+            .await
+            .map_err(|_| {
+                CodeExecutionError::Sandbox(format!(
+                    "bundled document helper '{name}' could not be installed"
+                ))
+            })?;
+    }
+    Ok(())
 }
 
 /// A resolved workspace-lifecycle handle over the currently selected provider.
@@ -751,9 +1014,30 @@ impl WorkspaceLifecycle for ConfiguredWorkspace {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openwave_core::{AgentError, DbStore};
+    use chrono::Utc;
+    use openwave_core::{
+        AgentError, ChatRootAttachment, DbStore, PermissionMode, RootAttachmentOrigin,
+    };
+    use std::sync::Mutex;
+    use uuid::Uuid;
 
     struct NoSecrets;
+
+    struct RecordingFolderResolver {
+        queries: Mutex<Vec<ExecFolderGrantQuery>>,
+        roots: Vec<ResolvedExecFolderGrant>,
+    }
+
+    #[async_trait]
+    impl ExecFolderGrantResolver for RecordingFolderResolver {
+        async fn resolve(
+            &self,
+            query: ExecFolderGrantQuery,
+        ) -> std::result::Result<Vec<ResolvedExecFolderGrant>, String> {
+            self.queries.lock().unwrap().push(query);
+            Ok(self.roots.clone())
+        }
+    }
 
     #[async_trait]
     impl SecretProvider for NoSecrets {
@@ -779,6 +1063,100 @@ mod tests {
         .await
         .unwrap();
         (store, dir)
+    }
+
+    #[tokio::test]
+    async fn folder_resolution_is_fenced_to_the_chat_projection() {
+        let (store, _database) = test_store().await;
+        let granted = HostRootId::from_uuid(Uuid::new_v4()).unwrap();
+        let injected = HostRootId::from_uuid(Uuid::new_v4()).unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        let resolver = Arc::new(RecordingFolderResolver {
+            queries: Mutex::new(Vec::new()),
+            roots: vec![ResolvedExecFolderGrant {
+                root_id: granted,
+                path: folder.path().to_path_buf(),
+                writable: false,
+            }],
+        });
+        let provider = ConfiguredCodeExecutionProvider::new(
+            Arc::new(store),
+            Arc::new(NoSecrets),
+            tempfile::tempdir().unwrap().path(),
+        )
+        .with_folder_grant_resolver(Some(resolver.clone()));
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            reasoning_effort: None,
+            permission_mode: Some(PermissionMode::Ask),
+            attachment_revision: 1,
+            root_attachments: vec![ChatRootAttachment {
+                root_id: granted,
+                origin: RootAttachmentOrigin::Conversation,
+            }],
+            created_at: Utc::now(),
+        };
+
+        let resolved = provider.resolve_chat_folder_grants(&chat).await.unwrap();
+        assert_eq!(resolved[0].root_id, granted);
+        assert_eq!(resolver.queries.lock().unwrap()[0].root_ids, vec![granted]);
+
+        let bad_resolver = Arc::new(RecordingFolderResolver {
+            queries: Mutex::new(Vec::new()),
+            roots: vec![ResolvedExecFolderGrant {
+                root_id: injected,
+                path: folder.path().to_path_buf(),
+                writable: true,
+            }],
+        });
+        let (store, _database) = test_store().await;
+        let bad_provider = ConfiguredCodeExecutionProvider::new(
+            Arc::new(store),
+            Arc::new(NoSecrets),
+            tempfile::tempdir().unwrap().path(),
+        )
+        .with_folder_grant_resolver(Some(bad_resolver));
+        assert!(bad_provider
+            .resolve_chat_folder_grants(&chat)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn exec_workspace_conventions_exist_before_a_command_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        prepare_execution_directories(dir.path(), true, None)
+            .await
+            .unwrap();
+
+        for name in ["output", "preview", "documents"] {
+            assert!(dir.path().join(name).is_dir());
+            assert!(dir.path().join(name).join(".openwave-directory").is_file());
+        }
+    }
+
+    #[tokio::test]
+    async fn bundled_document_helpers_are_installed_as_one_library() {
+        let source = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        for name in DOCUMENT_SCRIPT_FILES {
+            std::fs::write(source.path().join(name), format!("helper:{name}")).unwrap();
+        }
+
+        prepare_execution_directories(workspace.path(), false, Some(source.path()))
+            .await
+            .unwrap();
+
+        for name in DOCUMENT_SCRIPT_FILES {
+            let installed = workspace.path().join(DOCUMENT_SCRIPTS_DIR).join(name);
+            assert_eq!(
+                std::fs::read_to_string(installed).unwrap(),
+                format!("helper:{name}")
+            );
+        }
     }
 
     #[test]

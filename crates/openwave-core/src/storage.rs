@@ -29,19 +29,19 @@ use crate::deliverable::{CreateOutput, NewOutputRevision, OutputRecord, OutputRe
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{
-    AgentRunId, CallId, ChatId, DocumentId, DocumentJobId, MessageId, OutputId, OutputRevisionId,
-    ProjectId, RootAttachmentChangeId, TurnId, TurnSteerId,
+    AgentRunId, CallId, ChatId, DocumentId, MessageId, OutputId, OutputRevisionId, ProjectId,
+    RootAttachmentChangeId, TurnId, TurnSteerId,
 };
 use crate::image::ImageRef;
 use crate::model::{
     AgentRun, AgentRunInboxEntry, AgentRunResult, AgentRunTier, AgentRunWaitSetCandidate,
     BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus, Chat, ClientToolCallRequest,
-    DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
-    DocumentParseOutput, DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert,
-    DocumentSummaryRecord, DocumentUpsert, Message, MessageAttachment, PermissionMode, Project,
-    ReasoningEffort, RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord,
-    ToolCallResolution, TurnAgentRunWait, TurnAgentRunWaitSet, TurnCheckpointProgress,
-    TurnClientWait, TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnSteer,
+    DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert,
+    DocumentSummaryRecord, DocumentUpsert, Message, MessageAttachment, MessageDocumentAttachment,
+    PermissionMode, Project, ReasoningEffort, RootAttachmentChange, RootAttachmentChangeTerminal,
+    ToolCallRecord, ToolCallResolution, TurnAgentRunWait, TurnAgentRunWaitSet,
+    TurnCheckpointProgress, TurnClientWait, TurnFailureReceipt, TurnFailureRetry, TurnRun,
+    TurnSteer,
 };
 use crate::provider::{RefusalOutcome, StopReason, Usage};
 use crate::semantic_checkpoint::{ContextCheckpoint, SaveContextCheckpointOutcome};
@@ -68,6 +68,9 @@ pub struct ChatTranscriptSnapshot {
     /// Durable image identities grouped into the renderer transcript under the
     /// same per-chat fence as `messages`.
     pub message_attachments: Vec<MessageAttachment>,
+    /// Durable document identities grouped into the renderer transcript under
+    /// the same per-chat fence as `messages`.
+    pub message_document_attachments: Vec<MessageDocumentAttachment>,
     /// Refusal outcomes keyed to their durably completed assistant message.
     pub refusals: Vec<ChatRefusalSnapshot>,
     /// Ordered renderer-safe sources keyed to their assistant message.
@@ -204,25 +207,6 @@ pub struct ChatToolActivitySnapshot {
     pub status: ChatToolActivityStatus,
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-/// Result of atomically ensuring canonical output from one parser pipeline.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EnsureDocumentParseJobOutcome {
-    /// A new Parse job was inserted for the desired generation.
-    Enqueued(DocumentJob),
-    /// The desired current Parse job already exists and remains live.
-    Existing(DocumentJob),
-    /// The desired current Parse job exhausted its attempts.
-    Failed(DocumentJob),
-    /// Canonical output already came from the desired parser.
-    CanonicalCurrent,
-    /// Reparse was requested for a document without retained source bytes.
-    SourceUnavailable,
-    /// The source document no longer exists.
-    MissingDocument,
-    /// The caller inspected an obsolete source generation.
-    GenerationChanged(DocumentGeneration),
 }
 
 /// Result of atomically beginning one broker-backed root attachment change.
@@ -1070,11 +1054,8 @@ pub trait Store: Send + Sync {
     /// Persist a new authoritative document record.
     ///
     /// At most one of `chat_id` and `project_id` may be present, and it must
-    /// identify an existing owner. The store replaces the supplied
-    /// `revision_token` with a fresh token so a deleted document lifecycle
-    /// cannot be recreated with stale identity. A live document's ownership is
-    /// immutable: callers must delete it before recreating the same id in
-    /// another corpus.
+    /// identify an existing owner. A live document's ownership is immutable:
+    /// callers must delete it before recreating the same id in another corpus.
     async fn create_document(&self, _document: &DocumentRecord) -> Result<()> {
         document_storage_unavailable()
     }
@@ -1093,7 +1074,7 @@ pub trait Store: Send + Sync {
     ///
     /// At most `limit` records are returned. When `after` is present, results
     /// begin strictly after its `(created_at, id)` tuple in descending display
-    /// order. Implementations must not load canonical text or revision tokens.
+    /// order. Implementations must not load canonical text.
     async fn list_document_summaries(
         &self,
         _scope: DocumentScope,
@@ -1198,155 +1179,25 @@ pub trait Store: Send + Sync {
         document_storage_unavailable()
     }
 
-    /// Read the newest durable generation, including a hard-delete tombstone.
-    async fn get_document_generation(&self, _id: DocumentId) -> Result<Option<DocumentGeneration>> {
-        document_storage_unavailable()
-    }
-
-    /// Hard-delete source content and return its durable tombstone generation.
-    ///
-    /// The generation clock is retained without source content. Repeated deletion
-    /// returns the same tombstone; deleting a never-seen id creates revision one.
-    async fn delete_document(&self, _id: DocumentId) -> Result<DocumentGeneration> {
+    /// Hard-delete source content.
+    async fn delete_document(&self, _id: DocumentId) -> Result<()> {
         document_storage_unavailable()
     }
 
     /// Create or replace authoritative document content.
     ///
-    /// A never-seen id starts at revision one. Replacing or recreating an id
-    /// increments its retained generation atomically and preserves `created_at`
-    /// only for a live replacement. Published canonical content is immediately
-    /// ready. `project_id`, when present, must identify an existing project. A
-    /// live document cannot move between the unscoped and project corpora, or
-    /// between projects; direct upserts enforce the same ownership rules as the
-    /// enqueueing write path.
+    /// Replacements preserve `created_at` and use last-write-wins semantics.
+    /// `project_id`, when present, must identify an existing project. A live
+    /// document cannot move between corpora.
     async fn upsert_document(&self, _document: &DocumentUpsert) -> Result<DocumentRecord> {
         document_storage_unavailable()
     }
 
-    /// Atomically accept immutable raw source bytes and enqueue their parse job.
-    ///
-    /// The blob must already be durably published. Repeating an identical source
-    /// and parser fingerprint returns the exact existing generation and job.
-    /// Any source or parser change advances the generation, clears canonical
-    /// state, and cancels older nonterminal work in the same transaction.
-    async fn accept_document_source_and_enqueue_parse(
+    /// Atomically accept an already-published source blob and decoded text.
+    async fn accept_document_source(
         &self,
         _document: &DocumentSourceUpsert,
-        _parser_fingerprint: &str,
-        _max_attempts: i32,
-    ) -> Result<(DocumentRecord, DocumentJob)> {
-        document_storage_unavailable()
-    }
-
-    /// Atomically publish canonical parser output and mark the document ready.
-    ///
-    /// The transition succeeds only for the exact live, unexpired parse lease.
-    /// On success the parse job becomes terminal and canonical state becomes
-    /// authoritative in the same transaction.
-    async fn complete_document_parse_job(
-        &self,
-        _id: DocumentJobId,
-        _lease_token: uuid::Uuid,
-        _completed_at: chrono::DateTime<chrono::Utc>,
-        _output: &DocumentParseOutput,
-    ) -> Result<Option<DocumentRecord>> {
-        document_storage_unavailable()
-    }
-
-    /// Atomically establish the desired Parse job for retained source bytes.
-    ///
-    /// The caller's observed generation is a compare-and-swap fence. Missing
-    /// work for pending canonical output is repaired in that generation; a
-    /// parser change advances the generation once, clears derived canonical
-    /// state, and enqueues Parse without changing retained source fields.
-    /// Failed work remains failed until an explicit retry.
-    async fn ensure_document_parse_job(
-        &self,
-        _document_id: DocumentId,
-        _expected_generation: DocumentGeneration,
-        _pipeline_fingerprint: &str,
-        _max_attempts: i32,
-    ) -> Result<EnsureDocumentParseJobOutcome> {
-        document_storage_unavailable()
-    }
-
-    /// Fetch one durable document job by id.
-    async fn get_document_job(&self, _id: DocumentJobId) -> Result<Option<DocumentJob>> {
-        document_storage_unavailable()
-    }
-
-    /// List a document's semantic job history, oldest first.
-    async fn list_document_jobs(&self, _document_id: DocumentId) -> Result<Vec<DocumentJob>> {
-        document_storage_unavailable()
-    }
-
-    /// Explicitly retry one exact-generation failed semantic job.
-    ///
-    /// A matching failed job is reset to a fresh queued delivery using a
-    /// store-owned timestamp and `max_attempts`. Repeating the request while that
-    /// exact job is already nonterminal returns it unchanged. The observed
-    /// generation, semantic kind, fingerprint, and document stage must all still
-    /// agree. Succeeded, cancelled, superseded, missing, or mismatched jobs are
-    /// not revived and return `None`.
-    async fn retry_document_job(
-        &self,
-        _document_id: DocumentId,
-        _expected_generation: DocumentGeneration,
-        _kind: DocumentJobKind,
-        _pipeline_fingerprint: &str,
-        _max_attempts: i32,
-    ) -> Result<Option<DocumentJob>> {
-        document_storage_unavailable()
-    }
-
-    /// Atomically claim the oldest due document job and its exact source revision.
-    ///
-    /// A successful claim increments `attempt_count`, installs a fresh lease,
-    /// moves the matching document to `processing`, and returns the running job.
-    /// Expired running leases are reclaimed while attempts remain; an expired
-    /// final attempt atomically fails the exact current job/document and scanning
-    /// continues. Superseded candidates are terminally cancelled rather than
-    /// left to block the active-job slot. An exact-identity document with an
-    /// impossible lifecycle status is reported as corruption, never cancelled.
-    /// `retry_wait` remains user-visible as `queued` during backoff.
-    async fn claim_document_job(
-        &self,
-        _now: chrono::DateTime<chrono::Utc>,
-        _lease_expires_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<Option<DocumentJob>> {
-        document_storage_unavailable()
-    }
-
-    /// Extend a live lease owned by `lease_token` without resurrecting expiry.
-    ///
-    /// Returns `false` if the job is not running, the token differs, the lease
-    /// already expired, or the proposed expiry does not extend the current one.
-    async fn heartbeat_document_job(
-        &self,
-        _id: DocumentJobId,
-        _lease_token: uuid::Uuid,
-        _now: chrono::DateTime<chrono::Utc>,
-        _lease_expires_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<bool> {
-        document_storage_unavailable()
-    }
-
-    /// Atomically record a live job failure and its matching document state.
-    ///
-    /// A future `retry_at` moves a job with attempts remaining to `retry_wait`
-    /// and its document to `queued`; no retry time, or an exhausted attempt
-    /// budget, moves both to terminal `failed`. Returns the resulting job status,
-    /// or `None` when the exact live lease no longer owns the job.
-    async fn record_document_job_failure(
-        &self,
-        _id: DocumentJobId,
-        _lease_token: uuid::Uuid,
-        _failed_at: chrono::DateTime<chrono::Utc>,
-        _retry_at: Option<chrono::DateTime<chrono::Utc>>,
-        _error_code: &str,
-        _error_detail: Option<&str>,
-    ) -> Result<Option<DocumentJobStatus>> {
+    ) -> Result<DocumentRecord> {
         document_storage_unavailable()
     }
 
@@ -1376,8 +1227,8 @@ pub trait Store: Send + Sync {
     /// root remains attached, or while broker reconciliation is pending. The
     /// caller must first finish cancellation and use the durable root-detach
     /// flow; deletion never guesses at native broker state. Conversation-owned
-    /// documents are atomically converted to pending generation tombstones, and
-    /// retained source blobs are enqueued for asynchronous retirement.
+    /// documents are removed and retained source blobs are enqueued for
+    /// asynchronous retirement.
     async fn delete_chat(&self, _id: ChatId) -> Result<DeleteChatOutcome> {
         Err(AgentError::Store(
             "conversation deletion is not implemented by this Store".into(),
@@ -2055,18 +1906,18 @@ pub trait Store: Send + Sync {
         model: &str,
         content: &str,
     ) -> Result<AcceptTurnOutcome> {
-        self.accept_turn_with_attachments(id, chat_id, model, content, &[])
+        self.accept_turn_with_attachments(id, chat_id, model, content, &[], &[])
             .await
     }
 
-    /// Accept a turn whose input message also carries image attachments.
+    /// Accept a turn whose input message also carries image or file attachments.
     ///
     /// The attachments commit in the same transaction as the message and turn,
     /// and they participate in the same idempotency proof: a retry with the same
-    /// id but different images is an [`AcceptTurnOutcome::IdentityConflict`],
-    /// not a silent acceptance of the first submission's images. Each image is
-    /// recorded at its position in `images`, which is the order a reloaded
-    /// transcript replays them in.
+    /// id but different attachments is an [`AcceptTurnOutcome::IdentityConflict`],
+    /// not a silent acceptance of the first submission. Each attachment is
+    /// recorded at its position in its media-specific list, which is the order
+    /// a reloaded transcript replays it in.
     ///
     /// Recording an attachment makes its blob live: any queued retirement for
     /// that blob is cancelled in the same transaction. Because blob ids are
@@ -2079,6 +1930,7 @@ pub trait Store: Send + Sync {
         _model: &str,
         _content: &str,
         _images: &[ImageRef],
+        _documents: &[DocumentId],
     ) -> Result<AcceptTurnOutcome> {
         turn_storage_unavailable()
     }
@@ -2488,6 +2340,14 @@ pub trait Store: Send + Sync {
     /// attachment support report none, which degrades a reloaded turn to its
     /// text rather than failing the load.
     async fn list_message_attachments(&self, _chat_id: ChatId) -> Result<Vec<MessageAttachment>> {
+        Ok(Vec::new())
+    }
+
+    /// List a chat's file attachments, ordered by message then position.
+    async fn list_message_document_attachments(
+        &self,
+        _chat_id: ChatId,
+    ) -> Result<Vec<MessageDocumentAttachment>> {
         Ok(Vec::new())
     }
 

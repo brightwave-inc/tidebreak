@@ -530,6 +530,93 @@ async fn a_cancelled_and_a_retried_turn_leave_exactly_one_set_of_stored_bytes() 
 }
 
 #[tokio::test]
+async fn a_tool_preview_is_fetchable_only_through_its_chat() {
+    let (router, token, _state, store, _dir) = test_app_with_state().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let other_chat = make_chat(&router, &bearer).await;
+    let bytes = png_header(640, 480);
+    let blob_id = publish_png(&router, &bearer, chat.id, bytes.clone()).await;
+    let turn_id = TurnId::new();
+    store
+        .accept_turn(turn_id, chat.id, "fake", "run a command")
+        .await
+        .unwrap();
+    let call_id = CallId::new();
+    let now = chrono::Utc::now();
+    store
+        .accept_tool_call(&ToolCallRecord {
+            id: call_id,
+            chat_id: chat.id,
+            turn_id,
+            provider_id: "exec-1".into(),
+            name: "exec".into(),
+            arguments: serde_json::json!({"command": "python"}),
+            execution: ToolCallExecution::Server,
+            status: ToolCallStatus::Pending,
+            result: None,
+            result_preview: None,
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
+            created_at: now,
+            resolved_at: None,
+        })
+        .await
+        .unwrap();
+    let preview = openwave_core::ToolResultPreview::Exec {
+        exit_code: Some(0),
+        timed_out: false,
+        output_truncated: false,
+        stdout: String::new(),
+        stderr: String::new(),
+        images: vec![openwave_core::ImageRef {
+            blob_id,
+            media_type: openwave_core::ImageMediaType::Png,
+            width: 640,
+            height: 480,
+            byte_len: bytes.len() as u64,
+        }],
+    };
+    store
+        .resolve_server_tool_call_with_artifacts(
+            call_id,
+            &ToolCallResolution::Completed {
+                result: "preview ready".into(),
+            },
+            now,
+            Some(&preview),
+        )
+        .await
+        .unwrap();
+
+    let available = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(transcript_image_uri(chat.id, blob_id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(available.status(), StatusCode::OK);
+    let absent = router
+        .oneshot(
+            Request::builder()
+                .uri(transcript_image_uri(other_chat.id, blob_id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(absent.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn a_turn_carrying_images_against_a_text_only_model_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
@@ -567,7 +654,6 @@ async fn a_turn_carrying_images_against_a_text_only_model_is_refused() {
     )
     .await
     .unwrap();
-    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -583,7 +669,6 @@ async fn a_turn_carrying_images_against_a_text_only_model_is_refused() {
         )),
         secrets,
         Arc::new(ToolRegistry::new()),
-        retrieval,
         AgentConfig {
             model: "openai_compatible::vendor/model".into(),
             ..AgentConfig::default()
@@ -677,7 +762,6 @@ async fn a_curated_openai_model_answers_after_receiving_png_and_jpeg_attachments
     )
     .await
     .unwrap();
-    let retrieval = build_retrieval();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -693,7 +777,6 @@ async fn a_curated_openai_model_answers_after_receiving_png_and_jpeg_attachments
         )),
         secrets,
         Arc::new(ToolRegistry::new()),
-        retrieval,
         AgentConfig {
             model: "openai::gpt-5.6-sol".into(),
             ..AgentConfig::default()

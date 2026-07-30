@@ -10,12 +10,11 @@ use serde::{Deserialize, Serialize};
 use unicode_general_category::{get_general_category, GeneralCategory};
 
 use openwave_core::{
-    AgentError, ChatId, DocumentJobId, DocumentListCursor, DocumentRecord, DocumentScope,
-    DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, ProjectId,
+    AgentError, ChatId, DocumentId, DocumentListCursor, DocumentRecord, DocumentScope,
+    DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, ProjectId, SourceReadiness,
 };
-use openwave_retrieval::{DocumentId, RetrievalError};
 
-use crate::document_stage::{retry_document_job_spec, MAX_PARSE_ATTEMPTS};
+use crate::document_decode::decode_document;
 use crate::error::ServerError;
 use crate::extract::{Json, Path, Query, RawBytes};
 use crate::state::AppState;
@@ -63,12 +62,8 @@ pub struct StreamedRawDocumentQuery {
 pub struct IngestResult {
     /// The ingested document's id (derived from the URI when one is given).
     pub document_id: DocumentId,
-    /// Durable semantic job for this exact source generation.
-    pub job_id: DocumentJobId,
-    /// Monotonic authoritative source revision accepted by the store.
-    pub content_revision: i64,
-    /// Current asynchronous processing state.
-    pub processing_status: openwave_core::DocumentProcessingStatus,
+    /// Whether the stored source has canonical text.
+    pub readiness: SourceReadiness,
 }
 
 /// Result of streamed native-file ingestion.
@@ -76,8 +71,8 @@ pub struct IngestResult {
 pub struct StreamedIngestResult {
     /// The content-derived id in this conversation.
     pub document_id: DocumentId,
-    /// Current asynchronous processing state.
-    pub processing_status: openwave_core::DocumentProcessingStatus,
+    /// Whether the stored source has canonical text.
+    pub readiness: SourceReadiness,
     /// Whether this request found an existing source with the same immutable
     /// content rather than creating a second catalog record.
     pub already_present: bool,
@@ -100,15 +95,7 @@ pub struct DocumentSummary {
     pub title: Option<String>,
     /// Exact retained source byte length, when original bytes are available.
     pub source_byte_len: Option<u64>,
-    /// Current authoritative source revision.
-    pub content_revision: i64,
-    /// Processing lifecycle of the current source revision.
-    pub processing_status: openwave_core::DocumentProcessingStatus,
     /// Whether the canonical text can be read as a source.
-    ///
-    /// A `ready` source with `readable: false` was stored and can be opened
-    /// by name, but its parser produced no text — a scanned image, or a format
-    /// whose parser is not installed on this host.
     pub readable: bool,
     /// When this document was first created.
     pub created_at: chrono::DateTime<Utc>,
@@ -126,8 +113,6 @@ impl From<DocumentSummaryRecord> for DocumentSummary {
             media_type: document.media_type,
             title: document.title,
             source_byte_len: document.source_byte_len,
-            content_revision: document.content_revision,
-            processing_status: document.processing_status,
             readable: document.readable,
             created_at: document.created_at,
             updated_at: document.updated_at,
@@ -145,8 +130,6 @@ impl From<&DocumentRecord> for DocumentSummary {
             media_type: document.media_type.clone(),
             title: document.title.clone(),
             source_byte_len: document.source_blob.as_ref().map(|source| source.byte_len),
-            content_revision: document.content_revision,
-            processing_status: document.processing_status,
             readable: document.is_readable(),
             created_at: document.created_at,
             updated_at: document.updated_at,
@@ -200,13 +183,13 @@ fn decode_document_cursor(raw: &str) -> Result<DocumentListCursor, ServerError> 
     Ok(DocumentListCursor { created_at, id })
 }
 
-/// Full document response, including the canonical text used for reindexing.
+/// Full document response, including its canonical text.
 #[derive(Debug, Serialize)]
 pub struct DocumentDetail {
     /// Catalog metadata.
     #[serde(flatten)]
     pub summary: DocumentSummary,
-    /// Parsed text-of-record. Citation spans index into this string.
+    /// Parsed text-of-record returned by source reads.
     pub content: String,
 }
 
@@ -215,9 +198,8 @@ pub struct DocumentDetail {
 /// Deliberately narrower than [`DocumentDetail`], which flattens the full
 /// catalog summary. That summary carries `uri` — for a conversation source
 /// either absent or an opaque `connected-folder:{root_id}/{path}` reference, but
-/// for an unscoped source a real filesystem path — along with revision and index
-/// fingerprints that are server bookkeeping. None of it is the renderer's, and a
-/// projection is a guarantee where "it happens to be empty today" is not.
+/// for an unscoped source a real filesystem path. None of it is the renderer's,
+/// and a projection is a guarantee where "it happens to be empty today" is not.
 ///
 /// Adding a field here puts it on an untrusted surface. Nothing derived from a
 /// host path belongs in one.
@@ -229,7 +211,6 @@ pub struct ChatDocumentDetail {
     /// Media type of the canonical content, which selects the viewer.
     pub media_type: String,
     pub title: Option<String>,
-    pub processing_status: openwave_core::DocumentProcessingStatus,
     /// Whether the canonical text is readable as a source.
     pub readable: bool,
     /// Whether this source retained the bytes it was made from, and so whether
@@ -242,7 +223,7 @@ pub struct ChatDocumentDetail {
     /// enforces ownership regardless of what a client believes.
     pub has_original_bytes: bool,
     pub updated_at: chrono::DateTime<Utc>,
-    /// Parsed text-of-record. Citation spans index into this string.
+    /// Parsed text-of-record returned by source reads.
     pub content: String,
 }
 
@@ -254,7 +235,6 @@ impl From<DocumentRecord> for ChatDocumentDetail {
             document_id: summary.document_id,
             media_type: summary.media_type,
             title: summary.title,
-            processing_status: summary.processing_status,
             readable: summary.readable,
             has_original_bytes,
             updated_at: summary.updated_at,
@@ -272,17 +252,7 @@ impl From<DocumentRecord> for DocumentDetail {
     }
 }
 
-/// Map a retrieval failure to an HTTP error: a parse problem is the caller's
-/// (unsupported media type / bad content), everything else is server-side.
-fn retrieval_error(err: RetrievalError) -> ServerError {
-    match err {
-        RetrievalError::Parse(_) => ServerError::bad_request(err.to_string()),
-        _ => ServerError::internal(err.to_string()),
-    }
-}
-
-/// `POST /documents` — durably retain source bytes and enqueue exact-generation
-/// asynchronous parsing.
+/// `POST /documents` — decode and durably retain source bytes.
 pub async fn ingest_document(
     State(state): State<AppState>,
     Json(body): Json<IngestDocument>,
@@ -290,7 +260,7 @@ pub async fn ingest_document(
     ingest_document_in_scope(&state, None, None, body).await
 }
 
-/// `POST /projects/{project_id}/documents` — enqueue a document in one project corpus.
+/// `POST /projects/{project_id}/documents` — ingest a document in one project corpus.
 pub async fn ingest_project_document(
     State(state): State<AppState>,
     Path(project_id): Path<ProjectId>,
@@ -300,7 +270,7 @@ pub async fn ingest_project_document(
     ingest_document_in_scope(&state, None, Some(project_id), body).await
 }
 
-/// `POST /chats/{chat_id}/documents` — enqueue a source owned by one conversation.
+/// `POST /chats/{chat_id}/documents` — ingest a source owned by one conversation.
 pub async fn ingest_chat_document(
     State(state): State<AppState>,
     Path(chat_id): Path<ChatId>,
@@ -332,7 +302,7 @@ async fn ingest_document_in_scope(
 }
 
 /// `POST /documents/raw` — retain the exact request body under its required
-/// `Content-Type` and enqueue asynchronous parsing.
+/// `Content-Type` and decode it synchronously.
 pub async fn ingest_raw_document(
     State(state): State<AppState>,
     Query(query): Query<RawDocumentQuery>,
@@ -343,7 +313,7 @@ pub async fn ingest_raw_document(
 }
 
 /// `POST /projects/{project_id}/documents/raw` — retain exact bytes in one
-/// project corpus and enqueue asynchronous parsing.
+/// project corpus and decode it synchronously.
 pub async fn ingest_raw_project_document(
     State(state): State<AppState>,
     Path(project_id): Path<ProjectId>,
@@ -364,7 +334,7 @@ pub async fn ingest_raw_project_document(
 }
 
 /// `POST /chats/{chat_id}/documents/raw` — retain exact source bytes for one
-/// conversation and enqueue asynchronous parsing.
+/// conversation and decode it synchronously.
 pub async fn ingest_raw_chat_document(
     State(state): State<AppState>,
     Path(chat_id): Path<ChatId>,
@@ -390,16 +360,8 @@ pub async fn ingest_streamed_raw_chat_document(
     let source_blob = streamed_source_blob(&query)?;
     let media_type = raw_document_media_type(&headers)?;
     let title = normalize_document_title(query.title.as_deref())?;
-    let parser_fingerprint = state
-        .retrieval
-        .canonical_fingerprint_for(&media_type)
-        .map_err(retrieval_error)?;
     let document_id = DocumentId::derive_for_chat_content(chat_id, source_blob.sha256);
 
-    // A content-derived id is the concurrency key for both duplicate files in
-    // one batch and retries of the same import. Check under that guard before
-    // asking the blob store to read another byte.
-    let _document_write = state.document_writes.acquire(document_id).await;
     if let Some(existing) = state
         .store
         .get_document(document_id)
@@ -411,7 +373,7 @@ pub async fn ingest_streamed_raw_chat_document(
                 StatusCode::OK,
                 Json(StreamedIngestResult {
                     document_id,
-                    processing_status: existing.processing_status,
+                    readiness: SourceReadiness::of(existing.is_readable()),
                     already_present: true,
                 }),
             ));
@@ -428,30 +390,30 @@ pub async fn ingest_streamed_raw_chat_document(
         .boxed();
     let _blob_write = state.blob_writes.acquire(source_blob.id).await?;
     state.blobs.put_stream(source_blob.clone(), stream).await?;
-    let (revision, _job) = state
+    let source_bytes = state.blobs.get(source_blob.id).await?.ok_or_else(|| {
+        ServerError::internal("streamed document disappeared before synchronous decoding")
+    })?;
+    let canonical_text = decode_document(&media_type, &source_bytes);
+    let document = state
         .store
-        .accept_document_source_and_enqueue_parse(
-            &DocumentSourceUpsert {
-                id: document_id,
-                chat_id: Some(chat_id),
-                project_id: None,
-                source_uri: None,
-                media_type,
-                title,
-                source_blob,
-                updated_at: Utc::now(),
-            },
-            &parser_fingerprint,
-            MAX_PARSE_ATTEMPTS,
-        )
+        .accept_document_source(&DocumentSourceUpsert {
+            id: document_id,
+            chat_id: Some(chat_id),
+            project_id: None,
+            source_uri: None,
+            media_type,
+            title,
+            source_blob,
+            canonical_text,
+            updated_at: Utc::now(),
+        })
         .await?;
-    state.document_job_wake.notify_one();
     state.blob_retirement_wake.notify_one();
     Ok((
-        StatusCode::ACCEPTED,
+        StatusCode::CREATED,
         Json(StreamedIngestResult {
             document_id,
-            processing_status: revision.processing_status,
+            readiness: SourceReadiness::of(document.is_readable()),
             already_present: false,
         }),
     ))
@@ -497,10 +459,6 @@ async fn publish_document_source(
         _ => None,
     };
     let title = normalize_document_title(title.as_deref())?;
-    let parser_fingerprint = state
-        .retrieval
-        .canonical_fingerprint_for(&media_type)
-        .map_err(retrieval_error)?;
     let document_id = match (chat_id, project_id, source_uri.as_deref()) {
         (Some(chat_id), None, Some(uri)) => DocumentId::derive_for_chat(chat_id, uri),
         (None, Some(project_id), Some(uri)) => DocumentId::derive_for_project(project_id, uri),
@@ -513,10 +471,8 @@ async fn publish_document_source(
         }
     };
     let source_blob = DocumentSourceBlob::from_bytes(&source_bytes);
-    // Serialize the entire source publication boundary for one document. If
-    // the first accepted request blocks on blob I/O, a later request cannot
-    // commit its descriptor and then be overwritten by the older source.
-    let _document_write = state.document_writes.acquire(document_id).await;
+    let canonical_text = decode_document(&media_type, &source_bytes);
+
     // Publication intentionally precedes the catalog transaction so an
     // accepted descriptor can never reference missing bytes. A later catalog
     // failure may leave an unreferenced content-addressed blob; it must be
@@ -524,33 +480,26 @@ async fn publish_document_source(
     // document may already share the same blob id.
     let _blob_write = state.blob_writes.acquire(source_blob.id).await?;
     state.blobs.put(source_blob.id, source_bytes).await?;
-
-    let (revision, job) = state
+    let document = state
         .store
-        .accept_document_source_and_enqueue_parse(
-            &DocumentSourceUpsert {
-                id: document_id,
-                chat_id,
-                project_id,
-                source_uri,
-                media_type,
-                title,
-                source_blob,
-                updated_at: Utc::now(),
-            },
-            &parser_fingerprint,
-            MAX_PARSE_ATTEMPTS,
-        )
+        .accept_document_source(&DocumentSourceUpsert {
+            id: document_id,
+            chat_id,
+            project_id,
+            source_uri,
+            media_type,
+            title,
+            source_blob,
+            canonical_text,
+            updated_at: Utc::now(),
+        })
         .await?;
-    state.document_job_wake.notify_one();
     state.blob_retirement_wake.notify_one();
     Ok((
-        StatusCode::ACCEPTED,
+        StatusCode::CREATED,
         Json(IngestResult {
             document_id,
-            job_id: job.id,
-            content_revision: revision.content_revision,
-            processing_status: revision.processing_status,
+            readiness: SourceReadiness::of(document.is_readable()),
         }),
     ))
 }
@@ -646,93 +595,6 @@ mod title_tests {
         assert!(normalized.is_ok());
         assert_eq!(normalized.ok().flatten(), Some(unicode_title));
     }
-}
-
-/// `POST /documents/{id}/retry` — explicitly revive the current exact failed
-/// semantic job without mutating source content or its generation.
-pub async fn retry_document(
-    State(state): State<AppState>,
-    Path(id): Path<DocumentId>,
-) -> Result<impl IntoResponse, ServerError> {
-    retry_document_in_scope(&state, id, None, None).await
-}
-
-/// `POST /projects/{project_id}/documents/{document_id}/retry` — revive an owned
-/// document's current exact failed semantic job.
-pub async fn retry_project_document(
-    State(state): State<AppState>,
-    Path((project_id, document_id)): Path<(ProjectId, DocumentId)>,
-) -> Result<impl IntoResponse, ServerError> {
-    require_project(&state, project_id).await?;
-    retry_document_in_scope(&state, document_id, None, Some(project_id)).await
-}
-
-/// `POST /chats/{chat_id}/documents/{document_id}/retry` — revive a source
-/// owned by one conversation.
-pub async fn retry_chat_document(
-    State(state): State<AppState>,
-    Path((chat_id, document_id)): Path<(ChatId, DocumentId)>,
-) -> Result<impl IntoResponse, ServerError> {
-    require_chat(&state, chat_id).await?;
-    retry_document_in_scope(&state, document_id, Some(chat_id), None).await
-}
-
-async fn retry_document_in_scope(
-    state: &AppState,
-    id: DocumentId,
-    chat_id: Option<ChatId>,
-    project_id: Option<ProjectId>,
-) -> Result<(StatusCode, Json<IngestResult>), ServerError> {
-    let _document_write = state.document_writes.acquire(id).await;
-    let Some(document) = state
-        .store
-        .get_document(id)
-        .await?
-        .filter(|document| document.chat_id == chat_id && document.project_id == project_id)
-    else {
-        return Err(ServerError::not_found(format!("document {id} not found")));
-    };
-    let desired = retry_document_job_spec(&document, &state.retrieval).map_err(retrieval_error)?;
-    let Some(job) = state
-        .store
-        .retry_document_job(
-            id,
-            document.generation(),
-            desired.kind,
-            &desired.pipeline_fingerprint,
-            desired.max_attempts,
-        )
-        .await?
-    else {
-        return Err(ServerError::conflict(format!(
-            "document {id} has no retryable failed job for the active pipeline"
-        )));
-    };
-    let record = state
-        .store
-        .get_document(id)
-        .await?
-        .filter(|record| {
-            record.chat_id == chat_id
-                && record.project_id == project_id
-                && record.generation() == job.generation()
-        })
-        .ok_or_else(|| {
-            ServerError::internal(format!(
-                "retried job {} no longer matches document {id}",
-                job.id
-            ))
-        })?;
-    state.document_job_wake.notify_one();
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(IngestResult {
-            document_id: id,
-            job_id: job.id,
-            content_revision: record.content_revision,
-            processing_status: record.processing_status,
-        }),
-    ))
 }
 
 /// `GET /documents` — list the explicitly unscoped corpus without returning each
@@ -989,7 +851,7 @@ struct ByteRange {
 fn requested_byte_range(headers: &HeaderMap, full_len: u64) -> Result<Option<ByteRange>, ()> {
     // This route does not expose an HTTP validator in this slice. Treat
     // conditional ranges as a request for the complete representation so a
-    // stale validator can never produce bytes from the wrong generation.
+    // stale validator cannot select bytes from an outdated representation.
     if headers.contains_key(header::IF_RANGE) {
         return Ok(None);
     }
@@ -1120,13 +982,11 @@ mod byte_range_tests {
     }
 }
 
-/// `DELETE /documents/{id}` — atomically delete authoritative source/jobs and
-/// persist a pending empty tombstone. The durable worker publishes it.
+/// `DELETE /documents/{id}` — delete one authoritative source.
 pub async fn delete_document(
     State(state): State<AppState>,
     Path(id): Path<DocumentId>,
 ) -> Result<StatusCode, ServerError> {
-    let _document_write = state.document_writes.acquire(id).await;
     if state
         .store
         .get_document(id)
@@ -1136,7 +996,6 @@ pub async fn delete_document(
         return Err(ServerError::not_found(format!("document {id} not found")));
     }
     state.store.delete_document(id).await?;
-    state.document_job_wake.notify_one();
     state.blob_retirement_wake.notify_one();
     Ok(StatusCode::ACCEPTED)
 }
@@ -1147,7 +1006,6 @@ pub async fn delete_project_document(
     Path((project_id, document_id)): Path<(ProjectId, DocumentId)>,
 ) -> Result<StatusCode, ServerError> {
     require_project(&state, project_id).await?;
-    let _document_write = state.document_writes.acquire(document_id).await;
     if state
         .store
         .get_document(document_id)
@@ -1161,7 +1019,6 @@ pub async fn delete_project_document(
         )));
     }
     state.store.delete_document(document_id).await?;
-    state.document_job_wake.notify_one();
     state.blob_retirement_wake.notify_one();
     Ok(StatusCode::ACCEPTED)
 }
@@ -1173,7 +1030,6 @@ pub async fn delete_chat_document(
     Path((chat_id, document_id)): Path<(ChatId, DocumentId)>,
 ) -> Result<StatusCode, ServerError> {
     require_chat(&state, chat_id).await?;
-    let _document_write = state.document_writes.acquire(document_id).await;
     if state
         .store
         .get_document(document_id)
@@ -1185,7 +1041,6 @@ pub async fn delete_chat_document(
         )));
     }
     state.store.delete_document(document_id).await?;
-    state.document_job_wake.notify_one();
     state.blob_retirement_wake.notify_one();
     Ok(StatusCode::ACCEPTED)
 }

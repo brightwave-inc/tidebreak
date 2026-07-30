@@ -333,9 +333,7 @@ async fn chat_creation_reports_not_found_when_project_deletion_wins_after_prefli
     ));
     injected.do_not_pause_terminal();
     injected.delete_project_after_next_get();
-    let retrieval = build_retrieval();
-    let (router, token, _store, _dir) =
-        test_app_from_parts(Arc::new(FakeProvider), retrieval, injected, dir);
+    let (router, token, _store, _dir) = test_app_from_parts(Arc::new(FakeProvider), injected, dir);
 
     let response = router
         .oneshot(
@@ -751,6 +749,7 @@ async fn a_retained_result_projection_survives_reopening_the_chat() {
             execution: ToolCallExecution::Server,
             status: ToolCallStatus::Pending,
             result: None,
+            result_preview: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -781,6 +780,10 @@ async fn a_retained_result_projection_survives_reopening_the_chat() {
             .await
             .unwrap(),
         openwave_core::ResolveToolCallOutcome::Resolved
+    );
+    assert_eq!(
+        store.list_tool_calls(chat.id).await.unwrap()[0].result_preview,
+        Some(preview.clone())
     );
 
     let response = router
@@ -852,6 +855,7 @@ async fn transcript_tool_activity_is_allowlisted_and_redacts_canonical_tool_data
             execution: ToolCallExecution::Server,
             status: ToolCallStatus::Pending,
             result: None,
+            result_preview: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -892,6 +896,7 @@ async fn transcript_tool_activity_is_allowlisted_and_redacts_canonical_tool_data
             execution: ToolCallExecution::Server,
             status: ToolCallStatus::Pending,
             result: None,
+            result_preview: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -930,6 +935,7 @@ async fn transcript_tool_activity_is_allowlisted_and_redacts_canonical_tool_data
             execution: ToolCallExecution::Server,
             status: ToolCallStatus::Pending,
             result: None,
+            result_preview: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -970,6 +976,7 @@ async fn transcript_tool_activity_is_allowlisted_and_redacts_canonical_tool_data
             execution: ToolCallExecution::Server,
             status: ToolCallStatus::Pending,
             result: None,
+            result_preview: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -992,6 +999,7 @@ async fn transcript_tool_activity_is_allowlisted_and_redacts_canonical_tool_data
             execution: ToolCallExecution::Server,
             status: ToolCallStatus::Pending,
             result: None,
+            result_preview: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,

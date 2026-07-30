@@ -22,9 +22,7 @@ mod chat_titling;
 /// Host-owned code-execution provider selection and policy.
 pub mod code_execution;
 mod desktop_schema;
-mod document_auditor;
-mod document_stage;
-mod document_worker;
+mod document_decode;
 mod durable_oplog;
 mod error;
 mod event_projection;
@@ -82,13 +80,11 @@ use openwave_core::{
     Config, CreateDeliverable, KeychainSecretProvider, ListDir, Profile, ReadFile, Result,
     SecretProvider, Store, Tool, ToolRegistry, WriteFile,
 };
-use openwave_retrieval::Retriever;
-
 use resolver::KeyedResolver;
 
 pub use durable_oplog::DurableOperationStore;
 pub use error::ServerError;
-pub use pairing::{pair_with_gateway, PairingError, PairingHandle, PairingOutcome};
+pub use pairing::{register_pending_pairing, PairingError, PairingHandle, PendingRegistration};
 pub use state::AppState;
 
 const MAX_RAW_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
@@ -119,10 +115,6 @@ pub fn app(state: AppState) -> Router {
             delete(routes::delete_chat_document),
         )
         .route(
-            "/chats/{chat_id}/documents/{document_id}/retry",
-            post(routes::retry_chat_document),
-        )
-        .route(
             "/projects/{project_id}/documents",
             post(routes::ingest_project_document).get(routes::list_project_documents),
         )
@@ -140,10 +132,6 @@ pub fn app(state: AppState) -> Router {
             get(routes::get_project_document_file_content),
         )
         .route(
-            "/projects/{project_id}/documents/{document_id}/retry",
-            post(routes::retry_project_document),
-        )
-        .route(
             "/documents",
             post(routes::ingest_document).get(routes::list_documents),
         )
@@ -159,7 +147,6 @@ pub fn app(state: AppState) -> Router {
             "/documents/{id}/file-content",
             get(routes::get_document_file_content),
         )
-        .route("/documents/{id}/retry", post(routes::retry_document))
         // Image attachments sit on the same trust boundary as raw document
         // ingest — both take bytes off the user's disk for one conversation —
         // so they follow it into whichever router that boundary lands on.
@@ -317,6 +304,10 @@ pub fn app(state: AppState) -> Router {
         .route("/gateway/sign-in", post(routes::post_gateway_sign_in))
         .route("/gateway/sign-out", post(routes::post_gateway_sign_out))
         .route(
+            "/gateway/pairing/dismiss",
+            post(routes::post_gateway_pairing_dismiss),
+        )
+        .route(
             "/gateway/models/sync",
             post(routes::post_gateway_models_sync),
         )
@@ -467,10 +458,11 @@ pub struct Server {
     /// The live MCP runtime, handed to pairing so a profile that becomes
     /// managed mid-session takes its manual servers down immediately.
     mcp: Arc<mcp_config::McpRuntime>,
+    /// The one gateway runtime, handed to pairing so a registered pending
+    /// pairing lands in the same slot the sign-in surface reads.
+    gateway: Arc<gateway_runtime::GatewayRuntime>,
     listener: TcpListener,
     router: Router,
-    _document_auditor: AbortTask,
-    _document_worker: AbortTask,
     _turn_worker: AbortTask,
     _sandbox_agent_run_worker: AbortTask,
     _sandbox_web_search_worker: AbortTask,
@@ -548,9 +540,9 @@ impl Server {
     /// The handles the native deep-link pairing flow needs.
     ///
     /// Pairing is exported for native embedders only, and it has live effects
-    /// beyond the store — see [`pair_with_gateway`].
+    /// beyond the store — see [`register_pending_pairing`].
     pub fn pairing_handle(&self) -> PairingHandle {
-        PairingHandle::new(self.store.clone(), self.mcp.clone())
+        PairingHandle::new(self.store.clone(), self.mcp.clone(), self.gateway.clone())
     }
 
     /// Run the accept loop until the process exits.
@@ -570,7 +562,13 @@ const DEFAULT_MODEL: &str = "claude-opus-5";
 /// This generic embedding does not expose durable root-attachment mutations,
 /// because it has no restart-stable native executor identity.
 pub async fn bind(config: Config) -> Result<Server> {
-    bind_inner(config, None, mcp_config::ConfiguredMcpServers::default()).await
+    bind_inner(
+        config,
+        None,
+        mcp_config::ConfiguredMcpServers::default(),
+        None,
+    )
+    .await
 }
 
 /// Bind the API and mount external MCP servers from `OPENWAVE_MCP_CONFIG`.
@@ -579,7 +577,7 @@ pub async fn bind(config: Config) -> Result<Server> {
 /// to use [`bind`] when process-environment configuration is undesirable.
 pub async fn bind_configured(config: Config) -> Result<Server> {
     let mcp_servers = mcp_config::ConfiguredMcpServers::from_env()?;
-    bind_inner(config, None, mcp_servers).await
+    bind_inner(config, None, mcp_servers, None).await
 }
 
 /// Bind the API with a stable app-private native executor identity.
@@ -597,6 +595,7 @@ pub async fn bind_with_desktop_executor(
         config,
         Some(client_executor_id),
         mcp_config::ConfiguredMcpServers::default(),
+        None,
     )
     .await
 }
@@ -611,7 +610,27 @@ pub async fn bind_configured_with_desktop_executor(
         return Err(AgentError::config("client executor id must not be nil"));
     }
     let mcp_servers = mcp_config::ConfiguredMcpServers::from_env()?;
-    bind_inner(config, Some(client_executor_id), mcp_servers).await
+    bind_inner(config, Some(client_executor_id), mcp_servers, None).await
+}
+
+/// Desktop binding with the native bridge that resolves current connected
+/// folders into per-invocation local sandbox grants.
+pub async fn bind_configured_with_desktop_executor_and_folder_grants(
+    config: Config,
+    client_executor_id: Uuid,
+    folder_grant_resolver: Arc<dyn code_execution::ExecFolderGrantResolver>,
+) -> Result<Server> {
+    if client_executor_id.is_nil() {
+        return Err(AgentError::config("client executor id must not be nil"));
+    }
+    let mcp_servers = mcp_config::ConfiguredMcpServers::from_env()?;
+    bind_inner(
+        config,
+        Some(client_executor_id),
+        mcp_servers,
+        Some(folder_grant_resolver),
+    )
+    .await
 }
 
 /// The secret store the configured profile keeps its credentials in.
@@ -640,6 +659,7 @@ async fn bind_inner(
     config: Config,
     client_executor_id: Option<Uuid>,
     mcp_servers: mcp_config::ConfiguredMcpServers,
+    folder_grant_resolver: Option<Arc<dyn code_execution::ExecFolderGrantResolver>>,
 ) -> Result<Server> {
     // Desktop live delivery remains process-local. Turns, steering, and tool
     // approvals are durable, while one process still owns the complete data
@@ -687,24 +707,25 @@ async fn bind_inner(
         gateway.clone(),
         os_policy.clone(),
     ));
-    let code_execution = Arc::new(code_execution::ConfiguredCodeExecutionProvider::new(
-        store.clone(),
-        secrets.clone(),
-        config.data_dir.join("scratch"),
-    ));
+    let code_execution = Arc::new(
+        code_execution::ConfiguredCodeExecutionProvider::new(
+            store.clone(),
+            secrets.clone(),
+            config.data_dir.join("scratch"),
+        )
+        .with_document_scripts(config.exec_scripts_dir.clone())
+        .with_folder_grant_resolver(folder_grant_resolver),
+    );
     let foreground_web_search =
         Box::new(web_search::foreground_tool(store.clone(), secrets.clone()));
-    let extract_store = store.clone();
-    let extract_secrets = secrets.clone();
-    let (retrieval, tools, agent_config) = agent_deps(
-        code_execution,
+    let web_extract = Box::new(web_search::foreground_extract_tool(
+        store.clone(),
+        secrets.clone(),
+    ));
+    let (tools, agent_config) = agent_deps(
+        code_execution.clone(),
         foreground_web_search,
-        |_| {
-            Box::new(web_search::foreground_extract_tool(
-                extract_store,
-                extract_secrets,
-            ))
-        },
+        web_extract,
         store.clone(),
     );
     let tools = Arc::new(tools);
@@ -715,19 +736,10 @@ async fn bind_inner(
             resolver,
             secrets,
             tools,
-            retrieval,
             agent_config,
             client_executor_id,
         )?,
-        None => AppState::new(
-            config,
-            store,
-            resolver,
-            secrets,
-            tools,
-            retrieval,
-            agent_config,
-        ),
+        None => AppState::new(config, store, resolver, secrets, tools, agent_config),
     };
     // The resolver and the /gateway routes must share ONE runtime: refresh
     // rotation is serialized per GatewayConnection instance, and two
@@ -738,20 +750,6 @@ async fn bind_inner(
     state.mcp.initialize(mcp_servers).await?;
     let token = state.token.clone();
     let client_executor_token = state.client_executor_token.clone();
-    let document_worker = document_worker::DocumentWorker::new(
-        state.store.clone(),
-        state.blobs.clone(),
-        state.retrieval.clone(),
-        state.document_job_wake.clone(),
-        document_worker::DocumentWorkerConfig::default(),
-    );
-    let document_auditor = document_auditor::DocumentAuditor::new(
-        state.store.clone(),
-        state.retrieval.clone(),
-        state.document_writes.clone(),
-        state.document_job_wake.clone(),
-        document_auditor::DocumentAuditorConfig::default(),
-    );
     let blob_retirement_worker = blob_retirement_worker::BlobRetirementWorker::new(
         state.store.clone(),
         state.blobs.clone(),
@@ -789,7 +787,8 @@ async fn bind_inner(
         turn_worker::TurnWorkerConfig::default(),
     )
     .with_blobs(state.blobs.clone())
-    .with_mcp_runtime(state.mcp.clone());
+    .with_mcp_runtime(state.mcp.clone())
+    .with_exec_folder_context(code_execution);
     let sandbox_worker_config = sandbox_agent_run_worker::SandboxAgentRunWorkerConfig::default()
         .with_delegated_file_executor(client_executor_id.is_some());
     let sandbox_agent_run_worker = sandbox_agent_run_worker::SandboxAgentRunWorker::with_attempts(
@@ -813,6 +812,7 @@ async fn bind_inner(
         );
     let server_store = state.store.clone();
     let mcp_runtime = state.mcp.clone();
+    let gateway_runtime = state.gateway.clone();
     let router = app(state);
 
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -822,8 +822,6 @@ async fn bind_inner(
         .local_addr()
         .map_err(|e| AgentError::config(format!("no local address: {e}")))?;
 
-    let document_auditor = tokio::spawn(document_auditor.run());
-    let document_worker = tokio::spawn(document_worker.run());
     let turn_worker = tokio::spawn(turn_worker.run());
     let sandbox_agent_run_worker = tokio::spawn(sandbox_agent_run_worker.run());
     let sandbox_web_search_worker = tokio::spawn(sandbox_web_search_worker.run());
@@ -838,10 +836,9 @@ async fn bind_inner(
         client_executor_token,
         store: server_store,
         mcp: mcp_runtime,
+        gateway: gateway_runtime,
         listener,
         router,
-        _document_auditor: AbortTask(document_auditor),
-        _document_worker: AbortTask(document_worker),
         _turn_worker: AbortTask(turn_worker),
         _sandbox_agent_run_worker: AbortTask(sandbox_agent_run_worker),
         _sandbox_web_search_worker: AbortTask(sandbox_web_search_worker),
@@ -853,23 +850,19 @@ async fn bind_inner(
     })
 }
 
-/// Assemble the agent dependencies for a real launch: the retrieval pipeline, the
-/// tool set, and the per-turn tuning. The model **provider** is not built here — it
-/// is resolved per turn by the [`KeyedResolver`] (a composite router over enabled
-/// providers; see [`resolver`]), so configuring a provider at runtime takes effect
-/// without a restart. The model *name* comes from `OPENWAVE_MODEL` (or the built-in
+/// Assemble the tools and per-turn tuning for a real launch.
+///
+/// The model **provider** is not built here — it is resolved per turn by the
+/// [`KeyedResolver`] (a composite router over enabled providers; see
+/// [`resolver`]), so configuring a provider at runtime takes effect without a
+/// restart. The model *name* comes from `OPENWAVE_MODEL` (or the built-in
 /// default) and can be overridden at runtime via `PUT /settings` or per-chat.
 fn agent_deps(
     code_execution: Arc<dyn openwave_code_execution::CodeExecutionProvider>,
     web_search: Box<dyn Tool>,
-    // Built from the retriever rather than handed in ready-made: extraction now
-    // files each fetched page as a source, which means queueing it for the same
-    // canonical parsing pipeline every other source uses.
-    web_extract: impl FnOnce(&Retriever) -> Box<dyn Tool>,
+    web_extract: Box<dyn Tool>,
     source_store: Arc<dyn Store>,
-) -> (Arc<Retriever>, ToolRegistry, AgentConfig) {
-    let retrieval = build_retrieval();
-    let web_extract = web_extract(&retrieval);
+) -> (ToolRegistry, AgentConfig) {
     let mut tools = ToolRegistry::new()
         .with(Box::new(ReadFile))
         .with(Box::new(ListDir))
@@ -921,13 +914,7 @@ fn agent_deps(
         model,
         ..AgentConfig::default()
     };
-    (retrieval, tools, agent_config)
-}
-
-fn build_retrieval() -> Arc<Retriever> {
-    Arc::new(Retriever::new(Box::new(
-        openwave_retrieval::document_parser_registry(),
-    )))
+    (tools, agent_config)
 }
 
 /// Open the durable store the profile selects.

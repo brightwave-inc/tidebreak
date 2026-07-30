@@ -40,6 +40,14 @@ function noImages(): ComposerImages {
   };
 }
 
+function noFiles() {
+  return {
+    items: [],
+    attaching: false,
+    onRemove: vi.fn(),
+  };
+}
+
 /**
  * The pane with the draft wired up the way the root wires it: state for
  * rendering, a ref for reading it at the moment guidance is sent.
@@ -58,13 +66,12 @@ function DraftingChatView(overrides: Partial<ChatViewProps> = {}) {
       draftRef={draftRef}
       composerModelMenu={null}
       composerImages={noImages()}
-      attachedSourceName={null}
+      files={noFiles()}
       attachError={null}
       onDraftChange={(value) => {
         draftRef.current = value;
         setDraft(value);
       }}
-      onDismissAttachedSource={vi.fn()}
       onSelectPrompt={vi.fn()}
       onSend={vi.fn(async () => {})}
       {...overrides}
@@ -83,10 +90,9 @@ function renderChatView(overrides: Partial<ChatViewProps> = {}) {
     draftRef: { current: "" },
     composerModelMenu: null,
     composerImages: noImages(),
-    attachedSourceName: null,
+    files: noFiles(),
     attachError: null,
     onDraftChange: vi.fn(),
-    onDismissAttachedSource: vi.fn(),
     onSelectPrompt: vi.fn(),
     onSend: vi.fn(async () => {}),
     ...overrides,

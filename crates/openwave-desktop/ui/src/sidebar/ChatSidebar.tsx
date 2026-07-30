@@ -4,7 +4,6 @@ import {
   ChevronLeft,
   CircleAlert,
   FolderOpen,
-  Library,
   Shapes,
 } from "lucide-react";
 
@@ -12,7 +11,6 @@ import type { Chat } from "@/api";
 import { useChatAttention } from "@/ChatAttention";
 import { Badge } from "@/components/ui/badge";
 import { listDeliverables } from "@/deliverables";
-import { listLibraryDocuments } from "@/documents";
 import type { PanelType } from "@/panel/panelTypes";
 import { usePanelNav } from "@/panel/usePanelNav";
 import { useRefreshSignals } from "@/RefreshSignals";
@@ -47,7 +45,6 @@ export function ChatSidebar({ chat }: { chat: Chat }) {
     (id) => id !== chat.id,
   );
 
-  const sourceCount = useSidebarCount(chat.id, listLibraryDocuments, (c) => c.documents.length);
   const outputCount = useSidebarCount(chat.id, listDeliverables, (c) => c.deliverables.length);
 
   return (
@@ -66,15 +63,6 @@ export function ChatSidebar({ chat }: { chat: Chat }) {
         )}
       </SidebarButton>
 
-      <ChatPanelButton
-        label="Sources"
-        icon={<Library />}
-        active={openPanelTypes.has("sources")}
-        onClick={() => openPanel({ type: "sources" })}
-        badge={sourceCount > 0 ? (
-          <Badge variant="outline" className="-my-0.5">{sourceCount}</Badge>
-        ) : undefined}
-      />
       <ChatPanelButton
         label="Outputs"
         icon={<Shapes />}

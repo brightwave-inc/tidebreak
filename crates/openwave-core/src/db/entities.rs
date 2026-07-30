@@ -26,25 +26,6 @@ pub mod blob_retirement {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
-pub mod document_generation {
-    use sea_orm::entity::prelude::*;
-
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "document_generation")]
-    pub struct Model {
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub document_id: Uuid,
-        pub content_revision: i64,
-        pub revision_token: Uuid,
-        pub tombstone: bool,
-    }
-
-    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {}
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
 pub mod document {
     use sea_orm::entity::prelude::*;
 
@@ -63,44 +44,6 @@ pub mod document {
         pub source_byte_len: Option<i64>,
         #[sea_orm(column_type = "Text")]
         pub canonical_text: String,
-        pub canonical_fingerprint: Option<String>,
-        pub source_regions: Json,
-        pub content_revision: i64,
-        pub revision_token: Uuid,
-        pub processing_status: String,
-        pub created_at: DateTimeUtc,
-        pub updated_at: DateTimeUtc,
-    }
-
-    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {}
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
-pub mod document_job {
-    use sea_orm::entity::prelude::*;
-
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "document_job")]
-    pub struct Model {
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub id: Uuid,
-        pub document_id: Uuid,
-        pub content_revision: i64,
-        pub revision_token: Uuid,
-        pub kind: String,
-        pub status: String,
-        pub pipeline_fingerprint: String,
-        pub attempt_count: i32,
-        pub max_attempts: i32,
-        pub available_at: DateTimeUtc,
-        pub lease_token: Option<Uuid>,
-        pub lease_expires_at: Option<DateTimeUtc>,
-        pub started_at: Option<DateTimeUtc>,
-        pub finished_at: Option<DateTimeUtc>,
-        pub last_error_code: Option<String>,
-        pub last_error_detail: Option<String>,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
     }
@@ -422,6 +365,56 @@ pub mod message_attachment {
     impl Related<super::message::Entity> for Entity {
         fn to() -> RelationDef {
             Relation::Message.def()
+        }
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod message_document_attachment {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "message_document_attachment")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub message_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub ordinal: i32,
+        pub chat_id: Uuid,
+        pub document_id: Uuid,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {
+        #[sea_orm(
+            belongs_to = "super::message::Entity",
+            from = "Column::MessageId",
+            to = "super::message::Column::Id",
+            on_update = "NoAction",
+            on_delete = "Cascade"
+        )]
+        Message,
+        #[sea_orm(
+            belongs_to = "super::document::Entity",
+            from = "Column::DocumentId",
+            to = "super::document::Column::Id",
+            on_update = "NoAction",
+            on_delete = "Cascade"
+        )]
+        Document,
+    }
+
+    impl Related<super::message::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::Message.def()
+        }
+    }
+
+    impl Related<super::document::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::Document.def()
         }
     }
 

@@ -53,6 +53,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": {
+      "../../scripts/exec-documents/": "exec-scripts/"
+    },
     "externalBin": [
       "binaries/openwave-host-broker"
     ],

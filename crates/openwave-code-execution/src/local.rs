@@ -29,6 +29,8 @@ use crate::{
     ExecutionWorkspaceId, WorkspaceFileEntry, WorkspaceFilePath, WorkspaceLifecycle,
     WorkspaceListing, MAX_WORKSPACE_FILE_BYTES, MAX_WORKSPACE_LIST_ENTRIES,
 };
+#[cfg(target_os = "macos")]
+use crate::{ExecFolderAccess, ExecFolderGrant};
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 const RECEIPT_DIR: &str = ".code-execution-receipts";
@@ -46,6 +48,14 @@ const MAX_OPEN_FILES: u64 = 64;
 pub struct LocalExecutionProvider {
     scratch_root: PathBuf,
     timeout: Duration,
+    document_scripts_dir: Option<PathBuf>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+struct CanonicalExecFolderGrant {
+    path: PathBuf,
+    access: ExecFolderAccess,
 }
 
 impl LocalExecutionProvider {
@@ -61,7 +71,15 @@ impl LocalExecutionProvider {
         Ok(Self {
             scratch_root: scratch_root.into(),
             timeout,
+            document_scripts_dir: None,
         })
+    }
+
+    /// Expose the trusted bundled document helpers as a read-only subtree.
+    #[must_use]
+    pub fn with_document_scripts(mut self, directory: Option<PathBuf>) -> Self {
+        self.document_scripts_dir = directory;
+        self
     }
 
     /// Whether the mandatory native confinement primitive exists on this host.
@@ -223,6 +241,15 @@ impl CodeExecutionProvider for LocalExecutionProvider {
             ));
         }
         let (workspace, cwd, receipts) = self.resolve_paths(&request)?;
+        // Folder paths are host state injected by the configured provider, not
+        // tool arguments. Revalidate them for every new invocation before any
+        // path becomes a Seatbelt allowance. Revocation changes the next
+        // request; a process already running under an older profile retains
+        // that profile only until the process exits.
+        #[cfg(target_os = "macos")]
+        let folder_grants = canonicalize_folder_grants(&request.folder_grants)?;
+        #[cfg(not(target_os = "macos"))]
+        let folder_grants = Vec::new();
         let fingerprint = request_fingerprint(&request)?;
         let receipt_path = receipts.join(format!("{}.json", request.execution_id.as_str()));
         match begin_execution(&receipt_path, &fingerprint)? {
@@ -230,7 +257,26 @@ impl CodeExecutionProvider for LocalExecutionProvider {
             BeginExecution::Started => {}
         }
 
-        let result = run_native(&request, &workspace, &cwd, self.timeout).await;
+        let document_scripts_dir = self
+            .document_scripts_dir
+            .as_ref()
+            .map(|path| {
+                fs::canonicalize(path).map_err(|_| {
+                    CodeExecutionError::Sandbox(
+                        "bundled document helper directory is unavailable".into(),
+                    )
+                })
+            })
+            .transpose()?;
+        let result = run_native(
+            &request,
+            &workspace,
+            &cwd,
+            self.timeout,
+            document_scripts_dir.as_deref(),
+            &folder_grants,
+        )
+        .await;
         match result {
             Ok(response) => {
                 finish_execution(
@@ -640,9 +686,16 @@ async fn run_native(
     workspace: &Path,
     cwd: &Path,
     timeout: Duration,
+    document_scripts_dir: Option<&Path>,
+    folder_grants: &[CanonicalExecFolderGrant],
 ) -> Result<CodeExecutionResponse, CodeExecutionError> {
     let developer_dir = macos_developer_dir();
-    let profile = macos_profile(workspace, developer_dir.as_deref())?;
+    let profile = macos_profile(
+        workspace,
+        developer_dir.as_deref(),
+        document_scripts_dir,
+        folder_grants,
+    )?;
     let mut command = Command::new(SANDBOX_EXEC);
     command
         .args(["-p", &profile, "--", &request.command])
@@ -665,6 +718,9 @@ async fn run_native(
         );
     } else {
         command.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+    }
+    if let Some(directory) = document_scripts_dir {
+        command.env("OPENWAVE_EXEC_SCRIPTS", directory);
     }
     configure_unix_limits(&mut command, timeout);
 
@@ -731,6 +787,8 @@ async fn run_native(
     _workspace: &Path,
     _cwd: &Path,
     _timeout: Duration,
+    _document_scripts_dir: Option<&Path>,
+    _folder_grants: &[()],
 ) -> Result<CodeExecutionResponse, CodeExecutionError> {
     Err(CodeExecutionError::Unavailable(
         "native local sandboxing is not supported on this host".into(),
@@ -808,6 +866,8 @@ async fn finish_reader(mut reader: tokio::task::JoinHandle<()>) {
 fn macos_profile(
     workspace: &Path,
     developer_dir: Option<&Path>,
+    document_scripts_dir: Option<&Path>,
+    folder_grants: &[CanonicalExecFolderGrant],
 ) -> Result<String, CodeExecutionError> {
     const DENIED_READS: &[&str] = &[
         "/Applications",
@@ -894,6 +954,35 @@ fn macos_profile(
         .map(sandbox_subpath)
         .transpose()?
         .unwrap_or_default();
+    let document_scripts = document_scripts_dir
+        .map(sandbox_subpath)
+        .transpose()?
+        .unwrap_or_default();
+    // `folder_grants` is the canonical, host-resolved list prepared above.
+    // Command, arguments, cwd, and every other model-authored field are
+    // deliberately absent from these profile clauses.
+    let granted_reads = folder_grants
+        .iter()
+        .map(|grant| sandbox_subpath(&grant.path))
+        .collect::<Result<Vec<_>, _>>()?
+        .join("\n  ");
+    let granted_writes = folder_grants
+        .iter()
+        .filter(|grant| grant.access == ExecFolderAccess::ReadWrite)
+        .map(|grant| sandbox_subpath(&grant.path))
+        .collect::<Result<Vec<_>, _>>()?
+        .join("\n  ");
+    let mut grant_ancestors = folder_grants
+        .iter()
+        .flat_map(|grant| grant.path.ancestors().skip(1))
+        .collect::<Vec<_>>();
+    grant_ancestors.sort_unstable();
+    grant_ancestors.dedup();
+    let grant_metadata = grant_ancestors
+        .into_iter()
+        .map(sandbox_literal)
+        .collect::<Result<Vec<_>, _>>()?
+        .join("\n  ");
     let workspace = sandbox_subpath(workspace)?;
     Ok(format!(
         "(version 1)\n\
@@ -903,10 +992,44 @@ fn macos_profile(
          (allow sysctl-read)\n\
          (allow file-read*)\n\
          (deny file-read*\n  {denied})\n\
-         (allow file-read-metadata\n  {runtime_metadata})\n\
-         (allow file-read*\n  {literals}\n  {runtimes}\n  {selected_runtime}\n  {workspace})\n\
-         (allow file-write*\n  {workspace}\n  (literal \"/dev/null\"))\n"
+         (allow file-read-metadata\n  {runtime_metadata}\n  {grant_metadata})\n\
+         (allow file-read*\n  {literals}\n  {runtimes}\n  {selected_runtime}\n  {document_scripts}\n  {granted_reads}\n  {workspace})\n\
+         (allow file-write*\n  {granted_writes}\n  {workspace}\n  (literal \"/dev/null\"))\n"
     ))
+}
+
+#[cfg(target_os = "macos")]
+fn canonicalize_folder_grants(
+    grants: &[ExecFolderGrant],
+) -> Result<Vec<CanonicalExecFolderGrant>, CodeExecutionError> {
+    let mut canonical = Vec::<CanonicalExecFolderGrant>::new();
+    for grant in grants {
+        let metadata = fs::symlink_metadata(&grant.path)
+            .map_err(|_| CodeExecutionError::Sandbox("granted folder is unavailable".into()))?;
+        if metadata.file_type().is_symlink() {
+            return Err(CodeExecutionError::Sandbox(
+                "granted folder must not be a symbolic link".into(),
+            ));
+        }
+        if !metadata.is_dir() {
+            return Err(CodeExecutionError::Sandbox(
+                "granted folder is not a directory".into(),
+            ));
+        }
+        let path = fs::canonicalize(&grant.path)
+            .map_err(|_| CodeExecutionError::Sandbox("granted folder is unavailable".into()))?;
+        if let Some(existing) = canonical.iter_mut().find(|existing| existing.path == path) {
+            if grant.access == ExecFolderAccess::ReadWrite {
+                existing.access = ExecFolderAccess::ReadWrite;
+            }
+            continue;
+        }
+        canonical.push(CanonicalExecFolderGrant {
+            path,
+            access: grant.access,
+        });
+    }
+    Ok(canonical)
 }
 
 #[cfg(target_os = "macos")]
@@ -943,6 +1066,19 @@ fn sandbox_subpath(path: &Path) -> Result<String, CodeExecutionError> {
         ));
     }
     Ok(sbpl_subpath(path))
+}
+
+#[cfg(target_os = "macos")]
+fn sandbox_literal(path: &Path) -> Result<String, CodeExecutionError> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| CodeExecutionError::Sandbox("sandbox paths must be valid UTF-8".into()))?;
+    if path.chars().any(char::is_control) {
+        return Err(CodeExecutionError::Sandbox(
+            "sandbox paths cannot contain control characters".into(),
+        ));
+    }
+    Ok(sbpl_literal(path))
 }
 
 #[cfg(target_os = "macos")]
@@ -1255,7 +1391,15 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn profile_denies_network_and_escapes_workspace_paths() {
-        let profile = macos_profile(Path::new("/Users/test/we\"ird\\workspace"), None).unwrap();
+        let profile = macos_profile(
+            Path::new("/Users/test/we\"ird\\workspace"),
+            None,
+            Some(Path::new(
+                "/Applications/OpenWave.app/Contents/Resources/exec-scripts",
+            )),
+            &[],
+        )
+        .unwrap();
         assert!(profile.contains("(deny default)"));
         assert!(!profile.contains("allow network"));
         assert!(!profile.contains("mach-lookup"));
@@ -1263,6 +1407,105 @@ mod tests {
         assert!(profile.contains("(allow process-exec)"));
         assert!(profile.contains("(allow process-fork)"));
         assert!(profile.contains("we\\\"ird\\\\workspace"));
-        assert!(macos_profile(Path::new("/Users/test/control\nworkspace"), None).is_err());
+        assert!(profile.contains("Resources/exec-scripts"));
+        let write_rule = profile
+            .split("(allow file-write*")
+            .nth(1)
+            .expect("profile has a write rule");
+        assert!(!write_rule.contains("Resources/exec-scripts"));
+        assert!(
+            macos_profile(Path::new("/Users/test/control\nworkspace"), None, None, &[]).is_err()
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn profile_compiles_read_and_write_folder_grants_without_widening_reads() {
+        let folders = tempfile::tempdir().unwrap();
+        let read_only = folders.path().join("read-only");
+        let read_write = folders.path().join("read-write");
+        fs::create_dir_all(&read_only).unwrap();
+        fs::create_dir_all(&read_write).unwrap();
+        let grants = canonicalize_folder_grants(&[
+            ExecFolderGrant::new(&read_only, ExecFolderAccess::ReadOnly).unwrap(),
+            ExecFolderGrant::new(&read_write, ExecFolderAccess::ReadWrite).unwrap(),
+        ])
+        .unwrap();
+        let profile =
+            macos_profile(Path::new("/Users/test/workspace"), None, None, &grants).unwrap();
+        let canonical_read = fs::canonicalize(read_only).unwrap();
+        let canonical_write = fs::canonicalize(read_write).unwrap();
+
+        assert!(profile.contains(&sandbox_subpath(&canonical_read).unwrap()));
+        assert!(profile.contains(&sandbox_subpath(&canonical_write).unwrap()));
+        let write_rule = profile
+            .split("(allow file-write*")
+            .nth(1)
+            .expect("profile has a write rule");
+        assert!(!write_rule.contains(canonical_read.to_str().unwrap()));
+        assert!(write_rule.contains(canonical_write.to_str().unwrap()));
+        assert!(profile.contains("(deny file-read*"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn folder_grants_reject_symlinks_and_missing_roots() {
+        use std::os::unix::fs::symlink;
+
+        let folders = tempfile::tempdir().unwrap();
+        let target = folders.path().join("target");
+        let linked = folders.path().join("linked");
+        fs::create_dir_all(&target).unwrap();
+        symlink(&target, &linked).unwrap();
+
+        let symlink_error = canonicalize_folder_grants(&[ExecFolderGrant::new(
+            &linked,
+            ExecFolderAccess::ReadOnly,
+        )
+        .unwrap()])
+        .unwrap_err();
+        assert!(symlink_error.to_string().contains("symbolic link"));
+
+        let missing_error = canonicalize_folder_grants(&[ExecFolderGrant::new(
+            folders.path().join("missing"),
+            ExecFolderAccess::ReadOnly,
+        )
+        .unwrap()])
+        .unwrap_err();
+        assert!(missing_error.to_string().contains("unavailable"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn local_sandbox_reads_only_the_granted_sibling() {
+        let scratch = tempfile::tempdir().unwrap();
+        let workspace = "chat-grant";
+        fs::create_dir(scratch.path().join(workspace)).unwrap();
+        let host = tempfile::tempdir().unwrap();
+        let granted = host.path().join("granted");
+        let ungranted = host.path().join("ungranted");
+        fs::create_dir(&granted).unwrap();
+        fs::create_dir(&ungranted).unwrap();
+        fs::write(granted.join("visible.txt"), "visible").unwrap();
+        fs::write(ungranted.join("secret.txt"), "secret").unwrap();
+        let granted_path = fs::canonicalize(&granted).unwrap();
+        let ungranted_path = fs::canonicalize(&ungranted).unwrap();
+        let provider = LocalExecutionProvider::new(scratch.path(), Duration::from_secs(3)).unwrap();
+        let script = format!(
+            "cat '{}'; if cat '{}' >/dev/null 2>&1; then printf ungranted-open; else printf ungranted-blocked; fi",
+            granted_path.join("visible.txt").display(),
+            ungranted_path.join("secret.txt").display()
+        );
+        let request = request(workspace, "call-folder-grant", &script)
+            .with_folder_grants(vec![ExecFolderGrant::new(
+                &granted_path,
+                ExecFolderAccess::ReadOnly,
+            )
+            .unwrap()])
+            .unwrap();
+
+        let response = provider.execute(request).await.unwrap();
+        assert_eq!(response.exit_code, Some(0), "stderr: {}", response.stderr);
+        assert_eq!(response.stdout, "visibleungranted-blocked");
     }
 }

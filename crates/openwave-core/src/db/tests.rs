@@ -1,9 +1,9 @@
 use super::*;
 use crate::model::{
-    ByteSpan, ChatRootAttachment, DocumentParseOutput, DocumentSourceBlob, DocumentSourceUpsert,
-    RootAttachmentChangeAction, RootAttachmentChangeFailure, RootAttachmentChangeTerminal,
-    RootAttachmentOrigin, SourceLocation, SourceRegion, ToolCallExecution, ToolCallResolution,
-    ToolCallStatus, MAX_ATTACHMENT_REVISION, MAX_ROOT_ATTACHMENTS,
+    ChatRootAttachment, DocumentSourceBlob, DocumentSourceUpsert, RootAttachmentChangeAction,
+    RootAttachmentChangeFailure, RootAttachmentChangeTerminal, RootAttachmentOrigin,
+    ToolCallExecution, ToolCallResolution, ToolCallStatus, MAX_ATTACHMENT_REVISION,
+    MAX_ROOT_ATTACHMENTS,
 };
 use crate::storage::ApplyTurnSteerOutcome;
 use crate::{ApprovalClass, ToolApprovalStatus};
@@ -195,6 +195,7 @@ fn sample_raw_source(
         media_type: "application/octet-stream".into(),
         title: None,
         source_blob,
+        canonical_text: String::new(),
         updated_at: Utc::now(),
     }
 }
@@ -210,11 +211,6 @@ fn sample_document(project_id: Option<ProjectId>) -> DocumentRecord {
         title: Some("Résumé 📈".into()),
         source_blob: None,
         canonical_text: "# Résumé\n\n売上 grew by 10%.".into(),
-        canonical_fingerprint: None,
-        source_regions: Vec::new(),
-        content_revision: 1,
-        revision_token: uuid::Uuid::new_v4(),
-        processing_status: DocumentProcessingStatus::Queued,
         created_at,
         updated_at: created_at,
     }
@@ -726,7 +722,7 @@ async fn project_deletion_requires_an_empty_project_and_reports_missing_identity
 }
 
 #[tokio::test]
-async fn project_deletion_serializes_with_staged_source_ingestion() {
+async fn project_deletion_serializes_with_synchronous_source_ingestion() {
     let (_dir, store) = temp_store().await;
 
     for attempt in 0..16_u8 {
@@ -751,9 +747,7 @@ async fn project_deletion_serializes_with_staged_source_ingestion() {
         let ingest_source = source.clone();
         let ingest = tokio::spawn(async move {
             ingest_barrier.wait().await;
-            ingest_store
-                .accept_document_source_and_enqueue_parse(&ingest_source, "parser-v1", 3)
-                .await
+            ingest_store.accept_document_source(&ingest_source).await
         });
         barrier.wait().await;
 
@@ -763,7 +757,7 @@ async fn project_deletion_serializes_with_staged_source_ingestion() {
             (DeleteProjectOutcome::Deleted, Err(AgentError::ProjectNotFound(missing_project))) => {
                 assert_eq!(missing_project, project.id)
             }
-            (DeleteProjectOutcome::NotEmpty, Ok((record, _))) => {
+            (DeleteProjectOutcome::NotEmpty, Ok(record)) => {
                 assert_eq!(record.project_id, Some(project.id));
                 store.delete_document(record.id).await.unwrap();
                 assert_eq!(
@@ -790,7 +784,6 @@ async fn every_project_scoped_first_write_reports_a_typed_missing_project() {
     ));
 
     let canonical = DocumentUpsert {
-        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: Some(missing),
@@ -798,7 +791,6 @@ async fn every_project_scoped_first_write_reports_a_typed_missing_project() {
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "missing project".into(),
-        source_regions: Vec::new(),
         updated_at: Utc::now(),
     };
     assert!(matches!(
@@ -812,9 +804,7 @@ async fn every_project_scoped_first_write_reports_a_typed_missing_project() {
     );
     staged.project_id = Some(missing);
     assert!(matches!(
-        store
-            .accept_document_source_and_enqueue_parse(&staged, "parser-v1", 3)
-            .await,
+        store.accept_document_source(&staged).await,
         Err(AgentError::ProjectNotFound(id)) if id == missing
     ));
 
@@ -839,11 +829,9 @@ async fn documents_roundtrip_and_list_by_corpus_scope() {
     unscoped.created_at = DateTime::<Utc>::from_timestamp(1_000, 0).unwrap();
     let mut in_a = sample_document(Some(project_a.id));
     in_a.created_at = DateTime::<Utc>::from_timestamp(2_000, 0).unwrap();
-    in_a.processing_status = DocumentProcessingStatus::Ready;
     let mut in_b = sample_document(Some(project_b.id));
     in_b.created_at = DateTime::<Utc>::from_timestamp(3_000, 0).unwrap();
     in_b.source_blob = Some(DocumentSourceBlob::from_digest([0x5a; 32], 8_192));
-    in_b.canonical_fingerprint = Some("parser=markdown-v1".into());
 
     for document in [&unscoped, &in_a, &in_b] {
         store.create_document(document).await.unwrap();
@@ -853,7 +841,6 @@ async fn documents_roundtrip_and_list_by_corpus_scope() {
     in_b = store.get_document(in_b.id).await.unwrap().unwrap();
 
     let legacy_replacement = DocumentUpsert {
-        canonical_fingerprint: None,
         chat_id: None,
         id: in_b.id,
         project_id: in_b.project_id,
@@ -861,7 +848,6 @@ async fn documents_roundtrip_and_list_by_corpus_scope() {
         media_type: in_b.media_type.clone(),
         title: in_b.title.clone(),
         canonical_text: in_b.canonical_text.clone(),
-        source_regions: in_b.source_regions.clone(),
         updated_at: in_b.updated_at,
     };
     assert!(store.upsert_document(&legacy_replacement).await.is_err());
@@ -982,22 +968,17 @@ async fn document_summaries_page_by_created_at_then_id_without_gaps() {
 }
 
 #[tokio::test]
-async fn ready_summaries_report_whether_anything_is_actually_readable() {
+async fn summaries_derive_readiness_from_canonical_text() {
     let (_dir, store) = temp_store().await;
-    let ready = |raw_id: u128, canonical_text: &str| {
+    let document_with = |raw_id: u128, canonical_text: &str| {
         let mut document = sample_document(None);
         document.id = DocumentId(uuid::Uuid::from_u128(raw_id));
         document.canonical_text = canonical_text.to_owned();
-        document.processing_status = DocumentProcessingStatus::Ready;
         document
     };
-    // A parser can succeed and still produce nothing to read: an image with
-    // no OCR, or a format whose parser is not installed on this host.
-    let with_text = ready(2, "売上 grew by 10%.");
-    let without_text = ready(1, "");
-    let mut still_queued = sample_document(None);
-    still_queued.id = DocumentId(uuid::Uuid::from_u128(3));
-    for document in [&with_text, &without_text, &still_queued] {
+    let with_text = document_with(2, "売上 grew by 10%.");
+    let without_text = document_with(1, "");
+    for document in [&with_text, &without_text] {
         store.create_document(document).await.unwrap();
     }
 
@@ -1006,27 +987,19 @@ async fn ready_summaries_report_whether_anything_is_actually_readable() {
         .await
         .unwrap()
         .into_iter()
-        .map(|document| (document.id, document.processing_status, document.readable))
+        .map(|document| (document.id, document.readable, document.readiness()))
         .collect::<Vec<_>>();
     assert_eq!(
         readable,
         vec![
-            (
-                still_queued.id,
-                DocumentProcessingStatus::Queued,
-                // Not readable yet, but for a reason the caller must not
-                // confuse with a parser that found nothing.
-                false
-            ),
-            (with_text.id, DocumentProcessingStatus::Ready, true),
-            (without_text.id, DocumentProcessingStatus::Ready, false),
+            (with_text.id, true, crate::SourceReadiness::Readable),
+            (without_text.id, false, crate::SourceReadiness::StoredNoText,),
         ]
     );
     // The listing decides emptiness in the database, so it must still never
     // carry the text itself.
     assert!(with_text.is_readable());
     assert!(!without_text.is_readable());
-    assert!(!still_queued.is_readable());
 }
 
 #[tokio::test]
@@ -1045,17 +1018,8 @@ async fn document_project_fk_rejects_orphans_and_direct_project_deletion() {
         .is_err());
     assert!(store.get_project(project.id).await.unwrap().is_some());
     assert_eq!(
-        store
-            .get_document(document.id)
-            .await
-            .unwrap()
-            .unwrap()
-            .generation(),
-        store
-            .get_document_generation(document.id)
-            .await
-            .unwrap()
-            .unwrap()
+        store.get_document(document.id).await.unwrap(),
+        Some(document)
     );
 }
 
@@ -1068,7 +1032,6 @@ async fn live_document_cannot_move_between_project_corpora() {
     store.create_project(&project_a).await.unwrap();
     store.create_project(&project_b).await.unwrap();
     let source = DocumentUpsert {
-        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: Some(project_a.id),
@@ -1076,15 +1039,12 @@ async fn live_document_cannot_move_between_project_corpora() {
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "project A source".into(),
-        source_regions: Vec::new(),
         updated_at: Utc::now(),
     };
     let first = store.upsert_document(&source).await.unwrap();
     let moved = DocumentUpsert {
-        canonical_fingerprint: None,
         project_id: Some(project_b.id),
         canonical_text: "must not move".into(),
-        source_regions: Vec::new(),
         ..source
     };
     assert!(store.upsert_document(&moved).await.is_err());
@@ -1103,19 +1063,6 @@ async fn document_constraints_reject_invalid_catalog_state() {
     empty_source_uri.source_uri = Some(String::new());
     assert!(store.create_document(&empty_source_uri).await.is_err());
 
-    let mut invalid_revision = sample_document(None);
-    invalid_revision.content_revision = 0;
-    assert!(store.create_document(&invalid_revision).await.is_err());
-
-    let mut invalid_regions = sample_document(None);
-    invalid_regions.source_regions = vec![SourceRegion {
-        span: ByteSpan::new(4, 5),
-        location: SourceLocation::Page {
-            number: std::num::NonZeroU32::new(1).unwrap(),
-        },
-    }];
-    assert!(store.create_document(&invalid_regions).await.is_err());
-
     let mut oversized_source = sample_document(None);
     oversized_source.source_blob = Some(DocumentSourceBlob::from_digest([0; 32], u64::MAX));
     assert!(store.create_document(&oversized_source).await.is_err());
@@ -1129,13 +1076,6 @@ async fn document_constraints_reject_invalid_catalog_state() {
         store.get_document(invalid_source_id.id).await.unwrap(),
         None
     );
-
-    let mut empty_parser_fingerprint = sample_document(None);
-    empty_parser_fingerprint.canonical_fingerprint = Some(String::new());
-    assert!(store
-        .create_document(&empty_parser_fingerprint)
-        .await
-        .is_err());
 
     let mut valid_source = sample_document(None);
     valid_source.source_blob = Some(DocumentSourceBlob::from_digest([0x22; 32], 512));
@@ -1164,156 +1104,40 @@ async fn document_constraints_reject_invalid_catalog_state() {
 }
 
 #[tokio::test]
-async fn source_regions_roundtrip_and_provenance_changes_advance_revision() {
-    let (_dir, store) = temp_store().await;
-    let page = |number| SourceRegion {
-        span: ByteSpan::new(0, 9),
-        location: SourceLocation::Page {
-            number: std::num::NonZeroU32::new(number).unwrap(),
-        },
-    };
-    let source = DocumentUpsert {
-        canonical_fingerprint: None,
-        chat_id: None,
-        id: DocumentId::new(),
-        project_id: None,
-        source_uri: Some("file:///report.pdf".into()),
-        media_type: "application/pdf".into(),
-        title: Some("Report".into()),
-        canonical_text: "page text".into(),
-        source_regions: vec![page(1)],
-        updated_at: Utc::now(),
-    };
-
-    let first = store.upsert_document(&source).await.unwrap();
-    assert_eq!(first.content_revision, 1);
-    assert_eq!(first.source_regions, source.source_regions);
-    assert_eq!(first.processing_status, DocumentProcessingStatus::Ready);
-    assert_eq!(
-        store.get_document(source.id).await.unwrap(),
-        Some(first.clone())
-    );
-
-    let changed = DocumentUpsert {
-        canonical_fingerprint: None,
-        source_regions: vec![page(2)],
-        updated_at: Utc::now(),
-        ..source
-    };
-    let second = store.upsert_document(&changed).await.unwrap();
-    assert_eq!(second.content_revision, 2);
-    assert_eq!(second.source_regions, changed.source_regions);
-}
-
-#[tokio::test]
-async fn raw_source_parse_completion_publishes_a_ready_document() {
+async fn synchronous_source_accept_publishes_blob_and_text_together() {
     let (_dir, store) = temp_store().await;
     let source = DocumentSourceUpsert {
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
-        source_uri: Some("file:///report.pdf".into()),
-        media_type: "application/pdf".into(),
+        source_uri: Some("file:///report.txt".into()),
+        media_type: "text/plain".into(),
         title: Some("Report".into()),
         source_blob: DocumentSourceBlob::from_digest([0x33; 32], 4_096),
+        canonical_text: "Page one".into(),
         updated_at: Utc::now(),
     };
 
     let mut invalid = source.clone();
     invalid.source_blob.id = uuid::Uuid::new_v4();
-    let error = store
-        .accept_document_source_and_enqueue_parse(&invalid, "parser=pdf-v1", 3)
-        .await
-        .unwrap_err();
+    let error = store.accept_document_source(&invalid).await.unwrap_err();
     assert!(error
         .to_string()
         .contains("blob id does not match its SHA-256 digest"));
     assert_eq!(store.get_document(source.id).await.unwrap(), None);
 
-    let (accepted, parse_job) = store
-        .accept_document_source_and_enqueue_parse(&source, "parser=pdf-v1", 3)
-        .await
-        .unwrap();
+    let accepted = store.accept_document_source(&source).await.unwrap();
     assert_eq!(accepted.source_blob.as_ref(), Some(&source.source_blob));
-    assert!(accepted.canonical_text.is_empty());
-    assert_eq!(accepted.canonical_fingerprint, None);
-    assert_eq!(parse_job.kind, DocumentJobKind::Parse);
-    assert_eq!(parse_job.status, DocumentJobStatus::Queued);
+    assert_eq!(accepted.canonical_text, source.canonical_text);
+    assert!(accepted.is_readable());
 
-    let repeated = store
-        .accept_document_source_and_enqueue_parse(&source, "parser=pdf-v1", 9)
-        .await
-        .unwrap();
-    assert_eq!(repeated, (accepted.clone(), parse_job.clone()));
-    assert_eq!(store.list_document_jobs(source.id).await.unwrap().len(), 1);
-
-    let claim_at = Utc::now() + chrono::Duration::seconds(1);
-    let lease_expires_at = claim_at + chrono::Duration::minutes(1);
-    let claimed = store
-        .claim_document_job(claim_at, lease_expires_at)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(claimed.id, parse_job.id);
-    let lease_token = claimed.lease_token.unwrap();
-    entities::document_job::Entity::update_many()
-        .col_expr(
-            entities::document_job::Column::LastErrorCode,
-            sea_orm::sea_query::Expr::value(Some("transient_parse".to_owned())),
-        )
-        .col_expr(
-            entities::document_job::Column::LastErrorDetail,
-            sea_orm::sea_query::Expr::value(Some("prior attempt".to_owned())),
-        )
-        .filter(entities::document_job::Column::Id.eq(claimed.id.0))
-        .exec(&store.conn)
-        .await
-        .unwrap();
-    let output = DocumentParseOutput {
-        canonical_text: "Page one".into(),
-        source_regions: vec![SourceRegion {
-            span: ByteSpan::new(0, 8),
-            location: SourceLocation::Page {
-                number: std::num::NonZeroU32::new(1).unwrap(),
-            },
-        }],
-    };
-    let completed_at = claim_at + chrono::Duration::seconds(1);
-    let parsed = store
-        .complete_document_parse_job(claimed.id, lease_token, completed_at, &output)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(parsed.generation(), accepted.generation());
-    assert_eq!(parsed.canonical_text, output.canonical_text);
-    assert_eq!(parsed.source_regions, output.source_regions);
-    assert_eq!(
-        parsed.canonical_fingerprint.as_deref(),
-        Some("parser=pdf-v1")
-    );
-    assert_eq!(parsed.processing_status, DocumentProcessingStatus::Ready);
-    assert!(parsed.is_readable());
-    assert!(store
-        .complete_document_parse_job(claimed.id, lease_token, completed_at, &output)
-        .await
-        .unwrap()
-        .is_none());
-    let jobs = store.list_document_jobs(source.id).await.unwrap();
-    assert_eq!(jobs.len(), 1);
-    assert_eq!(jobs[0].status, DocumentJobStatus::Succeeded);
-    assert_eq!(jobs[0].last_error_code, None);
-    assert_eq!(jobs[0].last_error_detail, None);
-
-    let (reparse, reparse_job) = store
-        .accept_document_source_and_enqueue_parse(&source, "parser=pdf-v2", 3)
-        .await
-        .unwrap();
-    assert_eq!(reparse.content_revision, parsed.content_revision + 1);
-    assert_ne!(reparse.revision_token, parsed.revision_token);
-    assert!(reparse.canonical_text.is_empty());
-    assert_eq!(reparse.canonical_fingerprint, None);
-    assert_eq!(reparse_job.kind, DocumentJobKind::Parse);
-    assert_eq!(reparse.processing_status, DocumentProcessingStatus::Queued);
+    let mut replacement = source.clone();
+    replacement.canonical_text.clear();
+    replacement.updated_at += chrono::Duration::seconds(1);
+    let replaced = store.accept_document_source(&replacement).await.unwrap();
+    assert_eq!(replaced.created_at, accepted.created_at);
+    assert_eq!(replaced.updated_at, replacement.updated_at);
+    assert!(!replaced.is_readable());
 }
 
 #[tokio::test]
@@ -1330,14 +1154,8 @@ async fn blob_retirement_coalesces_candidates_and_live_writes_cancel_episodes() 
         "file:///shared-b.bin",
         shared_blob.clone(),
     );
-    let (_, job_a) = store
-        .accept_document_source_and_enqueue_parse(&source_a, "parser-v1", 3)
-        .await
-        .unwrap();
-    store
-        .accept_document_source_and_enqueue_parse(&source_b, "parser-v1", 3)
-        .await
-        .unwrap();
+    let original_a = store.accept_document_source(&source_a).await.unwrap();
+    store.accept_document_source(&source_b).await.unwrap();
     assert_eq!(
         store.get_blob_retirement(shared_blob.id).await.unwrap(),
         None
@@ -1348,10 +1166,7 @@ async fn blob_retirement_coalesces_candidates_and_live_writes_cancel_episodes() 
         source_b.source_uri.as_deref().unwrap(),
         DocumentSourceBlob::from_digest([0x52; 32], 52),
     );
-    store
-        .accept_document_source_and_enqueue_parse(&replacement_b, "parser-v1", 3)
-        .await
-        .unwrap();
+    store.accept_document_source(&replacement_b).await.unwrap();
     let queued = store
         .get_blob_retirement(shared_blob.id)
         .await
@@ -1366,11 +1181,8 @@ async fn blob_retirement_coalesces_candidates_and_live_writes_cancel_episodes() 
     assert_eq!(queued.lease_token, None);
     assert_eq!(queued.finished_at, None);
 
-    let repeated = store
-        .accept_document_source_and_enqueue_parse(&source_a, "parser-v1", 9)
-        .await
-        .unwrap();
-    assert_eq!(repeated.1, job_a);
+    let repeated = store.accept_document_source(&source_a).await.unwrap();
+    assert_eq!(repeated, original_a);
     let cancelled = store
         .get_blob_retirement(shared_blob.id)
         .await
@@ -1385,10 +1197,7 @@ async fn blob_retirement_coalesces_candidates_and_live_writes_cancel_episodes() 
         source_a.source_uri.as_deref().unwrap(),
         DocumentSourceBlob::from_digest([0x53; 32], 53),
     );
-    store
-        .accept_document_source_and_enqueue_parse(&replacement_a, "parser-v1", 3)
-        .await
-        .unwrap();
+    store.accept_document_source(&replacement_a).await.unwrap();
     let requeued = store
         .get_blob_retirement(shared_blob.id)
         .await
@@ -1412,10 +1221,7 @@ async fn blob_retirement_coalesces_candidates_and_live_writes_cancel_episodes() 
         "file:///shared-c.bin",
         replacement_a.source_blob.clone(),
     );
-    store
-        .accept_document_source_and_enqueue_parse(&source_c, "parser-v1", 3)
-        .await
-        .unwrap();
+    store.accept_document_source(&source_c).await.unwrap();
     assert_eq!(
         store
             .get_blob_retirement(replacement_a.source_blob.id)
@@ -1428,17 +1234,14 @@ async fn blob_retirement_coalesces_candidates_and_live_writes_cancel_episodes() 
 }
 
 #[tokio::test]
-async fn source_replacement_rolls_back_blob_retirement_with_job_insert_failure() {
+async fn source_replacement_rolls_back_when_blob_retirement_cannot_be_enqueued() {
     let (_dir, store) = temp_store().await;
     let original = sample_raw_source(
         DocumentId::new(),
         "file:///rollback-source.bin",
         DocumentSourceBlob::from_digest([0x61; 32], 61),
     );
-    let (original_record, original_job) = store
-        .accept_document_source_and_enqueue_parse(&original, "parser-v1", 3)
-        .await
-        .unwrap();
+    let original_record = store.accept_document_source(&original).await.unwrap();
     let replacement = sample_raw_source(
         original.id,
         original.source_uri.as_deref().unwrap(),
@@ -1447,30 +1250,22 @@ async fn source_replacement_rolls_back_blob_retirement_with_job_insert_failure()
     store
         .conn
         .execute_unprepared(
-            "CREATE TRIGGER fail_replacement_parse_insert
-             BEFORE INSERT ON document_job
-             WHEN NEW.kind = 'parse'
+            "CREATE TRIGGER fail_replacement_retirement_insert
+             BEFORE INSERT ON blob_retirement
              BEGIN SELECT RAISE(FAIL, 'injected replacement failure'); END",
         )
         .await
         .unwrap();
-    assert!(store
-        .accept_document_source_and_enqueue_parse(&replacement, "parser-v1", 3)
-        .await
-        .is_err());
+    assert!(store.accept_document_source(&replacement).await.is_err());
     store
         .conn
-        .execute_unprepared("DROP TRIGGER fail_replacement_parse_insert")
+        .execute_unprepared("DROP TRIGGER fail_replacement_retirement_insert")
         .await
         .unwrap();
 
     assert_eq!(
         store.get_document(original.id).await.unwrap(),
         Some(original_record)
-    );
-    assert_eq!(
-        store.get_document_job(original_job.id).await.unwrap(),
-        Some(original_job)
     );
     assert_eq!(
         store
@@ -1496,10 +1291,7 @@ async fn document_delete_rolls_back_when_blob_retirement_cannot_be_enqueued() {
         "file:///rollback-delete.bin",
         DocumentSourceBlob::from_digest([0x63; 32], 63),
     );
-    let (record, _) = store
-        .accept_document_source_and_enqueue_parse(&source, "parser-v1", 3)
-        .await
-        .unwrap();
+    let record = store.accept_document_source(&source).await.unwrap();
     store
         .conn
         .execute_unprepared(
@@ -1607,10 +1399,7 @@ async fn orphan_blob_retirement_only_queues_missing_or_completed_episodes() {
         "file:///referenced-orphan-audit.bin",
         DocumentSourceBlob::from_digest([0x7b; 32], 81),
     );
-    store
-        .accept_document_source_and_enqueue_parse(&referenced, "parser-v1", 3)
-        .await
-        .unwrap();
+    store.accept_document_source(&referenced).await.unwrap();
     assert!(!store
         .ensure_orphan_blob_retirement(referenced.source_blob.id)
         .await
@@ -1688,23 +1477,14 @@ async fn blob_retirement_claim_cancels_referenced_candidates() {
         "file:///claim-shared-b.bin",
         shared_blob.clone(),
     );
-    store
-        .accept_document_source_and_enqueue_parse(&source_a, "parser-v1", 3)
-        .await
-        .unwrap();
-    store
-        .accept_document_source_and_enqueue_parse(&source_b, "parser-v1", 3)
-        .await
-        .unwrap();
+    store.accept_document_source(&source_a).await.unwrap();
+    store.accept_document_source(&source_b).await.unwrap();
     let replacement = sample_raw_source(
         source_a.id,
         source_a.source_uri.as_deref().unwrap(),
         DocumentSourceBlob::from_digest([0x72; 32], 72),
     );
-    store
-        .accept_document_source_and_enqueue_parse(&replacement, "parser-v1", 3)
-        .await
-        .unwrap();
+    store.accept_document_source(&replacement).await.unwrap();
 
     let queued = store
         .get_blob_retirement(shared_blob.id)
@@ -1738,10 +1518,7 @@ async fn blob_retirement_claim_and_heartbeat_require_the_live_lease() {
         "file:///retire-claim.bin",
         DocumentSourceBlob::from_digest([0x73; 32], 73),
     );
-    store
-        .accept_document_source_and_enqueue_parse(&source, "parser-v1", 3)
-        .await
-        .unwrap();
+    store.accept_document_source(&source).await.unwrap();
     store.delete_document(source.id).await.unwrap();
     let queued = store
         .get_blob_retirement(source.source_blob.id)
@@ -1818,10 +1595,7 @@ async fn blob_retirement_completion_requires_the_exact_live_lease() {
         "file:///retire-complete.bin",
         DocumentSourceBlob::from_digest([0x75; 32], 75),
     );
-    store
-        .accept_document_source_and_enqueue_parse(&source, "parser-v1", 3)
-        .await
-        .unwrap();
+    store.accept_document_source(&source).await.unwrap();
     store.delete_document(source.id).await.unwrap();
     let queued = store
         .get_blob_retirement(source.source_blob.id)
@@ -1887,10 +1661,7 @@ async fn blob_retirement_final_validation_cancels_a_new_authoritative_reference(
         "file:///retire-final-check.bin",
         DocumentSourceBlob::from_digest([0x79; 32], 79),
     );
-    store
-        .accept_document_source_and_enqueue_parse(&retired_source, "parser-v1", 3)
-        .await
-        .unwrap();
+    store.accept_document_source(&retired_source).await.unwrap();
     store.delete_document(retired_source.id).await.unwrap();
     let queued = store
         .get_blob_retirement(retired_source.source_blob.id)
@@ -1909,10 +1680,7 @@ async fn blob_retirement_final_validation_cancels_a_new_authoritative_reference(
         "file:///retire-final-check-live.bin",
         DocumentSourceBlob::from_digest([0x7a; 32], 80),
     );
-    store
-        .accept_document_source_and_enqueue_parse(&live_source, "parser-v1", 3)
-        .await
-        .unwrap();
+    store.accept_document_source(&live_source).await.unwrap();
     // Simulate an uncoordinated external catalog writer to exercise the final
     // indexed reference check itself, rather than the normal write-time cancel.
     entities::document::Entity::update_many()
@@ -1964,10 +1732,7 @@ async fn blob_retirement_failure_retries_then_exhausts_the_attempt_budget() {
         "file:///retire-failure.bin",
         DocumentSourceBlob::from_digest([0x76; 32], 76),
     );
-    store
-        .accept_document_source_and_enqueue_parse(&source, "parser-v1", 3)
-        .await
-        .unwrap();
+    store.accept_document_source(&source).await.unwrap();
     store.delete_document(source.id).await.unwrap();
     entities::blob_retirement::Entity::update_many()
         .col_expr(
@@ -2104,7 +1869,7 @@ async fn blob_retirement_claim_skips_an_exhausted_lease_and_returns_later_work()
         DocumentSourceBlob::from_digest([0x77; 32], 77),
     );
     store
-        .accept_document_source_and_enqueue_parse(&exhausted_source, "parser-v1", 3)
+        .accept_document_source(&exhausted_source)
         .await
         .unwrap();
     store.delete_document(exhausted_source.id).await.unwrap();
@@ -2135,10 +1900,7 @@ async fn blob_retirement_claim_skips_an_exhausted_lease_and_returns_later_work()
         "file:///retire-later-work.bin",
         DocumentSourceBlob::from_digest([0x78; 32], 78),
     );
-    store
-        .accept_document_source_and_enqueue_parse(&later_source, "parser-v1", 3)
-        .await
-        .unwrap();
+    store.accept_document_source(&later_source).await.unwrap();
     store.delete_document(later_source.id).await.unwrap();
     entities::blob_retirement::Entity::update_many()
         .col_expr(
@@ -2173,10 +1935,7 @@ async fn expired_blob_retirement_leases_are_reclaimed_then_fail_at_the_attempt_l
         "file:///retire-reclaim.bin",
         DocumentSourceBlob::from_digest([0x74; 32], 74),
     );
-    store
-        .accept_document_source_and_enqueue_parse(&source, "parser-v1", 3)
-        .await
-        .unwrap();
+    store.accept_document_source(&source).await.unwrap();
     store.delete_document(source.id).await.unwrap();
     entities::blob_retirement::Entity::update_many()
         .col_expr(
@@ -2253,10 +2012,7 @@ async fn concurrent_blob_retirement_claimers_never_share_a_blob() {
             &format!("file:///retire-concurrent-{index}.bin"),
             DocumentSourceBlob::from_digest([0x80 + index as u8; 32], 80 + index),
         );
-        store
-            .accept_document_source_and_enqueue_parse(&source, "parser-v1", 3)
-            .await
-            .unwrap();
+        store.accept_document_source(&source).await.unwrap();
         store.delete_document(source.id).await.unwrap();
         latest_available_at = latest_available_at.max(
             store
@@ -2290,44 +2046,9 @@ async fn concurrent_blob_retirement_claimers_never_share_a_blob() {
 }
 
 #[tokio::test]
-async fn concurrent_first_document_upserts_allocate_distinct_revisions() {
-    let (_dir, store) = temp_store().await;
-    let first = DocumentUpsert {
-        canonical_fingerprint: None,
-        chat_id: None,
-        id: DocumentId::new(),
-        project_id: None,
-        source_uri: None,
-        media_type: "text/plain".into(),
-        title: None,
-        canonical_text: "a".into(),
-        source_regions: Vec::new(),
-        updated_at: DateTime::<Utc>::from_timestamp(1, 0).unwrap(),
-    };
-    let second = DocumentUpsert {
-        canonical_fingerprint: None,
-        canonical_text: "b".into(),
-        source_regions: Vec::new(),
-        ..first.clone()
-    };
-
-    let (first, second) = tokio::join!(
-        store.upsert_document(&first),
-        store.upsert_document(&second)
-    );
-    let mut revisions = [
-        first.unwrap().content_revision,
-        second.unwrap().content_revision,
-    ];
-    revisions.sort_unstable();
-    assert_eq!(revisions, [1, 2]);
-}
-
-#[tokio::test]
 async fn document_upsert_rolls_back_when_project_is_unknown() {
     let (_dir, store) = temp_store().await;
     let upsert = DocumentUpsert {
-        canonical_fingerprint: None,
         chat_id: None,
         id: DocumentId::new(),
         project_id: Some(ProjectId::new()),
@@ -2335,99 +2056,36 @@ async fn document_upsert_rolls_back_when_project_is_unknown() {
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "content".into(),
-        source_regions: Vec::new(),
         updated_at: Utc::now(),
     };
     assert!(store.upsert_document(&upsert).await.is_err());
     assert_eq!(store.get_document(upsert.id).await.unwrap(), None);
-    assert_eq!(
-        store.get_document_generation(upsert.id).await.unwrap(),
-        None
-    );
 }
 
 #[tokio::test]
-async fn concurrent_document_upserts_allocate_distinct_revisions() {
+async fn repeated_document_upserts_are_last_write_wins_and_preserve_creation_time() {
     let (_dir, store) = temp_store().await;
-    let base = DocumentUpsert {
-        canonical_fingerprint: None,
+    let first = DocumentUpsert {
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: None,
         media_type: "text/plain".into(),
         title: None,
-        canonical_text: "base".into(),
-        source_regions: Vec::new(),
+        canonical_text: "first".into(),
         updated_at: DateTime::<Utc>::from_timestamp(1, 0).unwrap(),
     };
-    let id = base.id;
-    assert_eq!(
-        store.upsert_document(&base).await.unwrap().content_revision,
-        1
-    );
-    let a = DocumentUpsert {
-        canonical_fingerprint: None,
-        canonical_text: "a".into(),
-        source_regions: Vec::new(),
+    let created = store.upsert_document(&first).await.unwrap();
+    let second = DocumentUpsert {
+        canonical_text: "second".into(),
         updated_at: DateTime::<Utc>::from_timestamp(2, 0).unwrap(),
-        ..base.clone()
+        ..first
     };
-    let b = DocumentUpsert {
-        canonical_fingerprint: None,
-        canonical_text: "b".into(),
-        source_regions: Vec::new(),
-        updated_at: DateTime::<Utc>::from_timestamp(3, 0).unwrap(),
-        ..base
-    };
+    let replaced = store.upsert_document(&second).await.unwrap();
 
-    let (a, b) = tokio::join!(store.upsert_document(&a), store.upsert_document(&b));
-    let mut revisions = [a.unwrap().content_revision, b.unwrap().content_revision];
-    revisions.sort_unstable();
-    assert_eq!(revisions, [2, 3]);
-    let current = store.get_document(id).await.unwrap().unwrap();
-    assert_eq!(current.content_revision, 3);
-    assert!(matches!(current.canonical_text.as_str(), "a" | "b"));
-}
-
-#[tokio::test]
-async fn high_contention_document_upserts_do_not_drop_writers() {
-    let (_dir, store) = temp_store().await;
-    let id = DocumentId::new();
-    let writes = (0..64).map(|i| {
-        let store = store.clone();
-        async move {
-            store
-                .upsert_document(&DocumentUpsert {
-                    canonical_fingerprint: None,
-                    id,
-                    chat_id: None,
-                    project_id: None,
-                    source_uri: None,
-                    media_type: "text/plain".into(),
-                    title: None,
-                    canonical_text: format!("writer {i}"),
-                    source_regions: Vec::new(),
-                    updated_at: DateTime::<Utc>::from_timestamp(i, 0).unwrap(),
-                })
-                .await
-                .unwrap()
-                .content_revision
-        }
-    });
-
-    let mut revisions = futures::future::join_all(writes).await;
-    revisions.sort_unstable();
-    assert_eq!(revisions, (1..=64).collect::<Vec<_>>());
-    assert_eq!(
-        store
-            .get_document(id)
-            .await
-            .unwrap()
-            .unwrap()
-            .content_revision,
-        64
-    );
+    assert_eq!(replaced.created_at, created.created_at);
+    assert_eq!(replaced.updated_at, second.updated_at);
+    assert_eq!(replaced.canonical_text, "second");
 }
 
 #[tokio::test]
@@ -2449,12 +2107,9 @@ async fn m0006_upgrades_an_existing_store_without_losing_records() {
     migration::Migrator::up(&conn, None).await.unwrap();
 
     assert_eq!(store.get_chat(chat.id).await.unwrap().as_ref(), Some(&chat));
-    let mut document = sample_document(None);
-    let supplied_token = document.revision_token;
+    let document = sample_document(None);
     store.create_document(&document).await.unwrap();
     let stored = store.get_document(document.id).await.unwrap().unwrap();
-    assert_ne!(stored.revision_token, supplied_token);
-    document.revision_token = stored.revision_token;
     assert_eq!(stored, document);
 }
 
@@ -2483,6 +2138,12 @@ async fn lightweight_citation_migration_has_a_working_down_and_reapply() {
     let conn = Database::connect(&url).await.unwrap();
     migration::Migrator::up(&conn, None).await.unwrap();
 
+    let appended = migrations_added_after("m20260729_000030_lightweight_citations");
+    if appended > 0 {
+        migration::Migrator::down(&conn, Some(appended))
+            .await
+            .unwrap();
+    }
     migration::Migrator::down(&conn, Some(1)).await.unwrap();
     for query in [
         "SELECT citation_format FROM chat LIMIT 1",
@@ -2562,6 +2223,120 @@ async fn lightweight_citation_migration_has_a_working_down_and_reapply() {
             .await
             .is_err());
     }
+}
+
+#[tokio::test]
+async fn retire_document_pipeline_migration_has_a_working_down_and_reapply() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        dir.path().join("document-pipeline-migration.db").display()
+    );
+    let conn = Database::connect(&url).await.unwrap();
+    migration::Migrator::up(&conn, None).await.unwrap();
+    let store = DbStore { conn: conn.clone() };
+    let readable = sample_document(None);
+    let mut empty = sample_document(None);
+    empty.id = DocumentId::new();
+    empty.canonical_text.clear();
+    store.create_document(&readable).await.unwrap();
+    store.create_document(&empty).await.unwrap();
+
+    let appended = migrations_added_after("m20260729_000031_retire_document_pipeline");
+    if appended > 0 {
+        migration::Migrator::down(&conn, Some(appended))
+            .await
+            .unwrap();
+    }
+    migration::Migrator::down(&conn, Some(1)).await.unwrap();
+    for query in [
+        "SELECT canonical_fingerprint, source_regions, content_revision, \
+         revision_token, processing_status FROM document LIMIT 1",
+        "SELECT * FROM document_generation LIMIT 1",
+        "SELECT * FROM document_job LIMIT 1",
+    ] {
+        conn.query_one_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            query.to_owned(),
+        ))
+        .await
+        .unwrap();
+    }
+    let statuses = conn
+        .query_all_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "SELECT processing_status FROM document ORDER BY processing_status".to_owned(),
+        ))
+        .await
+        .unwrap();
+    let statuses = statuses
+        .into_iter()
+        .map(|row| row.try_get::<String>("", "processing_status").unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(statuses, ["queued", "ready"]);
+
+    migration::Migrator::up(&conn, None).await.unwrap();
+    for retired in [
+        "SELECT canonical_fingerprint FROM document LIMIT 1",
+        "SELECT * FROM document_generation LIMIT 1",
+        "SELECT * FROM document_job LIMIT 1",
+    ] {
+        assert!(conn
+            .query_one_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                retired.to_owned(),
+            ))
+            .await
+            .is_err());
+    }
+    assert_eq!(
+        store
+            .get_document(readable.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .canonical_text,
+        readable.canonical_text
+    );
+    assert_eq!(
+        store
+            .get_document(empty.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .canonical_text,
+        ""
+    );
+}
+
+#[tokio::test]
+async fn message_document_attachment_migration_has_a_working_down_and_reapply() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        dir.path()
+            .join("message-document-attachment-migration.db")
+            .display()
+    );
+    let conn = Database::connect(&url).await.unwrap();
+    migration::Migrator::up(&conn, None).await.unwrap();
+
+    migration::Migrator::down(&conn, Some(1)).await.unwrap();
+    assert!(conn
+        .query_one_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "SELECT * FROM message_document_attachment LIMIT 1".to_owned(),
+        ))
+        .await
+        .is_err());
+
+    migration::Migrator::up(&conn, None).await.unwrap();
+    conn.query_one_raw(Statement::from_string(
+        DatabaseBackend::Sqlite,
+        "SELECT * FROM message_document_attachment LIMIT 1".to_owned(),
+    ))
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -5153,6 +4928,7 @@ async fn client_wait_schema_rejects_invalid_scope_claim_and_lifecycle() {
         execution: ToolCallExecution::Client,
         status: ToolCallStatus::Pending,
         result: None,
+        result_preview: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,
@@ -7849,7 +7625,6 @@ async fn document_chat_scope_is_isolated_and_mutually_exclusive_with_project_sco
     ] {
         store
             .upsert_document(&DocumentUpsert {
-                canonical_fingerprint: None,
                 id,
                 chat_id: Some(chat_id),
                 project_id: None,
@@ -7857,7 +7632,6 @@ async fn document_chat_scope_is_isolated_and_mutually_exclusive_with_project_sco
                 media_type: "text/plain".into(),
                 title: None,
                 canonical_text: text.into(),
-                source_regions: Vec::new(),
                 updated_at: Utc::now(),
             })
             .await
@@ -7880,7 +7654,6 @@ async fn document_chat_scope_is_isolated_and_mutually_exclusive_with_project_sco
 
     let error = store
         .upsert_document(&DocumentUpsert {
-            canonical_fingerprint: None,
             id: DocumentId::new(),
             chat_id: Some(first_chat.id),
             project_id: Some(project.id),
@@ -7888,7 +7661,6 @@ async fn document_chat_scope_is_isolated_and_mutually_exclusive_with_project_sco
             media_type: "text/plain".into(),
             title: None,
             canonical_text: "invalid double scope".into(),
-            source_regions: Vec::new(),
             updated_at: Utc::now(),
         })
         .await
@@ -8309,6 +8081,7 @@ async fn server_tool_call_lifecycle_is_atomic_and_idempotent() {
         execution: ToolCallExecution::Server,
         status: ToolCallStatus::Pending,
         result: None,
+        result_preview: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,
@@ -8417,6 +8190,7 @@ async fn claimed_tool_results_are_co_committed_with_the_turn_lease() {
         execution: ToolCallExecution::Server,
         status: ToolCallStatus::Pending,
         result: None,
+        result_preview: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,
@@ -8662,6 +8436,7 @@ async fn claimed_sensitive_call_with(
         execution: ToolCallExecution::Server,
         status: ToolCallStatus::Pending,
         result: None,
+        result_preview: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,
@@ -9406,6 +9181,7 @@ async fn client_tool_call_is_fenced_by_its_exact_lease() {
         execution: ToolCallExecution::Client,
         status: ToolCallStatus::Pending,
         result: None,
+        result_preview: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,
@@ -9670,6 +9446,7 @@ async fn expired_client_lease_is_not_transferred_implicitly() {
         execution: ToolCallExecution::Client,
         status: ToolCallStatus::Pending,
         result: None,
+        result_preview: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,
@@ -9801,6 +9578,7 @@ async fn concurrent_client_claim_has_one_sqlite_winner() {
         execution: ToolCallExecution::Client,
         status: ToolCallStatus::Pending,
         result: None,
+        result_preview: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,
