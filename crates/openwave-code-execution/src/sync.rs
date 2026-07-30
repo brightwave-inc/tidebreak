@@ -13,8 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tokio::io::AsyncWriteExt;
-
+use crate::host_paths::{resolve_scratch_directory, write_without_following};
 use crate::{
     CodeExecutionError, ExecutionWorkspaceId, WorkspaceFilePath, WorkspaceLifecycle,
     MAX_WORKSPACE_FILE_BYTES,
@@ -244,60 +243,15 @@ pub async fn pull_into_host_dir(
 /// Local exec is confined to this same scratch tree, so it can plant
 /// `<scratch>/out -> ~/.ssh` and wait for a pull: `create_dir_all` and a plain
 /// `write` both follow a symlinked *parent*, and the pull's host write is not
-/// sandboxed. So each intermediate component is checked before it is walked or
-/// created, and the canonical parent must still sit inside `host_root`.
-/// `None` means the path resolved outside the scratch directory, or the
-/// directories could not be made.
+/// sandboxed. `None` means the path resolved outside the scratch directory, or
+/// the directories could not be made.
 async fn host_file_path(host_root: &Path, path: &WorkspaceFilePath) -> Option<PathBuf> {
-    let mut dir = host_root.to_path_buf();
-    let mut components = path.as_str().split('/').peekable();
-    while let Some(component) = components.next() {
-        if components.peek().is_none() {
-            break;
-        }
-        dir.push(component);
-        match tokio::fs::symlink_metadata(&dir).await {
-            Ok(metadata) if metadata.is_dir() => {}
-            Ok(_) => return None,
-            Err(_) => tokio::fs::create_dir(&dir).await.ok()?,
-        }
-    }
-    let parent = tokio::fs::canonicalize(&dir).await.ok()?;
-    if !parent.starts_with(host_root) {
-        return None;
-    }
-    Some(parent.join(path.file_name()))
-}
-
-/// Write `content` at `host_path` without following a symlink at the final
-/// component either: the bytes go to an unpredictable temp name opened with an
-/// exclusive no-follow create, then a rename puts them in place. This is the
-/// same shape the workspace-put path in `local.rs` uses.
-async fn write_without_following(host_path: &Path, content: &[u8]) -> std::io::Result<()> {
-    let parent = host_path
-        .parent()
-        .ok_or_else(|| std::io::Error::other("host path has no parent"))?;
-    let temporary = parent.join(format!(".workspace-pull.{}", uuid::Uuid::new_v4()));
-    let mut options = tokio::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        options.mode(0o600);
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    let mut file = options.open(&temporary).await?;
-    let write = async {
-        file.write_all(content).await?;
-        file.sync_all().await?;
-        tokio::fs::rename(&temporary, host_path).await
-    };
-    match write.await {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let _ = tokio::fs::remove_file(&temporary).await;
-            Err(error)
-        }
-    }
+    let parent = path
+        .as_str()
+        .rsplit_once('/')
+        .map_or("", |(parent, _)| parent);
+    let dir = resolve_scratch_directory(host_root, parent, true).await?;
+    Some(dir.join(path.file_name()))
 }
 
 fn unreadable(path: &str) -> CodeExecutionError {

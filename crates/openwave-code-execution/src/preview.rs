@@ -33,6 +33,25 @@ struct Candidate {
 /// are named in a compact note so the model can repair the preview and rerun.
 pub fn scan_preview_directory(preview_dir: &Path) -> PreviewScan {
     let mut scan = PreviewScan::default();
+    // Skipping symlinked *entries* below is not enough on its own: the
+    // directory itself is opened by path, and local exec is confined to the
+    // scratch tree but can plant `<scratch>/preview -> ~/Pictures` there. The
+    // traversal has already happened by the time entries are filtered, so
+    // images from an arbitrary host directory would be attached to the chat.
+    match fs::symlink_metadata(preview_dir) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => {
+            scan.notes
+                .push("preview images unavailable: preview/ is not a private workspace directory. Remove it and rerun.".into());
+            return scan;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return scan,
+        Err(_) => {
+            scan.notes
+                .push("preview images unavailable: preview/ could not be read".into());
+            return scan;
+        }
+    }
     let entries = match fs::read_dir(preview_dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return scan,
@@ -197,6 +216,25 @@ mod tests {
         assert_eq!(scan.images[0].0.height, 1_000);
         assert!(scan.notes[0].contains("page-2.png"));
         assert!(scan.notes[0].contains("z.png"));
+    }
+
+    /// A preview directory replaced by a symlink would otherwise hand host
+    /// images from an arbitrary directory to the model: skipping symlinked
+    /// entries does not help once the traversal itself has happened.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_preview_directory_is_refused_rather_than_followed() {
+        let elsewhere = tempfile::tempdir().unwrap();
+        write_png(elsewhere.path(), "private.png", 16, 16);
+        let scratch = tempfile::tempdir().unwrap();
+        let preview = scratch.path().join("preview");
+        std::os::unix::fs::symlink(elsewhere.path(), &preview).unwrap();
+
+        let scan = scan_preview_directory(&preview);
+
+        assert!(scan.images.is_empty());
+        assert_eq!(scan.notes.len(), 1);
+        assert!(scan.notes[0].contains("not a private workspace directory"));
     }
 
     #[test]

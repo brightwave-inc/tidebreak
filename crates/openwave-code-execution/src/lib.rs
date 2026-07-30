@@ -13,6 +13,7 @@
 mod credential;
 mod daytona;
 mod e2b;
+pub mod host_paths;
 mod http;
 mod local;
 mod output;
@@ -25,6 +26,7 @@ mod types;
 
 pub use daytona::{DaytonaCredential, DaytonaExecutionProvider, DAYTONA_CREDENTIAL_KEY};
 pub use e2b::{E2BCredential, E2BExecutionProvider, E2B_CREDENTIAL_KEY};
+pub use host_paths::{resolve_scratch_directory, write_without_following};
 pub use local::LocalExecutionProvider;
 pub use preview::{scan_preview_directory, PreviewScan};
 pub use remote::RemoteSessionPool;

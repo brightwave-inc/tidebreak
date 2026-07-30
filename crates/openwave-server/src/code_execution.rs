@@ -13,12 +13,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use openwave_code_execution::{
-    sync, CodeExecutionError, CodeExecutionProvider, CodeExecutionProviderKind,
-    CodeExecutionRequest, CodeExecutionResponse, DaytonaCredential, DaytonaExecutionProvider,
-    E2BCredential, E2BExecutionProvider, ExecFolderAccess, ExecFolderGrant, ExecutionWorkspaceId,
-    LocalExecutionProvider, PreviewScan, RemoteSessionPool, WorkspaceFilePath, WorkspaceLifecycle,
-    WorkspaceListing, DAYTONA_CREDENTIAL_KEY, DOCUMENT_SCRIPTS_DIR, DOCUMENT_SCRIPT_FILES,
-    E2B_CREDENTIAL_KEY,
+    resolve_scratch_directory, sync, write_without_following, CodeExecutionError,
+    CodeExecutionProvider, CodeExecutionProviderKind, CodeExecutionRequest, CodeExecutionResponse,
+    DaytonaCredential, DaytonaExecutionProvider, E2BCredential, E2BExecutionProvider,
+    ExecFolderAccess, ExecFolderGrant, ExecutionWorkspaceId, LocalExecutionProvider, PreviewScan,
+    RemoteSessionPool, WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing,
+    DAYTONA_CREDENTIAL_KEY, DOCUMENT_SCRIPTS_DIR, DOCUMENT_SCRIPT_FILES, E2B_CREDENTIAL_KEY,
 };
 use openwave_core::{
     exec_attachment_file_name, BlobStore, Chat, ChatId, HostRootId, MessageDocumentAttachment,
@@ -985,24 +985,31 @@ async fn prepare_execution_directories(
     mirrored: bool,
     document_scripts_source: Option<&std::path::Path>,
 ) -> std::result::Result<(), CodeExecutionError> {
+    // The scratch directory itself is host-owned and named after the chat, but
+    // everything inside it is writable by local exec, which can plant
+    // `<scratch>/output -> /any/dir` between two runs. `create_dir_all` and a
+    // plain `write` both follow a symlinked parent, so each conventional
+    // directory is resolved a component at a time and the marker is written
+    // without following a link at the final component either.
+    tokio::fs::create_dir_all(host_dir).await.map_err(|_| {
+        CodeExecutionError::Sandbox("the private workspace directory is unavailable".into())
+    })?;
     for name in ["output", "preview", "documents"] {
-        let directory = host_dir.join(name);
-        tokio::fs::create_dir_all(&directory).await.map_err(|_| {
+        let unavailable = || {
             CodeExecutionError::Sandbox(format!(
                 "private workspace directory '{name}/' is unavailable"
             ))
-        })?;
+        };
+        let directory = resolve_scratch_directory(host_dir, name, true)
+            .await
+            .ok_or_else(unavailable)?;
         if mirrored {
             // The sync protocol mirrors files rather than empty directories.
             // A hidden zero-byte marker makes the conventional directories
             // exist in managed workspaces without becoming a user artifact.
-            tokio::fs::write(directory.join(".openwave-directory"), [])
+            write_without_following(&directory.join(".openwave-directory"), &[])
                 .await
-                .map_err(|_| {
-                    CodeExecutionError::Sandbox(format!(
-                        "private workspace directory '{name}/' is unavailable"
-                    ))
-                })?;
+                .map_err(|_| unavailable())?;
         }
     }
     if let Some(source) = document_scripts_source {
@@ -1015,10 +1022,14 @@ async fn install_document_scripts(
     source: &std::path::Path,
     host_dir: &std::path::Path,
 ) -> std::result::Result<(), CodeExecutionError> {
-    let destination = host_dir.join(DOCUMENT_SCRIPTS_DIR);
-    tokio::fs::create_dir_all(&destination).await.map_err(|_| {
-        CodeExecutionError::Sandbox("document helper directory is unavailable".into())
-    })?;
+    // `.openwave/` sits inside the scratch directory local exec writes to, so
+    // a planted `.openwave -> /elsewhere` would relocate the helper install
+    // and truncate known filenames there. Resolve it a component at a time.
+    let destination = resolve_scratch_directory(host_dir, DOCUMENT_SCRIPTS_DIR, true)
+        .await
+        .ok_or_else(|| {
+            CodeExecutionError::Sandbox("document helper directory is unavailable".into())
+        })?;
     for name in DOCUMENT_SCRIPT_FILES {
         let source_file = source.join(name);
         let metadata = tokio::fs::symlink_metadata(&source_file)
@@ -1043,7 +1054,7 @@ async fn install_document_scripts(
                 "bundled document helper '{name}' exceeds the workspace file limit"
             )));
         }
-        tokio::fs::write(destination.join(name), content)
+        write_without_following(&destination.join(name), &content)
             .await
             .map_err(|_| {
                 CodeExecutionError::Sandbox(format!(
@@ -1384,6 +1395,37 @@ mod tests {
                 format!("helper:{name}")
             );
         }
+    }
+
+    /// Local exec is confined to the scratch directory but can create entries
+    /// in it, including a symlink aimed at the host. Both preparation writes
+    /// run on that directory before the next command, unsandboxed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn preparation_does_not_write_through_a_planted_symlink() {
+        let outside = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        for name in DOCUMENT_SCRIPT_FILES {
+            std::fs::write(source.path().join(name), format!("helper:{name}")).unwrap();
+        }
+        let workspace = tempfile::tempdir().unwrap();
+
+        std::os::unix::fs::symlink(outside.path(), workspace.path().join("output")).unwrap();
+        assert!(
+            prepare_execution_directories(workspace.path(), true, Some(source.path()))
+                .await
+                .is_err()
+        );
+        assert!(!outside.path().join(".openwave-directory").exists());
+
+        std::fs::remove_file(workspace.path().join("output")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), workspace.path().join(".openwave")).unwrap();
+        assert!(
+            prepare_execution_directories(workspace.path(), true, Some(source.path()))
+                .await
+                .is_err()
+        );
+        assert!(!outside.path().join("exec-scripts").exists());
     }
 
     #[test]
