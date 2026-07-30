@@ -14,7 +14,8 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    has_physical_root_alias, root_display_name, BrokerError, MutationRecord, RegisteredRoot, State,
+    has_physical_root_alias, root_display_name, scope_targets_root, BrokerError, MutationRecord,
+    RegisteredRoot, State, UnavailableRoot, UnavailableRootReason,
 };
 use crate::{
     path_policy::RootIdentity, Grant, GrantSubject, OperationId, RootAttachment, RootId,
@@ -119,26 +120,48 @@ impl StateFile {
             .into());
         }
 
+        // One folder that cannot be reopened must not take the others down with
+        // it. Every root the host can still pin is admitted; the rest are set
+        // aside, keeping their grants and attachments, so a broker whose
+        // external drive is unplugged still starts and still serves the folders
+        // that are there.
         let mut roots = HashMap::new();
+        let mut unavailable = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for item in persisted.roots {
-            let validated = policy.open_root(&item.path)?;
-            if validated.identity() != item.identity {
-                return Err(invalid_data("persisted root identity changed").into());
-            }
-            let display_name = root_display_name(validated.canonical_path());
-            if roots
-                .insert(
-                    item.id,
-                    RegisteredRoot {
-                        owner: item.owner,
-                        display_name,
-                        root: Arc::new(validated),
-                    },
-                )
-                .is_some()
-            {
+            if !seen.insert(item.id) {
                 return Err(invalid_data("duplicate persisted root identity").into());
             }
+            match policy.open_root(&item.path) {
+                Ok(validated) if validated.identity() == item.identity => {
+                    let display_name = root_display_name(validated.canonical_path());
+                    roots.insert(
+                        item.id,
+                        RegisteredRoot {
+                            owner: item.owner,
+                            display_name,
+                            root: Arc::new(validated),
+                        },
+                    );
+                }
+                Ok(_) => unavailable.push(set_aside(item, UnavailableRootReason::Replaced)),
+                Err(error) => unavailable.push(set_aside(
+                    item,
+                    UnavailableRootReason::from_policy_error(&error),
+                )),
+            }
+        }
+
+        let mut grants = persisted.grants;
+        let mut attachments = persisted.attachments;
+        for root in &mut unavailable {
+            let root_id = root.id;
+            root.grants = take_matching(&mut grants, |grant| {
+                scope_targets_root(grant.scope(), root_id)
+            });
+            root.attachments = take_matching(&mut attachments, |attachment| {
+                attachment.root_id() == root_id
+            });
         }
 
         let mut mutations = HashMap::new();
@@ -154,10 +177,11 @@ impl StateFile {
         // existing root has to come from a fresh consent instead.
         let state = State {
             roots,
-            grants: persisted.grants,
-            attachments: persisted.attachments,
+            grants,
+            attachments,
             mutations,
             active_mutations: Default::default(),
+            unavailable,
         };
         validate_loaded_state(&state)?;
         Ok(state)
@@ -187,6 +211,15 @@ impl StateFile {
                 identity: root.root.identity(),
             })
             .collect::<Vec<_>>();
+        // Roots that were unavailable at load are written back untouched. This
+        // is what makes the pruning a property of the session rather than a
+        // deletion: the approval is still on disk when the folder returns.
+        roots.extend(state.unavailable.iter().map(|root| PersistedRoot {
+            id: root.id,
+            owner: root.owner,
+            path: root.path.clone(),
+            identity: root.identity,
+        }));
         roots.sort_by_key(|root| root.id.to_string());
         let mut mutations = state
             .mutations
@@ -197,11 +230,25 @@ impl StateFile {
             })
             .collect::<Vec<_>>();
         mutations.sort_by_key(|item| item.operation_id.to_string());
+        let mut grants = state.grants.clone();
+        grants.extend(
+            state
+                .unavailable
+                .iter()
+                .flat_map(|root| root.grants.iter().cloned()),
+        );
+        let mut attachments = state.attachments.clone();
+        attachments.extend(
+            state
+                .unavailable
+                .iter()
+                .flat_map(|root| root.attachments.iter().copied()),
+        );
         let persisted = PersistedState {
             version: STATE_VERSION,
             roots,
-            grants: state.grants.clone(),
-            attachments: state.attachments.clone(),
+            grants,
+            attachments,
             mutations,
         };
         let bytes = serde_json::to_vec_pretty(&persisted).map_err(invalid_data)?;
@@ -358,6 +405,13 @@ pub(super) fn validate_loaded_state(state: &State) -> Result<(), BrokerError> {
                         )
                         .into());
                     }
+                } else if state
+                    .unavailable
+                    .iter()
+                    .any(|root| root.id == result.root.root_id)
+                {
+                    // The registration is intact on disk; only its directory is
+                    // out of reach, so the receipt still describes real state.
                 } else {
                     let was_revoked = state.mutations.values().any(|record| {
                         matches!(
@@ -437,6 +491,32 @@ pub(super) fn validate_loaded_state(state: &State) -> Result<(), BrokerError> {
         }
     }
     Ok(())
+}
+
+fn set_aside(item: PersistedRoot, reason: UnavailableRootReason) -> UnavailableRoot {
+    UnavailableRoot {
+        id: item.id,
+        owner: item.owner,
+        path: item.path,
+        identity: item.identity,
+        reason,
+        grants: Vec::new(),
+        attachments: Vec::new(),
+    }
+}
+
+fn take_matching<T>(items: &mut Vec<T>, mut matches: impl FnMut(&T) -> bool) -> Vec<T> {
+    let mut taken = Vec::new();
+    let mut kept = Vec::with_capacity(items.len());
+    for item in items.drain(..) {
+        if matches(&item) {
+            taken.push(item);
+        } else {
+            kept.push(item);
+        }
+    }
+    *items = kept;
+    taken
 }
 
 fn invalid_data(error: impl std::fmt::Display) -> io::Error {
