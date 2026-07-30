@@ -34,6 +34,7 @@ use openwave_core::{
 
 use crate::error::ServerError;
 use crate::extract::{Path, RawBytes};
+use crate::routes::SERVED_BYTES_CONTENT_POLICY;
 use crate::state::AppState;
 
 /// Body limit for the publish endpoint, matching the durable per-image ceiling
@@ -158,12 +159,35 @@ pub async fn get_chat_image_attachment(
     }
     Response::builder()
         .status(StatusCode::OK)
+        // Named exactly as stored, with no resolution table in between. The
+        // document route needs one because its stored type is whatever the
+        // ingesting caller declared; here the type is an `ImageMediaType`, a
+        // closed enum of four inert raster formats that only a magic-byte
+        // sniff can produce. The allowlist is the type, and it is enforced at
+        // ingest rather than re-derived on every read. Naming it verbatim is
+        // also required by the renderer, which compares the fetched blob's
+        // type against the transcript's record and refuses to draw a
+        // disagreement.
         .header(header::CONTENT_TYPE, image.media_type.as_str())
         .header(header::CONTENT_LENGTH, actual_len.to_string())
         // The bearer is never put in a URL. Do not let the resulting pixels
         // persist in an HTTP cache either; the renderer owns the object URL's
         // short lifetime instead.
         .header(header::CACHE_CONTROL, "no-store")
+        // Defense in depth rather than a live hole: the bytes were sniffed at
+        // ingest, so they really are the format named above and a sniffing
+        // browser would reach the same answer. These say so anyway, because
+        // the guarantee lives in a validation step several layers away and a
+        // future format admitted there should not silently widen what a
+        // browser will do with the response.
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(header::CONTENT_SECURITY_POLICY, SERVED_BYTES_CONTENT_POLICY)
+        .header(header::REFERRER_POLICY, "no-referrer")
+        // `inline` is the honest answer for every format this route can serve,
+        // and it is what keeps the renderer working: the fetch that feeds the
+        // `<img>` ignores the disposition, but a reader who opens the URL
+        // directly should see the image rather than a download.
+        .header(header::CONTENT_DISPOSITION, "inline")
         .body(Body::from(bytes))
         .map_err(|error| {
             ServerError::internal(format!(

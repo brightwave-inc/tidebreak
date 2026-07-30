@@ -17,6 +17,7 @@ use openwave_core::{
 use crate::document_decode::decode_document;
 use crate::error::ServerError;
 use crate::extract::{Json, Path, Query, RawBytes};
+use crate::routes::SERVED_BYTES_CONTENT_POLICY;
 use crate::state::AppState;
 use crate::MAX_RAW_DOCUMENT_BYTES;
 
@@ -764,16 +765,6 @@ pub async fn get_chat_document_file_content(
     serve_document_file_content(&state, document_id, Some(chat_id), None, method, &headers).await
 }
 
-/// The policy every original-bytes response carries.
-///
-/// The route serves reader-supplied bytes from the API's own origin, so a
-/// response that a browser ever renders must be unable to reach back into that
-/// origin. `sandbox` drops the response into an opaque origin with scripting
-/// off, and `default-src 'none'` denies it every subresource and every
-/// outbound request.
-const DOCUMENT_CONTENT_POLICY: &str =
-    "default-src 'none'; sandbox; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
-
 /// How one response names and offers a document's original bytes.
 struct ServedMediaType {
     content_type: &'static str,
@@ -954,7 +945,7 @@ async fn serve_document_file_content(
         .header(header::CONTENT_TYPE, served.content_type)
         .header(header::CONTENT_DISPOSITION, served.disposition)
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
-        .header(header::CONTENT_SECURITY_POLICY, DOCUMENT_CONTENT_POLICY)
+        .header(header::CONTENT_SECURITY_POLICY, SERVED_BYTES_CONTENT_POLICY)
         .header(header::REFERRER_POLICY, "no-referrer")
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_LENGTH, body_len.to_string());
