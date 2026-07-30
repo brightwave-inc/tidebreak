@@ -1527,12 +1527,12 @@ async fn test_app_with_scanner_resolution_race(
 
 /// Shrink the retry backoff so failure-injection tests observe the next
 /// attempt without waiting out the production schedule.
-fn fast_retry_schedule() -> turn_worker::RetrySchedule {
-    turn_worker::RetrySchedule {
-        initial: Duration::from_millis(10),
-        max_delay: Duration::from_millis(50),
-        ..turn_worker::RetrySchedule::default()
-    }
+fn fast_retry_schedule() -> crate::retry::RetrySchedule {
+    crate::retry::RetrySchedule::new(
+        Duration::from_millis(10),
+        Duration::from_millis(50),
+        Duration::from_secs(600),
+    )
 }
 
 fn spawn_turn_worker(state: &AppState) {

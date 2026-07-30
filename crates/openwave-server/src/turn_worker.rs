@@ -11,7 +11,7 @@ use cap_std::ambient_authority;
 use cap_std::fs::{Dir, DirBuilder};
 #[cfg(unix)]
 use cap_std::fs::{DirBuilderExt as CapDirBuilderExt, PermissionsExt as CapPermissionsExt};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use futures::channel::mpsc::{unbounded, UnboundedReceiver};
 use futures::StreamExt;
 use openwave_core::{
@@ -30,6 +30,7 @@ use crate::bus::EventBus;
 use crate::chat_titling::ChatTitler;
 use crate::mcp_config::McpRuntime;
 use crate::resolver::ProviderResolver;
+use crate::retry::{RetryAttempt, RetrySchedule};
 use crate::state::TurnGuard;
 
 #[derive(Debug, Clone, Copy)]
@@ -53,108 +54,17 @@ impl Default for TurnWorkerConfig {
             idle_min: Duration::from_millis(250),
             idle_cap: Duration::from_secs(5),
             failure_delay: Duration::from_secs(1),
-            retry: RetrySchedule::default(),
+            // A user is watching this turn: start retrying in well under a
+            // second, and give up after ten minutes rather than hold a chat
+            // open longer than anyone waits.
+            retry: RetrySchedule::new(
+                Duration::from_millis(250),
+                Duration::from_secs(100),
+                Duration::from_secs(600),
+            ),
             max_concurrency: 4,
         }
     }
-}
-
-/// When a retryably failed turn becomes claimable again.
-///
-/// The schedule is bounded by wall clock, not by attempt count: each attempt
-/// waits twice as long as the last, and no attempt is scheduled past
-/// `envelope` measured from the turn's first claim. A turn that cannot be
-/// retried inside the envelope fails now with the provider's own error rather
-/// than being parked for longer than anyone is waiting.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct RetrySchedule {
-    /// Wait before the first retry, doubled for each attempt after it.
-    pub(crate) initial: Duration,
-    /// Ceiling on any single computed wait.
-    pub(crate) max_delay: Duration,
-    /// Wall-clock budget from the turn's first claim to its last retry.
-    pub(crate) envelope: Duration,
-}
-
-impl Default for RetrySchedule {
-    fn default() -> Self {
-        Self {
-            initial: Duration::from_millis(250),
-            max_delay: Duration::from_secs(100),
-            envelope: Duration::from_secs(600),
-        }
-    }
-}
-
-impl RetrySchedule {
-    /// Decide when a retryable failure may be attempted again, or `None` when
-    /// waiting can no longer help and the failure should be made permanent.
-    ///
-    /// `hint` is the provider's `Retry-After`. It wins over the computed
-    /// backoff whenever it is longer, because retrying before a rate limit
-    /// clears spends an attempt on a request that is already refused — the
-    /// exact way the fixed one-second delay used to burn a turn's whole
-    /// budget in a few seconds. It is floored at `initial` so a `Retry-After:
-    /// 0` cannot produce a hot loop.
-    ///
-    /// A hint longer than the remaining envelope is refused outright instead
-    /// of being honored: parking the turn for it would consume an attempt that
-    /// the deadline will never let run.
-    fn next_attempt_at(
-        self,
-        turn: &TurnRun,
-        hint: Option<Duration>,
-        now: DateTime<Utc>,
-    ) -> Option<DateTime<Utc>> {
-        if turn.attempt_count >= turn.max_attempts {
-            return None;
-        }
-        let deadline = turn.started_at.unwrap_or(turn.created_at)
-            + chrono::Duration::from_std(self.envelope).ok()?;
-        if now >= deadline {
-            return None;
-        }
-        let backoff = self.backoff(turn.attempt_count);
-        let delay = match hint {
-            Some(hint) => hint.max(self.initial),
-            None => jitter(backoff, turn.id, turn.attempt_count),
-        };
-        let at = now + chrono::Duration::from_std(delay).ok()?;
-        (at <= deadline).then_some(at)
-    }
-
-    /// Exponential wait for the attempt that just failed, capped at
-    /// `max_delay`. Attempt one waits `initial`.
-    fn backoff(self, attempt_count: i32) -> Duration {
-        let doublings = u32::try_from(attempt_count.saturating_sub(1)).unwrap_or(0);
-        self.initial
-            .checked_mul(1_u32.checked_shl(doublings.min(31)).unwrap_or(u32::MAX))
-            .unwrap_or(self.max_delay)
-            .min(self.max_delay)
-    }
-}
-
-/// Spread a computed wait over `[delay / 2, delay]`.
-///
-/// Turns that failed together — the common case, since they failed against the
-/// same provider — must not retry together. The offset is derived from the
-/// turn's own identity rather than a random source so a given turn's schedule
-/// is reproducible in a debugger and in tests.
-fn jitter(delay: Duration, turn_id: TurnId, attempt_count: i32) -> Duration {
-    let seed = u64::from_le_bytes(
-        turn_id.as_uuid().as_bytes()[..8]
-            .try_into()
-            .unwrap_or([0; 8]),
-    )
-    .wrapping_add(u64::from(attempt_count.unsigned_abs()));
-    // splitmix64 finalizer: the raw UUID bytes are not uniformly spread across
-    // the low bits we sample.
-    let mut mixed = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    mixed ^= mixed >> 31;
-    let half = delay / 2;
-    half + half.mul_f64(((mixed >> 11) as f64) / ((1_u64 << 53) as f64))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2294,7 +2204,7 @@ impl TurnWorker {
             .then(|| {
                 self.config
                     .retry
-                    .next_attempt_at(turn, retry_after, Utc::now())
+                    .next_attempt_at(retry_attempt(turn), retry_after, Utc::now())
             })
             .flatten()
             .map_or(TurnFailureRetry::Permanent, TurnFailureRetry::RetryAt);
@@ -2492,6 +2402,16 @@ fn checked_model_step_sum(total: i32, delta: usize) -> Result<i32> {
         .ok_or_else(|| AgentError::msg("model-step total exceeds the durable range"))
 }
 
+/// The turn's retry state, with its envelope measured from the first claim.
+fn retry_attempt(turn: &TurnRun) -> RetryAttempt {
+    RetryAttempt {
+        id: *turn.id.as_uuid(),
+        attempt_count: turn.attempt_count,
+        max_attempts: turn.max_attempts,
+        first_attempt_at: turn.started_at.unwrap_or(turn.created_at),
+    }
+}
+
 fn chrono_duration(duration: Duration) -> Result<chrono::Duration> {
     chrono::Duration::from_std(duration)
         .map_err(|error| AgentError::msg(format!("invalid turn-worker duration: {error}")))
@@ -2502,85 +2422,6 @@ fn log_turn_result(result: std::result::Result<Result<TurnWorkerOutcome>, tokio:
         Ok(Ok(_)) => {}
         Ok(Err(error)) => eprintln!("openwave: turn worker execution failed: {error}"),
         Err(error) => eprintln!("openwave: turn worker task stopped: {error}"),
-    }
-}
-
-#[cfg(test)]
-mod retry_schedule_tests {
-    use super::*;
-
-    fn failed_turn(attempt_count: i32, started_at: DateTime<Utc>) -> TurnRun {
-        TurnRun {
-            id: TurnId::new(),
-            chat_id: openwave_core::ChatId::new(),
-            agent_run_id: openwave_core::AgentRunId::new(),
-            input_message_id: MessageId::new(),
-            output_message_id: None,
-            model: "test-model".into(),
-            status: TurnRunStatus::Running,
-            attempt_count,
-            max_attempts: 4,
-            claim_count: attempt_count,
-            model_steps: 0,
-            usage: openwave_core::Usage::default(),
-            available_at: started_at,
-            lease_token: None,
-            lease_expires_at: None,
-            started_at: Some(started_at),
-            finished_at: None,
-            last_error_code: None,
-            last_error_detail: None,
-            steer_revision: 0,
-            last_steer_applied_at: None,
-            created_at: started_at,
-            updated_at: started_at,
-        }
-    }
-
-    /// The scheduling contract a rate-limited turn depends on: waits grow, the
-    /// provider's own `Retry-After` beats a guess that is far too short, and
-    /// neither the attempt budget nor a long hint can schedule work the
-    /// wall-clock envelope will never let run.
-    #[test]
-    fn retry_waits_grow_and_defer_to_the_provider_inside_the_envelope() {
-        let schedule = RetrySchedule::default();
-        let start = Utc::now();
-
-        // Exponential, jittered into the top half of each computed wait.
-        for (attempt, base) in [(1, 250), (2, 500), (3, 1_000)] {
-            let turn = failed_turn(attempt, start);
-            let at = schedule
-                .next_attempt_at(&turn, None, start)
-                .expect("a fresh turn retries");
-            let waited = (at - start).num_milliseconds();
-            assert!(
-                (base / 2..=base).contains(&waited),
-                "attempt {attempt} waited {waited}ms, expected {}..={base}ms",
-                base / 2
-            );
-        }
-
-        // A 60-second rate-limit hint replaces the sub-second guess that used
-        // to spend the whole budget before the limit cleared.
-        let turn = failed_turn(1, start);
-        let hinted = schedule
-            .next_attempt_at(&turn, Some(Duration::from_secs(60)), start)
-            .expect("a hint inside the envelope is honored");
-        assert_eq!((hinted - start).num_seconds(), 60);
-
-        // A hint reaching past the envelope is refused outright rather than
-        // spending an attempt on work the deadline will cancel.
-        assert!(schedule
-            .next_attempt_at(&turn, Some(Duration::from_secs(900)), start)
-            .is_none());
-
-        // So is any retry once the envelope has elapsed, or once the durable
-        // attempt budget is spent.
-        let late = start + chrono::Duration::seconds(601);
-        assert!(schedule.next_attempt_at(&turn, None, late).is_none());
-        assert!(schedule
-            .next_attempt_at(&failed_turn(4, start), None, start)
-            .is_none());
     }
 }
 

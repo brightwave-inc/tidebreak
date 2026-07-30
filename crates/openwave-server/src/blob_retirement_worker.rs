@@ -9,14 +9,14 @@ use openwave_core::{AgentError, BlobRetirement, BlobRetirementStatus, BlobStore,
 use tokio::sync::Notify;
 use uuid::Uuid;
 
+use crate::retry::{RetryAttempt, RetrySchedule};
 use crate::state::BlobWriteGuard;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BlobRetirementWorkerConfig {
     lease: Duration,
     heartbeat: Duration,
-    retry_base: Duration,
-    retry_cap: Duration,
+    retry: RetrySchedule,
     idle_min: Duration,
     idle_cap: Duration,
     failure_delay: Duration,
@@ -27,8 +27,18 @@ impl Default for BlobRetirementWorkerConfig {
         Self {
             lease: Duration::from_secs(60),
             heartbeat: Duration::from_secs(15),
-            retry_base: Duration::from_secs(5),
-            retry_cap: Duration::from_secs(5 * 60),
+            // Retiring a blob is background housekeeping with nobody waiting
+            // on it, and its failures are slow ones: a file still held open, a
+            // volume that is busy or briefly unmounted. Retrying in seconds
+            // buys nothing, so the first wait is a minute, later waits reach
+            // half an hour, and the sweep may keep trying for a day before the
+            // cost of giving up — one blob left on disk until the orphan
+            // auditor sees it — is worth paying.
+            retry: RetrySchedule::new(
+                Duration::from_secs(60),
+                Duration::from_secs(30 * 60),
+                Duration::from_secs(24 * 60 * 60),
+            ),
             idle_min: Duration::from_millis(250),
             idle_cap: Duration::from_secs(5),
             failure_delay: Duration::from_secs(1),
@@ -264,11 +274,16 @@ impl BlobRetirementWorker {
         detail: &str,
     ) -> Result<BlobRetirementWorkerOutcome> {
         let failed_at = Utc::now();
-        let retry_at = if retirement.attempt_count < retirement.max_attempts {
-            Some(failed_at + chrono_duration(self.retry_delay(retirement))?)
-        } else {
-            None
-        };
+        let retry_at = self.config.retry.next_attempt_at(
+            RetryAttempt {
+                id: retirement.blob_id,
+                attempt_count: retirement.attempt_count,
+                max_attempts: retirement.max_attempts,
+                first_attempt_at: retirement.started_at.unwrap_or(retirement.created_at),
+            },
+            None,
+            failed_at,
+        );
         let detail = truncate_detail(detail);
         let status = self
             .store
@@ -290,14 +305,6 @@ impl BlobRetirementWorker {
             }
             Some(_) | None => BlobRetirementWorkerOutcome::LeaseLost(retirement.blob_id),
         })
-    }
-
-    fn retry_delay(&self, retirement: &BlobRetirement) -> Duration {
-        let exponent = retirement.attempt_count.saturating_sub(1).clamp(0, 20) as u32;
-        self.config
-            .retry_base
-            .saturating_mul(2_u32.saturating_pow(exponent))
-            .min(self.config.retry_cap)
     }
 }
 
@@ -329,8 +336,11 @@ mod tests {
         BlobRetirementWorkerConfig {
             lease: Duration::from_millis(500),
             heartbeat: Duration::from_millis(25),
-            retry_base: Duration::from_millis(5),
-            retry_cap: Duration::from_millis(20),
+            retry: RetrySchedule::new(
+                Duration::from_millis(5),
+                Duration::from_millis(20),
+                Duration::from_secs(60),
+            ),
             idle_min: Duration::from_millis(1),
             idle_cap: Duration::from_millis(5),
             failure_delay: Duration::from_millis(1),
