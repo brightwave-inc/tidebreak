@@ -243,19 +243,23 @@ export function reduceChatSessionEvent(
         state: {
           ...state,
           provisionalToolCallIds,
-          messages: upsertPendingApprovalCard(state.messages, {
-            callId: event.call_id,
-            action: event.action,
-            approval: event.approval,
-            // Validated here rather than trusted: the socket frame is the one
-            // place a preview arrives without having gone through the HTTP
-            // recovery parser.
-            preview: parseToolActionPreview(event.preview),
-            canApprove: approval.canApprove,
-            canRemember: approval.canRemember,
-            autoJudging: event.auto_judging,
-            prefixRungs: event.prefix_rungs,
-          }),
+          messages: upsertPendingApprovalCard(
+            state.messages,
+            {
+              callId: event.call_id,
+              action: event.action,
+              approval: event.approval,
+              // Validated here rather than trusted: the socket frame is the one
+              // place a preview arrives without having gone through the HTTP
+              // recovery parser.
+              preview: parseToolActionPreview(event.preview),
+              canApprove: approval.canApprove,
+              canRemember: event.grant_rungs.length > 0,
+              autoJudging: event.auto_judging,
+              grantRungs: event.grant_rungs,
+            },
+            true,
+          ),
         },
         effects,
       };

@@ -28,8 +28,8 @@ type ApprovalCardProps = {
   canRemember: boolean;
   /** How far a remembered answer will reach, for the option labels. */
   grantScope?: GrantScopeName;
-  /** Token counts of the prefix rungs the server will honor for this call. */
-  prefixRungs?: readonly number[];
+  /** Complete standing-grant ladder the server will honor for this call. */
+  grantRungs?: readonly ApprovalGrantRung[];
   /** The Auto-mode judge is deciding. Advisory only: the card stays live. */
   autoJudging?: boolean;
   deciding: boolean;
@@ -60,7 +60,7 @@ export function ApprovalCard({
   canApprove,
   canRemember,
   grantScope = "chat",
-  prefixRungs = [],
+  grantRungs = [],
   autoJudging,
   deciding,
   error,
@@ -73,7 +73,7 @@ export function ApprovalCard({
     canRemember,
     expanded,
     grantScope,
-    prefixRungs,
+    grantRungs,
   );
   const [highlight, setHighlight] = useState(0);
   const rowRefs = useRef<Array<HTMLDivElement | null>>([]);
@@ -271,7 +271,7 @@ export function approvalOptions(
   canRemember: boolean,
   expanded = false,
   scope: GrantScopeName = "chat",
-  prefixRungs: readonly number[] = [],
+  grantRungs: readonly ApprovalGrantRung[] = [],
 ): ApprovalOption[] {
   if (!canApprove) return [declineOption()];
 
@@ -288,7 +288,7 @@ export function approvalOptions(
     },
   ];
 
-  const grants = canRemember ? grantLadder(preview, scope, prefixRungs) : [];
+  const grants = canRemember ? grantLadder(preview, scope, grantRungs) : [];
   const visible = expanded ? grants : grants.slice(0, INLINE_GRANTS);
   options.push(...visible);
   if (grants.length > visible.length) {
@@ -319,48 +319,54 @@ function declineOption(): ApprovalOption {
 export function grantLadder(
   preview: ToolActionPreview | null,
   scope: GrantScopeName = "chat",
-  prefixRungs: readonly number[] = [],
+  grantRungs: readonly ApprovalGrantRung[] = [],
 ): ApprovalOption[] {
   // The label names the level the server will actually write. A chat filed
   // under a project grants across it, and saying "this chat" while writing
   // something wider is the one thing a consent label must never do.
   const where = scope === "project" ? "in this project" : "in this chat";
-  const wholeTool: ApprovalOption = {
-    kind: "decide",
-    key: "whole-tool",
-    label:
-      preview?.tool === "exec"
-        ? `Yes, and don't ask again about commands ${where}`
-        : `Yes, and don't ask again ${where}`,
-    decision: "approve",
-    grant: "whole_tool",
-  };
-  if (!preview) return [wholeTool];
-
-  const exact: ApprovalOption = {
-    kind: "decide",
-    key: "exact",
-    label: `Yes, and always allow exactly \u201c${spokenAction(preview)}\u201d`,
-    decision: "approve",
-    grant: "exact_action",
-  };
-  if (preview.tool !== "exec") {
-    return [exact, wholeTool];
-  }
-  // Which token runs may be granted is the server's answer, not a guess made
-  // here: a command the analyzer would never auto-run under a prefix rule has
-  // none, and offering one anyway would promise something the gate refuses.
-  const argv = [preview.command, ...preview.args];
-  const prefixes: ApprovalOption[] = prefixRungs
-    .filter((tokens) => tokens > 0 && tokens <= argv.length)
-    .map((tokens) => ({
-      kind: "decide",
-      key: `prefix-${tokens}`,
-      label: `Yes, and always allow any \u201c${argv.slice(0, tokens).join(" ")}\u201d command`,
-      decision: "approve",
-      grant: { command_prefix: { tokens } },
-    }));
-  return [exact, ...prefixes, wholeTool];
+  return grantRungs.flatMap((grant): ApprovalOption[] => {
+    if (grant === "whole_tool") {
+      return [
+        {
+          kind: "decide",
+          key: "whole-tool",
+          label:
+            preview?.tool === "exec"
+              ? `Yes, and don't ask again about commands ${where}`
+              : `Yes, and don't ask again ${where}`,
+          decision: "approve",
+          grant,
+        },
+      ];
+    }
+    if (grant === "exact_action") {
+      return preview
+        ? [
+            {
+              kind: "decide",
+              key: "exact",
+              label: `Yes, and always allow exactly \u201c${spokenAction(preview)}\u201d`,
+              decision: "approve",
+              grant,
+            },
+          ]
+        : [];
+    }
+    if (preview?.tool !== "exec") return [];
+    const argv = [preview.command, ...preview.args];
+    const tokens = grant.command_prefix.tokens;
+    if (tokens < 1 || tokens > argv.length) return [];
+    return [
+      {
+        kind: "decide",
+        key: `prefix-${tokens}`,
+        label: `Yes, and always allow any \u201c${argv.slice(0, tokens).join(" ")}\u201d command`,
+        decision: "approve",
+        grant,
+      },
+    ];
+  });
 }
 
 /** How much of an action fits in one row of the option list. */

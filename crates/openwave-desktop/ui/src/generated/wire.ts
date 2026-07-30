@@ -125,6 +125,15 @@ export type AgentRunTier = "foreground" | "background";
 export type ApprovalClass = "read_only" | "workspace" | "sensitive";
 
 /**
+ * How wide a standing grant the human chose, narrowest first.
+ *
+ * The renderer names a rung; the server builds the concrete grant from the
+ * arguments the call is parked on. A grant can therefore only ever describe
+ * the action that was actually under review.
+ */
+export type ApprovalGrantRung = "exact_action" | { "command_prefix": { tokens: number, } } | "whole_tool";
+
+/**
  * Opaque renderer identity for one assistant-message citation.
  */
 export type AssistantCitationId = string;
@@ -747,15 +756,13 @@ export type PendingApprovalSnapshot = { call_id: CallId, turn_id: TurnId, action
  */
 preview?: ToolActionPreview, can_approve: boolean, can_remember: boolean, 
 /**
- * Token counts of the command-prefix rungs this call may be granted at,
- * narrowest first.
+ * Complete standing-grant ladder for this exact call, narrowest first.
  *
- * Derived server-side, because whether a prefix rung exists at all is a
- * question only the analyzer can answer — a wrapper has none. The
- * renderer slices the action's own tokens to these lengths for the
- * labels rather than deciding for itself what to offer.
+ * Empty means only one-shot approval is available. The renderer receives
+ * the whole ladder because command policy may refuse exact and whole-tool
+ * grants as well as prefixes.
  */
-prefix_rungs: Array<number>, 
+grant_rungs: Array<ApprovalGrantRung>, 
 /**
  * Where the Auto-mode judge stands, when one was engaged. Absent means
  * no judge ever owned this card.
@@ -903,10 +910,10 @@ export type RendererAgentEvent = { "type": "turn_started", turn_id: TurnId, } | 
  */
 auto_judging: boolean, 
 /**
- * Token counts of the command-prefix rungs on offer, narrowest
- * first. Empty when the action has none.
+ * Complete standing-grant ladder for this exact call, narrowest first.
+ * Empty means only one-shot approval is available.
  */
-prefix_rungs: Array<number>, 
+grant_rungs: Array<ApprovalGrantRung>, 
 /**
  * The one deliberate opening in this boundary. A human cannot consent
  * to a command they are not shown, so a tool may project a closed,

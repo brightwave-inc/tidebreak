@@ -266,6 +266,7 @@ describe("pending approval recovery", () => {
     class: "sensitive",
     can_approve: true,
     can_remember: true,
+    grant_rungs: ["whole_tool"],
   };
 
   it("parses only the closed renderer projection", () => {
@@ -278,12 +279,16 @@ describe("pending approval recovery", () => {
       preview: null,
       canApprove: true,
       canRemember: true,
-      prefixRungs: [],
+      grantRungs: ["whole_tool"],
       autoJudgeStatus: null,
     });
     expect(parsePendingToolApproval({ ...safe, arguments: { query: "private" } })).toBeNull();
     expect(parsePendingToolApproval({ ...safe, can_approve: false })).toBeNull();
     expect(parsePendingToolApproval({ ...safe, action: "private_plugin" })).toBeNull();
+    expect(parsePendingToolApproval({ ...safe, grant_rungs: [] })).toBeNull();
+    expect(
+      parsePendingToolApproval({ ...safe, grant_rungs: ["unknown_scope"] }),
+    ).toBeNull();
   });
 
   it("recovers the command an exec approval is granting", () => {
@@ -379,6 +384,7 @@ describe("pending approval recovery", () => {
         action: "other",
         approval: "external_mcp_may_call_server",
         can_remember: false,
+        grant_rungs: [],
       }),
     ).toMatchObject({
       action: "other",
@@ -391,6 +397,7 @@ describe("pending approval recovery", () => {
         ...safe,
         action: "other",
         approval: "external_mcp_may_call_server",
+        grant_rungs: [],
       }),
     ).toBeNull();
   });
@@ -403,6 +410,7 @@ describe("pending approval recovery", () => {
         approval: "unsupported",
         can_approve: false,
         can_remember: false,
+        grant_rungs: [],
       }),
     ).toMatchObject({ action: "wait_for_agents", canApprove: false });
     expect(
@@ -412,6 +420,7 @@ describe("pending approval recovery", () => {
         approval: "unsupported",
         can_approve: false,
         can_remember: false,
+        grant_rungs: [],
       }),
     ).toBeNull();
   });
@@ -424,6 +433,7 @@ describe("pending approval recovery", () => {
         approval: "unsupported",
         can_approve: false,
         can_remember: false,
+        grant_rungs: [],
       }),
     ).toMatchObject({ action: "read_delegated_file", canApprove: false });
     expect(
@@ -433,6 +443,7 @@ describe("pending approval recovery", () => {
         approval: "unsupported",
         can_approve: false,
         can_remember: false,
+        grant_rungs: [],
       }),
     ).toBeNull();
   });
