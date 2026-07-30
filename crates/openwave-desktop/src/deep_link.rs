@@ -241,13 +241,23 @@ fn refusal_message(origin: &str, failure: &PairingError) -> String {
 /// native dialog at all — the sign-in gate is the surface — so a refusal
 /// that reached only the log would read as the app silently ignoring the
 /// link the user just clicked. No retry affordance, no loop: the dialog
-/// closes and the attempt is over.
+/// closes and the attempt is over. At most one refusal dialog is up at a
+/// time — a deep link is an unauthenticated remote trigger, and a page
+/// firing links in a loop must not stack blocking dialogs; the extras get
+/// the log line only.
 fn show_pairing_failure(app: &tauri::AppHandle, origin: &str, failure: &PairingError) {
+    static REFUSAL_SHOWING: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    if REFUSAL_SHOWING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        log_pairing(app, "a refusal dialog is already up; logged only");
+        return;
+    }
     app.dialog()
         .message(refusal_message(origin, failure))
         .title("Pairing refused")
         .kind(MessageDialogKind::Error)
         .blocking_show();
+    REFUSAL_SHOWING.store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
 async fn wait_pairing_handle(app: &tauri::AppHandle) -> Result<PairingHandle, String> {

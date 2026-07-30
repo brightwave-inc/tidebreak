@@ -168,13 +168,19 @@ impl GatewayRuntime {
 
     /// Decline the pending pairing: clear it and invalidate any browser flow
     /// it started. Renderer-reachable, deliberately — declining changes
-    /// nothing durable, so the failure direction is safe.
+    /// nothing durable, so the failure direction is safe. With nothing
+    /// pending it is a strict no-op: the generation must not move, or a
+    /// stray dismiss could abandon a legitimate managed sign-in mid-flight.
     pub(crate) async fn dismiss_pending_pairing(&self) {
         let mut sign_in = self.sign_in.lock().await;
+        let mut pending = self.pending_pairing.lock().await;
+        if pending.is_none() {
+            return;
+        }
         self.sign_in_generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         *sign_in = SignInProgress::Idle;
-        *self.pending_pairing.lock().await = None;
+        *pending = None;
     }
 
     /// The renderer-facing connection status, derived from policy alone: a
