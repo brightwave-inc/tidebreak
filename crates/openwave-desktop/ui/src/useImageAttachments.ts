@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 
 import type { ApiClient } from "./api";
 import { publishChatImage } from "./attachments";
+import { useComposerDrafts } from "./ComposerDrafts";
 import { hasNativeHost } from "./host";
 import {
   imageAttachmentName,
@@ -32,6 +33,75 @@ export type ImageAttachmentControls = {
   clear: () => void;
 };
 
+const NO_IMAGES: ImageAttachment[] = [];
+
+/**
+ * The bytes behind the chips, which no store can hold.
+ *
+ * The attachment list itself lives in the composer draft store, so it survives
+ * the route remount that every chat switch causes. What cannot go there — the
+ * `File` a retry re-reads, the upload to abort, the preview's object URL — is
+ * kept here per conversation, for exactly as long as the draft it belongs to.
+ */
+type ImageBacking = {
+  files: Map<string, File>;
+  aborts: Map<string, AbortController>;
+  previews: Map<string, string>;
+};
+
+const backingByChat = new Map<string, ImageBacking>();
+
+function backingFor(chatId: string): ImageBacking {
+  let backing = backingByChat.get(chatId);
+  if (!backing) {
+    backing = { files: new Map(), aborts: new Map(), previews: new Map() };
+    backingByChat.set(chatId, backing);
+  }
+  return backing;
+}
+
+function forgetBacking(chatId: string, id: string): void {
+  const backing = backingByChat.get(chatId);
+  if (!backing) return;
+  backing.aborts.get(id)?.abort();
+  backing.aborts.delete(id);
+  const preview = backing.previews.get(id);
+  if (preview) URL.revokeObjectURL(preview);
+  backing.previews.delete(id);
+  backing.files.delete(id);
+}
+
+/**
+ * Hand every object URL and in-flight upload for one conversation back. An
+ * object URL outlives the element that rendered it, so it has to be handed
+ * back explicitly — but only when the draft itself is gone. Revoking on
+ * unmount would destroy the very thing the store just kept.
+ */
+function releaseBacking(chatId: string): void {
+  const backing = backingByChat.get(chatId);
+  if (!backing) return;
+  for (const controller of backing.aborts.values()) controller.abort();
+  for (const url of backing.previews.values()) URL.revokeObjectURL(url);
+  backingByChat.delete(chatId);
+}
+
+// A draft entry that disappears entirely — the chat was deleted, its composer
+// cleared from outside the route — takes its backing with it. Removals the
+// hook performs itself are forgotten one id at a time instead.
+useComposerDrafts.subscribe((state, previous) => {
+  for (const chatId of Object.keys(previous.attachments)) {
+    if (!(chatId in state.attachments)) releaseBacking(chatId);
+  }
+});
+
+function setComposerImages(
+  chatId: string,
+  change: (current: readonly ImageAttachment[]) => ImageAttachment[],
+): void {
+  const current = useComposerDrafts.getState().attachments[chatId]?.images ?? [];
+  useComposerDrafts.getState().setImages(chatId, change(current));
+}
+
 /**
  * The images waiting on one conversation's composer.
  *
@@ -42,57 +112,28 @@ export type ImageAttachmentControls = {
  * pixels to preview. Both land in the same list, so removal, retry, and send
  * gating cannot behave differently depending on how the image got here.
  *
- * The `File` behind each upload is kept until the attachment leaves the list.
- * That is what makes retry a retry, rather than an invitation to go and find
- * the file again.
+ * The list is the conversation's composer draft, so switching chats and coming
+ * back finds the strip as it was left — including an upload that finished
+ * while the reader was looking at another chat. The `File` behind each upload
+ * is kept until the attachment leaves the list. That is what makes retry a
+ * retry, rather than an invitation to go and find the file again.
  */
 export function useImageAttachments(
   client: ApiClient,
   chatId: string,
 ): ImageAttachmentControls {
-  const [attachments, setAttachments] = useState<ImageAttachment[]>([]);
+  const attachments = useComposerDrafts(
+    (state) => state.attachments[chatId]?.images ?? NO_IMAGES,
+  );
   const [error, setError] = useState<string | null>(null);
   const attachmentsRef = useRef<ImageAttachment[]>([]);
-  const filesRef = useRef(new Map<string, File>());
-  const abortsRef = useRef(new Map<string, AbortController>());
-  const previewsRef = useRef(new Map<string, string>());
-  const mountedRef = useRef(true);
 
   attachmentsRef.current = attachments;
-
-  // An object URL outlives the element that rendered it, so it has to be handed
-  // back explicitly. Closing a conversation with images attached would otherwise
-  // pin their bytes in memory for the life of the window, and an upload nobody
-  // is waiting for would keep running.
-  useEffect(() => {
-    mountedRef.current = true;
-    const aborts = abortsRef.current;
-    const previews = previewsRef.current;
-    const files = filesRef.current;
-    return () => {
-      mountedRef.current = false;
-      for (const controller of aborts.values()) controller.abort();
-      for (const url of previews.values()) URL.revokeObjectURL(url);
-      aborts.clear();
-      previews.clear();
-      files.clear();
-    };
-  }, [chatId]);
 
   function update(
     change: (current: readonly ImageAttachment[]) => ImageAttachment[],
   ) {
-    if (!mountedRef.current) return;
-    setAttachments((current) => change(current));
-  }
-
-  function forget(id: string) {
-    abortsRef.current.get(id)?.abort();
-    abortsRef.current.delete(id);
-    const preview = previewsRef.current.get(id);
-    if (preview) URL.revokeObjectURL(preview);
-    previewsRef.current.delete(id);
-    filesRef.current.delete(id);
+    setComposerImages(chatId, change);
   }
 
   /**
@@ -122,10 +163,11 @@ export function useImageAttachments(
   }
 
   async function upload(id: string) {
-    const file = filesRef.current.get(id);
+    const backing = backingFor(chatId);
+    const file = backing.files.get(id);
     if (!file) return;
     const controller = new AbortController();
-    abortsRef.current.set(id, controller);
+    backing.aborts.set(id, controller);
     update((current) => withUploadStarted(current, id));
     try {
       const published = await publish(id, file, controller.signal);
@@ -136,7 +178,7 @@ export function useImageAttachments(
       if (err instanceof DOMException && err.name === "AbortError") return;
       update((current) => withUploadFailed(current, id, failureText(err)));
     } finally {
-      abortsRef.current.delete(id);
+      backing.aborts.delete(id);
     }
   }
 
@@ -148,12 +190,13 @@ export function useImageAttachments(
       return;
     }
     setError(null);
+    const backing = backingFor(chatId);
     const now = new Date();
     const queued = files.map((file) => {
       const id = crypto.randomUUID();
-      filesRef.current.set(id, file);
+      backing.files.set(id, file);
       const previewUrl = URL.createObjectURL(file);
-      previewsRef.current.set(id, previewUrl);
+      backing.previews.set(id, previewUrl);
       return queuedImageAttachment(id, {
         name: imageAttachmentName(file, now),
         byteLen: file.size,
@@ -181,7 +224,7 @@ export function useImageAttachments(
     adopt,
     attachFiles,
     remove: (id) => {
-      forget(id);
+      forgetBacking(chatId, id);
       update((current) => withoutAttachment(current, id));
     },
     retry: (id) => {
@@ -189,7 +232,9 @@ export function useImageAttachments(
       void upload(id);
     },
     clear: () => {
-      for (const attachment of attachmentsRef.current) forget(attachment.id);
+      for (const attachment of attachmentsRef.current) {
+        forgetBacking(chatId, attachment.id);
+      }
       update(() => []);
       setError(null);
     },

@@ -3,6 +3,7 @@ import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ApiClient } from "./api";
+import { useComposerDrafts } from "./ComposerDrafts";
 import { useImageAttachments } from "./useImageAttachments";
 
 const ATTACHMENT_ID = "1c2f1a44-2f3b-4a1e-9f0a-2b6d5c4e3a21";
@@ -80,6 +81,10 @@ function png(name = "chart.png"): File {
 }
 
 beforeEach(() => {
+  // The attachments live in the module-level draft store now, so each test
+  // starts it empty rather than inheriting the last test's chips.
+  useComposerDrafts.setState({ drafts: {}, attachments: {} });
+  window.sessionStorage.clear();
   FakeUpload.opened = [];
   hasNativeHost.mockReturnValue(false);
   publishChatImage.mockReset();
@@ -210,6 +215,40 @@ describe("useImageAttachments", () => {
     );
     expect(FakeUpload.opened).toHaveLength(0);
     expect(publishChatImage).toHaveBeenCalledWith("chat-1", expect.any(File));
+  });
+
+  it("keeps the strip across the remount a chat switch causes", async () => {
+    const first = renderHook(() => useImageAttachments(client, "chat-1"));
+
+    act(() => first.result.current.attachFiles([png()]));
+    await waitFor(() => expect(FakeUpload.opened).toHaveLength(1));
+    act(() => FakeUpload.opened[0].finish(201, PUBLISHED));
+    await waitFor(() =>
+      expect(first.result.current.attachments[0].status).toBe("ready"),
+    );
+
+    first.unmount();
+    const second = renderHook(() => useImageAttachments(client, "chat-1"));
+    expect(second.result.current.attachments[0]).toMatchObject({
+      name: "chart.png",
+      status: "ready",
+      attachmentId: ATTACHMENT_ID,
+    });
+
+    // A chat the reader switched away from mid-upload lands ready when they
+    // return, rather than dying with the unmounted route.
+    act(() => second.result.current.attachFiles([png("later.png")]));
+    await waitFor(() => expect(FakeUpload.opened).toHaveLength(2));
+    second.unmount();
+    act(() => FakeUpload.opened[1].finish(201, PUBLISHED));
+
+    const third = renderHook(() => useImageAttachments(client, "chat-1"));
+    await waitFor(() =>
+      expect(third.result.current.attachments[1]).toMatchObject({
+        name: "later.png",
+        status: "ready",
+      }),
+    );
   });
 
   it("forgets everything once a turn has carried it", async () => {

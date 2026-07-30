@@ -14,7 +14,11 @@ import { ChatHeaderTitle } from "./ChatHeaderTitle";
 import { reconcilePendingApprovalCards } from "./ApprovalHistory";
 import { loadChatApprovalHydration } from "./ChatApprovalHydration";
 import { useChatListStore } from "./ChatListStore";
-import { useComposerDraft, useComposerDrafts } from "./ComposerDrafts";
+import {
+  useComposerAttachments,
+  useComposerDraft,
+  useComposerDrafts,
+} from "./ComposerDrafts";
 import { ChatSessionController } from "./ChatSessionController";
 import {
   applyTerminalHydration,
@@ -103,8 +107,8 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   const busy = useChatSessionStore((session) => session.busy);
   const [hydrated, setHydrated] = useState(false);
   const draft = useComposerDraft(chatId);
+  const files = useComposerAttachments(chatId).files;
   const [attaching, setAttaching] = useState(false);
-  const [files, setFiles] = useState<ImportedDocument[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
   const images = useImageAttachments(client, chatId);
   const handleEventRef = useRef<(event: SequencedEvent) => void>(() => {});
@@ -268,6 +272,14 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     composerDraftActions.setDraft(chatId, next);
   }
 
+  function setComposerFiles(
+    update: (current: readonly ImportedDocument[]) => ImportedDocument[],
+  ) {
+    const current =
+      useComposerDrafts.getState().attachments[chatId]?.files ?? [];
+    composerDraftActions.setFiles(chatId, update(current));
+  }
+
   async function onSend() {
     await sendMessage(draft.trim());
   }
@@ -374,7 +386,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       // reader has queued for their *next* message.
       if (fromComposer) {
         images.clear();
-        setFiles([]);
+        setComposerFiles(() => []);
       }
     } catch (err) {
       // Nothing was accepted, so the message has to go back to where it can be
@@ -442,7 +454,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     );
     images.adopt(imagesToAdopt);
     if (filesToAdopt.length > 0) {
-      setFiles((current) => [...current, ...filesToAdopt]);
+      setComposerFiles((current) => [...current, ...filesToAdopt]);
     }
     if (
       imagesToAdopt.length + filesToAdopt.length <
@@ -503,7 +515,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
               attaching,
               onAttach: hasNativeHost() ? onAttach : undefined,
               onRemove: (documentId) =>
-                setFiles((current) =>
+                setComposerFiles((current) =>
                   current.filter((file) => file.documentId !== documentId),
                 ),
             }}

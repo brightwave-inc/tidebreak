@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 
 import { useApp } from "./AppContext";
@@ -7,6 +7,7 @@ import { useChatListStore } from "./ChatListStore";
 import { Composer, type ComposerImages } from "./Composer";
 import {
   HOME_DRAFT_KEY,
+  useComposerAttachments,
   useComposerDraft,
   useComposerDrafts,
 } from "./ComposerDrafts";
@@ -55,22 +56,56 @@ export function HomeRoute() {
 
   // A chat created silently when the user attaches files before typing. The
   // chat exists on the server so files can upload, but the user stays on the
-  // home page until they send.
-  const [pendingChatId, setPendingChatId] = useState<string | null>(null);
-  const [pendingImages, setPendingImages] = useState<ImageAttachment[]>([]);
-  const [pendingFiles, setPendingFiles] = useState<ImportedDocument[]>([]);
+  // home page until they send. The id is part of the home draft: without it a
+  // restored attachment strip would publish to a chat nobody remembers.
+  const attachments = useComposerAttachments(HOME_DRAFT_KEY);
+  const pendingChatId = attachments.pendingChatId;
+  const pendingImages = attachments.images;
+  const pendingFiles = attachments.files;
   const [attaching, setAttaching] = useState(false);
   const [attachError, setAttachError] = useState<string | null>(null);
 
+  const chats = useChatListStore((state) => state.chats);
+  const chatsLoaded = useChatListStore((state) => state.chatsLoaded);
+
+  // A restored home draft may point at a chat that no longer exists — deleted
+  // in another window since the attachments were published to it. Those images
+  // and files can never send, so drop them; the text stands on its own.
+  useEffect(() => {
+    if (!chatsLoaded || !pendingChatId) return;
+    if (chats.some((chat) => chat.id === pendingChatId)) return;
+    composerDraftActions.setPendingChatId(HOME_DRAFT_KEY, null);
+    composerDraftActions.setImages(HOME_DRAFT_KEY, []);
+    composerDraftActions.setFiles(HOME_DRAFT_KEY, []);
+  }, [chatsLoaded, chats, pendingChatId]);
+
+  function setPendingImages(
+    update: (current: readonly ImageAttachment[]) => ImageAttachment[],
+  ) {
+    const current =
+      useComposerDrafts.getState().attachments[HOME_DRAFT_KEY]?.images ?? [];
+    composerDraftActions.setImages(HOME_DRAFT_KEY, update(current));
+  }
+
+  function setPendingFiles(
+    update: (current: readonly ImportedDocument[]) => ImportedDocument[],
+  ) {
+    const current =
+      useComposerDrafts.getState().attachments[HOME_DRAFT_KEY]?.files ?? [];
+    composerDraftActions.setFiles(HOME_DRAFT_KEY, update(current));
+  }
+
   async function ensurePendingChat(): Promise<string> {
-    if (pendingChatId) return pendingChatId;
+    const existing =
+      useComposerDrafts.getState().attachments[HOME_DRAFT_KEY]?.pendingChatId;
+    if (existing) return existing;
     const created = await client.createChat(newChat.model ?? undefined, null, {
       reasoningEffort: newChat.reasoningEffort,
       permissionMode: newChat.permissionMode,
     });
     chatListActions.prependChat(created);
     chatListActions.setChatsError(null);
-    setPendingChatId(created.id);
+    composerDraftActions.setPendingChatId(HOME_DRAFT_KEY, created.id);
     return created.id;
   }
 
@@ -171,12 +206,12 @@ export function HomeRoute() {
         images: pendingImages,
         files: pendingFiles,
       });
-      setDraft("");
-      setPendingChatId(null);
-      setPendingImages([]);
-      setPendingFiles([]);
-      setAttachError(null);
+      // Clear the home draft only once navigation has committed. If it throws,
+      // the message lives only in the FirstMessage store with no composer
+      // showing it — the draft has to stay where the reader can see and
+      // resend it.
       await navigate({ to: "/c/$chatId", params: { chatId } });
+      composerDraftActions.clearDraft(HOME_DRAFT_KEY);
     } catch (err) {
       setError(`Could not start a chat: ${String(err)}`);
     } finally {
