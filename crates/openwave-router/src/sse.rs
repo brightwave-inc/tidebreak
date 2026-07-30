@@ -119,6 +119,32 @@ pub fn safe_http_error(provider: &str, status: u16, body: &str) -> String {
     }
 }
 
+/// Build a client-safe message for an error delivered *inside* a 200 stream.
+///
+/// Providers can accept a request, start streaming, and then emit an error
+/// frame instead of finishing. There is no HTTP status to report in that case:
+/// some providers carry a numeric `code` (Gemini), others only a stable
+/// enum-style `type` / `code` token (Anthropic, OpenAI-compatible). As with
+/// [`safe_http_error`], nothing else from the untrusted payload is forwarded —
+/// these strings reach the client through `TurnFailed`.
+pub fn safe_in_band_error(provider: &str, error: &serde_json::Value) -> String {
+    let status = error
+        .get("code")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|code| u16::try_from(code).ok())
+        .filter(|code| (100..=599).contains(code))
+        .unwrap_or(500);
+    let detail = error
+        .get("type")
+        .or_else(|| error.get("code"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|code| safe_error_code(code));
+    match detail {
+        Some(code) => format!("{provider} returned {status} ({code})"),
+        None => format!("{provider} returned {status}"),
+    }
+}
+
 /// Accept only a compact enum-style token. Error fields come from an
 /// untrusted gateway and may otherwise contain echoed credentials, prompts, or
 /// control characters that would reach the renderer through `TurnFailed`.

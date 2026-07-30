@@ -20,7 +20,9 @@ use openwave_core::provider::{
 use openwave_core::tool::{strict_json_schema, OptionalProperties};
 use openwave_core::{ImageAttachments, Role};
 
-use crate::sse::{classify_provider_error, drain_frames, frame_data, read_bounded_error_body};
+use crate::sse::{
+    classify_provider_error, drain_frames, frame_data, read_bounded_error_body, safe_in_band_error,
+};
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -420,6 +422,9 @@ struct StreamState {
     output_block: Option<u32>,
     /// Whether any *other* tool call was announced this stream.
     saw_other_tool_call: bool,
+    /// Set once the stream has terminalized on an in-band error, so no later
+    /// frame can append events after the failure.
+    terminal: bool,
 }
 
 fn u32_at(value: &Value, key: &str) -> u32 {
@@ -428,7 +433,20 @@ fn u32_at(value: &Value, key: &str) -> u32 {
 
 /// Map one parsed Anthropic stream event into zero or more `ProviderEvent`s.
 fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
+    if state.terminal {
+        return Vec::new();
+    }
     match data.get("type").and_then(Value::as_str) {
+        // Anthropic answers 200, starts streaming, and can then send an error
+        // frame instead of finishing — overloaded_error and api_error both
+        // arrive this way. The stream closes right after, so without this arm
+        // the truncated step would read as a clean end and commit.
+        Some("error") => {
+            state.terminal = true;
+            vec![ProviderEvent::Failed {
+                message: safe_in_band_error("anthropic", data.get("error").unwrap_or(data)),
+            }]
+        }
         Some("message_start") => {
             if let Some(usage) = data.get("message").and_then(|m| m.get("usage")) {
                 state.input_tokens = u32_at(usage, "input_tokens");
@@ -754,6 +772,27 @@ mod tests {
             .iter()
             .flat_map(|e| normalize(e, &mut state))
             .collect()
+    }
+
+    #[test]
+    fn in_band_error_fails_the_stream_instead_of_ending_it_cleanly() {
+        let out = run(&[
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "partial"}}),
+            json!({"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}),
+            // Anything after the error must not resurrect a clean stop.
+            json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+        ]);
+        assert_eq!(
+            out,
+            vec![
+                ProviderEvent::TextDelta {
+                    text: "partial".into()
+                },
+                ProviderEvent::Failed {
+                    message: "anthropic returned 500 (overloaded_error)".into()
+                },
+            ]
+        );
     }
 
     #[test]

@@ -22,7 +22,9 @@ use openwave_core::provider::{
 use openwave_core::tool::{strict_json_schema, OptionalProperties};
 use openwave_core::{ImageAttachments, Role};
 
-use crate::sse::{classify_provider_error, drain_frames, frame_data, read_bounded_error_body};
+use crate::sse::{
+    classify_provider_error, drain_frames, frame_data, read_bounded_error_body, safe_in_band_error,
+};
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
@@ -152,7 +154,7 @@ impl ModelProvider for OpenAiCompatProvider {
             }
             // Emit a Stop if the stream ended without a finish_reason (some
             // local servers omit it on clean close).
-            if !state.stopped {
+            if !state.stopped && !state.terminal {
                 yield ProviderEvent::Stop {
                     reason: if state.saw_tool_call {
                         StopReason::ToolUse
@@ -412,6 +414,9 @@ struct StreamState {
     usage: Usage,
     stopped: bool,
     saw_tool_call: bool,
+    /// Set once the stream has terminalized on an in-band error. It suppresses
+    /// both later frames and the synthetic end-of-stream `Stop` below.
+    terminal: bool,
 }
 
 #[derive(Default)]
@@ -427,6 +432,20 @@ struct ToolCallBuf {
 
 /// Map one parsed Chat Completions stream chunk into zero or more events.
 fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
+    if state.terminal {
+        return Vec::new();
+    }
+    // Gateways accept the request, stream a few chunks, and then push an error
+    // object in place of the next chunk. Nothing follows it, so ignoring it
+    // would leave the synthetic end-of-stream `Stop` below to report the
+    // truncated step as a clean finish.
+    if let Some(error) = data.get("error") {
+        state.terminal = true;
+        return vec![ProviderEvent::Failed {
+            message: safe_in_band_error("openai-compat", error),
+        }];
+    }
+
     let mut events = Vec::new();
 
     if let Some(usage) = data.get("usage") {
@@ -743,6 +762,40 @@ mod tests {
             .iter()
             .flat_map(|c| normalize(c, &mut state))
             .collect()
+    }
+
+    #[test]
+    fn in_band_error_fails_the_stream_and_suppresses_the_synthetic_stop() {
+        let mut state = StreamState::default();
+        let out: Vec<ProviderEvent> = [
+            json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{\"pa"}}]}}]}),
+            json!({"error":{"message":"upstream is overloaded","type":"server_error","code":"server_overloaded"}}),
+        ]
+        .iter()
+        .flat_map(|chunk| normalize(chunk, &mut state))
+        .collect();
+
+        assert_eq!(
+            out,
+            vec![
+                ProviderEvent::ToolCallStarted {
+                    index: 0,
+                    id: "call_1".into(),
+                    name: "read_file".into(),
+                },
+                ProviderEvent::ToolCallArgsDelta {
+                    index: 0,
+                    fragment: "{\"pa".into(),
+                },
+                ProviderEvent::Failed {
+                    message: "openai-compat returned 500 (server_error)".into(),
+                },
+            ]
+        );
+        // The stream's end-of-stream fallback keys off this flag; without it a
+        // truncated tool call would be handed on under a clean `Stop`.
+        assert!(state.terminal);
+        assert!(!state.stopped);
     }
 
     #[test]
