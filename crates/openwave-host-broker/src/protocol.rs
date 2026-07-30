@@ -70,7 +70,9 @@ pub enum ControlRequest {
     ///
     /// This trusted-host operation returns absolute paths and must never be
     /// exposed as an agent-operation surface. The broker still intersects the
-    /// requested IDs with live attachment and capability state.
+    /// requested IDs with live attachment and capability state: a root is only
+    /// resolved when the conversation holds both [`crate::Capability::ReadFiles`]
+    /// and [`crate::Capability::ExecuteCommands`] over it.
     ResolveExecRoots(ResolveExecRootsRequest),
     /// Register the exact folder returned by a native picker and attach it to
     /// the conversation that initiated the trusted interaction.

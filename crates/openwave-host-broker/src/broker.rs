@@ -321,7 +321,7 @@ struct PreparedRegistration {
     conversation_id: Uuid,
     root_id: RootId,
     root: RegisteredRoot,
-    grants: [Grant; 3],
+    grants: [Grant; 4],
     attachment: RootAttachment,
 }
 
@@ -871,6 +871,17 @@ impl Controller {
             request.subject,
             Capability::WriteFiles,
             Scope::Root { root_id },
+            consent.clone(),
+        )?;
+        // Choosing a folder is how the user says the agent may work in it, so
+        // exec reach is part of that consent rather than a second prompt. The
+        // capability exists so it can be named, audited, and revoked on its own
+        // afterwards, not to add a step here.
+        let exec_grant = Grant::from_consent(
+            GrantId::new(),
+            request.subject,
+            Capability::ExecuteCommands,
+            Scope::Root { root_id },
             consent,
         )?;
         Ok(PreparedRegistration {
@@ -881,7 +892,7 @@ impl Controller {
                 display_name,
                 root: Arc::new(validated),
             },
-            grants: [list_grant, read_grant, write_grant],
+            grants: [list_grant, read_grant, write_grant, exec_grant],
             attachment: RootAttachment::new(request.conversation_id, root_id)?,
         })
     }
@@ -1943,12 +1954,15 @@ fn apply_root_attachment(
                 .roots
                 .get(&request.root_id)
                 .ok_or(BrokerError::UnknownRoot)?;
-            let consent = ConsentRecord::new(
-                request
-                    .consent_method
-                    .ok_or(BrokerError::InvalidConsentMethod)?,
-                Utc::now(),
-            );
+            let method = request
+                .consent_method
+                .ok_or(BrokerError::InvalidConsentMethod)?;
+            // `CarriedForward` describes a migration, not an interaction, so a
+            // control caller must not be able to stamp it on a live grant.
+            if matches!(method, ConsentMethod::CarriedForward) {
+                return Err(BrokerError::InvalidConsentMethod);
+            }
+            let consent = ConsentRecord::new(method, Utc::now());
             ensure_subject_grants(state, request.subject, request.root_id, consent)?;
             if has_root_attachment(state, request.conversation_id, request.root_id) {
                 false
@@ -2089,6 +2103,19 @@ fn ensure_subject_grants(
             subject,
             Capability::WriteFiles,
             Scope::Root { root_id },
+            consent.clone(),
+        )?);
+    }
+    if !state.grants.iter().any(|grant| {
+        grant.subject() == subject
+            && grant.capability() == Capability::ExecuteCommands
+            && matches!(grant.scope(), Scope::Root { root_id: granted } if *granted == root_id)
+    }) {
+        state.grants.push(Grant::from_consent(
+            GrantId::new(),
+            subject,
+            Capability::ExecuteCommands,
+            Scope::Root { root_id },
             consent,
         )?);
     }
@@ -2220,14 +2247,7 @@ fn resolve_exec_roots(
     let mut seen = HashSet::new();
     let mut roots = Vec::new();
     for root_id in request.root_ids {
-        if !seen.insert(root_id)
-            || authorize(
-                state,
-                request.context,
-                Capability::ReadFiles,
-                Resource::Root(&root_id),
-            )
-            .is_err()
+        if !seen.insert(root_id) || authorize_exec_reach(state, request.context, &root_id).is_err()
         {
             continue;
         }
@@ -2251,6 +2271,31 @@ fn resolve_exec_roots(
     Ok(roots)
 }
 
+/// Whether commands may run against one root's contents in this conversation.
+///
+/// Exec reach sits on top of read rather than beside it. A command with the
+/// folder in front of it can read every byte the read capability covers, so
+/// holding exec without read is not a state the broker will act on: revoking
+/// read has to stop the shell too, or the narrower revocation would be a lie.
+fn authorize_exec_reach(
+    state: &State,
+    context: ExecutionContext,
+    root_id: &RootId,
+) -> Result<GrantId, BrokerError> {
+    authorize(
+        state,
+        context,
+        Capability::ReadFiles,
+        Resource::Root(root_id),
+    )?;
+    authorize(
+        state,
+        context,
+        Capability::ExecuteCommands,
+        Resource::Root(root_id),
+    )
+}
+
 /// Per-folder capabilities this conversation actually holds on one root.
 ///
 /// Each candidate is put through the same [`authorize`] call that gates the
@@ -2262,12 +2307,16 @@ fn root_capabilities(
     context: ExecutionContext,
     root_id: &RootId,
 ) -> Vec<Capability> {
-    [Capability::ReadFiles, Capability::WriteFiles]
+    let mut capabilities = [Capability::ReadFiles, Capability::WriteFiles]
         .into_iter()
         .filter(|capability| {
             authorize(state, context, *capability, Resource::Root(root_id)).is_ok()
         })
-        .collect()
+        .collect::<Vec<_>>();
+    if authorize_exec_reach(state, context, root_id).is_ok() {
+        capabilities.push(Capability::ExecuteCommands);
+    }
+    capabilities
 }
 
 fn root_display_name(path: &Path) -> String {
