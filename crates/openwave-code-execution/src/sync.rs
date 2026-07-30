@@ -11,9 +11,12 @@
 //! files, dependency trees, truncated listings — is reported in the
 //! [`SyncReport`], never skipped silently.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use crate::host_paths::{try_resolve_scratch_directory, ScratchDir, ScratchRefusal};
+use crate::host_paths::{
+    resolve_scratch_directory, try_resolve_scratch_directory, ScratchDir, ScratchEntryKind,
+    ScratchRefusal,
+};
 use crate::{
     CodeExecutionError, ExecutionWorkspaceId, WorkspaceFilePath, WorkspaceLifecycle,
     MAX_WORKSPACE_FILE_BYTES,
@@ -80,6 +83,12 @@ impl SyncReport {
 ///
 /// A missing `host_dir` pushes nothing: the chat simply has no scratch yet.
 ///
+/// The walk is descriptor-relative from a pinned root, the same discipline the
+/// pull applies to its writes: directories are opened with symlink following
+/// disabled as they are discovered, and files are read through the directory
+/// they were listed in, so an entry swapped for a symlink between the listing
+/// and the read is refused rather than followed.
+///
 /// Every host-side failure — an unreadable file, a directory the walk cannot
 /// list — is reported against the entry it belongs to and the push continues.
 /// One permission-denied file in an attached folder should cost the agent that
@@ -90,18 +99,18 @@ pub async fn push_host_dir(
     host_dir: &Path,
 ) -> Result<SyncReport, CodeExecutionError> {
     let mut report = SyncReport::default();
-    if tokio::fs::symlink_metadata(host_dir).await.is_err() {
+    let Some(root) = resolve_scratch_directory(host_dir, "", false).await else {
         return Ok(report);
-    }
-    let mut stack: Vec<(PathBuf, String)> = vec![(host_dir.to_path_buf(), String::new())];
-    let mut files: Vec<(WorkspaceFilePath, PathBuf)> = Vec::new();
+    };
+    let mut stack: Vec<(ScratchDir, String)> = vec![(root, String::new())];
+    let mut files: Vec<(WorkspaceFilePath, ScratchDir, String)> = Vec::new();
     while let Some((dir, prefix)) = stack.pop() {
         let listed = if prefix.is_empty() {
             "the private scratch root".to_owned()
         } else {
             format!("{prefix}/")
         };
-        let mut entries = match tokio::fs::read_dir(&dir).await {
+        let entries = match dir.entries().await {
             Ok(entries) => entries,
             Err(error) => {
                 tracing::warn!("private scratch directory '{listed}' could not be listed: {error}");
@@ -112,82 +121,78 @@ pub async fn push_host_dir(
                 continue;
             }
         };
-        loop {
-            let entry = match entries.next_entry().await {
-                Ok(Some(entry)) => entry,
-                Ok(None) => break,
-                Err(error) => {
-                    tracing::warn!("listing of private scratch '{listed}' ended early: {error}");
-                    report.skip(
-                        "listing ended early",
-                        format!("not pushed: the listing of {listed} ended early ({error})"),
-                    );
-                    break;
-                }
-            };
-            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-                report.skip(
-                    "non-UTF-8 name",
-                    format!("not pushed: an entry under '{prefix}/' has a non-UTF-8 name"),
-                );
-                continue;
-            };
+        for entry in entries {
+            let name = entry.name;
             let relative = if prefix.is_empty() {
                 name.clone()
             } else {
                 format!("{prefix}/{name}")
             };
-            let metadata = match tokio::fs::symlink_metadata(entry.path()).await {
-                Ok(metadata) => metadata,
-                Err(error) => {
-                    tracing::debug!(
-                        "private scratch entry '{relative}' vanished or is unreadable: {error}"
-                    );
-                    report.skip(
-                        "could not be inspected",
-                        format!("not pushed: {relative} could not be inspected ({error})"),
-                    );
-                    continue;
+            match entry.kind {
+                ScratchEntryKind::Directory => {
+                    if SKIPPED_DIRS.contains(&name.as_str()) {
+                        report.skip(
+                            "dependency or VCS tree",
+                            format!("not pushed: {relative}/ (dependency or VCS tree)"),
+                        );
+                        continue;
+                    }
+                    // Open the child while it is being judged: the no-follow
+                    // open refuses a directory swapped for a symlink since the
+                    // listing instead of walking into wherever it points.
+                    match dir.open_dir(&name).await {
+                        Ok(child) => stack.push((child, relative)),
+                        Err(error) => {
+                            tracing::warn!(
+                                "private scratch directory '{relative}/' could not be entered: {error}"
+                            );
+                            report.skip(
+                                "could not be listed",
+                                format!("not pushed: {relative}/ could not be listed ({error})"),
+                            );
+                        }
+                    }
                 }
-            };
-            if metadata.is_symlink() {
-                report.skip(
-                    "is a symlink",
-                    format!("not pushed: {relative} is a symlink"),
-                );
-                continue;
-            }
-            if metadata.is_dir() {
-                if SKIPPED_DIRS.contains(&name.as_str()) {
-                    report.skip(
-                        "dependency or VCS tree",
-                        format!("not pushed: {relative}/ (dependency or VCS tree)"),
-                    );
-                } else {
-                    stack.push((entry.path(), relative));
+                ScratchEntryKind::File => {
+                    let Some(stamp) = dir.file_stamp(&name).await else {
+                        tracing::debug!(
+                            "private scratch entry '{relative}' vanished or is unreadable"
+                        );
+                        report.skip(
+                            "could not be inspected",
+                            format!("not pushed: {relative} could not be inspected"),
+                        );
+                        continue;
+                    };
+                    if stamp.len > MAX_WORKSPACE_FILE_BYTES as u64 {
+                        report.skip(
+                            "exceeds the file limit",
+                            format!(
+                                "not pushed: {relative} exceeds the {MAX_WORKSPACE_FILE_BYTES}-byte file limit"
+                            ),
+                        );
+                        continue;
+                    }
+                    let Ok(path) = WorkspaceFilePath::parse(&relative) else {
+                        report.skip(
+                            "not a valid workspace path",
+                            format!("not pushed: {relative} is not a valid workspace path"),
+                        );
+                        continue;
+                    };
+                    files.push((path, dir.clone(), name));
                 }
-                continue;
+                // The symlink question only decides which note to write;
+                // nothing here traverses the entry either way.
+                ScratchEntryKind::Other => {
+                    if dir.is_symlink(&name).await {
+                        report.skip(
+                            "is a symlink",
+                            format!("not pushed: {relative} is a symlink"),
+                        );
+                    }
+                }
             }
-            if !metadata.is_file() {
-                continue;
-            }
-            if metadata.len() > MAX_WORKSPACE_FILE_BYTES as u64 {
-                report.skip(
-                    "exceeds the file limit",
-                    format!(
-                        "not pushed: {relative} exceeds the {MAX_WORKSPACE_FILE_BYTES}-byte file limit"
-                    ),
-                );
-                continue;
-            }
-            let Ok(path) = WorkspaceFilePath::parse(&relative) else {
-                report.skip(
-                    "not a valid workspace path",
-                    format!("not pushed: {relative} is not a valid workspace path"),
-                );
-                continue;
-            };
-            files.push((path, entry.path()));
         }
     }
     files.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
@@ -200,8 +205,8 @@ pub async fn push_host_dir(
             ),
         );
     }
-    for (path, host_path) in files.into_iter().take(MAX_SYNC_FILES) {
-        let content = match tokio::fs::read(&host_path).await {
+    for (path, dir, name) in files.into_iter().take(MAX_SYNC_FILES) {
+        let content = match dir.read_file(&name).await {
             Ok(content) => content,
             Err(error) => {
                 tracing::debug!(
@@ -670,6 +675,68 @@ mod tests {
         assert!(pulled.notes.iter().any(|note| {
             note.contains("out/authorized_keys") && note.contains("symlinked parent directory")
         }));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pull_reports_a_symlink_planted_at_the_destination() {
+        let outside = tempfile::tempdir().unwrap();
+        // The target holds exactly what the sandbox reports, so a pull that
+        // read through the link would judge the file up to date and say
+        // nothing: the planted entry would never be surfaced.
+        std::fs::write(outside.path().join("config"), b"same bytes").unwrap();
+        let host = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path().join("config"), host.path().join("config"))
+            .unwrap();
+
+        let fake = FakeWorkspace::default();
+        fake.insert("config", b"same bytes");
+
+        let pulled = pull_into_host_dir(&fake, &workspace_id(), host.path())
+            .await
+            .unwrap();
+
+        assert_eq!(pulled.transferred, 0, "{:?}", pulled.notes);
+        assert!(pulled
+            .notes
+            .iter()
+            .any(|note| { note.contains("config") && note.contains("is a symlink on the host") }));
+        assert_eq!(
+            std::fs::read(outside.path().join("config")).unwrap(),
+            b"same bytes"
+        );
+        assert!(std::fs::symlink_metadata(host.path().join("config"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn push_reports_a_symlink_and_never_pushes_its_target() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret"), b"host secret").unwrap();
+        let host = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret"), host.path().join("link"))
+            .unwrap();
+        std::os::unix::fs::symlink(outside.path(), host.path().join("dir-link")).unwrap();
+
+        let fake = FakeWorkspace::default();
+        let pushed = push_host_dir(&fake, &workspace_id(), host.path())
+            .await
+            .unwrap();
+
+        assert_eq!(pushed.transferred, 0, "{:?}", pushed.notes);
+        assert!(fake.get("link").is_none());
+        assert!(fake.get("dir-link/secret").is_none());
+        assert!(pushed
+            .notes
+            .iter()
+            .any(|note| note.contains("link") && note.contains("is a symlink")));
+        assert!(pushed
+            .notes
+            .iter()
+            .any(|note| note.contains("dir-link") && note.contains("is a symlink")));
     }
 
     #[tokio::test]
