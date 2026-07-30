@@ -1022,6 +1022,19 @@ impl TurnWorker {
                                     if let Some(event) = resolution.terminal_event {
                                         self.publish(turn.chat_id, event);
                                     }
+                                    // The cache counters are the only way to
+                                    // see prompt caching work or silently stop:
+                                    // a miss never errors, it just costs more.
+                                    // Logged with the durable field names so the
+                                    // line is greppable across turns.
+                                    eprintln!(
+                                        "openwave: turn {} resolved usage input_tokens={} output_tokens={} cache_read_input_tokens={} cache_creation_input_tokens={}",
+                                        turn.id,
+                                        total_usage.input_tokens,
+                                        total_usage.output_tokens,
+                                        total_usage.cache_read_input_tokens,
+                                        total_usage.cache_creation_input_tokens,
+                                    );
                                     return Ok(TurnWorkerOutcome::Completed(turn.id));
                                 }
                                 CompleteTurnRunOutcome::SteerPending(_)
