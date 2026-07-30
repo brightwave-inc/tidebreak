@@ -147,27 +147,14 @@ impl StateFile {
                 return Err(invalid_data("duplicate persisted operation identity").into());
             }
         }
-        let mut grants = persisted.grants;
-        if persisted.version == 2 {
-            let write_grants = grants
-                .iter()
-                .filter(|grant| grant.capability() == crate::Capability::ReadFiles)
-                .map(|grant| {
-                    Grant::from_consent(
-                        crate::GrantId::new(),
-                        grant.subject(),
-                        crate::Capability::WriteFiles,
-                        grant.scope().clone(),
-                        grant.consent().clone(),
-                    )
-                    .map_err(BrokerError::from)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            grants.extend(write_grants);
-        }
+        // Version 2 predates write grants. Its read grants migrate as they
+        // stand: widening them would hand out authority the user never
+        // approved, and the only consent record available to attach to such a
+        // grant is the one they gave for reading. Write authority on an
+        // existing root has to come from a fresh consent instead.
         let state = State {
             roots,
-            grants,
+            grants: persisted.grants,
             attachments: persisted.attachments,
             mutations,
             active_mutations: Default::default(),

@@ -2453,6 +2453,44 @@ fn restart_rejects_an_oversized_state_file_before_parsing_it() {
 }
 
 #[test]
+fn version_two_read_grants_migrate_without_gaining_write() {
+    let (temp, broker, path, state_dir) = durable_setup();
+    let conversation = Uuid::new_v4();
+    let subject = GrantSubject::conversation(conversation).unwrap();
+    register(
+        &broker.controller(),
+        subject,
+        conversation,
+        path,
+        OperationId::new(),
+    );
+    drop(broker);
+
+    // Reshape the persisted file into what a version 2 install left behind:
+    // read grants only, before write grants existed.
+    let state_path = state_dir.join("host-broker-state.json");
+    let mut persisted: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    persisted["version"] = serde_json::json!(2);
+    persisted["grants"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|grant| grant["capability"] != serde_json::json!("write_files"));
+    std::fs::write(&state_path, serde_json::to_vec(&persisted).unwrap()).unwrap();
+
+    let broker = Broker::open(test_policy(&temp), &state_dir).unwrap();
+    let state = broker.shared.state.lock().unwrap();
+    assert!(state
+        .grants
+        .iter()
+        .any(|grant| grant.capability() == Capability::ReadFiles));
+    assert!(!state
+        .grants
+        .iter()
+        .any(|grant| grant.capability() == Capability::WriteFiles));
+}
+
+#[test]
 fn binary_reads_return_bytes_that_text_reads_refuse() {
     let (_temp, broker, path, audit) = audited_setup();
     // A minimal PDF header followed by a byte sequence that is not valid UTF-8.
