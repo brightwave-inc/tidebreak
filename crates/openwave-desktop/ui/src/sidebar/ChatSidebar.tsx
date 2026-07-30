@@ -10,12 +10,17 @@ import {
 import type { Chat } from "@/api";
 import { useChatAttention } from "@/ChatAttention";
 import { Badge } from "@/components/ui/badge";
-import { listDeliverables } from "@/deliverables";
+import { listDeliverables, type DeliverablesCatalog } from "@/deliverables";
 import type { PanelType } from "@/panel/panelTypes";
 import { usePanelNav } from "@/panel/usePanelNav";
 import { useRefreshSignals } from "@/RefreshSignals";
 import { SidebarButton } from "./primitives";
 import { SidebarFrame } from "./SidebarFrame";
+
+// Module scope, not an inline arrow: the count effect keys on the extractor's
+// identity, and this rail re-renders on every composer keystroke.
+const countDeliverables = (catalog: DeliverablesCatalog) =>
+  catalog.deliverables.length;
 
 /**
  * The rail inside one conversation, holding only what acts on that
@@ -45,7 +50,7 @@ export function ChatSidebar({ chat }: { chat: Chat }) {
     (id) => id !== chat.id,
   );
 
-  const outputCount = useSidebarCount(chat.id, listDeliverables, (c) => c.deliverables.length);
+  const outputCount = useSidebarCount(chat.id, listDeliverables, countDeliverables);
 
   return (
     <SidebarFrame>

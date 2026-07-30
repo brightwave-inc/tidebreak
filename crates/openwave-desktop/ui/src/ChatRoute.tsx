@@ -93,6 +93,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   const { layout, openPanel } = usePanelNav();
   const sourceNav = useStableSourceNav(openPanel);
   const chats = useChatListStore((state) => state.chats);
+  const chatsLoaded = useChatListStore((state) => state.chatsLoaded);
   const deletingChatId = useChatListStore((state) => state.deletingChatId);
   const busy = useChatSessionStore((session) => session.busy);
   const [hydrated, setHydrated] = useState(false);
@@ -110,10 +111,13 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   const folders = useChatFolderAttachments(chat, nativeHost);
 
   // A chat id that is not in the list — deleted in another window, or a stale
-  // deep link — should land somewhere real rather than on an empty frame.
+  // deep link — should land somewhere real rather than on an empty frame. The
+  // gate is whether the list has been fetched, not whether it has rows: an
+  // account with no chats left is exactly the case that would otherwise sit on
+  // the loading frame forever.
   useEffect(() => {
-    if (chats.length > 0 && !chat) void navigate({ to: "/", replace: true });
-  }, [chats.length, chat, navigate]);
+    if (chatsLoaded && !chat) void navigate({ to: "/", replace: true });
+  }, [chatsLoaded, chat, navigate]);
 
   // A conversation opened from the home composer arrives with its first message
   // already written. `take` clears it, so a re-render cannot send it twice.
