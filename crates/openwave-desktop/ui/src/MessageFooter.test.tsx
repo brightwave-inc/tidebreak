@@ -30,6 +30,19 @@ describe("MessageFooter", () => {
     expect(markup).toBe("");
   });
 
+  it("leaves a mid-turn assistant fragment bare", () => {
+    const markup = renderToStaticMarkup(
+      <MessageFooter
+        role="assistant"
+        text="Interim answer"
+        createdAt="2026-07-20T10:00:00Z"
+        sequenceEnd={false}
+      />,
+    );
+
+    expect(markup).toBe("");
+  });
+
   it("does not render a timestamp-only footer for an empty settled assistant", () => {
     const markup = renderToStaticMarkup(
       <MessageFooter

@@ -469,6 +469,23 @@ function isActivityMessage(message: ChatMessage | undefined): boolean {
   return message.role === "tool" || message.role === "approval";
 }
 
+/**
+ * Whether the assistant bubble at `index` closes its turn. A turn's prose is
+ * split into one bubble per activity phase it passed through, and the copy
+ * action and timestamp belong to the turn, not to each fragment — so only
+ * the closing bubble carries them. Activity after a bubble is the turn
+ * continuing, whatever it goes on to say; another assistant bubble right
+ * behind it (a superseded stream's replacement) is the same turn resuming.
+ */
+export function isTurnClosingAssistant(
+  messages: readonly ChatMessage[],
+  index: number,
+): boolean {
+  const follower = messages[index + 1];
+  if (isActivityMessage(follower)) return false;
+  return follower === undefined || follower.role !== "assistant";
+}
+
 export function groupMessageItems(
   messages: ChatMessage[],
   busy: boolean,
@@ -537,6 +554,10 @@ export function groupMessageItems(
           key={message.id}
           message={message}
           busy={message.id === streamingAssistantId}
+          sequenceEnd={
+            message.role !== "assistant" ||
+            isTurnClosingAssistant(messages, index)
+          }
           imageClient={imageClient}
           chatId={chatId}
           onRetry={
@@ -832,12 +853,15 @@ const EMPTY_SOURCES: readonly AssistantSource[] = [];
 function MessageBubbleImpl({
   message,
   busy,
+  sequenceEnd = true,
   imageClient,
   chatId,
   onRetry,
 }: {
   message: ChatMessage;
   busy: boolean;
+  /** Only the turn-closing assistant bubble carries the footer. */
+  sequenceEnd?: boolean;
   imageClient?: Pick<ApiClient, "getChatImageAttachment">;
   chatId?: string;
   /** Present only on the transcript's newest retryable failure. */
@@ -894,6 +918,7 @@ function MessageBubbleImpl({
             text={stripCitationDirectives(message.text)}
             createdAt={message.createdAt}
             settled={!busy}
+            sequenceEnd={sequenceEnd}
           />
         </article>
       </MessageCitationsProvider>
