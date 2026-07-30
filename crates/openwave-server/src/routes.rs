@@ -1409,7 +1409,6 @@ pub async fn delete_chat(
 ) -> Result<StatusCode, ServerError> {
     match state.store.delete_chat(id).await? {
         DeleteChatOutcome::Deleted => {
-            state.document_job_wake.notify_one();
             state.blob_retirement_wake.notify_one();
             let scratch_root = state.config.data_dir.join("scratch");
             let cleanup =

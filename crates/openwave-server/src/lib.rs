@@ -22,9 +22,6 @@ mod chat_titling;
 /// Host-owned code-execution provider selection and policy.
 pub mod code_execution;
 mod desktop_schema;
-mod document_auditor;
-mod document_stage;
-mod document_worker;
 mod durable_oplog;
 mod error;
 mod event_projection;
@@ -119,10 +116,6 @@ pub fn app(state: AppState) -> Router {
             delete(routes::delete_chat_document),
         )
         .route(
-            "/chats/{chat_id}/documents/{document_id}/retry",
-            post(routes::retry_chat_document),
-        )
-        .route(
             "/projects/{project_id}/documents",
             post(routes::ingest_project_document).get(routes::list_project_documents),
         )
@@ -140,10 +133,6 @@ pub fn app(state: AppState) -> Router {
             get(routes::get_project_document_file_content),
         )
         .route(
-            "/projects/{project_id}/documents/{document_id}/retry",
-            post(routes::retry_project_document),
-        )
-        .route(
             "/documents",
             post(routes::ingest_document).get(routes::list_documents),
         )
@@ -159,7 +148,6 @@ pub fn app(state: AppState) -> Router {
             "/documents/{id}/file-content",
             get(routes::get_document_file_content),
         )
-        .route("/documents/{id}/retry", post(routes::retry_document))
         // Image attachments sit on the same trust boundary as raw document
         // ingest — both take bytes off the user's disk for one conversation —
         // so they follow it into whichever router that boundary lands on.
@@ -476,8 +464,6 @@ pub struct Server {
     gateway: Arc<gateway_runtime::GatewayRuntime>,
     listener: TcpListener,
     router: Router,
-    _document_auditor: AbortTask,
-    _document_worker: AbortTask,
     _turn_worker: AbortTask,
     _sandbox_agent_run_worker: AbortTask,
     _sandbox_web_search_worker: AbortTask,
@@ -745,20 +731,6 @@ async fn bind_inner(
     state.mcp.initialize(mcp_servers).await?;
     let token = state.token.clone();
     let client_executor_token = state.client_executor_token.clone();
-    let document_worker = document_worker::DocumentWorker::new(
-        state.store.clone(),
-        state.blobs.clone(),
-        state.retrieval.clone(),
-        state.document_job_wake.clone(),
-        document_worker::DocumentWorkerConfig::default(),
-    );
-    let document_auditor = document_auditor::DocumentAuditor::new(
-        state.store.clone(),
-        state.retrieval.clone(),
-        state.document_writes.clone(),
-        state.document_job_wake.clone(),
-        document_auditor::DocumentAuditorConfig::default(),
-    );
     let blob_retirement_worker = blob_retirement_worker::BlobRetirementWorker::new(
         state.store.clone(),
         state.blobs.clone(),
@@ -830,8 +802,6 @@ async fn bind_inner(
         .local_addr()
         .map_err(|e| AgentError::config(format!("no local address: {e}")))?;
 
-    let document_auditor = tokio::spawn(document_auditor.run());
-    let document_worker = tokio::spawn(document_worker.run());
     let turn_worker = tokio::spawn(turn_worker.run());
     let sandbox_agent_run_worker = tokio::spawn(sandbox_agent_run_worker.run());
     let sandbox_web_search_worker = tokio::spawn(sandbox_web_search_worker.run());
@@ -849,8 +819,6 @@ async fn bind_inner(
         gateway: gateway_runtime,
         listener,
         router,
-        _document_auditor: AbortTask(document_auditor),
-        _document_worker: AbortTask(document_worker),
         _turn_worker: AbortTask(turn_worker),
         _sandbox_agent_run_worker: AbortTask(sandbox_agent_run_worker),
         _sandbox_web_search_worker: AbortTask(sandbox_web_search_worker),

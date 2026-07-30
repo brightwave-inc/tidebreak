@@ -162,7 +162,6 @@ pub fn run() {
             documents::list_library_documents,
             documents::search_library_documents,
             documents::delete_library_document,
-            documents::retry_library_document,
             documents::export_library_document,
             deliverables::list_deliverables,
             deliverables::read_deliverable,

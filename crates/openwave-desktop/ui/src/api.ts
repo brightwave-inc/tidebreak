@@ -64,7 +64,6 @@ import {
   type ToolApprovalKind,
   type ToolResultPreview as WireToolResultPreview,
 } from "./generated/wire";
-import type { DocumentProcessingStatus } from "./documents";
 
 export type {
   ApprovalClass,
@@ -111,7 +110,6 @@ export type DocumentDetail = {
   document_id: string;
   media_type: string;
   title: string | null;
-  processing_status: DocumentProcessingStatus;
   readable: boolean;
   /**
    * Whether the source kept the bytes it was made from. A source with none —

@@ -141,8 +141,6 @@ async fn postgres_terminal_citations_are_atomic_and_exactly_recoverable() {
             media_type: "text/plain".into(),
             title: None,
             canonical_text: "fact".into(),
-            canonical_fingerprint: None,
-            source_regions: Vec::new(),
             updated_at: claimed_at,
         })
         .await
@@ -2016,6 +2014,7 @@ async fn postgres_project_deletion_serializes_with_staged_source_ingestion() {
         media_type: "application/octet-stream".into(),
         title: None,
         source_blob: DocumentSourceBlob::from_digest([0x7a; 32], 1),
+        canonical_text: String::new(),
         updated_at: utc_now_at_postgres_precision(),
     };
 
@@ -2031,9 +2030,7 @@ async fn postgres_project_deletion_serializes_with_staged_source_ingestion() {
     let ingest_source = source.clone();
     let ingest = tokio::spawn(async move {
         ingest_barrier.wait().await;
-        ingest_store
-            .accept_document_source_and_enqueue_parse(&ingest_source, "parser-v1", 3)
-            .await
+        ingest_store.accept_document_source(&ingest_source).await
     });
     barrier.wait().await;
 
@@ -2043,7 +2040,7 @@ async fn postgres_project_deletion_serializes_with_staged_source_ingestion() {
         (DeleteProjectOutcome::Deleted, Err(AgentError::ProjectNotFound(missing_project))) => {
             assert_eq!(missing_project, project.id);
         }
-        (DeleteProjectOutcome::NotEmpty, Ok((record, _))) => {
+        (DeleteProjectOutcome::NotEmpty, Ok(record)) => {
             assert_eq!(record.project_id, Some(project.id));
             store.delete_document(record.id).await.unwrap();
             assert_eq!(

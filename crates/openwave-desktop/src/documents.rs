@@ -15,9 +15,7 @@ use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
 use futures::{stream, StreamExt};
-use openwave_core::{
-    ChatId, DocumentId, DocumentJobStatus, DocumentProcessingStatus, DocumentSourceBlob, Store,
-};
+use openwave_core::{ChatId, DocumentId, DocumentSourceBlob, SourceReadiness, Store};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, DragDropEvent, Emitter, Manager, State, WindowEvent};
@@ -57,17 +55,8 @@ struct CatalogDocument {
     title: Option<String>,
     media_type: String,
     source_byte_len: Option<u64>,
-    content_revision: i64,
-    processing_status: DocumentProcessingStatus,
     readable: bool,
     updated_at: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct LibraryDocumentFailure {
-    message: &'static str,
-    retriable: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -77,9 +66,7 @@ pub(crate) struct LibraryDocument {
     title: Option<String>,
     media_type: String,
     size_bytes: Option<u64>,
-    processing_status: DocumentProcessingStatus,
     readable: bool,
-    failure: Option<LibraryDocumentFailure>,
     updated_at: String,
 }
 
@@ -91,7 +78,7 @@ pub(crate) struct LibraryCatalog {
 }
 
 impl LibraryDocument {
-    fn from_catalog(document: CatalogDocument, failure: Option<LibraryDocumentFailure>) -> Self {
+    fn from_catalog(document: CatalogDocument) -> Self {
         Self {
             document_id: document.document_id.to_string(),
             title: document
@@ -99,9 +86,7 @@ impl LibraryDocument {
                 .and_then(|title| is_safe_renderer_text(&title, 255, false).then_some(title)),
             media_type: document.media_type,
             size_bytes: document.source_byte_len,
-            processing_status: document.processing_status,
             readable: document.readable,
-            failure,
             updated_at: document.updated_at,
         }
     }
@@ -132,19 +117,17 @@ pub(crate) struct LibrarySearchResult {
 pub(crate) struct ImportedDocument {
     document_id: String,
     display_name: String,
-    processing_status: DocumentProcessingStatus,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct IngestResponse {
     pub(crate) document_id: Uuid,
-    pub(crate) processing_status: DocumentProcessingStatus,
+    pub(crate) readiness: SourceReadiness,
 }
 
 #[derive(Debug, Deserialize)]
 struct StreamedIngestResponse {
     document_id: Uuid,
-    processing_status: DocumentProcessingStatus,
     already_present: bool,
 }
 
@@ -191,7 +174,6 @@ struct LibraryImportProgress {
     display_name: String,
     status: LibraryImportProgressStatus,
     document_id: Option<String>,
-    processing_status: Option<DocumentProcessingStatus>,
     message: Option<String>,
 }
 
@@ -355,9 +337,6 @@ pub(crate) async fn list_library_documents(
     let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
     let info = wait_server_info(state.inner()).await?;
     let http = local_client();
-    let store = host_access
-        .store()
-        .ok_or_else(|| "OpenWave is still starting".to_owned())?;
     let path = documents_path(chat_id);
     let mut cursor: Option<String> = None;
     let mut documents = Vec::new();
@@ -381,8 +360,7 @@ pub(crate) async fn list_library_documents(
             .await
             .map_err(|_| "The source catalog returned an invalid response".to_owned())?;
         for document in page.documents {
-            let failure = library_document_failure(store.as_ref(), &document).await?;
-            documents.push(LibraryDocument::from_catalog(document, failure));
+            documents.push(LibraryDocument::from_catalog(document));
         }
         cursor = page.next_cursor;
         if documents.len() >= MAX_LIBRARY_DOCUMENTS || cursor.is_none() {
@@ -420,37 +398,6 @@ pub(crate) async fn delete_library_document(
     .map_err(|_| "Could not delete that source".to_owned())?;
     if !response.status().is_success() {
         return Err("Could not delete that source".to_owned());
-    }
-    Ok(())
-}
-
-#[tauri::command]
-pub(crate) async fn retry_library_document(
-    state: State<'_, Arc<AppState>>,
-    host_access: State<'_, HostAccess>,
-    request: LibraryDocumentRequest,
-) -> Result<(), String> {
-    let (chat_id, document_id) =
-        resolve_document_scope(&host_access, request.chat_id, request.document_id).await?;
-    let info = wait_server_info(state.inner()).await?;
-    let response = native_auth(
-        local_client().post(format!(
-            "{}{}",
-            info.base_url,
-            retry_document_path(chat_id, document_id)
-        )),
-        &info,
-    )
-    .send()
-    .await
-    .map_err(|_| "Could not retry that source".to_owned())?;
-    if !response.status().is_success() {
-        return Err(if response.status() == reqwest::StatusCode::CONFLICT {
-            "This source can no longer be retried. Refresh sources for its current status."
-                .to_owned()
-        } else {
-            "Could not retry that source".to_owned()
-        });
     }
     Ok(())
 }
@@ -517,7 +464,6 @@ pub(crate) async fn import_library_document(
             display_name: display_name.clone(),
             status: LibraryImportProgressStatus::Queued,
             document_id: None,
-            processing_status: None,
             message: None,
         },
     );
@@ -916,7 +862,6 @@ pub(crate) async fn import_document_paths(
                 display_name: import.display_name.clone(),
                 status: LibraryImportProgressStatus::Queued,
                 document_id: None,
-                processing_status: None,
                 message: None,
             },
         );
@@ -1043,74 +988,12 @@ async fn resolve_document_scope(
     Ok((chat_id, document_id))
 }
 
-async fn library_document_failure(
-    store: &dyn Store,
-    document: &CatalogDocument,
-) -> Result<Option<LibraryDocumentFailure>, String> {
-    if document.processing_status != DocumentProcessingStatus::Failed {
-        return Ok(None);
-    }
-    let failed = store
-        .list_document_jobs(DocumentId::from(document.document_id))
-        .await
-        .map_err(|_| "Could not load this conversation's source status".to_owned())?
-        .into_iter()
-        .filter(|job| {
-            job.content_revision == document.content_revision
-                && job.status == DocumentJobStatus::Failed
-        })
-        .max_by_key(|job| job.updated_at);
-    Ok(Some(failure_projection(
-        failed
-            .as_ref()
-            .and_then(|job| job.last_error_code.as_deref()),
-    )))
-}
-
-fn failure_projection(code: Option<&str>) -> LibraryDocumentFailure {
-    let (message, retriable) = match code {
-        Some("source_blob_read_failed") => (
-            "OpenWave could not read the stored file. Retry, or delete it and add it again if the problem continues.",
-            true,
-        ),
-        Some("pipeline_changed" | "lease_expired") => (
-            "Source processing changed before this file finished. Retry with the current setup.",
-            true,
-        ),
-        Some("parse_failed") => (
-            "OpenWave could not read this file. Delete it and add a supported, uncorrupted version.",
-            false,
-        ),
-        Some(
-            "source_blob_missing"
-            | "source_blob_length_mismatch"
-            | "source_blob_digest_mismatch",
-        ) => (
-            "The stored file is unavailable or damaged. Delete this source and add the file again.",
-            false,
-        ),
-        Some("invalid_document_stage") => (
-            "This source was superseded while it was being prepared. Delete it and add the file again.",
-            false,
-        ),
-        Some(_) | None => (
-            "OpenWave could not prepare this source. Delete it and add the file again.",
-            false,
-        ),
-    };
-    LibraryDocumentFailure { message, retriable }
-}
-
 fn documents_path(chat_id: ChatId) -> String {
     format!("/chats/{chat_id}/documents")
 }
 
 fn document_path(chat_id: ChatId, document_id: DocumentId) -> String {
     format!("{}/{document_id}", documents_path(chat_id))
-}
-
-fn retry_document_path(chat_id: ChatId, document_id: DocumentId) -> String {
-    format!("{}/retry", document_path(chat_id, document_id))
 }
 
 pub(crate) fn raw_documents_path(chat_id: ChatId) -> String {
@@ -1368,7 +1251,6 @@ async fn import_selected_document_once(
             display_name: prepared.display_name.clone(),
             status: LibraryImportProgressStatus::Streaming,
             document_id: None,
-            processing_status: None,
             message: None,
         },
     );
@@ -1419,7 +1301,6 @@ async fn import_selected_document_once(
         document: ImportedDocument {
             document_id: accepted.document_id.to_string(),
             display_name: prepared.display_name,
-            processing_status: accepted.processing_status,
         },
         already_present: accepted.already_present,
     })
@@ -1439,7 +1320,6 @@ fn completed_progress(
         display_name: document.display_name.clone(),
         status,
         document_id: Some(document.document_id.clone()),
-        processing_status: Some(document.processing_status),
         message: None,
     }
 }
@@ -1457,7 +1337,6 @@ fn failed_import_result(
             display_name: display_name.clone(),
             status: LibraryImportProgressStatus::Failed,
             document_id: None,
-            processing_status: None,
             message: Some(message.clone()),
         },
     );
@@ -1585,10 +1464,6 @@ mod tests {
             format!("/chats/{}/documents/{document_id}", standalone.id)
         );
         assert_eq!(
-            retry_document_path(standalone.id, document_id),
-            format!("/chats/{}/documents/{document_id}/retry", standalone.id)
-        );
-        assert_eq!(
             search_path(standalone.id),
             format!("/chats/{}/search", standalone.id)
         );
@@ -1681,7 +1556,6 @@ mod tests {
                     document: ImportedDocument {
                         document_id: Uuid::new_v4().to_string(),
                         display_name: "notes.md".to_owned(),
-                        processing_status: DocumentProcessingStatus::Queued,
                     },
                 },
                 LibraryImportResult::Failed {
@@ -1801,19 +1675,14 @@ mod tests {
 
     #[test]
     fn renderer_catalog_projection_has_a_closed_safe_shape() {
-        let document = LibraryDocument::from_catalog(
-            CatalogDocument {
-                document_id: Uuid::nil(),
-                title: Some("notes.md".to_owned()),
-                media_type: "text/markdown".to_owned(),
-                source_byte_len: Some(42),
-                content_revision: 1,
-                processing_status: DocumentProcessingStatus::Ready,
-                readable: true,
-                updated_at: "2026-07-18T00:00:00Z".to_owned(),
-            },
-            None,
-        );
+        let document = LibraryDocument::from_catalog(CatalogDocument {
+            document_id: Uuid::nil(),
+            title: Some("notes.md".to_owned()),
+            media_type: "text/markdown".to_owned(),
+            source_byte_len: Some(42),
+            readable: true,
+            updated_at: "2026-07-18T00:00:00Z".to_owned(),
+        });
         let json = serde_json::to_value(document).unwrap();
         let keys = json
             .as_object()
@@ -1825,9 +1694,7 @@ mod tests {
             keys,
             [
                 "documentId",
-                "failure",
                 "mediaType",
-                "processingStatus",
                 "readable",
                 "sizeBytes",
                 "title",
@@ -1838,31 +1705,5 @@ mod tests {
         for forbidden in ["uri", "revision", "fingerprint", "content", "token", "path"] {
             assert!(!serialized.contains(forbidden));
         }
-    }
-
-    #[test]
-    fn failure_projection_offers_retry_only_for_recoverable_worker_failures() {
-        for code in [
-            "source_blob_read_failed",
-            "pipeline_changed",
-            "lease_expired",
-        ] {
-            let failure = failure_projection(Some(code));
-            assert!(failure.retriable, "{code}");
-            assert!(is_safe_renderer_text(failure.message, 500, false));
-        }
-        for code in [
-            "parse_failed",
-            "source_blob_missing",
-            "source_blob_length_mismatch",
-            "source_blob_digest_mismatch",
-            "invalid_document_stage",
-            "unknown",
-        ] {
-            let failure = failure_projection(Some(code));
-            assert!(!failure.retriable, "{code}");
-            assert!(is_safe_renderer_text(failure.message, 500, false));
-        }
-        assert!(!failure_projection(None).retriable);
     }
 }

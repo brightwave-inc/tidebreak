@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use openwave_core::{
     AgentConfig, AgentError, AgentRunId, BlobStore, CallId, CancelToken, ChatId, Config,
-    DocumentId, FsBlobStore, Result, SecretProvider, SteerInbox, Store, ToolRegistry, TurnId,
+    FsBlobStore, Result, SecretProvider, SteerInbox, Store, ToolRegistry, TurnId,
 };
 use openwave_retrieval::Retriever;
 use tokio::sync::Notify;
@@ -52,10 +52,8 @@ pub struct AppState {
     /// assembly in `bind_inner` replaces this with the platform's reader via
     /// `managed_policy::platform_source`.
     pub(crate) os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
-    /// The canonical parsing pipeline used by the durable document worker.
+    /// The canonical parsing pipeline used by document upload requests.
     pub retrieval: Arc<Retriever>,
-    /// Wakes the durable document worker after an enqueue commits.
-    pub(crate) document_job_wake: Arc<Notify>,
     /// Wakes the durable turn worker after acceptance or cancellation commits.
     pub(crate) turn_job_wake: Arc<Notify>,
     /// Wakes the bounded sandbox-run worker after delegated work commits.
@@ -65,8 +63,6 @@ pub struct AppState {
     pub(crate) agent_run_wake: Arc<Notify>,
     /// Wakes the source-blob retirement worker after a reference drop commits.
     pub(crate) blob_retirement_wake: Arc<Notify>,
-    /// Serializes lifecycle inspection with source replacement or deletion.
-    pub(crate) document_writes: Arc<DocumentWriteGuard>,
     /// Coordinates source publication and retirement across server processes.
     pub(crate) blob_writes: Arc<BlobWriteGuard>,
     /// Per-turn agent tuning (model, limits, …).
@@ -162,11 +158,9 @@ impl AppState {
             gateway,
             os_policy,
             retrieval,
-            document_job_wake: Arc::new(Notify::new()),
             turn_job_wake: Arc::new(Notify::new()),
             agent_run_wake: Arc::new(Notify::new()),
             blob_retirement_wake: Arc::new(Notify::new()),
-            document_writes: Arc::new(DocumentWriteGuard::default()),
             blob_writes,
             agent_config,
             token: Uuid::new_v4().to_string().into(),
@@ -367,38 +361,6 @@ impl BlobWriteGuard {
 
 fn blob_lock_error(error: std::io::Error) -> AgentError {
     AgentError::Store(format!("failed to acquire blob lifecycle lock: {error}"))
-}
-
-/// A bounded keyed async lock for document lifecycle transitions.
-///
-/// These stripes keep an auditor's read-and-repair decision from racing a
-/// concurrent source replacement or deletion.
-pub(crate) struct DocumentWriteGuard {
-    stripes: Box<[Arc<tokio::sync::Mutex<()>>]>,
-}
-
-impl Default for DocumentWriteGuard {
-    fn default() -> Self {
-        Self {
-            stripes: (0..256)
-                .map(|_| Arc::new(tokio::sync::Mutex::new(())))
-                .collect(),
-        }
-    }
-}
-
-impl DocumentWriteGuard {
-    pub(crate) async fn acquire(
-        &self,
-        document_id: DocumentId,
-    ) -> tokio::sync::OwnedMutexGuard<()> {
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        document_id.hash(&mut hasher);
-        let stripe = hasher.finish() as usize % self.stripes.len();
-        self.stripes[stripe].clone().lock_owned().await
-    }
 }
 
 /// Exact local handles for one durably claimed turn attempt.

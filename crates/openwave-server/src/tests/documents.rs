@@ -488,8 +488,8 @@ async fn document_file_content_preserves_document_scope_before_blob_access() {
 }
 
 #[tokio::test]
-async fn raw_ingest_retains_exact_bytes_and_runs_the_async_pipeline() {
-    let (router, token, store, dir, worker) = test_app_with_worker().await;
+async fn raw_ingest_retains_exact_bytes_and_decodes_before_responding() {
+    let (router, token, store, dir) = test_app().await;
     let bearer = format!("Bearer {token}");
     let raw = b"raw \xff source\n".to_vec();
     let response = post_raw(
@@ -500,7 +500,7 @@ async fn raw_ingest_retains_exact_bytes_and_runs_the_async_pipeline() {
         raw.clone(),
     )
     .await;
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(response.status(), StatusCode::CREATED);
     let accepted: serde_json::Value = json_body(response).await;
     let document_id: openwave_core::DocumentId =
         accepted["document_id"].as_str().unwrap().parse().unwrap();
@@ -509,19 +509,12 @@ async fn raw_ingest_retains_exact_bytes_and_runs_the_async_pipeline() {
         openwave_core::DocumentId::derive("file:///raw.txt")
     );
 
-    let pending = store.get_document(document_id).await.unwrap().unwrap();
-    assert_eq!(pending.media_type, "text/plain; charset=utf-8");
-    let source_blob = pending.source_blob.unwrap();
+    let document = store.get_document(document_id).await.unwrap().unwrap();
+    assert_eq!(document.media_type, "text/plain; charset=utf-8");
+    let source_blob = document.source_blob.unwrap();
     let blobs = openwave_core::FsBlobStore::new(dir.path().join("blobs"));
     assert_eq!(blobs.get(source_blob.id).await.unwrap().unwrap(), raw);
-
-    run_parse(&worker).await;
-    let ready = store.get_document(document_id).await.unwrap().unwrap();
-    assert_eq!(ready.canonical_text, String::from_utf8_lossy(&raw));
-    assert_eq!(
-        ready.processing_status,
-        openwave_core::DocumentProcessingStatus::Ready
-    );
+    assert_eq!(document.canonical_text, String::from_utf8_lossy(&raw));
 }
 
 #[tokio::test]
@@ -552,7 +545,7 @@ async fn streamed_raw_ingest_accepts_large_chunked_sources_and_deduplicates_by_c
         vec![raw[..64 * 1024].to_vec(), raw[64 * 1024..].to_vec()],
     )
     .await;
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(response.status(), StatusCode::CREATED);
     let accepted: serde_json::Value = json_body(response).await;
     assert_eq!(accepted["already_present"], false);
     let document_id: openwave_core::DocumentId =
@@ -613,7 +606,7 @@ async fn raw_ingest_enforces_media_type_body_and_project_scope() {
         b"# scoped".to_vec(),
     )
     .await;
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(response.status(), StatusCode::CREATED);
     let accepted: serde_json::Value = json_body(response).await;
     let document_id = accepted["document_id"].as_str().unwrap().parse().unwrap();
     assert_eq!(
@@ -640,7 +633,7 @@ async fn raw_ingest_persists_a_safe_title_without_requiring_a_source_path() {
         b"# Notes".to_vec(),
     )
     .await;
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(response.status(), StatusCode::CREATED);
     let accepted: serde_json::Value = json_body(response).await;
     let document_id = accepted["document_id"].as_str().unwrap().parse().unwrap();
     let document = store.get_document(document_id).await.unwrap().unwrap();
@@ -670,7 +663,7 @@ async fn raw_ingest_has_an_explicit_limit_and_preserves_payload_too_large() {
         vec![b'x'; MAX_RAW_DOCUMENT_BYTES],
     )
     .await;
-    assert_eq!(boundary.status(), StatusCode::ACCEPTED);
+    assert_eq!(boundary.status(), StatusCode::CREATED);
 
     let too_large = post_raw(
         &router,
@@ -687,7 +680,7 @@ async fn raw_ingest_has_an_explicit_limit_and_preserves_payload_too_large() {
 
 #[tokio::test]
 async fn project_document_routes_enforce_corpus_identity_and_ownership() {
-    let (router, token, store, _dir, worker) = test_app_with_worker().await;
+    let (router, token, store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");
     let project_a = make_project(&router, &bearer).await;
     let project_b = make_project(&router, &bearer).await;
@@ -738,13 +731,6 @@ async fn project_document_routes_enforce_corpus_identity_and_ownership() {
     );
     assert_ne!(root["document_id"], a["document_id"]);
     assert_ne!(a["document_id"], b["document_id"]);
-
-    for _ in 0..3 {
-        assert!(matches!(
-            worker.run_once().await.unwrap(),
-            document_worker::WorkerOutcome::Completed(_)
-        ));
-    }
 
     let request = |method: axum::http::Method, uri: String| {
         let router = router.clone();
@@ -809,17 +795,6 @@ async fn project_document_routes_enforce_corpus_identity_and_ownership() {
         request(axum::http::Method::GET, format!("/documents/{a_id}"),)
             .await
             .status(),
-        StatusCode::NOT_FOUND
-    );
-    assert_eq!(
-        post_json(
-            &router,
-            &bearer,
-            &format!("/documents/{a_id}/retry"),
-            serde_json::Value::Null,
-        )
-        .await
-        .status(),
         StatusCode::NOT_FOUND
     );
     assert_eq!(
@@ -978,87 +953,6 @@ async fn chat_document_routes_isolate_sources_and_delete_lifecycle() {
 }
 
 #[tokio::test]
-async fn explicit_retry_selects_the_failed_parse_stage() {
-    let (router, token, store, dir, worker) = test_app_with_worker().await;
-    let bearer = format!("Bearer {token}");
-    let raw = b"parse retry succeeds through the durable worker".to_vec();
-    let source_blob = openwave_core::DocumentSourceBlob::from_bytes(&raw);
-    let blob_id = source_blob.id;
-    let blobs = openwave_core::FsBlobStore::new(dir.path().join("blobs"));
-    openwave_core::BlobStore::put(&blobs, blob_id, raw.clone())
-        .await
-        .unwrap();
-    let source = openwave_core::DocumentSourceUpsert {
-        chat_id: None,
-        id: openwave_core::DocumentId::new(),
-        project_id: None,
-        source_uri: Some("file:///parse-retry.txt".into()),
-        media_type: "text/plain".into(),
-        title: None,
-        source_blob,
-        updated_at: chrono::Utc::now(),
-    };
-    let (_, parse_job) = store
-        .accept_document_source_and_enqueue_parse(&source, "plain-text-lossy-v1", 1)
-        .await
-        .unwrap();
-    let claim_at = parse_job.available_at + chrono::Duration::seconds(1);
-    let claimed = store
-        .claim_document_job(claim_at, claim_at + chrono::Duration::minutes(1))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(claimed.id, parse_job.id);
-    assert_eq!(
-        store
-            .record_document_job_failure(
-                claimed.id,
-                claimed.lease_token.unwrap(),
-                claim_at + chrono::Duration::seconds(1),
-                None,
-                "parse_failed",
-                None,
-            )
-            .await
-            .unwrap(),
-        Some(openwave_core::DocumentJobStatus::Failed)
-    );
-
-    let response = router
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/documents/{}/retry", source.id))
-                .header(header::AUTHORIZATION, bearer)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    let retried = store.get_document_job(parse_job.id).await.unwrap().unwrap();
-    assert_eq!(retried.id, parse_job.id);
-    assert_eq!(retried.kind, openwave_core::DocumentJobKind::Parse);
-    assert_eq!(retried.status, openwave_core::DocumentJobStatus::Queued);
-    assert_eq!(retried.attempt_count, 0);
-    assert_eq!(retried.max_attempts, document_stage::MAX_PARSE_ATTEMPTS);
-
-    assert_eq!(
-        worker.run_once().await.unwrap(),
-        document_worker::WorkerOutcome::Completed(parse_job.id)
-    );
-    let jobs = store.list_document_jobs(source.id).await.unwrap();
-    assert_eq!(jobs.len(), 1);
-    assert_eq!(jobs[0].status, openwave_core::DocumentJobStatus::Succeeded);
-    let document = store.get_document(source.id).await.unwrap().unwrap();
-    assert_eq!(document.canonical_text.as_bytes(), raw);
-    assert_eq!(
-        document.processing_status,
-        openwave_core::DocumentProcessingStatus::Ready
-    );
-}
-
-#[tokio::test]
 async fn document_catalog_pages_metadata_and_keeps_project_content_private() {
     let (router, token, store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");
@@ -1091,7 +985,7 @@ async fn document_catalog_pages_metadata_and_keeps_project_content_private() {
             )
             .await
             .status(),
-            StatusCode::ACCEPTED
+            StatusCode::CREATED
         );
     }
 
@@ -1108,11 +1002,6 @@ async fn document_catalog_pages_metadata_and_keeps_project_content_private() {
             title: None,
             source_blob: None,
             canonical_text: "project-only source".into(),
-            canonical_fingerprint: None,
-            source_regions: Vec::new(),
-            content_revision: 1,
-            revision_token: uuid::Uuid::new_v4(),
-            processing_status: openwave_core::DocumentProcessingStatus::Queued,
             created_at: now,
             updated_at: now,
         })
@@ -1173,12 +1062,11 @@ async fn document_catalog_pages_metadata_and_keeps_project_content_private() {
         catalog_summary["source_byte_len"],
         serde_json::json!("# Catalog\n\nDurable source".len())
     );
-    assert_eq!(catalog_summary["content_revision"], 1);
-    assert_eq!(catalog_summary["processing_status"], "queued");
+    assert_eq!(catalog_summary["readable"], true);
     let detail = get(format!("/documents/{id}")).await;
     assert_eq!(detail.status(), StatusCode::OK);
     let detail: serde_json::Value = json_body(detail).await;
-    assert_eq!(detail["content"], "");
+    assert_eq!(detail["content"], "# Catalog\n\nDurable source");
     assert_eq!(detail["document_id"], id);
     assert!(detail.get("revision_token").is_none());
 
@@ -1225,11 +1113,6 @@ async fn document_catalog_cursor_preserves_nanosecond_ordering() {
                 title: None,
                 source_blob: None,
                 canonical_text: nanos.to_string(),
-                canonical_fingerprint: None,
-                source_regions: Vec::new(),
-                content_revision: 1,
-                revision_token: uuid::Uuid::new_v4(),
-                processing_status: openwave_core::DocumentProcessingStatus::Queued,
                 created_at,
                 updated_at: created_at,
             })
@@ -1267,7 +1150,7 @@ async fn document_catalog_cursor_preserves_nanosecond_ordering() {
 }
 
 #[tokio::test]
-async fn concurrent_same_document_ingests_publish_in_request_order() {
+async fn concurrent_same_document_ingests_are_last_write_wins() {
     let dir = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
         DbStore::connect(&format!(
@@ -1290,7 +1173,7 @@ async fn concurrent_same_document_ingests_publish_in_request_order() {
         Arc::new(FixedResolver(Arc::new(FakeProvider))),
         Arc::new(MemSecrets::default()),
         Arc::new(ToolRegistry::new()),
-        retrieval.clone(),
+        retrieval,
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
@@ -1298,13 +1181,6 @@ async fn concurrent_same_document_ingests_publish_in_request_order() {
     );
     state.blobs = blobs.clone();
     let token = state.token.clone();
-    let worker = document_worker::DocumentWorker::new(
-        store.clone(),
-        state.blobs.clone(),
-        retrieval,
-        state.document_job_wake.clone(),
-        document_worker::DocumentWorkerConfig::default(),
-    );
     let router = app(state);
     let bearer = format!("Bearer {token}");
 
@@ -1328,7 +1204,7 @@ async fn concurrent_same_document_ingests_publish_in_request_order() {
 
     let second_router = router.clone();
     let second_bearer = bearer.clone();
-    let mut second = tokio::spawn(async move {
+    let second = tokio::spawn(async move {
         post_json(
             &second_router,
             &second_bearer,
@@ -1340,48 +1216,31 @@ async fn concurrent_same_document_ingests_publish_in_request_order() {
         )
         .await
     });
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), &mut second)
-            .await
-            .is_err(),
-        "later request must not complete while the first publication is blocked"
-    );
+    let second = tokio::time::timeout(Duration::from_secs(1), second)
+        .await
+        .expect("later request was blocked by an earlier publication")
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::CREATED);
     assert_eq!(
         blobs.calls.load(Ordering::SeqCst),
-        1,
-        "later request must block before publishing its blob"
+        2,
+        "independent requests publish their blobs without a document write lock"
     );
     blobs.release.notify_one();
     let first = first.await.unwrap();
-    let second = second.await.unwrap();
-    assert_eq!(first.status(), StatusCode::ACCEPTED);
-    assert_eq!(second.status(), StatusCode::ACCEPTED);
-    assert_eq!(blobs.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(first.status(), StatusCode::CREATED);
     let record = store
         .get_document(openwave_core::DocumentId::derive("file:///concurrent.txt"))
         .await
         .unwrap()
         .unwrap();
-    assert!(record.canonical_text.is_empty());
+    assert_eq!(record.canonical_text, "first version");
     assert!(record.source_blob.is_some());
-    assert_eq!(record.content_revision, 2);
-    let jobs = store.list_document_jobs(record.id).await.unwrap();
-    assert_eq!(jobs.len(), 2);
-    assert_eq!(jobs[0].status, openwave_core::DocumentJobStatus::Cancelled);
-    assert_eq!(jobs[1].status, openwave_core::DocumentJobStatus::Queued);
-
-    run_parse(&worker).await;
-    let record = store.get_document(record.id).await.unwrap().unwrap();
-    assert_eq!(record.canonical_text, "second version");
-    assert_eq!(
-        record.processing_status,
-        openwave_core::DocumentProcessingStatus::Ready
-    );
 }
 
 #[tokio::test]
 async fn re_ingesting_the_same_uri_is_idempotent() {
-    let (router, token, store, _dir, worker) = test_app_with_worker().await;
+    let (router, token, store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");
     let doc = serde_json::json!({
         "uri": "file:///notes.txt",
@@ -1394,17 +1253,16 @@ async fn re_ingesting_the_same_uri_is_idempotent() {
         json_body(post_json(&router, &bearer, "/documents", doc).await).await;
     // Same URI => same derived document id => replaced in place.
     assert_eq!(first["document_id"], second["document_id"]);
-    assert_eq!(first["job_id"], second["job_id"]);
-    assert_eq!(first["content_revision"], second["content_revision"]);
     let document_id = first["document_id"].as_str().unwrap().parse().unwrap();
-    let jobs = store.list_document_jobs(document_id).await.unwrap();
-    assert_eq!(jobs.len(), 1);
-    assert_eq!(jobs[0].kind, openwave_core::DocumentJobKind::Parse);
-    assert_eq!(jobs[0].status, openwave_core::DocumentJobStatus::Queued);
-    run_parse(&worker).await;
-    let jobs = store.list_document_jobs(document_id).await.unwrap();
-    assert_eq!(jobs.len(), 1);
-    assert_eq!(jobs[0].status, openwave_core::DocumentJobStatus::Succeeded);
+    assert_eq!(
+        store
+            .get_document(document_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .canonical_text,
+        "one two three four five six seven eight nine ten"
+    );
 }
 
 #[tokio::test]
@@ -1454,7 +1312,7 @@ async fn ingest_rejects_empty_content() {
 
 #[tokio::test]
 async fn ingest_accepts_any_media_type_via_the_fallback_parser() {
-    let (router, token, store, _dir, worker) = test_app_with_worker().await;
+    let (router, token, store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");
 
     // A text-like body with an unrecognized media type is accepted and remains
@@ -1467,7 +1325,7 @@ async fn ingest_accepts_any_media_type_via_the_fallback_parser() {
         b"level=info service started ok".to_vec(),
     )
     .await;
-    assert_eq!(textual.status(), StatusCode::ACCEPTED);
+    assert_eq!(textual.status(), StatusCode::CREATED);
     let textual_id: openwave_core::DocumentId = json_body::<serde_json::Value>(textual).await
         ["document_id"]
         .as_str()
@@ -1485,7 +1343,7 @@ async fn ingest_accepts_any_media_type_via_the_fallback_parser() {
         b"%PDF-1.7\n%\xFF\xFF\n".to_vec(),
     )
     .await;
-    assert_eq!(binary.status(), StatusCode::ACCEPTED);
+    assert_eq!(binary.status(), StatusCode::CREATED);
     let binary_id: openwave_core::DocumentId = json_body::<serde_json::Value>(binary).await
         ["document_id"]
         .as_str()
@@ -1493,25 +1351,13 @@ async fn ingest_accepts_any_media_type_via_the_fallback_parser() {
         .parse()
         .unwrap();
 
-    // Two documents produce two parse jobs.
-    run_parse(&worker).await;
-    run_parse(&worker).await;
-
     let textual_doc = store.get_document(textual_id).await.unwrap().unwrap();
-    assert_eq!(
-        textual_doc.processing_status,
-        openwave_core::DocumentProcessingStatus::Ready
-    );
     assert_eq!(textual_doc.canonical_text, "level=info service started ok");
 
     let binary_doc = store.get_document(binary_id).await.unwrap().unwrap();
-    assert_eq!(
-        binary_doc.processing_status,
-        openwave_core::DocumentProcessingStatus::Ready
-    );
     assert!(binary_doc.canonical_text.is_empty());
     assert_eq!(
-        openwave_core::SourceReadiness::of(binary_doc.processing_status, binary_doc.is_readable()),
+        openwave_core::SourceReadiness::of(binary_doc.is_readable()),
         openwave_core::SourceReadiness::StoredNoText
     );
 }
@@ -1761,7 +1607,7 @@ async fn catalog_delete_failure_leaves_source_stale_and_repairable() {
         .await
         .unwrap()
         .unwrap();
-    assert!(record.canonical_text.is_empty());
+    assert_eq!(record.canonical_text, "rebuildable source");
     assert!(record.source_blob.is_some());
     assert_eq!(delete(id).await.status(), StatusCode::ACCEPTED);
 }

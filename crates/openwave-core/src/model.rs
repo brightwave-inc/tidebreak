@@ -10,260 +10,15 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::num::NonZeroU32;
 use uuid::Uuid;
 
 use crate::image::ImageRef;
 use crate::provider::Usage;
 
-/// A half-open UTF-8 byte range `[start, end)` in canonical document text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ByteSpan {
-    /// Inclusive start byte offset.
-    pub start: usize,
-    /// Exclusive end byte offset.
-    pub end: usize,
-}
-
-impl ByteSpan {
-    /// Construct a byte span.
-    #[must_use]
-    pub const fn new(start: usize, end: usize) -> Self {
-        debug_assert!(start <= end, "span start must not exceed end");
-        Self { start, end }
-    }
-
-    /// Number of bytes covered by the span.
-    #[must_use]
-    pub const fn len(&self) -> usize {
-        self.end.saturating_sub(self.start)
-    }
-
-    /// Whether the span covers no bytes.
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.end <= self.start
-    }
-}
-
-/// Format-specific location in the original source represented by canonical text.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum SourceLocation {
-    /// One page in a paginated source. Page numbers are one-based.
-    Page {
-        /// One-based page number.
-        number: NonZeroU32,
-    },
-    /// One node of a structured source — a JSON value, an XML or HTML element.
-    ///
-    /// A structured source has no pages: its canonical text is the file itself,
-    /// and the position a reader opens is a node of the tree the file parses
-    /// into. The path is recorded alongside the span rather than instead of it,
-    /// because the span is still what addresses the extracted text.
-    StructuredPath {
-        /// The path itself, interpreted according to `path_type`.
-        path: String,
-        /// How to read the path.
-        path_type: StructuredPathType,
-    },
-    /// Cells of one sheet of a workbook.
-    ///
-    /// A workbook has no pages either: its canonical text is a rendering of the
-    /// grid, and the position a reader opens is a range of that grid. A parser
-    /// emits one region per cell, so a passage that later covers many of them
-    /// can be reduced to the rectangle it occupies rather than to the first cell
-    /// it touched.
-    SpreadsheetCells {
-        /// Zero-based position of the sheet in the workbook.
-        sheet_index: i32,
-        /// The sheet's own name, which is what a reader is shown.
-        sheet_name: String,
-        /// First cell of the range, in A1 notation.
-        start_cell: String,
-        /// Last cell of the range, in A1 notation, for a range wider than one
-        /// cell.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        end_cell: Option<String>,
-    },
-}
-
-impl SourceLocation {
-    /// The structured path this location names, where it names one.
-    #[must_use]
-    pub fn structured_path(&self) -> Option<(&str, StructuredPathType)> {
-        match self {
-            Self::StructuredPath { path, path_type } => Some((path.as_str(), *path_type)),
-            _ => None,
-        }
-    }
-
-    /// The cells of a sheet this location names, where it names some.
-    #[must_use]
-    pub fn spreadsheet_cells(&self) -> Option<SpreadsheetCells<'_>> {
-        match self {
-            Self::SpreadsheetCells {
-                sheet_index,
-                sheet_name,
-                start_cell,
-                end_cell,
-            } => Some(SpreadsheetCells {
-                sheet_index: *sheet_index,
-                sheet_name: sheet_name.as_str(),
-                start_cell: start_cell.as_str(),
-                end_cell: end_cell.as_deref(),
-            }),
-            _ => None,
-        }
-    }
-}
-
-/// A borrowed view of the cells a [`SourceLocation::SpreadsheetCells`] names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SpreadsheetCells<'a> {
-    /// Zero-based position of the sheet in the workbook.
-    pub sheet_index: i32,
-    /// The sheet's own name.
-    pub sheet_name: &'a str,
-    /// First cell of the range, in A1 notation.
-    pub start_cell: &'a str,
-    /// Last cell of the range, for a range wider than one cell.
-    pub end_cell: Option<&'a str>,
-}
-
-/// A cell's zero-based column and row, which is the form a range is compared and
-/// combined in. A1 notation is what a reader reads; this is what arithmetic
-/// works on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct CellAddress {
-    /// Zero-based column, so `A` is 0.
-    pub column: u32,
-    /// Zero-based row, so row `1` is 0.
-    pub row: u32,
-}
-
-impl CellAddress {
-    /// Read an A1 reference — `B5`, `AA10` — into column and row.
-    ///
-    /// Returns `None` for anything `is_a1_reference` would reject, so a
-    /// malformed reference never becomes an arbitrary cell. Column letters are
-    /// read case-insensitively, which is how a spreadsheet reads them.
-    #[must_use]
-    pub fn parse(cell: &str) -> Option<Self> {
-        if !is_a1_reference(cell) {
-            return None;
-        }
-        let split = cell.bytes().take_while(u8::is_ascii_alphabetic).count();
-        let (letters, digits) = cell.split_at(split);
-        let column = letters.bytes().try_fold(0_u32, |column, letter| {
-            column
-                .checked_mul(26)?
-                .checked_add(u32::from(letter.to_ascii_uppercase() - b'A') + 1)
-        })?;
-        let row: u32 = digits.parse().ok()?;
-        Some(Self {
-            // Both are one-based on the page and zero-based here; the guard
-            // above has already rejected a zero row.
-            column: column - 1,
-            row: row.checked_sub(1)?,
-        })
-    }
-
-    /// Write this address back as A1 notation.
-    ///
-    /// `None` for an address past the widest and tallest worksheet A1 addresses,
-    /// which no real sheet reaches but a malformed file can claim. Producers
-    /// leave such a cell out rather than recording a reference that would be
-    /// rejected downstream, taking the whole document with it.
-    #[must_use]
-    pub fn to_a1(self) -> Option<String> {
-        let mut letters = Vec::new();
-        let mut column = self.column;
-        loop {
-            letters.push(b'A' + u8::try_from(column % 26).expect("a remainder of 26 fits u8"));
-            match column / 26 {
-                0 => break,
-                next => column = next - 1,
-            }
-        }
-        letters.reverse();
-        let letters = String::from_utf8(letters).expect("ASCII column letters are UTF-8");
-        let cell = format!("{letters}{}", self.row.checked_add(1)?);
-        is_a1_reference(&cell).then_some(cell)
-    }
-}
-
-/// Mapping from canonical text back to a location in the original source.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SourceRegion {
-    /// Document-global canonical-text span represented by this region.
-    pub span: ByteSpan,
-    /// Original source location for the span.
-    pub location: SourceLocation,
-}
-
-/// Validate parser-produced source regions against their canonical text.
-///
-/// Regions must be ordered, nonempty, nonoverlapping, in bounds, and aligned to
-/// UTF-8 boundaries. Gaps are valid for parser-inserted separators.
-pub fn validate_source_regions(
-    text: &str,
-    regions: &[SourceRegion],
-) -> std::result::Result<(), &'static str> {
-    let mut previous_end = 0;
-    for region in regions {
-        if region.span.is_empty() {
-            return Err("source regions must be nonempty");
-        }
-        if region.span.end > text.len() {
-            return Err("source region falls outside canonical text");
-        }
-        if !text.is_char_boundary(region.span.start) || !text.is_char_boundary(region.span.end) {
-            return Err("source region offsets must be UTF-8 character boundaries");
-        }
-        if region.span.start < previous_end {
-            return Err("source regions must be ordered and nonoverlapping");
-        }
-        match &region.location {
-            SourceLocation::Page { .. } => {}
-            SourceLocation::StructuredPath { path, .. } => {
-                if path.is_empty() || path.len() > MAX_STRUCTURED_PATH_BYTES || path.contains('\0')
-                {
-                    return Err("structured source region paths must be nonempty and bounded");
-                }
-            }
-            SourceLocation::SpreadsheetCells {
-                sheet_index,
-                sheet_name,
-                start_cell,
-                end_cell,
-            } => {
-                if !is_a1_reference(start_cell)
-                    || !end_cell.as_deref().is_none_or(is_a1_reference)
-                    || *sheet_index < 0
-                    || sheet_name.is_empty()
-                    || sheet_name.len() > MAX_SHEET_NAME_BYTES
-                    || sheet_name.contains('\0')
-                {
-                    return Err("spreadsheet source regions must name a sheet and A1 cells");
-                }
-            }
-        }
-        previous_end = region.span.end;
-    }
-    Ok(())
-}
-
 use crate::id::{
-    AgentRunId, CallId, ChatId, DocumentId, DocumentJobId, HostRootId, MessageId, ProjectId,
+    AgentRunId, CallId, ChatId, DocumentId, HostRootId, MessageId, ProjectId,
     RootAttachmentChangeId, TurnId,
 };
-
-const MAX_CELL_COLUMN_LETTERS: usize = 3;
-const MAX_CELL_ROW_DIGITS: usize = 7;
-const MAX_SHEET_NAME_BYTES: usize = 1024;
-const MAX_STRUCTURED_PATH_BYTES: usize = 4 * 1024;
 
 /// Maximum number of host roots projected onto one project or conversation.
 ///
@@ -657,70 +412,25 @@ pub struct Project {
     pub created_at: DateTime<Utc>,
 }
 
-/// User-visible lifecycle of the current authoritative document revision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum DocumentProcessingStatus {
-    /// Durable source exists and awaits processing or retry.
-    Queued,
-    /// A worker owns the current processing job.
-    Processing,
-    /// The current revision's text of record is published and readable.
-    Ready,
-    /// Processing exhausted retries or hit a permanent failure.
-    Failed,
-}
-
-impl DocumentProcessingStatus {
-    /// Stable database and wire representation.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Queued => "queued",
-            Self::Processing => "processing",
-            Self::Ready => "ready",
-            Self::Failed => "failed",
-        }
-    }
-}
-
 /// What a caller can actually do with a source right now.
-///
-/// The durable lifecycle and whether parsing produced any text are two
-/// separate facts, and neither alone answers the question a caller has. `Ready`
-/// on its own says a pipeline finished, not that it found anything; a source
-/// that parsed to nothing is `Ready` and holds no readable text forever.
-/// Collapsing both facts into one value keeps callers from reading "finished"
-/// as "usable".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum SourceReadiness {
-    /// Still being parsed. Checking again later may change this.
-    Processing,
-    /// Parsed to text a reader can be given.
+    /// The source contains text a reader can be given.
     Readable,
     /// Durably stored and citable by name, but holding no text to read.
-    ///
-    /// A scan without OCR, or a format whose parser is not installed on this
-    /// host. Waiting will not change this; reprocessing might.
     StoredNoText,
-    /// Processing exhausted retries or hit a permanent failure.
-    Failed,
 }
 
 impl SourceReadiness {
-    /// Combine the durable lifecycle with whether any text was extracted.
+    /// Derive readiness from whether canonical text is present.
     #[must_use]
-    pub const fn of(status: DocumentProcessingStatus, readable: bool) -> Self {
-        match status {
-            DocumentProcessingStatus::Queued | DocumentProcessingStatus::Processing => {
-                Self::Processing
-            }
-            DocumentProcessingStatus::Failed => Self::Failed,
-            DocumentProcessingStatus::Ready if readable => Self::Readable,
-            DocumentProcessingStatus::Ready => Self::StoredNoText,
+    pub const fn of(readable: bool) -> Self {
+        if readable {
+            Self::Readable
+        } else {
+            Self::StoredNoText
         }
     }
 
@@ -728,34 +438,13 @@ impl SourceReadiness {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Processing => "processing",
             Self::Readable => "readable",
             Self::StoredNoText => "stored_no_text",
-            Self::Failed => "failed",
         }
     }
 }
 
-/// Semantic stage performed by a durable document job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum DocumentJobKind {
-    /// Parse immutable raw source bytes into canonical text and provenance.
-    Parse,
-}
-
-impl DocumentJobKind {
-    /// Stable database and wire representation.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Parse => "parse",
-        }
-    }
-}
-
-/// Immutable raw source retained for reparsing one document revision.
+/// Content-addressed raw source retained for original-file access.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocumentSourceBlob {
     /// UUID key in the configured [`crate::BlobStore`].
@@ -796,7 +485,7 @@ impl DocumentSourceBlob {
     }
 }
 
-/// Metadata and immutable bytes accepted for asynchronous document parsing.
+/// Authoritative source content accepted after synchronous decoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocumentSourceUpsert {
     /// Stable document identifier.
@@ -813,139 +502,16 @@ pub struct DocumentSourceUpsert {
     pub title: Option<String>,
     /// Immutable source bytes already published to the blob store.
     pub source_blob: DocumentSourceBlob,
+    /// Parsed text-of-record.
+    pub canonical_text: String,
     /// Source metadata timestamp; workflow timestamps remain store-owned.
     pub updated_at: DateTime<Utc>,
 }
 
-/// Canonical parser output published by a successfully leased parse job.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DocumentParseOutput {
-    /// Parsed text-of-record used by the indexing stage.
-    pub canonical_text: String,
-    /// Parser-produced mappings into the original source.
-    pub source_regions: Vec<SourceRegion>,
-}
-
-/// Durable delivery state of one document-processing job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum DocumentJobStatus {
-    /// Eligible to be claimed at `available_at`.
-    Queued,
-    /// Currently owned by the exact lease token and expiry on the job.
-    Running,
-    /// Failed transiently and becomes claimable again at `available_at`.
-    RetryWait,
-    /// Completed successfully.
-    Succeeded,
-    /// Exhausted retries or failed permanently.
-    Failed,
-    /// Superseded or explicitly cancelled.
-    Cancelled,
-}
-
-impl DocumentJobStatus {
-    /// Stable database and wire representation.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Queued => "queued",
-            Self::Running => "running",
-            Self::RetryWait => "retry_wait",
-            Self::Succeeded => "succeeded",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-        }
-    }
-
-    /// Whether no worker may claim this job again without an explicit retry.
-    #[must_use]
-    pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
-    }
-}
-
-/// Exact, monotonically ordered source generation for one stable document id.
-///
-/// The revision clock survives hard source deletion, while the token identifies
-/// one exact revision and prevents equal-revision corruption.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DocumentGeneration {
-    /// Monotonic revision for this document id, including delete tombstones.
-    pub content_revision: i64,
-    /// Opaque identity for this exact generation.
-    pub revision_token: Uuid,
-}
-
-/// How the `path` of a structured-path evidence location is written.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum StructuredPathType {
-    /// Dot-separated keys and indices into a JSON document, as in
-    /// `items.0.invoice_number`.
-    JsonDotNotation,
-    /// An XPath expression into an XML or HTML document.
-    XmlXpath,
-}
-
-impl StructuredPathType {
-    /// The character that separates one step of a path of this kind.
-    #[must_use]
-    pub const fn separator(self) -> char {
-        match self {
-            Self::JsonDotNotation => '.',
-            Self::XmlXpath => '/',
-        }
-    }
-
-    /// The deepest node both paths lie under, as a path of the same kind.
-    ///
-    /// Empty when the two share no addressable node: two JSON paths under
-    /// different top-level keys, or two XPaths whose only common step is the
-    /// document itself. The root of a tree has no path, so an empty answer is
-    /// the honest one rather than a path that addresses everything.
-    #[must_use]
-    pub fn common_ancestor<'a>(self, left: &'a str, right: &str) -> &'a str {
-        let separator = self.separator();
-        let matched: usize = left
-            .split(separator)
-            .zip(right.split(separator))
-            .take_while(|(left_step, right_step)| left_step == right_step)
-            .map(|(left_step, _)| left_step.len())
-            .sum::<usize>();
-        let steps = left
-            .split(separator)
-            .zip(right.split(separator))
-            .take_while(|(left_step, right_step)| left_step == right_step)
-            .count();
-        // The shared steps are rejoined by the separator they were split on, so
-        // the prefix is their bytes plus one separator between each pair. An
-        // XPath's leading step is empty, which leaves the root as the empty
-        // path it is.
-        &left[..matched + steps.saturating_sub(1)]
-    }
-}
-
-/// Whether `cell` is an A1-notation reference: a column of letters followed by
-/// a one-based row number, and nothing else.
-fn is_a1_reference(cell: &str) -> bool {
-    let column_letters = cell.bytes().take_while(u8::is_ascii_alphabetic).count();
-    let (column, row) = cell.split_at(column_letters);
-    (1..=MAX_CELL_COLUMN_LETTERS).contains(&column.len())
-        && (1..=MAX_CELL_ROW_DIGITS).contains(&row.len())
-        && row.bytes().all(|byte| byte.is_ascii_digit())
-        && !row.starts_with('0')
-}
-
-/// An authoritative source document whose derived chunks live in the retrieval
-/// index. Canonical text stays in the operational store so an index can be
-/// rebuilt after an embedding or chunking change. Reprocessing with a different
-/// parser additionally requires the original bytes, which belong in `BlobStore`.
+/// An authoritative source document and its synchronously decoded text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocumentRecord {
-    /// Stable identifier shared with the retrieval index.
+    /// Stable document identifier.
     pub id: DocumentId,
     /// Owning conversation for conversation-scoped sources.
     pub chat_id: Option<ChatId>,
@@ -957,24 +523,10 @@ pub struct DocumentRecord {
     pub media_type: String,
     /// Optional human-facing title.
     pub title: Option<String>,
-    /// Immutable raw bytes for this revision, when retained.
+    /// Retained original raw bytes, when available.
     pub source_blob: Option<DocumentSourceBlob>,
-    /// Parsed text-of-record used to rechunk, re-embed, and verify citations.
+    /// Parsed text-of-record used by source readers.
     pub canonical_text: String,
-    /// Parser fingerprint that produced the canonical text, when tracked.
-    pub canonical_fingerprint: Option<String>,
-    /// Parser-produced mappings from canonical text to original source pages.
-    pub source_regions: Vec<SourceRegion>,
-    /// Monotonic content revision, starting at one and continuing through hard
-    /// delete tombstones and later recreation of this document id.
-    pub content_revision: i64,
-    /// Opaque identity for this exact content revision.
-    ///
-    /// Paired with the integer clock as exact identity so equal-revision
-    /// corruption cannot be mistaken for the same generation.
-    pub revision_token: Uuid,
-    /// Processing lifecycle of the current authoritative revision.
-    pub processing_status: DocumentProcessingStatus,
     /// When this record was first created.
     pub created_at: DateTime<Utc>,
     /// When authoritative content or metadata last changed.
@@ -982,89 +534,11 @@ pub struct DocumentRecord {
 }
 
 impl DocumentRecord {
-    /// Exact generation represented by this live source record.
-    #[must_use]
-    pub const fn generation(&self) -> DocumentGeneration {
-        DocumentGeneration {
-            content_revision: self.content_revision,
-            revision_token: self.revision_token,
-        }
-    }
-
-    /// Whether this revision holds text a reader can be given.
-    ///
-    /// Empty canonical text means the parser ran and found nothing — an image
-    /// without OCR, or a format whose parser is not installed. The bytes are
-    /// still retained, so a later reprocess can change this answer.
+    /// Whether this source holds text a reader can be given.
     #[must_use]
     pub fn is_readable(&self) -> bool {
-        self.processing_status == DocumentProcessingStatus::Ready && !self.canonical_text.is_empty()
+        !self.canonical_text.is_empty()
     }
-}
-
-/// One durable semantic processing stage bound to an exact document revision.
-///
-/// Expensive work happens outside the operational database transaction. Every
-/// operational-state mutation must therefore present `lease_token` and still
-/// match the job's `(document_id, content_revision, revision_token)`. This fences
-/// stale database completion.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DocumentJob {
-    /// Stable job identity.
-    pub id: DocumentJobId,
-    /// Authoritative document this job processes.
-    pub document_id: DocumentId,
-    /// Exact monotonic source revision claimed by this job.
-    pub content_revision: i64,
-    /// Exact lifecycle identity; prevents delete/recreate ABA completion in the
-    /// operational store and identifies the generation derived stores must fence.
-    pub revision_token: Uuid,
-    /// Semantic pipeline stage.
-    pub kind: DocumentJobKind,
-    /// Durable delivery state.
-    pub status: DocumentJobStatus,
-    /// Identity of the parser/chunker/embedder configuration for this stage.
-    pub pipeline_fingerprint: String,
-    /// Claims already made, including the current claim when running.
-    pub attempt_count: i32,
-    /// Maximum claims before a retryable error becomes terminal.
-    pub max_attempts: i32,
-    /// Earliest time a queued/retry-wait job may be claimed.
-    pub available_at: DateTime<Utc>,
-    /// Exact claim identity required for heartbeat/completion writes.
-    pub lease_token: Option<Uuid>,
-    /// When the current claim becomes recoverably stale.
-    pub lease_expires_at: Option<DateTime<Utc>>,
-    /// When the first claim began.
-    pub started_at: Option<DateTime<Utc>>,
-    /// When this job entered a terminal state.
-    pub finished_at: Option<DateTime<Utc>>,
-    /// Stable machine-readable failure category.
-    pub last_error_code: Option<String>,
-    /// Bounded diagnostic detail for local operators.
-    pub last_error_detail: Option<String>,
-    /// When this semantic job was created.
-    pub created_at: DateTime<Utc>,
-    /// When its durable state last changed.
-    pub updated_at: DateTime<Utc>,
-}
-
-impl DocumentJob {
-    /// Exact source generation this job is allowed to process.
-    #[must_use]
-    pub const fn generation(&self) -> DocumentGeneration {
-        DocumentGeneration {
-            content_revision: self.content_revision,
-            revision_token: self.revision_token,
-        }
-    }
-
-    /// Maximum persisted parser/chunker/embedder fingerprint length.
-    pub const MAX_PIPELINE_FINGERPRINT_LEN: usize = 512;
-    /// Maximum persisted stable failure-code length.
-    pub const MAX_ERROR_CODE_LEN: usize = 128;
-    /// Maximum persisted local diagnostic-detail length.
-    pub const MAX_ERROR_DETAIL_LEN: usize = 4096;
 }
 
 /// Durable deletion state for one content-addressed source blob.
@@ -1159,12 +633,11 @@ impl BlobRetirementStatus {
 
 /// Metadata returned by bounded document listings.
 ///
-/// This deliberately excludes canonical content and the revision token so list
-/// callers cannot accidentally load either large source text or write-only
-/// concurrency credentials.
+/// This deliberately excludes canonical content so list callers cannot
+/// accidentally load large source text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocumentSummaryRecord {
-    /// Stable identifier shared with the retrieval index.
+    /// Stable document identifier.
     pub id: DocumentId,
     /// Owning conversation for conversation-scoped sources.
     pub chat_id: Option<ChatId>,
@@ -1178,18 +651,7 @@ pub struct DocumentSummaryRecord {
     pub title: Option<String>,
     /// Exact retained source byte length, when original bytes are available.
     pub source_byte_len: Option<u64>,
-    /// Current authoritative source revision.
-    pub content_revision: i64,
-    /// Processing lifecycle of the current authoritative revision.
-    pub processing_status: DocumentProcessingStatus,
-    /// Whether the current revision holds text a reader can be given.
-    ///
-    /// Processing that finishes is not the same as processing that found
-    /// something. A scanned image, or a format whose parser is not installed on
-    /// this host, produces a document that is durably stored and citable by
-    /// name but whose text no reader will ever see. Keeping this separate from
-    /// [`DocumentProcessingStatus::Ready`] stops that outcome from being
-    /// presented as a fully usable source.
+    /// Whether the source holds text a reader can be given.
     pub readable: bool,
     /// When this record was first created.
     pub created_at: DateTime<Utc>,
@@ -1201,7 +663,7 @@ impl DocumentSummaryRecord {
     /// What a caller can do with this source right now.
     #[must_use]
     pub const fn readiness(&self) -> SourceReadiness {
-        SourceReadiness::of(self.processing_status, self.readable)
+        SourceReadiness::of(self.readable)
     }
 }
 
@@ -1220,11 +682,10 @@ pub struct DocumentListCursor {
 
 /// Authoritative content to create or replace for a document.
 ///
-/// The store owns revision and index-watermark transitions: the first upsert is
-/// revision one; each replacement increments it and clears the prior watermark.
+/// Repeated writes use last-write-wins semantics while preserving `created_at`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocumentUpsert {
-    /// Stable identifier shared with the retrieval index.
+    /// Stable document identifier.
     pub id: DocumentId,
     /// Owning conversation for conversation-scoped sources.
     pub chat_id: Option<ChatId>,
@@ -1238,18 +699,6 @@ pub struct DocumentUpsert {
     pub title: Option<String>,
     /// Parsed text-of-record.
     pub canonical_text: String,
-    /// Identity of whatever produced [`Self::canonical_text`], when the caller
-    /// knows it.
-    ///
-    /// Blob-backed sources get this from the parse job, which is the only thing
-    /// that can answer for them. A caller of this path already holds parsed
-    /// text, so it is the only one who can say where the text came from — and
-    /// for a source with no retained original, the answer is unrecoverable
-    /// afterwards. `None` means "not tracked", which is what every historical
-    /// row of this shape holds.
-    pub canonical_fingerprint: Option<String>,
-    /// Parser-produced mappings from canonical text to original source pages.
-    pub source_regions: Vec<SourceRegion>,
     /// Time of this authoritative write.
     pub updated_at: DateTime<Utc>,
 }
@@ -1258,7 +707,7 @@ pub struct DocumentUpsert {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DocumentScope {
-    /// Every document, for maintenance and reindexing only.
+    /// Every document, for maintenance only.
     All,
     /// Only explicitly legacy projectless, conversationless documents.
     Unscoped,
@@ -2801,7 +2250,6 @@ impl ToolCallRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::num::NonZeroU32;
 
     #[test]
     fn reasoning_effort_tokens_round_trip_and_keep_the_original_three() {
@@ -2891,25 +2339,11 @@ mod tests {
     }
 
     #[test]
-    fn document_processing_enums_have_stable_snake_case_values() {
-        assert_eq!(
-            serde_json::to_string(&DocumentProcessingStatus::Processing).unwrap(),
-            "\"processing\""
-        );
-        assert_eq!(
-            serde_json::to_string(&DocumentJobKind::Parse).unwrap(),
-            "\"parse\""
-        );
-        assert_eq!(
-            serde_json::to_string(&DocumentJobStatus::RetryWait).unwrap(),
-            "\"retry_wait\""
-        );
+    fn durable_work_statuses_have_stable_snake_case_values() {
         assert_eq!(
             serde_json::to_string(&BlobRetirementStatus::RetryWait).unwrap(),
             "\"retry_wait\""
         );
-        assert!(DocumentJobStatus::Succeeded.is_terminal());
-        assert!(!DocumentJobStatus::Running.is_terminal());
         assert!(BlobRetirementStatus::Cancelled.is_terminal());
         assert!(!BlobRetirementStatus::Queued.is_terminal());
         assert_eq!(
@@ -3016,76 +2450,5 @@ mod tests {
         invalid.id = Uuid::new_v4();
         assert!(!invalid.has_content_addressed_id());
         assert_ne!(first.id, DocumentSourceBlob::from_bytes(b"other").id);
-    }
-
-    fn page_region(start: usize, end: usize, page: u32) -> SourceRegion {
-        SourceRegion {
-            span: ByteSpan::new(start, end),
-            location: SourceLocation::Page {
-                number: NonZeroU32::new(page).unwrap(),
-            },
-        }
-    }
-
-    #[test]
-    fn source_region_validation_accepts_ordered_regions_and_gaps() {
-        let text = "aé gap z";
-        assert_eq!(
-            validate_source_regions(text, &[page_region(0, 3, 1), page_region(8, 9, 2)]),
-            Ok(())
-        );
-    }
-
-    #[test]
-    fn source_region_validation_rejects_invalid_spans() {
-        let text = "aéz";
-        assert!(validate_source_regions(text, &[page_region(1, 2, 1)]).is_err());
-        assert!(validate_source_regions(text, &[page_region(0, 0, 1)]).is_err());
-        assert!(validate_source_regions(text, &[page_region(0, 99, 1)]).is_err());
-        assert!(
-            validate_source_regions(text, &[page_region(2, 4, 2), page_region(0, 1, 1)]).is_err()
-        );
-    }
-
-    /// Column letters are bijective base-26, not base-26: `Z` is followed by
-    /// `AA`, not by `BA`, and there is no zero digit. Getting the carry wrong
-    /// sends a citation to a cell nobody meant, silently and plausibly, which is
-    /// exactly the failure a reader cannot detect.
-    #[test]
-    fn a_cell_survives_the_round_trip_through_column_and_row() {
-        for (cell, column, row) in [
-            ("A1", 0, 0),
-            ("B5", 1, 4),
-            ("Z1", 25, 0),
-            ("AA1", 26, 0),
-            ("AZ10", 51, 9),
-            ("BA1", 52, 0),
-            ("XFD1048576", 16_383, 1_048_575),
-        ] {
-            let address = CellAddress::parse(cell).expect("an A1 reference parses");
-            assert_eq!(address, CellAddress { column, row }, "{cell}");
-            assert_eq!(address.to_a1().as_deref(), Some(cell));
-        }
-        assert_eq!(CellAddress::parse("aa1"), CellAddress::parse("AA1"));
-        assert_eq!(CellAddress::parse("A0"), None);
-        // No worksheet is this wide or tall, but a malformed file can claim a
-        // cell that is. It has no A1 form, and a producer that wrote one anyway
-        // would fail validation for the whole document rather than that cell.
-        assert_eq!(
-            CellAddress {
-                column: 18_278,
-                row: 0
-            }
-            .to_a1(),
-            None
-        );
-        assert_eq!(
-            CellAddress {
-                column: 0,
-                row: 10_000_000
-            }
-            .to_a1(),
-            None
-        );
     }
 }

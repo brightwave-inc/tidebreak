@@ -34,17 +34,4 @@ export function mediaTypeLabel(mediaType: string): string {
   return "File";
 }
 
-/** The Status facet's values, collapsing queued and processing into one state. */
-export function statusLabel(document: LibraryDocument): string {
-  switch (document.processingStatus) {
-    case "queued":
-    case "processing":
-      return "Processing";
-    case "failed":
-      return "Failed";
-    case "ready":
-      return document.readable ? "Ready" : "No text";
-  }
-}
-
 export { formatBytes as formatSize };

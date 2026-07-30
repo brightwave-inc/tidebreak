@@ -347,10 +347,7 @@ impl ReferenceClass {
                     "file:///reference-class.bin",
                     blob.clone(),
                 );
-                store
-                    .accept_document_source_and_enqueue_parse(&source, "parser-v1", 3)
-                    .await
-                    .unwrap();
+                store.accept_document_source(&source).await.unwrap();
             }
             Self::MessageAttachment => {
                 let chat = sample_chat();
@@ -586,10 +583,7 @@ async fn an_attachment_blob_shared_with_a_document_survives_either_owner() {
     };
 
     let source = sample_raw_source(DocumentId::new(), "file:///also-a-source.png", blob.clone());
-    store
-        .accept_document_source_and_enqueue_parse(&source, "parser-v1", 3)
-        .await
-        .unwrap();
+    store.accept_document_source(&source).await.unwrap();
 
     let chat = sample_chat();
     store.create_chat(&chat).await.unwrap();

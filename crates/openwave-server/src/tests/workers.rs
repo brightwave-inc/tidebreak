@@ -1966,8 +1966,8 @@ async fn foreground_web_search_runs_end_to_end_through_durable_approval() {
 }
 
 /// End-to-end integration test that drives the whole product path as a single
-/// flow over one in-process server, store, and worker set: raw document ingest,
-/// the parse worker, and a chat turn whose Sensitive tool crosses the approval
+/// flow over one in-process server and store: synchronous raw document ingest
+/// and a chat turn whose Sensitive tool crosses the approval
 /// gate — first parking on the gate, then reusing a standing grant so a later
 /// covered call runs without re-prompting.
 ///
@@ -1975,7 +1975,7 @@ async fn foreground_web_search_runs_end_to_end_through_durable_approval() {
 /// the HTTP endpoint decides against. The point is to catch gaps the mocked-seam
 /// unit tests cannot.
 #[tokio::test(flavor = "multi_thread")]
-async fn ingest_parse_then_chat_through_the_approval_gate() {
+async fn ingest_then_chat_through_the_approval_gate() {
     let dir = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
         DbStore::connect(&format!(
@@ -2003,20 +2003,13 @@ async fn ingest_parse_then_chat_through_the_approval_gate() {
         }))),
         Arc::new(MemSecrets::default()),
         tools,
-        retrieval.clone(),
+        retrieval,
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
         },
     );
     let token = state.token.clone();
-    let worker = document_worker::DocumentWorker::new(
-        store.clone(),
-        state.blobs.clone(),
-        retrieval,
-        state.document_job_wake.clone(),
-        document_worker::DocumentWorkerConfig::default(),
-    );
     spawn_turn_worker(&state);
     let router = app(state);
     let bearer = format!("Bearer {token}");
@@ -2031,21 +2024,16 @@ async fn ingest_parse_then_chat_through_the_approval_gate() {
         raw.clone(),
     )
     .await;
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(response.status(), StatusCode::CREATED);
     let accepted: serde_json::Value = json_body(response).await;
     let document_id: openwave_core::DocumentId =
         accepted["document_id"].as_str().unwrap().parse().unwrap();
 
-    // 2. Drive the parse worker as the per-slice tests do.
-    run_parse(&worker).await;
+    // 2. The response only returns after canonical text is stored.
     let ready = store.get_document(document_id).await.unwrap().unwrap();
-    assert_eq!(
-        ready.processing_status,
-        openwave_core::DocumentProcessingStatus::Ready
-    );
     assert_eq!(ready.canonical_text, String::from_utf8_lossy(&raw));
 
-    // 4a. A chat turn calls the Sensitive tool and parks on the approval gate.
+    // 3a. A chat turn calls the Sensitive tool and parks on the approval gate.
     let chat = make_chat(&router, &bearer).await;
     let first_turn = TurnId::new();
     assert_eq!(
@@ -2098,7 +2086,7 @@ async fn ingest_parse_then_chat_through_the_approval_gate() {
     ));
     assert_eq!(ran.load(Ordering::SeqCst), 1);
 
-    // 4b. A second covered call runs under the standing grant left by
+    // 3b. A second covered call runs under the standing grant left by
     // `remember: true` — no second approval prompt, the tool just executes.
     let second_turn = TurnId::new();
     assert_eq!(

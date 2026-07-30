@@ -1,6 +1,6 @@
 [package]
 name = "openwave-retrieval"
-description = "OpenWave document ingestion: canonical parsing with source-region mappings."
+description = "OpenWave document ingestion: synchronous plain-text and fallback decoding."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,7 +13,7 @@ workspace = true
 [dependencies]
 async-trait = { workspace = true }
 thiserror = { workspace = true }
-# Core owns the canonical document identity and source-region contracts.
+# Core owns the canonical document identity and storage contracts.
 # Default features stay off: no SQLite, keychain, or file tools are pulled into
 # this library.
 openwave-core = { path = "../openwave-core", default-features = false }

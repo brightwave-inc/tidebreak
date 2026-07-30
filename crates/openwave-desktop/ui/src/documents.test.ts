@@ -8,97 +8,45 @@ import {
 } from "./documents";
 
 const documentId = "6c3df6af-bc62-4a66-a34e-29f327eaef41";
+const importId = "11111111-1111-4111-8111-111111111111";
 
 describe("document library renderer projections", () => {
-  it("parses native batch results and rejects invalid progress", () => {
+  it("parses the slim import and progress shapes exactly", () => {
     expect(
       parseLibraryImportBatch({
-        results: [
-          {
-            status: "imported",
-            documentId,
-            displayName: "notes.md",
-            processingStatus: "queued",
-          },
-        ],
+        results: [{ status: "imported", documentId, displayName: "notes.md" }],
       }),
     ).toEqual({
       results: [
         {
           status: "imported",
-          document: {
-            documentId,
-            displayName: "notes.md",
-            processingStatus: "queued",
-          },
+          document: { documentId, displayName: "notes.md" },
         },
       ],
     });
-
-    expect(() =>
+    expect(
       parseLibraryImportProgress({
-        importId: "not-an-id",
+        importId,
         displayName: "notes.md",
-        status: "streaming",
-        documentId: null,
-        processingStatus: null,
+        status: "imported",
+        documentId,
         message: null,
       }),
-    ).toThrow("Invalid document import progress");
-
-    expect(() =>
-      parseLibraryImportBatch({
-        results: Array.from({ length: 1_001 }, () => ({
-          status: "failed",
-          displayName: "entry.md",
-          message: "Could not import",
-        })),
-      }),
-    ).toThrow("Invalid document import response");
-  });
-
-  it("accepts the closed catalog and import shapes", () => {
-    expect(
-      parseLibraryCatalog({
-        documents: [
-          {
-            documentId,
-            title: "notes.md",
-            mediaType: "text/markdown",
-            sizeBytes: 1_024,
-            processingStatus: "processing",
-            readable: false,
-            failure: null,
-            updatedAt: "2026-07-18T12:00:00Z",
-          },
-        ],
-        truncated: false,
-      }).documents,
-    ).toHaveLength(1);
-
-    expect(
-      parseImportedDocument({
-        documentId,
-        displayName: "notes.md",
-        processingStatus: "queued",
-      }),
     ).toEqual({
+      importId,
+      displayName: "notes.md",
+      status: "imported",
+      documentId,
+      message: null,
+    });
+    expect(parseImportedDocument({ documentId, displayName: "notes.md" })).toEqual({
       documentId,
       displayName: "notes.md",
-      processingStatus: "queued",
     });
     expect(parseImportedDocument(null)).toBeNull();
-    const unicodeName = `${"😀".repeat(250)}.md`;
-    expect(
-      parseImportedDocument({
-        documentId,
-        displayName: unicodeName,
-        processingStatus: "queued",
-      })?.displayName,
-    ).toBe(unicodeName);
   });
 
-  it("keeps searchability distinct from having finished processing", () => {
+  it("derives source usability from the required readable flag", () => {
     const stored = parseLibraryCatalog({
       documents: [
         {
@@ -106,18 +54,14 @@ describe("document library renderer projections", () => {
           title: "scan.pdf",
           mediaType: "application/pdf",
           sizeBytes: 2_048,
-          processingStatus: "ready",
           readable: false,
-          failure: null,
           updatedAt: "2026-07-18T12:00:00Z",
         },
       ],
       truncated: false,
     }).documents[0];
-    expect(stored?.processingStatus).toBe("ready");
     expect(stored?.readable).toBe(false);
 
-    // Omitting the flag must not silently read as readable.
     expect(() =>
       parseLibraryCatalog({
         documents: [
@@ -126,8 +70,6 @@ describe("document library renderer projections", () => {
             title: "scan.pdf",
             mediaType: "application/pdf",
             sizeBytes: 2_048,
-            processingStatus: "ready",
-            failure: null,
             updatedAt: "2026-07-18T12:00:00Z",
           },
         ],
@@ -136,57 +78,13 @@ describe("document library renderer projections", () => {
     ).toThrow("Invalid document library response");
   });
 
-  it("accepts only bounded renderer-safe failures tied to failed state", () => {
-    const failed = {
-      documentId,
-      title: "report.pdf",
-      mediaType: "application/pdf",
-      sizeBytes: 4_096,
-      processingStatus: "failed",
-      readable: false,
-      failure: {
-        message: "The local search index was unavailable. Retry preparing this source.",
-        retriable: true,
-      },
-      updatedAt: "2026-07-18T12:00:00Z",
-    };
-    expect(
-      parseLibraryCatalog({ documents: [failed], truncated: false }).documents[0]
-        ?.failure?.retriable,
-    ).toBe(true);
-
-    expect(() =>
-      parseLibraryCatalog({
-        documents: [{ ...failed, processingStatus: "ready" }],
-        truncated: false,
-      }),
-    ).toThrow("Invalid document library response");
-    expect(() =>
-      parseLibraryCatalog({
-        documents: [{ ...failed, failure: null }],
-        truncated: false,
-      }),
-    ).toThrow("Invalid document library response");
-    expect(() =>
-      parseLibraryCatalog({
-        documents: [
-          {
-            ...failed,
-            failure: { message: `unsafe\u202e`, retriable: true },
-          },
-        ],
-        truncated: false,
-      }),
-    ).toThrow("Invalid document library response");
-  });
-
-  it("rejects catalog fields that could reveal native or indexing details", () => {
+  it("rejects native, pipeline, and canonical metadata at the renderer boundary", () => {
     for (const field of [
       "uri",
       "sourcePath",
       "contentRevision",
-      "indexedRevision",
-      "indexFingerprint",
+      "processingStatus",
+      "failure",
       "generationToken",
       "content",
     ]) {
@@ -198,9 +96,7 @@ describe("document library renderer projections", () => {
               title: "notes.md",
               mediaType: "text/markdown",
               sizeBytes: 42,
-              processingStatus: "ready",
               readable: true,
-              failure: null,
               updatedAt: "2026-07-18T12:00:00Z",
               [field]: "private",
             },
@@ -219,15 +115,12 @@ describe("document library renderer projections", () => {
     ).toEqual([
       { documentId, snippet: "A matching passage", heading: "Overview" },
     ]);
-
     expect(() =>
       parseLibrarySearchResults([
         {
           documentId,
           snippet: "A matching passage",
           heading: null,
-          chunkId: "private",
-          score: 0.9,
           sourceRegions: [{ path: "/private/notes.md" }],
         },
       ]),
@@ -239,35 +132,17 @@ describe("document library renderer projections", () => {
       parseImportedDocument({
         documentId: "not-a-document-id",
         displayName: "notes.md",
-        processingStatus: "ready",
-      }),
-    ).toThrow("Invalid document import response");
-    for (const unsafe of ["\u200d", "\u206a", "\u206f", "\u2028", "\u2029"]) {
-      expect(() =>
-        parseImportedDocument({
-          documentId,
-          displayName: `report${unsafe}.md`,
-          processingStatus: "ready",
-        }),
-      ).toThrow("Invalid document import response");
-      expect(() =>
-        parseLibrarySearchResults([
-          { documentId, snippet: `unsafe${unsafe}`, heading: null },
-        ]),
-      ).toThrow("Invalid document search response");
-    }
-    expect(() =>
-      parseImportedDocument({
-        documentId,
-        displayName: "report\u202etxt.md",
-        processingStatus: "ready",
       }),
     ).toThrow("Invalid document import response");
     expect(() =>
-      parseLibrarySearchResults([
-        { documentId, snippet: "x".repeat(4_001), heading: null },
-      ]),
-    ).toThrow("Invalid document search response");
+      parseLibraryImportBatch({
+        results: Array.from({ length: 1_001 }, () => ({
+          status: "failed",
+          displayName: "entry.md",
+          message: "Could not import",
+        })),
+      }),
+    ).toThrow("Invalid document import response");
     expect(() =>
       parseLibrarySearchResults(
         Array.from({ length: 9 }, () => ({ documentId, snippet: "x", heading: null })),

@@ -558,74 +558,33 @@ content-derived identifier. Identical bytes can therefore be shared safely by
 more than one document. Blob publication happens before the catalog transaction,
 so an accepted catalog record never points at bytes that were not written.
 
-### 2. Accept a new document generation
+### 2. Decode and accept the document
 
-The operational store creates or updates the stable document record and queues a
-`Parse` job in the same transaction. The API returns `202 Accepted`; parsing
-happens later.
+The request selects a parser, decodes canonical text, and then stores the blob
+descriptor and text on the stable document row in one transaction. Blob
+publication happens first, so the row never points at bytes that were not
+written. A successful request returns only after the document is usable.
 
-This is where “revision” and “generation” matter:
+`DocumentId` means “this logical document.” A URI gives it a stable identity;
+conversation scope is included so the same URI in different chats stays
+separate. Re-ingesting that identity is a last-write-wins replacement that keeps
+its original creation time. There is no background document job, generation
+clock, or status transition to poll.
 
-- `DocumentId` means “this logical document.” A URI gives it a stable identity;
-  conversation scope is included so the same URI in different chats stays
-  separate. Legacy global and project APIs retain their own identity scopes.
-- `content_revision` is a counter: first content is 1, replacement is 2, and so
-  on. Deletion also advances the clock.
-- `revision_token` is a random identity for that exact revision.
-- Together, the revision and token are a `DocumentGeneration`.
+### 3. Canonical text and readiness
 
-The retained integer clock says which version is newer and keeps increasing
-through deletion and recreation, preventing ordinary version reuse. The token
-adds exact identity, so even an unexpected equal revision cannot be mistaken for
-the generation a worker originally claimed.
-
-This model is more explicit than a simple mutable document row because parsing
-happens outside the database and may take time. Every worker completion needs
-to prove, “I processed exactly the generation that is still current.”
-
-### 3. Parse into canonical text
-
-A document worker claims the `Parse` job with a lease, verifies the retained
-byte length and SHA-256 digest, and parses it into:
-
-- canonical UTF-8 text, the text-of-record used by direct source reads;
-- source regions that map text byte ranges back to locations such as pages.
-
-The parse completion marks the document ready atomically. The configured
-registry parses JSON, XML, HTML, and `text/*` in process. A fallback keeps other
-media types storable by decoding valid UTF-8 and leaving binary content empty.
-The model can represent page provenance, but the parsers do not emit page
-regions today.
-
-Because that selection is by media type, the media type has to be right. The
-trusted native side decides it from the bytes rather than from the filename, so
-a document cannot be routed to a parser that cannot read it. PDF, Office,
-workbook, and raster image uploads currently reach the fallback and report
+The in-process registry decodes `text/*`, JSON, XML, and HTML as UTF-8 text.
+The fallback does the same for valid UTF-8 under other media types and stores
+binary or undecodable content with empty canonical text. PDF, Office, workbook,
+and raster image uploads therefore remain stored but currently report
 `stored_no_text`; richer extraction will move to an execution-based document
-path. Any parser that produces no text yields a ready source with no directly
-readable text.
+path.
 
-There is no document event stream yet. After receiving `202`, a client polls the
-document list or detail endpoint for `queued → processing → ready/failed`. The
-public record exposes the failed state but not the underlying job's error detail;
-operators currently rely on logs, and the retry endpoint revives only the current
-exact failed job when it is still compatible with the active pipeline.
-
-The durable job state machine is:
-
-```text
-queued --> running --> succeeded
-            |   |
-            |   +--> retry_wait --> running
-            |
-            +------> failed
-
-superseded work and deleted documents become cancelled instead of publishing.
-```
-
-An auditor periodically compares authoritative documents, parser fingerprints,
-and jobs. It can repair missing work or schedule reprocessing after a parser
-change.
+Readiness follows the row itself: non-empty canonical text is `readable`, and
+empty canonical text is `stored_no_text`. A real decode error fails the upload
+request instead of creating a failed background job. Source regions and parser
+fingerprints are not persisted because span citations and reparse decisions no
+longer consume them.
 
 ### 4. Retire unused blobs
 
@@ -817,8 +776,8 @@ a gate in #853, which any shared-deployment work should be blocked on.
 | Model providers | `crates/openwave-router/src/` | Anthropic/OpenAI adapters and model-to-provider routing |
 | Local API | `crates/openwave-server/src/lib.rs`, `routes.rs`, `routes/client_execution.rs` | Authentication, API assembly, chat, turn, and leased client-execution routes |
 | Turn execution | `crates/openwave-server/src/turn_worker.rs` | Claiming, heartbeats, event journaling, terminal resolution |
-| Documents | `crates/openwave-server/src/routes/document.rs`, `document_worker.rs` | Upload API and durable parse-worker orchestration |
-| Retrieval | `crates/openwave-retrieval/src/` | Parser selection, canonical text, and source-region mappings |
+| Documents | `crates/openwave-server/src/routes/document.rs` | Synchronous upload, canonical decoding, and source-file access |
+| Retrieval | `crates/openwave-retrieval/src/` | Plain-text and fallback parser selection |
 | Desktop | `crates/openwave-desktop/src/`, `crates/openwave-desktop/ui/src/` | Tauri host and current React shell |
 | Host access | `crates/openwave-host-broker/src/`, `docs/host-access.md` | Broker trust boundary, connected-root model, and reconciliation plan |
 | MCP | `crates/openwave-mcp/src/`, `crates/openwave-cli/src/main.rs` | MCP protocol server and stdio command |

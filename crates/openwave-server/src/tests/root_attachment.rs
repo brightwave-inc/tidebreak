@@ -78,7 +78,7 @@ async fn embedded_renderer_bearer_cannot_reach_canonical_document_routes() {
         )
         .await
         .unwrap();
-    assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+    assert_eq!(accepted.status(), StatusCode::CREATED);
     let accepted: serde_json::Value = json_body(accepted).await;
     let document_id = accepted["document_id"].as_str().unwrap();
     let project_id = ProjectId::new();
@@ -128,7 +128,6 @@ async fn embedded_renderer_bearer_cannot_reach_canonical_document_routes() {
             "/Users/private",
             "review-sentinel",
             "private-content-sentinel",
-            "content_revision",
         ] {
             assert!(
                 !body.contains(sentinel),
@@ -144,7 +143,7 @@ async fn embedded_renderer_bearer_cannot_reach_canonical_document_routes() {
         native_detail["uri"],
         "file:///Users/private/review-sentinel.md"
     );
-    assert!(native_detail.get("content_revision").is_some());
+    assert_eq!(native_detail["content"], "private-content-sentinel");
 }
 
 fn root_attachment_begin_body(
