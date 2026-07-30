@@ -2242,6 +2242,12 @@ async fn retire_document_pipeline_migration_has_a_working_down_and_reapply() {
     store.create_document(&readable).await.unwrap();
     store.create_document(&empty).await.unwrap();
 
+    let appended = migrations_added_after("m20260729_000031_retire_document_pipeline");
+    if appended > 0 {
+        migration::Migrator::down(&conn, Some(appended))
+            .await
+            .unwrap();
+    }
     migration::Migrator::down(&conn, Some(1)).await.unwrap();
     for query in [
         "SELECT canonical_fingerprint, source_regions, content_revision, \
@@ -2301,6 +2307,36 @@ async fn retire_document_pipeline_migration_has_a_working_down_and_reapply() {
             .canonical_text,
         ""
     );
+}
+
+#[tokio::test]
+async fn message_document_attachment_migration_has_a_working_down_and_reapply() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        dir.path()
+            .join("message-document-attachment-migration.db")
+            .display()
+    );
+    let conn = Database::connect(&url).await.unwrap();
+    migration::Migrator::up(&conn, None).await.unwrap();
+
+    migration::Migrator::down(&conn, Some(1)).await.unwrap();
+    assert!(conn
+        .query_one_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "SELECT * FROM message_document_attachment LIMIT 1".to_owned(),
+        ))
+        .await
+        .is_err());
+
+    migration::Migrator::up(&conn, None).await.unwrap();
+    conn.query_one_raw(Statement::from_string(
+        DatabaseBackend::Sqlite,
+        "SELECT * FROM message_document_attachment LIMIT 1".to_owned(),
+    ))
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

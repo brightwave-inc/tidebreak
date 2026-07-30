@@ -8,66 +8,45 @@ import {
   searchFromLayout,
 } from "./panelUrl";
 
-describe("parsePanelSegment", () => {
-  it("reads the bare panel names", () => {
+describe("panel URLs", () => {
+  it("reads navigation panels and addressed document viewers", () => {
     expect(parsePanelSegment("chat")).toEqual({ type: "chat" });
-    expect(parsePanelSegment("sources")).toEqual({ type: "sources" });
     expect(parsePanelSegment("outputs")).toEqual({ type: "outputs" });
     expect(parsePanelSegment("folders")).toEqual({ type: "folders" });
-  });
-
-  it("reads a panel pointed at one of its items", () => {
-    expect(parsePanelSegment("sources.0e5b1c3a")).toEqual({
-      type: "sources",
-      documentId: "0e5b1c3a",
+    expect(parsePanelSegment("document.doc-1")).toEqual({
+      type: "document",
+      documentId: "doc-1",
+    });
+    expect(parsePanelSegment("document.doc-1.cite-1")).toEqual({
+      type: "document",
+      documentId: "doc-1",
+      citationId: "cite-1",
     });
   });
 
-  it("reads the citation a source panel should open at", () => {
-    expect(parsePanelSegment("sources.0e5b1c3a.7f21b904")).toEqual({
-      type: "sources",
-      documentId: "0e5b1c3a",
-      citationId: "7f21b904",
+  it("keeps historical source detail links but retires the bare catalog", () => {
+    expect(parsePanelSegment("sources")).toBeNull();
+    expect(parsePanelSegment("sources.doc-1.cite-1")).toEqual({
+      type: "document",
+      documentId: "doc-1",
+      citationId: "cite-1",
     });
   });
 
-  it("rejects a citation target that addresses nothing", () => {
-    // Half an address, or one segment more than the grammar has.
-    expect(parsePanelSegment("sources..7f21b904")).toBeNull();
-    expect(parsePanelSegment("sources.0e5b1c3a.")).toBeNull();
-    expect(parsePanelSegment("sources.0e5b1c3a.7f21b904.extra")).toBeNull();
+  it("rejects incomplete or overlong document targets", () => {
+    expect(parsePanelSegment("document")).toBeNull();
+    expect(parsePanelSegment("document..cite-1")).toBeNull();
+    expect(parsePanelSegment("document.doc-1.")).toBeNull();
+    expect(parsePanelSegment("document.doc-1.cite-1.extra")).toBeNull();
   });
 
-  it("carries an opaque output identity", () => {
-    expect(
-      parsePanelSegment("outputs.550062d4-2528-5cc6-90f8-a788e119bf36"),
-    ).toEqual({
-      type: "outputs",
-      outputId: "550062d4-2528-5cc6-90f8-a788e119bf36",
-    });
-  });
-
-  it("rejects an identifier on a panel that cannot take one", () => {
-    expect(parsePanelSegment("chat.abc")).toBeNull();
-    expect(parsePanelSegment("folders.abc")).toBeNull();
-  });
-
-  it("rejects a name it does not know", () => {
-    expect(parsePanelSegment("reports")).toBeNull();
-    expect(parsePanelSegment("")).toBeNull();
-  });
-
-  it("round-trips everything it can encode", () => {
+  it("round-trips every current panel shape", () => {
     for (const panel of [
       { type: "chat" },
-      { type: "sources" },
-      { type: "sources", documentId: "doc-1" },
-      { type: "sources", documentId: "doc-1", citationId: "cite-1" },
+      { type: "document", documentId: "doc-1" },
+      { type: "document", documentId: "doc-1", citationId: "cite-1" },
       { type: "outputs" },
-      {
-        type: "outputs",
-        outputId: "550062d4-2528-5cc6-90f8-a788e119bf36",
-      },
+      { type: "outputs", outputId: "output-1" },
       { type: "folders" },
     ] as const) {
       expect(parsePanelSegment(encodePanelSegment(panel))).toEqual(panel);
@@ -75,63 +54,51 @@ describe("parsePanelSegment", () => {
   });
 });
 
-describe("layoutFromSearch", () => {
-  it("treats no search params as the conversation alone", () => {
-    expect(layoutFromSearch({})).toEqual({ mode: "single", panel: { type: "chat" } });
-  });
+describe("layout URLs", () => {
+  const single = { mode: "single", panel: { type: "chat" } } as const;
 
-  it("fills the unnamed side with the conversation", () => {
-    expect(layoutFromSearch({ left: "sources" })).toEqual({
-      mode: "split",
-      left: { type: "sources" },
-      right: { type: "chat" },
-      fullscreen: undefined,
-    });
-  });
-
-  it("carries the fullscreen side through", () => {
-    const layout = layoutFromSearch({ left: "sources", right: "chat", fullscreen: "left" });
-    expect(layout).toMatchObject({ mode: "split", fullscreen: "left" });
-  });
-
-  it("ignores a fullscreen value that names no side", () => {
-    expect(layoutFromSearch({ left: "sources", fullscreen: "middle" })).toMatchObject({
-      fullscreen: undefined,
-    });
-  });
-
-  it("falls back to the conversation rather than failing on a bad URL", () => {
-    // A hand-edited or stale link should land somewhere real.
-    const single = { mode: "single", panel: { type: "chat" } };
-    expect(layoutFromSearch({ left: "nonsense" })).toEqual(single);
-    expect(layoutFromSearch({ left: "sources", right: "sources.doc-1" })).toEqual(single);
-    expect(layoutFromSearch({ left: "chat", right: "chat" })).toEqual(single);
-  });
-});
-
-describe("searchFromLayout", () => {
-  it("clears every param for the conversation alone", () => {
-    expect(searchFromLayout({ mode: "single", panel: { type: "chat" } })).toEqual({
+  it("uses a bare URL for the conversation alone", () => {
+    expect(layoutFromSearch({})).toEqual(single);
+    expect(searchFromLayout(single)).toEqual({
       left: undefined,
       right: undefined,
       fullscreen: undefined,
     });
   });
 
-  it("round-trips a split layout", () => {
+  it("fills the unnamed side with the conversation", () => {
+    expect(layoutFromSearch({ right: "document.doc-1" })).toEqual({
+      mode: "split",
+      left: { type: "chat" },
+      right: { type: "document", documentId: "doc-1" },
+      fullscreen: undefined,
+    });
+  });
+
+  it("falls back rather than opening a stale bare sources panel", () => {
+    expect(layoutFromSearch({ left: "sources" })).toEqual(single);
+    expect(layoutFromSearch({ left: "chat", right: "chat" })).toEqual(single);
+  });
+
+  it("round-trips a split document layout", () => {
     const layout = {
       mode: "split",
-      left: { type: "sources", documentId: "doc-1" },
-      right: { type: "chat" },
-      fullscreen: "left",
+      left: { type: "chat" },
+      right: { type: "document", documentId: "doc-1" },
+      fullscreen: "right",
     } as const;
     expect(layoutFromSearch(searchFromLayout(layout))).toEqual(layout);
   });
-});
 
-describe("isValidLayout", () => {
-  it("refuses the same kind of panel on both sides", () => {
-    expect(isValidLayout({ type: "sources" }, { type: "sources", documentId: "d" })).toBe(false);
-    expect(isValidLayout({ type: "sources" }, { type: "chat" })).toBe(true);
+  it("refuses two document viewers in one layout", () => {
+    expect(
+      isValidLayout(
+        { type: "document", documentId: "a" },
+        { type: "document", documentId: "b" },
+      ),
+    ).toBe(false);
+    expect(
+      isValidLayout({ type: "document", documentId: "a" }, { type: "chat" }),
+    ).toBe(true);
   });
 });

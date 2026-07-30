@@ -537,26 +537,29 @@ Applying a steer commits its user message, application receipt, revision, and
 lost, the worker retries the same identity and recovers the exact existing
 result rather than applying the instruction twice.
 
-## What happens when a source is added
+## What happens when a file is attached
 
-Adding a source to a conversation does not crawl its connected roots. Source
-documents enter the system through an explicit upload scoped to the exact chat.
-A source URI is identity and provenance; OpenWave does not fetch that URI
-itself. The lower-level global and project document APIs remain as legacy
-surfaces, but the desktop does not use them as a fallback.
+Attaching a file does not crawl connected roots. Files enter through the
+composer, are scoped to the exact chat, and are linked to the user message that
+introduced them. They render as chips in the transcript; opening a chip uses the
+same document viewer as a citation. A source URI is identity and provenance;
+OpenWave does not fetch that URI itself. The lower-level global and project
+document APIs remain as legacy surfaces, but the desktop does not use them as a
+fallback or expose a standalone source catalog.
 
 > **Pre-1.0 upgrade note:** Sources created through the older shared or
 > project-scoped desktop flow are retained in their legacy corpus, but they are
 > not automatically attached to a conversation. Re-add any source you still
-> need from that conversation's composer or Sources view. An explicit legacy re-attachment
+> need from that conversation's composer. An explicit legacy re-attachment
 > flow can be added before compatibility guarantees begin.
 
 ### 1. Publish immutable source bytes
 
 The server hashes the upload and writes it to the blob store under a
 content-derived identifier. Identical bytes can therefore be shared safely by
-more than one document. Blob publication happens before the catalog transaction,
-so an accepted catalog record never points at bytes that were not written.
+more than one document. Blob publication happens before the document
+transaction, so an accepted document never points at bytes that were not
+written.
 
 ### 2. Decode and accept the document
 
@@ -686,12 +689,12 @@ shares the same pathless source of truth.
 In the native embedding, canonical document routes require the second
 native-executor credential withheld from the renderer. Headless embeddings keep
 those routes on their primary bearer because they do not have a webview trust
-boundary. The native document bridge follows bounded catalog cursors and reports
-when it has intentionally stopped at the newest 1,000 records.
+boundary. The native bridge imports bytes for the composer and returns only the
+document identity and bounded chip metadata to the renderer.
 
 The chat's `list_sources` and `read_source` tools can see only documents owned by
-that exact conversation. Direct reads become available as soon as parsing
-publishes canonical text and produce durable grounded-citation evidence. A page
+that exact conversation. Direct reads become available as soon as decoding
+publishes canonical text and include lightweight positions the model can cite. A page
 fetched by `web_extract` becomes one of those documents, so a claim drawn from
 the public web is anchored and reopenable on the same terms as one drawn from an
 imported file; it arrives already parsed, so it is citable immediately.

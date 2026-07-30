@@ -37,10 +37,11 @@ use crate::model::{
     AgentRun, AgentRunInboxEntry, AgentRunResult, AgentRunTier, AgentRunWaitSetCandidate,
     BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus, Chat, ClientToolCallRequest,
     DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert,
-    DocumentSummaryRecord, DocumentUpsert, Message, MessageAttachment, PermissionMode, Project,
-    ReasoningEffort, RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord,
-    ToolCallResolution, TurnAgentRunWait, TurnAgentRunWaitSet, TurnCheckpointProgress,
-    TurnClientWait, TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnSteer,
+    DocumentSummaryRecord, DocumentUpsert, Message, MessageAttachment, MessageDocumentAttachment,
+    PermissionMode, Project, ReasoningEffort, RootAttachmentChange, RootAttachmentChangeTerminal,
+    ToolCallRecord, ToolCallResolution, TurnAgentRunWait, TurnAgentRunWaitSet,
+    TurnCheckpointProgress, TurnClientWait, TurnFailureReceipt, TurnFailureRetry, TurnRun,
+    TurnSteer,
 };
 use crate::provider::{RefusalOutcome, StopReason, Usage};
 use crate::semantic_checkpoint::{ContextCheckpoint, SaveContextCheckpointOutcome};
@@ -67,6 +68,9 @@ pub struct ChatTranscriptSnapshot {
     /// Durable image identities grouped into the renderer transcript under the
     /// same per-chat fence as `messages`.
     pub message_attachments: Vec<MessageAttachment>,
+    /// Durable document identities grouped into the renderer transcript under
+    /// the same per-chat fence as `messages`.
+    pub message_document_attachments: Vec<MessageDocumentAttachment>,
     /// Refusal outcomes keyed to their durably completed assistant message.
     pub refusals: Vec<ChatRefusalSnapshot>,
     /// Ordered renderer-safe sources keyed to their assistant message.
@@ -1902,18 +1906,18 @@ pub trait Store: Send + Sync {
         model: &str,
         content: &str,
     ) -> Result<AcceptTurnOutcome> {
-        self.accept_turn_with_attachments(id, chat_id, model, content, &[])
+        self.accept_turn_with_attachments(id, chat_id, model, content, &[], &[])
             .await
     }
 
-    /// Accept a turn whose input message also carries image attachments.
+    /// Accept a turn whose input message also carries image or file attachments.
     ///
     /// The attachments commit in the same transaction as the message and turn,
     /// and they participate in the same idempotency proof: a retry with the same
-    /// id but different images is an [`AcceptTurnOutcome::IdentityConflict`],
-    /// not a silent acceptance of the first submission's images. Each image is
-    /// recorded at its position in `images`, which is the order a reloaded
-    /// transcript replays them in.
+    /// id but different attachments is an [`AcceptTurnOutcome::IdentityConflict`],
+    /// not a silent acceptance of the first submission. Each attachment is
+    /// recorded at its position in its media-specific list, which is the order
+    /// a reloaded transcript replays it in.
     ///
     /// Recording an attachment makes its blob live: any queued retirement for
     /// that blob is cancelled in the same transaction. Because blob ids are
@@ -1926,6 +1930,7 @@ pub trait Store: Send + Sync {
         _model: &str,
         _content: &str,
         _images: &[ImageRef],
+        _documents: &[DocumentId],
     ) -> Result<AcceptTurnOutcome> {
         turn_storage_unavailable()
     }
@@ -2335,6 +2340,14 @@ pub trait Store: Send + Sync {
     /// attachment support report none, which degrades a reloaded turn to its
     /// text rather than failing the load.
     async fn list_message_attachments(&self, _chat_id: ChatId) -> Result<Vec<MessageAttachment>> {
+        Ok(Vec::new())
+    }
+
+    /// List a chat's file attachments, ordered by message then position.
+    async fn list_message_document_attachments(
+        &self,
+        _chat_id: ChatId,
+    ) -> Result<Vec<MessageDocumentAttachment>> {
         Ok(Vec::new())
     }
 

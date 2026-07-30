@@ -223,9 +223,9 @@ async function openCitationThenAnother(
 }
 
 describe("DocumentDetailRoot", () => {
-  it("draws the original, saves it, and leads back to the list", async () => {
+  it("draws and saves the attached original without a catalog breadcrumb", async () => {
     const user = userEvent.setup();
-    const { client, download, router } = await openPanel(detail());
+    const { client, download } = await openPanel(detail());
 
     expect(await screen.findByAltText("Document image")).toHaveAttribute(
       "src",
@@ -242,10 +242,8 @@ describe("DocumentDetailRoot", () => {
     await user.click(screen.getByRole("button", { name: "Download" }));
     await waitFor(() => expect(download).toHaveBeenCalledWith("chat-1", "doc-1"));
 
-    await user.click(screen.getByRole("button", { name: "Sources" }));
-    await waitFor(() =>
-      expect(router.state.location.search).toEqual({ left: "sources", right: "chat" }),
-    );
+    expect(screen.getByText("Document")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Sources" })).not.toBeInTheDocument();
   });
 
   it("opens a format it cannot draw on the extracted text alone", async () => {

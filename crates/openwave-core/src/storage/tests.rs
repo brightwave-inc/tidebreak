@@ -468,6 +468,7 @@ impl Store for MemStore {
         Ok(Some(ChatTranscriptSnapshot {
             messages: Vec::new(),
             message_attachments: Vec::new(),
+            message_document_attachments: Vec::new(),
             refusals: Vec::new(),
             citations: Vec::new(),
             tool_activity: Vec::new(),

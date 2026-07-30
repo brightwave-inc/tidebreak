@@ -44,8 +44,8 @@ use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{AgentRunId, CallId, ChatId, MessageId, TurnId};
 use crate::image::{ImageAttachments, ImageData, ImageRef};
 use crate::model::{
-    Chat, Message, MessageAttachment, PermissionMode, Role, ToolCallExecution, ToolCallRecord,
-    ToolCallResolution, ToolCallStatus, TurnRunStatus,
+    Chat, Message, MessageAttachment, MessageDocumentAttachment, PermissionMode, Role,
+    ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnRunStatus,
 };
 use crate::preview::{ToolActionPreview, ToolResultPreview};
 use crate::provider::{
@@ -2913,10 +2913,15 @@ impl Agent {
         let messages = self.store.list_messages(chat_id).await?;
         let tool_calls = self.store.list_tool_calls(chat_id).await?;
         let attachments = self.store.list_message_attachments(chat_id).await?;
+        let document_attachments = self
+            .store
+            .list_message_document_attachments(chat_id)
+            .await?;
         let (messages, checkpoint_boundary, source_boundaries) = rebuild_transcript_with_boundary(
             &messages,
             &tool_calls,
             &attachments,
+            &document_attachments,
             self.config.max_tool_result_bytes,
             checkpoint_source,
         );
@@ -3235,10 +3240,11 @@ impl Agent {
 /// message. Legacy `Role::Tool` rows are ignored.
 ///
 /// The block transcript is never stored, only reconstructed here, so this is
-/// also the single place history regains the images a message was submitted
-/// with: each non-assistant message's attachments become [`ContentBlock::Image`]
-/// blocks in their recorded order, ahead of the text they were sent with. A
-/// message with no attachments rebuilds exactly as before.
+/// also the single place history regains the attachments a message was
+/// submitted with: images become [`ContentBlock::Image`] blocks in their
+/// recorded order, while files become a compact manifest that teaches the
+/// model which document ids it can pass to `read_source`. A message with no
+/// attachments rebuilds exactly as before.
 #[cfg(test)]
 fn rebuild_transcript(
     messages: &[Message],
@@ -3246,7 +3252,15 @@ fn rebuild_transcript(
     attachments: &[MessageAttachment],
     max_result_bytes: usize,
 ) -> Vec<ChatMessage> {
-    rebuild_transcript_with_boundary(messages, tool_calls, attachments, max_result_bytes, None).0
+    rebuild_transcript_with_boundary(
+        messages,
+        tool_calls,
+        attachments,
+        &[],
+        max_result_bytes,
+        None,
+    )
+    .0
 }
 
 /// Rebuild a provider transcript and locate the end of one durable-message
@@ -3260,6 +3274,7 @@ fn rebuild_transcript_with_boundary(
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
     attachments: &[MessageAttachment],
+    document_attachments: &[MessageDocumentAttachment],
     max_result_bytes: usize,
     checkpoint_source: Option<MessageId>,
 ) -> (
@@ -3272,6 +3287,7 @@ fn rebuild_transcript_with_boundary(
         .filter(|message| message.role != Role::Tool)
         .collect();
     let images = group_attachments(attachments);
+    let documents = group_document_attachments(document_attachments);
     let batches = batch_tool_calls(tool_calls);
     let mut batch_i = 0;
     let mut out: Vec<ChatMessage> = Vec::new();
@@ -3308,9 +3324,10 @@ fn rebuild_transcript_with_boundary(
                 out.push(ChatMessage::text(Role::Assistant, text.to_string()));
             }
         } else {
-            out.push(user_message_with_images(
+            out.push(user_message_with_attachments(
                 message,
                 images.get(&message.id).map(Vec::as_slice).unwrap_or(&[]),
+                documents.get(&message.id).map(Vec::as_slice).unwrap_or(&[]),
             ));
             // Tool-only steps between this message and the next non-assistant
             // (e.g. user → tools → user steer). If the next message is
@@ -3383,22 +3400,62 @@ fn group_attachments(
         .collect()
 }
 
-/// Rebuild one user-authored message, carrying its images alongside its text.
+fn group_document_attachments(
+    attachments: &[MessageDocumentAttachment],
+) -> std::collections::HashMap<crate::id::MessageId, Vec<MessageDocumentAttachment>> {
+    let mut grouped: std::collections::HashMap<
+        crate::id::MessageId,
+        Vec<MessageDocumentAttachment>,
+    > = std::collections::HashMap::new();
+    for attachment in attachments {
+        grouped
+            .entry(attachment.message_id)
+            .or_default()
+            .push(attachment.clone());
+    }
+    for attachments in grouped.values_mut() {
+        attachments.sort_by_key(|attachment| attachment.ordinal);
+    }
+    grouped
+}
+
+/// Rebuild one user-authored message, carrying its attachments with its text.
 ///
 /// Images lead the block list: both supported providers document better results
 /// when an image precedes the text that refers to it, and the user's prompt is
 /// almost always a question *about* the attachment.
-fn user_message_with_images(message: &Message, images: &[ImageRef]) -> ChatMessage {
-    if images.is_empty() {
+fn user_message_with_attachments(
+    message: &Message,
+    images: &[ImageRef],
+    documents: &[MessageDocumentAttachment],
+) -> ChatMessage {
+    if images.is_empty() && documents.is_empty() {
         return ChatMessage::text(message.role, message.content.clone());
     }
     let mut content: Vec<ContentBlock> = images
         .iter()
         .map(|image| ContentBlock::Image { image: *image })
         .collect();
-    content.push(ContentBlock::Text {
-        text: message.content.clone(),
-    });
+    let text = if documents.is_empty() {
+        message.content.clone()
+    } else {
+        let manifest = documents
+            .iter()
+            .map(|document| {
+                serde_json::json!({
+                    "document_id": document.document_id,
+                    "name": document.title.as_deref().unwrap_or("Attachment"),
+                    "media_type": document.media_type,
+                })
+            })
+            .collect::<Vec<_>>();
+        format!(
+            "Files attached to this message (use read_source with document_id to read them):\n{}\n\n{}",
+            serde_json::to_string(&manifest).expect("attachment manifest is serializable"),
+            message.content
+        )
+    };
+    content.push(ContentBlock::Text { text });
     ChatMessage {
         role: message.role,
         content,
@@ -9169,6 +9226,49 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_identifies_attached_files_for_read_source() {
+        let turn = TurnId::new();
+        let chat = ChatId::new();
+        let message_id = MessageId::new();
+        let document_id = crate::id::DocumentId::new();
+        let created_at = DateTime::<Utc>::from_timestamp(1_000, 0).unwrap();
+        let message = Message {
+            id: message_id,
+            chat_id: chat,
+            turn_id: turn,
+            role: Role::User,
+            content: "summarize this file".into(),
+            created_at,
+        };
+        let document = MessageDocumentAttachment {
+            message_id,
+            chat_id: chat,
+            ordinal: 0,
+            document_id,
+            title: Some("brief.pdf".into()),
+            media_type: "application/pdf".into(),
+            created_at,
+        };
+
+        let rebuilt = rebuild_transcript_with_boundary(
+            &[message],
+            &[],
+            &[],
+            &[document],
+            DEFAULT_MAX_TOOL_RESULT_BYTES,
+            None,
+        )
+        .0;
+        let ContentBlock::Text { text } = &rebuilt[0].content[0] else {
+            panic!("file attachment should annotate the user text");
+        };
+        assert!(text.contains(&document_id.to_string()));
+        assert!(text.contains("\"name\":\"brief.pdf\""));
+        assert!(text.contains("\"media_type\":\"application/pdf\""));
+        assert!(text.ends_with("\n\nsummarize this file"));
+    }
+
+    #[test]
     fn rebuild_attaches_tools_to_assistant_text() {
         let turn = TurnId::new();
         let chat = ChatId::new();
@@ -9696,6 +9796,7 @@ mod image_hydration_tests {
                 "fake",
                 "what is in this screenshot?",
                 &[image],
+                &[],
             )
             .await
             .unwrap();
@@ -9732,7 +9833,7 @@ mod image_hydration_tests {
         let pixels = b"pixels".to_vec();
         let image = image_ref(uuid::Uuid::from_u128(9), &pixels);
         store
-            .accept_turn_with_attachments(TurnId::new(), chat.id, "fake", "look", &[image])
+            .accept_turn_with_attachments(TurnId::new(), chat.id, "fake", "look", &[image], &[])
             .await
             .unwrap();
 
@@ -9769,6 +9870,7 @@ mod image_hydration_tests {
                     "fake",
                     &format!("image {index}"),
                     &[image_ref(blob_id, &pixels)],
+                    &[],
                 )
                 .await
                 .unwrap();

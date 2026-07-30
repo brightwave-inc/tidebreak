@@ -10,13 +10,12 @@ import {
  * and linked at — which is what a citation needs in order to point at a place
  * inside a document rather than just at the app.
  *
- * The grammar is `{type}` or `{type}.{id}`, with one source panel taking a
+ * The grammar is `{type}` or `{type}.{id}`, with one document panel taking a
  * second identifier:
  *
  *   chat
- *   sources
- *   sources.{documentId}
- *   sources.{documentId}.{citationId}
+ *   document.{documentId}
+ *   document.{documentId}.{citationId}
  *   outputs
  *   outputs.{outputId}
  *   folders
@@ -36,8 +35,12 @@ export function parsePanelSegment(segment: string): PanelContent | null {
       return id ? null : { type: "chat" };
     case "folders":
       return id ? null : { type: "folders" };
+    case "document":
+      return parseDocumentTarget(id);
     case "sources":
-      return parseSourcesTarget(id);
+      // Historical links used `sources.{document}.{citation}`. Preserve those
+      // detail links while refusing the retired bare catalog.
+      return id ? parseDocumentTarget(id) : null;
     case "outputs":
       return id ? { type: "outputs", outputId: id } : { type: "outputs" };
     default:
@@ -45,18 +48,17 @@ export function parsePanelSegment(segment: string): PanelContent | null {
   }
 }
 
-function parseSourcesTarget(id: string): PanelContent | null {
-  if (!id) return { type: "sources" };
-
+function parseDocumentTarget(id: string): PanelContent | null {
+  if (!id) return null;
   const separator = id.indexOf(".");
-  if (separator === -1) return { type: "sources", documentId: id };
+  if (separator === -1) return { type: "document", documentId: id };
 
   const documentId = id.slice(0, separator);
   const citationId = id.slice(separator + 1);
   // A citation is a position inside one document, so neither half addresses
   // anything alone, and a third segment is not part of the grammar.
   if (!documentId || !citationId || citationId.includes(".")) return null;
-  return { type: "sources", documentId, citationId };
+  return { type: "document", documentId, citationId };
 }
 
 export function encodePanelSegment(panel: PanelContent): string {
@@ -65,11 +67,10 @@ export function encodePanelSegment(panel: PanelContent): string {
       return "chat";
     case "folders":
       return "folders";
-    case "sources":
-      if (!panel.documentId) return "sources";
+    case "document":
       return panel.citationId
-        ? `sources.${panel.documentId}.${panel.citationId}`
-        : `sources.${panel.documentId}`;
+        ? `document.${panel.documentId}.${panel.citationId}`
+        : `document.${panel.documentId}`;
     case "outputs":
       return panel.outputId ? `outputs.${panel.outputId}` : "outputs";
   }

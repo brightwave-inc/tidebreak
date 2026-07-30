@@ -91,6 +91,7 @@ impl MigratorTrait for Migrator {
             Box::new(RetireDocumentIndexing),
             Box::new(LightweightCitations),
             Box::new(RetireDocumentPipeline),
+            Box::new(AddMessageDocumentAttachments),
         ]
     }
 }
@@ -2015,6 +2016,136 @@ impl MigrationTrait for AddMessageAttachments {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .drop_table(Table::drop().table(MessageAttachment::Table).to_owned())
+            .await
+    }
+}
+
+/// Links imported source documents to the user message that introduced them.
+struct AddMessageDocumentAttachments;
+
+impl MigrationName for AddMessageDocumentAttachments {
+    fn name(&self) -> &str {
+        "m20260729_000032_add_message_document_attachments"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddMessageDocumentAttachments {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(MessageDocumentAttachment::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(MessageDocumentAttachment::MessageId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(MessageDocumentAttachment::Ordinal)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(MessageDocumentAttachment::ChatId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(MessageDocumentAttachment::DocumentId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(MessageDocumentAttachment::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .primary_key(
+                        Index::create()
+                            .col(MessageDocumentAttachment::MessageId)
+                            .col(MessageDocumentAttachment::Ordinal),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_message_document_attachment_message")
+                            .from(
+                                MessageDocumentAttachment::Table,
+                                MessageDocumentAttachment::MessageId,
+                            )
+                            .to(Message::Table, Message::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_message_document_attachment_document")
+                            .from(
+                                MessageDocumentAttachment::Table,
+                                MessageDocumentAttachment::DocumentId,
+                            )
+                            .to(Document::Table, Document::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_message_document_attachment_chat")
+                            .from(
+                                MessageDocumentAttachment::Table,
+                                MessageDocumentAttachment::ChatId,
+                            )
+                            .to(Chat::Table, Chat::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .check(Expr::col(MessageDocumentAttachment::DocumentId).ne(uuid::Uuid::nil()))
+                    .check(Expr::col(MessageDocumentAttachment::Ordinal).gte(0))
+                    .check(
+                        Expr::col(MessageDocumentAttachment::Ordinal)
+                            .lt(crate::model::MAX_MESSAGE_ATTACHMENTS as i32),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_message_document_attachment_chat")
+                    .table(MessageDocumentAttachment::Table)
+                    .col(MessageDocumentAttachment::ChatId)
+                    .col(MessageDocumentAttachment::MessageId)
+                    .col(MessageDocumentAttachment::Ordinal)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_message_document_attachment_document")
+                    .table(MessageDocumentAttachment::Table)
+                    .col(MessageDocumentAttachment::DocumentId)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_message_document_attachment_unique")
+                    .table(MessageDocumentAttachment::Table)
+                    .col(MessageDocumentAttachment::MessageId)
+                    .col(MessageDocumentAttachment::DocumentId)
+                    .unique()
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(MessageDocumentAttachment::Table)
+                    .to_owned(),
+            )
             .await
     }
 }
@@ -8942,6 +9073,16 @@ enum MessageAttachment {
     Width,
     Height,
     ByteLen,
+    CreatedAt,
+}
+
+#[derive(DeriveIden)]
+enum MessageDocumentAttachment {
+    Table,
+    MessageId,
+    Ordinal,
+    ChatId,
+    DocumentId,
     CreatedAt,
 }
 

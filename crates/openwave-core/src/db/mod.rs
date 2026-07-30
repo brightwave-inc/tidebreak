@@ -34,10 +34,11 @@ use crate::model::{
     AgentRunWaitSetCandidate, BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus,
     Chat, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceBlob,
     DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, MessageAttachment,
-    PermissionMode, Project, ReasoningEffort, RootAttachmentChange, RootAttachmentChangeTerminal,
-    SandboxToolCall, SandboxToolCallReceipt, SandboxToolCallRequest, ToolCallRecord,
-    ToolCallResolution, TurnAgentRunWaitStatus, TurnCheckpointProgress, TurnClientWaitStatus,
-    TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteerStatus, MAX_ROOT_ATTACHMENTS,
+    MessageDocumentAttachment, PermissionMode, Project, ReasoningEffort, RootAttachmentChange,
+    RootAttachmentChangeTerminal, SandboxToolCall, SandboxToolCallReceipt, SandboxToolCallRequest,
+    ToolCallRecord, ToolCallResolution, TurnAgentRunWaitStatus, TurnCheckpointProgress,
+    TurnClientWaitStatus, TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteerStatus,
+    MAX_ROOT_ATTACHMENTS,
 };
 use crate::provider::{StopReason, Usage};
 use crate::semantic_checkpoint::{ContextCheckpoint, SaveContextCheckpointOutcome};
@@ -1035,7 +1036,7 @@ impl Store for DbStore {
         model: &str,
         content: &str,
     ) -> Result<AcceptTurnOutcome> {
-        ops::turn::accept_turn(self, id, chat_id, model, content, &[]).await
+        ops::turn::accept_turn(self, id, chat_id, model, content, &[], &[]).await
     }
 
     async fn accept_turn_with_attachments(
@@ -1045,8 +1046,9 @@ impl Store for DbStore {
         model: &str,
         content: &str,
         images: &[ImageRef],
+        documents: &[DocumentId],
     ) -> Result<AcceptTurnOutcome> {
-        ops::turn::accept_turn(self, id, chat_id, model, content, images).await
+        ops::turn::accept_turn(self, id, chat_id, model, content, images, documents).await
     }
 
     async fn claim_turn_run(
@@ -1378,6 +1380,13 @@ impl Store for DbStore {
 
     async fn list_message_attachments(&self, chat_id: ChatId) -> Result<Vec<MessageAttachment>> {
         ops::message_attachment::list_for_chat(self, chat_id).await
+    }
+
+    async fn list_message_document_attachments(
+        &self,
+        chat_id: ChatId,
+    ) -> Result<Vec<MessageDocumentAttachment>> {
+        ops::message_document_attachment::list_for_chat(self, chat_id).await
     }
 
     async fn accept_tool_call(&self, call: &ToolCallRecord) -> Result<AcceptToolCallOutcome> {

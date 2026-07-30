@@ -1,0 +1,40 @@
+import { documentIcon } from "./documentIcon";
+import { useSourceNav } from "./panel/SourceNav";
+
+export type TranscriptFileAttachment = {
+  documentId: string;
+  name: string;
+  mediaType: string;
+};
+
+export function TranscriptFileAttachments({
+  files,
+}: {
+  files: readonly TranscriptFileAttachment[];
+}) {
+  const navigation = useSourceNav();
+  return (
+    <ul
+      className="m-0 flex list-none flex-wrap gap-2 p-0"
+      aria-label="Attached files"
+    >
+      {files.map((file) => {
+        const Icon = documentIcon(file.mediaType);
+        return (
+          <li key={file.documentId}>
+            <button
+              type="button"
+              className="flex max-w-64 items-center gap-2 rounded-lg border border-border bg-background/70 px-3 py-2 text-left text-xs text-foreground hover:bg-accent"
+              onClick={() => navigation?.openDocument(file.documentId)}
+            >
+              <Icon className="size-4 shrink-0 text-muted-foreground" />
+              <span className="truncate" title={file.name}>
+                {file.name}
+              </span>
+            </button>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}

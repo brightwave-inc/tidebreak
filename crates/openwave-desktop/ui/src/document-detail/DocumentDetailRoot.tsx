@@ -17,7 +17,6 @@ import { exportLibraryDocument } from "@/documents";
 import { hasNativeHost } from "@/host";
 import { PanelFrame } from "@/panel/PanelFrame";
 import type { PanelPosition } from "@/panel/panelTypes";
-import { usePanelNav } from "@/panel/usePanelNav";
 import { useCitationPlacement } from "./citationPlacement";
 import {
   DocumentDetailActions,
@@ -40,8 +39,8 @@ type Props = {
 };
 
 /**
- * One source, opened in a panel addressed as `sources.{documentId}`, or as
- * `sources.{documentId}.{citationId}` when a citation led here.
+ * One attachment, opened in a panel addressed as `document.{documentId}`, or
+ * with a citation id when a citation led here.
  */
 export function DocumentDetailRoot({
   chatId,
@@ -52,7 +51,6 @@ export function DocumentDetailRoot({
   canDownload = hasNativeHost(),
 }: Props) {
   const { client } = useApp();
-  const { openPanel } = usePanelNav();
   const [info, setInfo] = useState<DocumentDetail | null>(null);
   const [loadError, setLoadError] = useState<LoadError | null>(null);
   const [reloads, setReloads] = useState(0);
@@ -165,7 +163,6 @@ export function DocumentDetailRoot({
       breadcrumb={
         <DocumentDetailBreadcrumb
           documentName={documentName}
-          onBackToSources={() => openPanel({ type: "sources" })}
         />
       }
       headerRightSlot={

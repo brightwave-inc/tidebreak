@@ -1,34 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-
-export type LibraryDocument = {
-  documentId: string;
-  title: string | null;
-  mediaType: string;
-  sizeBytes: number | null;
-  /** Whether searching this conversation can actually match this source. */
-  readable: boolean;
-  updatedAt: string;
-};
 
 export type ImportedDocument = {
   documentId: string;
   displayName: string;
-};
-
-export type LibraryImportState =
-  | "queued"
-  | "streaming"
-  | "imported"
-  | "already_present"
-  | "failed";
-
-export type LibraryImportProgress = {
-  importId: string;
-  displayName: string;
-  status: LibraryImportState;
-  documentId: string | null;
-  message: string | null;
+  mediaType: string;
+  byteLen: number;
 };
 
 export type LibraryImportBatch = {
@@ -44,62 +20,11 @@ export type LibraryImportResult =
   | LibraryImportSuccess
   | { status: "failed"; displayName: string; message: string };
 
-export type LibrarySearchResult = {
-  documentId: string;
-  snippet: string;
-  heading: string | null;
-};
-
-export type LibraryCatalog = {
-  documents: LibraryDocument[];
-  truncated: boolean;
-};
-
-export async function listLibraryDocuments(chatId: string): Promise<LibraryCatalog> {
-  return parseLibraryCatalog(
-    await invoke("list_library_documents", { request: { chatId } }),
-  );
-}
-
-export async function deleteLibraryDocument(
-  chatId: string,
-  documentId: string,
-): Promise<void> {
-  await invoke("delete_library_document", { request: { chatId, documentId } });
-}
-
-export async function importLibraryDocument(
-  chatId: string,
-): Promise<ImportedDocument | null> {
-  return parseImportedDocument(
-    await invoke("import_library_document", { request: { chatId } }),
-  );
-}
-
-/** Select several sources in one native picker and receive progress by event. */
-export async function importLibraryDocuments(
-  chatId: string,
-): Promise<LibraryImportBatch | null> {
-  return parseLibraryImportBatch(
-    await invoke("import_library_documents", { request: { chatId } }),
-  );
-}
-
-/** Claim one just-dropped native file set without ever serializing its paths. */
-export async function importDroppedLibraryDocuments(
-  chatId: string,
-): Promise<LibraryImportBatch | null> {
-  return parseLibraryImportBatch(
-    await invoke("import_dropped_library_documents", { request: { chatId } }),
-  );
-}
-
 /**
- * Write one source's original bytes wherever the reader chooses.
+ * Write one attached file's original bytes wherever the reader chooses.
  *
- * Resolves false when the save dialog was dismissed. The bytes never pass
- * through the renderer: the host reads them and writes the file itself, so
- * neither the destination nor the size of the source is a renderer concern.
+ * The bytes never pass through the renderer: the host reads them and writes
+ * the destination selected in the native save dialog.
  */
 export async function exportLibraryDocument(
   chatId: string,
@@ -108,44 +33,6 @@ export async function exportLibraryDocument(
   return (await invoke("export_library_document", {
     request: { chatId, documentId },
   })) as boolean;
-}
-
-export async function listenForLibraryImportProgress(
-  listener: (progress: LibraryImportProgress) => void,
-): Promise<() => void> {
-  return listen<unknown>("library-import-progress", (event) => {
-    listener(parseLibraryImportProgress(event.payload));
-  });
-}
-
-export function parseLibraryImportProgress(value: unknown): LibraryImportProgress {
-  if (
-    !isExactRecord(value, [
-      "importId",
-      "displayName",
-      "status",
-      "documentId",
-      "message",
-    ]) ||
-    !isUuid(value.importId) ||
-    typeof value.displayName !== "string" ||
-    value.displayName.length === 0 ||
-    !isSafeRendererText(value.displayName, 255, false) ||
-    !isLibraryImportState(value.status) ||
-    (value.documentId !== null && !isUuid(value.documentId)) ||
-    (value.message !== null &&
-      (typeof value.message !== "string" ||
-        !isSafeRendererText(value.message, 500, false)))
-  ) {
-    throw new Error("Invalid document import progress");
-  }
-  return {
-    importId: value.importId,
-    displayName: value.displayName,
-    status: value.status,
-    documentId: value.documentId,
-    message: value.message,
-  };
 }
 
 export function parseLibraryImportBatch(value: unknown): LibraryImportBatch | null {
@@ -165,26 +52,31 @@ export function parseLibraryImportBatch(value: unknown): LibraryImportBatch | nu
       const record = result as Record<string, unknown>;
       if (
         (record.status === "imported" || record.status === "already_present") &&
-        isExactRecord(record, ["status", "documentId", "displayName"])
+        isExactRecord(record, [
+          "status",
+          "documentId",
+          "displayName",
+          "mediaType",
+          "byteLen",
+        ])
       ) {
         const document = parseImportedDocument({
           documentId: record.documentId,
           displayName: record.displayName,
+          mediaType: record.mediaType,
+          byteLen: record.byteLen,
         });
         if (!document) throw new Error("Invalid document import response");
-        return {
-          status: record.status,
-          document,
-        };
+        return { status: record.status, document };
       }
       if (
         record.status === "failed" &&
         isExactRecord(record, ["status", "displayName", "message"]) &&
         typeof record.displayName === "string" &&
         record.displayName.length > 0 &&
-        isSafeRendererText(record.displayName, 255, false) &&
+        isSafeRendererText(record.displayName, 255) &&
         typeof record.message === "string" &&
-        isSafeRendererText(record.message, 500, false)
+        isSafeRendererText(record.message, 500)
       ) {
         return {
           status: "failed",
@@ -197,122 +89,35 @@ export function parseLibraryImportBatch(value: unknown): LibraryImportBatch | nu
   };
 }
 
-export async function searchLibraryDocuments(
-  chatId: string,
-  query: string,
-): Promise<LibrarySearchResult[]> {
-  return parseLibrarySearchResults(
-    await invoke("search_library_documents", { request: { chatId, query } }),
-  );
-}
-
-export function parseLibraryCatalog(value: unknown): LibraryCatalog {
-  if (!isExactRecord(value, ["documents", "truncated"])) {
-    throw new Error("Invalid document library response");
-  }
-  if (!Array.isArray(value.documents) || value.documents.length > 1_000) {
-    throw new Error("Invalid document library response");
-  }
-  if (typeof value.truncated !== "boolean") {
-    throw new Error("Invalid document library response");
-  }
-  return {
-    documents: value.documents.map(parseLibraryDocument),
-    truncated: value.truncated,
-  };
-}
-
 export function parseImportedDocument(value: unknown): ImportedDocument | null {
   if (value === null) return null;
-  if (!isExactRecord(value, ["documentId", "displayName"])) {
-    throw new Error("Invalid document import response");
-  }
   if (
+    !isExactRecord(value, [
+      "documentId",
+      "displayName",
+      "mediaType",
+      "byteLen",
+    ]) ||
     !isUuid(value.documentId) ||
     typeof value.displayName !== "string" ||
     value.displayName.length === 0 ||
-    !isSafeRendererText(value.displayName, 255, false)
+    !isSafeRendererText(value.displayName, 255) ||
+    typeof value.mediaType !== "string" ||
+    value.mediaType.length === 0 ||
+    value.mediaType.length > 255 ||
+    typeof value.byteLen !== "number" ||
+    !Number.isSafeInteger(value.byteLen) ||
+    value.byteLen < 1 ||
+    value.byteLen > MAX_SOURCE_BYTES
   ) {
     throw new Error("Invalid document import response");
   }
   return {
     documentId: value.documentId,
     displayName: value.displayName,
-  };
-}
-
-export function parseLibrarySearchResults(value: unknown): LibrarySearchResult[] {
-  if (!Array.isArray(value) || value.length > 8) {
-    throw new Error("Invalid document search response");
-  }
-  return value.map((item) => {
-    if (!isExactRecord(item, ["documentId", "snippet", "heading"])) {
-      throw new Error("Invalid document search response");
-    }
-    if (
-      !isUuid(item.documentId) ||
-      typeof item.snippet !== "string" ||
-      !isSafeRendererText(item.snippet, 4_000, true) ||
-      (item.heading !== null &&
-        (typeof item.heading !== "string" ||
-          !isSafeRendererText(item.heading, 200, false)))
-    ) {
-      throw new Error("Invalid document search response");
-    }
-    return {
-      documentId: item.documentId,
-      snippet: item.snippet,
-      heading: item.heading,
-    };
-  });
-}
-
-function parseLibraryDocument(value: unknown): LibraryDocument {
-  if (
-    !isExactRecord(value, [
-      "documentId",
-      "title",
-      "mediaType",
-      "sizeBytes",
-      "readable",
-      "updatedAt",
-    ])
-  ) {
-    throw new Error("Invalid document library response");
-  }
-  if (
-    !isUuid(value.documentId) ||
-    (value.title !== null &&
-      (typeof value.title !== "string" ||
-        !isSafeRendererText(value.title, 255, false))) ||
-    typeof value.mediaType !== "string" ||
-    value.mediaType.length === 0 ||
-    value.mediaType.length > 255 ||
-    (value.sizeBytes !== null &&
-      (typeof value.sizeBytes !== "number" ||
-        !Number.isSafeInteger(value.sizeBytes) ||
-        value.sizeBytes < 1 ||
-        value.sizeBytes > MAX_SOURCE_BYTES)) ||
-    typeof value.readable !== "boolean" ||
-    typeof value.updatedAt !== "string" ||
-    !Number.isFinite(Date.parse(value.updatedAt))
-  ) {
-    throw new Error("Invalid document library response");
-  }
-  return {
-    documentId: value.documentId,
-    title: value.title,
     mediaType: value.mediaType,
-    sizeBytes: value.sizeBytes,
-    readable: value.readable,
-    updatedAt: value.updatedAt,
+    byteLen: value.byteLen,
   };
-}
-
-function isLibraryImportState(value: unknown): value is LibraryImportState {
-  return ["queued", "streaming", "imported", "already_present", "failed"].includes(
-    String(value),
-  );
 }
 
 function isUuid(value: unknown): value is string {
@@ -324,17 +129,12 @@ function isUuid(value: unknown): value is string {
   );
 }
 
-function isSafeRendererText(
-  value: string,
-  maxCodePoints: number,
-  allowLineBreaks: boolean,
-): boolean {
+function isSafeRendererText(value: string, maxCodePoints: number): boolean {
   const characters = [...value];
-  if (characters.length > maxCodePoints) return false;
-  return characters.every((character) => {
-    if (allowLineBreaks && ["\n", "\r", "\t"].includes(character)) return true;
-    return !DISALLOWED_RENDERER_CATEGORY.test(character);
-  });
+  return (
+    characters.length <= maxCodePoints &&
+    characters.every((character) => !DISALLOWED_RENDERER_CATEGORY.test(character))
+  );
 }
 
 const DISALLOWED_RENDERER_CATEGORY = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
@@ -344,7 +144,9 @@ function isExactRecord(
   value: unknown,
   keys: readonly string[],
 ): value is Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
   const actual = Object.keys(value);
   return actual.length === keys.length && actual.every((key) => keys.includes(key));
 }

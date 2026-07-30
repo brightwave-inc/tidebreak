@@ -10,7 +10,11 @@ import {
 import type { ApiClient, Chat } from "./api";
 import { followScrollBehavior, isNearBottom, scrollToLatest } from "./ChatScroll";
 import { useChatSessionStore } from "./ChatSessionStore";
-import { Composer, type ComposerImages } from "./Composer";
+import {
+  Composer,
+  type ComposerFiles,
+  type ComposerImages,
+} from "./Composer";
 import { MessageList } from "./MessageList";
 import { useTranscriptVisible } from "./TranscriptVisibility";
 import { useFolderAccessRequests } from "./useFolderAccessRequests";
@@ -33,10 +37,10 @@ export type ChatViewProps = {
   draftRef: RefObject<string>;
   composerModelMenu: ReactNode;
   composerImages: ComposerImages;
-  attachedSourceName: string | null;
+  files: ComposerFiles;
+  nativeDropTarget?: ReactNode;
   attachError: string | null;
   onDraftChange: (value: string) => void;
-  onDismissAttachedSource: () => void;
   onSelectPrompt: (prompt: string) => void;
   onSend: () => Promise<void>;
   /** Open the outputs surface, offered on a completed background run's row. */
@@ -60,10 +64,10 @@ export function ChatView({
   draftRef,
   composerModelMenu,
   composerImages,
-  attachedSourceName,
+  files,
+  nativeDropTarget,
   attachError,
   onDraftChange,
-  onDismissAttachedSource,
   onSelectPrompt,
   onSend,
   onViewOutput,
@@ -321,9 +325,9 @@ export function ChatView({
           draft={draft}
           modelMenu={composerModelMenu}
           images={composerImages}
-          attachedSourceName={attachedSourceName}
+          files={files}
+          nativeDropTarget={nativeDropTarget}
           attachError={attachError}
-          onDismissAttachedSource={onDismissAttachedSource}
           // Typing retires the verdict on the last piece of guidance. Accepted
           // guidance clears the draft through the raw callback instead, so
           // "Guidance sent" survives the clearing it caused.

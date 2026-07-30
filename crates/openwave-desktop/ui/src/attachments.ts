@@ -33,6 +33,15 @@ export async function attachChatFiles(chatId: string): Promise<AttachedFiles | n
   return parseAttachedFiles(await invoke("attach_chat_files", { request: { chatId } }));
 }
 
+/** Claim one just-dropped native path set and attach it to the composer. */
+export async function attachDroppedChatFiles(
+  chatId: string,
+): Promise<AttachedFiles | null> {
+  return parseAttachedFiles(
+    await invoke("attach_dropped_chat_files", { request: { chatId } }),
+  );
+}
+
 /**
  * Publish an image the renderer is already holding, from the host.
  *

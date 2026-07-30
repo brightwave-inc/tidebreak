@@ -208,7 +208,12 @@ export type ChatMessageSnapshot = { id: MessageId, role: TranscriptRole, content
  * geometry only; image bytes remain behind a chat-scoped authenticated
  * endpoint and never enter the transcript payload.
  */
-image_attachments?: Array<TranscriptImageAttachment>, refusal?: RendererRefusal, };
+image_attachments?: Array<TranscriptImageAttachment>, 
+/**
+ * Files submitted with this user message. Their bytes remain behind the
+ * existing chat-scoped document endpoints.
+ */
+file_attachments?: Array<TranscriptFileAttachment>, refusal?: RendererRefusal, };
 
 /**
  * One pathless root in a conversation's exact ordered projection.
@@ -1099,6 +1104,11 @@ failures: Array<ResultFailure>,
  * telling the reader something false.
  */
 elided: number, };
+
+/**
+ * One renderer-safe source document attached to a historical user message.
+ */
+export type TranscriptFileAttachment = { document_id: DocumentId, name: string, media_type: string, };
 
 /**
  * One renderer-safe image identity attached to a historical user message.

@@ -14,7 +14,7 @@ function Harness() {
   const sourceNav = useStableSourceNav(openPanel);
   return (
     <div>
-      <button onClick={() => openPanel({ type: "sources" })}>open sources</button>
+      <button onClick={() => openPanel({ type: "folders" })}>open folders</button>
       <button onClick={() => openPanel({ type: "outputs" })}>open outputs</button>
       <button
         onClick={() =>
@@ -39,16 +39,16 @@ describe("usePanelNav", () => {
     const user = userEvent.setup();
     const { router } = await mount("/c/chat-1");
 
-    await user.click(screen.getByText("open sources"));
+    await user.click(screen.getByText("open folders"));
 
     await waitFor(() =>
-      expect(router.state.location.search).toEqual({ left: "sources", right: "chat" }),
+      expect(router.state.location.search).toEqual({ left: "folders", right: "chat" }),
     );
   });
 
   it("replaces a panel that belongs on the same side", async () => {
     const user = userEvent.setup();
-    const { router } = await mount("/c/chat-1?left=sources&right=chat");
+    const { router } = await mount("/c/chat-1?left=folders&right=chat");
 
     await user.click(screen.getByText("open outputs"));
 
@@ -65,22 +65,22 @@ describe("usePanelNav", () => {
     // Another source is already open, and the conversation is fullscreen — the
     // reader is reading it, and the citation they clicked is in it.
     const { router } = await mount(
-      "/c/chat-1?left=sources.doc-1&right=chat&fullscreen=right",
+      "/c/chat-1?left=chat&right=document.doc-1&fullscreen=left",
     );
 
     await user.click(screen.getByText("open citation"));
 
     await waitFor(() =>
       expect(router.state.location.search).toEqual({
-        left: "sources.doc-2.cite-1",
-        right: "chat",
+        left: "chat",
+        right: "document.doc-2.cite-1",
       }),
     );
   });
 
   it("collapses to the bare URL when the survivor is the conversation", async () => {
     const user = userEvent.setup();
-    const { router } = await mount("/c/chat-1?left=sources&right=chat");
+    const { router } = await mount("/c/chat-1?left=folders&right=chat");
 
     await user.click(screen.getByText("close left"));
 
@@ -89,20 +89,20 @@ describe("usePanelNav", () => {
 
   it("returns the survivor to its own side rather than leaving it stranded", async () => {
     const user = userEvent.setup();
-    // Sources sits on the right here, which is not where a navigation panel
+    // Folders sits on the right here, which is not where a navigation panel
     // belongs; closing the other slot should move it home.
-    const { router } = await mount("/c/chat-1?left=outputs&right=sources");
+    const { router } = await mount("/c/chat-1?left=outputs&right=folders");
 
     await user.click(screen.getByText("close left"));
 
     await waitFor(() =>
-      expect(router.state.location.search).toEqual({ left: "sources", right: "chat" }),
+      expect(router.state.location.search).toEqual({ left: "folders", right: "chat" }),
     );
   });
 
   it("toggles fullscreen on and back off", async () => {
     const user = userEvent.setup();
-    const { router } = await mount("/c/chat-1?left=sources&right=chat");
+    const { router } = await mount("/c/chat-1?left=folders&right=chat");
 
     await user.click(screen.getByText("fullscreen left"));
     await waitFor(() =>
@@ -111,7 +111,7 @@ describe("usePanelNav", () => {
 
     await user.click(screen.getByText("fullscreen left"));
     await waitFor(() =>
-      expect(router.state.location.search).toEqual({ left: "sources", right: "chat" }),
+      expect(router.state.location.search).toEqual({ left: "folders", right: "chat" }),
     );
   });
 

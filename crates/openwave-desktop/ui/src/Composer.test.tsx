@@ -286,7 +286,7 @@ describe("Composer", () => {
     expect(markup).toContain('disabled=""');
   });
 
-  it("reports what source was added", () => {
+  it("renders a removable file attachment chip", () => {
     const markup = renderToStaticMarkup(
       <Composer
         activeTurnId={null}
@@ -295,9 +295,17 @@ describe("Composer", () => {
         cancelPending={false}
         disabled={false}
         draft="Summarize this"
-        attachedSourceName="brief.pdf"
+        files={{
+          items: [{
+            documentId: "6c3df6af-bc62-4a66-a34e-29f327eaef41",
+            displayName: "brief.pdf",
+            mediaType: "application/pdf",
+            byteLen: 2048,
+          }],
+          attaching: false,
+          onRemove: vi.fn(),
+        }}
         attachError={null}
-        onDismissAttachedSource={vi.fn()}
         onDraftChange={vi.fn()}
         onSend={noop}
         onSteer={noop}
@@ -310,8 +318,8 @@ describe("Composer", () => {
     );
 
     expect(markup).toContain("brief.pdf");
-    expect(markup).toContain("Added to this conversation");
-    expect(markup).toContain('aria-label="Dismiss brief.pdf"');
+    expect(markup).toContain("2 KB");
+    expect(markup).toContain('aria-label="Remove brief.pdf"');
   });
 
   it("previews an uploading image from the local file with determinate progress", () => {

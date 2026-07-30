@@ -2051,11 +2051,10 @@ pub struct Message {
     pub created_at: DateTime<Utc>,
 }
 
-/// Maximum number of images one message may carry.
+/// Maximum number of attachments one message may carry.
 ///
-/// Every attachment costs prompt tokens on every subsequent turn, so the bound
-/// keeps a single submit from permanently inflating a conversation. It also
-/// bounds the ordinal column, which the schema range-checks.
+/// The bound keeps one submit and its transcript projection finite. It also
+/// bounds the ordinal columns, which the schema range-checks.
 pub const MAX_MESSAGE_ATTACHMENTS: usize = 16;
 
 /// One image attached to a persisted message.
@@ -2095,6 +2094,50 @@ impl MessageAttachment {
             return Err("message attachment blob id must not be nil");
         }
         self.image.validate()
+    }
+}
+
+/// One source document attached to a persisted message.
+///
+/// The document remains the authoritative owner of its bytes and decoded text;
+/// this row only preserves which user message introduced it and its display
+/// order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageDocumentAttachment {
+    /// The message this document is attached to.
+    pub message_id: MessageId,
+    /// The chat that owns both the message and document.
+    pub chat_id: ChatId,
+    /// Zero-based position among the message's file attachments.
+    pub ordinal: i32,
+    /// The attached document.
+    pub document_id: DocumentId,
+    /// Human-facing name captured from the document record.
+    pub title: Option<String>,
+    /// Media type captured from the document record.
+    pub media_type: String,
+    /// When the attachment was recorded.
+    pub created_at: DateTime<Utc>,
+}
+
+impl MessageDocumentAttachment {
+    /// Validate the bounds the schema also enforces.
+    ///
+    /// # Errors
+    ///
+    /// Returns a static reason when the ordinal is out of range, the document
+    /// id is nil, or the media type is empty.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.ordinal < 0 || self.ordinal as usize >= MAX_MESSAGE_ATTACHMENTS {
+            return Err("message document attachment ordinal is out of range");
+        }
+        if self.document_id.0.is_nil() {
+            return Err("message document attachment id must not be nil");
+        }
+        if self.media_type.is_empty() {
+            return Err("message document attachment media type must not be empty");
+        }
+        Ok(())
     }
 }
 

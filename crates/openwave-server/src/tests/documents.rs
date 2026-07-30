@@ -1,4 +1,75 @@
 use super::*;
+
+#[tokio::test]
+async fn an_imported_file_commits_with_its_message_and_replays_as_a_chip() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let accepted: serde_json::Value = json_body(
+        post_raw(
+            &router,
+            &bearer,
+            &format!("/chats/{}/documents/raw?title=brief.pdf", chat.id),
+            Some("application/pdf"),
+            b"%PDF attachment".to_vec(),
+        )
+        .await,
+    )
+    .await;
+    let document_id: openwave_core::DocumentId =
+        accepted["document_id"].as_str().unwrap().parse().unwrap();
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/chats/{}/messages", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "turn_id": TurnId::new(),
+                        "content": "Summarize this file",
+                        "file_attachments": [document_id],
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/chats/{}/messages", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let transcript: serde_json::Value = json_body(response).await;
+    assert_eq!(
+        transcript["messages"][0]["file_attachments"][0],
+        serde_json::json!({
+            "document_id": document_id,
+            "name": "brief.pdf",
+            "media_type": "application/pdf",
+        })
+    );
+    let persisted = store
+        .list_message_document_attachments(chat.id)
+        .await
+        .unwrap();
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0].document_id, document_id);
+}
+
 #[tokio::test]
 async fn document_file_content_supports_full_head_and_single_range_responses() {
     let (router, token, _store, _dir) = test_app().await;

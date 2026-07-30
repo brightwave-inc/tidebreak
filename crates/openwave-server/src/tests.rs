@@ -110,6 +110,7 @@ fn transcript_citation_json_is_closed_and_renderer_bounded() {
             locator: openwave_core::CitationLocator::Pages { start: 2, end: 4 },
         }],
         image_attachments: None,
+        file_attachments: None,
         refusal: None,
     };
     let json = serde_json::to_value(snapshot).unwrap();
@@ -879,13 +880,14 @@ impl Store for PauseTerminalStore {
         model: &str,
         content: &str,
         images: &[openwave_core::ImageRef],
+        documents: &[openwave_core::DocumentId],
     ) -> Result<openwave_core::AcceptTurnOutcome> {
         if self.pause_accept.swap(false, Ordering::SeqCst) {
             self.entered.notify_one();
             self.release.notified().await;
         }
         self.inner
-            .accept_turn_with_attachments(id, chat_id, model, content, images)
+            .accept_turn_with_attachments(id, chat_id, model, content, images, documents)
             .await
     }
     async fn accept_turn_steer(

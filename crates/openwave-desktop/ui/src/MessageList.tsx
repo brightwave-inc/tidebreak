@@ -33,6 +33,10 @@ import { WelcomeState } from "./WelcomeState";
 import { UserQuestionsCard } from "./UserQuestionsCard";
 import type { TranscriptImageAttachment } from "./ImageAttachments";
 import { TranscriptImageAttachments } from "./TranscriptImageAttachments";
+import {
+  TranscriptFileAttachments,
+  type TranscriptFileAttachment,
+} from "./TranscriptFileAttachments";
 import { BackgroundAgentList } from "./BackgroundAgentList";
 import { WebSearchProviderRequiredCard } from "./WebSearchProviderRequiredCard";
 import { useSourceNav } from "./panel/SourceNav";
@@ -45,6 +49,7 @@ export type ChatMessage =
       role: "user";
       text: string;
       images?: TranscriptImageAttachment[];
+      files?: TranscriptFileAttachment[];
       createdAt?: string;
     }
   | {
@@ -718,6 +723,9 @@ function MessageBubbleImpl({
               chatId={chatId}
               images={message.images}
             />
+          )}
+          {message.files && message.files.length > 0 && (
+            <TranscriptFileAttachments files={message.files} />
           )}
           <MessageMarkdown>{message.text}</MessageMarkdown>
         </article>
