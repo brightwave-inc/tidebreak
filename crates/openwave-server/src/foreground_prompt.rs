@@ -40,6 +40,7 @@ const WEB_SEARCH_HEADING: &str = "## Public web research";
 const WEB_EXTRACT_HEADING: &str = "## Public web pages";
 const CONNECTED_FOLDERS_HEADING: &str = "## Connected folders";
 const OUTPUTS_HEADING: &str = "## User-visible outputs";
+const APPS_HEADING: &str = "## Local apps";
 const EXECUTION_HEADING: &str = "## Code execution";
 const DELEGATION_HEADING: &str = "## Background delegation";
 const MCP_HEADING: &str = "## External MCP tools";
@@ -261,6 +262,18 @@ pub(crate) fn compose_for_surface(
         );
     }
 
+    if has(openwave_core::local_app::CREATE_APP_TOOL) {
+        push_section(
+            &mut prompt,
+            APPS_HEADING,
+            &[
+                "- Use `create_app` only when the user asks for a reusable interactive view they can reopen later — not for a one-off answer, report, or file.",
+                "- The manifest pins the exact mounted tools the app may call; pin only what the app genuinely needs. The app runs sandboxed with no network access, and its pinned tools run only after the user grants them.",
+                "- To revise an existing app, pass the `app_id` a create_app result reported; revisions append and never overwrite.",
+            ],
+        );
+    }
+
     if has("exec") {
         let mut lines = vec![
             "- Use `exec` for bounded computation or validation when it improves the result."
@@ -417,6 +430,7 @@ mod tests {
             WEB_EXTRACT_HEADING,
             CONNECTED_FOLDERS_HEADING,
             OUTPUTS_HEADING,
+            APPS_HEADING,
             EXECUTION_HEADING,
             DELEGATION_HEADING,
             MCP_HEADING,
@@ -425,6 +439,7 @@ mod tests {
             "`request_folder_access`",
             "`spawn_sandbox_agent`",
             "`web_extract`",
+            "`create_app`",
         ] {
             assert!(
                 !prompt.contains(unavailable),

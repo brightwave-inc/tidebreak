@@ -423,6 +423,9 @@ const ENTRY_TOOLS: &[&str] = &[
     crate::READ_CONNECTED_FILE_TOOL,
     crate::IMPORT_CONNECTED_FILE_TOOL,
     crate::WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
+    // Lists the one app record the call created or revised: name and ordinal
+    // only, never the bundle or the manifest's bindings.
+    crate::local_app::CREATE_APP_TOOL,
 ];
 
 impl ToolResultPreview {
