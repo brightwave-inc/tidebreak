@@ -289,6 +289,23 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         // thinking blocks but with empty text, which reads in a live transcript
         // as a long silent pause before the answer. `summarized` is what makes
         // the reasoning stream the renderer already draws worth drawing.
+        //
+        // Rebuilt history deliberately replays no thinking blocks at all.
+        // Adaptive mode relaxes turn validation for exactly this case: no
+        // assistant turn has to begin with a thinking block, and history
+        // assembled from mixed sources needs none reinserted, so sending zero
+        // of them consistently is a valid shape. The 400 lives in *partial*
+        // replay — within the latest assistant message the consecutive
+        // thinking blocks must match what the model generated verbatim,
+        // `redacted_thinking` included, so a future fix that stores and
+        // filters on `type == "thinking"` would introduce errors we do not
+        // have today. What omission costs is reasoning continuity across tool
+        // steps, worst on Opus 4.7 and later where inter-tool reasoning lands
+        // entirely in thinking blocks. It also keeps history portable: blocks
+        // are bound to the model that produced them and a chat can switch
+        // models mid-conversation, where a foreign block is ignored rather
+        // than rejected and so only wastes input tokens. See #1200 for the
+        // in-turn-only recovery of the lost quality.
         body["thinking"] = json!({ "type": "adaptive", "display": "summarized" });
         if let Some(effort) = req.reasoning_effort {
             body["output_config"] = json!({ "effort": effort.as_str() });
@@ -580,6 +597,11 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                     index,
                     fragment: str_at(delta, "partial_json"),
                 }],
+                // `signature_delta` and `redacted_thinking` fall through here
+                // on purpose: they are only useful for replaying thinking
+                // blocks, which the request built above deliberately does not
+                // do. Capturing them here alone would not enable replay and
+                // would tempt the partial-replay bug described there.
                 _ => Vec::new(),
             }
         }
