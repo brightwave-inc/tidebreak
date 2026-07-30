@@ -561,6 +561,7 @@ async fn a_tool_preview_is_fetchable_only_through_its_chat() {
             provider_id: "exec-1".into(),
             name: "exec".into(),
             arguments: serde_json::json!({"command": "python"}),
+            raw_arguments: None,
             execution: ToolCallExecution::Server,
             status: ToolCallStatus::Pending,
             result: None,

@@ -980,6 +980,7 @@ async fn agent_run_snapshots_expose_only_safe_live_foreground_folder_activity() 
         provider_id: "historical-provider-call-identity".into(),
         name: "read_connected_file".into(),
         arguments: serde_json::json!({"path": historical_argument}),
+        raw_arguments: None,
         execution: ToolCallExecution::Client,
         status: ToolCallStatus::Pending,
         result: None,
@@ -1042,6 +1043,7 @@ async fn agent_run_snapshots_expose_only_safe_live_foreground_folder_activity() 
             "path": relative_path,
             "grant": "private-grant"
         }),
+        raw_arguments: None,
         execution: ToolCallExecution::Client,
         status: ToolCallStatus::Pending,
         result: None,

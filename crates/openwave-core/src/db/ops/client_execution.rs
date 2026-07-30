@@ -55,6 +55,7 @@ pub(in crate::db) async fn accept_tool_call(
         history_order: Set(history_order),
         name: Set(call.name.clone()),
         arguments: Set(call.arguments.clone()),
+        raw_arguments: Set(call.raw_arguments.clone()),
         execution: Set(call.execution.as_str().into()),
         status: Set(ToolCallStatus::Pending.as_str().into()),
         result: Set(None),
@@ -138,6 +139,7 @@ pub(in crate::db) async fn accept_claimed_tool_call(
         history_order: Set(history_order),
         name: Set(call.name.clone()),
         arguments: Set(call.arguments.clone()),
+        raw_arguments: Set(call.raw_arguments.clone()),
         execution: Set(call.execution.as_str().into()),
         status: Set(ToolCallStatus::Pending.as_str().into()),
         result: Set(None),
@@ -826,9 +828,17 @@ fn validate_accept(call: &ToolCallRecord) -> Result<()> {
     let args_len = serde_json::to_vec(&call.arguments)
         .map_err(|error| AgentError::Store(format!("serialize tool arguments: {error}")))?
         .len();
+    // The raw fragment is untrusted stream text kept for debugging: it must
+    // stay bounded and store-safe, and it is never parsed on the way back out.
+    let raw_valid = call.raw_arguments.as_deref().is_none_or(|fragment| {
+        !fragment.is_empty()
+            && fragment.len() <= ToolCallRecord::MAX_ARGUMENT_BYTES
+            && !fragment.contains('\0')
+    });
     if call.id.0.is_nil()
         || !labels_valid
         || args_len > ToolCallRecord::MAX_ARGUMENT_BYTES
+        || !raw_valid
         || !matches!(
             call.execution,
             ToolCallExecution::Server | ToolCallExecution::Client
@@ -898,6 +908,7 @@ fn immutable_request_matches(
         && model.provider_id == call.provider_id
         && model.name == call.name
         && model.arguments == call.arguments
+        && model.raw_arguments == call.raw_arguments
         && model.execution == call.execution.as_str()
         && model.created_at == created_at
 }
@@ -953,6 +964,7 @@ pub(in crate::db) fn tool_call_from_model(
         provider_id: model.provider_id,
         name: model.name,
         arguments: model.arguments,
+        raw_arguments: model.raw_arguments,
         execution: execution_from_db(&model.execution)?,
         status: status_from_db(&model.status)?,
         result: model.result,

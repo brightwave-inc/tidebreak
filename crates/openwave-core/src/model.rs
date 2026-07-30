@@ -2463,6 +2463,13 @@ pub struct ToolCallRecord {
     pub name: String,
     /// Parsed JSON arguments.
     pub arguments: serde_json::Value,
+    /// The exact argument bytes the provider streamed, kept only when they
+    /// would not parse as JSON — `arguments` then holds the coerced empty
+    /// object and this is the sole copy of what the model actually sent.
+    /// Bounded, untrusted text for post-hoc debugging of a garbled stream;
+    /// never re-parsed. Absent for well-formed calls and historical rows.
+    #[serde(default)]
+    pub raw_arguments: Option<String>,
     /// Which trusted surface owns execution.
     pub execution: ToolCallExecution,
     /// Durable execution state.

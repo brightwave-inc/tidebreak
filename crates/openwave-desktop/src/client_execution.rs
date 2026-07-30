@@ -581,6 +581,7 @@ mod tests {
                 "requested_capabilities": ["read_files"],
                 "folder_hint": "documents"
             }),
+            raw_arguments: None,
             execution: ToolCallExecution::Client,
             status: ToolCallStatus::Pending,
             result: None,

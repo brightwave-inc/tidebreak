@@ -1340,6 +1340,7 @@ mod tests {
             provider_id: "provider".into(),
             name: name.into(),
             arguments: serde_json::json!({}),
+            raw_arguments: None,
             execution: crate::model::ToolCallExecution::Server,
             status: crate::model::ToolCallStatus::Completed,
             result: Some("model-facing text".into()),

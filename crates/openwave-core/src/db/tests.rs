@@ -5242,6 +5242,7 @@ async fn client_wait_schema_rejects_invalid_scope_claim_and_lifecycle() {
         provider_id: "native-second".into(),
         name: "connect_folder".into(),
         arguments: serde_json::json!({}),
+        raw_arguments: None,
         execution: ToolCallExecution::Client,
         status: ToolCallStatus::Pending,
         result: None,
@@ -8413,6 +8414,7 @@ async fn server_tool_call_lifecycle_is_atomic_and_idempotent() {
         provider_id: "tu_1".into(),
         name: "read_file".into(),
         arguments: serde_json::json!({"path": "note.txt"}),
+        raw_arguments: None,
         execution: ToolCallExecution::Server,
         status: ToolCallStatus::Pending,
         result: None,
@@ -8436,6 +8438,7 @@ async fn server_tool_call_lifecycle_is_atomic_and_idempotent() {
         store
             .accept_tool_call(&ToolCallRecord {
                 arguments: serde_json::json!({"path": "other.txt"}),
+                raw_arguments: None,
                 ..call.clone()
             })
             .await
@@ -8522,6 +8525,7 @@ async fn claimed_tool_results_are_co_committed_with_the_turn_lease() {
         provider_id: "tu_claimed".into(),
         name: "write_file".into(),
         arguments: serde_json::json!({"path": "note.txt"}),
+        raw_arguments: None,
         execution: ToolCallExecution::Server,
         status: ToolCallStatus::Pending,
         result: None,
@@ -8768,6 +8772,7 @@ async fn claimed_sensitive_call_with(
         provider_id: "approval-call".into(),
         name: tool_name.into(),
         arguments,
+        raw_arguments: None,
         execution: ToolCallExecution::Server,
         status: ToolCallStatus::Pending,
         result: None,
@@ -9513,6 +9518,7 @@ async fn client_tool_call_is_fenced_by_its_exact_lease() {
         provider_id: "tu_client".into(),
         name: "select_folder".into(),
         arguments: serde_json::json!({"hint": "Documents"}),
+        raw_arguments: None,
         execution: ToolCallExecution::Client,
         status: ToolCallStatus::Pending,
         result: None,
@@ -9778,6 +9784,7 @@ async fn expired_client_lease_is_not_transferred_implicitly() {
         provider_id: "tu_picker".into(),
         name: "select_folder".into(),
         arguments: serde_json::json!({}),
+        raw_arguments: None,
         execution: ToolCallExecution::Client,
         status: ToolCallStatus::Pending,
         result: None,
@@ -9910,6 +9917,7 @@ async fn concurrent_client_claim_has_one_sqlite_winner() {
         provider_id: "tu_race".into(),
         name: "select_folder".into(),
         arguments: serde_json::json!({}),
+        raw_arguments: None,
         execution: ToolCallExecution::Client,
         status: ToolCallStatus::Pending,
         result: None,

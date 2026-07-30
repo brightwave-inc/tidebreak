@@ -1140,6 +1140,9 @@ pub mod tool_call {
         pub name: String,
         #[sea_orm(column_type = "JsonBinary")]
         pub arguments: Json,
+        /// The exact bytes the provider streamed when `arguments` would not
+        /// parse and had to be coerced; `NULL` for well-formed calls.
+        pub raw_arguments: Option<String>,
         pub execution: String,
         pub status: String,
         pub result: Option<String>,

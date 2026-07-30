@@ -147,6 +147,7 @@ pub(in crate::db) async fn park_turn_for_client_tool_call(
         history_order: Set(history_order),
         name: Set(call.name.clone()),
         arguments: Set(call.arguments.clone()),
+        raw_arguments: Set(None),
         execution: Set(checkpoint_execution(&call.name).as_str().into()),
         status: Set(ToolCallStatus::Pending.as_str().into()),
         result: Set(None),

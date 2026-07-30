@@ -2076,6 +2076,7 @@ async fn postgres_client_execution_claim_has_one_winner() {
         provider_id: "postgres_client_call".into(),
         name: "select_folder".into(),
         arguments: serde_json::json!({"reason": "test"}),
+        raw_arguments: None,
         execution: ToolCallExecution::Client,
         status: ToolCallStatus::Pending,
         result: None,

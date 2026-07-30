@@ -1574,6 +1574,7 @@ mod tests {
                     provider_id: format!("provider-{call_id}"),
                     name: "exec".into(),
                     arguments: serde_json::json!({}),
+                    raw_arguments: None,
                     execution: ToolCallExecution::Server,
                     status: ToolCallStatus::Pending,
                     result: None,

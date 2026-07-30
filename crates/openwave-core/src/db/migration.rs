@@ -98,6 +98,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddExecFileSnapshots),
             Box::new(AddLocalApps),
             Box::new(AddAppGrants),
+            Box::new(AddToolCallRawArguments),
         ]
     }
 }
@@ -430,6 +431,49 @@ impl MigrationTrait for AddExecFileSnapshots {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .drop_table(Table::drop().table(ExecFileSnapshot::Table).to_owned())
+            .await
+    }
+}
+
+/// Keeps the exact bytes a provider streamed for a tool call whose arguments
+/// would not parse (issue #1142). Dispatch refuses such a call, but the
+/// durable record still wrote the lenient coerced `{}` down and kept the
+/// fragment nowhere — so post-hoc debugging of a garbled stream had nothing
+/// to look at. The column holds the raw fragment, bounded at the ops layer
+/// and treated as untrusted text that is never re-parsed.
+///
+/// Nullable because every call recorded before this migration streamed no
+/// recoverable fragment, and because well-formed calls — the overwhelming
+/// majority — have none. Purely additive, with a symmetric `down`.
+struct AddToolCallRawArguments;
+
+impl MigrationName for AddToolCallRawArguments {
+    fn name(&self) -> &str {
+        "m20260730_000037_add_tool_call_raw_arguments"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddToolCallRawArguments {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(ToolCall::Table)
+                    .add_column(ColumnDef::new(ToolCall::RawArguments).text())
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(ToolCall::Table)
+                    .drop_column(ToolCall::RawArguments)
+                    .to_owned(),
+            )
             .await
     }
 }
@@ -9872,6 +9916,7 @@ enum ToolCall {
     HistoryOrder,
     Name,
     Arguments,
+    RawArguments,
     Execution,
     Status,
     Result,
