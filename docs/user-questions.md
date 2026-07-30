@@ -24,9 +24,12 @@ foreground coordinator, which decides whether to ask the user.
 4. The user answers every question once through
    `POST /chats/{chat_id}/questions/{call_id}/answer`.
 5. One transaction stores the exact answers, completes the tool call with the
-   model-facing JSON result, closes the wait, and moves the original turn to
-   `resuming`. A worker then reclaims that turn and reconstructs the matching
-   `ToolUse` and `ToolResult` in the provider transcript.
+   model-facing JSON result, journals the call's `ToolCallCompleted`, closes
+   the wait, and moves the original turn to `resuming`. The route publishes the
+   completion live so the renderer settles the card immediately instead of at
+   the turn's terminal hydration. A worker then reclaims that turn and
+   reconstructs the matching `ToolUse` and `ToolResult` in the provider
+   transcript.
 
 Cancelling the turn closes an unanswered card and the wait in the same
 serialized state transition. Answer and cancellation take the same chat, turn,
@@ -73,6 +76,8 @@ correctness.
 Changes to this path should preserve:
 
 - atomic question, wait, event, and tool-call checkpointing;
+- a single renderer completion announcement committed with the answer, never
+  repeated by an exact retry;
 - exact idempotent answer recovery with contradictory retries rejected;
 - serialization of pending projection reads with answer and cancellation;
 - deletion ordering for question rows before their chat, turn, tool, and event

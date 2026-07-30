@@ -3629,7 +3629,7 @@ async fn postgres_user_questions_resume_exactly_and_serialize_with_cancellation(
     });
     assert!(matches!(
         answer_task.await.unwrap(),
-        AnswerUserQuestionsOutcome::Answered(turn)
+        AnswerUserQuestionsOutcome::Answered { turn, .. }
             if turn.id == turn_id && turn.status == TurnRunStatus::Resuming
     ));
     let first_claim = claim_task.await.unwrap();
@@ -3715,7 +3715,7 @@ async fn postgres_user_questions_resume_exactly_and_serialize_with_cancellation(
     });
     assert!(matches!(
         answer_task.await.unwrap(),
-        AnswerUserQuestionsOutcome::Answered(_) | AnswerUserQuestionsOutcome::Unavailable
+        AnswerUserQuestionsOutcome::Answered { .. } | AnswerUserQuestionsOutcome::Unavailable
     ));
     assert!(matches!(
         cancel_task.await.unwrap(),

@@ -741,7 +741,13 @@ pub enum DecidePlanOutcome {
 #[derive(Debug, Clone, PartialEq)]
 pub enum AnswerUserQuestionsOutcome {
     /// The exact answers completed the tool call and made the turn resumable.
-    Answered(TurnRun),
+    Answered {
+        /// The resumable turn.
+        turn: TurnRun,
+        /// The call's journaled completion, committed with the answer so a
+        /// live renderer settles the card now rather than at the turn's end.
+        completion_event: Box<SequencedEvent>,
+    },
     /// An ambiguous retry recovered the same committed answers.
     Existing(TurnRun),
     /// The request already committed different answers.
