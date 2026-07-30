@@ -328,7 +328,7 @@ permission_mode: PermissionMode | null,
 /**
  * Outbound network access for code execution in this chat.
  */
-network_policy: NetworkPolicy,
+network_policy: NetworkPolicy, 
 /**
  * CAS revision of this conversation's exact root projection.
  */
