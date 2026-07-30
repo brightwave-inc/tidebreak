@@ -5,15 +5,35 @@
 //! execution location is copied into the turn worker and remains fixed for the
 //! life of that server process.
 
+use std::sync::Arc;
+
 use openwave_core::{AgentRunExecutionLocation, Config};
 
 use crate::sandbox_docker::{DockerConfig, DockerSandboxBackend};
 
-/// Resolve where this server process admits newly spawned background runs.
-pub(crate) fn resolve_execution_location(config: &Config) -> AgentRunExecutionLocation {
-    let backend = DockerSandboxBackend::new(docker_config(config));
+/// Container backend and admission route resolved once during server startup.
+pub(crate) struct SandboxContainerAdmission {
+    pub(crate) backend: Arc<DockerSandboxBackend>,
+    pub(crate) execution_location: AgentRunExecutionLocation,
+}
+
+impl SandboxContainerAdmission {
+    /// Whether both configuration and runtime availability selected containers.
+    pub(crate) fn enabled(&self) -> bool {
+        self.execution_location == AgentRunExecutionLocation::Container
+    }
+}
+
+/// Resolve the backend and fixed location for this server process.
+pub(crate) fn resolve(config: &Config) -> SandboxContainerAdmission {
+    let backend = Arc::new(DockerSandboxBackend::new(docker_config(config)));
     let backend_available = config.container_execution_enabled && backend.is_available();
-    execution_location(config.container_execution_enabled, backend_available)
+    let execution_location =
+        execution_location(config.container_execution_enabled, backend_available);
+    SandboxContainerAdmission {
+        backend,
+        execution_location,
+    }
 }
 
 /// Apply the routing decision independently from capability detection.

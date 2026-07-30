@@ -703,7 +703,8 @@ async fn bind_inner(
     // approvals are durable, while one process still owns the complete data
     // directory and its worker set.
     let instance_lock = InstanceLock::acquire(&config)?;
-    let sandbox_spawn_execution_location = sandbox_admission::resolve_execution_location(&config);
+    let sandbox_container_admission = sandbox_admission::resolve(&config);
+    let sandbox_spawn_execution_location = sandbox_container_admission.execution_location;
     let store = connect_store(&config).await?;
     let secrets = secret_provider(&config);
     // The product boot path is where this platform's OS-managed (MDM) policy
@@ -856,15 +857,10 @@ async fn bind_inner(
             sandbox_web_search_worker::SandboxWebSearchWorkerConfig::default(),
         );
     let sandbox_container_run_worker = {
-        // Issue #1230 replaces this constructor gate with the profile flag.
-        // Keep it false in this slice so admission routing and configuration
-        // remain independently reviewable.
-        let container_execution_enabled = false;
-        let backend = Arc::new(sandbox_docker::DockerSandboxBackend::with_defaults());
-        let enabled = container_execution_enabled && backend.is_available();
+        let enabled = sandbox_container_admission.enabled();
         sandbox_container_run_worker::SandboxContainerRunWorker::new(
             state.store.clone(),
-            backend,
+            sandbox_container_admission.backend,
             state.resolver.clone(),
             state.agent_run_wake.clone(),
             enabled,
