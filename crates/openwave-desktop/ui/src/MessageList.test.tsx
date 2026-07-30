@@ -1,7 +1,13 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { AgentRun } from "./api";
-import { MessageBubble, MessageList, type ChatMessage } from "./MessageList";
+import {
+  MessageBubble,
+  MessageList,
+  retryableTurn,
+  type ChatMessage,
+} from "./MessageList";
+import type { TurnFailureCategory } from "./generated/wire";
 
 const noop = () => undefined;
 
@@ -463,5 +469,56 @@ describe("superseded responses", () => {
     expect(markup).toContain("message-superseded");
     expect(markup).toContain("Superseded response");
     expect(markup).toContain("abandoned partial");
+  });
+});
+
+describe("retryableTurn", () => {
+  const failed = (category: TurnFailureCategory): ChatMessage[] => [
+    { id: "u1", role: "user", text: "summarize this" },
+    { id: "f1", role: "turn_failure", category },
+  ];
+
+  // `auth` is the case worth pinning: a retry would present the same credential
+  // the provider just rejected, so offering the button lies about recovery.
+  it("offers a retry for every terminal category except auth", () => {
+    expect(retryableTurn(failed("rate_limited"))).toMatchObject({
+      failureId: "f1",
+      text: "summarize this",
+    });
+    expect(retryableTurn(failed("transient"))).not.toBeNull();
+    expect(retryableTurn(failed("unknown"))).not.toBeNull();
+    expect(retryableTurn(failed("auth"))).toBeNull();
+  });
+
+  it("offers nothing once the failure is no longer the newest message", () => {
+    expect(
+      retryableTurn([
+        ...failed("transient"),
+        { id: "u2", role: "user", text: "never mind" },
+      ]),
+    ).toBeNull();
+  });
+
+  it("carries the failed turn's attachments so the resend is not text-only", () => {
+    const turn = retryableTurn([
+      {
+        id: "u1",
+        role: "user",
+        text: "what is in this",
+        images: [
+          { attachmentId: "img-1", mediaType: "image/png", width: 8, height: 8 },
+        ],
+        files: [
+          {
+            documentId: "doc-1",
+            name: "notes.pdf",
+            mediaType: "application/pdf",
+          },
+        ],
+      },
+      { id: "f1", role: "turn_failure", category: "rate_limited" },
+    ]);
+    expect(turn?.images.map((image) => image.attachmentId)).toEqual(["img-1"]);
+    expect(turn?.files.map((file) => file.documentId)).toEqual(["doc-1"]);
   });
 });

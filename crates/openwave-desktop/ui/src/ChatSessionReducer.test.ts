@@ -500,18 +500,18 @@ describe("terminal events", () => {
     ]);
   });
 
-  it("turn_failed settles active tools as failed and appends the error bubble", () => {
+  it("turn_failed settles active tools as failed and carries the category through", () => {
     const { state } = play([
       TURN,
       { type: "tool_call_started", call_id: "call-1", name: "search" },
-      { type: "turn_failed", category: "unknown" },
+      { type: "turn_failed", category: "rate_limited" },
     ]);
     expect(state.messages.find((m) => m.role === "tool")).toMatchObject({
       status: "failed",
     });
     expect(state.messages[state.messages.length - 1]).toMatchObject({
-      role: "error",
-      text: "The turn could not be completed.",
+      role: "turn_failure",
+      category: "rate_limited",
     });
   });
 

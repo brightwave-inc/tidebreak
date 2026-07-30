@@ -43,6 +43,11 @@ import {
 import { BackgroundAgentList } from "./BackgroundAgentList";
 import { WebSearchProviderRequiredCard } from "./WebSearchProviderRequiredCard";
 import { useSourceNav } from "./panel/SourceNav";
+import {
+  TurnFailureNotice,
+  turnFailureOffersRetry,
+} from "./TurnFailureNotice";
+import type { TurnFailureCategory } from "./generated/wire";
 import { useStreamingTypewriter } from "./useStreamingTypewriter";
 import { Skeleton } from "./components/ui/skeleton";
 
@@ -101,7 +106,46 @@ export type ChatMessage =
       prefixRungs?: readonly number[];
       resolved?: boolean;
     }
-  | { id: string; role: "error"; text: string };
+  | { id: string; role: "error"; text: string }
+  | { id: string; role: "turn_failure"; category: TurnFailureCategory };
+
+/** Everything a retry needs to put the failed turn back on the wire unchanged. */
+export type RetryableTurn = {
+  /** The failure notice that offers this retry. */
+  failureId: string;
+  text: string;
+  images: readonly TranscriptImageAttachment[];
+  files: readonly TranscriptFileAttachment[];
+};
+
+/**
+ * The retry the transcript currently offers, if any.
+ *
+ * Only a transcript that *ends* on a retryable failure has one. An older
+ * failure keeps its explanation but loses its button: resending a prompt from
+ * the middle of a conversation the reader has since moved past is a footgun,
+ * and the turns after it already answered whatever came next.
+ */
+export function retryableTurn(
+  messages: readonly ChatMessage[],
+): RetryableTurn | null {
+  const failure = messages[messages.length - 1];
+  if (failure?.role !== "turn_failure") return null;
+  if (!turnFailureOffersRetry(failure.category)) return null;
+  for (let index = messages.length - 2; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role !== "user") continue;
+    // Nothing to resend — the prompt the turn failed on is no longer in hand.
+    if (message.text.trim().length === 0) return null;
+    return {
+      failureId: failure.id,
+      text: message.text,
+      images: message.images ?? [],
+      files: message.files ?? [],
+    };
+  }
+  return null;
+}
 
 type MessageListProps = {
   messages: ChatMessage[];
@@ -163,6 +207,8 @@ type MessageListProps = {
   ) => void;
   onUserQuestionsCancel?: (turnId: string) => void;
   onSelectPrompt?: (prompt: string) => void;
+  /** Resend the failed turn. Offered only on the transcript's newest failure. */
+  onRetryTurn?: (turn: RetryableTurn) => void;
   hydrated?: boolean;
   imageClient?: Pick<ApiClient, "getChatImageAttachment">;
 };
@@ -206,6 +252,7 @@ export function MessageList({
   onAnswerUserQuestions = () => undefined,
   onUserQuestionsCancel = () => undefined,
   onSelectPrompt,
+  onRetryTurn,
   hydrated = true,
   imageClient,
 }: MessageListProps) {
@@ -215,6 +262,12 @@ export function MessageList({
     () => ({ decidingApprovalCalls, approvalErrors, grantScope }),
     [decidingApprovalCalls, approvalErrors, grantScope],
   );
+  const retry = useMemo(() => {
+    if (!onRetryTurn) return undefined;
+    const turn = retryableTurn(messages);
+    if (!turn) return undefined;
+    return { failureId: turn.failureId, onRetry: () => onRetryTurn(turn) };
+  }, [messages, onRetryTurn]);
   const { items: messageItems, lastTurnStart } = groupMessageItems(
     messages,
     busy,
@@ -231,6 +284,7 @@ export function MessageList({
       loadActivity: onLoadBackgroundAgentActivity,
       viewOutput: onViewBackgroundAgentOutput,
     },
+    retry,
   );
   // Only greet a genuinely empty, fully-hydrated conversation. While an
   // existing chat's transcript is still loading it is transiently empty; showing
@@ -419,6 +473,7 @@ export function groupMessageItems(
     cancel: async () => undefined,
     loadActivity: async () => [],
   },
+  retry?: { failureId: string; onRetry: () => void },
 ) {
   const items: ReactNode[] = [];
   // The item index at which the trailing turn opens (its user message). Lets the
@@ -457,6 +512,9 @@ export function groupMessageItems(
           busy={message.id === streamingAssistantId}
           imageClient={imageClient}
           chatId={chatId}
+          onRetry={
+            retry?.failureId === message.id ? retry.onRetry : undefined
+          }
         />,
       );
       index += 1;
@@ -749,11 +807,14 @@ function MessageBubbleImpl({
   busy,
   imageClient,
   chatId,
+  onRetry,
 }: {
   message: ChatMessage;
   busy: boolean;
   imageClient?: Pick<ApiClient, "getChatImageAttachment">;
   chatId?: string;
+  /** Present only on the transcript's newest retryable failure. */
+  onRetry?: () => void;
 }) {
   const sourceNav = useSourceNav();
   // One way into the source panel for both anchors a citation has: the phrase
@@ -858,6 +919,10 @@ function MessageBubbleImpl({
     );
   }
 
+  if (message.role === "turn_failure") {
+    return <TurnFailureNotice category={message.category} onRetry={onRetry} />;
+  }
+
   if (message.role === "refusal") {
     return (
       <div className="message-notice is-refusal" role="status">
@@ -926,6 +991,12 @@ export function shouldShowAssistantWorking(
   if (latest?.role === "assistant") {
     return latest.text.trim().length === 0 && latest.sources.length === 0;
   }
-  if (latest?.role === "system" || latest?.role === "error") return false;
+  if (
+    latest?.role === "system" ||
+    latest?.role === "error" ||
+    latest?.role === "turn_failure"
+  ) {
+    return false;
+  }
   return true;
 }
