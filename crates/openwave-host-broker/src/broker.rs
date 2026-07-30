@@ -36,11 +36,11 @@ use crate::{
         LookupRegisterRootReceiptResult, LookupRootAttachmentReceiptRequest,
         LookupRootAttachmentReceiptResult, OperationEnvelope, OperationRequest,
         OperationResponseEnvelope, OperationResult, PathRequest, ReadFileBinaryResult,
-        ReadFileResult, RegisterRootReceipt, RegisterRootRequest, RegisterRootResult, Response,
-        ResponseEnvelope, RevokeRootRequest, RevokeRootResult, RootAccess,
-        RootAttachmentMutationKind, RootAttachmentMutationReceipt, RootAttachmentMutationRequest,
-        RootAttachmentMutationResult, RootSummary, WriteFileMode, WriteFileRequest,
-        WriteFileResult, MAX_READ_FILE_BINARY_BYTES, PROTOCOL_VERSION,
+        ReadFileResult, RegisterRootReceipt, RegisterRootRequest, RegisterRootResult,
+        ResolveExecRootsRequest, ResolvedExecRoot, Response, ResponseEnvelope, RevokeRootRequest,
+        RevokeRootResult, RootAccess, RootAttachmentMutationKind, RootAttachmentMutationReceipt,
+        RootAttachmentMutationRequest, RootAttachmentMutationResult, RootSummary, WriteFileMode,
+        WriteFileRequest, WriteFileResult, MAX_READ_FILE_BINARY_BYTES, PROTOCOL_VERSION,
     },
     Capability, ConsentMethod, ConsentRecord, ExecutionContext, Grant, GrantError, GrantId,
     GrantSubject, OperationId, RelativePath, RootAttachment, RootId, RootPolicy, RootPolicyError,
@@ -54,6 +54,7 @@ const MAX_READ_FILE_BYTES: usize = 64 * 1024;
 const MAX_LIST_DIR_BYTES: usize = 64 * 1024;
 const MAX_LIST_DIR_ENTRIES: usize = 4_096;
 const MAX_LIST_ROOTS: usize = 256;
+const MAX_RESOLVE_EXEC_ROOTS: usize = 32;
 const MAX_ROOT_DISPLAY_BYTES: usize = 1024;
 pub(crate) const MAX_WRITE_FILE_BYTES: usize = 512 * 1024;
 
@@ -242,7 +243,7 @@ struct PreparedRegistration {
 struct ControlAudit {
     actor: AuditActor,
     operation: AuditOperation,
-    operation_id: OperationId,
+    operation_id: Option<OperationId>,
     target: AuditTarget,
 }
 
@@ -250,13 +251,26 @@ impl ControlAudit {
     fn from_request(request: &ControlRequest) -> Option<Self> {
         match request {
             ControlRequest::Hello | ControlRequest::ListApprovedRoots => None,
+            ControlRequest::ResolveExecRoots(request) => Some(Self {
+                actor: AuditActor::Control {
+                    subject: match request.context.project_id() {
+                        Some(project_id) => GrantSubject::project(project_id),
+                        None => GrantSubject::conversation(request.context.conversation_id()),
+                    }
+                    .expect("execution contexts contain non-nil identities"),
+                    conversation_id: Some(request.context.conversation_id()),
+                },
+                operation: AuditOperation::ResolveExecRoots,
+                operation_id: None,
+                target: AuditTarget::Subject,
+            }),
             ControlRequest::RegisterRoot(request) => Some(Self {
                 actor: AuditActor::Control {
                     subject: request.subject,
                     conversation_id: Some(request.conversation_id),
                 },
                 operation: AuditOperation::RegisterRoot,
-                operation_id: request.operation_id,
+                operation_id: Some(request.operation_id),
                 target: AuditTarget::selected_folder(&request.path),
             }),
             ControlRequest::LookupRegisterRootReceipt(request) => Some(Self {
@@ -265,7 +279,7 @@ impl ControlAudit {
                     conversation_id: Some(request.conversation_id),
                 },
                 operation: AuditOperation::LookupRegisterRootReceipt,
-                operation_id: request.operation_id,
+                operation_id: Some(request.operation_id),
                 target: AuditTarget::Subject,
             }),
             ControlRequest::AttachRoot(request) => Some(Self {
@@ -274,7 +288,7 @@ impl ControlAudit {
                     conversation_id: Some(request.conversation_id),
                 },
                 operation: AuditOperation::AttachRoot,
-                operation_id: request.operation_id,
+                operation_id: Some(request.operation_id),
                 target: AuditTarget::Root {
                     root_id: request.root_id,
                 },
@@ -285,7 +299,7 @@ impl ControlAudit {
                     conversation_id: Some(request.conversation_id),
                 },
                 operation: AuditOperation::DetachRoot,
-                operation_id: request.operation_id,
+                operation_id: Some(request.operation_id),
                 target: AuditTarget::Root {
                     root_id: request.root_id,
                 },
@@ -296,7 +310,7 @@ impl ControlAudit {
                     conversation_id: Some(request.conversation_id),
                 },
                 operation: AuditOperation::LookupRootAttachmentReceipt,
-                operation_id: request.operation_id,
+                operation_id: Some(request.operation_id),
                 target: AuditTarget::Root {
                     root_id: request.root_id,
                 },
@@ -307,7 +321,7 @@ impl ControlAudit {
                     conversation_id: None,
                 },
                 operation: AuditOperation::RevokeRoot,
-                operation_id: request.operation_id,
+                operation_id: Some(request.operation_id),
                 target: AuditTarget::Root {
                     root_id: request.root_id,
                 },
@@ -458,7 +472,7 @@ impl Controller {
             event_id: Uuid::new_v4(),
             timestamp: Utc::now(),
             request_id,
-            operation_id: Some(metadata.operation_id),
+            operation_id: metadata.operation_id,
             actor: metadata.actor,
             operation,
             target: metadata.target,
@@ -482,6 +496,12 @@ impl Controller {
             ControlRequest::ListApprovedRoots => {
                 let state = self.lock_state().map_err(error_response)?;
                 list_approved_roots(&state).map(|roots| ControlResult::ListApprovedRoots { roots })
+            }
+            ControlRequest::ResolveExecRoots(request) => {
+                let state = self.lock_state().map_err(error_response)?;
+                resolve_exec_roots(&state, request)
+                    .map(|roots| ControlResult::ResolveExecRoots { roots })
+                    .map_err(error_response)
             }
             ControlRequest::RegisterRoot(request) => {
                 self.register_root(request).map(ControlResult::RegisterRoot)
@@ -1975,6 +1995,47 @@ fn list_roots(
             .then_with(|| left.root_id.to_string().cmp(&right.root_id.to_string()))
     });
     Ok((OperationResult::ListRoots { roots }, Some(grant_id)))
+}
+
+fn resolve_exec_roots(
+    state: &State,
+    request: ResolveExecRootsRequest,
+) -> Result<Vec<ResolvedExecRoot>, BrokerError> {
+    if request.root_ids.len() > MAX_RESOLVE_EXEC_ROOTS {
+        return Err(BrokerError::RootListTooLarge);
+    }
+    let mut seen = HashSet::new();
+    let mut roots = Vec::new();
+    for root_id in request.root_ids {
+        if !seen.insert(root_id)
+            || authorize(
+                state,
+                request.context,
+                Capability::ReadFiles,
+                Resource::Root(&root_id),
+            )
+            .is_err()
+        {
+            continue;
+        }
+        let Some(root) = state.roots.get(&root_id) else {
+            continue;
+        };
+        let path = root.root.canonical_path_if_current()?.to_path_buf();
+        let writable = authorize(
+            state,
+            request.context,
+            Capability::WriteFiles,
+            Resource::Root(&root_id),
+        )
+        .is_ok();
+        roots.push(ResolvedExecRoot {
+            root_id,
+            path,
+            writable,
+        });
+    }
+    Ok(roots)
 }
 
 /// Per-folder capabilities this conversation actually holds on one root.

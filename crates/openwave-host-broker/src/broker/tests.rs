@@ -211,6 +211,22 @@ fn list_approved(controller: &Controller) -> Vec<RootSummary> {
     roots
 }
 
+fn resolve_exec(
+    controller: &Controller,
+    context: ExecutionContext,
+    root_ids: Vec<RootId>,
+) -> Result<Vec<ResolvedExecRoot>, ErrorResponse> {
+    let result = unwrap_response(controller.handle(ControlEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: crate::RequestId::new(),
+        request: ControlRequest::ResolveExecRoots(ResolveExecRootsRequest { context, root_ids }),
+    }))?;
+    let ControlResult::ResolveExecRoots { roots } = result else {
+        panic!("unexpected control result")
+    };
+    Ok(roots)
+}
+
 fn revoke(
     controller: &Controller,
     operation_id: OperationId,
@@ -2684,6 +2700,78 @@ fn a_listing_reports_the_capabilities_the_broker_would_authorize() {
         })
     ));
     assert!(!path.join("published/report.txt").exists());
+}
+
+#[test]
+fn exec_root_resolution_intersects_product_ids_with_live_grants() {
+    let (_temp, broker, path) = setup();
+    let conversation = Uuid::new_v4();
+    let subject = GrantSubject::conversation(conversation).unwrap();
+    let registered = register(
+        &broker.controller(),
+        subject,
+        conversation,
+        path.clone(),
+        OperationId::new(),
+    );
+    let context = ExecutionContext::standalone(conversation).unwrap();
+    let root_id = registered.root.root_id;
+
+    assert_eq!(
+        resolve_exec(&broker.controller(), context, vec![root_id]).unwrap(),
+        vec![ResolvedExecRoot {
+            root_id,
+            path: std::fs::canonicalize(&path).unwrap(),
+            writable: true,
+        }]
+    );
+
+    broker
+        .shared
+        .state
+        .lock()
+        .unwrap()
+        .grants
+        .retain(|grant| grant.capability() != Capability::WriteFiles);
+    assert!(!resolve_exec(&broker.controller(), context, vec![root_id]).unwrap()[0].writable);
+
+    broker
+        .shared
+        .state
+        .lock()
+        .unwrap()
+        .grants
+        .retain(|grant| grant.capability() != Capability::ReadFiles);
+    assert!(
+        resolve_exec(&broker.controller(), context, vec![root_id])
+            .unwrap()
+            .is_empty(),
+        "a product root id is not authority after its live read grant is gone"
+    );
+}
+
+#[test]
+fn exec_root_resolution_rejects_a_replaced_registered_path() {
+    let (temp, broker, path) = setup();
+    let conversation = Uuid::new_v4();
+    let registered = register(
+        &broker.controller(),
+        GrantSubject::conversation(conversation).unwrap(),
+        conversation,
+        path.clone(),
+        OperationId::new(),
+    );
+    let moved = temp.path().join("moved-documents");
+    std::fs::rename(&path, &moved).unwrap();
+    std::fs::create_dir(&path).unwrap();
+
+    let error = resolve_exec(
+        &broker.controller(),
+        ExecutionContext::standalone(conversation).unwrap(),
+        vec![registered.root.root_id],
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::HostIo);
 }
 
 #[test]

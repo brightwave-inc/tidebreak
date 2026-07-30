@@ -86,6 +86,7 @@ pub(crate) struct TurnWorker {
     wake: Arc<Notify>,
     sandbox_agent_wake: Arc<Notify>,
     agent_config: AgentConfig,
+    exec_folder_context: Option<Arc<crate::code_execution::ConfiguredCodeExecutionProvider>>,
     private_scratch_root: Option<PathBuf>,
     config: TurnWorkerConfig,
 }
@@ -117,13 +118,23 @@ pub(crate) struct ForegroundTurnSurface {
     pub(crate) agent_config: AgentConfig,
 }
 
+#[cfg(test)]
 pub(crate) fn freeze_foreground_turn_surface(
     tools: Arc<ToolRegistry>,
     base_agent_config: &AgentConfig,
 ) -> ForegroundTurnSurface {
+    freeze_foreground_turn_surface_with_folders(tools, base_agent_config, &[])
+}
+
+fn freeze_foreground_turn_surface_with_folders(
+    tools: Arc<ToolRegistry>,
+    base_agent_config: &AgentConfig,
+    exec_folders: &[crate::code_execution::ResolvedExecFolderGrant],
+) -> ForegroundTurnSurface {
     let mut agent_config = base_agent_config.clone();
-    agent_config.system_prompt = Some(crate::foreground_prompt::compose(
+    agent_config.system_prompt = Some(crate::foreground_prompt::compose_with_exec_folders(
         &tools.specs_for_foreground(true),
+        exec_folders,
     ));
     ForegroundTurnSurface {
         tools,
@@ -315,6 +326,7 @@ impl TurnWorker {
             wake,
             sandbox_agent_wake,
             agent_config,
+            exec_folder_context: None,
             private_scratch_root,
             config,
         }
@@ -333,6 +345,17 @@ impl TurnWorker {
     /// affect later turns without changing this worker's active replay surface.
     pub(crate) fn with_mcp_runtime(mut self, mcp: Arc<McpRuntime>) -> Self {
         self.mcp = Some(mcp);
+        self
+    }
+
+    /// Add per-turn folder visibility for local exec. The provider resolves
+    /// again at invocation time; this snapshot is model guidance, not
+    /// authority.
+    pub(crate) fn with_exec_folder_context(
+        mut self,
+        provider: Arc<crate::code_execution::ConfiguredCodeExecutionProvider>,
+    ) -> Self {
+        self.exec_folder_context = Some(provider);
         self
     }
 
@@ -429,14 +452,6 @@ impl TurnWorker {
             .mcp
             .as_ref()
             .map_or_else(|| self.tools.clone(), |mcp| mcp.snapshot());
-        let surface = freeze_foreground_turn_surface(tools, &self.agent_config);
-        if let Some(prompt) = surface.agent_config.system_prompt.as_deref() {
-            eprintln!(
-                "openwave: turn {} operating_prompt={}",
-                turn.id,
-                crate::foreground_prompt::identity(prompt)
-            );
-        }
         let mut total_model_steps = turn.model_steps;
         let consumed_steps = usize::try_from(total_model_steps).map_err(|_| {
             AgentError::msg(format!(
@@ -485,6 +500,31 @@ impl TurnWorker {
                 )
                 .await;
         };
+        let exec_folders = match self.exec_folder_context.as_ref() {
+            Some(provider) => match provider.folder_grants_for_chat(&chat).await {
+                Ok(folders) => folders,
+                Err(error) => {
+                    // Prompt enrichment is not an authority boundary. A broker
+                    // failure here leaves the list empty; the provider resolves
+                    // again and returns the concrete error if `exec` is called.
+                    eprintln!(
+                        "openwave: local exec folders unavailable for chat {}: {}",
+                        chat.id, error
+                    );
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        };
+        let surface =
+            freeze_foreground_turn_surface_with_folders(tools, &self.agent_config, &exec_folders);
+        if let Some(prompt) = surface.agent_config.system_prompt.as_deref() {
+            eprintln!(
+                "openwave: turn {} operating_prompt={}",
+                turn.id,
+                crate::foreground_prompt::identity(prompt)
+            );
+        }
         let model_policy = if self.resolver.enforces_model_registry() {
             crate::providers::resolve_model_policy(&*self.store, &turn.model, true).await?
         } else {

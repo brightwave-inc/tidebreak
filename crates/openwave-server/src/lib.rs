@@ -562,7 +562,13 @@ const DEFAULT_MODEL: &str = "claude-opus-5";
 /// This generic embedding does not expose durable root-attachment mutations,
 /// because it has no restart-stable native executor identity.
 pub async fn bind(config: Config) -> Result<Server> {
-    bind_inner(config, None, mcp_config::ConfiguredMcpServers::default()).await
+    bind_inner(
+        config,
+        None,
+        mcp_config::ConfiguredMcpServers::default(),
+        None,
+    )
+    .await
 }
 
 /// Bind the API and mount external MCP servers from `OPENWAVE_MCP_CONFIG`.
@@ -571,7 +577,7 @@ pub async fn bind(config: Config) -> Result<Server> {
 /// to use [`bind`] when process-environment configuration is undesirable.
 pub async fn bind_configured(config: Config) -> Result<Server> {
     let mcp_servers = mcp_config::ConfiguredMcpServers::from_env()?;
-    bind_inner(config, None, mcp_servers).await
+    bind_inner(config, None, mcp_servers, None).await
 }
 
 /// Bind the API with a stable app-private native executor identity.
@@ -589,6 +595,7 @@ pub async fn bind_with_desktop_executor(
         config,
         Some(client_executor_id),
         mcp_config::ConfiguredMcpServers::default(),
+        None,
     )
     .await
 }
@@ -603,7 +610,27 @@ pub async fn bind_configured_with_desktop_executor(
         return Err(AgentError::config("client executor id must not be nil"));
     }
     let mcp_servers = mcp_config::ConfiguredMcpServers::from_env()?;
-    bind_inner(config, Some(client_executor_id), mcp_servers).await
+    bind_inner(config, Some(client_executor_id), mcp_servers, None).await
+}
+
+/// Desktop binding with the native bridge that resolves current connected
+/// folders into per-invocation local sandbox grants.
+pub async fn bind_configured_with_desktop_executor_and_folder_grants(
+    config: Config,
+    client_executor_id: Uuid,
+    folder_grant_resolver: Arc<dyn code_execution::ExecFolderGrantResolver>,
+) -> Result<Server> {
+    if client_executor_id.is_nil() {
+        return Err(AgentError::config("client executor id must not be nil"));
+    }
+    let mcp_servers = mcp_config::ConfiguredMcpServers::from_env()?;
+    bind_inner(
+        config,
+        Some(client_executor_id),
+        mcp_servers,
+        Some(folder_grant_resolver),
+    )
+    .await
 }
 
 /// The secret store the configured profile keeps its credentials in.
@@ -632,6 +659,7 @@ async fn bind_inner(
     config: Config,
     client_executor_id: Option<Uuid>,
     mcp_servers: mcp_config::ConfiguredMcpServers,
+    folder_grant_resolver: Option<Arc<dyn code_execution::ExecFolderGrantResolver>>,
 ) -> Result<Server> {
     // Desktop live delivery remains process-local. Turns, steering, and tool
     // approvals are durable, while one process still owns the complete data
@@ -685,7 +713,8 @@ async fn bind_inner(
             secrets.clone(),
             config.data_dir.join("scratch"),
         )
-        .with_document_scripts(config.exec_scripts_dir.clone()),
+        .with_document_scripts(config.exec_scripts_dir.clone())
+        .with_folder_grant_resolver(folder_grant_resolver),
     );
     let foreground_web_search =
         Box::new(web_search::foreground_tool(store.clone(), secrets.clone()));
@@ -694,7 +723,7 @@ async fn bind_inner(
         secrets.clone(),
     ));
     let (tools, agent_config) = agent_deps(
-        code_execution,
+        code_execution.clone(),
         foreground_web_search,
         web_extract,
         store.clone(),
@@ -758,7 +787,8 @@ async fn bind_inner(
         turn_worker::TurnWorkerConfig::default(),
     )
     .with_blobs(state.blobs.clone())
-    .with_mcp_runtime(state.mcp.clone());
+    .with_mcp_runtime(state.mcp.clone())
+    .with_exec_folder_context(code_execution);
     let sandbox_worker_config = sandbox_agent_run_worker::SandboxAgentRunWorkerConfig::default()
         .with_delegated_file_executor(client_executor_id.is_some());
     let sandbox_agent_run_worker = sandbox_agent_run_worker::SandboxAgentRunWorker::with_attempts(

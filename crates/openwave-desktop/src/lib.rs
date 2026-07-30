@@ -263,9 +263,16 @@ async fn boot_server(
     {
         config.keychain_service = Some("openwave.dev".into());
     }
-    let server = openwave_server::bind_configured_with_desktop_executor(config, client_executor_id)
-        .await
-        .map_err(|e| e.to_string())?;
+    let folder_grants = Arc::new(host_access::DesktopExecFolderGrantResolver::new(
+        app.clone(),
+    ));
+    let server = openwave_server::bind_configured_with_desktop_executor_and_folder_grants(
+        config,
+        client_executor_id,
+        folder_grants,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     app.state::<host_access::HostAccess>()
         .initialize_store(server.store())?;
     // Unblock any pairing task parked on a deep link that arrived pre-boot.

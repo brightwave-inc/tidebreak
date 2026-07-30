@@ -4,7 +4,7 @@
 //! a host-selected [`CodeExecutionProvider`]. Requests carry a stable execution
 //! identity and an opaque workspace identity, so a future managed adapter can
 //! reconcile retries and map a chat to its own remote session without exposing
-//! provider credentials or host paths to the model.
+//! provider credentials or accepting model-authored host paths.
 //!
 //! [`LocalExecutionProvider`] runs directly on macOS under the native Seatbelt
 //! sandbox. Managed providers run the same direct command contract in a remote
@@ -31,10 +31,11 @@ pub use remote::RemoteSessionPool;
 pub use tool::{ExecTool, EXEC_TOOL_NAME};
 pub use types::{
     CodeExecutionError, CodeExecutionProvider, CodeExecutionProviderKind, CodeExecutionRequest,
-    CodeExecutionResponse, ExecutionId, ExecutionWorkspaceId, WorkspaceFileEntry,
-    WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing, MAX_ARGUMENTS, MAX_ARGUMENT_BYTES,
-    MAX_CAPTURE_BYTES, MAX_COMMAND_BYTES, MAX_CWD_BYTES, MAX_WORKSPACE_FILE_BYTES,
-    MAX_WORKSPACE_LIST_ENTRIES, MAX_WORKSPACE_PATH_BYTES,
+    CodeExecutionResponse, ExecFolderAccess, ExecFolderGrant, ExecutionId, ExecutionWorkspaceId,
+    WorkspaceFileEntry, WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing, MAX_ARGUMENTS,
+    MAX_ARGUMENT_BYTES, MAX_CAPTURE_BYTES, MAX_COMMAND_BYTES, MAX_CWD_BYTES,
+    MAX_EXEC_FOLDER_GRANTS, MAX_WORKSPACE_FILE_BYTES, MAX_WORKSPACE_LIST_ENTRIES,
+    MAX_WORKSPACE_PATH_BYTES,
 };
 
 /// Stable workspace-relative location populated by hosts that ship the

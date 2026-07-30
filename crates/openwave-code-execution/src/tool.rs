@@ -46,7 +46,9 @@ impl Tool for ExecTool {
             description: "Run one executable with an argument vector in the configured isolated \
                           execution provider. No shell parses the arguments unless you explicitly \
                           invoke a shell. The local provider blocks network and user-data access \
-                          outside private chat scratch; managed cloud sandboxes (E2B, Daytona) \
+                          outside private chat scratch plus any current host-resolved folder \
+                          grants listed in the operating context; folder paths are host state, \
+                          never tool arguments. Managed cloud sandboxes (E2B, Daytona) \
                           have the chat's private scratch mirrored in before the command runs and \
                           mirrored back after, so files from write_file are visible here and \
                           files this command writes are visible to read_file. Every provider \

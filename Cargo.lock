@@ -3907,6 +3907,7 @@ dependencies = [
 name = "openwave-desktop"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
  "base64 0.23.0",
  "cap-fs-ext",
  "cap-std",
