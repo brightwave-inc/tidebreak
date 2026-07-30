@@ -113,7 +113,7 @@ async fn read_until_turns_end(
             let event: RendererSequencedEvent = serde_json::from_str(text.as_str()).unwrap();
             if matches!(
                 event.event,
-                RendererAgentEvent::TurnCompleted | RendererAgentEvent::TurnFailed
+                RendererAgentEvent::TurnCompleted | RendererAgentEvent::TurnFailed { .. }
             ) {
                 completed += 1;
             }

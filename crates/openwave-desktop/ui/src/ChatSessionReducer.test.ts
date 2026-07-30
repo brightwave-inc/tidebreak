@@ -504,7 +504,7 @@ describe("terminal events", () => {
     const { state } = play([
       TURN,
       { type: "tool_call_started", call_id: "call-1", name: "search" },
-      { type: "turn_failed" },
+      { type: "turn_failed", category: "unknown" },
     ]);
     expect(state.messages.find((m) => m.role === "tool")).toMatchObject({
       status: "failed",
@@ -520,7 +520,7 @@ describe("terminal events", () => {
       TURN,
       { type: "tool_call_started", call_id: "done", name: "search" },
       { type: "tool_call_completed", call_id: "done", status: "completed" },
-      { type: "turn_failed" },
+      { type: "turn_failed", category: "unknown" },
     ]);
     expect(state.messages.find((m) => m.role === "tool")).toMatchObject({
       status: "completed",
@@ -611,7 +611,7 @@ describe("reasoning presentation", () => {
       { type: "tool_call_started", call_id: "c", name: "search" },
       { type: "stream_interrupted" },
       { type: "turn_completed" },
-      { type: "turn_failed" },
+      { type: "turn_failed", category: "unknown" },
     ] as AgentEvent[]) {
       const thinking = play([TURN, { type: "reasoning_delta" }]);
       const next = reduceChatSessionEvent(

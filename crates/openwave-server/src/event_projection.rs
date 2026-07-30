@@ -138,7 +138,11 @@ pub(crate) enum RendererAgentEvent {
     TurnRefused {
         refusal: RendererRefusal,
     },
-    TurnFailed,
+    TurnFailed {
+        /// Why the turn failed, at the only resolution a client can act on.
+        /// The failure's `kind` and `message` stay internal.
+        category: TurnFailureCategory,
+    },
     TurnCancelled,
     /// The message body is available through the transcript endpoint. Keeping
     /// only its durable id lets clients reconcile without duplicating content.
@@ -150,6 +154,57 @@ pub(crate) enum RendererAgentEvent {
     /// Fail-closed marker for a newer internal event until it gets an explicit
     /// renderer projection. The sequence still advances without dropping it.
     EventOmitted,
+}
+
+/// Why a turn failed, closed and coarse enough to be stable.
+///
+/// A failure's `kind` is an internal diagnostic vocabulary: it grows with the
+/// server, and its `message` can carry provider diagnostics and host paths, so
+/// neither crosses to the renderer. What a client actually needs is narrower —
+/// what to tell the person, and whether running the same turn again could
+/// plausibly do anything different. This enum is exactly that, and nothing is
+/// worth a variant here unless a client would say or do something different
+/// for it.
+///
+/// It is also the worker's own retry taxonomy — the same classification decides
+/// whether a failed turn is rescheduled — so the category a client sees and the
+/// category the scheduler acted on cannot drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TurnFailureCategory {
+    /// The provider throttled or shed the request. Automatic retries were
+    /// already spent, but waiting and asking again is the actual remedy.
+    RateLimited,
+    /// The provider rejected our credentials. Retrying replays the same
+    /// rejection; only fixing the key changes the outcome.
+    Auth,
+    /// A transient fault below the turn — an upstream error, a storage or
+    /// secret-store failure. Retrying is reasonable.
+    Transient,
+    /// Everything else: budgets the turn exceeded, malformed agent output,
+    /// internal invariants. Retrying is a guess, so a client should not promise
+    /// that it helps.
+    Unknown,
+}
+
+impl TurnFailureCategory {
+    /// Classify a failure `kind` from the internal vocabulary.
+    ///
+    /// Unrecognized kinds fall to [`Self::Unknown`], so a new internal failure
+    /// code is coarse rather than wrong.
+    pub(crate) fn from_kind(kind: &str) -> Self {
+        match kind {
+            "rate_limited" | "overloaded" => Self::RateLimited,
+            "authentication" => Self::Auth,
+            "provider" | "store" | "secret" => Self::Transient,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Whether running the same turn again could plausibly succeed.
+    pub(crate) const fn retries_may_succeed(self) -> bool {
+        matches!(self, Self::RateLimited | Self::Transient)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -226,7 +281,9 @@ impl From<&SequencedEvent> for RendererSequencedEvent {
             AgentEvent::TurnRefused { refusal, .. } => RendererAgentEvent::TurnRefused {
                 refusal: refusal.into(),
             },
-            AgentEvent::TurnFailed { .. } => RendererAgentEvent::TurnFailed,
+            AgentEvent::TurnFailed { error } => RendererAgentEvent::TurnFailed {
+                category: TurnFailureCategory::from_kind(&error.kind),
+            },
             AgentEvent::TurnCancelled { .. } => RendererAgentEvent::TurnCancelled,
             AgentEvent::UserSteered {
                 message_id,
@@ -360,6 +417,52 @@ mod tests {
         assert!(serialized.contains(r#""action":"other""#));
         assert!(serialized.contains(r#""status":"failed""#));
         assert!(serialized.contains(r#""text":"visible steer text""#));
+    }
+
+    /// The category is the one thing a failure is allowed to tell a client, and
+    /// a client branches on it — so both halves of that boundary are contract:
+    /// the classification each failure lands in, and the diagnostics that stay
+    /// behind.
+    #[test]
+    fn failure_projection_carries_a_category_and_nothing_else() {
+        let cases = [
+            (
+                AgentError::RateLimited("upstream said 429 for key sk-live".into()),
+                TurnFailureCategory::RateLimited,
+            ),
+            (
+                AgentError::Authentication("invalid x-api-key sk-live".into()),
+                TurnFailureCategory::Auth,
+            ),
+            (
+                AgentError::Provider("upstream 503 from api.example".into()),
+                TurnFailureCategory::Transient,
+            ),
+            (
+                AgentError::msg("max steps per turn were consumed"),
+                TurnFailureCategory::Unknown,
+            ),
+        ];
+
+        for (error, expected) in cases {
+            let projected = RendererSequencedEvent::from(&SequencedEvent {
+                seq: 1,
+                event: AgentEvent::TurnFailed {
+                    error: (&error).into(),
+                },
+            });
+            assert_eq!(
+                projected.event,
+                RendererAgentEvent::TurnFailed { category: expected },
+                "{error}"
+            );
+            let encoded = serde_json::to_value(&projected).unwrap();
+            assert_eq!(
+                encoded["event"].as_object().unwrap().len(),
+                2,
+                "the failure frame carries only its type and category: {encoded}"
+            );
+        }
     }
 
     #[test]
