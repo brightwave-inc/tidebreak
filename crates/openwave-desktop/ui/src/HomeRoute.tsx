@@ -7,6 +7,11 @@ import { ChatExplorer } from "./ChatExplorer";
 import { useChatListStore } from "./ChatListStore";
 import { Composer, type ComposerImages } from "./Composer";
 import {
+  HOME_DRAFT_KEY,
+  useComposerDraft,
+  useComposerDrafts,
+} from "./ComposerDrafts";
+import {
   type ImportedDocument,
   type LibraryImportSuccess,
 } from "./documents";
@@ -28,6 +33,7 @@ import type { AttachedFiles } from "./attachments";
 import { MAX_IMAGE_ATTACHMENTS } from "./ImageAttachments";
 
 const chatListActions = useChatListStore.getState();
+const composerDraftActions = useComposerDrafts.getState();
 const firstMessageActions = useFirstMessage.getState();
 
 function isImportedDocument(
@@ -41,7 +47,9 @@ export function HomeRoute() {
   const { client, models, defaultModelKey } = useApp();
   const chatsLoaded = useChatListStore((state) => state.chatsLoaded);
   const creatingChat = useChatListStore((state) => state.creatingChat);
-  const [draft, setDraft] = useState("");
+  const draft = useComposerDraft(HOME_DRAFT_KEY);
+  const setDraft = (text: string) =>
+    composerDraftActions.setDraft(HOME_DRAFT_KEY, text);
   const [error, setError] = useState<string | null>(null);
   const newChat = useNewChatSettings();
   const efforts = modelForSelection(models, newChat.model)?.reasoning_efforts ?? [];
