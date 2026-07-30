@@ -598,7 +598,20 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                 .and_then(|d| d.get("stop_reason"))
                 .and_then(Value::as_str)
             {
-                let mut reason = map_stop_reason(reason);
+                let mut reason = match map_stop_reason(reason) {
+                    StopOutcome::Reason(reason) => reason,
+                    // Whatever streamed before this stop is a fragment, so no
+                    // clean stop may follow it. Failing the stream is what the
+                    // agent loop reads as "discard this step's partial output";
+                    // reporting a stop instead would commit the fragment — and
+                    // any tool call inside it — as a finished answer.
+                    StopOutcome::Interrupted(message) => {
+                        events.push(ProviderEvent::Failed {
+                            message: message.into(),
+                        });
+                        return events;
+                    }
+                };
                 // The forced output tool is not a tool call the consumer has to
                 // answer; the model said everything it had to say. Reporting
                 // `ToolUse` here would read as a turn waiting on a tool result.
@@ -635,15 +648,39 @@ fn str_at(value: &Value, key: &str) -> String {
         .to_string()
 }
 
-fn map_stop_reason(reason: &str) -> StopReason {
+/// What a provider `stop_reason` means for the step that was streaming.
+#[derive(Debug, PartialEq, Eq)]
+enum StopOutcome {
+    /// A stop the agent may commit as this step's outcome.
+    Reason(StopReason),
+    /// A stop that invalidates everything streamed before it.
+    Interrupted(&'static str),
+}
+
+fn map_stop_reason(reason: &str) -> StopOutcome {
     match reason {
-        "max_tokens" => StopReason::MaxTokens,
-        "tool_use" => StopReason::ToolUse,
-        "stop_sequence" => StopReason::StopSequence,
-        "refusal" => StopReason::Refusal,
-        // "end_turn" and anything we don't yet model (e.g. pause_turn) fall
-        // back to a clean end.
-        _ => StopReason::EndTurn,
+        "max_tokens" => StopOutcome::Reason(StopReason::MaxTokens),
+        "tool_use" => StopOutcome::Reason(StopReason::ToolUse),
+        "stop_sequence" => StopOutcome::Reason(StopReason::StopSequence),
+        "refusal" => StopOutcome::Reason(StopReason::Refusal),
+        // The conversation outgrew the model's context window while the
+        // response was streaming. The 400 that reports the same overflow
+        // before a stream starts becomes `PromptTooLong` and drives the agent
+        // loop's context-reduction climb; that climb runs before the request
+        // goes out, so a mid-stream overflow cannot rejoin it without
+        // re-emitting text the client has already seen. Interrupting is the
+        // honest end for this stream: the fragment is discarded and the turn
+        // fails visibly instead of committing truncated prose as a success.
+        "model_context_window_exceeded" => StopOutcome::Interrupted(
+            "anthropic: the model's context window was exceeded mid-response",
+        ),
+        // The provider suspended the turn for a long-running server-side tool
+        // and expects the paused response replayed back to resume it. Nothing
+        // here drives that continuation, so the paused fragment is incomplete
+        // by construction and must not read as a finished answer.
+        "pause_turn" => StopOutcome::Interrupted("anthropic: the provider paused the turn"),
+        // "end_turn" and anything we don't yet model fall back to a clean end.
+        _ => StopOutcome::Reason(StopReason::EndTurn),
     }
 }
 
@@ -922,6 +959,37 @@ mod tests {
     }
 
     #[test]
+    fn mid_stream_context_overflow_fails_the_stream_and_strands_no_tool_call() {
+        let out = run(&[
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "toolu_1", "name": "read_file"}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"path\":\"a"}}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "model_context_window_exceeded"}, "usage": {"output_tokens": 9}}),
+        ]);
+        assert_eq!(
+            out,
+            vec![
+                ProviderEvent::ToolCallStarted {
+                    index: 0,
+                    id: "toolu_1".into(),
+                    name: "read_file".into(),
+                },
+                ProviderEvent::ToolCallArgsDelta {
+                    index: 0,
+                    fragment: "{\"path\":\"a".into(),
+                },
+                ProviderEvent::Usage(Usage {
+                    output_tokens: 9,
+                    ..Usage::default()
+                }),
+                ProviderEvent::Failed {
+                    message: "anthropic: the model's context window was exceeded mid-response"
+                        .into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn normalizes_text_and_usage_and_stop() {
         let out = run(&[
             json!({"type": "message_start", "message": {"usage": {"input_tokens": 10, "cache_read_input_tokens": 4}}}),
@@ -973,10 +1041,19 @@ mod tests {
 
     #[test]
     fn maps_stop_reasons() {
-        assert_eq!(map_stop_reason("tool_use"), StopReason::ToolUse);
-        assert_eq!(map_stop_reason("max_tokens"), StopReason::MaxTokens);
-        assert_eq!(map_stop_reason("refusal"), StopReason::Refusal);
-        assert_eq!(map_stop_reason("future_reason"), StopReason::EndTurn);
+        use StopOutcome::{Interrupted, Reason};
+        assert_eq!(map_stop_reason("tool_use"), Reason(StopReason::ToolUse));
+        assert_eq!(map_stop_reason("max_tokens"), Reason(StopReason::MaxTokens));
+        assert_eq!(map_stop_reason("refusal"), Reason(StopReason::Refusal));
+        assert_eq!(
+            map_stop_reason("future_reason"),
+            Reason(StopReason::EndTurn)
+        );
+        assert!(matches!(map_stop_reason("pause_turn"), Interrupted(_)));
+        assert!(matches!(
+            map_stop_reason("model_context_window_exceeded"),
+            Interrupted(_)
+        ));
     }
 
     #[test]
