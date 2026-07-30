@@ -833,7 +833,8 @@ impl<'a, 'b> AssistantStreamEventFilter<'a, 'b> {
     }
 
     fn discard(&mut self) {
-        // Nothing is buffered.
+        // Nothing is buffered — the discard itself is the separately-sent
+        // `StreamInterrupted` event, not anything this hook does.
     }
 }
 
@@ -1442,6 +1443,15 @@ impl Agent {
             // the left arm of the nested select). Also catch a cancel that raced
             // the final stream event.
             if matches!(stream_end, StreamEnd::Cancelled) || self.cancel.is_cancelled() {
+                // Calls that started before the cancel were already journaled,
+                // so terminalizing silently would leave replay and live clients
+                // holding a call that never resolves. Mark them discarded the
+                // way the refusal path does — but only when calls had actually
+                // started, because the marker also clears streamed prose and a
+                // cancel with prose alone deliberately retains it.
+                if !calls.is_empty() {
+                    events.send(AgentEvent::StreamInterrupted);
+                }
                 return Ok(self.finish_cancelled(
                     events,
                     total_usage,
@@ -9101,6 +9111,122 @@ mod tests {
             .map(|m| m.role)
             .collect();
         assert_eq!(roles, vec![Role::User]);
+    }
+
+    struct ToolCallStallProvider;
+
+    #[async_trait]
+    impl ModelProvider for ToolCallStallProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("tool-stall")
+        }
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            let head = stream::iter(vec![
+                ProviderEvent::TextDelta {
+                    text: "partial".into(),
+                },
+                ProviderEvent::ToolCallStarted {
+                    index: 0,
+                    id: "call-0".into(),
+                    name: "echo".into(),
+                },
+            ]);
+            Ok(head.chain(stream::pending()).boxed())
+        }
+    }
+
+    /// A cancel that lands after `ToolCallStarted` was already journaled must
+    /// mark the call discarded, or replay and live clients hold a call that
+    /// never resolves. The marker is conditional — a cancel with only partial
+    /// prose must not send it, because replay clears visible assistant text on
+    /// the marker and cancellation deliberately retains that prose.
+    #[tokio::test]
+    async fn cancel_after_a_tool_call_starts_does_not_leave_it_dangling() {
+        let (store, chat, _workspace) = cancel_test_chat().await;
+
+        let cancel = CancelToken::new();
+        let agent = Agent::new(
+            Arc::new(ToolCallStallProvider),
+            Arc::new(ToolRegistry::new()),
+            store,
+            AgentConfig {
+                model: "tool-stall".into(),
+                ..Default::default()
+            },
+        )
+        .with_cancel(cancel.clone());
+
+        let (tx, mut rx) = unbounded();
+        let handle = tokio::spawn(async move {
+            let _ = agent.run_turn(&chat, "go", &tx).await;
+        });
+
+        // Cancel the instant the started call is visible; the stream then
+        // stalls, so only the cancel can end the turn.
+        let mut events = Vec::new();
+        while let Some(event) = rx.next().await {
+            if matches!(event, AgentEvent::ToolCallStarted { .. }) {
+                cancel.cancel();
+            }
+            events.push(event);
+        }
+        handle.await.unwrap();
+
+        let started = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::ToolCallStarted { .. }));
+        let interrupted = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::StreamInterrupted));
+        let cancelled = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::TurnCancelled { .. }));
+        assert!(
+            matches!((started, interrupted, cancelled), (Some(a), Some(b), Some(c)) if a < b && b < c),
+            "the started call is marked discarded before the turn terminalizes: {events:?}"
+        );
+
+        // The other half of the contract: with no started tool call the marker
+        // stays unsent, so the partial prose the client already showed survives.
+        let (store, chat, _workspace) = cancel_test_chat().await;
+        let cancel = CancelToken::new();
+        let agent = Agent::new(
+            Arc::new(StallProvider),
+            Arc::new(ToolRegistry::new()),
+            store,
+            AgentConfig {
+                model: "stall".into(),
+                ..Default::default()
+            },
+        )
+        .with_cancel(cancel.clone());
+
+        let (tx, mut rx) = unbounded();
+        let handle = tokio::spawn(async move {
+            let _ = agent.run_turn(&chat, "go", &tx).await;
+        });
+
+        let mut events = Vec::new();
+        while let Some(event) = rx.next().await {
+            if matches!(event, AgentEvent::TextDelta { .. }) {
+                cancel.cancel();
+            }
+            events.push(event);
+        }
+        handle.await.unwrap();
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TurnCancelled { .. })),
+            "a prose-only cancel still ends the turn as cancelled"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::StreamInterrupted)),
+            "a cancel with no started tool call keeps the partial prose"
+        );
     }
 
     #[tokio::test]
