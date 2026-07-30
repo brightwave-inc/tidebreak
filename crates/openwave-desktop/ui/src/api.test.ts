@@ -844,6 +844,7 @@ describe("parseToolResultPreview closed results", () => {
       exitCode: 0,
       timedOut: false,
       outputTruncated: false,
+      outputs: [],
       stdout: "ok",
       stderr: "",
       images: [
