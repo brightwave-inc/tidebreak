@@ -1017,6 +1017,9 @@ fn agent_deps(
         ApprovalClass::Workspace,
         validate_import_connected_file_arguments,
     );
+    // The spec advertises the model-facing filename shape; the agent resolves
+    // that filename into the canonical id-bearing arguments before the call is
+    // checkpointed, so the validator checks the canonical durable form.
     tools.register_validated_client(
         write_output_to_connected_folder_tool_spec(),
         ApprovalClass::Workspace,

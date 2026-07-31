@@ -247,8 +247,43 @@ pub enum OutputWriteMode {
     Replace,
 }
 
-/// Canonical model proposal for writing one existing output to an attached root.
+/// Model proposal for writing one published output to an attached root.
 ///
+/// The model names the output by its display filename — exec results report
+/// published outputs by filename only, and output ids are deliberately not
+/// part of the model's vocabulary. The agent resolves the filename against
+/// the conversation's live outputs and checkpoints the canonical id-bearing
+/// [`WriteOutputToConnectedFolderArgs`] instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WriteOutputToConnectedFolderProposal {
+    /// Display filename of a published output owned by this conversation.
+    #[schemars(
+        length(min = 1, max = crate::deliverable::MAX_DELIVERABLE_NAME_CHARS),
+        description = "Filename of a published output of this conversation, exactly as reported when it was published."
+    )]
+    pub filename: String,
+    /// Opaque root identity already attached to this conversation.
+    #[schemars(description = "")]
+    pub root_id: uuid::Uuid,
+    /// Nonempty destination relative to the attached root.
+    #[schemars(
+        length(min = 1, max = MAX_CONNECTED_FOLDER_PATH_BYTES),
+        description = "Nonempty root-relative destination path."
+    )]
+    pub path: String,
+    /// Create/no-clobber by default; replacement requires a fresh native approval.
+    #[schemars(description = "")]
+    pub mode: OutputWriteMode,
+}
+
+/// Canonical checkpointed arguments for writing one existing output to an
+/// attached root.
+///
+/// This is the durable host-side form: the agent resolves the model's
+/// [`WriteOutputToConnectedFolderProposal`] filename into the opaque output
+/// identity before the call is checkpointed, so everything downstream (server
+/// route, approval card, native write-back) works from a stable identity.
 /// Output bytes and revision identity are deliberately absent. The trusted
 /// native executor resolves both from the authoritative output record at claim
 /// time, then binds them into its private recovery receipt.
@@ -321,6 +356,15 @@ impl ReadConnectedFileArgs {
     }
 }
 
+impl WriteOutputToConnectedFolderProposal {
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        crate::deliverable::validate_portable_filename(&self.filename).is_ok()
+            && !self.root_id.is_nil()
+            && valid_connected_folder_path(&self.path, false)
+    }
+}
+
 impl WriteOutputToConnectedFolderArgs {
     #[must_use]
     pub fn is_well_formed(&self) -> bool {
@@ -357,7 +401,11 @@ pub fn validate_import_connected_file_arguments(arguments: &Value) -> bool {
         .is_ok_and(|arguments| arguments.is_well_formed())
 }
 
-/// Validate one pathless output write-back proposal before checkpointing it.
+/// Validate one canonical (id-bearing) output write-back checkpoint payload.
+///
+/// This checks the durable form the agent writes after resolving the model's
+/// filename proposal, not the model-facing schema advertised by
+/// [`write_output_to_connected_folder_tool_spec`].
 #[must_use]
 pub fn validate_write_output_to_connected_folder_arguments(arguments: &Value) -> bool {
     serde_json::from_value::<WriteOutputToConnectedFolderArgs>(arguments.clone())
@@ -398,9 +446,9 @@ pub fn import_connected_file_tool_spec() -> ToolSpec {
 
 #[must_use]
 pub fn write_output_to_connected_folder_tool_spec() -> ToolSpec {
-    ToolSpec::for_args::<WriteOutputToConnectedFolderArgs>(
+    ToolSpec::for_args::<WriteOutputToConnectedFolderProposal>(
         WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
-        "Copy an existing conversation output into a folder already connected to this conversation. Provide only the opaque output_id, opaque root_id, bounded root-relative destination, and explicit create or replace intent. Create refuses an existing entry. Replace requires fresh user approval; never provide output bytes or an absolute path.",
+        "Copy an output already published in this conversation into a folder already connected to this conversation. Provide only the output's filename exactly as reported when it was published, the opaque root_id, a bounded root-relative destination, and explicit create or replace intent. Create refuses an existing entry. Replace requires fresh user approval; never provide output bytes or an absolute path.",
     )
 }
 
@@ -674,11 +722,65 @@ mod tests {
                 &invalid
             ));
         }
+        // The model-facing spec names outputs by filename: the exec surface
+        // reports published outputs by filename only, so an id-shaped argument
+        // would be impossible to supply.
         let spec = write_output_to_connected_folder_tool_spec();
         assert_eq!(spec.name, WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL);
         assert_eq!(spec.input_schema["additionalProperties"], false);
+        assert_eq!(
+            spec.input_schema["required"],
+            serde_json::json!(["filename", "root_id", "path", "mode"])
+        );
+        assert!(spec.input_schema["properties"].get("output_id").is_none());
+        assert!(spec.description.contains("filename"));
+        assert!(!spec.description.contains("output_id"));
         assert!(spec.description.contains("never provide output bytes"));
         assert!(!spec.description.contains("scratch"));
+    }
+
+    #[test]
+    fn output_writeback_proposal_takes_a_portable_filename_never_an_id() {
+        let root_id = uuid::Uuid::new_v4();
+        let proposal: WriteOutputToConnectedFolderProposal =
+            serde_json::from_value(serde_json::json!({
+                "filename": "final report.md",
+                "root_id": root_id,
+                "path": "reports/final.md",
+                "mode": "create"
+            }))
+            .unwrap();
+        assert!(proposal.is_well_formed());
+
+        let mut invalid = proposal.clone();
+        invalid.filename = "../escape.md".into();
+        assert!(!invalid.is_well_formed());
+        invalid = proposal.clone();
+        invalid.filename = String::new();
+        assert!(!invalid.is_well_formed());
+        invalid = proposal;
+        invalid.path = "/tmp/final.md".into();
+        assert!(!invalid.is_well_formed());
+
+        // An id-bearing payload is not a valid proposal, and a filename-bearing
+        // payload is not a valid canonical checkpoint.
+        assert!(
+            serde_json::from_value::<WriteOutputToConnectedFolderProposal>(serde_json::json!({
+                "output_id": uuid::Uuid::new_v4(),
+                "root_id": root_id,
+                "path": "final.md",
+                "mode": "create"
+            }))
+            .is_err()
+        );
+        assert!(!validate_write_output_to_connected_folder_arguments(
+            &serde_json::json!({
+                "filename": "final.md",
+                "root_id": root_id,
+                "path": "final.md",
+                "mode": "create"
+            })
+        ));
     }
 
     #[test]

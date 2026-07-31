@@ -39,8 +39,9 @@ pub const EXEC_OUTPUT_DIRECTORY: &str = "output";
 pub const MAX_OUTPUT_SCAN_FILES: usize = 64;
 
 /// Upper bound on the filename lookup when matching scan files to existing
-/// outputs. Far above the catalog's own display cap.
-const OUTPUT_LOOKUP_LIMIT: u64 = 1_000;
+/// outputs. Far above the catalog's own display cap. Shared with the agent's
+/// filename resolution for output write-backs so both match the same window.
+pub(crate) const OUTPUT_LOOKUP_LIMIT: u64 = 1_000;
 
 /// What one scanned file did to the output record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
