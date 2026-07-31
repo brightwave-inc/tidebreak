@@ -92,21 +92,25 @@ test("workflow container images are pinned by digest", () => {
   assert.doesNotMatch(workflows["ci.yml"], /gitleaks\/gitleaks:latest/);
 });
 
-test("Rust CI requires the same PostgreSQL lane on pull requests and main", () => {
+test("heavy CI is opt-in on pull requests and automatic elsewhere", () => {
   const ci = workflows["ci.yml"];
   const changes = workflowJob(ci, "changes");
+  const fmt = workflowJob(ci, "fmt");
   const postgres = workflowJob(ci, "postgres");
   const testJob = workflowJob(ci, "test");
+  const fullCiGate =
+    /github\.event_name != 'pull_request' \|\| contains\(github\.event\.pull_request\.labels\.\*\.name, 'full-ci'\)/;
 
   assert.match(
     ci,
     /^on:\n  push:\n    branches: \[main\]\n  pull_request:/m,
   );
+  assert.match(
+    ci,
+    /pull_request:\n\s+types:\n\s+\[[^\]]*labeled, unlabeled[^\]]*\]/,
+  );
   assert.doesNotMatch(ci, /^  build:$/m);
-  // Scoped to the lanes that skip openwave-desktop, but still never exempted
-  // from pull requests.
-  assert.match(postgres, /if:.*needs\.changes\.outputs\.workspace == 'true'/);
-  assert.doesNotMatch(postgres, /github\.event_name != 'pull_request'/);
+  assert.doesNotMatch(fmt, /full-ci/);
   assert.match(postgres, /OPENWAVE_REQUIRE_POSTGRES_TEST: "true"/);
   // The narrower `workspace` scope must imply the `rust` one. Without this the
   // crate-coverage lanes could be gated on a scope that never ran for them.
@@ -116,6 +120,16 @@ test("Rust CI requires the same PostgreSQL lane on pull requests and main", () =
   );
   assert.doesNotMatch(ci, /^  rust:$/m);
   assert.doesNotMatch(ci, /name: fmt · clippy · build · test/);
+
+  for (const job of [
+    workflowJob(ci, "lint"),
+    workflowJob(ci, "desktop"),
+    testJob,
+    postgres,
+    workflowJob(ci, "ui"),
+  ]) {
+    assert.match(job, fullCiGate);
+  }
 
   for (const job of [
     workflowJob(ci, "lint"),
@@ -138,6 +152,7 @@ test("Rust CI requires the same PostgreSQL lane on pull requests and main", () =
   );
   assert.doesNotMatch(ci, /^  parsers:$/m);
   assert.doesNotMatch(ci, /outputs\.parsers|echo "parsers=/);
+  assert.match(changes, /\*\.md\|docs\/\*\|assets\/\*\|\.githooks\/\*/);
 
   const desktop = workflowJob(ci, "desktop");
   assert.match(
