@@ -46,7 +46,6 @@ function TitleCellRenderer(props: CellProps) {
 
   return (
     <div className="flex h-full min-w-0 items-center gap-2">
-      <MessageCircleMore className="size-4 shrink-0 text-muted-foreground" />
       <span className="truncate text-sm">{title}</span>
       {context.needsAttention(chat.id) && (
         <span
