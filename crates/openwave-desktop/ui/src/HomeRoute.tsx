@@ -257,7 +257,10 @@ export function HomeRoute() {
 
   function homeContent() {
     return (
-      <div className="flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden px-[clamp(0.5rem,4%,5rem)]">
+      // The panel slot this sits in is a plain block, so nothing stretches
+      // the column to the slot's height — it has to claim it itself, the
+      // same way .chat-pane does.
+      <div className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden px-[clamp(0.5rem,4%,5rem)]">
         <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto">
           {/* The same null state an empty conversation shows: home is where a
               chat starts, so it greets the same way. Picking a starter prompt
