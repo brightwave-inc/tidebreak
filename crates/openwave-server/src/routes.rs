@@ -33,6 +33,7 @@ use crate::code_execution::{
 };
 use crate::error::ServerError;
 use crate::event_projection::{RendererChatFrame, RendererChatMetadata, RendererSequencedEvent};
+use crate::exec_write_snapshot::{undo_turn_file_changes, ExecTurnUndoOutcome};
 use crate::extract::{Json, Path, Query};
 use crate::mcp_config::{McpServersConfig, McpServersInfo};
 use crate::model_roles::{self, ModelRole};
@@ -652,6 +653,21 @@ pub async fn delete_code_execution_credential(
     Ok(Json(
         code_execution::delete_credential(&*state.secrets, provider).await?,
     ))
+}
+
+/// `POST /chats/{chat_id}/turns/{turn_id}/file-changes/undo` — restore the
+/// prior bytes journaled for one turn without clobbering later edits.
+pub async fn post_undo_turn_file_changes(
+    State(state): State<AppState>,
+    Path((chat_id, turn_id)): Path<(ChatId, TurnId)>,
+) -> Result<Json<ExecTurnUndoOutcome>, ServerError> {
+    let outcome = undo_turn_file_changes(&*state.store, &*state.blobs, chat_id, turn_id).await?;
+    if outcome.files.is_empty() {
+        return Err(ServerError::not_found(format!(
+            "turn {turn_id} has no retained file changes in chat {chat_id}"
+        )));
+    }
+    Ok(Json(outcome))
 }
 
 /// Maximum API-key size accepted by the local credential endpoint. This is
