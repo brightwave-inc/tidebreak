@@ -17,14 +17,16 @@ import {
   useState,
 } from "react";
 
-import type { ApiClient } from "@/api";
 import { Button } from "@/components/ui/button";
 import {
   Popover,
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import { useFileDownload } from "@/document/useFileDownload";
+import {
+  useFileDownload,
+  type FileBytesSource,
+} from "@/document/useFileDownload";
 import { cn } from "@/lib/utils";
 import { FileDownloadProgressIndicator } from "./FileDownloadProgress";
 
@@ -112,22 +114,18 @@ function isContainer(value: unknown): boolean {
 // ---------------------------------------------------------------------------
 
 interface JsonViewerProps extends HTMLAttributes<HTMLDivElement> {
-  client: Pick<ApiClient, "getChatDocumentFile">;
-  chatId: string;
-  documentID: string;
+  source: FileBytesSource;
   /** Glom-style dot-notation path to highlight, e.g. "items.0.invoice_number" */
   highlightPath?: string;
 }
 
 export function JsonViewer({
-  client,
-  chatId,
-  documentID,
+  source,
   highlightPath,
   className,
   ...props
 }: JsonViewerProps) {
-  const fileDownload = useFileDownload(client, chatId, documentID, {
+  const fileDownload = useFileDownload(source, {
     parseAs: "text",
   });
 

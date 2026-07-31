@@ -2,27 +2,26 @@ import { Loader2Icon } from "lucide-react";
 import type { HTMLAttributes } from "react";
 import { useEffect, useState } from "react";
 
-import type { ApiClient } from "@/api";
-import { useFileDownload } from "@/document/useFileDownload";
+import {
+  useFileDownload,
+  type FileBytesSource,
+} from "@/document/useFileDownload";
 import { cn } from "@/lib/utils";
 import { FileDownloadProgressIndicator } from "./FileDownloadProgress";
 
 interface Props extends HTMLAttributes<HTMLDivElement> {
-  client: Pick<ApiClient, "getChatDocumentFile">;
-  chatId: string;
-  documentID: string;
+  source: FileBytesSource;
 }
 
 export function ImageViewer({
-  client,
-  chatId,
-  documentID,
+  source,
   className,
   ...restProps
 }: Props) {
   const [imageError, setImageError] = useState(false);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
-  const fileDownload = useFileDownload(client, chatId, documentID, {
+  const fileId = source.id;
+  const fileDownload = useFileDownload(source, {
     parseAs: "blob",
   });
 
@@ -38,7 +37,7 @@ export function ImageViewer({
   // Reset error state on document change
   useEffect(() => {
     setImageError(false);
-  }, [documentID]);
+  }, [fileId]);
 
   if (fileDownload.isLoading) {
     return (

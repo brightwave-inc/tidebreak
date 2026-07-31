@@ -23,8 +23,18 @@ export type DeliverablePreview = {
   filename: string;
   mediaType: string;
   revisionCount: number;
+  /** Revision this preview was built from — keys the inline file viewer. */
+  revisionId: string;
   content: string;
   truncated: boolean;
+};
+
+/** One revision's complete bytes, for inline viewers (office, PDF, image). */
+export type DeliverableFile = {
+  outputId: string;
+  revisionId: string;
+  mediaType: string;
+  bytes: Uint8Array;
 };
 
 export type OutputExportResult =
@@ -45,7 +55,7 @@ export type OutputExportResult =
         | "ambiguous_native_failure";
     };
 
-/** The curated model-authored text types, which are the only previewable ones. */
+/** The curated model-authored text types (bounded text preview + size ceiling). */
 export type TextDeliverableMediaType =
   | "text/markdown"
   | "text/plain"
@@ -87,6 +97,25 @@ export async function readDeliverable(
 ): Promise<DeliverablePreview> {
   return parseDeliverablePreview(
     await invoke("read_deliverable", { request: { chatId, outputId } }),
+  );
+}
+
+/**
+ * Load one revision's complete bytes for an inline viewer.
+ *
+ * Omit `revisionId` to read the current revision. Unlike
+ * {@link readDeliverable}, this is not a capped text preview and works for
+ * binary artifacts the document engines can draw.
+ */
+export async function readDeliverableFile(
+  chatId: string,
+  outputId: string,
+  revisionId?: string,
+): Promise<DeliverableFile> {
+  return parseDeliverableFile(
+    await invoke("read_deliverable_file", {
+      request: { chatId, outputId, revisionId: revisionId ?? null },
+    }),
   );
 }
 
@@ -251,6 +280,7 @@ export function parseDeliverablePreview(value: unknown): DeliverablePreview {
       "filename",
       "mediaType",
       "revisionCount",
+      "revisionId",
       "content",
       "truncated",
     ]) ||
@@ -261,6 +291,7 @@ export function parseDeliverablePreview(value: unknown): DeliverablePreview {
     !Number.isSafeInteger(value.revisionCount) ||
     value.revisionCount < 1 ||
     value.revisionCount > MAX_OUTPUT_REVISIONS ||
+    !isOpaqueId(value.revisionId) ||
     typeof value.content !== "string" ||
     [...value.content].length > MAX_PREVIEW_CHARACTERS ||
     value.content.includes("\0") ||
@@ -273,9 +304,60 @@ export function parseDeliverablePreview(value: unknown): DeliverablePreview {
     filename: value.filename,
     mediaType: value.mediaType,
     revisionCount: value.revisionCount,
+    revisionId: value.revisionId,
     content: value.content,
     truncated: value.truncated,
   };
+}
+
+export function parseDeliverableFile(value: unknown): DeliverableFile {
+  if (
+    !isExactRecord(value, [
+      "outputId",
+      "revisionId",
+      "mediaType",
+      "contentBase64",
+    ]) ||
+    !isOpaqueId(value.outputId) ||
+    !isOpaqueId(value.revisionId) ||
+    !isDeliverableMediaType(value.mediaType) ||
+    typeof value.contentBase64 !== "string" ||
+    value.contentBase64.length === 0
+  ) {
+    throw new Error("Invalid output file response");
+  }
+  let bytes: Uint8Array;
+  try {
+    bytes = decodeBase64(value.contentBase64);
+  } catch {
+    throw new Error("Invalid output file response");
+  }
+  if (bytes.byteLength === 0 || bytes.byteLength > deliverableByteCeiling(value.mediaType)) {
+    throw new Error("Invalid output file response");
+  }
+  return {
+    outputId: value.outputId,
+    revisionId: value.revisionId,
+    mediaType: value.mediaType,
+    bytes,
+  };
+}
+
+/**
+ * Decode base64 in chunks so a 16 MB artifact does not blow the argument stack
+ * the way a single `Uint8Array.from(..., charCodeAt)` would.
+ */
+function decodeBase64(encoded: string): Uint8Array {
+  const binary = atob(encoded);
+  const bytes = new Uint8Array(binary.length);
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < binary.length; offset += chunkSize) {
+    const end = Math.min(offset + chunkSize, binary.length);
+    for (let i = offset; i < end; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+  }
+  return bytes;
 }
 
 export function parseOutputExportResult(

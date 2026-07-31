@@ -18,6 +18,7 @@ import {
   hasOriginalViewer,
 } from "@/document/DocumentViewer";
 import type { SheetHighlightRange } from "@/document/UniverSpreadsheetViewer";
+import { documentFileSource } from "@/document/useFileDownload";
 import { cn } from "@/lib/utils";
 import {
   CITATION_MARK_CLASS,
@@ -117,6 +118,7 @@ export function DocumentDetails({
   const { client } = useApp();
   const type = baseMediaType(info.media_type);
   const structured = structuredKind(type);
+  const source = documentFileSource(client, chatId, info.document_id);
 
   return (
     <div className="flex min-h-0 grow flex-col overflow-hidden">
@@ -124,9 +126,7 @@ export function DocumentDetails({
         <>
           {hasOriginalViewer(type) ? (
             <DocumentViewer
-              client={client}
-              chatId={chatId}
-              documentId={info.document_id}
+              source={source}
               mediaType={type}
               targetPage={targetPage}
               citationCellRange={citationCellRange}
@@ -134,25 +134,19 @@ export function DocumentDetails({
             />
           ) : type.startsWith("image/") ? (
             <ImageViewer
-              client={client}
-              chatId={chatId}
-              documentID={info.document_id}
+              source={source}
               className="bg-page-background grow"
             />
           ) : structured !== null ? (
             <Suspense fallback={<ViewerLoading />}>
               {structured === "json" ? (
                 <JsonViewer
-                  client={client}
-                  chatId={chatId}
-                  documentID={info.document_id}
+                  source={source}
                   className="grow"
                 />
               ) : (
                 <XmlViewer
-                  client={client}
-                  chatId={chatId}
-                  documentID={info.document_id}
+                  source={source}
                   className="grow"
                 />
               )}
@@ -162,9 +156,7 @@ export function DocumentDetails({
             // extracted out of those: the text of record is the file, so the
             // citation's own offsets address what the viewer draws.
             <MarkdownViewer
-              client={client}
-              chatId={chatId}
-              documentID={info.document_id}
+              source={source}
               targetLines={targetLines}
               markdown={type === "text/markdown"}
               className="bg-page-background grow"

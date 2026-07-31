@@ -16,14 +16,16 @@ import {
   useState,
 } from "react";
 
-import type { ApiClient } from "@/api";
 import { Button } from "@/components/ui/button";
 import {
   Popover,
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import { useFileDownload } from "@/document/useFileDownload";
+import {
+  useFileDownload,
+  type FileBytesSource,
+} from "@/document/useFileDownload";
 import { cn } from "@/lib/utils";
 import { FileDownloadProgressIndicator } from "./FileDownloadProgress";
 
@@ -190,22 +192,18 @@ function getAttributes(el: Element): [string, string][] {
 // ---------------------------------------------------------------------------
 
 interface XmlViewerProps extends HTMLAttributes<HTMLDivElement> {
-  client: Pick<ApiClient, "getChatDocumentFile">;
-  chatId: string;
-  documentID: string;
+  source: FileBytesSource;
   /** XPath expression to highlight, e.g. "/root/items/item[1]" */
   highlightPath?: string;
 }
 
 export function XmlViewer({
-  client,
-  chatId,
-  documentID,
+  source,
   highlightPath,
   className,
   ...props
 }: XmlViewerProps) {
-  const fileDownload = useFileDownload(client, chatId, documentID, {
+  const fileDownload = useFileDownload(source, {
     parseAs: "text",
   });
 

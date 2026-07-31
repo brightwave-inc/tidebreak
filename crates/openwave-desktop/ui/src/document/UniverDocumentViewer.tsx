@@ -7,11 +7,10 @@ import { Loader2Icon } from "lucide-react";
 import type { HTMLAttributes } from "react";
 import { useEffect, useRef, useState } from "react";
 
-import type { ApiClient } from "@/api";
 import { cn } from "@/lib/utils";
 import { docxToUniver } from "./docx-to-univer";
 import { FileDownloadProgressIndicator } from "@/components/document/FileDownloadProgress";
-import { useFileDownload } from "./useFileDownload";
+import { useFileDownload, type FileBytesSource } from "./useFileDownload";
 
 // The MODERN flavor hardcodes page width to 595/0.75 ≈ 793px. To fill the
 // container we CSS-scale the render canvas so its pixel width matches the
@@ -30,9 +29,7 @@ const UNIVER_VIEWER_STYLES = `
 `;
 
 interface Props extends HTMLAttributes<HTMLDivElement> {
-  client: Pick<ApiClient, "getChatDocumentFile">;
-  chatId: string;
-  documentId: string;
+  source: FileBytesSource;
 }
 
 /**
@@ -43,9 +40,7 @@ interface Props extends HTMLAttributes<HTMLDivElement> {
  * of viewing one locally.
  */
 export default function UniverDocumentViewer({
-  client,
-  chatId,
-  documentId,
+  source,
   className,
   ...restProps
 }: Props) {
@@ -53,8 +48,9 @@ export default function UniverDocumentViewer({
   const univerRef = useRef<FUniver | null>(null);
   const [errorType, setErrorType] = useState<"parse" | "load" | null>(null);
   const [isReady, setIsReady] = useState(false);
+  const fileId = source.id;
 
-  const fileDownload = useFileDownload(client, chatId, documentId, {
+  const fileDownload = useFileDownload(source, {
     parseAs: "arrayBuffer",
   });
 
@@ -129,7 +125,7 @@ export default function UniverDocumentViewer({
         univerRef.current = null;
       }
     };
-  }, [fileDownload.data, documentId]);
+  }, [fileDownload.data, fileId]);
 
   useEffect(() => {
     if (fileDownload.error) setErrorType("load");

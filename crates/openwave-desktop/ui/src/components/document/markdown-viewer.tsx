@@ -2,8 +2,10 @@ import { FileIcon, Loader2Icon } from "lucide-react";
 import type { HTMLAttributes } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import type { ApiClient } from "@/api";
-import { useFileDownload } from "@/document/useFileDownload";
+import {
+  useFileDownload,
+  type FileBytesSource,
+} from "@/document/useFileDownload";
 import { cn } from "@/lib/utils";
 import { extractHeadings } from "@/markdownHeadings";
 import { MessageMarkdown } from "@/MessageMarkdown";
@@ -58,9 +60,7 @@ export function splitIntoChunks(text: string, chunkSize: number): string[] {
 }
 
 interface Props extends HTMLAttributes<HTMLDivElement> {
-  client: Pick<ApiClient, "getChatDocumentFile">;
-  chatId: string;
-  documentID: string;
+  source: FileBytesSource;
   /** Model-authored line range to reveal when a citation led here. */
   targetLines?: Readonly<{ start: number; end: number }>;
   /** Render the file as markdown rather than as the text it literally is. */
@@ -69,9 +69,7 @@ interface Props extends HTMLAttributes<HTMLDivElement> {
 
 /** Text-shaped originals: markdown rendered, everything else as written. */
 export function MarkdownViewer({
-  client,
-  chatId,
-  documentID,
+  source,
   targetLines,
   markdown = false,
   className,
@@ -80,7 +78,7 @@ export function MarkdownViewer({
   const containerRef = useRef<HTMLDivElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
 
-  const fileDownload = useFileDownload(client, chatId, documentID, {
+  const fileDownload = useFileDownload(source, {
     parseAs: "text",
   });
   const fullContent = fileDownload.data ?? "";

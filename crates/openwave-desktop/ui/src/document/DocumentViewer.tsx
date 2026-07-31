@@ -12,8 +12,8 @@
 import { lazy, Suspense } from "react";
 import { Loader2Icon } from "lucide-react";
 
-import type { ApiClient } from "@/api";
 import type { SheetHighlightRange } from "@/document/UniverSpreadsheetViewer";
+import type { FileBytesSource } from "@/document/useFileDownload";
 
 // pdf.js is a large dependency and most sessions never open a PDF, so it is
 // fetched from the app bundle on first use rather than at startup.
@@ -87,9 +87,7 @@ export function isGridOriginalViewer(mediaType: string): boolean {
 }
 
 interface DocumentViewerProps {
-  client: Pick<ApiClient, "getChatDocumentFile">;
-  chatId: string;
-  documentId: string;
+  source: FileBytesSource;
   mediaType: string;
   /** Open on this page the first time it is requested for this document. */
   targetPage?: number;
@@ -102,9 +100,7 @@ interface DocumentViewerProps {
 }
 
 export function DocumentViewer({
-  client,
-  chatId,
-  documentId,
+  source,
   mediaType,
   targetPage,
   citationCellRange,
@@ -116,9 +112,7 @@ export function DocumentViewer({
     return (
       <ViewerBoundary>
         <PdfViewer
-          client={client}
-          chatId={chatId}
-          documentId={documentId}
+          source={source}
           targetPage={targetPage}
           className={className}
         />
@@ -130,10 +124,8 @@ export function DocumentViewer({
     return (
       <ViewerBoundary>
         <UniverSpreadsheetViewer
-          key={documentId}
-          client={client}
-          chatId={chatId}
-          documentId={documentId}
+          key={source.id}
+          source={source}
           highlightRange={citationCellRange}
           isCsv={DELIMITED_TEXT_MEDIA_TYPES.has(type)}
           className={className}
@@ -146,10 +138,8 @@ export function DocumentViewer({
     return (
       <ViewerBoundary>
         <UniverDocumentViewer
-          key={documentId}
-          client={client}
-          chatId={chatId}
-          documentId={documentId}
+          key={source.id}
+          source={source}
           className={className}
         />
       </ViewerBoundary>

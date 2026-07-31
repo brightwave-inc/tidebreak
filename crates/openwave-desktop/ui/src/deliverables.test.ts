@@ -5,6 +5,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
 import {
   exportDeliverable,
+  parseDeliverableFile,
   parseDeliverablePreview,
   parseDeliverablesCatalog,
   parseOutputExportResult,
@@ -166,12 +167,32 @@ describe("deliverable renderer projections", () => {
   });
 
   it("rejects canonical paths, missing opaque ids, and oversized previews", () => {
+    expect(
+      parseDeliverablePreview({
+        outputId,
+        filename: "brief.md",
+        mediaType: "text/markdown",
+        revisionCount: 1,
+        revisionId,
+        content: "safe",
+        truncated: false,
+      }),
+    ).toEqual({
+      outputId,
+      filename: "brief.md",
+      mediaType: "text/markdown",
+      revisionCount: 1,
+      revisionId,
+      content: "safe",
+      truncated: false,
+    });
     expect(() =>
       parseDeliverablePreview({
         outputId,
         filename: "brief.md",
         mediaType: "text/markdown",
         revisionCount: 1,
+        revisionId,
         content: "safe",
         truncated: false,
         path: "/private/scratch/brief.md",
@@ -182,6 +203,7 @@ describe("deliverable renderer projections", () => {
         filename: "brief.md",
         mediaType: "text/markdown",
         revisionCount: 1,
+        revisionId,
         content: "safe",
         truncated: false,
       }),
@@ -192,6 +214,7 @@ describe("deliverable renderer projections", () => {
         filename: "brief.md",
         mediaType: "text/markdown",
         revisionCount: 1,
+        revisionId,
         content: "x".repeat(100_001),
         truncated: true,
       }),
@@ -255,5 +278,40 @@ describe("deliverable renderer projections", () => {
     });
     expect(invokeMock).toHaveBeenCalledTimes(2);
     expect(invokeMock.mock.calls[1]?.[1]).toEqual(invokeMock.mock.calls[0]?.[1]);
+  });
+
+  it("decodes a pathless output file payload and rejects empty or oversized ones", () => {
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+    const contentBase64 = btoa(String.fromCharCode(...bytes));
+    expect(
+      parseDeliverableFile({
+        outputId,
+        revisionId,
+        mediaType: "image/png",
+        contentBase64,
+      }),
+    ).toEqual({
+      outputId,
+      revisionId,
+      mediaType: "image/png",
+      bytes,
+    });
+    expect(() =>
+      parseDeliverableFile({
+        outputId,
+        revisionId,
+        mediaType: "image/png",
+        contentBase64: "",
+      }),
+    ).toThrow("Invalid output file response");
+    expect(() =>
+      parseDeliverableFile({
+        outputId,
+        revisionId,
+        mediaType: "image/png",
+        contentBase64,
+        path: "/private/scratch/chart.png",
+      }),
+    ).toThrow("Invalid output file response");
   });
 });

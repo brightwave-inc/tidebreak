@@ -24,13 +24,13 @@ vi.mock("@/document/PdfViewer", async () => {
   const { usePdfPageState } = await import("@/document/usePdfPageState");
   return {
     PdfViewer: ({
-      documentId,
+      source,
       targetPage,
     }: {
-      documentId: string;
+      source: { id: string };
       targetPage?: number;
     }) => {
-      const { currentPage, setCurrentPage } = usePdfPageState(documentId, {
+      const { currentPage, setCurrentPage } = usePdfPageState(source.id, {
         numPages: 20,
         targetPage,
       });

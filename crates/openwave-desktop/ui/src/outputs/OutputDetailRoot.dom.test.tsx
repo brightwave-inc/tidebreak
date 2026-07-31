@@ -8,6 +8,22 @@ import type { DeliverablePreview, OutputRevisionInfo } from "@/deliverables";
 import { renderWithRouter } from "@/test/router";
 import { OutputDetailRoot, type OutputDetailApis } from "./OutputDetailRoot";
 
+vi.mock("@/components/document/image-viewer", () => ({
+  ImageViewer: () => <div>Image preview</div>,
+}));
+
+vi.mock("@/document/DocumentViewer", async () => {
+  const actual = await vi.importActual<typeof import("@/document/DocumentViewer")>(
+    "@/document/DocumentViewer",
+  );
+  return {
+    ...actual,
+    DocumentViewer: ({ mediaType }: { mediaType: string }) => (
+      <div>Document preview ({mediaType})</div>
+    ),
+  };
+});
+
 afterEach(cleanup);
 
 const outputId = "550062d4-2528-5cc6-90f8-a788e119bf36";
@@ -21,6 +37,7 @@ function preview(overrides: Partial<DeliverablePreview> = {}): DeliverablePrevie
     filename: "Research brief.md",
     mediaType: "text/markdown",
     revisionCount: 1,
+    revisionId,
     content: "# Findings\n\nGrounded.",
     truncated: false,
     ...overrides,
@@ -120,9 +137,9 @@ describe("OutputDetailRoot", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("output not found");
   });
 
-  // Non-markdown outputs are source text, not prose: rendering a CSV as markdown
-  // would eat its structure.
-  it("renders a delimited output as text rather than as markdown", async () => {
+  // CSV shares the spreadsheet viewer with xlsx — never markdown, which would
+  // eat its structure into headings.
+  it("renders a delimited output in the spreadsheet viewer", async () => {
     const apis = detailApis({
       read: vi.fn().mockResolvedValue(
         preview({
@@ -135,9 +152,8 @@ describe("OutputDetailRoot", () => {
     });
     await openOutput(apis);
 
-    expect(await screen.findByText(/# not a heading,2/)).toBeVisible();
+    expect(await screen.findByText("Document preview (text/csv)")).toBeVisible();
     expect(screen.queryByRole("heading", { name: "not a heading,2" })).toBeNull();
-    expect(screen.getByText(/Saving writes the complete file/)).toBeVisible();
   });
 
   // Alpha parity: the history affordance is invisible until an output actually
@@ -207,14 +223,50 @@ describe("OutputDetailRoot", () => {
     expect(apis.restoreRevision).not.toHaveBeenCalled();
   });
 
-  // Binary artifacts arrive with empty content; the panel offers export rather
-  // than an inline rendering it cannot produce.
-  it("offers export instead of a preview for a binary artifact", async () => {
+  it("draws an image output with the shared image viewer", async () => {
     const apis = detailApis({
       read: vi.fn().mockResolvedValue(
         preview({
           filename: "chart.png",
           mediaType: "image/png",
+          content: "",
+        }),
+      ),
+    });
+    await openOutput(apis);
+
+    expect(await screen.findByText("Image preview")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Save as…" })).toBeEnabled();
+  });
+
+  it("draws an office output with the shared document viewer", async () => {
+    const apis = detailApis({
+      read: vi.fn().mockResolvedValue(
+        preview({
+          filename: "model.xlsx",
+          mediaType:
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          content: "",
+        }),
+      ),
+    });
+    await openOutput(apis);
+
+    expect(
+      await screen.findByText(
+        "Document preview (application/vnd.openxmlformats-officedocument.spreadsheetml.sheet)",
+      ),
+    ).toBeVisible();
+  });
+
+  // Formats with no viewer still arrive with empty content; the panel offers
+  // export rather than an inline rendering it cannot produce.
+  it("offers export instead of a preview for an unsupported binary artifact", async () => {
+    const apis = detailApis({
+      read: vi.fn().mockResolvedValue(
+        preview({
+          filename: "bundle.zip",
+          mediaType: "application/zip",
           content: "",
         }),
       ),

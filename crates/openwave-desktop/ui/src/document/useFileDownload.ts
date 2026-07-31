@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { ApiClient, FileDownloadProgress } from "@/api";
+import { readDeliverableFile } from "@/deliverables";
 
 /** How a viewer wants the bytes handed to it. */
 export type FileDownloadFormat = "arrayBuffer" | "text" | "blob";
@@ -15,29 +16,53 @@ type Decoded<F extends FileDownloadFormat> = F extends "text"
 type StoredFile = { bytes: Uint8Array; contentType: string | null };
 
 /**
- * How many bytes of source documents may be held at once.
+ * Fetch one file's bytes for a viewer. Progress is optional — Tauri-backed
+ * sources load in one shot and have nothing to report.
+ */
+export type FileBytesFetcher = (
+  signal: AbortSignal,
+  onProgress?: (progress: FileDownloadProgress) => void,
+) => Promise<{ bytes: Uint8Array; contentType: string | null }>;
+
+/**
+ * Where a viewer gets its bytes, and how they are addressed in the cache.
+ *
+ * Sources and outputs both draw with the same engines; they differ only in
+ * how the bytes are fetched. `id` is the stable identity UI state (page,
+ * remount keys) keys off; `cacheKey` must change whenever the bytes would.
+ */
+export type FileBytesSource = {
+  id: string;
+  cacheKey: string;
+  fetch: FileBytesFetcher;
+};
+
+/**
+ * How many bytes of viewed files may be held at once.
  *
  * The budget is on total bytes rather than on entries because the cost being
  * bounded is memory: a cap of "ten documents" treats a 12 MB workbook and a
- * 4 KB note as the same thing. A source cannot exceed 16 MB — the import limit
- * both the server and the renderer enforce — so 64 MB holds four of the largest
- * files a reader can open, or dozens of ordinary ones. That is generous for an
- * access pattern of "the source I am reading, and the one before it", while
- * still being small next to what a desktop renderer already occupies, and it no
- * longer grows with the length of the session.
+ * 4 KB note as the same thing. A source or binary output cannot exceed 16 MB
+ * — the import / acceptance limit both the server and the renderer enforce —
+ * so 64 MB holds four of the largest files a reader can open, or dozens of
+ * ordinary ones. That is generous for an access pattern of "the file I am
+ * reading, and the one before it", while still being small next to what a
+ * desktop renderer already occupies, and it no longer grows with the length
+ * of the session.
  */
 const MAX_CACHED_BYTES = 64 * 1024 * 1024;
 
 /**
- * Source documents' original bytes, held across viewer mounts.
+ * Viewed files' original bytes, held across viewer mounts.
  *
- * A document's content is immutable once imported — replacing a file produces a
- * new document with a new id — so a cache hit can never be stale. It earns its
- * place because the panel unmounts the viewer whenever the reader switches
- * between the original and the extracted text: without the cache, every flip
- * back re-downloads the whole file and redraws from a spinner.
+ * A source document's content is immutable once imported — replacing a file
+ * produces a new document with a new id — so a cache hit can never be stale.
+ * An output revision is likewise write-once. The cache earns its place
+ * because the panel unmounts the viewer whenever the reader switches between
+ * views: without it, every flip back re-downloads the whole file and redraws
+ * from a spinner.
  *
- * Eviction is least-recently-*read*, not least-recently-inserted: the document a
+ * Eviction is least-recently-*read*, not least-recently-inserted: the file a
  * reader keeps flipping back to is the one worth keeping, however long ago it
  * was downloaded.
  */
@@ -116,40 +141,78 @@ export type FileDownload<F extends FileDownloadFormat> = {
   contentType: string | null;
   /**
    * How far the transfer has got, or null when there is nothing to report — a
-   * small file, a response that never declared its length, or a cache hit,
-   * which is instant and has no transfer to report on.
+   * small file, a response that never declared its length, a cache hit, or a
+   * one-shot IPC load with no streaming progress.
    */
   progress: FileDownloadProgress | null;
 };
 
-/**
- * Download one source's original bytes, for every viewer that draws them.
- *
- * The file is addressed by document id inside its conversation, never by a host
- * path, so a viewer can draw the file the reader imported without the renderer
- * learning where on disk it came from. The client is passed in rather than
- * pulled from context so the hook can be driven without a provider, and so a
- * viewer's dependencies are visible in its props.
- */
-export function useFileDownload<F extends FileDownloadFormat>(
+/** Bytes of one imported source document, addressed by document id. */
+export function documentFileSource(
   client: Pick<ApiClient, "getChatDocumentFile">,
   chatId: string,
   documentId: string,
+): FileBytesSource {
+  return {
+    id: documentId,
+    cacheKey: `document/${chatId}/${documentId}`,
+    fetch: (signal, onProgress) =>
+      client.getChatDocumentFile(chatId, documentId, signal, onProgress),
+  };
+}
+
+/**
+ * Bytes of one output revision in private scratch.
+ *
+ * `revisionId` is required so the cache key names immutable content: omitting
+ * it and keying on "current" would serve a stale revision after an update.
+ */
+export function outputFileSource(
+  chatId: string,
+  outputId: string,
+  revisionId: string,
+): FileBytesSource {
+  return {
+    id: `${outputId}/${revisionId}`,
+    cacheKey: `output/${chatId}/${outputId}/${revisionId}`,
+    fetch: async (signal) => {
+      const file = await readDeliverableFile(chatId, outputId, revisionId);
+      if (signal.aborted) {
+        throw new DOMException("The operation was aborted.", "AbortError");
+      }
+      return { bytes: file.bytes, contentType: file.mediaType };
+    },
+  };
+}
+
+/**
+ * Download one file's original bytes, for every viewer that draws them.
+ *
+ * The source is passed in rather than pulled from context so the hook can be
+ * driven without a provider, and so a viewer's dependencies are visible in
+ * its props. Sources and outputs share the cache and the decode path.
+ */
+export function useFileDownload<F extends FileDownloadFormat>(
+  source: FileBytesSource,
   options: { parseAs: F },
 ): FileDownload<F> {
   const { parseAs } = options;
-  const key = `${chatId}/${documentId}`;
+  const { cacheKey, fetch } = source;
   const [file, setFile] = useState<StoredFile | null>(
-    () => byteCache.get(key) ?? null,
+    () => byteCache.get(cacheKey) ?? null,
   );
   const [error, setError] = useState<Error | null>(null);
   const [isLoading, setIsLoading] = useState(file === null);
   const [progress, setProgress] = useState<FileDownloadProgress | null>(null);
   const requestRef = useRef(0);
+  // Keep the latest fetch without re-running the effect when the caller
+  // rebuilds an otherwise-identical source object each render.
+  const fetchRef = useRef(fetch);
+  fetchRef.current = fetch;
 
   useEffect(() => {
     const request = ++requestRef.current;
-    const cached = byteCache.get(key);
+    const cached = byteCache.get(cacheKey);
     if (cached) {
       setFile(cached);
       setError(null);
@@ -166,9 +229,7 @@ export function useFileDownload<F extends FileDownloadFormat>(
 
     void (async () => {
       try {
-        const downloaded = await client.getChatDocumentFile(
-          chatId,
-          documentId,
+        const downloaded = await fetchRef.current(
           controller.signal,
           (next) => {
             if (!controller.signal.aborted && request === requestRef.current) {
@@ -177,7 +238,7 @@ export function useFileDownload<F extends FileDownloadFormat>(
           },
         );
         if (request !== requestRef.current) return;
-        byteCache.set(key, downloaded);
+        byteCache.set(cacheKey, downloaded);
         setFile(downloaded);
       } catch (err) {
         if (controller.signal.aborted || request !== requestRef.current) return;
@@ -191,7 +252,7 @@ export function useFileDownload<F extends FileDownloadFormat>(
     })();
 
     return () => controller.abort();
-  }, [client, chatId, documentId, key]);
+  }, [cacheKey]);
 
   const data = useMemo(() => {
     if (!file) return null;

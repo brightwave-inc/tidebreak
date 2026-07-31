@@ -32,11 +32,16 @@ symlinks rather than following them.
 - Filenames are one portable ASCII component, at most 120 characters.
 - Content is valid UTF-8, non-empty, and at most 512 KiB.
 - The catalog returns the newest 100 valid output files.
-- Previews return at most 100,000 Unicode characters. Export always uses the
-  complete file.
+- Text previews return at most 100,000 Unicode characters. Export always uses
+  the complete file.
+- Formats with an inline viewer — spreadsheets and CSV (Univer), Word documents
+  (Univer), PDFs, and images — load the revision's complete bytes through a
+  separate native read and reuse the same engines as source documents.
 - Markdown previews use the same safe renderer as assistant messages: raw HTML,
   local-file links, executable URL schemes, and remote image loads are not
-  rendered. HTML outputs are shown as text rather than executed.
+  rendered. Plain text, JSON, and HTML outputs use a syntax-highlighted source
+  view (HTML is never executed). Unsupported binary types (for example ZIP)
+  remain export-only.
 
 The output directory is a capability-confined child of private per-chat
 scratch. Native reads reject symlinks and non-regular or oversized files.

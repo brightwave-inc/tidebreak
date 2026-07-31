@@ -9,6 +9,8 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
@@ -88,6 +90,9 @@ pub(crate) struct DeliverablePreview {
     /// Lets the detail panel gate its version-history affordance without a
     /// second catalog fetch.
     revision_count: u32,
+    /// The revision this preview (or empty binary placeholder) was built from,
+    /// so an inline viewer can address the same immutable bytes.
+    revision_id: OutputRevisionId,
     content: String,
     truncated: bool,
 }
@@ -98,6 +103,28 @@ pub(crate) struct OutputRevisionRequest {
     chat_id: Uuid,
     output_id: OutputId,
     revision_id: OutputRevisionId,
+}
+
+/// Read one revision's full bytes for an inline viewer.
+///
+/// `revision_id` is optional: omit it to read the output's current revision.
+/// Bytes travel as base64 so they share one IPC argument with identity — the
+/// same shape pasted images use — rather than as a JSON number array.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DeliverableFileRequest {
+    chat_id: Uuid,
+    output_id: OutputId,
+    revision_id: Option<OutputRevisionId>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DeliverableFile {
+    output_id: OutputId,
+    revision_id: OutputRevisionId,
+    media_type: String,
+    content_base64: String,
 }
 
 /// One row of an output's version history, oldest ordinal highest in the list.
@@ -173,6 +200,51 @@ pub(crate) async fn read_deliverable(
     revision_preview(&app, chat_id, &output, &revision).await
 }
 
+/// Return one revision's complete bytes for an inline viewer (office, PDF, image).
+///
+/// Unlike [`read_deliverable`], this is not capped to a text preview and is not
+/// limited to curated text media types — viewers that already draw source
+/// documents reuse the same engines against these bytes.
+#[tauri::command]
+pub(crate) async fn read_deliverable_file(
+    app: AppHandle,
+    host_access: State<'_, HostAccess>,
+    request: DeliverableFileRequest,
+) -> Result<DeliverableFile, String> {
+    let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
+    let (output, revision) = match request.revision_id {
+        None => require_live_output(host_access.store(), chat_id, request.output_id).await?,
+        Some(revision_id) => {
+            let (output, _) =
+                require_live_output(host_access.store(), chat_id, request.output_id).await?;
+            let store = host_access
+                .store()
+                .ok_or_else(|| "OpenWave is still starting".to_owned())?;
+            let revision = store
+                .get_output_revision(revision_id)
+                .await
+                .map_err(|_| "Could not load that version".to_owned())?
+                .filter(|revision| revision.output_id == output.id)
+                .ok_or_else(|| "That version does not belong to this output".to_owned())?;
+            (output, revision)
+        }
+    };
+    let scratch_root = crate::data_dir(&app)?.join("scratch");
+    let read_output = output.clone();
+    let read_revision = revision.clone();
+    let bytes = tauri::async_runtime::spawn_blocking(move || {
+        read_output_revision_bytes(&scratch_root, chat_id, &read_output, &read_revision)
+    })
+    .await
+    .map_err(|_| "Could not open that output".to_owned())??;
+    Ok(DeliverableFile {
+        output_id: output.id,
+        revision_id: revision.id,
+        media_type: output.media_type.clone(),
+        content_base64: BASE64.encode(bytes),
+    })
+}
+
 /// Build the bounded preview of one exact revision's content.
 async fn revision_preview(
     app: &AppHandle,
@@ -180,14 +252,16 @@ async fn revision_preview(
     output: &OutputRecord,
     revision: &OutputRevision,
 ) -> Result<DeliverablePreview, String> {
-    // Binary artifacts have no inline preview; the renderer keys its placeholder
-    // off the media type, so the response carries identity without content.
+    // Binary artifacts have no inline text preview; the renderer keys its
+    // viewer (or export-only placeholder) off the media type, and uses
+    // `revision_id` to fetch the full bytes when a viewer can draw them.
     if !media_type_is_text(&output.media_type) {
         return Ok(DeliverablePreview {
             output_id: output.id,
             filename: output.filename.clone(),
             media_type: output.media_type.clone(),
             revision_count: output.revision_count,
+            revision_id: revision.id,
             content: String::new(),
             truncated: false,
         });
@@ -200,7 +274,7 @@ async fn revision_preview(
     })
     .await
     .map_err(|_| "Could not preview that output".to_owned())??;
-    preview_from_bytes(output, bytes)
+    preview_from_bytes(output, revision, bytes)
 }
 
 /// List an output's version history, newest revision first.
@@ -646,7 +720,11 @@ pub(crate) fn read_output_revision_bytes(
     Ok(bytes)
 }
 
-fn preview_from_bytes(output: &OutputRecord, bytes: Vec<u8>) -> Result<DeliverablePreview, String> {
+fn preview_from_bytes(
+    output: &OutputRecord,
+    revision: &OutputRevision,
+    bytes: Vec<u8>,
+) -> Result<DeliverablePreview, String> {
     let text =
         String::from_utf8(bytes).map_err(|_| "Output is not a supported text file".to_owned())?;
     if text.contains('\0')
@@ -662,6 +740,7 @@ fn preview_from_bytes(output: &OutputRecord, bytes: Vec<u8>) -> Result<Deliverab
         filename: output.filename.clone(),
         media_type: output.media_type.clone(),
         revision_count: output.revision_count,
+        revision_id: revision.id,
         content,
         truncated,
     })
