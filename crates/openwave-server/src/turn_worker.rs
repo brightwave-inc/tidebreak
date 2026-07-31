@@ -860,8 +860,21 @@ impl TurnWorker {
                         ),
                     }
                     drop(active);
+                    // A cancel that raced the drive still keeps the prose the
+                    // cancelled outcome carried out of the loop.
+                    let partial = match drive_result {
+                        Ok(AgentTurnOutcome::Cancelled {
+                            output, citations, ..
+                        }) => output.map(|message| (message, citations)),
+                        _ => None,
+                    };
                     return self
-                        .acknowledge_cancellation(&turn, lease_token, total_usage)
+                        .acknowledge_cancellation_with_output(
+                            &turn,
+                            lease_token,
+                            total_usage,
+                            partial,
+                        )
                         .await;
                 }
                 LeaseState::Lost => return Ok(TurnWorkerOutcome::LeaseLost(turn.id)),
@@ -1857,7 +1870,12 @@ impl TurnWorker {
                     continuation_heartbeat.abort_and_wait().await;
                     continue;
                 }
-                Ok(AgentTurnOutcome::Cancelled { usage, .. }) => {
+                Ok(AgentTurnOutcome::Cancelled {
+                    output,
+                    citations,
+                    usage,
+                    ..
+                }) => {
                     match checked_usage_sum(total_usage, usage) {
                         Ok(total) => total_usage = total,
                         Err(error) => eprintln!(
@@ -1867,7 +1885,12 @@ impl TurnWorker {
                     }
                     drop(active);
                     return self
-                        .acknowledge_cancellation(&turn, lease_token, total_usage)
+                        .acknowledge_cancellation_with_output(
+                            &turn,
+                            lease_token,
+                            total_usage,
+                            output.map(|message| (message, citations)),
+                        )
                         .await;
                 }
                 Ok(AgentTurnOutcome::Failed {
@@ -2164,11 +2187,37 @@ impl TurnWorker {
         lease_token: uuid::Uuid,
         usage: openwave_core::Usage,
     ) -> Result<TurnWorkerOutcome> {
+        self.acknowledge_cancellation_with_output(turn, lease_token, usage, None)
+            .await
+    }
+
+    /// Acknowledge a cancellation, committing any partial prose the cancelled
+    /// agent loop carried out as the turn's durable output (#1182).
+    async fn acknowledge_cancellation_with_output(
+        &self,
+        turn: &TurnRun,
+        lease_token: uuid::Uuid,
+        usage: openwave_core::Usage,
+        output: Option<(
+            openwave_core::Message,
+            Vec<openwave_core::AssistantCitationInput>,
+        )>,
+    ) -> Result<TurnWorkerOutcome> {
         let terminal_event = AgentEvent::TurnCancelled { usage };
         loop {
             match self
                 .store
-                .finish_turn_cancellation_and_append_event(turn.id, lease_token, Utc::now(), usage)
+                .finish_turn_cancellation_and_append_event(
+                    turn.id,
+                    lease_token,
+                    Utc::now(),
+                    usage,
+                    output.as_ref().map(|(message, _)| message),
+                    output
+                        .as_ref()
+                        .map(|(_, citations)| citations.as_slice())
+                        .unwrap_or(&[]),
+                )
                 .await
             {
                 Ok(Some(resolution)) => {

@@ -109,17 +109,31 @@ export function presentChatTranscript(
           createdAt: entry.createdAt,
           reasoning: entry.reasoning,
         } satisfies ChatMessage;
-        return entry.refusal
-          ? [
-              assistant,
-              {
-                id: `refusal:${entry.id}`,
-                role: "refusal",
-                category: entry.refusal.category,
-                partialOutput: entry.refusal.partial_output,
-              } satisfies ChatMessage,
-            ]
-          : [assistant];
+        if (entry.refusal) {
+          return [
+            assistant,
+            {
+              id: `refusal:${entry.id}`,
+              role: "refusal",
+              category: entry.refusal.category,
+              partialOutput: entry.refusal.partial_output,
+            } satisfies ChatMessage,
+          ];
+        }
+        // A cancelled turn that committed its partial prose renders as an
+        // ordinary assistant message, but the stop the user asked for still
+        // gets the same notice a message-less cancellation shows.
+        if (entry.interrupted) {
+          return [
+            assistant,
+            {
+              id: `cancellation:${entry.id}`,
+              role: "system",
+              text: TURN_CANCELLED_NOTICE,
+            } satisfies ChatMessage,
+          ];
+        }
+        return [assistant];
       }
       return [
         {

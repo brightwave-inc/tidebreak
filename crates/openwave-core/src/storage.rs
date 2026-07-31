@@ -2607,12 +2607,19 @@ pub trait Store: Send + Sync {
     ///
     /// Exact ambiguous retries recover both the cancelled turn and the same
     /// journal sequence, including the usage recorded by the original worker.
+    ///
+    /// `output` carries the prose the cancelled turn had already streamed; a
+    /// non-empty output commits as the turn's durable assistant message in the
+    /// same transaction, so reload and the next model turn keep what the user
+    /// was reading when they stopped the run (#1182).
     async fn finish_turn_cancellation_and_append_event(
         &self,
         _id: TurnId,
         _lease_token: uuid::Uuid,
         _now: chrono::DateTime<chrono::Utc>,
         _usage: Usage,
+        _output: Option<&Message>,
+        _citations: &[crate::AssistantCitationInput],
     ) -> Result<Option<JournaledTurnOutcome<FinishTurnCancellationOutcome>>> {
         turn_storage_unavailable()
     }

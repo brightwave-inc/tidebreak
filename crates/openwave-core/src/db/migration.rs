@@ -103,6 +103,7 @@ impl MigratorTrait for Migrator {
             Box::new(RaiseAttemptBudgets),
             Box::new(AddChatNetworkPolicy),
             Box::new(ExtendUserQuestions),
+            Box::new(RetainCancelledTurnOutput),
         ]
     }
 }
@@ -4766,463 +4767,12 @@ impl MigrationTrait for Init {
             .execute_unprepared("INSERT INTO turn_claim_lock (id) VALUES (1)")
             .await?;
 
-        let valid_turn_status = Expr::col(TurnRun::Status).is_in([
-            TurnRunStatus::Queued.as_str(),
-            TurnRunStatus::Running.as_str(),
-            TurnRunStatus::Cancelling.as_str(),
-            TurnRunStatus::WaitingForClient.as_str(),
-            TurnRunStatus::WaitingForAgentRun.as_str(),
-            TurnRunStatus::CancellingClient.as_str(),
-            TurnRunStatus::Resuming.as_str(),
-            TurnRunStatus::RetryWait.as_str(),
-            TurnRunStatus::Completed.as_str(),
-            TurnRunStatus::Failed.as_str(),
-            TurnRunStatus::Cancelled.as_str(),
-        ]);
-        let active_lease = Expr::col(TurnRun::Status)
-            .is_in([
-                TurnRunStatus::Running.as_str(),
-                TurnRunStatus::Cancelling.as_str(),
-            ])
-            .and(Expr::col(TurnRun::LeaseToken).is_not_null())
-            .and(Expr::col(TurnRun::LeaseExpiresAt).is_not_null());
-        let no_lease = Expr::col(TurnRun::Status)
-            .ne(TurnRunStatus::Running.as_str())
-            .and(Expr::col(TurnRun::Status).ne(TurnRunStatus::Cancelling.as_str()))
-            .and(Expr::col(TurnRun::LeaseToken).is_null())
-            .and(Expr::col(TurnRun::LeaseExpiresAt).is_null());
-        let completed_output = Expr::col(TurnRun::Status)
-            .eq(TurnRunStatus::Completed.as_str())
-            .and(Expr::col(TurnRun::OutputMessageId).is_not_null());
-        let no_output = Expr::col(TurnRun::Status)
-            .ne(TurnRunStatus::Completed.as_str())
-            .and(Expr::col(TurnRun::OutputMessageId).is_null());
-        let terminal_finished = Expr::col(TurnRun::Status)
-            .is_in([
-                TurnRunStatus::Completed.as_str(),
-                TurnRunStatus::Failed.as_str(),
-                TurnRunStatus::Cancelled.as_str(),
-            ])
-            .and(Expr::col(TurnRun::FinishedAt).is_not_null());
-        let nonterminal_unfinished = Expr::col(TurnRun::Status)
-            .is_in([
-                TurnRunStatus::Queued.as_str(),
-                TurnRunStatus::Running.as_str(),
-                TurnRunStatus::Cancelling.as_str(),
-                TurnRunStatus::WaitingForClient.as_str(),
-                TurnRunStatus::WaitingForAgentRun.as_str(),
-                TurnRunStatus::CancellingClient.as_str(),
-                TurnRunStatus::Resuming.as_str(),
-                TurnRunStatus::RetryWait.as_str(),
-            ])
-            .and(Expr::col(TurnRun::FinishedAt).is_null());
-        let queued_attempt = Expr::col(TurnRun::Status)
-            .eq(TurnRunStatus::Queued.as_str())
-            .and(Expr::col(TurnRun::AttemptCount).eq(0))
-            .and(Expr::col(TurnRun::ClaimCount).eq(0))
-            .and(Expr::col(TurnRun::StartedAt).is_null());
-        let leased_attempt = Expr::col(TurnRun::Status)
-            .is_in([
-                TurnRunStatus::Running.as_str(),
-                TurnRunStatus::Cancelling.as_str(),
-            ])
-            .and(Expr::col(TurnRun::AttemptCount).gte(1))
-            .and(Expr::col(TurnRun::StartedAt).is_not_null());
-        let retryable_attempt = Expr::col(TurnRun::Status)
-            .eq(TurnRunStatus::RetryWait.as_str())
-            .and(Expr::col(TurnRun::AttemptCount).gte(1))
-            .and(Expr::col(TurnRun::AttemptCount).lt(Expr::col(TurnRun::MaxAttempts)))
-            .and(Expr::col(TurnRun::StartedAt).is_not_null());
-        let continuation_checkpoint_attempt = Expr::col(TurnRun::Status)
-            .is_in([
-                TurnRunStatus::WaitingForClient.as_str(),
-                TurnRunStatus::WaitingForAgentRun.as_str(),
-                TurnRunStatus::CancellingClient.as_str(),
-                TurnRunStatus::Resuming.as_str(),
-            ])
-            .and(Expr::col(TurnRun::AttemptCount).gte(1))
-            .and(Expr::col(TurnRun::StartedAt).is_not_null());
-        let resolved_attempt = Expr::col(TurnRun::Status)
-            .is_in([
-                TurnRunStatus::Completed.as_str(),
-                TurnRunStatus::Failed.as_str(),
-            ])
-            .and(Expr::col(TurnRun::AttemptCount).gte(1))
-            .and(Expr::col(TurnRun::StartedAt).is_not_null());
-        let cancelled_attempt = Expr::col(TurnRun::Status)
-            .eq(TurnRunStatus::Cancelled.as_str())
-            .and(
-                Expr::col(TurnRun::AttemptCount)
-                    .eq(0)
-                    .and(Expr::col(TurnRun::ClaimCount).eq(0))
-                    .and(Expr::col(TurnRun::StartedAt).is_null())
-                    .or(Expr::col(TurnRun::AttemptCount)
-                        .gte(1)
-                        .and(Expr::col(TurnRun::StartedAt).is_not_null())),
-            );
-        let failure_has_error = Expr::col(TurnRun::Status)
-            .is_in([
-                TurnRunStatus::RetryWait.as_str(),
-                TurnRunStatus::Failed.as_str(),
-            ])
-            .and(Expr::col(TurnRun::LastErrorCode).is_not_null());
-        let success_has_no_error = Expr::col(TurnRun::Status)
-            .is_in([
-                TurnRunStatus::Queued.as_str(),
-                TurnRunStatus::Running.as_str(),
-                TurnRunStatus::Cancelling.as_str(),
-                TurnRunStatus::WaitingForClient.as_str(),
-                TurnRunStatus::WaitingForAgentRun.as_str(),
-                TurnRunStatus::CancellingClient.as_str(),
-                TurnRunStatus::Resuming.as_str(),
-                TurnRunStatus::Completed.as_str(),
-                TurnRunStatus::Cancelled.as_str(),
-            ])
-            .and(Expr::col(TurnRun::LastErrorCode).is_null())
-            .and(Expr::col(TurnRun::LastErrorDetail).is_null());
-        let coherent_steer_generation = Expr::col(TurnRun::SteerRevision)
-            .eq(0)
-            .and(Expr::col(TurnRun::LastSteerAppliedAt).is_null())
-            .or(Expr::col(TurnRun::SteerRevision)
-                .gte(1)
-                .and(Expr::col(TurnRun::LastSteerAppliedAt).is_not_null()));
-
         manager
-            .create_table(
-                Table::create()
-                    .table(TurnRun::Table)
-                    .if_not_exists()
-                    .col(ColumnDef::new(TurnRun::Id).uuid().not_null().primary_key())
-                    .col(ColumnDef::new(TurnRun::ChatId).uuid().not_null())
-                    .col(ColumnDef::new(TurnRun::AgentRunId).uuid().not_null())
-                    .col(
-                        ColumnDef::new(TurnRun::AgentRunDepth)
-                            .small_integer()
-                            .not_null()
-                            .default(0),
-                    )
-                    .col(ColumnDef::new(TurnRun::InputMessageId).uuid().not_null())
-                    .col(ColumnDef::new(TurnRun::OutputMessageId).uuid())
-                    .col(
-                        ColumnDef::new(TurnRun::Model)
-                            .string_len(crate::model::TurnRun::MAX_MODEL_LEN as u32)
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(TurnRun::Status)
-                            .string_len(32)
-                            .not_null()
-                            .default(TurnRunStatus::Queued.as_str()),
-                    )
-                    .col(
-                        ColumnDef::new(TurnRun::AttemptCount)
-                            .integer()
-                            .not_null()
-                            .default(0),
-                    )
-                    .col(
-                        ColumnDef::new(TurnRun::MaxAttempts)
-                            .integer()
-                            .not_null()
-                            .default(crate::model::TurnRun::DEFAULT_MAX_ATTEMPTS),
-                    )
-                    .col(
-                        ColumnDef::new(TurnRun::ClaimCount)
-                            .integer()
-                            .not_null()
-                            .default(0),
-                    )
-                    .col(
-                        ColumnDef::new(TurnRun::ModelSteps)
-                            .integer()
-                            .not_null()
-                            .default(0),
-                    )
-                    .col(
-                        ColumnDef::new(TurnRun::InputTokens)
-                            .big_integer()
-                            .not_null()
-                            .default(0),
-                    )
-                    .col(
-                        ColumnDef::new(TurnRun::OutputTokens)
-                            .big_integer()
-                            .not_null()
-                            .default(0),
-                    )
-                    .col(
-                        ColumnDef::new(TurnRun::CacheReadInputTokens)
-                            .big_integer()
-                            .not_null()
-                            .default(0),
-                    )
-                    .col(
-                        ColumnDef::new(TurnRun::CacheCreationInputTokens)
-                            .big_integer()
-                            .not_null()
-                            .default(0),
-                    )
-                    .col(
-                        ColumnDef::new(TurnRun::AvailableAt)
-                            .timestamp_with_time_zone()
-                            .not_null(),
-                    )
-                    .col(ColumnDef::new(TurnRun::LeaseToken).uuid())
-                    .col(ColumnDef::new(TurnRun::LeaseExpiresAt).timestamp_with_time_zone())
-                    .col(ColumnDef::new(TurnRun::StartedAt).timestamp_with_time_zone())
-                    .col(ColumnDef::new(TurnRun::FinishedAt).timestamp_with_time_zone())
-                    .col(
-                        ColumnDef::new(TurnRun::LastErrorCode)
-                            .string_len(crate::model::TurnRun::MAX_ERROR_CODE_LEN as u32),
-                    )
-                    .col(
-                        ColumnDef::new(TurnRun::LastErrorDetail)
-                            .string_len(crate::model::TurnRun::MAX_ERROR_DETAIL_LEN as u32),
-                    )
-                    .col(
-                        ColumnDef::new(TurnRun::SteerRevision)
-                            .big_integer()
-                            .not_null()
-                            .default(0),
-                    )
-                    .col(ColumnDef::new(TurnRun::LastSteerAppliedAt).timestamp_with_time_zone())
-                    .col(
-                        ColumnDef::new(TurnRun::CreatedAt)
-                            .timestamp_with_time_zone()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(TurnRun::UpdatedAt)
-                            .timestamp_with_time_zone()
-                            .not_null(),
-                    )
-                    .foreign_key(
-                        ForeignKey::create()
-                            .name("fk_turn_run_chat")
-                            .from(TurnRun::Table, TurnRun::ChatId)
-                            .to(Chat::Table, Chat::Id)
-                            .on_delete(ForeignKeyAction::Cascade),
-                    )
-                    .foreign_key(
-                        ForeignKey::create()
-                            .name("fk_turn_run_foreground_agent")
-                            .from_tbl(TurnRun::Table)
-                            .from_col(TurnRun::AgentRunId)
-                            .from_col(TurnRun::ChatId)
-                            .from_col(TurnRun::AgentRunDepth)
-                            .to_tbl(AgentRun::Table)
-                            .to_col(AgentRun::Id)
-                            .to_col(AgentRun::ChatId)
-                            .to_col(AgentRun::Depth)
-                            .on_delete(ForeignKeyAction::Restrict),
-                    )
-                    .foreign_key(
-                        ForeignKey::create()
-                            .name("fk_turn_run_input_message")
-                            .from_tbl(TurnRun::Table)
-                            .from_col(TurnRun::InputMessageId)
-                            .from_col(TurnRun::ChatId)
-                            .from_col(TurnRun::Id)
-                            .to_tbl(Message::Table)
-                            .to_col(Message::Id)
-                            .to_col(Message::ChatId)
-                            .to_col(Message::TurnId)
-                            .on_delete(ForeignKeyAction::Restrict),
-                    )
-                    .foreign_key(
-                        ForeignKey::create()
-                            .name("fk_turn_run_output_message")
-                            .from_tbl(TurnRun::Table)
-                            .from_col(TurnRun::OutputMessageId)
-                            .from_col(TurnRun::ChatId)
-                            .from_col(TurnRun::Id)
-                            .to_tbl(Message::Table)
-                            .to_col(Message::Id)
-                            .to_col(Message::ChatId)
-                            .to_col(Message::TurnId)
-                            .on_delete(ForeignKeyAction::Restrict),
-                    )
-                    .foreign_key(
-                        ForeignKey::create()
-                            .name("fk_turn_run_live_claim")
-                            .from_tbl(TurnRun::Table)
-                            .from_col(TurnRun::LeaseToken)
-                            .from_col(TurnRun::Id)
-                            .from_col(TurnRun::AttemptCount)
-                            .from_col(TurnRun::ClaimCount)
-                            .to_tbl(TurnClaim::Table)
-                            .to_col(TurnClaim::Token)
-                            .to_col(TurnClaim::TurnId)
-                            .to_col(TurnClaim::AttemptCount)
-                            .to_col(TurnClaim::ClaimCount)
-                            .on_delete(ForeignKeyAction::Restrict),
-                    )
-                    .check(
-                        Func::char_length(Expr::col(TurnRun::Model))
-                            .between(1, crate::model::TurnRun::MAX_MODEL_LEN as i32),
-                    )
-                    .check(Expr::col(TurnRun::AgentRunDepth).eq(0))
-                    .check(valid_turn_status)
-                    .check(
-                        Expr::col(TurnRun::AttemptCount)
-                            .gte(0)
-                            .and(Expr::col(TurnRun::MaxAttempts).gte(1))
-                            .and(
-                                Expr::col(TurnRun::AttemptCount)
-                                    .lte(Expr::col(TurnRun::MaxAttempts)),
-                            ),
-                    )
-                    .check(Expr::col(TurnRun::ClaimCount).gte(Expr::col(TurnRun::AttemptCount)))
-                    .check(active_lease.or(no_lease))
-                    .check(completed_output.or(no_output))
-                    .check(terminal_finished.or(nonterminal_unfinished))
-                    .check(
-                        queued_attempt
-                            .or(leased_attempt)
-                            .or(continuation_checkpoint_attempt)
-                            .or(retryable_attempt)
-                            .or(resolved_attempt)
-                            .or(cancelled_attempt),
-                    )
-                    .check(failure_has_error.or(success_has_no_error))
-                    .check(
-                        Expr::col(TurnRun::LastErrorCode)
-                            .is_null()
-                            .or(Func::char_length(Expr::col(TurnRun::LastErrorCode))
-                                .between(1, crate::model::TurnRun::MAX_ERROR_CODE_LEN as i32)),
-                    )
-                    .check(
-                        Expr::col(TurnRun::LastErrorDetail)
-                            .is_null()
-                            .or(Func::char_length(Expr::col(TurnRun::LastErrorDetail))
-                                .between(1, crate::model::TurnRun::MAX_ERROR_DETAIL_LEN as i32)),
-                    )
-                    .check(Expr::col(TurnRun::SteerRevision).gte(0))
-                    .check(coherent_steer_generation)
-                    .check(
-                        Expr::col(TurnRun::ModelSteps)
-                            .gte(0)
-                            .and(Expr::col(TurnRun::ModelSteps).lte(i64::from(i32::MAX)))
-                            .and(Expr::col(TurnRun::InputTokens).gte(0))
-                            .and(Expr::col(TurnRun::InputTokens).lte(i64::from(u32::MAX)))
-                            .and(Expr::col(TurnRun::OutputTokens).gte(0))
-                            .and(Expr::col(TurnRun::OutputTokens).lte(i64::from(u32::MAX)))
-                            .and(Expr::col(TurnRun::CacheReadInputTokens).gte(0))
-                            .and(Expr::col(TurnRun::CacheReadInputTokens).lte(i64::from(u32::MAX)))
-                            .and(Expr::col(TurnRun::CacheCreationInputTokens).gte(0))
-                            .and(
-                                Expr::col(TurnRun::CacheCreationInputTokens)
-                                    .lte(i64::from(u32::MAX)),
-                            ),
-                    )
-                    .check(
-                        Expr::col(TurnRun::LastSteerAppliedAt)
-                            .is_null()
-                            .or(Expr::col(TurnRun::LastSteerAppliedAt)
-                                .gte(Expr::col(TurnRun::CreatedAt))
-                                .and(
-                                    Expr::col(TurnRun::LastSteerAppliedAt)
-                                        .lte(Expr::col(TurnRun::UpdatedAt)),
-                                )),
-                    )
-                    .to_owned(),
-            )
+            .create_table(turn_run_table(TurnRun::Table, false))
             .await?;
-
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_turn_run_chat_identity")
-                    .table(TurnRun::Table)
-                    .col(TurnRun::ChatId)
-                    .col(TurnRun::Id)
-                    .unique()
-                    .to_owned(),
-            )
-            .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_turn_run_input_message")
-                    .table(TurnRun::Table)
-                    .col(TurnRun::InputMessageId)
-                    .unique()
-                    .to_owned(),
-            )
-            .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_turn_run_one_active")
-                    .table(TurnRun::Table)
-                    .col(TurnRun::ChatId)
-                    .unique()
-                    .and_where(Expr::col(TurnRun::Status).is_in([
-                        TurnRunStatus::Queued.as_str(),
-                        TurnRunStatus::Running.as_str(),
-                        TurnRunStatus::Cancelling.as_str(),
-                        TurnRunStatus::WaitingForClient.as_str(),
-                        TurnRunStatus::WaitingForAgentRun.as_str(),
-                        TurnRunStatus::CancellingClient.as_str(),
-                        TurnRunStatus::Resuming.as_str(),
-                        TurnRunStatus::RetryWait.as_str(),
-                    ]))
-                    .to_owned(),
-            )
-            .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_turn_run_due")
-                    .table(TurnRun::Table)
-                    .col(TurnRun::Status)
-                    .col(TurnRun::AvailableAt)
-                    .col(TurnRun::CreatedAt)
-                    .to_owned(),
-            )
-            .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_turn_run_lease_token")
-                    .table(TurnRun::Table)
-                    .col(TurnRun::LeaseToken)
-                    .unique()
-                    .to_owned(),
-            )
-            .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_turn_run_stale_lease")
-                    .table(TurnRun::Table)
-                    .col(TurnRun::Status)
-                    .col(TurnRun::LeaseExpiresAt)
-                    .to_owned(),
-            )
-            .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_turn_run_history")
-                    .table(TurnRun::Table)
-                    .col(TurnRun::ChatId)
-                    .col(TurnRun::CreatedAt)
-                    .to_owned(),
-            )
-            .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_turn_run_admission_owner")
-                    .table(TurnRun::Table)
-                    .col(TurnRun::Id)
-                    .col(TurnRun::ChatId)
-                    .col(TurnRun::AgentRunId)
-                    .unique()
-                    .to_owned(),
-            )
-            .await?;
+        for index in turn_run_indexes() {
+            manager.create_index(index).await?;
+        }
 
         manager
             .create_table(
@@ -10130,7 +9680,7 @@ enum MessageIdentity {
     Owner,
 }
 
-#[derive(DeriveIden)]
+#[derive(DeriveIden, Clone, Copy)]
 enum TurnRun {
     Table,
     Id,
@@ -10345,4 +9895,582 @@ enum Event {
     Terminal,
     Payload,
     CreatedAt,
+}
+
+/// The `turn_run` table, shared between `Init` and the cancelled-output
+/// rebuild migration so the two definitions cannot drift. `table` is the
+/// physical table to create — the canonical one in `Init`, a scratch alias
+/// during a SQLite rebuild. `cancelled_output` selects the terminal-output
+/// domain: strict, or widened so a cancelled turn keeps the partial prose it
+/// had already streamed (#1182).
+fn turn_run_table<T>(table: T, cancelled_output: bool) -> TableCreateStatement
+where
+    T: IntoTableRef + Clone,
+{
+    let valid_turn_status = Expr::col(TurnRun::Status).is_in([
+        TurnRunStatus::Queued.as_str(),
+        TurnRunStatus::Running.as_str(),
+        TurnRunStatus::Cancelling.as_str(),
+        TurnRunStatus::WaitingForClient.as_str(),
+        TurnRunStatus::WaitingForAgentRun.as_str(),
+        TurnRunStatus::CancellingClient.as_str(),
+        TurnRunStatus::Resuming.as_str(),
+        TurnRunStatus::RetryWait.as_str(),
+        TurnRunStatus::Completed.as_str(),
+        TurnRunStatus::Failed.as_str(),
+        TurnRunStatus::Cancelled.as_str(),
+    ]);
+    let active_lease = Expr::col(TurnRun::Status)
+        .is_in([
+            TurnRunStatus::Running.as_str(),
+            TurnRunStatus::Cancelling.as_str(),
+        ])
+        .and(Expr::col(TurnRun::LeaseToken).is_not_null())
+        .and(Expr::col(TurnRun::LeaseExpiresAt).is_not_null());
+    let no_lease = Expr::col(TurnRun::Status)
+        .ne(TurnRunStatus::Running.as_str())
+        .and(Expr::col(TurnRun::Status).ne(TurnRunStatus::Cancelling.as_str()))
+        .and(Expr::col(TurnRun::LeaseToken).is_null())
+        .and(Expr::col(TurnRun::LeaseExpiresAt).is_null());
+    let terminal_finished = Expr::col(TurnRun::Status)
+        .is_in([
+            TurnRunStatus::Completed.as_str(),
+            TurnRunStatus::Failed.as_str(),
+            TurnRunStatus::Cancelled.as_str(),
+        ])
+        .and(Expr::col(TurnRun::FinishedAt).is_not_null());
+    let nonterminal_unfinished = Expr::col(TurnRun::Status)
+        .is_in([
+            TurnRunStatus::Queued.as_str(),
+            TurnRunStatus::Running.as_str(),
+            TurnRunStatus::Cancelling.as_str(),
+            TurnRunStatus::WaitingForClient.as_str(),
+            TurnRunStatus::WaitingForAgentRun.as_str(),
+            TurnRunStatus::CancellingClient.as_str(),
+            TurnRunStatus::Resuming.as_str(),
+            TurnRunStatus::RetryWait.as_str(),
+        ])
+        .and(Expr::col(TurnRun::FinishedAt).is_null());
+    let queued_attempt = Expr::col(TurnRun::Status)
+        .eq(TurnRunStatus::Queued.as_str())
+        .and(Expr::col(TurnRun::AttemptCount).eq(0))
+        .and(Expr::col(TurnRun::ClaimCount).eq(0))
+        .and(Expr::col(TurnRun::StartedAt).is_null());
+    let leased_attempt = Expr::col(TurnRun::Status)
+        .is_in([
+            TurnRunStatus::Running.as_str(),
+            TurnRunStatus::Cancelling.as_str(),
+        ])
+        .and(Expr::col(TurnRun::AttemptCount).gte(1))
+        .and(Expr::col(TurnRun::StartedAt).is_not_null());
+    let retryable_attempt = Expr::col(TurnRun::Status)
+        .eq(TurnRunStatus::RetryWait.as_str())
+        .and(Expr::col(TurnRun::AttemptCount).gte(1))
+        .and(Expr::col(TurnRun::AttemptCount).lt(Expr::col(TurnRun::MaxAttempts)))
+        .and(Expr::col(TurnRun::StartedAt).is_not_null());
+    let continuation_checkpoint_attempt = Expr::col(TurnRun::Status)
+        .is_in([
+            TurnRunStatus::WaitingForClient.as_str(),
+            TurnRunStatus::WaitingForAgentRun.as_str(),
+            TurnRunStatus::CancellingClient.as_str(),
+            TurnRunStatus::Resuming.as_str(),
+        ])
+        .and(Expr::col(TurnRun::AttemptCount).gte(1))
+        .and(Expr::col(TurnRun::StartedAt).is_not_null());
+    let resolved_attempt = Expr::col(TurnRun::Status)
+        .is_in([
+            TurnRunStatus::Completed.as_str(),
+            TurnRunStatus::Failed.as_str(),
+        ])
+        .and(Expr::col(TurnRun::AttemptCount).gte(1))
+        .and(Expr::col(TurnRun::StartedAt).is_not_null());
+    let cancelled_attempt = Expr::col(TurnRun::Status)
+        .eq(TurnRunStatus::Cancelled.as_str())
+        .and(
+            Expr::col(TurnRun::AttemptCount)
+                .eq(0)
+                .and(Expr::col(TurnRun::ClaimCount).eq(0))
+                .and(Expr::col(TurnRun::StartedAt).is_null())
+                .or(Expr::col(TurnRun::AttemptCount)
+                    .gte(1)
+                    .and(Expr::col(TurnRun::StartedAt).is_not_null())),
+        );
+    let failure_has_error = Expr::col(TurnRun::Status)
+        .is_in([
+            TurnRunStatus::RetryWait.as_str(),
+            TurnRunStatus::Failed.as_str(),
+        ])
+        .and(Expr::col(TurnRun::LastErrorCode).is_not_null());
+    let success_has_no_error = Expr::col(TurnRun::Status)
+        .is_in([
+            TurnRunStatus::Queued.as_str(),
+            TurnRunStatus::Running.as_str(),
+            TurnRunStatus::Cancelling.as_str(),
+            TurnRunStatus::WaitingForClient.as_str(),
+            TurnRunStatus::WaitingForAgentRun.as_str(),
+            TurnRunStatus::CancellingClient.as_str(),
+            TurnRunStatus::Resuming.as_str(),
+            TurnRunStatus::Completed.as_str(),
+            TurnRunStatus::Cancelled.as_str(),
+        ])
+        .and(Expr::col(TurnRun::LastErrorCode).is_null())
+        .and(Expr::col(TurnRun::LastErrorDetail).is_null());
+    let coherent_steer_generation = Expr::col(TurnRun::SteerRevision)
+        .eq(0)
+        .and(Expr::col(TurnRun::LastSteerAppliedAt).is_null())
+        .or(Expr::col(TurnRun::SteerRevision)
+            .gte(1)
+            .and(Expr::col(TurnRun::LastSteerAppliedAt).is_not_null()));
+
+    Table::create()
+        .table(table.clone())
+        .col(ColumnDef::new(TurnRun::Id).uuid().not_null().primary_key())
+        .col(ColumnDef::new(TurnRun::ChatId).uuid().not_null())
+        .col(ColumnDef::new(TurnRun::AgentRunId).uuid().not_null())
+        .col(
+            ColumnDef::new(TurnRun::AgentRunDepth)
+                .small_integer()
+                .not_null()
+                .default(0),
+        )
+        .col(ColumnDef::new(TurnRun::InputMessageId).uuid().not_null())
+        .col(ColumnDef::new(TurnRun::OutputMessageId).uuid())
+        .col(
+            ColumnDef::new(TurnRun::Model)
+                .string_len(crate::model::TurnRun::MAX_MODEL_LEN as u32)
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(TurnRun::Status)
+                .string_len(32)
+                .not_null()
+                .default(TurnRunStatus::Queued.as_str()),
+        )
+        .col(
+            ColumnDef::new(TurnRun::AttemptCount)
+                .integer()
+                .not_null()
+                .default(0),
+        )
+        .col(
+            ColumnDef::new(TurnRun::MaxAttempts)
+                .integer()
+                .not_null()
+                .default(crate::model::TurnRun::DEFAULT_MAX_ATTEMPTS),
+        )
+        .col(
+            ColumnDef::new(TurnRun::ClaimCount)
+                .integer()
+                .not_null()
+                .default(0),
+        )
+        .col(
+            ColumnDef::new(TurnRun::ModelSteps)
+                .integer()
+                .not_null()
+                .default(0),
+        )
+        .col(
+            ColumnDef::new(TurnRun::InputTokens)
+                .big_integer()
+                .not_null()
+                .default(0),
+        )
+        .col(
+            ColumnDef::new(TurnRun::OutputTokens)
+                .big_integer()
+                .not_null()
+                .default(0),
+        )
+        .col(
+            ColumnDef::new(TurnRun::CacheReadInputTokens)
+                .big_integer()
+                .not_null()
+                .default(0),
+        )
+        .col(
+            ColumnDef::new(TurnRun::CacheCreationInputTokens)
+                .big_integer()
+                .not_null()
+                .default(0),
+        )
+        .col(
+            ColumnDef::new(TurnRun::AvailableAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .col(ColumnDef::new(TurnRun::LeaseToken).uuid())
+        .col(ColumnDef::new(TurnRun::LeaseExpiresAt).timestamp_with_time_zone())
+        .col(ColumnDef::new(TurnRun::StartedAt).timestamp_with_time_zone())
+        .col(ColumnDef::new(TurnRun::FinishedAt).timestamp_with_time_zone())
+        .col(
+            ColumnDef::new(TurnRun::LastErrorCode)
+                .string_len(crate::model::TurnRun::MAX_ERROR_CODE_LEN as u32),
+        )
+        .col(
+            ColumnDef::new(TurnRun::LastErrorDetail)
+                .string_len(crate::model::TurnRun::MAX_ERROR_DETAIL_LEN as u32),
+        )
+        .col(
+            ColumnDef::new(TurnRun::SteerRevision)
+                .big_integer()
+                .not_null()
+                .default(0),
+        )
+        .col(ColumnDef::new(TurnRun::LastSteerAppliedAt).timestamp_with_time_zone())
+        .col(
+            ColumnDef::new(TurnRun::CreatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(TurnRun::UpdatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_turn_run_chat")
+                .from(table.clone(), TurnRun::ChatId)
+                .to(Chat::Table, Chat::Id)
+                .on_delete(ForeignKeyAction::Cascade),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_turn_run_foreground_agent")
+                .from_tbl(table.clone())
+                .from_col(TurnRun::AgentRunId)
+                .from_col(TurnRun::ChatId)
+                .from_col(TurnRun::AgentRunDepth)
+                .to_tbl(AgentRun::Table)
+                .to_col(AgentRun::Id)
+                .to_col(AgentRun::ChatId)
+                .to_col(AgentRun::Depth)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_turn_run_input_message")
+                .from_tbl(table.clone())
+                .from_col(TurnRun::InputMessageId)
+                .from_col(TurnRun::ChatId)
+                .from_col(TurnRun::Id)
+                .to_tbl(Message::Table)
+                .to_col(Message::Id)
+                .to_col(Message::ChatId)
+                .to_col(Message::TurnId)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_turn_run_output_message")
+                .from_tbl(table.clone())
+                .from_col(TurnRun::OutputMessageId)
+                .from_col(TurnRun::ChatId)
+                .from_col(TurnRun::Id)
+                .to_tbl(Message::Table)
+                .to_col(Message::Id)
+                .to_col(Message::ChatId)
+                .to_col(Message::TurnId)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_turn_run_live_claim")
+                .from_tbl(table.clone())
+                .from_col(TurnRun::LeaseToken)
+                .from_col(TurnRun::Id)
+                .from_col(TurnRun::AttemptCount)
+                .from_col(TurnRun::ClaimCount)
+                .to_tbl(TurnClaim::Table)
+                .to_col(TurnClaim::Token)
+                .to_col(TurnClaim::TurnId)
+                .to_col(TurnClaim::AttemptCount)
+                .to_col(TurnClaim::ClaimCount)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .check(
+            Func::char_length(Expr::col(TurnRun::Model))
+                .between(1, crate::model::TurnRun::MAX_MODEL_LEN as i32),
+        )
+        .check(Expr::col(TurnRun::AgentRunDepth).eq(0))
+        .check(valid_turn_status)
+        .check(
+            Expr::col(TurnRun::AttemptCount)
+                .gte(0)
+                .and(Expr::col(TurnRun::MaxAttempts).gte(1))
+                .and(Expr::col(TurnRun::AttemptCount).lte(Expr::col(TurnRun::MaxAttempts))),
+        )
+        .check(Expr::col(TurnRun::ClaimCount).gte(Expr::col(TurnRun::AttemptCount)))
+        .check(active_lease.or(no_lease))
+        .check(turn_run_terminal_output_check(cancelled_output))
+        .check(terminal_finished.or(nonterminal_unfinished))
+        .check(
+            queued_attempt
+                .or(leased_attempt)
+                .or(continuation_checkpoint_attempt)
+                .or(retryable_attempt)
+                .or(resolved_attempt)
+                .or(cancelled_attempt),
+        )
+        .check(failure_has_error.or(success_has_no_error))
+        .check(
+            Expr::col(TurnRun::LastErrorCode)
+                .is_null()
+                .or(Func::char_length(Expr::col(TurnRun::LastErrorCode))
+                    .between(1, crate::model::TurnRun::MAX_ERROR_CODE_LEN as i32)),
+        )
+        .check(
+            Expr::col(TurnRun::LastErrorDetail)
+                .is_null()
+                .or(Func::char_length(Expr::col(TurnRun::LastErrorDetail))
+                    .between(1, crate::model::TurnRun::MAX_ERROR_DETAIL_LEN as i32)),
+        )
+        .check(Expr::col(TurnRun::SteerRevision).gte(0))
+        .check(coherent_steer_generation)
+        .check(
+            Expr::col(TurnRun::ModelSteps)
+                .gte(0)
+                .and(Expr::col(TurnRun::ModelSteps).lte(i64::from(i32::MAX)))
+                .and(Expr::col(TurnRun::InputTokens).gte(0))
+                .and(Expr::col(TurnRun::InputTokens).lte(i64::from(u32::MAX)))
+                .and(Expr::col(TurnRun::OutputTokens).gte(0))
+                .and(Expr::col(TurnRun::OutputTokens).lte(i64::from(u32::MAX)))
+                .and(Expr::col(TurnRun::CacheReadInputTokens).gte(0))
+                .and(Expr::col(TurnRun::CacheReadInputTokens).lte(i64::from(u32::MAX)))
+                .and(Expr::col(TurnRun::CacheCreationInputTokens).gte(0))
+                .and(Expr::col(TurnRun::CacheCreationInputTokens).lte(i64::from(u32::MAX))),
+        )
+        .check(
+            Expr::col(TurnRun::LastSteerAppliedAt)
+                .is_null()
+                .or(Expr::col(TurnRun::LastSteerAppliedAt)
+                    .gte(Expr::col(TurnRun::CreatedAt))
+                    .and(
+                        Expr::col(TurnRun::LastSteerAppliedAt).lte(Expr::col(TurnRun::UpdatedAt)),
+                    )),
+        )
+        .to_owned()
+}
+
+/// The terminal-output domain of `turn_run`. Strict: only a completed turn
+/// carries an output message. Widened (#1182): a cancelled turn may also
+/// carry one — the partial prose it had already streamed — or none, when the
+/// cancel arrived before any text.
+fn turn_run_terminal_output_check(cancelled_output: bool) -> SimpleExpr {
+    let completed_output = Expr::col(TurnRun::Status)
+        .eq(TurnRunStatus::Completed.as_str())
+        .and(Expr::col(TurnRun::OutputMessageId).is_not_null());
+    if cancelled_output {
+        completed_output
+            .or(Expr::col(TurnRun::Status).eq(TurnRunStatus::Cancelled.as_str()))
+            .or(Expr::col(TurnRun::Status)
+                .is_not_in([
+                    TurnRunStatus::Completed.as_str(),
+                    TurnRunStatus::Cancelled.as_str(),
+                ])
+                .and(Expr::col(TurnRun::OutputMessageId).is_null()))
+    } else {
+        let no_output = Expr::col(TurnRun::Status)
+            .ne(TurnRunStatus::Completed.as_str())
+            .and(Expr::col(TurnRun::OutputMessageId).is_null());
+        completed_output.or(no_output)
+    }
+}
+
+/// Every index `turn_run` carries, for `Init` and for recreation after a
+/// SQLite table rebuild.
+fn turn_run_indexes() -> Vec<IndexCreateStatement> {
+    vec![
+        Index::create()
+            .name("idx_turn_run_chat_identity")
+            .table(TurnRun::Table)
+            .col(TurnRun::ChatId)
+            .col(TurnRun::Id)
+            .unique()
+            .to_owned(),
+        Index::create()
+            .name("idx_turn_run_input_message")
+            .table(TurnRun::Table)
+            .col(TurnRun::InputMessageId)
+            .unique()
+            .to_owned(),
+        Index::create()
+            .name("idx_turn_run_one_active")
+            .table(TurnRun::Table)
+            .col(TurnRun::ChatId)
+            .unique()
+            .and_where(Expr::col(TurnRun::Status).is_in([
+                TurnRunStatus::Queued.as_str(),
+                TurnRunStatus::Running.as_str(),
+                TurnRunStatus::Cancelling.as_str(),
+                TurnRunStatus::WaitingForClient.as_str(),
+                TurnRunStatus::WaitingForAgentRun.as_str(),
+                TurnRunStatus::CancellingClient.as_str(),
+                TurnRunStatus::Resuming.as_str(),
+                TurnRunStatus::RetryWait.as_str(),
+            ]))
+            .to_owned(),
+        Index::create()
+            .name("idx_turn_run_due")
+            .table(TurnRun::Table)
+            .col(TurnRun::Status)
+            .col(TurnRun::AvailableAt)
+            .col(TurnRun::CreatedAt)
+            .to_owned(),
+        Index::create()
+            .name("idx_turn_run_lease_token")
+            .table(TurnRun::Table)
+            .col(TurnRun::LeaseToken)
+            .unique()
+            .to_owned(),
+        Index::create()
+            .name("idx_turn_run_stale_lease")
+            .table(TurnRun::Table)
+            .col(TurnRun::Status)
+            .col(TurnRun::LeaseExpiresAt)
+            .to_owned(),
+        Index::create()
+            .name("idx_turn_run_history")
+            .table(TurnRun::Table)
+            .col(TurnRun::ChatId)
+            .col(TurnRun::CreatedAt)
+            .to_owned(),
+        Index::create()
+            .name("idx_turn_run_admission_owner")
+            .table(TurnRun::Table)
+            .col(TurnRun::Id)
+            .col(TurnRun::ChatId)
+            .col(TurnRun::AgentRunId)
+            .unique()
+            .to_owned(),
+    ]
+}
+
+const TURN_RUN_REBUILD: &str = "turn_run_rebuild";
+
+/// Rebuild `turn_run` on SQLite with the chosen terminal-output domain.
+///
+/// The output check is an anonymous CHECK from `Init`, and SQLite cannot drop
+/// or alter one in place — the sanctioned path is a scratch-table rebuild, the
+/// same shape the container-location migration uses for `agent_run`. Other
+/// tables' foreign keys reference `turn_run` by name and survive the
+/// drop-and-rename under `PRAGMA foreign_keys=OFF`.
+async fn rebuild_turn_run_sqlite_output(
+    manager: &SchemaManager<'_>,
+    cancelled_output: bool,
+) -> Result<(), DbErr> {
+    let columns = "id, chat_id, agent_run_id, agent_run_depth, input_message_id, \
+         output_message_id, model, status, attempt_count, max_attempts, claim_count, \
+         model_steps, input_tokens, output_tokens, cache_read_input_tokens, \
+         cache_creation_input_tokens, available_at, lease_token, lease_expires_at, \
+         started_at, finished_at, last_error_code, last_error_detail, steer_revision, \
+         last_steer_applied_at, created_at, updated_at";
+    let mut statements = vec![
+        "PRAGMA foreign_keys=OFF".to_owned(),
+        "BEGIN IMMEDIATE".to_owned(),
+        turn_run_table(Alias::new(TURN_RUN_REBUILD), cancelled_output)
+            .to_string(SqliteQueryBuilder),
+        format!("INSERT INTO {TURN_RUN_REBUILD} ({columns}) SELECT {columns} FROM turn_run"),
+        "DROP TABLE turn_run".to_owned(),
+        format!("ALTER TABLE {TURN_RUN_REBUILD} RENAME TO turn_run"),
+    ];
+    statements.extend(
+        turn_run_indexes()
+            .iter()
+            .map(|index| index.to_string(SqliteQueryBuilder)),
+    );
+    statements.push("COMMIT".to_owned());
+    statements.push("PRAGMA foreign_keys=ON".to_owned());
+    manager
+        .get_connection()
+        .execute_unprepared(&format!("{};", statements.join(";\n")))
+        .await?;
+    Ok(())
+}
+
+/// Refuse to narrow the terminal-output domain while any cancelled turn still
+/// carries an output message, so a rollback fails up front with the actual
+/// problem named instead of stranding a half-rebuilt schema.
+async fn reject_down_with_cancelled_output_rows(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    let conn = manager.get_connection();
+    let backend = manager.get_database_backend();
+    let remaining = conn
+        .query_one_raw(sea_orm::Statement::from_string(
+            backend,
+            "SELECT COUNT(*) AS remaining FROM turn_run \
+             WHERE status = 'cancelled' AND output_message_id IS NOT NULL",
+        ))
+        .await?;
+    let remaining = match remaining {
+        Some(row) => row.try_get::<i64>("", "remaining")?,
+        None => 0,
+    };
+    if remaining > 0 {
+        return Err(DbErr::Custom(format!(
+            "cannot narrow turn_run's output domain: {remaining} cancelled turn(s) retain \
+             partial output; delete those messages before rolling this migration back"
+        )));
+    }
+    Ok(())
+}
+
+/// A cancelled turn keeps the partial prose it had already streamed as its
+/// durable output message (#1182). The `Init` schema pinned "only a completed
+/// turn carries an output message" in a CHECK on `turn_run`; this widens that
+/// domain to let cancelled turns carry one too.
+struct RetainCancelledTurnOutput;
+
+impl MigrationName for RetainCancelledTurnOutput {
+    fn name(&self) -> &str {
+        "m20260731_000041_retain_cancelled_turn_output"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for RetainCancelledTurnOutput {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if manager.get_database_backend() == DatabaseBackend::Sqlite {
+            return rebuild_turn_run_sqlite_output(manager, true).await;
+        }
+        // The check is anonymous, so locate it by definition. Add the widened
+        // constraint before dropping the strict one so no window exists in
+        // which the output column is unconstrained.
+        let widened = render_postgres_check(turn_run_terminal_output_check(true));
+        manager
+            .get_connection()
+            .execute_unprepared(&format!(
+                "DO $$ DECLARE strict_name text; BEGIN \
+                 SELECT conname INTO strict_name FROM pg_constraint \
+                 WHERE conrelid = 'turn_run'::regclass AND contype = 'c' \
+                 AND pg_get_constraintdef(oid) LIKE '%output_message_id%'; \
+                 IF strict_name IS NULL THEN \
+                 RAISE EXCEPTION 'turn_run output check not found'; END IF; \
+                 EXECUTE $q$ALTER TABLE turn_run ADD CONSTRAINT \
+                 chk_turn_run_terminal_output CHECK ({widened})$q$; \
+                 EXECUTE format('ALTER TABLE turn_run DROP CONSTRAINT %I', strict_name); \
+                 END $$;"
+            ))
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        reject_down_with_cancelled_output_rows(manager).await?;
+        if manager.get_database_backend() == DatabaseBackend::Sqlite {
+            return rebuild_turn_run_sqlite_output(manager, false).await;
+        }
+        let strict = render_postgres_check(turn_run_terminal_output_check(false));
+        manager
+            .get_connection()
+            .execute_unprepared(&format!(
+                "DO $$ BEGIN \
+                 EXECUTE $q$ALTER TABLE turn_run ADD CONSTRAINT \
+                 chk_turn_run_completed_output CHECK ({strict})$q$; \
+                 EXECUTE 'ALTER TABLE turn_run DROP CONSTRAINT chk_turn_run_terminal_output'; \
+                 END $$;"
+            ))
+            .await?;
+        Ok(())
+    }
 }

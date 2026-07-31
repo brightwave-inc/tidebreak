@@ -478,6 +478,56 @@ describe("terminal transcript presentation", () => {
     });
   });
 
+  it("keeps the cancellation notice on a cancelled turn that committed its partial output", () => {
+    const presented = presentChatTranscript({
+      messages: [
+        {
+          id: "question",
+          role: "user",
+          content: "Long question",
+          created_at: "2026-07-19T10:00:00Z",
+          citations: [],
+        },
+        {
+          id: "partial-answer",
+          role: "assistant",
+          content: "The answer so far",
+          created_at: "2026-07-19T10:00:30Z",
+          citations: [],
+        },
+      ],
+      tool_activity: [],
+      terminal_turns: [
+        {
+          turn_id: "turn-cancelled",
+          message_id: "partial-answer",
+          status: "cancelled",
+          partial_content: "",
+          reasoning: "Considering the first approach",
+          file_changes: [],
+          finished_at: "2026-07-19T10:01:00Z",
+        },
+      ],
+      last_event_seq: 20,
+    });
+
+    expect(
+      presented.messages.map((message) => [message.id, message.role]),
+    ).toEqual([
+      ["question", "user"],
+      ["partial-answer", "assistant"],
+      ["cancellation:partial-answer", "system"],
+    ]);
+    expect(presented.messages[1]).toMatchObject({
+      text: "The answer so far",
+      reasoning: "Considering the first approach",
+    });
+    expect(presented.messages[2]).toMatchObject({
+      text: TURN_CANCELLED_NOTICE,
+    });
+    expect(presented.messageIds).toEqual(new Set(["question", "partial-answer"]));
+  });
+
   it("uses renderer-owned copy that distinguishes an incomplete refusal", () => {
     expect(refusalCopy("cyber", false)).toBe(
       "The model declined this response because it matched the cyber safety category.",
