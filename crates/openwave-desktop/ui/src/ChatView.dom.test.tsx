@@ -138,6 +138,7 @@ describe("ChatView", () => {
               header: "Scope",
               question: "Which quarter?",
               options: [],
+              questionType: "single_select",
               allowFreeForm: true,
             },
           ],

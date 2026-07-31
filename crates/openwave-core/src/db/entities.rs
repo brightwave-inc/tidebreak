@@ -1017,6 +1017,7 @@ pub mod user_question_request {
         pub event_seq: i64,
         pub asked_at: DateTimeUtc,
         pub resolved_at: Option<DateTimeUtc>,
+        pub additional_user_context: Option<String>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -1040,10 +1041,15 @@ pub mod user_question {
         pub prompt: String,
         #[sea_orm(column_type = "JsonBinary")]
         pub options: Json,
+        pub question_type: String,
         pub allow_free_form: bool,
         pub answer_option_id: Option<String>,
         pub answer_free_form: Option<String>,
         pub answered_at: Option<DateTimeUtc>,
+        #[sea_orm(column_type = "JsonBinary")]
+        pub answer_selected_option_ids: Option<Json>,
+        pub answer_custom_answer: Option<String>,
+        pub response_recorded_at: Option<DateTimeUtc>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

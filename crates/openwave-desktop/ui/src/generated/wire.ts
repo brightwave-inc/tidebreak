@@ -1422,12 +1422,17 @@ export type TurnId = string;
 /**
  * One bounded question shown to the user.
  */
-export type UserQuestion = { id: string, header: string, question: string, options: Array<UserQuestionOption>, allow_free_form: boolean, };
+export type UserQuestion = { id: string, header: string, question: string, options: Array<UserQuestionOption>, question_type: UserQuestionType, allow_free_form: boolean, };
 
 /**
- * One mutually exclusive answer choice.
+ * One selectable answer choice.
  */
 export type UserQuestionOption = { id: string, label: string, description: string, };
+
+/**
+ * Whether the reader may select one option or several independent options.
+ */
+export type UserQuestionType = "single_select" | "multi_select";
 
 /**
  * Public state returned by the local API. It intentionally reports only

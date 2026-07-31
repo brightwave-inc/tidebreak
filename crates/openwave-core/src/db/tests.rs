@@ -4636,12 +4636,14 @@ async fn park_test_user_questions(
                         {"id": "staging", "label": "Staging", "description": "Deploy for internal verification."},
                         {"id": "production", "label": "Production", "description": "Deploy to customers."}
                     ],
-                    "allow_free_form": false
+                    "question_type": "multi_select",
+                    "allow_free_form": true
                 },
                 {
                     "id": "note",
                     "header": "Note",
                     "question": "Anything else I should know?",
+                    "question_type": "single_select",
                     "allow_free_form": true
                 }
             ]
@@ -4683,18 +4685,12 @@ async fn park_test_user_questions(
 
 fn sample_user_answers() -> crate::AnswerUserQuestions {
     crate::AnswerUserQuestions {
-        answers: vec![
-            crate::UserQuestionAnswer {
-                question_id: "target".into(),
-                option_id: Some("staging".into()),
-                free_form: None,
-            },
-            crate::UserQuestionAnswer {
-                question_id: "note".into(),
-                option_id: None,
-                free_form: Some("Keep the rollout reversible.".into()),
-            },
-        ],
+        answers: vec![crate::UserQuestionAnswer {
+            question_id: "target".into(),
+            selected_option_ids: vec!["staging".into(), "production".into()],
+            custom_answer: Some("Start with a canary.".into()),
+        }],
+        additional_user_context: Some("Keep the rollout reversible.".into()),
     }
 }
 
@@ -4838,18 +4834,12 @@ async fn user_questions_survive_reconnect_and_answer_exactly_once() {
     );
     let contradictory = crate::AnswerUserQuestionsRequest {
         answers: crate::AnswerUserQuestions {
-            answers: vec![
-                crate::UserQuestionAnswer {
-                    question_id: "target".into(),
-                    option_id: Some("production".into()),
-                    free_form: None,
-                },
-                crate::UserQuestionAnswer {
-                    question_id: "note".into(),
-                    option_id: None,
-                    free_form: Some("Keep the rollout reversible.".into()),
-                },
-            ],
+            answers: vec![crate::UserQuestionAnswer {
+                question_id: "target".into(),
+                selected_option_ids: vec!["production".into()],
+                custom_answer: None,
+            }],
+            additional_user_context: Some("Keep the rollout reversible.".into()),
         },
         ..answer_request
     };
@@ -4913,9 +4903,10 @@ async fn user_question_answer_validation_and_cancellation_are_closed() {
         answers: crate::AnswerUserQuestions {
             answers: vec![crate::UserQuestionAnswer {
                 question_id: "target".into(),
-                option_id: Some("not-an-option".into()),
-                free_form: None,
+                selected_option_ids: vec!["not-an-option".into()],
+                custom_answer: None,
             }],
+            additional_user_context: None,
         },
     };
     assert_eq!(

@@ -1120,6 +1120,13 @@ async fn park_user_questions_for_route_test(
                     {"id": "staging", "label": "Staging", "description": "Deploy for internal verification."},
                     {"id": "production", "label": "Production", "description": "Deploy to customers."}
                 ],
+                "question_type": "multi_select",
+                "allow_free_form": true
+            }, {
+                "id": "note",
+                "header": "Note",
+                "question": "Anything else?",
+                "question_type": "single_select",
                 "allow_free_form": true
             }]
         }),
@@ -1223,6 +1230,7 @@ async fn user_question_api_is_renderer_safe_exact_and_not_native_claimable() {
     assert_eq!(pending[0]["call_id"], call.id.to_string());
     assert_eq!(pending[0]["turn_id"], turn_id.to_string());
     assert_eq!(pending[0]["questions"][0]["id"], "target");
+    assert_eq!(pending[0]["questions"][0]["question_type"], "multi_select");
     let serialized = pending.to_string();
     for private in [
         "provider-question",
@@ -1272,13 +1280,21 @@ async fn user_question_api_is_renderer_safe_exact_and_not_native_claimable() {
         &bearer,
         &answer_uri,
         serde_json::json!({
-            "answers": [{"question_id": "target", "option_id": "unknown"}]
+            "answers": [{
+                "question_id": "target",
+                "selected_option_ids": ["unknown"]
+            }]
         }),
     )
     .await;
     assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
     let answer = serde_json::json!({
-        "answers": [{"question_id": "target", "option_id": "staging"}]
+        "answers": [{
+            "question_id": "target",
+            "selected_option_ids": ["staging", "production"],
+            "custom_answer": "Start with a canary."
+        }],
+        "additional_user_context": "Keep the rollout reversible."
     });
     let first = post_json(&router, &bearer, &answer_uri, answer.clone()).await;
     assert_eq!(first.status(), StatusCode::OK);
@@ -1297,7 +1313,11 @@ async fn user_question_api_is_renderer_safe_exact_and_not_native_claimable() {
         &bearer,
         &answer_uri,
         serde_json::json!({
-            "answers": [{"question_id": "target", "option_id": "production"}]
+            "answers": [{
+                "question_id": "target",
+                "selected_option_ids": ["production"]
+            }],
+            "additional_user_context": "Keep the rollout reversible."
         }),
     )
     .await;
@@ -1337,7 +1357,7 @@ async fn user_question_answer_announces_the_completion_live_once() {
     let mut live = state.events.subscribe(chat.id);
     let answer_uri = format!("/chats/{}/questions/{}/answer", chat.id, call.id);
     let answer = serde_json::json!({
-        "answers": [{"question_id": "target", "option_id": "staging"}]
+        "answers": []
     });
     let answered = post_json(&router, &bearer, &answer_uri, answer.clone()).await;
     assert_eq!(answered.status(), StatusCode::OK);

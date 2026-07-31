@@ -7,8 +7,11 @@ export type UserQuestions = {
   requests: PendingUserQuestions[];
   answering: Set<string>;
   errors: Record<string, string>;
-  answer: (callId: string, answers: UserQuestionAnswer[]) => void;
-  cancel: (turnId: string) => void;
+  answer: (
+    callId: string,
+    answers: UserQuestionAnswer[],
+    additionalUserContext?: string,
+  ) => void;
 };
 
 /**
@@ -78,29 +81,26 @@ export function useUserQuestions(
     }
   }
 
-  function answer(callId: string, answers: UserQuestionAnswer[]) {
+  function answer(
+    callId: string,
+    answers: UserQuestionAnswer[],
+    additionalUserContext?: string,
+  ) {
     if (!client || !chatId || answeringRef.current.has(callId)) return;
     const startedChatId = chatId;
     void send(
       callId,
       startedChatId,
-      () => client.answerUserQuestions(startedChatId, callId, answers),
+      () =>
+        client.answerUserQuestions(
+          startedChatId,
+          callId,
+          answers,
+          additionalUserContext,
+        ),
       (err) => `Could not send your answer: ${String(err)}`,
     );
   }
 
-  function cancel(turnId: string) {
-    if (!client || !chatId) return;
-    const request = requests.find((candidate) => candidate.turnId === turnId);
-    if (!request || answeringRef.current.has(request.callId)) return;
-    const startedChatId = chatId;
-    void send(
-      request.callId,
-      startedChatId,
-      () => client.cancel(startedChatId, turnId),
-      (err) => `Could not cancel the turn: ${String(err)}`,
-    );
-  }
-
-  return { requests, answering, errors, answer, cancel };
+  return { requests, answering, errors, answer };
 }
