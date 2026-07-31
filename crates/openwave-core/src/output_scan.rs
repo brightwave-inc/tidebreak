@@ -272,19 +272,19 @@ fn read_output_candidates(scratch: &Dir) -> (Vec<ScanCandidate>, Vec<String>) {
             notes.push("a file with a non-UTF-8 name was ignored".into());
             continue;
         };
-        let is_regular_file = entry
-            .metadata()
-            .map(|metadata| metadata.is_file())
-            .unwrap_or(false);
-        if !is_regular_file {
-            // Subdirectories and symlinks are outside the outputs contract;
-            // dotfiles are workspace plumbing. Neither warrants a note.
-            continue;
-        }
         if name.starts_with('.') {
+            // Dotfiles are workspace plumbing and never publishable.
             continue;
         }
-        names.push(name);
+        match entry.metadata().map(|metadata| metadata.file_type()) {
+            Ok(file_type) if file_type.is_file() => names.push(name),
+            Ok(file_type) if file_type.is_dir() => notes.push(format!(
+                "output/{name}/ was not published: only files directly in output/ become outputs; save each file at the top level or produce a single archive"
+            )),
+            _ => notes.push(format!(
+                "output/{name} was not published: it is not a regular file"
+            )),
+        }
     }
     names.sort();
     if names.len() > MAX_OUTPUT_SCAN_FILES {

@@ -625,9 +625,9 @@ mod output_scan {
     }
 
     fn write_output_file(scratch: &std::path::Path, name: &str, content: &[u8]) {
-        let directory = scratch.join(EXEC_OUTPUT_DIRECTORY);
-        std::fs::create_dir_all(&directory).unwrap();
-        std::fs::write(directory.join(name), content).unwrap();
+        let path = scratch.join(EXEC_OUTPUT_DIRECTORY).join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
     }
 
     #[tokio::test]
@@ -762,6 +762,7 @@ mod output_scan {
         );
         write_output_file(scratch.path(), "binary.md", b"text\xff\xfe");
         write_output_file(scratch.path(), ".hidden.md", b"# Plumbing");
+        write_output_file(scratch.path(), "nested/index.html", b"<html></html>");
 
         let scan = sync(&store, &dir, chat.id, CallId::new(), 0).await;
 
@@ -777,6 +778,10 @@ mod output_scan {
             .iter()
             .any(|note| note.contains("binary.md") && note.contains("UTF-8")));
         assert!(!scan.notes.iter().any(|note| note.contains(".hidden.md")));
+        assert!(scan
+            .notes
+            .iter()
+            .any(|note| note.contains("nested") && note.contains("top level")));
     }
 
     #[tokio::test]
@@ -800,7 +805,10 @@ mod output_scan {
         write_output_file(scratch.path(), "fresh.md", b"# Lands anyway");
         let scan = sync(&store, &dir, chat.id, CallId::new(), 500).await;
 
-        assert!(scan.notes.iter().any(|note| note.contains("capped.md")));
+        assert!(scan
+            .notes
+            .iter()
+            .any(|note| note.contains("capped.md") && note.contains("new filename")));
         assert_eq!(scan.entries.len(), 1);
         assert_eq!(scan.entries[0].filename, "fresh.md");
         assert_eq!(scan.entries[0].status, OutputSyncStatus::Created);

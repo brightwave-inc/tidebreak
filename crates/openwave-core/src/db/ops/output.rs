@@ -119,7 +119,7 @@ pub(in crate::db) async fn append_output_revision(
     if ordinal > MAX_OUTPUT_REVISIONS {
         transaction.rollback().await.map_err(store_err)?;
         return Err(AgentError::Store(format!(
-            "output {output_id} has reached its {MAX_OUTPUT_REVISIONS}-revision limit"
+            "output {output_id} has reached its {MAX_OUTPUT_REVISIONS}-revision limit; save the file under a new filename to publish further changes"
         )));
     }
     insert_revision_on(&transaction, output_id, ordinal, revision, created_at).await?;
