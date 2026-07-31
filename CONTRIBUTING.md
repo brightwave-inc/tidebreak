@@ -31,6 +31,9 @@ scripts/clean-worktree-artifacts.sh --worktree ../finished-task --yes
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+
+# Optional fast checks for staged files
+git config core.hooksPath .githooks
 ```
 
 The Rust toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml);

@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+git diff --cached --check
+
+if ! git diff --cached --quiet --diff-filter=ACMR -- '*.rs'; then
+  cargo fmt --all --check
+fi
+
+if ! git diff --cached --quiet --diff-filter=ACMR -- \
+  ':(glob)crates/openwave-desktop/ui/**/*.ts' \
+  ':(glob)crates/openwave-desktop/ui/**/*.tsx'; then
+  pnpm --dir crates/openwave-desktop/ui exec tsc --noEmit
+fi
