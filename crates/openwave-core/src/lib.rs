@@ -23,6 +23,13 @@ pub const VERSION: &str = match option_env!("OPENWAVE_VERSION") {
     None => env!("CARGO_PKG_VERSION"),
 };
 
+/// Upper bound on the filename lookup when matching files to existing
+/// outputs. Far above the catalog's own display cap. Shared between the
+/// output scan and the agent's filename resolution for output write-backs so
+/// both match the same window; it lives here, ungated, because the agent
+/// compiles without the `tools` feature the scan is behind.
+pub(crate) const OUTPUT_LOOKUP_LIMIT: u64 = 1_000;
+
 pub mod agent;
 pub mod agent_tools;
 pub mod approval;
