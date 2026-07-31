@@ -674,6 +674,9 @@ pub struct ConfiguredCodeExecutionProvider {
     blobs: Option<Arc<dyn BlobStore>>,
     scratch_root: PathBuf,
     document_scripts_source: Option<PathBuf>,
+    /// Built-in skills validated once at configuration and staged into every
+    /// exec workspace; the prompt catalog is derived from the same load.
+    skills: Arc<Vec<openwave_code_execution::BuiltinSkill>>,
     folder_grant_resolver: Option<Arc<dyn ExecFolderGrantResolver>>,
     /// Cross-process exclusion for the blobs a write-back snapshot publishes.
     blob_writes: Option<Arc<BlobWriteGuard>>,
@@ -827,6 +830,7 @@ impl ConfiguredCodeExecutionProvider {
             blobs: None,
             scratch_root: scratch_root.into(),
             document_scripts_source: None,
+            skills: Arc::new(Vec::new()),
             folder_grant_resolver: None,
             blob_writes: None,
             remote_sessions: RemoteSessionPool::default(),
@@ -856,6 +860,29 @@ impl ConfiguredCodeExecutionProvider {
     pub fn with_document_scripts(mut self, source: Option<PathBuf>) -> Self {
         self.document_scripts_source = source;
         self
+    }
+
+    /// Load and install the built-in skill packages staged into every exec
+    /// workspace. Malformed packages are skipped (with a warning) at this one
+    /// load, so staging and the prompt catalog always agree. Headless
+    /// embeddings leave the source absent.
+    #[must_use]
+    pub fn with_skills(mut self, source: Option<PathBuf>) -> Self {
+        self.skills = Arc::new(
+            source
+                .as_deref()
+                .map(openwave_code_execution::load_builtin_skills)
+                .unwrap_or_default(),
+        );
+        self
+    }
+
+    /// The host-derived (name, description) catalog for prompt composition.
+    pub(crate) fn skill_catalog(&self) -> Vec<openwave_code_execution::SkillPackage> {
+        self.skills
+            .iter()
+            .map(|skill| skill.package.clone())
+            .collect()
     }
 
     /// Install the native bridge that resolves product root IDs through the
@@ -1306,6 +1333,7 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
             &host_dir,
             kind != CodeExecutionProviderKind::Local,
             self.document_scripts_source.as_deref(),
+            &self.skills,
         )
         .await?;
         if let Some(blobs) = self.blobs.as_deref() {
@@ -1351,7 +1379,10 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
         // workspace would otherwise surface as a baffling not-found inside the
         // sandbox. Entries a listed directory had to leave behind individually
         // ride along as notes instead.
-        let mut staged_paths = implicit_staged_paths(self.document_scripts_source.is_some());
+        let mut staged_paths = implicit_staged_paths(
+            self.document_scripts_source.is_some(),
+            !self.skills.is_empty(),
+        );
         staged_paths.extend(request.files.iter().cloned());
         let mut notes =
             sync::stage_listed_paths(lifecycle, &request.workspace_id, &host_dir, &staged_paths)
@@ -1469,13 +1500,16 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
 /// bundled document helpers the tool description tells the model to invoke
 /// without listing. All of it is host-authored, bounded, and digest-skipped on
 /// a reused session.
-fn implicit_staged_paths(with_document_scripts: bool) -> Vec<WorkspaceFilePath> {
+fn implicit_staged_paths(with_document_scripts: bool, with_skills: bool) -> Vec<WorkspaceFilePath> {
     let mut paths = vec![
         "output/.openwave-directory".to_owned(),
         "preview/.openwave-directory".to_owned(),
     ];
     if with_document_scripts {
         paths.push(DOCUMENT_SCRIPTS_DIR.to_owned());
+    }
+    if with_skills {
+        paths.push(openwave_code_execution::SKILLS_DIR.to_owned());
     }
     paths
         .into_iter()
@@ -1595,6 +1629,7 @@ async fn prepare_execution_directories(
     host_dir: &std::path::Path,
     mirrored: bool,
     document_scripts_source: Option<&std::path::Path>,
+    skills: &[openwave_code_execution::BuiltinSkill],
 ) -> std::result::Result<(), CodeExecutionError> {
     // The scratch directory itself is host-owned and named after the chat, but
     // everything inside it is writable by local exec, which can plant
@@ -1627,6 +1662,43 @@ async fn prepare_execution_directories(
     }
     if let Some(source) = document_scripts_source {
         install_document_scripts(source, host_dir).await?;
+    }
+    install_skills(skills, host_dir).await?;
+    Ok(())
+}
+
+/// Stage the validated built-in skills into `.openwave/skills/<name>/`.
+///
+/// Each destination is resolved a component at a time for the same reason the
+/// helper install is: `.openwave/` is writable by local exec, so a planted
+/// symlink must not relocate the staged files. Content was validated at
+/// configuration; a failure here means the workspace itself is unusable.
+async fn install_skills(
+    skills: &[openwave_code_execution::BuiltinSkill],
+    host_dir: &std::path::Path,
+) -> std::result::Result<(), CodeExecutionError> {
+    for skill in skills {
+        let name = &skill.package.name;
+        let destination = resolve_scratch_directory(
+            host_dir,
+            &format!("{}/{name}", openwave_code_execution::SKILLS_DIR),
+            true,
+        )
+        .await
+        .ok_or_else(|| {
+            CodeExecutionError::Sandbox(format!("skill directory '{name}' is unavailable"))
+        })?;
+        destination
+            .write_file(
+                openwave_code_execution::SKILL_MANIFEST_FILE,
+                skill.manifest.as_bytes(),
+            )
+            .await
+            .map_err(|_| {
+                CodeExecutionError::Sandbox(format!(
+                    "bundled skill '{name}' could not be installed"
+                ))
+            })?;
     }
     Ok(())
 }
@@ -2035,7 +2107,7 @@ mod tests {
     #[tokio::test]
     async fn exec_workspace_conventions_exist_before_a_command_runs() {
         let dir = tempfile::tempdir().unwrap();
-        prepare_execution_directories(dir.path(), true, None)
+        prepare_execution_directories(dir.path(), true, None, &[])
             .await
             .unwrap();
 
@@ -2131,7 +2203,7 @@ mod tests {
             .unwrap();
 
         let workspace = database.path().join("scratch").join(chat.id.to_string());
-        prepare_execution_directories(&workspace, false, None)
+        prepare_execution_directories(&workspace, false, None, &[])
             .await
             .unwrap();
         materialize_chat_attachments(&store, &blobs, chat.id, &workspace)
@@ -2169,9 +2241,22 @@ mod tests {
             std::fs::write(source.path().join(name), format!("helper:{name}")).unwrap();
         }
 
-        prepare_execution_directories(workspace.path(), false, Some(source.path()))
-            .await
-            .unwrap();
+        let skill = openwave_code_execution::BuiltinSkill {
+            package: openwave_code_execution::SkillPackage {
+                name: "pdf-documents".into(),
+                description: "Produce PDFs.".into(),
+                python_deps: vec!["fpdf2==2.8.3".into()],
+            },
+            manifest: "---\nname: pdf-documents\n---\nbody".into(),
+        };
+        prepare_execution_directories(
+            workspace.path(),
+            false,
+            Some(source.path()),
+            std::slice::from_ref(&skill),
+        )
+        .await
+        .unwrap();
 
         for name in DOCUMENT_SCRIPT_FILES {
             let installed = workspace.path().join(DOCUMENT_SCRIPTS_DIR).join(name);
@@ -2180,6 +2265,15 @@ mod tests {
                 format!("helper:{name}")
             );
         }
+        let staged_skill = workspace
+            .path()
+            .join(openwave_code_execution::SKILLS_DIR)
+            .join("pdf-documents")
+            .join(openwave_code_execution::SKILL_MANIFEST_FILE);
+        assert_eq!(
+            std::fs::read_to_string(staged_skill).unwrap(),
+            skill.manifest
+        );
     }
 
     /// Local exec is confined to the scratch directory but can create entries
@@ -2195,9 +2289,19 @@ mod tests {
         }
         let workspace = tempfile::tempdir().unwrap();
 
+        let skill = openwave_code_execution::BuiltinSkill {
+            package: openwave_code_execution::SkillPackage {
+                name: "pdf-documents".into(),
+                description: "Produce PDFs.".into(),
+                python_deps: Vec::new(),
+            },
+            manifest: "---\nname: pdf-documents\n---\nbody".into(),
+        };
+        let skills = std::slice::from_ref(&skill);
+
         std::os::unix::fs::symlink(outside.path(), workspace.path().join("output")).unwrap();
         assert!(
-            prepare_execution_directories(workspace.path(), true, Some(source.path()))
+            prepare_execution_directories(workspace.path(), true, Some(source.path()), skills)
                 .await
                 .is_err()
         );
@@ -2206,11 +2310,12 @@ mod tests {
         std::fs::remove_file(workspace.path().join("output")).unwrap();
         std::os::unix::fs::symlink(outside.path(), workspace.path().join(".openwave")).unwrap();
         assert!(
-            prepare_execution_directories(workspace.path(), true, Some(source.path()))
+            prepare_execution_directories(workspace.path(), true, Some(source.path()), skills)
                 .await
                 .is_err()
         );
         assert!(!outside.path().join("exec-scripts").exists());
+        assert!(!outside.path().join("skills").exists());
     }
 
     #[test]
