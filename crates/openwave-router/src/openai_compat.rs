@@ -299,12 +299,22 @@ fn extend_openai_messages(
             ContentBlock::ToolResult {
                 tool_use_id,
                 content,
-                ..
-            } => Some(json!({
-                "role": "tool",
-                "tool_call_id": tool_use_id,
-                "content": content,
-            })),
+                is_error,
+            } => {
+                // Chat Completions has no error flag on tool messages, so a
+                // failed result carries the signal in-band; without it the
+                // model reads a declined or failed call as a success.
+                let content = if *is_error {
+                    format!("Error: the tool call failed.\n{content}")
+                } else {
+                    content.clone()
+                };
+                Some(json!({
+                    "role": "tool",
+                    "tool_call_id": tool_use_id,
+                    "content": content,
+                }))
+            }
             _ => None,
         })
         .collect();
@@ -763,19 +773,34 @@ mod tests {
     fn tool_result_becomes_tool_role() {
         let msg = openwave_core::ChatMessage {
             role: Role::User,
-            content: vec![ContentBlock::ToolResult {
-                tool_use_id: "call_1".into(),
-                content: "ok".into(),
-                is_error: false,
-            }],
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_1".into(),
+                    content: "ok".into(),
+                    is_error: false,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_2".into(),
+                    content: "not run: the user declined.".into(),
+                    is_error: true,
+                },
+            ],
             reasoning: Vec::new(),
         };
         let mut out = Vec::new();
         extend_openai_messages(&mut out, &msg, &ImageAttachments::new()).unwrap();
-        assert_eq!(out.len(), 1);
+        assert_eq!(out.len(), 2);
         assert_eq!(out[0]["role"], "tool");
         assert_eq!(out[0]["tool_call_id"], "call_1");
         assert_eq!(out[0]["content"], "ok");
+        // The wire format has no error flag, so the failure marker in the
+        // content is the only signal the model gets.
+        assert_eq!(out[1]["role"], "tool");
+        assert_eq!(out[1]["tool_call_id"], "call_2");
+        assert_eq!(
+            out[1]["content"],
+            "Error: the tool call failed.\nnot run: the user declined."
+        );
     }
 
     fn run(chunks: &[Value]) -> Vec<ProviderEvent> {
