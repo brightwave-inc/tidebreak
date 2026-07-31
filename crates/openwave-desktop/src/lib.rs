@@ -134,6 +134,21 @@ fn exec_scripts_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(directory)
 }
 
+fn exec_skills_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    const REQUIRED_SKILLS: [&str; 1] = ["pdf-documents"];
+    let directory = app
+        .path()
+        .resource_dir()
+        .map_err(|error| format!("app resource dir: {error}"))?
+        .join("skills");
+    for name in REQUIRED_SKILLS {
+        if !directory.join(name).join("SKILL.md").is_file() {
+            return Err(format!("bundled document skill is missing: {name}"));
+        }
+    }
+    Ok(directory)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg_attr(not(debug_assertions), allow(unused_mut))]
@@ -265,6 +280,7 @@ async fn boot_server(
     let client_executor_id = app.state::<host_access::HostAccess>().client_executor_id();
     let mut config = Config::desktop(data_dir);
     config.exec_scripts_dir = Some(exec_scripts_dir(&app)?);
+    config.exec_skills_dir = Some(exec_skills_dir(&app)?);
     // The effective identifier — including the debug-build override — keys
     // the macOS managed-preferences (MDM) domain the server reads policy from.
     config.bundle_id = Some(app.config().identifier.clone());

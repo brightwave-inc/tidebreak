@@ -141,19 +141,21 @@ pub(crate) fn freeze_foreground_turn_surface(
     tools: Arc<ToolRegistry>,
     base_agent_config: &AgentConfig,
 ) -> ForegroundTurnSurface {
-    freeze_foreground_turn_surface_with_folders(tools, base_agent_config, &[], false)
+    freeze_foreground_turn_surface_with_folders(tools, base_agent_config, &[], &[], false)
 }
 
 fn freeze_foreground_turn_surface_with_folders(
     tools: Arc<ToolRegistry>,
     base_agent_config: &AgentConfig,
     exec_folders: &[crate::code_execution::ResolvedExecFolderGrant],
+    skills: &[openwave_code_execution::SkillPackage],
     plan_mode: bool,
 ) -> ForegroundTurnSurface {
     let mut agent_config = base_agent_config.clone();
     agent_config.system_prompt = Some(crate::foreground_prompt::compose_for_surface(
         &tools.specs_for_surface(true, plan_mode),
         exec_folders,
+        skills,
         plan_mode,
     ));
     ForegroundTurnSurface {
@@ -559,10 +561,16 @@ impl TurnWorker {
             },
             None => Vec::new(),
         };
+        let skills = self
+            .exec_folder_context
+            .as_ref()
+            .map(|provider| provider.skill_catalog())
+            .unwrap_or_default();
         let surface = freeze_foreground_turn_surface_with_folders(
             tools,
             &self.agent_config,
             &exec_folders,
+            &skills,
             matches!(
                 chat.permission_mode,
                 Some(openwave_core::PermissionMode::Plan)

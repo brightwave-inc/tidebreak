@@ -54,7 +54,8 @@
     "active": true,
     "targets": "all",
     "resources": {
-      "../../scripts/exec-documents/": "exec-scripts/"
+      "../../scripts/exec-documents/": "exec-scripts/",
+      "../../skills/": "skills/"
     },
     "externalBin": [
       "binaries/openwave-host-broker"

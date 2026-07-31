@@ -799,6 +799,7 @@ async fn bind_inner(
         .with_blobs(blobs.clone())
         .with_blob_write_locks(exec_blob_writes)
         .with_document_scripts(config.exec_scripts_dir.clone())
+        .with_skills(config.exec_skills_dir.clone())
         .with_folder_grant_resolver(folder_grant_resolver),
     );
     let foreground_web_search =
