@@ -1007,8 +1007,9 @@ mod tests {
         assert_eq!(summary.size_bytes, content.len() as u64);
         assert_eq!(summary.revision_count, 1);
 
-        let preview = preview_from_bytes(&output, content.to_vec()).unwrap();
+        let preview = preview_from_bytes(&output, &revision, content.to_vec()).unwrap();
         assert_eq!(preview.output_id, output.id);
+        assert_eq!(preview.revision_id, revision.id);
         assert_eq!(preview.content, "# Brief");
         let serialized = serde_json::to_value(preview).unwrap();
         assert_eq!(
@@ -1024,6 +1025,7 @@ mod tests {
                 "mediaType",
                 "outputId",
                 "revisionCount",
+                "revisionId",
                 "truncated"
             ]
         );
