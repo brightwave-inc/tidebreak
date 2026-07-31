@@ -4096,8 +4096,10 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.23.0",
  "chrono",
  "futures",
+ "image",
  "openwave-core",
  "reqwest 0.12.28",
  "serde",
