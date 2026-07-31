@@ -70,6 +70,15 @@ use crate::tool::{
 /// Keep a model-produced read batch from overwhelming the local runtime or a
 /// remote read service. Results still retain the provider's requested order.
 const MAX_PARALLEL_READ_ONLY_CALLS: usize = 8;
+/// How many consecutive identical server calls — same tool, same canonicalized
+/// arguments — may execute before the loop steps in. Once a streak reaches
+/// this length the next identical call is answered without running: the model
+/// has already seen everything the call can tell it, so another repeat is a
+/// stuck loop, not new work. Any different call, a plain text step, or a
+/// reader decline breaks the streak; the refusal itself leaves it intact, so
+/// re-issuing the same call keeps getting the refusal while a changed argument
+/// proceeds normally.
+const REPEATED_CALL_LIMIT: usize = 3;
 const MAX_ANNOUNCED_FILES: usize = 8;
 const MAX_ANNOUNCED_IMAGES: usize = 8;
 
@@ -1217,6 +1226,12 @@ impl Agent {
             .await?;
         let mut reduction_level: u32 = 0;
         let mut checkpoint_attempt_boundary = None;
+        // The current run of consecutive identical plain server calls — the
+        // (name, canonical arguments) pair and how many of it have executed.
+        // Deliberately in-memory and per-attempt: the streak is a nudge to a
+        // live model, not part of the durable record, so it never survives a
+        // turn boundary or a crash-recovery resume.
+        let mut repeat_streak: Option<((String, String), usize)> = None;
 
         // A turn with no budget at all has nothing to wrap up: there is no work
         // in flight and no prose to preserve, so it stays the hard failure the
@@ -1540,6 +1555,43 @@ impl Agent {
                 .collect();
             let isolated = isolations.iter().position(Option::is_some);
 
+            // A model stuck re-issuing one call verbatim learns nothing from
+            // the repeats: identical arguments already produced their answer.
+            // Count consecutive identical plain calls and, once the streak
+            // reaches the limit, answer the next one without running it.
+            // Decided here, before admission, so a refused call still flows
+            // through the ordinary resolution path and its durable row
+            // terminalizes like any other failure. Approval-bearing and
+            // isolated calls are exempt — their gates carry their own
+            // guidance — and they break the streak like any other change of
+            // course.
+            let mut repeat_refusals: Vec<Option<String>> = Vec::with_capacity(calls.len());
+            for (index, call) in calls.iter().enumerate() {
+                if isolations[index].is_some() || sensitives[index] {
+                    repeat_streak = None;
+                    repeat_refusals.push(None);
+                    continue;
+                }
+                let key = (call.name.clone(), parse_args(&call.args).0.to_string());
+                let refusal = match repeat_streak.as_mut() {
+                    Some((streak_key, count)) if *streak_key == key => {
+                        if *count >= REPEATED_CALL_LIMIT {
+                            Some(format!(
+                                "not run: this exact call has now been made {REPEATED_CALL_LIMIT} times in a row with the same arguments. Change the arguments or the approach, or tell the user what you are stuck on.",
+                            ))
+                        } else {
+                            *count += 1;
+                            None
+                        }
+                    }
+                    _ => {
+                        repeat_streak = Some((key, 1));
+                        None
+                    }
+                };
+                repeat_refusals.push(refusal);
+            }
+
             // This step is about to persist tool-call rows, execute server tool
             // side effects, and record the assistant message. Fence those on the
             // lease first: the provider stream just consumed may have outlasted
@@ -1599,6 +1651,9 @@ impl Agent {
             }
 
             if calls.is_empty() {
+                // A plain text step is a change of course, so it breaks any
+                // repeated-call streak the previous steps had built up.
+                repeat_streak = None;
                 // Legacy turns persist each candidate immediately, so each needs
                 // its own identity. A claimed turn keeps the caller's stable
                 // completion identity: steered candidates are persisted
@@ -1723,11 +1778,19 @@ impl Agent {
                     futures::stream::iter((0..parallel_batch_len).map(|index| {
                         let call = &calls[index];
                         let recovered = recovered_results.remove(&call.call_id);
+                        let repeat_refusal = repeat_refusals[index].take();
                         async move {
                             (
                                 index,
-                                self.execute_server_call(chat, turn_id, call, events, recovered)
-                                    .await,
+                                self.execute_server_call(
+                                    chat,
+                                    turn_id,
+                                    call,
+                                    events,
+                                    recovered,
+                                    repeat_refusal,
+                                )
+                                .await,
                             )
                         }
                     }))
@@ -1765,6 +1828,7 @@ impl Agent {
                         call,
                         events,
                         recovered_results.remove(&call.call_id),
+                        repeat_refusals[index].take(),
                     )
                     .await?,
                 );
@@ -1792,7 +1856,7 @@ impl Agent {
                 }
                 let recovered = self.accept_server_call(chat.id, turn_id, call).await?;
                 outputs[index] = Some(
-                    self.execute_server_call(chat, turn_id, call, events, recovered)
+                    self.execute_server_call(chat, turn_id, call, events, recovered, None)
                         .await?,
                 );
                 if self.cancel.is_cancelled() {
@@ -1803,6 +1867,18 @@ impl Agent {
                         publish_terminal,
                     ));
                 }
+            }
+
+            // A reader's decline already tells the model what to do
+            // differently, so it clears the repeat streak rather than stacking
+            // a second layer of guidance on top: re-asking a declined call
+            // goes back to the approval gate, not to the repetition guard.
+            if outputs
+                .iter()
+                .flatten()
+                .any(|output| output.error_category == Some(ToolErrorCategory::UserDeclined))
+            {
+                repeat_streak = None;
             }
 
             // A batch can name more than one call that has to stand alone. The
@@ -2072,6 +2148,7 @@ impl Agent {
         call: &PendingCall,
         events: &EventSink<'_>,
         recovered: Option<ToolOutput>,
+        repeat_refusal: Option<String>,
     ) -> Result<ToolOutput> {
         let (mut output, needs_resolution) = match recovered {
             Some(output) => (output, false),
@@ -2082,10 +2159,16 @@ impl Agent {
                 ),
                 true,
             ),
-            None => {
-                self.ensure_durable_lease_current(turn_id).await?;
-                (self.run_tool(chat, turn_id, call, events, None).await, true)
-            }
+            // A repeated-call refusal answers the admitted row without
+            // dispatching the tool, then resolves it below like any other
+            // failure so recovery never finds it pending.
+            None => match repeat_refusal {
+                Some(reason) => (ToolOutput::error(reason), true),
+                None => {
+                    self.ensure_durable_lease_current(turn_id).await?;
+                    (self.run_tool(chat, turn_id, call, events, None).await, true)
+                }
+            },
         };
         if needs_resolution {
             self.publish_tool_images(&mut output).await?;
@@ -6099,6 +6182,177 @@ mod tests {
         assert_eq!(advertised.len(), 2, "one tool step, then the wrap-up");
         assert!(!advertised[0].is_empty());
         assert!(advertised[1].is_empty());
+    }
+
+    /// One `read_file` call per step, arguments taken from a script, then a
+    /// final answer once the script runs out.
+    struct RepeatedCallProvider {
+        calls: AtomicUsize,
+        scripts: Vec<&'static str>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for RepeatedCallProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("repeat")
+        }
+
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            let step = self.calls.fetch_add(1, Ordering::SeqCst);
+            let events = match self.scripts.get(step) {
+                Some(args) => vec![
+                    ProviderEvent::ToolCallStarted {
+                        index: 0,
+                        id: format!("call_{step}"),
+                        name: "read_file".into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 0,
+                        fragment: (*args).into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::ToolUse,
+                    },
+                ],
+                None => vec![
+                    ProviderEvent::TextDelta {
+                        text: "done".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ],
+            };
+            Ok(stream::iter(events).boxed())
+        }
+    }
+
+    /// A read-only tool that counts its executions, so a test can tell a call
+    /// that ran from one that was answered without running.
+    struct CountingReadTool {
+        ran: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for CountingReadTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "read_file".into(),
+                description: "a counting read tool".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }
+        }
+
+        fn approval_class(&self) -> ApprovalClass {
+            ApprovalClass::ReadOnly
+        }
+
+        async fn execute(&self, _ctx: &ToolCtx, _args: Value) -> Result<ToolOutput> {
+            self.ran.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolOutput::text("same result"))
+        }
+    }
+
+    fn repeated_call_agent(
+        store: Arc<dyn Store>,
+        ran: Arc<AtomicUsize>,
+        scripts: Vec<&'static str>,
+    ) -> Agent {
+        Agent::new(
+            Arc::new(RepeatedCallProvider {
+                calls: AtomicUsize::new(0),
+                scripts,
+            }),
+            Arc::new(ToolRegistry::new().with(Box::new(CountingReadTool { ran }))),
+            store,
+            AgentConfig {
+                model: "fake".into(),
+                ..Default::default()
+            },
+        )
+    }
+
+    /// After `REPEATED_CALL_LIMIT` identical executions, further identical
+    /// calls are answered without dispatching the tool — and the refusal still
+    /// terminalizes the admitted durable row, so recovery never finds a
+    /// refused call pending.
+    #[tokio::test]
+    async fn the_fourth_identical_call_is_refused_instead_of_run() {
+        let store = search_grant_store().await;
+        let chat = search_grant_chat(&store).await;
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let same = r#"{"path":"note.txt"}"#;
+        let agent = repeated_call_agent(store.clone(), ran.clone(), vec![same; 5]);
+
+        let (tx, rx) = unbounded();
+        agent.run_turn(&chat, "go", &tx).await.unwrap();
+        drop(tx);
+        let events: Vec<AgentEvent> = rx.collect().await;
+
+        assert!(
+            matches!(events.last(), Some(AgentEvent::TurnCompleted { .. })),
+            "the refusal steers the model, it does not fail the turn: {events:?}"
+        );
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            REPEATED_CALL_LIMIT,
+            "only the streak executes; every later identical call is refused"
+        );
+
+        let calls = store.list_tool_calls(chat.id).await.unwrap();
+        assert_eq!(calls.len(), 5, "refused calls still get durable rows");
+        for call in &calls[..REPEATED_CALL_LIMIT] {
+            assert_eq!(call.status, ToolCallStatus::Completed);
+        }
+        // The fourth and fifth asks are both refused: re-issuing the same
+        // call keeps getting the refusal until something changes.
+        for call in &calls[REPEATED_CALL_LIMIT..] {
+            assert_eq!(call.status, ToolCallStatus::Failed);
+            assert!(
+                call.result
+                    .as_deref()
+                    .is_some_and(|result| result.starts_with("not run: this exact call")),
+                "the refusal is the model-facing result: {:?}",
+                call.result
+            );
+            assert!(call.resolved_at.is_some(), "the refused row terminalizes");
+        }
+    }
+
+    /// A different argument is a change of course: it executes, and the
+    /// original call earns a fresh streak afterwards.
+    #[tokio::test]
+    async fn a_changed_argument_resets_the_repeat_streak() {
+        let store = search_grant_store().await;
+        let chat = search_grant_chat(&store).await;
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let same = r#"{"path":"note.txt"}"#;
+        let other = r#"{"path":"other.txt"}"#;
+        let agent = repeated_call_agent(
+            store.clone(),
+            ran.clone(),
+            vec![same, same, same, other, same],
+        );
+
+        let (tx, rx) = unbounded();
+        agent.run_turn(&chat, "go", &tx).await.unwrap();
+        drop(tx);
+        let events: Vec<AgentEvent> = rx.collect().await;
+
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::TurnCompleted { .. })
+        ));
+        assert_eq!(ran.load(Ordering::SeqCst), 5, "every call ran");
+        let calls = store.list_tool_calls(chat.id).await.unwrap();
+        assert!(
+            calls
+                .iter()
+                .all(|call| call.status == ToolCallStatus::Completed),
+            "nothing was refused: {calls:?}"
+        );
     }
 
     /// A reasoning block streamed on one step must ride the step's assistant
