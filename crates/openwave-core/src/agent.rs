@@ -568,6 +568,13 @@ pub enum AgentTurnOutcome {
     },
     /// The loop observed its cancellation token and stopped cooperatively.
     Cancelled {
+        /// Prose the user was already reading when the stop arrived, prepared
+        /// for durable commit alongside the cancellation. Carried only when
+        /// the cancelled step produced text and no tool calls — a step whose
+        /// calls started was discarded whole under `StreamInterrupted`.
+        output: Option<Message>,
+        /// Ordered lightweight citations authored in the partial text.
+        citations: Vec<AssistantCitationInput>,
         /// Aggregate provider usage for the eventual terminal event.
         usage: Usage,
         /// Model-call steps consumed from the turn-wide execution budget.
@@ -1269,6 +1276,7 @@ impl Agent {
                     total_usage,
                     steps_before,
                     publish_terminal,
+                    None,
                 ));
             }
             if wrap_up {
@@ -1311,6 +1319,7 @@ impl Agent {
                         total_usage,
                         steps_before,
                         publish_terminal,
+                        None,
                     ));
                 }
                 let (mut fitted, reduced) = self.fit_transcript(
@@ -1485,11 +1494,42 @@ impl Agent {
                 if !calls.is_empty() {
                     events.send(AgentEvent::StreamInterrupted);
                 }
+                // The prose the reader was watching survives the stop: a
+                // text-only step hands its partial output to the terminal
+                // commit so reload and the next model turn keep what the user
+                // already saw (#1182). A step whose calls started was
+                // discarded whole just above and stays message-less.
+                let partial = if calls.is_empty() {
+                    let parsed = parse_assistant_citations(&text);
+                    if parsed.content.trim().is_empty() {
+                        None
+                    } else {
+                        let message_id = if publish_terminal {
+                            MessageId::new()
+                        } else {
+                            output_message_id
+                        };
+                        let candidate = AssistantCandidate {
+                            message_id,
+                            content: parsed.content,
+                            citations: parsed.citations,
+                        };
+                        let message = candidate.message(message_id, chat.id, turn_id);
+                        if publish_terminal {
+                            self.append_assistant_exact_retry(&message, &candidate.citations)
+                                .await?;
+                        }
+                        Some((message, candidate.citations))
+                    }
+                } else {
+                    None
+                };
                 return Ok(self.finish_cancelled(
                     events,
                     total_usage,
                     steps_used,
                     publish_terminal,
+                    partial,
                 ));
             }
             if matches!(stream_end, StreamEnd::Steered) {
@@ -1694,11 +1734,16 @@ impl Agent {
                 // arrives before sealing still continues the turn.
                 loop {
                     if self.cancel.is_cancelled() {
+                        // The answer is fully formed here; a cancel that races
+                        // the completion fence keeps it rather than discarding
+                        // a finished reply the user watched stream (#1182).
                         return Ok(self.finish_cancelled(
                             events,
                             total_usage,
                             steps_used,
                             publish_terminal,
+                            (!output.content.trim().is_empty())
+                                .then(|| (output.clone(), candidate.citations.clone())),
                         ));
                     }
                     if self
@@ -1822,6 +1867,7 @@ impl Agent {
                         total_usage,
                         steps_used,
                         publish_terminal,
+                        None,
                     ));
                 }
             }
@@ -1852,6 +1898,7 @@ impl Agent {
                         total_usage,
                         steps_used,
                         publish_terminal,
+                        None,
                     ));
                 }
             }
@@ -1877,6 +1924,7 @@ impl Agent {
                         total_usage,
                         steps_used,
                         publish_terminal,
+                        None,
                     ));
                 }
             }
@@ -2475,17 +2523,31 @@ impl Agent {
 
     /// Emit the cancellation terminal event and end the turn as a (non-error)
     /// success — the client asked for the stop, so it isn't a `TurnFailed`.
+    ///
+    /// `partial` carries prose the user was already reading so the worker can
+    /// commit it durably with the cancellation; losing it made the next turn
+    /// continue as though the answer was never given (#1182).
     fn finish_cancelled(
         &self,
         events: &EventSink<'_>,
         usage: Usage,
         model_steps: usize,
         publish_terminal_event: bool,
+        partial: Option<(Message, Vec<AssistantCitationInput>)>,
     ) -> AgentTurnOutcome {
         if publish_terminal_event {
             events.send(AgentEvent::TurnCancelled { usage });
         }
-        AgentTurnOutcome::Cancelled { usage, model_steps }
+        let (output, citations) = match partial {
+            Some((message, citations)) => (Some(message), citations),
+            None => (None, Vec::new()),
+        };
+        AgentTurnOutcome::Cancelled {
+            output,
+            citations,
+            usage,
+            model_steps,
+        }
     }
 
     /// Drain the steer inbox into the transcript. Returns whether any messages
@@ -6256,6 +6318,8 @@ mod tests {
         assert_eq!(
             outcome,
             AgentTurnOutcome::Cancelled {
+                output: None,
+                citations: Vec::new(),
                 usage: Usage::default(),
                 model_steps: 0,
             }
@@ -6274,6 +6338,8 @@ mod tests {
                 cancellation_token,
                 Utc::now(),
                 Usage::default(),
+                None,
+                &[],
             )
             .await
             .unwrap()
@@ -6301,6 +6367,8 @@ mod tests {
                 cancellation_token,
                 cancellation_claimed_at + chrono::Duration::hours(1),
                 Usage::default(),
+                None,
+                &[],
             )
             .await
             .unwrap()
@@ -10093,15 +10161,12 @@ mod tests {
         handle.await.unwrap();
 
         assert!(cancelled, "a mid-stream cancel ends the turn as cancelled");
-        // The partial assistant text of the preempted step is discarded, not stored.
-        let roles: Vec<Role> = store
-            .list_messages(chat_id)
-            .await
-            .unwrap()
-            .iter()
-            .map(|m| m.role)
-            .collect();
-        assert_eq!(roles, vec![Role::User]);
+        // The prose the reader was already watching commits durably with the
+        // cancellation, so the next model turn sees what was said (#1182).
+        let messages = store.list_messages(chat_id).await.unwrap();
+        let roles: Vec<Role> = messages.iter().map(|m| m.role).collect();
+        assert_eq!(roles, vec![Role::User, Role::Assistant]);
+        assert_eq!(messages[1].content, "partial");
     }
 
     struct ToolCallStallProvider;

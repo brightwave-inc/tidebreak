@@ -2564,6 +2564,8 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
             cancellation_token,
             acknowledged_at,
             usage,
+            None,
+            &[],
         )
         .await
         .unwrap()
@@ -2580,6 +2582,8 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
             cancellation_token,
             acknowledged_at + Duration::hours(1),
             usage,
+            None,
+            &[],
         )
         .await
         .unwrap()

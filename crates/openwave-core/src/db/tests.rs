@@ -6690,7 +6690,14 @@ async fn running_turn_cancellation_holds_the_chat_until_exact_worker_acknowledge
         ..Usage::default()
     };
     let journaled = store
-        .finish_turn_cancellation_and_append_event(turn.id, token, acknowledged_at, usage)
+        .finish_turn_cancellation_and_append_event(
+            turn.id,
+            token,
+            acknowledged_at,
+            usage,
+            None,
+            &[],
+        )
         .await
         .unwrap()
         .unwrap();
@@ -6711,6 +6718,8 @@ async fn running_turn_cancellation_holds_the_chat_until_exact_worker_acknowledge
             token,
             acknowledged_at + chrono::Duration::hours(1),
             usage,
+            None,
+            &[],
         )
         .await
         .unwrap()
@@ -6726,6 +6735,8 @@ async fn running_turn_cancellation_holds_the_chat_until_exact_worker_acknowledge
             token,
             acknowledged_at + chrono::Duration::hours(1),
             Usage::default(),
+            None,
+            &[],
         )
         .await
         .is_err());
@@ -6820,6 +6831,8 @@ async fn claim_scan_terminalizes_an_expired_cancelling_lease() {
             token,
             expires_at + chrono::Duration::hours(1),
             Usage::default(),
+            None,
+            &[],
         )
         .await
         .unwrap()
@@ -10284,6 +10297,8 @@ async fn message_less_terminal_turns_rebuild_partial_text_and_reasoning() {
             cancelled_lease,
             cancellation_requested_at + chrono::Duration::seconds(1),
             Usage::default(),
+            None,
+            &[],
         )
         .await
         .unwrap()
@@ -10396,5 +10411,134 @@ async fn message_less_terminal_turns_rebuild_partial_text_and_reasoning() {
             "considering failure".into(),
             Some("provider".into()),
         )
+    );
+}
+
+/// A cancellation acknowledged with partial output commits it as the turn's
+/// durable assistant message in the same transition (#1182): the transcript
+/// serves the prose from the message row rather than rebuilding journal
+/// deltas, and the next turn's context (built from message rows) includes it.
+#[tokio::test]
+async fn cancellation_with_partial_output_commits_a_durable_message() {
+    use crate::event::AgentEvent;
+    use crate::provider::Usage;
+
+    let (_dir, store) = temp_store().await;
+
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+    let accepted = match store
+        .accept_turn(turn_id, chat.id, "claude", "stop this")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let lease = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(
+            lease,
+            accepted.available_at,
+            accepted.available_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .turn
+        .expect("accepted turn is claimable");
+    store
+        .append_turn_event(
+            chat.id,
+            turn_id,
+            lease,
+            1,
+            accepted.available_at,
+            &AgentEvent::TextDelta {
+                text: "the answer so far".into(),
+            },
+        )
+        .await
+        .unwrap()
+        .expect("a live attempt may journal its visible stream");
+    let requested_at = accepted.available_at + chrono::Duration::seconds(1);
+    store
+        .request_turn_cancellation(turn_id, requested_at)
+        .await
+        .unwrap()
+        .expect("running cancellation is accepted");
+
+    let output = Message {
+        id: MessageId::new(),
+        chat_id: chat.id,
+        turn_id,
+        role: Role::Assistant,
+        content: "the answer so far".into(),
+        created_at: requested_at,
+    };
+    store
+        .finish_turn_cancellation_and_append_event(
+            turn_id,
+            lease,
+            requested_at + chrono::Duration::seconds(1),
+            Usage::default(),
+            Some(&output),
+            &[],
+        )
+        .await
+        .unwrap()
+        .expect("worker acknowledges cancellation with output");
+
+    let transcript = store.get_chat_transcript(chat.id).await.unwrap().unwrap();
+    let snapshot = transcript
+        .terminal_turns
+        .last()
+        .expect("cancelled turn remains in the transcript");
+    assert_eq!(
+        (
+            snapshot.status.clone(),
+            snapshot.message_id,
+            snapshot.partial_content.as_str(),
+        ),
+        (
+            crate::storage::ChatTerminalTurnStatus::Cancelled,
+            Some(output.id),
+            "",
+        ),
+        "the committed message, not the journal rebuild, carries the prose"
+    );
+    let committed = transcript
+        .messages
+        .iter()
+        .find(|message| message.id == output.id)
+        .expect("partial output is a durable message");
+    assert_eq!(
+        (committed.role, committed.content.as_str()),
+        (Role::Assistant, "the answer so far")
+    );
+
+    // An exact retry of the same acknowledgement stays idempotent.
+    store
+        .finish_turn_cancellation_and_append_event(
+            turn_id,
+            lease,
+            requested_at + chrono::Duration::seconds(2),
+            Usage::default(),
+            Some(&output),
+            &[],
+        )
+        .await
+        .unwrap()
+        .expect("exact cancellation retry recovers");
+    assert_eq!(
+        store
+            .list_messages(chat.id)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|message| message.role == Role::Assistant)
+            .count(),
+        1,
+        "a retried acknowledgement must not duplicate the output message"
     );
 }

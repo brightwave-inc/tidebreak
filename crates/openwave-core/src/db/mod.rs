@@ -1457,9 +1457,19 @@ impl Store for DbStore {
         lease_token: uuid::Uuid,
         now: chrono::DateTime<Utc>,
         usage: Usage,
+        output: Option<&Message>,
+        citations: &[crate::AssistantCitationInput],
     ) -> Result<Option<JournaledTurnOutcome<FinishTurnCancellationOutcome>>> {
-        ops::turn::finish_turn_cancellation_and_append_event(self, id, lease_token, now, usage)
-            .await
+        ops::turn::finish_turn_cancellation_and_append_event(
+            self,
+            id,
+            lease_token,
+            now,
+            usage,
+            output,
+            citations,
+        )
+        .await
     }
 
     async fn park_turn_for_client_tool_call(

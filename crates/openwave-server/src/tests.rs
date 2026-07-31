@@ -1191,6 +1191,8 @@ impl Store for PauseTerminalStore {
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
         usage: Usage,
+        output: Option<&openwave_core::Message>,
+        citations: &[openwave_core::AssistantCitationInput],
     ) -> Result<
         Option<openwave_core::JournaledTurnOutcome<openwave_core::FinishTurnCancellationOutcome>>,
     > {
@@ -1201,7 +1203,14 @@ impl Store for PauseTerminalStore {
             self.terminalize_expired_turn(id).await?;
         }
         self.inner
-            .finish_turn_cancellation_and_append_event(id, lease_token, now, usage)
+            .finish_turn_cancellation_and_append_event(
+                id,
+                lease_token,
+                now,
+                usage,
+                output,
+                citations,
+            )
             .await
     }
     async fn append_turn_event(

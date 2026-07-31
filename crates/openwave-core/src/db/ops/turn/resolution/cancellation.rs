@@ -419,32 +419,46 @@ pub(in crate::db) async fn finish_turn_cancellation(
     now: chrono::DateTime<Utc>,
 ) -> Result<Option<FinishTurnCancellationOutcome>> {
     Ok(
-        finish_turn_cancellation_inner(store, id, lease_token, now, None)
+        finish_turn_cancellation_inner(store, id, lease_token, now, None, None, &[])
             .await?
             .map(|resolution| resolution.outcome),
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::db) async fn finish_turn_cancellation_and_append_event(
     store: &DbStore,
     id: TurnId,
     lease_token: uuid::Uuid,
     now: chrono::DateTime<Utc>,
     usage: Usage,
+    output: Option<&Message>,
+    citations: &[crate::AssistantCitationInput],
 ) -> Result<Option<JournaledTurnOutcome<FinishTurnCancellationOutcome>>> {
     let event = AgentEvent::TurnCancelled { usage };
-    finish_turn_cancellation_inner(store, id, lease_token, now, Some(&event)).await
+    finish_turn_cancellation_inner(store, id, lease_token, now, Some(&event), output, citations)
+        .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn finish_turn_cancellation_inner(
     store: &DbStore,
     id: TurnId,
     lease_token: uuid::Uuid,
     now: chrono::DateTime<Utc>,
     terminal_event: Option<&AgentEvent>,
+    output: Option<&Message>,
+    citations: &[crate::AssistantCitationInput],
 ) -> Result<Option<JournaledTurnOutcome<FinishTurnCancellationOutcome>>> {
     if lease_token.is_nil() {
         return Err(AgentError::Store("turn lease token must not be nil".into()));
+    }
+    // The prose a cancelled turn already streamed commits with the same
+    // transition (#1182). An empty output is not a message.
+    let output = output.filter(|output| !output.content.is_empty());
+    if let Some(output) = output {
+        validate_turn_output(id, lease_token, output)?;
+        super::super::super::citation::validate_assistant_message(output, citations)?;
     }
     let now = canonical_db_timestamp(now)?;
     let journal_chat_id = journal_chat_id(store, id, terminal_event.is_some()).await?;
@@ -512,7 +526,49 @@ async fn finish_turn_cancellation_inner(
         .await?;
     super::super::super::plan::close_pending_for_terminal_turn_on(&transaction, id, now).await?;
 
-    let cancelled = entities::turn_run::Entity::update_many()
+    // Commit the partial output under the cancelled turn before the status
+    // flip so the message row and the terminal transition land atomically —
+    // the same shape as a completed turn's output.
+    let output_message_id = match output {
+        Some(output) => {
+            if output.chat_id.0 != turn.chat_id {
+                return Err(AgentError::Store(format!(
+                    "turn {id} output belongs to a different chat"
+                )));
+            }
+            if !reserve_message_identity_on(
+                &transaction,
+                output.id,
+                output.chat_id,
+                output.turn_id,
+                MESSAGE_IDENTITY_OWNER_MESSAGE,
+            )
+            .await?
+            {
+                return Err(AgentError::Store(format!(
+                    "turn output message identity {} is already reserved",
+                    output.id
+                )));
+            }
+            let message = entities::message::ActiveModel {
+                id: Set(output.id.0),
+                chat_id: Set(output.chat_id.0),
+                turn_id: Set(output.turn_id.0),
+                seq: Set(next_message_seq_on(&transaction, output.chat_id).await?),
+                role: Set("assistant".into()),
+                content: Set(output.content.clone()),
+                turn_lease_token: Set(Some(lease_token)),
+                created_at: Set(canonical_db_timestamp(output.created_at)?),
+            };
+            message.insert(&transaction).await.map_err(store_err)?;
+            super::super::super::citation::insert_for_message_on(&transaction, output, citations)
+                .await?;
+            Some(output.id.0)
+        }
+        None => None,
+    };
+
+    let mut cancelled = entities::turn_run::Entity::update_many()
         .col_expr(
             entities::turn_run::Column::Status,
             sea_orm::sea_query::Expr::value(TurnRunStatus::Cancelled.as_str()),
@@ -532,7 +588,14 @@ async fn finish_turn_cancellation_inner(
         .col_expr(
             entities::turn_run::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(now),
-        )
+        );
+    if let Some(message_id) = output_message_id {
+        cancelled = cancelled.col_expr(
+            entities::turn_run::Column::OutputMessageId,
+            sea_orm::sea_query::Expr::value(Some(message_id)),
+        );
+    }
+    let cancelled = cancelled
         .filter(entities::turn_run::Column::Id.eq(id.0))
         .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Cancelling.as_str()))
         .filter(entities::turn_run::Column::AttemptCount.eq(claim.attempt_count))

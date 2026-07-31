@@ -26,6 +26,11 @@ export type HydratedTranscriptEntry =
       refusal?: RendererRefusal;
       /** The turn's presentable reasoning summary, on assistant entries. */
       reasoning?: string;
+      /**
+       * The turn was cancelled after this assistant message's prose streamed;
+       * the partial output is durable but the stop still needs its notice.
+       */
+      interrupted?: boolean;
     }
   | {
       id: string;
@@ -117,6 +122,9 @@ export function hydrateTranscriptHistory(
           message.role === "assistant" ? terminalTurn?.refusal : undefined,
         reasoning:
           message.role === "assistant" ? terminalTurn?.reasoning : undefined,
+        interrupted:
+          message.role === "assistant" &&
+          terminalTurn?.status === "cancelled",
       };
     }),
     ...toolActivity.map((activity) => ({
