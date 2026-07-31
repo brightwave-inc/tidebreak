@@ -9,7 +9,6 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { WithTooltip } from "@/components/ui/tooltip";
 import {
   exportDeliverable,
-  isTextDeliverableMediaType,
   listOutputRevisions,
   readDeliverable,
   readOutputRevision,
@@ -20,7 +19,6 @@ import {
   type OutputRevisionInfo,
   type OutputRevisionsCatalog,
 } from "@/deliverables";
-import { MessageMarkdown } from "@/MessageMarkdown";
 import {
   PICKER_BUSY_MESSAGE,
   PICKER_HOLDERS,
@@ -29,6 +27,7 @@ import {
 import { PanelFrame } from "@/panel/PanelFrame";
 import type { PanelPosition } from "@/panel/panelTypes";
 import { usePanelNav } from "@/panel/usePanelNav";
+import { OutputContent } from "./OutputContent";
 import { outputTypeLabel } from "./outputFormat";
 import { exportFailureMessage, friendlyOutputError } from "./OutputsView";
 
@@ -349,26 +348,7 @@ export function OutputDetailRoot({
           <div className="shrink-0 px-6 pt-4 text-xs text-muted-foreground">
             {outputTypeLabel(viewing.mediaType)}
           </div>
-          <div className="min-h-0 flex-1 overflow-auto p-6">
-            <div className="mx-auto max-w-4xl">
-              {!isTextDeliverableMediaType(viewing.mediaType) ? (
-                <p className="text-sm text-muted-foreground" role="status">
-                  No preview for this file type. Save as… exports the file.
-                </p>
-              ) : viewing.mediaType === "text/markdown" ? (
-                <MessageMarkdown>{viewing.content}</MessageMarkdown>
-              ) : (
-                <pre className="font-mono text-xs break-words whitespace-pre-wrap">
-                  {viewing.content}
-                </pre>
-              )}
-              {viewing.truncated && (
-                <p className="mt-6 text-xs text-muted-foreground">
-                  Preview truncated. Saving writes the complete file.
-                </p>
-              )}
-            </div>
-          </div>
+          <OutputContent chatId={chatId} preview={viewing} />
         </>
       ) : (
         <p className="p-6 text-sm text-muted-foreground" role="status">

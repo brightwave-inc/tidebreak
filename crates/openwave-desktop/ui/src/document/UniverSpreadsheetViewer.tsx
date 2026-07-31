@@ -13,14 +13,13 @@ import { Loader2Icon } from "lucide-react";
 import type { HTMLAttributes, ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import type { ApiClient } from "@/api";
 import { cn } from "@/lib/utils";
 import { useTheme } from "@/theme";
 import UniverFormulaWorker from "@/workers/univer-formula.worker?worker&inline";
 import { SpreadsheetShortcutsInfoBar } from "./SpreadsheetShortcutsInfo";
 import { parseCellAddress } from "./spreadsheet";
 import { FileDownloadProgressIndicator } from "@/components/document/FileDownloadProgress";
-import { useFileDownload } from "./useFileDownload";
+import { useFileDownload, type FileBytesSource } from "./useFileDownload";
 import { useUniverWorker } from "./useUniverWorker";
 
 /** A cell range a citation points at, resolved against a named or indexed sheet. */
@@ -32,9 +31,7 @@ export interface SheetHighlightRange {
 }
 
 interface Props extends HTMLAttributes<HTMLDivElement> {
-  client: Pick<ApiClient, "getChatDocumentFile">;
-  chatId: string;
-  documentId: string;
+  source: FileBytesSource;
   highlightRange?: SheetHighlightRange;
   /** When true, skip the XLSX-only style pass — a CSV has none. */
   isCsv?: boolean;
@@ -57,9 +54,7 @@ interface UniverInstance {
  * navigation, selection, and the formula engine's own writes through.
  */
 export default function UniverSpreadsheetViewer({
-  client,
-  chatId,
-  documentId,
+  source,
   highlightRange,
   isCsv,
   className,
@@ -74,6 +69,7 @@ export default function UniverSpreadsheetViewer({
   const { resolved: resolvedTheme } = useTheme();
   const resolvedThemeRef = useRef(resolvedTheme);
   resolvedThemeRef.current = resolvedTheme;
+  const fileId = source.id;
 
   // Sync dark mode with Univer.
   useEffect(() => {
@@ -93,7 +89,7 @@ export default function UniverSpreadsheetViewer({
     };
   }, []);
 
-  const fileDownload = useFileDownload(client, chatId, documentId, {
+  const fileDownload = useFileDownload(source, {
     parseAs: "arrayBuffer",
   });
 
@@ -211,7 +207,7 @@ export default function UniverSpreadsheetViewer({
     let disposed = false;
 
     univerWorker
-      .parseWorkbook(fileDownload.data, documentId, { isCsv })
+      .parseWorkbook(fileDownload.data, fileId, { isCsv })
       .then(({ workbookData }) => {
         if (disposed || !containerRef.current) return;
 
@@ -314,7 +310,7 @@ export default function UniverSpreadsheetViewer({
         univerInstanceRef.current = null;
       }
     };
-  }, [fileDownload.data, documentId, isCsv, univerWorker]);
+  }, [fileDownload.data, fileId, isCsv, univerWorker]);
 
   // Apply a highlight that arrives after the canvas is up; one that arrives
   // before it is applied by the canvas poll above.

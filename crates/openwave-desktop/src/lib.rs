@@ -190,6 +190,7 @@ pub fn run() {
             documents::export_library_document,
             deliverables::list_deliverables,
             deliverables::read_deliverable,
+            deliverables::read_deliverable_file,
             deliverables::export_deliverable,
             deliverables::restore_output,
             deliverables::list_output_revisions,

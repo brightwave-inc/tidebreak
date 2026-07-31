@@ -14,11 +14,13 @@ import { Document, Page, pdfjs } from "react-pdf";
 // security policy. Vite emits the file and rewrites this to its final URL.
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
-import type { ApiClient } from "@/api";
 import { FileDownloadProgressIndicator } from "@/components/document/FileDownloadProgress";
 import { Button } from "@/components/ui/button";
 import { useRegisterPdfControls } from "@/document/PdfControlsContext";
-import { useFileDownload } from "@/document/useFileDownload";
+import {
+  useFileDownload,
+  type FileBytesSource,
+} from "@/document/useFileDownload";
 import { usePdfPageState } from "@/document/usePdfPageState";
 import { useWheelPageNavigation } from "@/document/useWheelPageNavigation";
 import { useZoom } from "@/document/useZoom";
@@ -28,9 +30,7 @@ import { cn } from "@/lib/utils";
 pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 interface Props extends HTMLAttributes<HTMLDivElement> {
-  client: Pick<ApiClient, "getChatDocumentFile">;
-  chatId: string;
-  documentId: string;
+  source: FileBytesSource;
   /** Open on this page the first time it is requested for this document. */
   targetPage?: number;
   /** Render the toolbar at a smaller scale. */
@@ -56,9 +56,7 @@ function PdfPage({ pageNumber, width }: { pageNumber: number; width: number }) {
  * and page-at-a-time is what makes wheel and arrow paging mean anything.
  */
 export function PdfViewer({
-  client,
-  chatId,
-  documentId,
+  source,
   targetPage,
   compact,
   className,
@@ -75,8 +73,9 @@ export function PdfViewer({
 
   const [renderFailed, setRenderFailed] = useState(false);
   const [numPages, setNumPages] = useState(0);
+  const fileId = source.id;
 
-  const { data, error, progress } = useFileDownload(client, chatId, documentId, {
+  const { data, error, progress } = useFileDownload(source, {
     parseAs: "arrayBuffer",
   });
   const loadFailed = renderFailed || error !== null;
@@ -86,7 +85,7 @@ export function PdfViewer({
     setScale(100);
     setRenderFailed(false);
     setNumPages(0);
-  }, [documentId, setScale]);
+  }, [fileId, setScale]);
 
   const pdfFile = useMemo(() => {
     if (!data) return null;
@@ -95,7 +94,7 @@ export function PdfViewer({
     return { data: new Uint8Array(data) };
   }, [data]);
 
-  const { currentPage, setCurrentPage } = usePdfPageState(documentId, {
+  const { currentPage, setCurrentPage } = usePdfPageState(fileId, {
     numPages,
     targetPage,
   });
@@ -283,7 +282,7 @@ export function PdfViewer({
       {/* Scrollable page area */}
       <div className="relative min-h-0 flex-1 overflow-scroll" ref={setContainerRef}>
         <Document
-          key={documentId}
+          key={fileId}
           file={pdfFile ?? undefined}
           onLoadSuccess={({ numPages }) => setNumPages(numPages)}
           onLoadError={() => setRenderFailed(true)}
