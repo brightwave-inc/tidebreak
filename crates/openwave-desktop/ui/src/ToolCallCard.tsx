@@ -21,6 +21,7 @@ export type ToolCallStatus =
   | "waiting_approval"
   | "completed"
   | "failed"
+  | "denied"
   | "cancelled";
 
 type ToolCommandCardProps = {
@@ -532,6 +533,16 @@ function statusPresentation(tool: ToolPresentation, status: ToolCallStatus) {
         badge: "Failed",
         label: "Tool could not complete",
         tone: "failed" as const,
+      };
+    case "denied":
+      // The reader said no; the tool did not break. Distinct copy keeps a
+      // decline from reading as either a crash or a cancelled turn.
+      return {
+        icon: "–",
+        title: tool.label,
+        badge: "Declined",
+        label: "Declined",
+        tone: "cancelled" as const,
       };
     case "cancelled":
       return {

@@ -449,7 +449,7 @@ result_unreadable: boolean, background_agent_run_id?: AgentRunId, status: ChatTo
 /**
  * Fixed lifecycle vocabulary exposed for a historical tool card.
  */
-export type ChatToolActivityStatus = "completed" | "failed" | "cancelled";
+export type ChatToolActivityStatus = "completed" | "failed" | "denied" | "cancelled";
 
 /**
  * One visible transcript plus the durable journal watermark that produced it.

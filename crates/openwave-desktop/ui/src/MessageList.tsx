@@ -1083,6 +1083,7 @@ export function shouldShowAssistantWorking(
       (message.role === "tool" &&
         message.status !== "completed" &&
         message.status !== "failed" &&
+        message.status !== "denied" &&
         message.status !== "cancelled") ||
       (message.role === "approval" && !message.resolved),
   );
