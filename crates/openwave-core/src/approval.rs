@@ -372,6 +372,15 @@ pub struct ToolApproval {
 }
 
 impl ToolApproval {
+    /// Reject reason when the reader gave none.
+    ///
+    /// The model reads this verbatim, so it carries the recovery guidance a
+    /// silent reader would otherwise leave implicit: retrying the exact call
+    /// just re-asks the question the reader already answered.
+    pub const DEFAULT_REJECT_REASON: &'static str = "The user declined to approve this action. \
+        Do not retry the same action; propose a different approach, ask the user why, or \
+        continue without it.";
+
     /// Maximum stored reject-reason bytes.
     pub const MAX_REASON_BYTES: usize = 1024;
 
@@ -397,7 +406,7 @@ impl ToolApproval {
                 reason: self
                     .reason
                     .clone()
-                    .unwrap_or_else(|| "user denied approval".into()),
+                    .unwrap_or_else(|| Self::DEFAULT_REJECT_REASON.into()),
             }),
         }
     }
