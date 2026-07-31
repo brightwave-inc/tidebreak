@@ -3123,7 +3123,9 @@ pub async fn post_approval(
                 .reason
                 .map(|reason| reason.trim().to_owned())
                 .filter(|reason| !reason.is_empty())
-                .unwrap_or_else(|| "user denied approval".into()),
+                .unwrap_or_else(|| {
+                    openwave_core::ToolApproval::DEFAULT_REJECT_REASON.into()
+                }),
         },
     };
     if body.grant.is_some() && !matches!(&decision, ApprovalDecision::Approve) {
