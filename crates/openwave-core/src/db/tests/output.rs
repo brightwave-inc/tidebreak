@@ -763,11 +763,21 @@ mod output_scan {
         write_output_file(scratch.path(), "binary.md", b"text\xff\xfe");
         write_output_file(scratch.path(), ".hidden.md", b"# Plumbing");
         write_output_file(scratch.path(), "nested/index.html", b"<html></html>");
+        write_output_file(scratch.path(), "fake.pdf", b"<html>not a pdf</html>");
+        write_output_file(scratch.path(), "real.pdf", b"%PDF-1.7 minimal");
 
         let scan = sync(&store, &dir, chat.id, CallId::new(), 0).await;
 
-        assert_eq!(scan.entries.len(), 1);
-        assert_eq!(scan.entries[0].filename, "good.md");
+        let published: Vec<&str> = scan
+            .entries
+            .iter()
+            .map(|entry| entry.filename.as_str())
+            .collect();
+        assert_eq!(published, ["good.md", "real.pdf"]);
+        assert!(scan
+            .notes
+            .iter()
+            .any(|note| note.contains("fake.pdf") && note.contains("not a PDF")));
         assert!(scan.notes.iter().any(|note| note.contains("empty.md")));
         assert!(scan
             .notes

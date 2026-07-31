@@ -305,6 +305,52 @@ fn read_output_candidates(scratch: &Dir) -> (Vec<ScanCandidate>, Vec<String>) {
     (candidates, notes)
 }
 
+/// Refuse a binary candidate whose bytes do not start with its extension's
+/// unambiguous format signature, so a mislabeled file (HTML saved as
+/// `report.pdf`) becomes a note the model can act on instead of a broken
+/// preview.
+///
+/// Only formats with a fixed magic number are checked; extensions without one
+/// (and anything that classified as text) publish exactly as before. Office
+/// formats are ZIP containers, so they share the ZIP check. An empty-archive
+/// end-of-central-directory record (`PK\x05\x06`) counts as a valid ZIP: it is
+/// a real, well-formed archive, and whether it opens as a useful office file
+/// is fidelity validation, which stays out of scope until a
+/// conversion-capable runtime exists.
+fn check_binary_signature(name: &str, content: &[u8]) -> std::result::Result<(), String> {
+    fn is_zip(content: &[u8]) -> bool {
+        content.starts_with(b"PK\x03\x04") || content.starts_with(b"PK\x05\x06")
+    }
+
+    let Some((_, extension)) = name.rsplit_once('.') else {
+        return Ok(());
+    };
+    let (matches, format) = match extension.to_ascii_lowercase().as_str() {
+        "pdf" => (content.starts_with(b"%PDF-"), "PDF"),
+        "docx" => (is_zip(content), "DOCX"),
+        "xlsx" => (is_zip(content), "XLSX"),
+        "xlsm" => (is_zip(content), "XLSM"),
+        "pptx" => (is_zip(content), "PPTX"),
+        "zip" => (is_zip(content), "ZIP archive"),
+        "png" => (content.starts_with(b"\x89PNG\r\n\x1a\n"), "PNG"),
+        "jpg" | "jpeg" => (content.starts_with(b"\xff\xd8\xff"), "JPEG"),
+        "webp" => (
+            content.len() >= 12 && content.starts_with(b"RIFF") && &content[8..12] == b"WEBP",
+            "WebP",
+        ),
+        "gif" => (
+            content.starts_with(b"GIF87a") || content.starts_with(b"GIF89a"),
+            "GIF",
+        ),
+        _ => return Ok(()),
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(format!("the bytes are not a {format}"))
+    }
+}
+
 /// Read one file and classify it as a text deliverable or binary artifact.
 fn classify_candidate(directory: &Dir, name: &str) -> std::result::Result<ScanCandidate, String> {
     validate_portable_filename(name).map_err(str::to_owned)?;
@@ -347,9 +393,12 @@ fn classify_candidate(directory: &Dir, name: &str) -> std::result::Result<ScanCa
             }
             DeliverableKind::Text
         }
-        None => DeliverableKind::Binary {
-            media_type: binary_media_type_for_extension(name).to_owned(),
-        },
+        None => {
+            check_binary_signature(name, &content)?;
+            DeliverableKind::Binary {
+                media_type: binary_media_type_for_extension(name).to_owned(),
+            }
+        }
     };
     Ok(ScanCandidate {
         filename: name.to_owned(),
