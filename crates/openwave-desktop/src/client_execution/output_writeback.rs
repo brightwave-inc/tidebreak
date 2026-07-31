@@ -519,6 +519,7 @@ fn materialization_resolution(
         }
         (_, RejectedChangeReason::SnapshotUnavailable) => "output_writeback_snapshot_unavailable",
         (_, RejectedChangeReason::StagedFileTooLarge) => "output_writeback_source_unavailable",
+        (_, RejectedChangeReason::TrashUnavailable) => "output_writeback_unavailable",
         (_, RejectedChangeReason::Unavailable) => "output_writeback_unavailable",
     };
     unavailable(code)

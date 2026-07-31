@@ -36,9 +36,10 @@ pub use host_paths::{
 pub use local::LocalExecutionProvider;
 pub use overlay::{
     materialize_file, materialized_file_matches, sweep_abandoned_overlays,
-    MaterializationPrecondition, MaterializedChange, MaterializedChangeKind, OverlayInspector,
-    OverlayOutcome, OverlaySlot, PreparedWriteSnapshot, PriorContents, RejectedChange,
-    RejectedChangeReason, StagedChange, WriteOverlay, WriteSnapshotSink, OVERLAY_DIR,
+    MaterializationPrecondition, MaterializedChange, MaterializedChangeKind, NativeTrash,
+    OverlayInspector, OverlayOutcome, OverlaySlot, PreparedWriteSnapshot, PriorContents,
+    RejectedChange, RejectedChangeReason, StagedChange, TrashSink, WriteOverlay, WriteSnapshotSink,
+    OVERLAY_DIR,
 };
 pub use preview::{scan_preview_directory, PreviewScan};
 pub use remote::RemoteSessionPool;

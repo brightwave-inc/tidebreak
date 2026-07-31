@@ -73,4 +73,5 @@ libc = "=0.2.189"
 async-stream = "=0.3.6"
 axum = { version = "=0.8.9", features = ["ws"] }
 tempfile = "=3.27.0"
+trash = { version = "=5.2.6", default-features = false, features = ["coinit_apartmentthreaded"] }
 zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2"] }

@@ -377,10 +377,27 @@ mod tests {
     use std::collections::BTreeMap;
 
     use chrono::Utc;
-    use openwave_code_execution::WriteOverlay;
+    use openwave_code_execution::{TrashSink, WriteOverlay};
     use openwave_core::{Chat, DbStore, FsBlobStore};
 
     use crate::state::BlobWriteGuard;
+
+    struct TestTrash(std::sync::Mutex<Vec<(String, Vec<u8>)>>);
+
+    #[async_trait::async_trait]
+    impl TrashSink for TestTrash {
+        async fn trash(&self, path: &Path) -> Result<(), String> {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| "trash name is not UTF-8".to_owned())?
+                .to_owned();
+            let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+            std::fs::remove_file(path).map_err(|error| error.to_string())?;
+            self.0.lock().unwrap().push((name, bytes));
+            Ok(())
+        }
+    }
 
     /// The issue contract: the turn journal survives process state, and undo
     /// restores overwritten/deleted bytes while removing a file the turn made.
@@ -433,9 +450,14 @@ mod tests {
         std::fs::write(staged.join("created.txt"), b"new file").unwrap();
         std::fs::remove_file(staged.join("removed.txt")).unwrap();
 
-        let materialized = overlay.materialize(Some(&sink)).await;
+        let trash = TestTrash(std::sync::Mutex::new(Vec::new()));
+        let materialized = overlay.materialize_with_trash(Some(&sink), &trash).await;
         assert_eq!(materialized.written.len(), 3);
         assert!(materialized.rejected.is_empty());
+        assert_eq!(
+            *trash.0.lock().unwrap(),
+            vec![("removed.txt".to_owned(), b"bring me back".to_vec())]
+        );
         sink.commit(chat.id, turn_id).await.unwrap();
         assert_eq!(
             std::fs::read(granted.join("notes.md")).unwrap(),
