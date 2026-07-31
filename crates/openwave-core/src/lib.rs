@@ -104,10 +104,10 @@ pub use client_tools::{
     write_output_to_connected_folder_tool_spec, ImportConnectedFileArgs, ImportConnectedFileResult,
     ListConnectedFoldersArgs, ListFolderArgs, OutputWriteMode, ReadConnectedFileArgs,
     RequestFolderAccessArgs, RequestFolderAccessResult, RequestedFolderCapability,
-    RequestedFolderHint, WriteOutputToConnectedFolderArgs, IMPORT_CONNECTED_FILE_TOOL,
-    LIST_CONNECTED_FOLDERS_TOOL, LIST_FOLDER_TOOL, MAX_CONNECTED_FOLDER_PATH_BYTES,
-    MAX_FOLDER_ACCESS_REASON_CHARS, READ_CONNECTED_FILE_TOOL, REQUEST_FOLDER_ACCESS_TOOL,
-    WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
+    RequestedFolderHint, WriteOutputToConnectedFolderArgs, WriteOutputToConnectedFolderProposal,
+    IMPORT_CONNECTED_FILE_TOOL, LIST_CONNECTED_FOLDERS_TOOL, LIST_FOLDER_TOOL,
+    MAX_CONNECTED_FOLDER_PATH_BYTES, MAX_FOLDER_ACCESS_REASON_CHARS, READ_CONNECTED_FILE_TOOL,
+    REQUEST_FOLDER_ACCESS_TOOL, WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
 };
 pub use config::{Config, Profile};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]

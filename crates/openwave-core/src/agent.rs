@@ -929,6 +929,18 @@ enum CallIsolation {
     AgentWait,
 }
 
+/// How one client call's model-facing arguments map onto the canonical durable
+/// arguments its checkpoint stores.
+enum ClientArgumentResolution {
+    /// The model's arguments are already the canonical form.
+    Unchanged,
+    /// The model named a host identity that resolved into canonical arguments.
+    Resolved(Value),
+    /// The named identity does not exist; the model gets this answer instead
+    /// of a checkpoint.
+    Refused(String),
+}
+
 /// The closed action projection for a pending call, parsed from the arguments
 /// it will run with. Arguments that never parsed cannot describe an action.
 fn call_action_preview(call: &PendingCall) -> Option<ToolActionPreview> {
@@ -1926,23 +1938,40 @@ impl Agent {
                 } else {
                     match isolations[index].expect("an isolated call has a class") {
                         CallIsolation::Client => {
-                            match self.client_checkpoint(
-                                chat,
-                                turn_id,
-                                call,
-                                generation_steer_revision,
-                            ) {
-                                Ok((request, steer_revision)) => {
-                                    return Ok(AgentTurnOutcome::ClientToolCall {
-                                        request,
-                                        usage: total_usage,
-                                        steer_revision,
-                                        model_steps: steps_used,
-                                    })
+                            match self.resolve_client_call_arguments(chat, call).await? {
+                                ClientArgumentResolution::Refused(reason) => {
+                                    outputs[index] = Some(self.decline_call(call, events, reason));
                                 }
-                                Err(reason) => {
-                                    outputs[index] =
-                                        Some(self.decline_call(call, events, reason.into()));
+                                resolution => {
+                                    let resolved = match resolution {
+                                        ClientArgumentResolution::Resolved(arguments) => {
+                                            Some(arguments)
+                                        }
+                                        _ => None,
+                                    };
+                                    match self.client_checkpoint(
+                                        chat,
+                                        turn_id,
+                                        call,
+                                        resolved,
+                                        generation_steer_revision,
+                                    ) {
+                                        Ok((request, steer_revision)) => {
+                                            return Ok(AgentTurnOutcome::ClientToolCall {
+                                                request,
+                                                usage: total_usage,
+                                                steer_revision,
+                                                model_steps: steps_used,
+                                            })
+                                        }
+                                        Err(reason) => {
+                                            outputs[index] = Some(self.decline_call(
+                                                call,
+                                                events,
+                                                reason.into(),
+                                            ));
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -2276,13 +2305,69 @@ impl Agent {
         output
     }
 
+    /// Map one client call's model-facing arguments onto the canonical durable
+    /// arguments its checkpoint stores.
+    ///
+    /// The output write-back tool is the only mapping today: the model names a
+    /// published output by display filename (ids are never in its vocabulary),
+    /// and the host resolves that name against the chat's live outputs exactly
+    /// like the output scan does — `list_outputs` orders newest-updated first
+    /// and excludes deleted outputs, so the first filename match is the live
+    /// record the model named. Payloads that fail to parse pass through
+    /// unchanged so [`Self::client_checkpoint`] reports them with its standard
+    /// malformed-arguments answer.
+    async fn resolve_client_call_arguments(
+        &self,
+        chat: &Chat,
+        call: &PendingCall,
+    ) -> Result<ClientArgumentResolution> {
+        if call.name != crate::WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL {
+            return Ok(ClientArgumentResolution::Unchanged);
+        }
+        let Some(proposal) = parse_tool_args(&call.args).and_then(|arguments| {
+            serde_json::from_value::<crate::WriteOutputToConnectedFolderProposal>(arguments).ok()
+        }) else {
+            return Ok(ClientArgumentResolution::Unchanged);
+        };
+        if !proposal.is_well_formed() {
+            return Ok(ClientArgumentResolution::Unchanged);
+        }
+        let outputs = self
+            .store
+            .list_outputs(chat.id, crate::output_scan::OUTPUT_LOOKUP_LIMIT)
+            .await?;
+        let Some(output) = outputs
+            .iter()
+            .find(|output| output.filename == proposal.filename)
+        else {
+            return Ok(ClientArgumentResolution::Refused(format!(
+                "not run: no live output in this conversation is named \"{}\". Use the exact filename of an output reported as published.",
+                proposal.filename
+            )));
+        };
+        let canonical = crate::WriteOutputToConnectedFolderArgs {
+            output_id: *output.id.as_uuid(),
+            root_id: proposal.root_id,
+            path: proposal.path,
+            mode: proposal.mode,
+        };
+        let arguments = serde_json::to_value(canonical)
+            .map_err(|error| AgentError::Store(format!("unencodable write-back: {error}")))?;
+        Ok(ClientArgumentResolution::Resolved(arguments))
+    }
+
     /// The client-tool checkpoint for `call`, or what the model is told when
     /// the request cannot be made.
+    ///
+    /// `resolved_arguments`, when present, replaces the model's raw arguments
+    /// with the canonical form produced by
+    /// [`Self::resolve_client_call_arguments`].
     fn client_checkpoint(
         &self,
         chat: &Chat,
         turn_id: TurnId,
         call: &PendingCall,
+        resolved_arguments: Option<Value>,
         steer_revision: Option<i64>,
     ) -> std::result::Result<(crate::model::ClientToolCallRequest, i64), &'static str> {
         if self.tools.is_foreground_client(&call.name) && !self.agent_orchestration_active() {
@@ -2299,8 +2384,14 @@ impl Agent {
                 "not run: this tool is not available in plan mode; the chat is read-only until the reader leaves plan mode. Continue with read-only tools.",
             );
         }
-        let Some(arguments) = parse_tool_args(&call.args) else {
-            return Err("not run: the client tool arguments were not valid JSON. Ask again with one complete JSON value.");
+        let arguments = match resolved_arguments {
+            Some(arguments) => arguments,
+            None => {
+                let Some(arguments) = parse_tool_args(&call.args) else {
+                    return Err("not run: the client tool arguments were not valid JSON. Ask again with one complete JSON value.");
+                };
+                arguments
+            }
         };
         let request = crate::model::ClientToolCallRequest {
             id: call.call_id,
@@ -4816,6 +4907,182 @@ mod tests {
             "invalid arguments must not reach a checkpoint: {invalid_outcome:?}"
         );
         assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
+    }
+
+    async fn output_writeback_fixture(
+    ) -> (tempfile::TempDir, Arc<dyn Store>, Chat, TurnId, uuid::Uuid) {
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("writeback.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            reasoning_effort: None,
+            permission_mode: None,
+            network_policy: Default::default(),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let turn_id = TurnId::new();
+        store
+            .accept_turn(turn_id, chat.id, "fake", "publish the report")
+            .await
+            .unwrap();
+        let lease_token = uuid::Uuid::new_v4();
+        let claimed_at = Utc::now();
+        store
+            .claim_turn_run(
+                lease_token,
+                claimed_at,
+                claimed_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap();
+        (db, store, chat, turn_id, lease_token)
+    }
+
+    async fn create_named_output(
+        store: &Arc<dyn Store>,
+        chat_id: ChatId,
+        filename: &str,
+        created_at: chrono::DateTime<Utc>,
+    ) -> crate::OutputId {
+        let id = crate::OutputId::new();
+        store
+            .create_output(&crate::CreateOutput {
+                id,
+                chat_id,
+                filename: filename.to_owned(),
+                kind: crate::DeliverableKind::Text,
+                revision: crate::NewOutputRevision {
+                    id: crate::OutputRevisionId::new(),
+                    byte_len: 5,
+                    sha256: [7; 32],
+                    turn_id: None,
+                    producing_run_id: None,
+                    created_at,
+                },
+            })
+            .await
+            .unwrap();
+        id
+    }
+
+    fn output_writeback_agent(
+        store: Arc<dyn Store>,
+        arguments: String,
+        lease_token: uuid::Uuid,
+    ) -> Agent {
+        let mut registry = ToolRegistry::new();
+        registry.register_validated_client(
+            crate::write_output_to_connected_folder_tool_spec(),
+            ApprovalClass::Workspace,
+            crate::validate_write_output_to_connected_folder_arguments,
+        );
+        Agent::new(
+            Arc::new(ClientToolProvider {
+                assistant_text: false,
+                sibling_call: false,
+                name: crate::WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
+                arguments: Box::leak(arguments.into_boxed_str()),
+            }),
+            Arc::new(registry),
+            store,
+            AgentConfig {
+                model: "fake".into(),
+                max_steps: 1,
+                ..AgentConfig::default()
+            },
+        )
+        .with_durable_steer(lease_token)
+    }
+
+    /// The model names an output by filename; the checkpoint carries the
+    /// resolved opaque id of the newest live output with that name — the same
+    /// record the output scan would version — so everything downstream keeps
+    /// working from a stable identity the model never saw.
+    #[tokio::test]
+    async fn output_writeback_filename_resolves_to_the_newest_live_output() {
+        let (_db, store, chat, turn_id, lease_token) = output_writeback_fixture().await;
+        let older = Utc::now() - chrono::Duration::minutes(10);
+        create_named_output(&store, chat.id, "report.md", older).await;
+        let newest = create_named_output(&store, chat.id, "report.md", Utc::now()).await;
+
+        let root_id = uuid::Uuid::new_v4();
+        let agent = output_writeback_agent(
+            store.clone(),
+            format!(
+                r#"{{"filename":"report.md","root_id":"{root_id}","path":"reports/report.md","mode":"create"}}"#
+            ),
+            lease_token,
+        );
+        let (tx, _rx) = unbounded();
+        let outcome = agent
+            .run_claimed_turn(&chat, turn_id, MessageId::new(), 1, &tx)
+            .await
+            .unwrap();
+        let AgentTurnOutcome::ClientToolCall { request, .. } = outcome else {
+            panic!("a resolvable filename must reach a client checkpoint: {outcome:?}");
+        };
+        assert_eq!(request.name, crate::WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL);
+        assert_eq!(
+            request.arguments,
+            serde_json::json!({
+                "output_id": newest.as_uuid(),
+                "root_id": root_id,
+                "path": "reports/report.md",
+                "mode": "create"
+            })
+        );
+    }
+
+    /// A filename with no live output — never published, or deleted — is
+    /// answered in place with an error naming the file, instead of parking a
+    /// checkpoint no executor could satisfy.
+    #[tokio::test]
+    async fn output_writeback_without_a_live_match_is_refused_naming_the_filename() {
+        let (_db, store, chat, turn_id, lease_token) = output_writeback_fixture().await;
+        let deleted = create_named_output(&store, chat.id, "report.md", Utc::now()).await;
+        store.delete_output(deleted, Utc::now()).await.unwrap();
+
+        let agent = output_writeback_agent(
+            store.clone(),
+            format!(
+                r#"{{"filename":"report.md","root_id":"{}","path":"report.md","mode":"create"}}"#,
+                uuid::Uuid::new_v4()
+            ),
+            lease_token,
+        );
+        let (tx, rx) = unbounded();
+        let outcome = agent
+            .run_claimed_turn(&chat, turn_id, MessageId::new(), 1, &tx)
+            .await
+            .unwrap();
+        drop(tx);
+        assert!(
+            !matches!(outcome, AgentTurnOutcome::ClientToolCall { .. }),
+            "an unresolvable filename must not reach a checkpoint: {outcome:?}"
+        );
+        assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
+        let events = emitted_events(rx.collect().await);
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::ToolCallCompleted { output, .. }
+                    if output.is_error && output.content.contains("report.md")
+            )),
+            "the refusal must name the filename"
+        );
     }
 
     #[tokio::test]
