@@ -347,9 +347,14 @@ impl ModelProvider for RecordingProvider {
     }
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
         self.models.lock().unwrap().push(req.model);
-        Ok(stream::iter(vec![ProviderEvent::Stop {
-            reason: StopReason::EndTurn,
-        }])
+        Ok(stream::iter(vec![
+            ProviderEvent::TextDelta {
+                text: "recorded".into(),
+            },
+            ProviderEvent::Stop {
+                reason: StopReason::EndTurn,
+            },
+        ])
         .boxed())
     }
 }

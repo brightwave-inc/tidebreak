@@ -4,9 +4,10 @@
 //! submodule; settings, providers, projects, chats, and event streaming remain
 //! here.
 
+use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use cap_std::ambient_authority;
 use cap_std::fs::Dir;
@@ -33,7 +34,11 @@ use crate::code_execution::{
 };
 use crate::error::ServerError;
 use crate::event_projection::{RendererChatFrame, RendererChatMetadata, RendererSequencedEvent};
-use crate::exec_write_snapshot::{undo_turn_file_changes, ExecTurnUndoOutcome};
+use crate::exec_write_snapshot::{
+    list_file_change_summaries, render_file_change_preview, undo_one_file_change,
+    undo_turn_file_changes, ExecFileChangeSummary, ExecFilePreviewError, ExecFilePreviewRequest,
+    ExecFilePreviewRevision, ExecFileUndoOutcome, ExecTurnUndoOutcome,
+};
 use crate::extract::{Json, Path, Query};
 use crate::mcp_config::{McpServersConfig, McpServersInfo};
 use crate::model_roles::{self, ModelRole};
@@ -668,6 +673,105 @@ pub async fn post_undo_turn_file_changes(
         )));
     }
     Ok(Json(outcome))
+}
+
+/// `POST /chats/{chat_id}/turns/{turn_id}/file-changes/{snapshot_id}/undo` —
+/// restore one file from the turn without touching its siblings.
+pub async fn post_undo_one_file_change(
+    State(state): State<AppState>,
+    Path((chat_id, turn_id, snapshot_id)): Path<(ChatId, TurnId, uuid::Uuid)>,
+) -> Result<Json<ExecFileUndoOutcome>, ServerError> {
+    undo_one_file_change(&*state.store, &*state.blobs, chat_id, turn_id, snapshot_id)
+        .await?
+        .map(Json)
+        .ok_or_else(|| ServerError::not_found("no retained file change for this turn"))
+}
+
+/// `GET /chats/{chat_id}/turns/{turn_id}/file-changes/{snapshot_id}/preview/{revision}`
+/// — render one authorized journal revision without exposing source bytes,
+/// paths, or a reusable document identity.
+pub async fn get_file_change_preview(
+    State(state): State<AppState>,
+    Path((chat_id, turn_id, snapshot_id, revision)): Path<(
+        ChatId,
+        TurnId,
+        uuid::Uuid,
+        ExecFilePreviewRevision,
+    )>,
+) -> Result<Response, ServerError> {
+    if state.store.get_chat(chat_id).await?.is_none() {
+        return Err(ServerError::not_found(format!("chat {chat_id} not found")));
+    }
+    let _permit = state
+        .file_preview_permits
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            ServerError::too_many_requests_kind(
+                "file_preview_busy",
+                "Document preview rendering is busy; try again shortly.",
+            )
+        })?;
+    let rendered = render_file_change_preview(
+        &*state.store,
+        &*state.blobs,
+        ExecFilePreviewRequest {
+            chat_id,
+            turn_id,
+            snapshot_id,
+            revision,
+            scripts_dir: state.config.exec_scripts_dir.as_deref(),
+            temp_root: &state.config.data_dir.join("file-preview-temp"),
+        },
+    )
+    .await
+    .map_err(file_preview_error)?;
+    let byte_len = rendered.bytes.len();
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, rendered.media_type.as_str())
+        .header(header::CONTENT_LENGTH, byte_len.to_string())
+        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(header::CONTENT_SECURITY_POLICY, SERVED_BYTES_CONTENT_POLICY)
+        .header(header::REFERRER_POLICY, "no-referrer")
+        .header(header::CONTENT_DISPOSITION, "inline")
+        .header("x-openwave-preview-width", rendered.width.to_string())
+        .header("x-openwave-preview-height", rendered.height.to_string())
+        .body(Body::from(rendered.bytes))
+        .map_err(|_| ServerError::internal("failed to build document preview response"))
+}
+
+fn file_preview_error(error: ExecFilePreviewError) -> ServerError {
+    match error {
+        ExecFilePreviewError::NotFound => {
+            ServerError::not_found("No file change with that identity exists in this turn.")
+        }
+        ExecFilePreviewError::Unsupported => ServerError::unsupported_media_type_kind(
+            "file_preview_unsupported",
+            "No visual preview is available for this file type.",
+        ),
+        ExecFilePreviewError::Empty => ServerError::unprocessable_kind(
+            "file_preview_empty",
+            "This side of the change has no file.",
+        ),
+        ExecFilePreviewError::Stale => ServerError::conflict_kind(
+            "file_preview_stale",
+            "The file changed again; its after preview is no longer available.",
+        ),
+        ExecFilePreviewError::TooLarge => ServerError::unprocessable_kind(
+            "file_preview_too_large",
+            "This revision is too large to preview.",
+        ),
+        ExecFilePreviewError::Unavailable => ServerError::unprocessable_kind(
+            "file_preview_unavailable",
+            "This revision is no longer available to preview.",
+        ),
+        ExecFilePreviewError::RenderFailed => ServerError::unprocessable_kind(
+            "file_preview_failed",
+            "OpenWave could not render this revision on this device.",
+        ),
+    }
 }
 
 /// Maximum API-key size accepted by the local credential endpoint. This is
@@ -1462,6 +1566,7 @@ pub struct ChatTerminalTurnSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub failure_category: Option<crate::event_projection::TurnFailureCategory>,
+    pub file_changes: Vec<ExecFileChangeSummary>,
     pub finished_at: chrono::DateTime<Utc>,
 }
 
@@ -1493,6 +1598,7 @@ impl From<openwave_core::ChatTerminalTurnSnapshot> for ChatTerminalTurnSnapshot 
             reasoning: (!snapshot.reasoning.trim().is_empty()).then_some(snapshot.reasoning),
             refusal: snapshot.refusal.as_ref().map(Into::into),
             failure_category,
+            file_changes: Vec::new(),
             finished_at: snapshot.finished_at,
         }
     }
@@ -1623,13 +1729,31 @@ pub async fn list_chat_messages(
             Some(snapshot)
         })
         .collect();
+    let mut file_changes_by_turn =
+        match list_file_change_summaries(&*state.store, &*state.blobs, id).await {
+            Ok(summaries) => summaries,
+            Err(error) => {
+                tracing::warn!(
+                    chat = %id,
+                    %error,
+                    "could not load connected-folder change summaries"
+                );
+                std::collections::HashMap::new()
+            }
+        };
     Ok(Json(ChatTranscript {
         messages,
         tool_activity: transcript.tool_activity,
         terminal_turns: transcript
             .terminal_turns
             .into_iter()
-            .map(ChatTerminalTurnSnapshot::from)
+            .map(|turn| {
+                let mut snapshot = ChatTerminalTurnSnapshot::from(turn);
+                snapshot.file_changes = file_changes_by_turn
+                    .remove(&snapshot.turn_id)
+                    .unwrap_or_default();
+                snapshot
+            })
             .collect(),
         last_event_seq: transcript.last_event_seq,
     }))

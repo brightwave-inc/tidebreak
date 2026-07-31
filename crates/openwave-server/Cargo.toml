@@ -49,6 +49,10 @@ plist = "=1.10.0"
 # minimal misconfigured state; these warnings are the admin's field
 # diagnostic for what exactly is broken.
 tracing = "=0.1.44"
+# Bounded unified diffs for the post-turn connected-folder change summary.
+similar = "=2.7.0"
+# Private, automatically removed inputs and outputs for ephemeral document previews.
+tempfile = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 # Effective-uid account lookup (getpwuid_r) for the macOS managed-preferences
@@ -70,4 +74,3 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time
 tower = { version = "=0.5.3", features = ["util"] }
 reqwest = { workspace = true }
 tokio-tungstenite = "=0.30.0"
-tempfile = "=3.27.0"

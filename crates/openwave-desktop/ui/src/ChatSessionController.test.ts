@@ -209,9 +209,14 @@ describe("frame validation", () => {
     const h = harness();
     h.controller.start();
     h.latest().emit({ metadata: "titled", title: "Q3 revenue reconciliation" });
+    h.latest().emit({
+      metadata: "file_changes_recorded",
+      turn_id: "turn-1",
+    });
 
     expect(h.metadata).toEqual([
       { metadata: "titled", title: "Q3 revenue reconciliation" },
+      { metadata: "file_changes_recorded", turn_id: "turn-1" },
     ]);
     expect(h.events).toEqual([]);
   });

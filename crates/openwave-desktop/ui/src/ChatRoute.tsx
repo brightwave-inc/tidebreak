@@ -200,8 +200,14 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       openSocket: (after, onFrame) => client.openEvents(chatId, after, onFrame),
       getAfter: () => useChatSessionStore.getState().lastSeq,
       onEvent: (event) => handleEventRef.current(event),
-      onMetadata: (metadata) =>
-        chatListActions.applyDerivedTitle(chatId, metadata.title),
+      onMetadata: (metadata) => {
+        if (metadata.metadata === "titled") {
+          chatListActions.applyDerivedTitle(chatId, metadata.title);
+          return;
+        }
+        const generation = ++terminalHydrationGenerationRef.current;
+        void refreshTerminalTranscript(generation);
+      },
       onConnectionState: (connectionState) =>
         setStatus((current) => `${withoutConnectionState(current)} · ${connectionState}`),
     });

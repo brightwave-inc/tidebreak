@@ -11,7 +11,7 @@ use std::sync::Mutex;
 
 use tokio::sync::broadcast;
 
-use openwave_core::{ChatId, SequencedEvent};
+use openwave_core::{ChatId, SequencedEvent, TurnId};
 
 /// How many live events a slow subscriber may fall behind before it's dropped
 /// (`Lagged`). A lagging client is expected to reconnect and replay from the
@@ -37,6 +37,8 @@ const METADATA_BUFFER: usize = 8;
 pub enum ChatMetadataNotice {
     /// The chat was given a name it did not have.
     Titled { title: String },
+    /// A terminal turn's connected-folder write report is durable and readable.
+    FileChangesRecorded { turn_id: TurnId },
 }
 
 /// Per-chat broadcast channels for live turn events and metadata notices.

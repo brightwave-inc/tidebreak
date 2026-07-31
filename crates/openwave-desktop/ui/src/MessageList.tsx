@@ -13,6 +13,7 @@ import type {
   ToolActionPreview,
   ToolResultPreview,
   UserQuestionAnswer,
+  ExecFileChangeSummary,
 } from "./api";
 import { ApprovalCard, type GrantScopeName } from "./ApprovalCard";
 import { AssistantWorkingIndicator } from "./AssistantWorkingIndicator";
@@ -54,6 +55,7 @@ import {
 import type { TurnFailureCategory } from "./generated/wire";
 import { useStreamingTypewriter } from "./useStreamingTypewriter";
 import { Skeleton } from "./components/ui/skeleton";
+import { ChangeSummaryCard } from "./ChangeSummaryCard";
 
 export type ChatMessage =
   | {
@@ -113,7 +115,14 @@ export type ChatMessage =
       resolved?: boolean;
     }
   | { id: string; role: "error"; text: string }
-  | { id: string; role: "turn_failure"; category: TurnFailureCategory };
+  | { id: string; role: "turn_failure"; category: TurnFailureCategory }
+  | {
+      id: string;
+      role: "change_summary";
+      turnId: string;
+      files: ExecFileChangeSummary[];
+      createdAt?: string;
+    };
 
 /** Everything a retry needs to put the failed turn back on the wire unchanged. */
 export type RetryableTurn = {
@@ -221,6 +230,10 @@ type MessageListProps = {
   onRetryTurn?: (turn: RetryableTurn) => void;
   hydrated?: boolean;
   imageClient?: Pick<ApiClient, "getChatImageAttachment">;
+  changeClient?: Pick<
+    ApiClient,
+    "getFileChangePreview" | "undoFileChange" | "undoTurnFileChanges"
+  >;
 };
 
 export function MessageList({
@@ -268,6 +281,7 @@ export function MessageList({
   onRetryTurn,
   hydrated = true,
   imageClient,
+  changeClient,
 }: MessageListProps) {
   // Stable identity between renders so memoized rows only re-render when the
   // approval state itself changes, not on every streamed token.
@@ -288,6 +302,7 @@ export function MessageList({
     approvalState,
     imageClient,
     chatId,
+    changeClient,
     {
       runs: backgroundAgentRuns,
       loading: backgroundAgentRunsLoading,
@@ -504,6 +519,10 @@ export function groupMessageItems(
   },
   imageClient?: Pick<ApiClient, "getChatImageAttachment">,
   chatId?: string,
+  changeClient?: Pick<
+    ApiClient,
+    "getFileChangePreview" | "undoFileChange" | "undoTurnFileChanges"
+  >,
   backgroundAgents: {
     runs: AgentRun[];
     loading: boolean;
@@ -563,6 +582,7 @@ export function groupMessageItems(
           }
           imageClient={imageClient}
           chatId={chatId}
+          changeClient={changeClient}
           onRetry={
             retry?.failureId === message.id ? retry.onRetry : undefined
           }
@@ -859,6 +879,7 @@ function MessageBubbleImpl({
   sequenceEnd = true,
   imageClient,
   chatId,
+  changeClient,
   onRetry,
 }: {
   message: ChatMessage;
@@ -867,6 +888,10 @@ function MessageBubbleImpl({
   sequenceEnd?: boolean;
   imageClient?: Pick<ApiClient, "getChatImageAttachment">;
   chatId?: string;
+  changeClient?: Pick<
+    ApiClient,
+    "getFileChangePreview" | "undoFileChange" | "undoTurnFileChanges"
+  >;
   /** Present only on the transcript's newest retryable failure. */
   onRetry?: () => void;
 }) {
@@ -985,6 +1010,18 @@ function MessageBubbleImpl({
 
   if (message.role === "turn_failure") {
     return <TurnFailureNotice category={message.category} onRetry={onRetry} />;
+  }
+
+  if (message.role === "change_summary") {
+    if (!chatId || !changeClient) return null;
+    return (
+      <ChangeSummaryCard
+        chatId={chatId}
+        turnId={message.turnId}
+        files={message.files}
+        client={changeClient}
+      />
+    );
   }
 
   if (message.role === "refusal") {

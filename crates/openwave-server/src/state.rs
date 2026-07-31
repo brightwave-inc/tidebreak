@@ -11,7 +11,7 @@ use openwave_core::{
     AgentConfig, AgentError, AgentRunId, BlobStore, CallId, CancelToken, ChatId, Config,
     FsBlobStore, Result, SecretProvider, SteerInbox, Store, ToolRegistry, TurnId,
 };
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore};
 use uuid::Uuid;
 
 use crate::approvals::ApprovalBroker;
@@ -66,6 +66,8 @@ pub struct AppState {
     pub(crate) blob_retirement_wake: Arc<Notify>,
     /// Coordinates source publication and retirement across server processes.
     pub(crate) blob_writes: Arc<BlobWriteGuard>,
+    /// Bounds expensive document renderers used by post-turn binary previews.
+    pub(crate) file_preview_permits: Arc<Semaphore>,
     /// Per-turn agent tuning (model, limits, …).
     pub agent_config: AgentConfig,
     /// The secret every request must present as `Authorization: Bearer <token>`.
@@ -160,6 +162,7 @@ impl AppState {
             agent_run_wake: Arc::new(Notify::new()),
             blob_retirement_wake: Arc::new(Notify::new()),
             blob_writes,
+            file_preview_permits: Arc::new(Semaphore::new(2)),
             agent_config,
             token: Uuid::new_v4().to_string().into(),
             client_executor_token: mint_client_executor_token(),
