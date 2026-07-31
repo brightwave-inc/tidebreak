@@ -47,7 +47,10 @@ const TERMINATE_GRACE: Duration = Duration::from_millis(250);
 #[cfg(target_os = "macos")]
 const MAX_WRITTEN_FILE_BYTES: u64 = 16 * 1_024 * 1_024;
 #[cfg(target_os = "macos")]
-const MAX_OPEN_FILES: u64 = 64;
+// Roomy enough for interpreters, package installs, and office-format
+// libraries that open many archive members at once; still far below the
+// system default, so a descriptor leak dies quickly.
+const MAX_OPEN_FILES: u64 = 512;
 
 /// Native local execution rooted at OpenWave's private per-chat scratch.
 pub struct LocalExecutionProvider {
