@@ -276,7 +276,7 @@ describe("tool call lifecycle", () => {
     ]);
     expect(
       rejectedThenCompleted.state.messages.find((m) => m.role === "tool"),
-    ).toMatchObject({ status: "cancelled" });
+    ).toMatchObject({ status: "denied" });
   });
 });
 
@@ -371,7 +371,7 @@ describe("approvals", () => {
       { type: "approval_decided", call_id: "call-1", approved: false },
     ]);
     expect(rejected.state.messages.find((m) => m.role === "tool")).toMatchObject(
-      { status: "cancelled" },
+      { status: "denied" },
     );
   });
 });

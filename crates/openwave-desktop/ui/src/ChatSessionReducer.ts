@@ -300,8 +300,8 @@ export function reduceChatSessionEvent(
           messages: updateToolCall(state.messages, event.call_id, (tool) => ({
             ...tool,
             status:
-              tool.status === "cancelled"
-                ? "cancelled"
+              tool.status === "cancelled" || tool.status === "denied"
+                ? tool.status
                 : event.status === "failed"
                   ? "failed"
                   : "completed",
@@ -641,7 +641,7 @@ export function updateApprovalAndToolCall(
     if (message.role === "tool" && message.callId === callId) {
       return {
         ...message,
-        status: approved ? "running" : "cancelled",
+        status: approved ? "running" : "denied",
       };
     }
     return message;

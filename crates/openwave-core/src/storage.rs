@@ -184,6 +184,13 @@ pub enum DeleteProjectOutcome {
 pub enum ChatToolActivityStatus {
     Completed,
     Failed,
+    /// The reader rejected the call's approval, so it never ran.
+    ///
+    /// Durably this is a `Failed` call whose error code says the user
+    /// declined; the projection splits it out because "you said no" and
+    /// "the tool broke" are different facts to show a reader, and folding
+    /// them made a decline indistinguishable from a crash in history.
+    Denied,
     Cancelled,
 }
 

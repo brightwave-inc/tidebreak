@@ -879,6 +879,12 @@ fn tool_activity_from_call(
 ) -> ChatToolActivitySnapshot {
     let status = match call.status {
         crate::model::ToolCallStatus::Completed => ChatToolActivityStatus::Completed,
+        crate::model::ToolCallStatus::Failed
+            if call.error_code.as_deref()
+                == Some(crate::tool::ToolErrorCategory::UserDeclined.as_str()) =>
+        {
+            ChatToolActivityStatus::Denied
+        }
         crate::model::ToolCallStatus::Failed => ChatToolActivityStatus::Failed,
         crate::model::ToolCallStatus::Cancelled => ChatToolActivityStatus::Cancelled,
         crate::model::ToolCallStatus::Pending => {
@@ -1414,6 +1420,28 @@ mod tests {
         );
         assert_eq!(activity.result, None);
         assert!(activity.result_unreadable);
+    }
+
+    /// "You said no" and "the tool broke" are different facts to show a
+    /// reader; folding a decline into `Failed` made history claim a crash.
+    #[test]
+    fn a_declined_call_projects_denied_while_other_failures_stay_failed() {
+        let declined = ToolCallRecord {
+            status: crate::model::ToolCallStatus::Failed,
+            ..terminal_call("exec", Some("user_declined"))
+        };
+        assert_eq!(
+            tool_activity_from_call(declined, None).status,
+            ChatToolActivityStatus::Denied
+        );
+        let crashed = ToolCallRecord {
+            status: crate::model::ToolCallStatus::Failed,
+            ..terminal_call("exec", Some("tool_failed"))
+        };
+        assert_eq!(
+            tool_activity_from_call(crashed, None).status,
+            ChatToolActivityStatus::Failed
+        );
     }
 
     /// Calls that resolved before projections were retained still rebuild the
