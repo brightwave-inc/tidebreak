@@ -294,25 +294,36 @@ pub(crate) fn compose_for_surface(
             let mut any_staged = false;
             for folder in exec_folders.iter().take(MAX_LISTED_EXEC_FOLDER_GRANTS) {
                 let path = quoted(&folder.path);
-                match (&folder.overlay, folder.writable) {
-                    (Some(overlay), true) => {
+                match (
+                    &folder.overlay,
+                    folder.writable,
+                    folder.staging_unavailable,
+                ) {
+                    (Some(overlay), true, false) => {
                         any_staged = true;
                         lines.push(format!(
                             "- read-write folder: {path}, staged at {}",
                             quoted(overlay)
                         ));
                     }
-                    (_, true) => lines.push(format!("- read-write folder: {path}")),
-                    (_, false) => lines.push(format!("- read-only folder: {path}")),
+                    (_, _, true) => lines.push(format!(
+                        "- write unavailable folder: {path} (OpenWave could not stage it safely for this turn; use connected-folder tools if a write is needed)"
+                    )),
+                    (_, true, false) => lines.push(format!("- read-write folder: {path}")),
+                    (_, false, false) => lines.push(format!("- read-only folder: {path}")),
                 }
             }
             if any_staged {
                 lines.push(
-                    "- A staged folder is writable only at its staged path, which holds a complete copy of the folder made for this turn. Read and edit the copy exactly as you would the folder itself; the changes are applied to the real folder when the turn ends."
+                    "- A staged folder is writable only at its staged path, which holds a copy of the folder made for this turn. Read and edit the copy exactly as you would the folder itself; regular-file changes are applied to the real folder when the turn ends, including when the turn is cancelled. A crash or abandoned turn discards them."
                         .to_owned(),
                 );
                 lines.push(
                     "- When you tell the user about a file in a staged folder, name it by the folder's own path, not the staged path."
+                        .to_owned(),
+                );
+                lines.push(
+                    "- Empty-directory and symlink changes cannot be applied from staging. OpenWave reports those, and files over the write-back limit, in the exec result."
                         .to_owned(),
                 );
             }
@@ -552,6 +563,7 @@ mod tests {
                 path: format!("/Users/example/grant-{index}").into(),
                 writable: index < 2,
                 overlay: (index == 0).then(|| "/scratch/.exec-overlays/chat/staged".into()),
+                staging_unavailable: index == 1,
             })
             .collect::<Vec<_>>();
         let prompt = compose_for_surface(&[spec("exec")], &folders, false);
@@ -559,9 +571,12 @@ mod tests {
         assert!(prompt.contains(
             "read-write folder: \"/Users/example/grant-0\", staged at \"/scratch/.exec-overlays/chat/staged\""
         ));
-        // An unstaged writable grant must not be described as staged.
-        assert!(prompt.contains("read-write folder: \"/Users/example/grant-1\"\n"));
+        assert!(prompt.contains(
+            "write unavailable folder: \"/Users/example/grant-1\" (OpenWave could not stage it safely"
+        ));
         assert!(prompt.contains("read-only folder: \"/Users/example/grant-2\""));
+        assert!(prompt.contains("including when the turn is cancelled"));
+        assert!(prompt.contains("Empty-directory and symlink changes cannot be applied"));
         assert!(prompt.contains("2 additional granted folder(s) are omitted"));
         assert!(!prompt.contains("/Users/example/grant-12"));
         assert!(prompt.contains("Revocation applies to the next invocation"));

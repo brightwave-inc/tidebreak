@@ -46,9 +46,10 @@
 //! it can rename directories under the paths this module would otherwise walk;
 //! pinning means the directory acted on is the directory that was checked.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use openwave_core::MAX_EXEC_SNAPSHOT_BYTES;
 use sha2::{Digest as _, Sha256};
@@ -76,6 +77,9 @@ const MAX_OVERLAY_DEPTH: usize = 24;
 /// Ceiling on one staged file's size when it is written back.
 const MAX_STAGED_FILE_BYTES: u64 = 64 * 1_024 * 1_024;
 
+/// Maximum paths included in one model-visible overlay note.
+const MAX_REPORTED_INERT_PATHS: usize = 8;
+
 /// What one regular file in the staged copy looked like before exec ran.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ManifestEntry {
@@ -95,6 +99,11 @@ pub struct OverlaySlot {
     overlay_dir: ScratchDir,
     /// Every regular file the copy started with, by overlay-relative path.
     manifest: BTreeMap<String, ManifestEntry>,
+    /// Directory names present when staging began.
+    directories: Arc<BTreeSet<String>>,
+    /// Symlinks and exotic entries present when staging began. A symlink's
+    /// target is retained so replacing it in place is still observable.
+    inert: Arc<BTreeMap<String, Option<PathBuf>>>,
 }
 
 impl std::fmt::Debug for OverlaySlot {
@@ -128,6 +137,21 @@ impl OverlaySlot {
 pub struct WriteOverlay {
     home: PathBuf,
     slots: Vec<OverlaySlot>,
+}
+
+/// An owned, descriptor-pinned view used to report overlay changes after an
+/// exec command without holding the server's overlay registry lock.
+#[derive(Debug, Clone)]
+pub struct OverlayInspector {
+    slots: Vec<OverlayInspectionSlot>,
+}
+
+#[derive(Debug, Clone)]
+struct OverlayInspectionSlot {
+    source: PathBuf,
+    directory: ScratchDir,
+    directories: Arc<BTreeSet<String>>,
+    inert: Arc<BTreeMap<String, Option<PathBuf>>>,
 }
 
 /// A staged change that passed its precondition and reached the granted folder.
@@ -265,10 +289,9 @@ impl WriteOverlay {
     /// Stage `sources` under a fresh per-turn home inside `scratch_root`.
     ///
     /// A source that cannot be copied — unreadable, too large, or a name that
-    /// something already occupies — is simply not staged. It keeps direct write
-    /// access, which is what it had before this module existed, so a folder
-    /// this cannot handle degrades to the previous behavior instead of losing
-    /// the agent's writes.
+    /// something already occupies — is left out of the returned slots. The
+    /// caller must then fail its write grant closed; this layer never grants
+    /// access to the source itself.
     pub async fn prepare(scratch_root: &Path, scope: &str, sources: &[PathBuf]) -> Option<Self> {
         if sources.is_empty() || scope.is_empty() || scope.contains('/') {
             return None;
@@ -291,7 +314,7 @@ impl WriteOverlay {
                 None => {
                     tracing::warn!(
                         source = %source.display(),
-                        "exec write overlay could not stage a granted folder; writes stay direct"
+                        "exec write overlay could not stage a granted folder"
                     );
                 }
             }
@@ -307,6 +330,25 @@ impl WriteOverlay {
     #[must_use]
     pub fn slots(&self) -> &[OverlaySlot] {
         &self.slots
+    }
+
+    /// Take a cheap owned view that can report changes which write-back cannot
+    /// apply. The inspection uses the same pinned directories and manifest as
+    /// materialization, so its warning cannot be redirected through a symlink.
+    #[must_use]
+    pub fn inspector(&self) -> OverlayInspector {
+        OverlayInspector {
+            slots: self
+                .slots
+                .iter()
+                .map(|slot| OverlayInspectionSlot {
+                    source: slot.source.clone(),
+                    directory: slot.overlay_dir.clone(),
+                    directories: Arc::clone(&slot.directories),
+                    inert: Arc::clone(&slot.inert),
+                })
+                .collect(),
+        }
     }
 
     /// Apply every staged change to the real folders and drop the overlay.
@@ -370,7 +412,20 @@ async fn stage_one(
     let overlay_dir = home_dir.open_dir(name).await.ok()?;
 
     let mut manifest = BTreeMap::new();
-    if !record_manifest(&overlay_dir, "", &mut manifest, 0).await {
+    let mut directories = BTreeSet::new();
+    let mut inert = BTreeMap::new();
+    let mut entries = 0;
+    if !record_manifest(
+        &overlay_dir,
+        "",
+        &mut manifest,
+        &mut directories,
+        &mut inert,
+        &mut entries,
+        0,
+    )
+    .await
+    {
         let _ = tokio::fs::remove_dir_all(&destination).await;
         return None;
     }
@@ -380,6 +435,8 @@ async fn stage_one(
         source_dir,
         overlay_dir,
         manifest,
+        directories: Arc::new(directories),
+        inert: Arc::new(inert),
     })
 }
 
@@ -394,6 +451,9 @@ async fn record_manifest(
     directory: &ScratchDir,
     prefix: &str,
     manifest: &mut BTreeMap<String, ManifestEntry>,
+    directories: &mut BTreeSet<String>,
+    inert: &mut BTreeMap<String, Option<PathBuf>>,
+    entry_count: &mut usize,
     depth: usize,
 ) -> bool {
     if depth > MAX_OVERLAY_DEPTH {
@@ -403,9 +463,10 @@ async fn record_manifest(
         return false;
     };
     for ScratchEntry { name, kind } in entries {
-        if manifest.len() >= MAX_OVERLAY_ENTRIES {
+        if *entry_count >= MAX_OVERLAY_ENTRIES {
             return false;
         }
+        *entry_count += 1;
         let relative = join_relative(prefix, &name);
         match kind {
             ScratchEntryKind::File => {
@@ -417,19 +478,195 @@ async fn record_manifest(
                 }
             }
             ScratchEntryKind::Directory => {
+                directories.insert(relative.clone());
                 let Ok(child) = directory.open_dir(&name).await else {
                     continue;
                 };
-                if !Box::pin(record_manifest(&child, &relative, manifest, depth + 1)).await {
+                if !Box::pin(record_manifest(
+                    &child,
+                    &relative,
+                    manifest,
+                    directories,
+                    inert,
+                    entry_count,
+                    depth + 1,
+                ))
+                .await
+                {
                     return false;
                 }
             }
             // Symlinks and everything exotic are copied by the clone but never
-            // walked, written back, or deleted. They are inert.
-            ScratchEntryKind::Other => {}
+            // walked, written back, or deleted. Retaining their identity lets
+            // the exec result say so if the command changes one.
+            ScratchEntryKind::Other => {
+                inert.insert(relative, directory.read_link(&name).await.ok());
+            }
         }
     }
     true
+}
+
+impl OverlayInspector {
+    /// Model-visible notes for changes that overlay materialization cannot
+    /// apply. Empty means every observed change is representable.
+    pub async fn notes(self) -> Vec<String> {
+        let mut notes = Vec::new();
+        for slot in self.slots {
+            let mut observed = ObservedOverlay::default();
+            if !inspect_directory(&slot.directory, "", &mut observed, 0).await {
+                notes.push(format!(
+                    "staged folder {}: OpenWave could not inspect all staged changes; some writes may not be applied",
+                    quoted_path(&slot.source)
+                ));
+                continue;
+            }
+
+            if !observed.oversized.is_empty() {
+                notes.push(format_inert_note(
+                    &slot.source,
+                    &observed.oversized,
+                    "exceed the 64 MiB write-back limit; content changes to them will not be applied",
+                ));
+            }
+
+            let empty_created = observed
+                .directories
+                .difference(&slot.directories)
+                .filter(|directory| !has_descendant_file(directory, &observed.files))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !empty_created.is_empty() {
+                notes.push(format_inert_note(
+                    &slot.source,
+                    &empty_created,
+                    "are new empty directories; empty-directory changes are not applied",
+                ));
+            }
+
+            let removed_directories = slot
+                .directories
+                .difference(&observed.directories)
+                .cloned()
+                .collect::<Vec<_>>();
+            if !removed_directories.is_empty() {
+                notes.push(format_inert_note(
+                    &slot.source,
+                    &removed_directories,
+                    "were removed in staging; directory removals are not applied",
+                ));
+            }
+
+            let changed_inert = slot
+                .inert
+                .keys()
+                .chain(observed.inert.keys())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .filter(|path| slot.inert.get(*path) != observed.inert.get(*path))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !changed_inert.is_empty() {
+                notes.push(format_inert_note(
+                    &slot.source,
+                    &changed_inert,
+                    "are symlink or unsupported-entry changes and will not be applied",
+                ));
+            }
+        }
+        notes
+    }
+}
+
+#[derive(Default)]
+struct ObservedOverlay {
+    files: BTreeSet<String>,
+    directories: BTreeSet<String>,
+    inert: BTreeMap<String, Option<PathBuf>>,
+    oversized: Vec<String>,
+}
+
+async fn inspect_directory(
+    directory: &ScratchDir,
+    prefix: &str,
+    observed: &mut ObservedOverlay,
+    depth: usize,
+) -> bool {
+    if depth > MAX_OVERLAY_DEPTH {
+        return false;
+    }
+    let Ok(entries) = directory.entries().await else {
+        return false;
+    };
+    for ScratchEntry { name, kind } in entries {
+        if observed.files.len() + observed.directories.len() + observed.inert.len()
+            >= MAX_OVERLAY_ENTRIES
+        {
+            return false;
+        }
+        let relative = join_relative(prefix, &name);
+        match kind {
+            ScratchEntryKind::File => {
+                observed.files.insert(relative.clone());
+                let Some(stamp) = directory.file_stamp(&name).await else {
+                    return false;
+                };
+                if stamp.len > MAX_STAGED_FILE_BYTES {
+                    observed.oversized.push(relative);
+                }
+            }
+            ScratchEntryKind::Directory => {
+                observed.directories.insert(relative.clone());
+                let Ok(child) = directory.open_dir(&name).await else {
+                    return false;
+                };
+                if !Box::pin(inspect_directory(&child, &relative, observed, depth + 1)).await {
+                    return false;
+                }
+            }
+            ScratchEntryKind::Other => {
+                observed
+                    .inert
+                    .insert(relative, directory.read_link(&name).await.ok());
+            }
+        }
+    }
+    true
+}
+
+fn has_descendant_file(directory: &str, files: &BTreeSet<String>) -> bool {
+    let prefix = format!("{directory}/");
+    files
+        .range(prefix.clone()..)
+        .next()
+        .is_some_and(|file| file.starts_with(&prefix))
+}
+
+fn format_inert_note(folder: &Path, paths: &[String], consequence: &str) -> String {
+    let shown = paths
+        .iter()
+        .take(MAX_REPORTED_INERT_PATHS)
+        .map(|path| quoted(path))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let omitted = paths.len().saturating_sub(MAX_REPORTED_INERT_PATHS);
+    let suffix = if omitted == 0 {
+        String::new()
+    } else {
+        format!(" (and {omitted} more)")
+    };
+    format!(
+        "staged folder {}: {shown}{suffix} {consequence}",
+        quoted_path(folder)
+    )
+}
+
+fn quoted_path(path: &Path) -> String {
+    quoted(&path.display().to_string())
+}
+
+fn quoted(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"<unprintable>\"".to_owned())
 }
 
 async fn apply_directory(
@@ -950,6 +1187,42 @@ mod tests {
             std::fs::read_to_string(granted.path().join("kept.txt")).unwrap(),
             "kept"
         );
+    }
+
+    /// Unsupported staging effects must ride the exec result while the model
+    /// can still react, rather than appearing only in a host log after the turn.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn inert_and_oversized_changes_are_reported_before_write_back() {
+        use std::os::unix::fs::symlink;
+
+        let granted = tempfile::tempdir().unwrap();
+        let (_scratch, overlay) = overlay_for(granted.path()).await;
+        let staged = overlay.slots()[0].overlay().to_path_buf();
+        std::fs::create_dir(staged.join("empty")).unwrap();
+        symlink("target.txt", staged.join("shortcut")).unwrap();
+        std::fs::File::create(staged.join("oversized.bin"))
+            .unwrap()
+            .set_len(MAX_STAGED_FILE_BYTES + 1)
+            .unwrap();
+
+        let notes = overlay.inspector().notes().await.join("\n");
+        assert!(notes.contains("\"oversized.bin\" exceed the 64 MiB write-back limit"));
+        assert!(notes.contains("\"empty\" are new empty directories"));
+        assert!(notes.contains("\"shortcut\" are symlink or unsupported-entry changes"));
+
+        let outcome = overlay.materialize(None).await;
+        assert_eq!(
+            outcome.rejected,
+            vec![RejectedChange {
+                folder: granted.path().to_path_buf(),
+                relative: "oversized.bin".to_owned(),
+                reason: RejectedChangeReason::StagedFileTooLarge,
+            }]
+        );
+        assert!(!granted.path().join("empty").exists());
+        assert!(!granted.path().join("shortcut").exists());
+        assert!(!granted.path().join("oversized.bin").exists());
     }
 
     #[derive(Debug, PartialEq, Eq)]
