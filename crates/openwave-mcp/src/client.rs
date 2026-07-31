@@ -7,9 +7,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use openwave_core::{
-    AgentError, ApprovalClass, Result, Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec,
-    ToolUiView,
+    AgentError, ApprovalClass, DocumentSourceBlob, ImageData, ImageMediaType, ImageRef, Result,
+    Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec, ToolUiView,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -42,6 +43,19 @@ const MAX_CALL_RESULT_BYTES: usize = MAX_RESOURCE_CONTENT_BYTES;
 const CALL_RESULT_TRUNCATION_MARKER: &str = "\n… [truncated: MCP result exceeded 1 MiB]";
 const CALL_RESULT_DATA_DROPPED_MARKER: &str =
     "\n… [dropped: MCP structured content exceeded 1 MiB]";
+/// Largest decoded image accepted from one `tools/call` content item.
+///
+/// The same ceiling as the rest of the server-controlled result rather than the
+/// 16 MiB attachment-ingest bound: an external server does not earn a wider
+/// budget for pixels than it gets for text, and anything larger could not fit
+/// inside a JSON-RPC frame anyway.
+const MAX_CALL_RESULT_IMAGE_BYTES: usize = MAX_CALL_RESULT_BYTES;
+/// Most image content items surfaced from one `tools/call` result.
+///
+/// Matches the cap the exec preview scan applies to its own images; anything
+/// past it degrades to the stringified form the model saw before images were
+/// surfaced at all.
+const MAX_CALL_RESULT_IMAGES: usize = 3;
 pub(crate) const MAX_JSON_RPC_FRAME_BYTES: usize = 2 * 1024 * 1024;
 
 /// Default maximum time to wait for one external MCP request.
@@ -966,15 +980,8 @@ impl Tool for McpTool {
                 ))
             })?;
         let result: CallToolResponse = decode_result("tools/call", result)?;
-        let (content, data) = clamp_call_result(
-            result
-                .content
-                .iter()
-                .map(content_for_model)
-                .collect::<Vec<_>>()
-                .join("\n"),
-            result.structured_content,
-        );
+        let split = split_call_content(&result.content);
+        let (content, data) = clamp_call_result(split.text, result.structured_content);
         Ok(ToolOutput {
             content,
             data,
@@ -992,7 +999,8 @@ impl Tool for McpTool {
             }),
             images: Vec::new(),
             image_data: openwave_core::ImageAttachments::new(),
-        })
+        }
+        .with_images(split.images))
     }
 }
 
@@ -1029,6 +1037,86 @@ fn clamp_call_result(mut content: String, data: Option<Value>) -> (String, Optio
         return (content, None);
     }
     (content, data)
+}
+
+/// A `tools/call` content list split into model-facing text and real images.
+struct SplitCallContent {
+    text: String,
+    images: Vec<(ImageRef, ImageData)>,
+}
+
+/// Separate image content items from the text the model reads.
+///
+/// An image item that decodes cleanly rides the output's image path, where the
+/// agent publishes it and attaches a sibling image block the model can actually
+/// see. Every other item — text, resources, and any image that is oversized,
+/// undecodable, past the count cap, or claiming a media type the pipeline does
+/// not accept — keeps the pre-existing stringified form, so a degraded image
+/// never fails the call and never vanishes from the result.
+fn split_call_content(content: &[Value]) -> SplitCallContent {
+    let mut text = Vec::new();
+    let mut images = Vec::new();
+    for item in content {
+        if item.get("type").and_then(Value::as_str) == Some("image")
+            && images.len() < MAX_CALL_RESULT_IMAGES
+        {
+            if let Some(image) = decode_image_content(item) {
+                images.push(image);
+                continue;
+            }
+        }
+        text.push(content_for_model(item));
+    }
+    SplitCallContent {
+        text: text.join("\n"),
+        images,
+    }
+}
+
+/// Decode one MCP image content item into an attachable image, or `None`.
+///
+/// The bytes are server-controlled, so this applies the same discipline as the
+/// trusted image-ingest boundary: the declared `mimeType` must be one the
+/// pipeline accepts *and* agree with the byte signature, the decoded size is
+/// bounded, and the dimensions come from the image header. `None` means the
+/// caller falls back to stringifying the item.
+fn decode_image_content(item: &Value) -> Option<(ImageRef, ImageData)> {
+    let declared = ImageMediaType::parse(item.get("mimeType")?.as_str()?)?;
+    let encoded = item.get("data")?.as_str()?;
+    // Refuse before decoding: base64 inflates by 4/3, so a payload longer than
+    // this cannot decode under the byte bound.
+    if encoded.len() > MAX_CALL_RESULT_IMAGE_BYTES.div_ceil(3) * 4 {
+        return None;
+    }
+    let bytes = BASE64.decode(encoded).ok()?;
+    if bytes.is_empty() || bytes.len() > MAX_CALL_RESULT_IMAGE_BYTES {
+        return None;
+    }
+    // The byte signature is the authority; a declared type that disagrees with
+    // it is refused rather than quietly corrected.
+    if ImageMediaType::sniff(&bytes)? != declared {
+        return None;
+    }
+    let format = match declared {
+        ImageMediaType::Png => image::ImageFormat::Png,
+        ImageMediaType::Jpeg => image::ImageFormat::Jpeg,
+        ImageMediaType::Webp => image::ImageFormat::WebP,
+        ImageMediaType::Gif => image::ImageFormat::Gif,
+    };
+    let (width, height) = image::ImageReader::with_format(std::io::Cursor::new(&bytes), format)
+        .into_dimensions()
+        .ok()?;
+    let image = ImageRef {
+        blob_id: DocumentSourceBlob::from_bytes(&bytes).id,
+        media_type: declared,
+        width,
+        height,
+        byte_len: u64::try_from(bytes.len()).ok()?,
+    };
+    // The agent re-validates before publishing and treats a violation as a
+    // hard error; checking here turns that into the graceful text fallback.
+    image.validate().ok()?;
+    Some((image, ImageData::new(declared, bytes)))
 }
 
 fn content_for_model(content: &Value) -> String {
@@ -1106,9 +1194,15 @@ mod tests {
             )
             .await
             .unwrap();
+        // The image item rides the image path instead of the joined text.
         assert_eq!(output.content, "found waves");
         assert_eq!(output.data, Some(json!({"matches": 1})));
         assert!(!output.is_error);
+        assert_eq!(output.images.len(), 1);
+        assert_eq!(
+            output.image_data.get(output.images[0].blob_id).unwrap(),
+            &ImageData::new(ImageMediaType::Png, tiny_png())
+        );
         // The declared view rides the output so the host can surface it.
         assert_eq!(
             output.ui_view,
@@ -1553,7 +1647,14 @@ mod tests {
                     assert_eq!(request["params"]["name"], "search");
                     assert_eq!(request["params"]["arguments"], json!({"query": "waves"}));
                     json!({
-                        "content": [{"type": "text", "text": "found waves"}],
+                        "content": [
+                            {"type": "text", "text": "found waves"},
+                            {
+                                "type": "image",
+                                "data": BASE64.encode(tiny_png()),
+                                "mimeType": "image/png"
+                            }
+                        ],
                         "structuredContent": {"matches": 1},
                         "isError": false
                     })
@@ -1667,6 +1768,52 @@ mod tests {
     fn non_text_content_is_preserved_for_the_model() {
         let block = json!({"type": "resource_link", "uri": "file:///report.pdf"});
         assert_eq!(content_for_model(&block), block.to_string());
+    }
+
+    /// A 2x1 PNG small enough to inline into fixture responses.
+    fn tiny_png() -> Vec<u8> {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(2, 1, image::Rgb([1, 2, 3])))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        png.into_inner()
+    }
+
+    #[test]
+    fn image_content_is_attached_and_a_bad_image_degrades_to_text() {
+        let png = tiny_png();
+        let good = json!({"type": "image", "data": BASE64.encode(&png), "mimeType": "image/png"});
+        // Valid base64, but the bytes are not a recognizable image.
+        let garbage =
+            json!({"type": "image", "data": BASE64.encode(b"not pixels"), "mimeType": "image/png"});
+        // Longer than any payload that could decode under the byte bound.
+        let oversized = json!({
+            "type": "image",
+            "data": "A".repeat(MAX_CALL_RESULT_IMAGE_BYTES * 2),
+            "mimeType": "image/png"
+        });
+
+        let split = split_call_content(&[
+            json!({"type": "text", "text": "before"}),
+            good,
+            garbage.clone(),
+            oversized.clone(),
+            json!({"type": "text", "text": "after"}),
+        ]);
+
+        // The good image is attached with its identity derived from the bytes,
+        // and never appears in the text the model reads.
+        assert_eq!(split.images.len(), 1);
+        let (image, data) = &split.images[0];
+        assert_eq!(image.blob_id, DocumentSourceBlob::from_bytes(&png).id);
+        assert_eq!(image.media_type, ImageMediaType::Png);
+        assert_eq!((image.width, image.height), (2, 1));
+        assert_eq!(image.byte_len, png.len() as u64);
+        assert_eq!(data.bytes(), png.as_slice());
+
+        // Text siblings keep their order, and the degraded image items keep
+        // the stringified form the model saw before images were surfaced.
+        assert_eq!(split.text, format!("before\n{garbage}\n{oversized}\nafter"));
     }
 
     mod http_transport {
