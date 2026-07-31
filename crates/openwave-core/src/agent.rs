@@ -2334,7 +2334,7 @@ impl Agent {
         }
         let outputs = self
             .store
-            .list_outputs(chat.id, crate::output_scan::OUTPUT_LOOKUP_LIMIT)
+            .list_outputs(chat.id, crate::OUTPUT_LOOKUP_LIMIT)
             .await?;
         let Some(output) = outputs
             .iter()

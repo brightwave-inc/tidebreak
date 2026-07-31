@@ -38,11 +38,6 @@ pub const EXEC_OUTPUT_DIRECTORY: &str = "output";
 /// rather than silently ignored.
 pub const MAX_OUTPUT_SCAN_FILES: usize = 64;
 
-/// Upper bound on the filename lookup when matching scan files to existing
-/// outputs. Far above the catalog's own display cap. Shared with the agent's
-/// filename resolution for output write-backs so both match the same window.
-pub(crate) const OUTPUT_LOOKUP_LIMIT: u64 = 1_000;
-
 /// What one scanned file did to the output record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputSyncStatus {
@@ -114,7 +109,9 @@ pub async fn sync_output_directory(
     }
 
     // One lookup serves every candidate: the newest live output per filename.
-    let existing = store.list_outputs(chat_id, OUTPUT_LOOKUP_LIMIT).await?;
+    let existing = store
+        .list_outputs(chat_id, crate::OUTPUT_LOOKUP_LIMIT)
+        .await?;
 
     for candidate in candidates {
         match record_candidate(
