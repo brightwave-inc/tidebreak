@@ -278,7 +278,9 @@ pub(crate) fn compose_for_surface(
         let mut lines = vec![
             "- Use `exec` for bounded computation or validation when it improves the result."
                 .to_owned(),
-            "- Do not imply that command execution has network access. Keep generated intermediates in private scratch."
+            "- Command network access follows this chat's network policy, which only the user can change; a refused connection means the current policy blocks it, so report that instead of retrying."
+                .to_owned(),
+            "- When the policy allows package managers, install a missing library with `python3 -m pip install --user <package>`; installs persist for this conversation. Keep generated intermediates in private scratch."
                 .to_owned(),
         ];
         if exec_folders.is_empty() {
@@ -652,7 +654,7 @@ mod tests {
 
         assert_eq!(
             identity(&prompt),
-            "foreground-v2:sha256:f6f9233a7d6899a7d459630c32b532fef3b086681b2be62028ee06b18b274790"
+            "foreground-v2:sha256:23bbd53eb8d59a75a8833c28ca17bdadb06d3ae15b8bf9be43ca8f992823ddd7"
         );
     }
 }
