@@ -369,11 +369,25 @@ Instructions live here.\n";
             .filter(|entry| entry.path().is_dir())
             .count();
         let skills = load_builtin_skills(&source);
-        assert!(!skills.is_empty(), "no bundled skills were loaded");
         assert_eq!(
             skills.len(),
             directories,
             "a bundled skill failed strict parsing"
+        );
+        // The curated document set. A missing name means a skill silently
+        // dropped out of the staged catalog.
+        assert_eq!(
+            skills
+                .iter()
+                .map(|skill| skill.package.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "charts",
+                "pdf-documents",
+                "presentations",
+                "spreadsheets",
+                "word-documents",
+            ]
         );
         for skill in &skills {
             assert!(

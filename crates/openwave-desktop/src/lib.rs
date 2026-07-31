@@ -135,7 +135,13 @@ fn exec_scripts_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 }
 
 fn exec_skills_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    const REQUIRED_SKILLS: [&str; 1] = ["pdf-documents"];
+    const REQUIRED_SKILLS: [&str; 5] = [
+        "charts",
+        "pdf-documents",
+        "presentations",
+        "spreadsheets",
+        "word-documents",
+    ];
     let directory = app
         .path()
         .resource_dir()
