@@ -6,10 +6,15 @@
 //! called, and which document the import belongs to. None of it is negotiable
 //! from the model side, and the imported bytes never travel back to it.
 
-use openwave_core::{ChatId, ImportConnectedFileArgs, ImportConnectedFileResult, ToolCallRecord};
+use std::{future::Future, path::PathBuf};
+
+use openwave_code_execution::host_paths::resolve_scratch_directory;
+use openwave_core::{
+    ChatId, HostRootId, ImportConnectedFileArgs, ImportConnectedFileResult, ToolCallRecord,
+};
 use openwave_host_broker::{
     OperationEnvelope, OperationRequest, OperationResult, PathRequest, RelativePath, RootId,
-    PROTOCOL_VERSION,
+    MAX_READ_FILE_BINARY_BYTES, PROTOCOL_VERSION,
 };
 
 use crate::documents::{is_safe_title_char, local_client, native_auth, raw_documents_path};
@@ -34,6 +39,18 @@ pub(super) struct ImportRequest {
     path: RelativePath,
     title: String,
     source_uri: String,
+}
+
+/// Exact bytes selected for one import and the overlay they came from, if any.
+struct SourceBytes {
+    bytes: Vec<u8>,
+    staged_root: Option<PathBuf>,
+}
+
+enum PublishError {
+    RootUnavailable,
+    StagingEnded,
+    Unavailable,
 }
 
 /// Recover the canonical import from a checkpointed call.
@@ -70,31 +87,16 @@ pub(super) async fn execute(
     context: AuthoritativeContext,
     request: &ImportRequest,
 ) -> StoredResolution {
-    let bytes = match read_source_bytes(state, context, request).await {
-        Ok(bytes) if !bytes.is_empty() => bytes,
+    let source = match read_source_bytes(state, context, request).await {
+        Ok(source) if !source.bytes.is_empty() => source,
         Ok(_) => return unavailable("That file is empty, so there is nothing to import."),
         Err(resolution) => return resolution,
     };
 
-    // The broker reauthorized before it released these bytes, but publishing is
-    // a separate, later effect. Confirm the root is still attached to this chat
-    // immediately before the source is created, so a detach or revocation that
-    // won the race discards the bytes instead of persisting them.
-    if !root_is_still_attached(state, context, request.root_id).await {
-        return unavailable("That connected folder is no longer available to this conversation.");
-    }
-
-    let media_type = crate::media_type::sniff_media_type(&bytes, Some(request.title.as_str()));
-    let byte_len = bytes.len() as u64;
-    match publish(
-        app,
-        ChatId::from(context.chat_id),
-        request,
-        &media_type,
-        bytes,
-    )
-    .await
-    {
+    let media_type =
+        crate::media_type::sniff_media_type(&source.bytes, Some(request.title.as_str()));
+    let byte_len = source.bytes.len() as u64;
+    match publish(state, app, context, request, &media_type, source).await {
         Ok(accepted) => imported(ImportConnectedFileResult::Imported {
             document_id: accepted.document_id,
             title: request.title.clone(),
@@ -102,11 +104,45 @@ pub(super) async fn execute(
             bytes: byte_len,
             readiness: accepted.readiness,
         }),
-        Err(()) => unavailable("That file could not be added to this conversation."),
+        Err(PublishError::RootUnavailable) => {
+            unavailable("That connected folder is no longer available to this conversation.")
+        }
+        Err(PublishError::StagingEnded) => {
+            unavailable("That file's staged changes are no longer available to import.")
+        }
+        Err(PublishError::Unavailable) => {
+            unavailable("That file could not be added to this conversation.")
+        }
     }
 }
 
 async fn read_source_bytes(
+    state: &HostAccess,
+    context: AuthoritativeContext,
+    request: &ImportRequest,
+) -> Result<SourceBytes, StoredResolution> {
+    let staged_root = current_staged_root(state, context, request.root_id);
+    if staged_root.is_some() {
+        // Looking up staging proves only that this turn has a private copy; the
+        // broker remains the live authority for whether the chat may read the
+        // connected root. Check before releasing staged bytes; publication
+        // checks both this authority and the selected overlay again.
+        if !root_is_still_attached(state, context, request.root_id).await {
+            return Err(unavailable(
+                "That connected folder is no longer available to this conversation.",
+            ));
+        }
+    }
+
+    select_source_bytes(
+        staged_root,
+        &request.path,
+        read_broker_source_bytes(state, context, request),
+    )
+    .await
+}
+
+async fn read_broker_source_bytes(
     state: &HostAccess,
     context: AuthoritativeContext,
     request: &ImportRequest,
@@ -139,6 +175,74 @@ async fn read_source_bytes(
     }
 }
 
+/// Select the turn's coherent file view, never falling back once staged.
+///
+/// A missing staged path may represent a deletion by exec. Polling the broker
+/// read in that case would resurrect the pre-turn file, so the fallback future
+/// is deliberately left untouched whenever an overlay was selected.
+async fn select_source_bytes<BrokerRead>(
+    staged_root: Option<PathBuf>,
+    path: &RelativePath,
+    broker_read: BrokerRead,
+) -> Result<SourceBytes, StoredResolution>
+where
+    BrokerRead: Future<Output = Result<Vec<u8>, StoredResolution>>,
+{
+    match staged_root {
+        Some(staged_root) => {
+            let bytes = read_staged_file_bytes(&staged_root, path)
+                .await
+                .ok_or_else(|| {
+                    unavailable(
+                        "That file is not available to this conversation. It may be too large, or the folder may no longer be connected.",
+                    )
+                })?;
+            Ok(SourceBytes {
+                bytes,
+                staged_root: Some(staged_root),
+            })
+        }
+        None => broker_read.await.map(|bytes| SourceBytes {
+            bytes,
+            staged_root: None,
+        }),
+    }
+}
+
+/// Read one import from the turn's staged tree without following symlinks.
+///
+/// The broker's binary-read ceiling stays authoritative even though these
+/// bytes do not cross its transport. The file handle is opened relative to a
+/// descriptor-pinned directory, and the second length check refuses a file
+/// that grows while it is being read rather than silently truncating it.
+async fn read_staged_file_bytes(overlay: &std::path::Path, path: &RelativePath) -> Option<Vec<u8>> {
+    let (prefix, name) = path
+        .as_str()
+        .rsplit_once('/')
+        .map_or_else(|| ("", path.as_str()), |(prefix, name)| (prefix, name));
+    if name.is_empty() {
+        return None;
+    }
+    let directory = resolve_scratch_directory(overlay, prefix, false).await?;
+    let file = directory.open_file(name).await.ok()?;
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read as _;
+
+        let metadata = file.metadata().ok()?;
+        if !metadata.is_file() || metadata.len() > MAX_READ_FILE_BINARY_BYTES as u64 {
+            return None;
+        }
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        file.take((MAX_READ_FILE_BINARY_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        (bytes.len() <= MAX_READ_FILE_BINARY_BYTES).then_some(bytes)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 /// Whether this chat still has live read authority for the root.
 ///
 /// `ListRoots` is the cheapest operation that answers exactly that: the broker
@@ -164,21 +268,51 @@ async fn root_is_still_attached(
     )
 }
 
+fn current_staged_root(
+    state: &HostAccess,
+    context: AuthoritativeContext,
+    root_id: RootId,
+) -> Option<PathBuf> {
+    let root_id = HostRootId::from_uuid(root_id.as_uuid()).ok()?;
+    state
+        .staged_folders()?
+        .staged_root(ChatId::from(context.chat_id), root_id)
+}
+
+fn selected_staging_is_current(
+    state: &HostAccess,
+    context: AuthoritativeContext,
+    root_id: RootId,
+    selected: Option<&std::path::Path>,
+) -> bool {
+    current_staged_root(state, context, root_id).as_deref() == selected
+}
+
 async fn publish(
+    host_access: &HostAccess,
     app: &tauri::AppHandle,
-    chat_id: ChatId,
+    context: AuthoritativeContext,
     request: &ImportRequest,
     media_type: &str,
-    bytes: Vec<u8>,
-) -> Result<crate::documents::IngestResponse, ()> {
+    source: SourceBytes,
+) -> Result<crate::documents::IngestResponse, PublishError> {
     use tauri::Manager;
 
     let state = app.state::<std::sync::Arc<crate::AppState>>();
     let info = crate::wait_server_info(state.inner())
         .await
-        .map_err(|_| ())?;
-    let response = native_auth(
-        local_client().post(format!("{}{}", info.base_url, raw_documents_path(chat_id))),
+        .map_err(|_| PublishError::Unavailable)?;
+    let SourceBytes { bytes, staged_root } = source;
+    let staged_root = staged_root.as_deref();
+    if !selected_staging_is_current(host_access, context, request.root_id, staged_root) {
+        return Err(PublishError::StagingEnded);
+    }
+    let publish_request = native_auth(
+        local_client().post(format!(
+            "{}{}",
+            info.base_url,
+            raw_documents_path(ChatId::from(context.chat_id))
+        )),
         &info,
     )
     .query(&[
@@ -186,17 +320,29 @@ async fn publish(
         ("uri", request.source_uri.as_str()),
     ])
     .header(reqwest::header::CONTENT_TYPE, media_type)
-    .body(bytes)
-    .send()
-    .await
-    .map_err(|_| ())?;
+    .body(bytes);
+
+    // Publication is a distinct durable effect. Reauthorize beside the POST,
+    // then make one final synchronous overlay-identity check so a detach,
+    // revocation, or turn teardown that won the race cannot persist stale
+    // staged bytes.
+    if !root_is_still_attached(host_access, context, request.root_id).await {
+        return Err(PublishError::RootUnavailable);
+    }
+    if !selected_staging_is_current(host_access, context, request.root_id, staged_root) {
+        return Err(PublishError::StagingEnded);
+    }
+    let response = publish_request
+        .send()
+        .await
+        .map_err(|_| PublishError::Unavailable)?;
     if !response.status().is_success() {
-        return Err(());
+        return Err(PublishError::Unavailable);
     }
     response
         .json::<crate::documents::IngestResponse>()
         .await
-        .map_err(|_| ())
+        .map_err(|_| PublishError::Unavailable)
 }
 
 /// Last path segment, when it is safe to show as a title.
@@ -241,7 +387,9 @@ fn unavailable(message: &str) -> StoredResolution {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openwave_core::{CallId, SourceReadiness, ToolCallExecution, ToolCallStatus, TurnId};
+    use openwave_core::{
+        CallId, DocumentSourceBlob, SourceReadiness, ToolCallExecution, ToolCallStatus, TurnId,
+    };
 
     fn import_call(path: &str, root_id: uuid::Uuid) -> ToolCallRecord {
         ToolCallRecord {
@@ -340,5 +488,74 @@ mod tests {
         assert!(result.contains("\"readiness\":\"stored_no_text\""));
         assert!(!result.contains("root_id"));
         assert!(!result.contains("path"));
+    }
+
+    /// Reproduces #1233: exec edits a document in the turn's private copy,
+    /// then `import_connected_file` must snapshot those bytes rather than the
+    /// pre-turn file that remains in the connected folder until write-back. A
+    /// staged deletion must likewise stay deleted instead of falling through
+    /// to those pre-turn broker bytes.
+    #[tokio::test]
+    async fn an_import_after_exec_reads_the_staged_document_bytes() {
+        let granted = tempfile::tempdir().unwrap();
+        std::fs::create_dir(granted.path().join("reports")).unwrap();
+        let connected = granted.path().join("reports/q3.docx");
+        std::fs::write(&connected, b"pre-turn document").unwrap();
+
+        let scratch = tempfile::tempdir().unwrap();
+        let overlay = openwave_code_execution::WriteOverlay::prepare(
+            scratch.path(),
+            "chat",
+            &[granted.path().to_path_buf()],
+        )
+        .await
+        .expect("a readable granted folder stages");
+        let staged = overlay.slots()[0].overlay().to_path_buf();
+
+        // What exec does before the import call in the same turn.
+        std::fs::write(staged.join("reports/q3.docx"), b"staged document").unwrap();
+
+        let path = RelativePath::parse("reports/q3.docx").unwrap();
+        let broker_read = std::cell::Cell::new(false);
+        let imported = select_source_bytes(Some(staged.clone()), &path, async {
+            broker_read.set(true);
+            Ok(b"pre-turn document".to_vec())
+        })
+        .await
+        .expect("the staged document is importable");
+        assert_eq!(imported.bytes, b"staged document");
+        assert_eq!(imported.staged_root.as_deref(), Some(staged.as_path()));
+        assert!(
+            !broker_read.get(),
+            "a staged import must not read the broker"
+        );
+        assert_eq!(std::fs::read(connected).unwrap(), b"pre-turn document");
+
+        // The ingest endpoint derives its retained blob digest from these
+        // exact bytes, so the durable source identifies the staged revision.
+        assert_eq!(
+            DocumentSourceBlob::from_bytes(&imported.bytes),
+            DocumentSourceBlob::from_bytes(b"staged document")
+        );
+        assert_ne!(
+            DocumentSourceBlob::from_bytes(&imported.bytes),
+            DocumentSourceBlob::from_bytes(b"pre-turn document")
+        );
+
+        std::fs::remove_file(staged.join("reports/q3.docx")).unwrap();
+        broker_read.set(false);
+        let missing = select_source_bytes(Some(staged), &path, async {
+            broker_read.set(true);
+            Ok(b"pre-turn document".to_vec())
+        })
+        .await;
+        let Err(StoredResolution::Failed { error_code, .. }) = missing else {
+            panic!("a staged deletion must be unavailable");
+        };
+        assert_eq!(error_code, "import_unavailable");
+        assert!(
+            !broker_read.get(),
+            "a staged deletion must not resurrect the broker's pre-turn file"
+        );
     }
 }
