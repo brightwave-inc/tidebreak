@@ -617,6 +617,63 @@ export type ConnectedAppsInfo = {
 apps: Array<ConnectedAppInfo>, };
 
 /**
+ * The durable identity a revocation names.
+ *
+ * The two stores revoke differently: a tool grant is withdrawn through
+ * `DELETE /grants/{call_id}`, while a capability grant is not individually
+ * revocable yet — today the Folders surface disconnects the whole root, and
+ * per-statement withdrawal arrives when the boundary is derived from these
+ * statements.
+ */
+export type ConsentHandle = { "kind": "tool_grant", call_id: CallId, } | { "kind": "capability_grant", grant_id: string, };
+
+/**
+ * The trusted interaction that captured a consent statement.
+ */
+export type ConsentMethodSnapshot = "approval_card" | "folder_picker" | "permission_dialog" | "operator_config" | "carried_forward";
+
+/**
+ * What a consent statement's verb is allowed to touch.
+ */
+export type ConsentResource = { "kind": "action_scope", scope: GrantScope, } | { "kind": "host_subject" } | { "kind": "host_root", root_id: string, display_name: string | null, } | { "kind": "host_path_subtree", root_id: string, display_name: string | null, relative: string, };
+
+/**
+ * One statement of consent the agent currently holds, whatever store it
+ * lives in.
+ */
+export type ConsentStatementSnapshot = { 
+/**
+ * What a revocation of this statement names, and where to send it.
+ */
+handle: ConsentHandle, 
+/**
+ * How far the statement reaches — one chat, or every chat in a project.
+ */
+level: GrantLevel, 
+/**
+ * The name of whatever the level points at, for provenance. `None` when
+ * that chat or project is untitled.
+ */
+level_title: string | null, 
+/**
+ * The class of action the user allowed.
+ */
+verb: ConsentVerb, 
+/**
+ * What the verb is allowed to touch.
+ */
+resource: ConsentResource, 
+/**
+ * The trusted interaction through which consent was captured.
+ */
+method: ConsentMethodSnapshot, granted_at: string, };
+
+/**
+ * The class of action a consent statement allows.
+ */
+export type ConsentVerb = { "kind": "tool", action: RendererToolName, approval: ToolApprovalKind, } | { "kind": "capability", capability: HostCapability, };
+
+/**
  * Where the resolved credential value is placed on the request.
  *
  * Externally tagged and closed: `"bearer"` or `{"header": "X-Api-Key"}`; an
@@ -801,6 +858,15 @@ export type GrantLevel = { "level": "chat", chat_id: ChatId, } | { "level": "pro
  * much larger thing to agree to than "don't ask me about `cargo` again".
  */
 export type GrantScope = { "scope": "exact_action" } & ToolActionPreview | { "scope": "any_args_for", command: string, } | { "scope": "command_prefix", tokens: Array<string>, } | { "scope": "whole_tool" };
+
+/**
+ * Renderer-safe mirror of the host broker's capability vocabulary.
+ *
+ * The server does not link the broker crate, so the boundary vocabulary is
+ * restated here for the wire; the desktop maps the broker's own enum into
+ * this one when it assembles capability statements.
+ */
+export type HostCapability = "list_roots" | "read_files" | "write_files" | "execute_commands";
 
 /**
  * Opaque identifier for a folder registered with a host broker.

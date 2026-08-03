@@ -3040,6 +3040,12 @@ pub(crate) struct StandingGrantSnapshot {
 pub(crate) async fn list_standing_grants(
     store: ScopedStore,
 ) -> Result<Json<Vec<StandingGrantSnapshot>>, ServerError> {
+    standing_grant_snapshots(&store).await.map(Json)
+}
+
+async fn standing_grant_snapshots(
+    store: &ScopedStore,
+) -> Result<Vec<StandingGrantSnapshot>, ServerError> {
     let grants = store.list_standing_tool_grants().await?;
     let chat_titles: std::collections::HashMap<ChatId, Option<String>> = store
         .list_chats()
@@ -3053,28 +3059,57 @@ pub(crate) async fn list_standing_grants(
         .into_iter()
         .map(|project| (project.id, project.title))
         .collect();
-    Ok(Json(
-        grants
-            .into_iter()
-            .map(|record| {
-                let level = record.grant.level();
-                let level_title = match level {
-                    openwave_core::GrantLevel::Chat { chat_id } => {
-                        chat_titles.get(&chat_id).cloned().flatten()
-                    }
-                    openwave_core::GrantLevel::Project { project_id } => {
-                        project_titles.get(&project_id).cloned().flatten()
-                    }
-                };
-                StandingGrantSnapshot {
-                    source_call_id: record.source_call_id,
-                    level,
-                    level_title,
-                    action: openwave_core::RendererToolName::from(record.grant.tool_name()),
-                    approval: record.grant.kind(),
-                    scope: record.grant.scope().clone(),
-                    granted_at: record.grant.granted_at(),
+    Ok(grants
+        .into_iter()
+        .map(|record| {
+            let level = record.grant.level();
+            let level_title = match level {
+                openwave_core::GrantLevel::Chat { chat_id } => {
+                    chat_titles.get(&chat_id).cloned().flatten()
                 }
+                openwave_core::GrantLevel::Project { project_id } => {
+                    project_titles.get(&project_id).cloned().flatten()
+                }
+            };
+            StandingGrantSnapshot {
+                source_call_id: record.source_call_id,
+                level,
+                level_title,
+                action: openwave_core::RendererToolName::from(record.grant.tool_name()),
+                approval: record.grant.kind(),
+                scope: record.grant.scope().clone(),
+                granted_at: record.grant.granted_at(),
+            }
+        })
+        .collect())
+}
+
+/// `GET /consent/statements` — the server's rows of the unified consent read
+/// model: every standing tool grant as one [`ConsentStatementSnapshot`].
+///
+/// The capability half of the union lives in the desktop's host broker and
+/// joins these rows renderer-side; the server serves what its own store
+/// holds, in the shared statement shape, so both halves render as one list.
+pub(crate) async fn list_consent_statements(
+    store: ScopedStore,
+) -> Result<Json<Vec<crate::consent::ConsentStatementSnapshot>>, ServerError> {
+    Ok(Json(
+        standing_grant_snapshots(&store)
+            .await?
+            .into_iter()
+            .map(|grant| crate::consent::ConsentStatementSnapshot {
+                handle: crate::consent::ConsentHandle::ToolGrant {
+                    call_id: grant.source_call_id,
+                },
+                level: grant.level,
+                level_title: grant.level_title,
+                verb: crate::consent::ConsentVerb::Tool {
+                    action: grant.action,
+                    approval: grant.approval,
+                },
+                resource: crate::consent::ConsentResource::ActionScope { scope: grant.scope },
+                method: crate::consent::ConsentMethodSnapshot::ApprovalCard,
+                granted_at: grant.granted_at,
             })
             .collect(),
     ))

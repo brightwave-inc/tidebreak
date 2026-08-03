@@ -22,6 +22,9 @@ mod chat_titling;
 /// Host-owned code-execution provider selection and policy.
 pub mod code_execution;
 mod connected_apps;
+/// The unified consent read model: standing tool grants and host-broker
+/// capability grants as one renderer-facing statement shape.
+pub mod consent;
 mod desktop_schema;
 mod document_decode;
 mod durable_oplog;
@@ -469,6 +472,7 @@ pub fn app(state: AppState) -> Router {
             post(routes::post_approval),
         )
         .route("/grants", get(routes::list_standing_grants))
+        .route("/consent/statements", get(routes::list_consent_statements))
         .route(
             "/grants/{call_id}",
             axum::routing::delete(routes::delete_standing_grant),

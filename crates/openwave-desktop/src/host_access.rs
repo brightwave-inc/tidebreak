@@ -360,6 +360,116 @@ pub(crate) async fn list_approved_folders(
     approved_folders(&state).await
 }
 
+/// The capability half of the unified consent read model.
+///
+/// Every host-broker grant, mapped into the same statement shape the server
+/// serves for standing tool grants, so the Permissions surface renders both
+/// stores as one list. Read-only: enforcement stays in the broker's
+/// `authorize()`, and these rows are a projection of the records it consults.
+#[tauri::command]
+pub(crate) async fn list_capability_consents(
+    state: State<'_, HostAccess>,
+) -> Result<Vec<openwave_server::consent::ConsentStatementSnapshot>, String> {
+    let result = state
+        .broker
+        .control(ControlRequest::ListGrantStatements)
+        .await
+        .map_err(|error| error.to_string())?;
+    let ControlResult::ListGrantStatements { grants } = result else {
+        return Err("host broker returned an unexpected response".to_owned());
+    };
+
+    let store = state
+        .store()
+        .ok_or_else(|| "OpenWave is still starting".to_owned())?;
+    let mut statements = Vec::with_capacity(grants.len());
+    for grant in grants {
+        let Some(statement) = capability_statement(store.as_ref(), grant).await else {
+            continue;
+        };
+        statements.push(statement);
+    }
+    Ok(statements)
+}
+
+/// One broker grant as a consent statement, or `None` for vocabulary this
+/// build does not know how to render.
+///
+/// A subject whose chat or project no longer exists keeps its row with no
+/// title: the grant still conveys authority until something revokes it, and
+/// the read model exists precisely so such consent stays visible.
+async fn capability_statement(
+    store: &dyn Store,
+    grant: openwave_host_broker::GrantStatementSummary,
+) -> Option<openwave_server::consent::ConsentStatementSnapshot> {
+    use openwave_host_broker::{ConsentMethod, Scope, SubjectKind};
+    use openwave_server::consent::{
+        ConsentHandle, ConsentMethodSnapshot, ConsentResource, ConsentStatementSnapshot,
+        ConsentVerb, HostCapability,
+    };
+
+    let capability = match grant.capability {
+        Capability::ListRoots => HostCapability::ListRoots,
+        Capability::ReadFiles => HostCapability::ReadFiles,
+        Capability::WriteFiles => HostCapability::WriteFiles,
+        Capability::ExecuteCommands => HostCapability::ExecuteCommands,
+        _ => return None,
+    };
+    let method = match grant.consent_method {
+        ConsentMethod::FolderPicker => ConsentMethodSnapshot::FolderPicker,
+        ConsentMethod::PermissionDialog => ConsentMethodSnapshot::PermissionDialog,
+        ConsentMethod::OperatorConfig => ConsentMethodSnapshot::OperatorConfig,
+        ConsentMethod::CarriedForward => ConsentMethodSnapshot::CarriedForward,
+        _ => return None,
+    };
+    let (level, level_title) = match grant.subject.kind() {
+        SubjectKind::Conversation => {
+            let chat_id = ChatId::from(grant.subject.id());
+            let title = store
+                .get_chat(chat_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|chat| chat.title);
+            (openwave_core::GrantLevel::Chat { chat_id }, title)
+        }
+        SubjectKind::Project => {
+            let project_id = openwave_core::ProjectId::from(grant.subject.id());
+            let title = store
+                .get_project(project_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|project| project.title);
+            (openwave_core::GrantLevel::Project { project_id }, title)
+        }
+    };
+    let resource = match &grant.scope {
+        Scope::Subject => ConsentResource::HostSubject,
+        Scope::Root { root_id } => ConsentResource::HostRoot {
+            root_id: root_id.to_string(),
+            display_name: grant.root_display_name.clone(),
+        },
+        Scope::PathSubtree { root_id, relative } => ConsentResource::HostPathSubtree {
+            root_id: root_id.to_string(),
+            display_name: grant.root_display_name.clone(),
+            relative: relative.as_str().to_owned(),
+        },
+        _ => return None,
+    };
+    Some(ConsentStatementSnapshot {
+        handle: ConsentHandle::CapabilityGrant {
+            grant_id: grant.grant_id.to_string(),
+        },
+        level,
+        level_title,
+        verb: ConsentVerb::Capability { capability },
+        resource,
+        method,
+        granted_at: grant.granted_at,
+    })
+}
+
 #[tauri::command]
 pub(crate) async fn connect_approved_folder(
     app: AppHandle,

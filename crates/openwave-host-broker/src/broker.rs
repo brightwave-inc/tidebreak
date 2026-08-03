@@ -33,15 +33,16 @@ use crate::{
     path_policy::RootIdentity,
     protocol::{
         ControlEnvelope, ControlRequest, ControlResponseEnvelope, ControlResult, DirectoryEntry,
-        EntryKind, ErrorCode, ErrorResponse, HelloResult, LookupRegisterRootReceiptRequest,
-        LookupRegisterRootReceiptResult, LookupRootAttachmentReceiptRequest,
-        LookupRootAttachmentReceiptResult, OperationEnvelope, OperationRequest,
-        OperationResponseEnvelope, OperationResult, PathRequest, ReadFileBinaryResult,
-        ReadFileResult, RegisterRootReceipt, RegisterRootRequest, RegisterRootResult,
-        ResolveExecRootsRequest, ResolvedExecRoot, Response, ResponseEnvelope, RevokeRootRequest,
-        RevokeRootResult, RootAccess, RootAttachmentMutationKind, RootAttachmentMutationReceipt,
-        RootAttachmentMutationRequest, RootAttachmentMutationResult, RootSummary, WriteFileMode,
-        WriteFileRequest, WriteFileResult, MAX_READ_FILE_BINARY_BYTES, PROTOCOL_VERSION,
+        EntryKind, ErrorCode, ErrorResponse, GrantStatementSummary, HelloResult,
+        LookupRegisterRootReceiptRequest, LookupRegisterRootReceiptResult,
+        LookupRootAttachmentReceiptRequest, LookupRootAttachmentReceiptResult, OperationEnvelope,
+        OperationRequest, OperationResponseEnvelope, OperationResult, PathRequest,
+        ReadFileBinaryResult, ReadFileResult, RegisterRootReceipt, RegisterRootRequest,
+        RegisterRootResult, ResolveExecRootsRequest, ResolvedExecRoot, Response, ResponseEnvelope,
+        RevokeRootRequest, RevokeRootResult, RootAccess, RootAttachmentMutationKind,
+        RootAttachmentMutationReceipt, RootAttachmentMutationRequest, RootAttachmentMutationResult,
+        RootSummary, WriteFileMode, WriteFileRequest, WriteFileResult, MAX_READ_FILE_BINARY_BYTES,
+        PROTOCOL_VERSION,
     },
     Capability, ConsentMethod, ConsentRecord, ExecutionContext, Grant, GrantError, GrantId,
     GrantSubject, OperationId, RelativePath, RequestId, RootAttachment, RootId, RootPolicy,
@@ -338,13 +339,16 @@ struct ControlAudit {
 impl ControlAudit {
     fn from_request(request: &ControlRequest) -> Option<Self> {
         match request {
-            // Neither reaches user data or changes anything. `Hello` is a
-            // version handshake against a constant, and `ListApprovedRoots`
-            // projects folders the trusted control surface already knows about
-            // for the management UI. Recording them would add volume to a
-            // bounded, rotating log without adding anything a reader could act
-            // on, which costs the records that matter their retention.
-            ControlRequest::Hello | ControlRequest::ListApprovedRoots => None,
+            // None of these reaches user data or changes anything. `Hello` is
+            // a version handshake against a constant, and the two listings
+            // project state the trusted control surface already knows about —
+            // approved folders and standing grants — for the management UI.
+            // Recording them would add volume to a bounded, rotating log
+            // without adding anything a reader could act on, which costs the
+            // records that matter their retention.
+            ControlRequest::Hello
+            | ControlRequest::ListApprovedRoots
+            | ControlRequest::ListGrantStatements => None,
             ControlRequest::ResolveExecRoots(request) => Some(Self {
                 actor: AuditActor::Control {
                     subject: match request.context.project_id() {
@@ -659,6 +663,11 @@ impl Controller {
             ControlRequest::ListApprovedRoots => {
                 let state = self.lock_state().map_err(error_response)?;
                 list_approved_roots(&state).map(|roots| ControlResult::ListApprovedRoots { roots })
+            }
+            ControlRequest::ListGrantStatements => {
+                let state = self.lock_state().map_err(error_response)?;
+                list_grant_statements(&state)
+                    .map(|grants| ControlResult::ListGrantStatements { grants })
             }
             ControlRequest::ResolveExecRoots(request) => {
                 let state = self.lock_state().map_err(error_response)?;
@@ -2193,6 +2202,63 @@ fn list_approved_roots(state: &State) -> Result<Vec<RootSummary>, ErrorResponse>
             .then_with(|| left.root_id.to_string().cmp(&right.root_id.to_string()))
     });
     Ok(roots)
+}
+
+/// Every grant the broker holds, live and dormant, newest consent first.
+///
+/// Unavailable roots keep their grants in the listing: the approval stands
+/// until something withdraws it, and hiding a statement because its volume is
+/// unmounted would make the consent surface understate what the user agreed
+/// to. Their display name is recovered from the approved path's basename, the
+/// same identity a live registration would carry.
+fn list_grant_statements(state: &State) -> Result<Vec<GrantStatementSummary>, ErrorResponse> {
+    // Registration mints a bounded number of grants per root, so the grant
+    // table scales with the root table; the cap exists for the same reason as
+    // the root listing's.
+    const MAX_LIST_GRANTS: usize = MAX_LIST_ROOTS * 8;
+    let scope_display_name = |scope: &Scope, dormant: Option<&UnavailableRoot>| {
+        let root_id = match scope {
+            Scope::Subject => return None,
+            Scope::Root { root_id } | Scope::PathSubtree { root_id, .. } => *root_id,
+        };
+        if let Some(root) = state.roots.get(&root_id) {
+            return Some(root.display_name.clone());
+        }
+        dormant
+            .filter(|root| root.id == root_id)
+            .and_then(|root| root.path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+    };
+    let live = state
+        .grants
+        .iter()
+        .map(|grant| (grant, None::<&UnavailableRoot>));
+    let dormant = state
+        .unavailable
+        .iter()
+        .flat_map(|root| root.grants.iter().map(move |grant| (grant, Some(root))));
+    let mut statements = live
+        .chain(dormant)
+        .map(|(grant, dormant)| GrantStatementSummary {
+            grant_id: grant.id(),
+            subject: grant.subject(),
+            capability: grant.capability(),
+            scope: grant.scope().clone(),
+            root_display_name: scope_display_name(grant.scope(), dormant),
+            consent_method: grant.consent().method(),
+            granted_at: grant.consent().granted_at(),
+        })
+        .collect::<Vec<_>>();
+    if statements.len() > MAX_LIST_GRANTS {
+        return Err(error_response(BrokerError::RootListTooLarge));
+    }
+    statements.sort_by(|left, right| {
+        right
+            .granted_at
+            .cmp(&left.granted_at)
+            .then_with(|| left.grant_id.to_string().cmp(&right.grant_id.to_string()))
+    });
+    Ok(statements)
 }
 
 fn list_roots(

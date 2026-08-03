@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    Capability, ConsentMethod, ExecutionContext, GrantSubject, OperationId, RelativePath,
-    RequestId, RootId,
+    Capability, ConsentMethod, ExecutionContext, GrantId, GrantSubject, OperationId, RelativePath,
+    RequestId, RootId, Scope,
 };
 
 /// Current pre-v1 broker protocol. Bump this for incompatible wire changes.
@@ -66,6 +66,13 @@ pub enum ControlRequest {
     /// This is a trusted-host management operation, not an agent operation.
     /// It exposes neither absolute paths nor attachment authority.
     ListApprovedRoots,
+    /// List every capability grant with its consent provenance.
+    ///
+    /// A trusted-host management operation feeding the unified consent read
+    /// model: a grant the user cannot find is a one-way door. It exposes the
+    /// same safe folder identity as [`ControlRequest::ListApprovedRoots`] —
+    /// display names, never absolute paths — and confers no authority.
+    ListGrantStatements,
     /// Resolve exact product-attached roots for one local-exec invocation.
     ///
     /// This trusted-host operation returns absolute paths and must never be
@@ -314,6 +321,7 @@ pub type OperationResponseEnvelope = ResponseEnvelope<OperationResult>;
 pub enum ControlResult {
     Hello(HelloResult),
     ListApprovedRoots { roots: Vec<RootSummary> },
+    ListGrantStatements { grants: Vec<GrantStatementSummary> },
     ResolveExecRoots { roots: Vec<ResolvedExecRoot> },
     RegisterRoot(RegisterRootResult),
     LookupRegisterRootReceipt(LookupRegisterRootReceiptResult),
@@ -371,6 +379,27 @@ pub struct HelloResult {
 pub struct RootSummary {
     pub root_id: RootId,
     pub display_name: String,
+}
+
+/// One capability grant with its consent provenance, for the management UI.
+///
+/// The scope is reported verbatim; `root_display_name` joins in the same safe
+/// folder identity [`RootSummary`] exposes when the scope names a root, so a
+/// reader can recognize the folder without the broker revealing its absolute
+/// path. Grants whose root is currently unavailable still appear: the consent
+/// stands until something withdraws it, and a statement the user cannot see
+/// cannot be reconsidered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantStatementSummary {
+    pub grant_id: GrantId,
+    pub subject: GrantSubject,
+    pub capability: Capability,
+    pub scope: Scope,
+    /// Present when the scope names a root the broker can still describe.
+    pub root_display_name: Option<String>,
+    pub consent_method: ConsentMethod,
+    pub granted_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// One reachable folder together with what the broker would actually allow on

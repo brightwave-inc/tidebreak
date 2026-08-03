@@ -2,18 +2,20 @@ import { useCallback, useEffect, useState } from "react";
 
 import type {
   ApiClient,
+  ConsentStatementSnapshot,
   GrantScope,
   RendererToolName,
-  StandingGrantSnapshot,
 } from "../api";
 import { useConfirm } from "../components/ConfirmDialog";
+import { listCapabilityConsents } from "../host";
 import { Button } from "@/components/ui/button";
 import { SettingsError, SettingsPanel, SettingsSection } from "./primitives";
 
-// The "what the agent can do without asking" surface: every standing grant,
-// grouped by the chat it applies to, each revocable back to being asked.
-// A grant the reader cannot find is a one-way door; this page is where it is
-// found.
+// The "what may the agent do without asking" surface, rendered from the
+// unified consent read model: standing tool grants served by the server and
+// host-broker capability grants reported over the Tauri boundary, as one list
+// of statements grouped by what they reach. A consent the reader cannot find
+// is a one-way door; this page is where it is found.
 
 const TOOL_LABELS: Partial<Record<RendererToolName, string>> = {
   exec: "Commands",
@@ -24,6 +26,26 @@ const TOOL_LABELS: Partial<Record<RendererToolName, string>> = {
 
 export function toolGrantLabel(action: RendererToolName): string {
   return TOOL_LABELS[action] ?? action;
+}
+
+const CAPABILITY_LABELS: Record<
+  Extract<
+    ConsentStatementSnapshot["verb"],
+    { kind: "capability" }
+  >["capability"],
+  string
+> = {
+  list_roots: "List folders",
+  read_files: "Read files",
+  write_files: "Write files",
+  execute_commands: "Run commands",
+};
+
+/** The verb line: the class of action this statement allows. */
+export function verbLabel(verb: ConsentStatementSnapshot["verb"]): string {
+  return verb.kind === "tool"
+    ? toolGrantLabel(verb.action)
+    : CAPABILITY_LABELS[verb.capability];
 }
 
 /**
@@ -72,78 +94,124 @@ export function grantScopeLabel(
   }
 }
 
+/**
+ * The resource line: what the statement's verb is allowed to touch. Host
+ * resources carry the same safe folder identity the folders surface shows —
+ * a display name, never an absolute path.
+ */
+export function resourceLabel(statement: ConsentStatementSnapshot): string {
+  const { resource, verb } = statement;
+  switch (resource.kind) {
+    case "action_scope":
+      return grantScopeLabel(
+        resource.scope,
+        verb.kind === "tool" ? verb.action : "other",
+      );
+    case "host_subject":
+      return "Connected folders";
+    case "host_root":
+      return resource.display_name ?? `Folder ${shortOpaqueId(resource.root_id)}`;
+    case "host_path_subtree": {
+      const folder =
+        resource.display_name ?? `Folder ${shortOpaqueId(resource.root_id)}`;
+      return `${folder}/${resource.relative}`;
+    }
+  }
+}
+
+const METHOD_PHRASES: Record<ConsentStatementSnapshot["method"], string> = {
+  approval_card: "from an approval card",
+  folder_picker: "with the folder picker",
+  permission_dialog: "in a permission dialog",
+  operator_config: "by operator configuration",
+  carried_forward: "carried forward from an earlier approval",
+};
+
 export function shortOpaqueId(id: string): string {
   return id.length <= 10 ? id : `${id.slice(0, 6)}…${id.slice(-4)}`;
 }
 
-/** The identity of whatever a grant reaches, for grouping. */
-export function levelKey(grant: StandingGrantSnapshot): string {
-  return grant.level.level === "chat"
-    ? `chat:${grant.level.chat_id}`
-    : `project:${grant.level.project_id}`;
+/** The identity of whatever a statement reaches, for grouping. */
+export function levelKey(statement: ConsentStatementSnapshot): string {
+  return statement.level.level === "chat"
+    ? `chat:${statement.level.chat_id}`
+    : `project:${statement.level.project_id}`;
 }
 
 /**
- * What a group of grants applies to, named the way the reader chose it. A
- * project grant says so out loud: it reaches conversations that have not been
- * started yet, which is the whole point and also the thing worth being able
- * to see.
+ * What a group of statements applies to, named the way the reader chose it. A
+ * project statement says so out loud: it reaches conversations that have not
+ * been started yet, which is the whole point and also the thing worth being
+ * able to see.
  */
-export function levelLabel(grant: StandingGrantSnapshot): string {
-  const title = grant.level_title?.trim();
-  if (grant.level.level === "project") {
+export function levelLabel(statement: ConsentStatementSnapshot): string {
+  const title = statement.level_title?.trim();
+  if (statement.level.level === "project") {
     return title
       ? `Everything in ${title}`
-      : `Everything in project ${shortOpaqueId(grant.level.project_id)}`;
+      : `Everything in project ${shortOpaqueId(statement.level.project_id)}`;
   }
-  return title || `Chat ${shortOpaqueId(grant.level.chat_id)}`;
+  return title || `Chat ${shortOpaqueId(statement.level.chat_id)}`;
 }
 
-function grantedAtLabel(grantedAt: string): string {
-  const when = new Date(grantedAt);
+function grantedAtLabel(statement: ConsentStatementSnapshot): string {
+  const when = new Date(statement.granted_at);
   if (Number.isNaN(when.getTime())) return "";
-  return `Added ${when.toLocaleDateString(undefined, {
+  const date = when.toLocaleDateString(undefined, {
     year: "numeric",
     month: "short",
     day: "numeric",
-  })}`;
+  });
+  return `Added ${date} ${METHOD_PHRASES[statement.method]}`;
 }
 
-/** Grants in listing order, bucketed by what they reach, order preserved. */
+/** A statement's revocation identity, unique across both stores. */
+export function handleKey(statement: ConsentStatementSnapshot): string {
+  return statement.handle.kind === "tool_grant"
+    ? `tool_grant:${statement.handle.call_id}`
+    : `capability_grant:${statement.handle.grant_id}`;
+}
+
+/** Statements in listing order, bucketed by what they reach, order preserved. */
 export function groupByLevel(
-  grants: readonly StandingGrantSnapshot[],
-): { key: string; label: string; grants: StandingGrantSnapshot[] }[] {
+  statements: readonly ConsentStatementSnapshot[],
+): { key: string; label: string; statements: ConsentStatementSnapshot[] }[] {
   const groups = new Map<
     string,
-    { key: string; label: string; grants: StandingGrantSnapshot[] }
+    { key: string; label: string; statements: ConsentStatementSnapshot[] }
   >();
-  for (const grant of grants) {
-    const key = levelKey(grant);
+  for (const statement of statements) {
+    const key = levelKey(statement);
     const group = groups.get(key);
-    if (group) group.grants.push(grant);
-    else groups.set(key, { key, label: levelLabel(grant), grants: [grant] });
+    if (group) group.statements.push(statement);
+    else
+      groups.set(key, {
+        key,
+        label: levelLabel(statement),
+        statements: [statement],
+      });
   }
   return [...groups.values()];
 }
 
-function GrantRow({
-  grant,
+function StatementRow({
+  statement,
   busy,
   onRevoke,
 }: {
-  grant: StandingGrantSnapshot;
+  statement: ConsentStatementSnapshot;
   busy: boolean;
   onRevoke: () => void;
 }) {
-  const metadata = grantedAtLabel(grant.granted_at);
+  const metadata = grantedAtLabel(statement);
   return (
     <div className="flex items-center justify-between gap-4">
       <div className="min-w-0 flex-1">
         <p className="truncate text-sm font-medium">
-          {grantScopeLabel(grant.scope, grant.action)}
+          {resourceLabel(statement)}
         </p>
         <p className="text-muted-foreground mt-0.5 truncate text-sm">
-          {toolGrantLabel(grant.action)}
+          {verbLabel(statement.verb)}
         </p>
         {metadata && (
           <p className="text-muted-foreground mt-1 truncate text-xs">
@@ -151,22 +219,36 @@ function GrantRow({
           </p>
         )}
       </div>
-      <Button variant="ghost" size="sm" disabled={busy} onClick={onRevoke}>
-        Revoke
-      </Button>
+      {statement.handle.kind === "tool_grant" ? (
+        <Button variant="ghost" size="sm" disabled={busy} onClick={onRevoke}>
+          Revoke
+        </Button>
+      ) : (
+        // Capability statements are not individually revocable yet; the
+        // Folders surface disconnects the whole folder. Read model first.
+        <span className="text-muted-foreground text-xs">
+          Managed with its folder
+        </span>
+      )}
     </div>
   );
 }
 
 export function PermissionsPanel({ client }: { client: ApiClient }) {
-  const [grants, setGrants] = useState<StandingGrantSnapshot[] | null>(null);
+  const [statements, setStatements] = useState<
+    ConsentStatementSnapshot[] | null
+  >(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const { confirm, dialog } = useConfirm();
 
   const reload = useCallback(async () => {
     try {
-      setGrants(await client.listStandingGrants());
+      const [tool, capability] = await Promise.all([
+        client.listConsentStatements(),
+        listCapabilityConsents(),
+      ]);
+      setStatements([...tool, ...capability]);
       setError(null);
     } catch {
       setError("Saved approvals could not be loaded.");
@@ -177,26 +259,29 @@ export function PermissionsPanel({ client }: { client: ApiClient }) {
     void reload();
   }, [reload]);
 
-  async function revoke(grant: StandingGrantSnapshot) {
+  async function revoke(statement: ConsentStatementSnapshot) {
+    if (statement.handle.kind !== "tool_grant") return;
+    const callId = statement.handle.call_id;
     const confirmed = await confirm({
       title: "Revoke this approval?",
-      description: `The agent will ask again before ${toolGrantLabel(
-        grant.action,
-      ).toLowerCase()} covered by “${grantScopeLabel(
-        grant.scope,
-        grant.action,
-      )}” in ${levelLabel(grant).toLowerCase()}.`,
+      description: `The agent will ask again before ${verbLabel(
+        statement.verb,
+      ).toLowerCase()} covered by “${resourceLabel(
+        statement,
+      )}” in ${levelLabel(statement).toLowerCase()}.`,
       confirmLabel: "Revoke",
       destructive: true,
     });
     if (!confirmed) return;
-    setBusyId(grant.source_call_id);
+    setBusyId(handleKey(statement));
     try {
-      await client.revokeStandingGrant(grant.source_call_id);
-      setGrants(
+      await client.revokeStandingGrant(callId);
+      setStatements(
         (current) =>
           current?.filter(
-            (existing) => existing.source_call_id !== grant.source_call_id,
+            (existing) =>
+              existing.handle.kind !== "tool_grant" ||
+              existing.handle.call_id !== callId,
           ) ?? null,
       );
       setError(null);
@@ -211,25 +296,25 @@ export function PermissionsPanel({ client }: { client: ApiClient }) {
     <SettingsPanel
       title="Permissions"
       description="What the agent can do without asking. Revoke anything to be asked again."
-      busy={grants === null}
+      busy={statements === null}
     >
       {error && <SettingsError>{error}</SettingsError>}
-      {grants !== null && grants.length === 0 && !error && (
+      {statements !== null && statements.length === 0 && !error && (
         <p className="text-sm text-muted-foreground">
-          Nothing saved yet. When you answer an approval with “always allow”,
-          it appears here.
+          Nothing saved yet. When you answer an approval with “always allow”
+          or connect a folder, it appears here.
         </p>
       )}
-      {grants !== null &&
-        groupByLevel(grants).map((group) => (
+      {statements !== null &&
+        groupByLevel(statements).map((group) => (
           <SettingsSection key={group.key} title={group.label}>
             <div className="flex flex-col gap-4">
-              {group.grants.map((grant) => (
-                <GrantRow
-                  key={grant.source_call_id}
-                  grant={grant}
-                  busy={busyId === grant.source_call_id}
-                  onRevoke={() => void revoke(grant)}
+              {group.statements.map((statement) => (
+                <StatementRow
+                  key={handleKey(statement)}
+                  statement={statement}
+                  busy={busyId === handleKey(statement)}
+                  onRevoke={() => void revoke(statement)}
                 />
               ))}
             </div>
