@@ -75,9 +75,18 @@
 //! [`address`](SandboxBackend::address) resolves the proxy's port. The per-run
 //! transport secret still gates attach.
 //!
-//! Residual: engines differ on whether the embedded DNS resolver forwards
-//! external lookups from internal networks; where an older engine does, name
-//! lookups (not payload connections) can leak. Not closed here.
+//! The sandbox never needs external DNS: CONNECT carries the destination
+//! *name* and the proxy resolves it outside the sandbox. So the sandbox
+//! container's DNS upstream is pointed at a blackhole ([`SANDBOX_DNS_SINK`])
+//! — the embedded resolver still answers the internal network's own names
+//! (the proxy alias) authoritatively, but an external lookup has nowhere to
+//! go. On engines new enough to not forward external lookups from internal
+//! networks the flag is redundant; on older engines that do forward, it turns
+//! the name-lookup side channel into a query addressed to an unroutable
+//! documentation prefix. Residual: on those older engines the query packet
+//! still *leaves* the host toward that prefix before being dropped unanswered,
+//! so an observer on the local segment could see looked-up names; payload
+//! connections stay blocked either way.
 //!
 //! # The image is not verified
 //!
@@ -134,10 +143,19 @@ const NETWORK_TAG_LIST_FORMAT: &str = "{{.Name}}\t{{.Label \"openwave.run-tag\"}
 pub const EGRESS_PROXY_ALIAS: &str = "openwave-egress";
 /// The in-proxy CONNECT listener port. Kept in sync with the agent binary's
 /// `egress-proxy` default; never published to the host.
-const EGRESS_PROXY_PORT: u16 = 3128;
+pub(crate) const EGRESS_PROXY_PORT: u16 = 3128;
 /// Environment variable carrying the compiled egress policy (JSON) into the
 /// proxy container. Kept in sync with the agent's constant of the same name.
 const EGRESS_POLICY_ENV: &str = "OPENWAVE_EGRESS_POLICY";
+/// The sandbox container's DNS upstream: an RFC 5737 documentation address
+/// (TEST-NET-1), guaranteed never assigned, so a forwarded lookup goes
+/// nowhere and gets no answer. Docker's embedded resolver keeps answering the
+/// internal network's own names ([`EGRESS_PROXY_ALIAS`] included)
+/// authoritatively regardless of the upstream; only external lookups — which
+/// the sandbox never legitimately needs, since the proxy resolves CONNECT
+/// destinations host-side — are affected. See the module docs' egress section
+/// for the residual this leaves on older engines.
+const SANDBOX_DNS_SINK: &str = "192.0.2.1";
 /// Environment variable overriding the proxy's transport-relay listener.
 const RELAY_LISTEN_ENV: &str = "OPENWAVE_RELAY_LISTEN";
 /// Environment variable naming the relay's upstream — the sandbox container's
@@ -658,8 +676,9 @@ fn proxy_name(tag: SandboxTag) -> String {
 }
 
 /// The per-run sandbox container's name: the DNS name the proxy's transport
-/// relay dials on the internal network.
-fn sandbox_name(tag: SandboxTag) -> String {
+/// relay dials on the internal network. Crate-visible so the Docker-gated
+/// e2e egress probe can `docker exec` into the sandbox by name.
+pub(crate) fn sandbox_name(tag: SandboxTag) -> String {
     format!("openwave-sbx-{tag}")
 }
 
@@ -831,6 +850,12 @@ fn run_args(
         // it could not reach the host anyway; the proxy relays the transport.
         "--network".to_owned(),
         network_name(tag),
+        // External DNS points at a blackhole: the proxy resolves CONNECT
+        // destinations host-side, so the sandbox needs only the internal
+        // network's own names, which the embedded resolver answers without
+        // consulting this upstream.
+        "--dns".to_owned(),
+        SANDBOX_DNS_SINK.to_owned(),
         "--label".to_owned(),
         format!("{RUN_TAG_LABEL}={tag}"),
         "--label".to_owned(),
@@ -1124,6 +1149,11 @@ mod tests {
         let network_at = args.iter().position(|arg| arg == "--network").unwrap();
         assert_eq!(args[network_at + 1], network_name(tag));
         assert!(!args.iter().any(|arg| arg == "--publish"));
+        // External DNS is blackholed: the embedded resolver still answers the
+        // internal network's names, and the proxy resolves CONNECT
+        // destinations, so nothing legitimate needs an external lookup.
+        let dns_at = args.iter().position(|arg| arg == "--dns").unwrap();
+        assert_eq!(args[dns_at + 1], SANDBOX_DNS_SINK);
         // Compliant tools are pointed at the proxy by every spelling.
         for var in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
             assert!(args.contains(&format!(
@@ -1189,6 +1219,9 @@ mod tests {
         // It is tagged for the sweep and deterministically named for recovery.
         assert!(args.contains(&format!("{RUN_TAG_LABEL}={tag}")));
         assert!(args.contains(&proxy_name(tag)));
+        // The proxy resolves CONNECT destinations for the sandbox, so it must
+        // keep real DNS — the blackhole belongs to the sandbox only.
+        assert!(!args.iter().any(|arg| arg == "--dns"));
 
         // A test image without the agent binary can stand in a port-holder.
         let stand_in = DockerConfig {

@@ -1758,3 +1758,164 @@ async fn docker_container_conforms_at_the_transport_boundary() {
         .await
         .expect("tearing the conformance container down succeeds");
 }
+
+/// Run one Python probe inside the sandbox container and return its first
+/// stdout line. The probe scripts are written to always exit 0 and print a
+/// marker, so a failure is a wrong marker (with the probe's own diagnostics in
+/// it), not an opaque non-zero exit.
+async fn exec_probe(container: &str, script: &str) -> String {
+    let output = tokio::process::Command::new("docker")
+        .args(["exec", container, "python3", "-c", script])
+        .output()
+        .await
+        .expect("docker exec runs");
+    assert!(
+        output.status.success(),
+        "probe exited non-zero: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// The egress boundary on a real container: only the topology can prove that
+/// the internal network actually has no route out, that the proxy's alias
+/// resolves from the sandbox, and that the proxy's verdicts are what a command
+/// inside the boundary observes. The loopback integration tests already prove
+/// the proxy's protocol; this proves the wiring around it:
+///
+/// 1. a direct connection to a public address — ignoring `HTTP(S)_PROXY` —
+///    fails: the internal network has no route anywhere;
+/// 2. a CONNECT to a policy-denied destination is refused with a 403;
+/// 3. a CONNECT to the policy's allowed host flows end to end (the proxy
+///    resolves the name host-side and splices a real upstream connection);
+/// 4. an external DNS lookup inside the sandbox fails — the embedded resolver
+///    answers only the internal network's own names, and the sandbox's
+///    upstream is the blackhole `sandbox_docker` configures.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a Docker daemon, the agent image, and outbound network reach; run explicitly or in the Docker CI lane"]
+async fn docker_egress_boundary_denies_and_allows_through_the_proxy() {
+    use crate::sandbox_docker::{
+        sandbox_name, DockerConfig, DockerSandboxBackend, EGRESS_PROXY_ALIAS, EGRESS_PROXY_PORT,
+    };
+    use openwave_sandbox_protocol::SandboxNetworkPolicy;
+
+    let Some(image) = build_agent_image().await else {
+        return;
+    };
+
+    // The one host the policy allows, on 443 only. A stable public site the CI
+    // runner can reach; the allowed probe needs real outbound connectivity.
+    const ALLOWED_HOST: &str = "example.com";
+    const DENIED_HOST: &str = "denied.example";
+
+    let backend = DockerSandboxBackend::new(DockerConfig {
+        image: image.to_owned(),
+        ..DockerConfig::default()
+    });
+    let tag = SandboxTag::new();
+    let handle = backend
+        .provision(ProvisionRequest {
+            run_id: RunId::new(),
+            tag,
+            lifetime_cap_secs: None,
+            network_policy: SandboxNetworkPolicy {
+                allow_all_public: false,
+                allowed_hosts: Vec::new(),
+                https_only_hosts: vec![ALLOWED_HOST.to_owned()],
+            },
+        })
+        .await
+        .expect("provisioning the egress-probe sandbox succeeds");
+    let sandbox = sandbox_name(tag);
+
+    // A CONNECT probe: dial the proxy by its alias (retrying while the proxy
+    // container finishes starting), issue one CONNECT, print the status line.
+    let connect_probe = |host: &str| {
+        format!(
+            r#"
+import socket, time
+last = None
+for _ in range(30):
+    try:
+        s = socket.create_connection(("{EGRESS_PROXY_ALIAS}", {EGRESS_PROXY_PORT}), timeout=5)
+        break
+    except OSError as error:
+        last = error
+        time.sleep(1)
+else:
+    print(f"PROXY UNREACHABLE {{last}}")
+    raise SystemExit(0)
+s.settimeout(30)
+s.sendall(b"CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n")
+print(s.recv(64).decode("latin1").splitlines()[0])
+"#
+        )
+    };
+
+    let checks = tokio::time::timeout(Duration::from_secs(180), async {
+        // 1. The topology itself: a command that ignores the proxy environment
+        // has no route to a public address, well-known or otherwise.
+        let direct = exec_probe(
+            &sandbox,
+            r#"
+import socket
+try:
+    socket.create_connection(("1.1.1.1", 443), timeout=10)
+    print("REACHED")
+except OSError as error:
+    print(f"BLOCKED {error}")
+"#,
+        )
+        .await;
+        assert!(
+            direct.starts_with("BLOCKED"),
+            "direct egress must have no route: {direct}"
+        );
+
+        // 2. The proxy refuses a policy-denied destination before touching it.
+        let denied = exec_probe(&sandbox, &connect_probe(DENIED_HOST)).await;
+        assert!(
+            denied.starts_with("HTTP/1.1 403"),
+            "a denied CONNECT must be refused with 403: {denied}"
+        );
+
+        // 3. The allowed destination flows end to end through the proxy.
+        let allowed = exec_probe(&sandbox, &connect_probe(ALLOWED_HOST)).await;
+        assert!(
+            allowed.starts_with("HTTP/1.1 200"),
+            "an allowed CONNECT must be established: {allowed}"
+        );
+
+        // 4. The name-lookup side channel: an external lookup inside the
+        // sandbox fails, because the proxy resolves destinations host-side and
+        // the sandbox's own upstream is a blackhole.
+        let lookup = exec_probe(
+            &sandbox,
+            &format!(
+                r#"
+import socket
+try:
+    socket.getaddrinfo("{ALLOWED_HOST}", 443)
+    print("RESOLVED")
+except OSError as error:
+    print(f"UNRESOLVED {{error}}")
+"#
+            ),
+        )
+        .await;
+        assert!(
+            lookup.starts_with("UNRESOLVED"),
+            "an external DNS lookup inside the sandbox must fail: {lookup}"
+        );
+    })
+    .await;
+
+    // A failed assertion above leaks the trio in a local run, exactly as in
+    // the conformance test: the CI runner is ephemeral, and local reruns
+    // reclaim it through the tag sweep. The timeout case still tears down.
+    backend
+        .destroy(&handle)
+        .await
+        .expect("tearing the egress-probe sandbox down succeeds");
+    checks.expect("egress probes completed within their bound");
+}
