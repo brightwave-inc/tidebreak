@@ -757,6 +757,110 @@ async fn worker_retries_a_transient_provider_failure_without_a_terminal_event() 
     assert_eq!(turn.status, TurnRunStatus::Completed);
 }
 
+/// A retryable provider failure during the wrap-up call resumes into the
+/// wrap-up, not a `max_steps_exceeded` failure (#1181). The retrying lease
+/// segment arrives with zero remaining step budget — the budget was spent
+/// before the wrap-up, which is deliberately outside it — and must still be
+/// allowed to make the one tool-free closing call.
+#[tokio::test(flavor = "multi_thread")]
+async fn zero_budget_resume_runs_the_wrap_up_instead_of_failing() {
+    struct WrapUpFailOnce {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for WrapUpFailOnce {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("wrap-up-fail-once")
+        }
+
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            match self.calls.fetch_add(1, Ordering::SeqCst) {
+                // The only budgeted step: spend it on a tool call.
+                0 => Ok(stream::iter(vec![
+                    ProviderEvent::ToolCallStarted {
+                        index: 0,
+                        id: "call_1".into(),
+                        name: "read_file".into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 0,
+                        fragment: "{}".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::ToolUse,
+                    },
+                ])
+                .boxed()),
+                // The wrap-up call fails retryably; the retry claims the turn
+                // with its whole step budget already consumed.
+                1 => Err(AgentError::Provider("injected wrap-up failure".into())),
+                _ => Ok(stream::iter(vec![
+                    ProviderEvent::TextDelta {
+                        text: "wrapped up after resume".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ])
+                .boxed()),
+            }
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let calls = Arc::new(AtomicUsize::new(0));
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(WrapUpFailOnce {
+            calls: calls.clone(),
+        }))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            max_steps: 1,
+            ..AgentConfig::default()
+        },
+    );
+    let token = state.token.clone();
+    spawn_turn_worker(&state);
+    let router = app(state);
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    assert_eq!(
+        send_message(&router, &bearer, chat.id, "go").await,
+        StatusCode::ACCEPTED
+    );
+
+    let events = wait_for_turn(&store, chat.id).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert!(matches!(
+        events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnCompleted { .. })
+    ));
+    let turn = store.list_turn_runs(chat.id).await.unwrap().pop().unwrap();
+    assert_eq!(turn.status, TurnRunStatus::Completed);
+    assert_eq!(turn.attempt_count, 2);
+    // The wrap-up is outside the budget: only the tool step is counted.
+    assert_eq!(turn.model_steps, 1);
+    assert!(store
+        .list_messages(chat.id)
+        .await
+        .unwrap()
+        .iter()
+        .any(|message| message.content == "wrapped up after resume"));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn scanner_won_failure_does_not_wedge_the_only_worker_lane() {
     struct FailOnceProvider {
