@@ -117,7 +117,7 @@ impl ModelProvider for AnthropicProvider {
         };
         let url = format!("{}/v1/messages", self.base_url);
         let api_key = match &self.token_source {
-            Some(source) => source.bearer_token().await?,
+            Some(source) => source.bearer_token_for(req.conversation).await?,
             None => self.api_key.clone(),
         };
 
@@ -1758,5 +1758,46 @@ mod tests {
         );
         assert!(requests[1].get(GATEWAY_CONVERSATION_HEADER).is_none());
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn the_token_source_is_asked_for_the_request_conversation() {
+        // The conversation must reach the token source, not just the header:
+        // a gateway source mints inside the chat's attestation context, and a
+        // token fetched without the conversation would record no observations
+        // for the chat's tool calls.
+        struct Recording(std::sync::Mutex<Vec<Option<openwave_core::id::ChatId>>>);
+
+        #[async_trait::async_trait]
+        impl crate::BearerTokenSource for Recording {
+            async fn bearer_token(&self) -> openwave_core::Result<String> {
+                unreachable!("the adapter must ask per conversation");
+            }
+
+            async fn bearer_token_for(
+                &self,
+                conversation: Option<openwave_core::id::ChatId>,
+            ) -> openwave_core::Result<String> {
+                self.0.lock().unwrap().push(conversation);
+                Ok("mg_at_test".into())
+            }
+        }
+
+        let source = std::sync::Arc::new(Recording(std::sync::Mutex::new(Vec::new())));
+        let provider = AnthropicProvider::new("unused")
+            .with_base_url("http://127.0.0.1:9")
+            .with_token_source(source.clone());
+        let conversation = openwave_core::id::ChatId::new();
+        // The request itself fails (nothing listens); the token exchange has
+        // already happened by then, which is all this asserts.
+        let _ = provider
+            .stream(ChatRequest {
+                model: "claude-opus-4-8".into(),
+                conversation: Some(conversation),
+                messages: vec![ChatMessage::text(Role::User, "hi")],
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(source.0.lock().unwrap().as_slice(), &[Some(conversation)]);
     }
 }
