@@ -4167,6 +4167,7 @@ dependencies = [
  "chrono",
  "futures",
  "image",
+ "jsonschema",
  "libc",
  "openwave-code-execution",
  "openwave-connectors",

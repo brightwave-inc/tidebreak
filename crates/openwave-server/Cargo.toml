@@ -29,6 +29,11 @@ futures = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# The governed REST executor's pinned per-request egress client.
+reqwest = { workspace = true }
+# Catalog-declared parameter and body schemas validated per request in the
+# governed REST executor.
+jsonschema = { workspace = true }
 # Output-constraint schemas for the host's own model calls, e.g. chat titling.
 schemars = { workspace = true }
 uuid = { workspace = true }
@@ -73,5 +78,4 @@ openwave-sandbox-agent = { path = "../openwave-sandbox-agent" }
 sea-orm = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
 tower = { version = "=0.5.3", features = ["util"] }
-reqwest = { workspace = true }
 tokio-tungstenite = "=0.30.0"
