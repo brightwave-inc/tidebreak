@@ -13,7 +13,6 @@ import { Switch } from "@/components/ui/switch";
 import {
   SettingsError,
   SettingsField,
-  SettingsPanel,
   SettingsSection,
   SettingsStatus,
 } from "./primitives";
@@ -380,8 +379,7 @@ export function McpPanel({
 
   if (managed) {
     return (
-      <SettingsPanel
-        title="MCP servers"
+      <McpKindSection
         description="Tool servers provided by your organization's model gateway."
         busy={loading || working}
       >
@@ -393,13 +391,12 @@ export function McpPanel({
         )}
         {fallbackListError}
         {error && <SettingsError>{error}</SettingsError>}
-      </SettingsPanel>
+      </McpKindSection>
     );
   }
 
   return (
-    <SettingsPanel
-      title="MCP servers"
+    <McpKindSection
       description="Connect local stdio tool servers or remote HTTP endpoints without a shell or a desktop restart."
       busy={loading || working}
     >
@@ -713,7 +710,33 @@ export function McpPanel({
       )}
       {fallbackListError}
       {error && <SettingsError>{error}</SettingsError>}
-    </SettingsPanel>
+    </McpKindSection>
+  );
+}
+
+/**
+ * The MCP kind-section frame. This panel renders inside the Connected apps
+ * page rather than as a page of its own, so it leads with a section heading
+ * — the page title, column, and rhythm belong to the surrounding
+ * `SettingsPanel` — while `aria-busy` still scopes this kind's own work.
+ */
+function McpKindSection({
+  description,
+  busy,
+  children,
+}: {
+  description: string;
+  busy: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <section className="flex flex-col gap-10" aria-busy={busy}>
+      <div className="flex flex-col gap-1">
+        <h2 className="text-lg font-semibold">MCP servers</h2>
+        <p className="text-sm text-muted-foreground">{description}</p>
+      </div>
+      {children}
+    </section>
   );
 }
 

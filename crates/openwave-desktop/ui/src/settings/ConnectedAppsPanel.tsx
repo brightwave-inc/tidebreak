@@ -9,6 +9,7 @@ import type {
 } from "../api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { McpPanel } from "./McpPanel";
 import {
   SettingsError,
   SettingsField,
@@ -18,7 +19,6 @@ import {
 } from "./primitives";
 
 type RestEntry = Extract<ConnectedAppInfo, { kind: "rest_api" }>;
-type McpEntry = Extract<ConnectedAppInfo, { kind: "mcp_server" }>;
 
 type CredentialMode = "none" | "bearer" | "header";
 
@@ -64,13 +64,6 @@ function samePlacement(
   return stored.header === chosen.header;
 }
 
-function healthLabel(entry: McpEntry): string {
-  const health = entry.health.charAt(0).toUpperCase() + entry.health.slice(1);
-  return entry.health === "healthy"
-    ? `${health} — ${entry.tool_count} tool${entry.tool_count === 1 ? "" : "s"}`
-    : health;
-}
-
 function credentialLabel(entry: RestEntry): string {
   switch (entry.credential_status) {
     case "none":
@@ -89,22 +82,22 @@ function errorMessage(err: unknown): string {
 }
 
 /**
- * The Connected apps page: one listing across both kinds. MCP entries show
- * the runtime's health and deep-link to the MCP servers page for editing —
- * the phased absorption is presentation only — while REST entries are
- * created, edited, and deleted right here.
+ * The Connected apps page: the one settings surface for both kinds. The MCP
+ * section is the full server editor — `McpPanel`, absorbed here when the
+ * standalone MCP servers page retired — and REST entries are created,
+ * edited, and deleted below it. The absorption is presentation only; the
+ * connected-apps record was authoritative throughout the phasing.
  */
 export function ConnectedAppsPanel({
   client,
   managed = false,
-  onOpenMcpSettings,
 }: {
   client: ApiClient;
   /** On a managed profile the server refuses `rest_api` writes wholesale —
    * the gateway is the sole governed REST channel — so the REST half renders
-   * a read-only notice and no editing affordances. */
+   * a read-only notice and no editing affordances. `McpPanel` reads the same
+   * flag and renders its own managed view. */
   managed?: boolean;
-  onOpenMcpSettings: () => void;
 }) {
   const [apps, setApps] = useState<ConnectedAppInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -134,9 +127,6 @@ export function ConnectedAppsPanel({
     };
   }, [client]);
 
-  const mcpEntries = apps.filter(
-    (entry): entry is McpEntry => entry.kind === "mcp_server",
-  );
   const restEntries = apps.filter(
     (entry): entry is RestEntry => entry.kind === "rest_api",
   );
@@ -371,41 +361,12 @@ export function ConnectedAppsPanel({
       description="Outside integrations this profile can reach: MCP servers and REST APIs, bound by local apps with your consent."
       busy={loading || saving || deleting !== null}
     >
+      <McpPanel client={client} managed={managed} />
+
       {loading ? (
         <p className="text-sm text-muted-foreground">Loading connected apps…</p>
       ) : (
         <>
-          <SettingsSection
-            title="MCP servers"
-            description="Tool servers mounted into conversations. Configure them on the MCP servers page."
-          >
-            {mcpEntries.length === 0 ? (
-              <p className="text-sm text-muted-foreground">
-                No MCP servers configured.
-              </p>
-            ) : (
-              mcpEntries.map((entry) => (
-                <div
-                  key={entry.id}
-                  className="flex items-center justify-between gap-4"
-                >
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-bold">{entry.name}</p>
-                    <p className="truncate text-xs text-muted-foreground">
-                      {healthLabel(entry)}
-                      {entry.diagnostic !== null && ` — ${entry.diagnostic}`}
-                    </p>
-                  </div>
-                </div>
-              ))
-            )}
-            <div>
-              <Button variant="outline" size="sm" onClick={onOpenMcpSettings}>
-                Manage MCP servers
-              </Button>
-            </div>
-          </SettingsSection>
-
           <SettingsSection
             title="REST APIs"
             description="A base URL and an OpenAPI document; requests run through the governed executor."

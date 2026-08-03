@@ -40,10 +40,10 @@ function managedPanel(
   client: ApiClient,
   {
     onChanged = () => undefined,
-    onOpenMcpSettings = () => undefined,
+    onOpenConnectedApps = () => undefined,
   }: {
     onChanged?: () => void;
-    onOpenMcpSettings?: () => void;
+    onOpenConnectedApps?: () => void;
   } = {},
 ) {
   return (
@@ -52,7 +52,7 @@ function managedPanel(
       managed
       gatewayUrl={GATEWAY_URL}
       onChanged={onChanged}
-      onOpenMcpSettings={onOpenMcpSettings}
+      onOpenConnectedApps={onOpenConnectedApps}
     />
   );
 }
@@ -72,7 +72,7 @@ describe("GatewayPanel", () => {
         managed={false}
         gatewayUrl={null}
         onChanged={() => undefined}
-        onOpenMcpSettings={() => undefined}
+        onOpenConnectedApps={() => undefined}
       />,
     );
 
@@ -201,11 +201,11 @@ describe("GatewayPanel", () => {
     expect(screen.queryByText("Connected apps")).not.toBeInTheDocument();
     // The route to mounting still shows: older gateways mount by slug too.
     expect(
-      screen.getByRole("button", { name: /Mount endpoints in MCP servers/ }),
+      screen.getByRole("button", { name: /Mount endpoints in Connected apps/ }),
     ).toBeInTheDocument();
   });
 
-  it("keeps connected apps informational and sends mounting to the MCP page", async () => {
+  it("keeps connected apps informational and sends mounting to Connected apps", async () => {
     const client = api({
       getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
       getGatewayApps: vi.fn().mockResolvedValue({
@@ -221,9 +221,9 @@ describe("GatewayPanel", () => {
         ],
       }),
     });
-    const openMcpSettings = vi.fn();
+    const openConnectedApps = vi.fn();
     const user = userEvent.setup();
-    render(managedPanel(client, { onOpenMcpSettings: openMcpSettings }));
+    render(managedPanel(client, { onOpenConnectedApps: openConnectedApps }));
 
     expect(await screen.findByText("Incident API")).toBeInTheDocument();
     expect(
@@ -231,9 +231,9 @@ describe("GatewayPanel", () => {
     ).not.toBeInTheDocument();
 
     await user.click(
-      screen.getByRole("button", { name: /Mount endpoints in MCP servers/ }),
+      screen.getByRole("button", { name: /Mount endpoints in Connected apps/ }),
     );
-    expect(openMcpSettings).toHaveBeenCalled();
+    expect(openConnectedApps).toHaveBeenCalled();
   });
 
   it("a policy that names no gateway cannot be connected to", async () => {
@@ -252,7 +252,7 @@ describe("GatewayPanel", () => {
         managed
         gatewayUrl={null}
         onChanged={() => undefined}
-        onOpenMcpSettings={() => undefined}
+        onOpenConnectedApps={() => undefined}
       />,
     );
 

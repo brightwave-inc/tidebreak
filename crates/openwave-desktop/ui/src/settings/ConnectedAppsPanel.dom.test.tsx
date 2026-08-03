@@ -2,10 +2,28 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ApiClient, ConnectedAppsInfo } from "../api";
+import type { ApiClient, ConnectedAppsInfo, McpServerInfo } from "../api";
 import { ConnectedAppsPanel } from "./ConnectedAppsPanel";
 
 const SECRET = "sk-rest-value-hunter2";
+
+/** One configured manual server, so the embedded editor has a row to show. */
+const docsServer: McpServerInfo = {
+  name: "docs",
+  command: "/usr/local/bin/docs-mcp",
+  args: [],
+  env: {},
+  env_from: [],
+  cwd: null,
+  url: null,
+  bearer_token_env: null,
+  gateway_endpoint: null,
+  request_timeout_ms: 60_000,
+  enabled: true,
+  health: "healthy",
+  tool_count: 3,
+  diagnostic: null,
+};
 
 const bothKinds: ConnectedAppsInfo = {
   apps: [
@@ -36,6 +54,9 @@ function api(overrides: Partial<Record<keyof ApiClient, unknown>> = {}) {
     listConnectedApps: vi.fn().mockResolvedValue(bothKinds),
     putRestConnectedApp: vi.fn().mockResolvedValue(bothKinds),
     deleteRestConnectedApp: vi.fn().mockResolvedValue(undefined),
+    // The embedded MCP editor reads its own server list and gateway session.
+    listMcpServers: vi.fn().mockResolvedValue({ servers: [docsServer] }),
+    getGatewayStatus: vi.fn().mockResolvedValue({ signed_in: false }),
     ...overrides,
   } as unknown as ApiClient;
 }
@@ -46,37 +67,29 @@ afterEach(() => {
 });
 
 describe("ConnectedAppsPanel", () => {
-  it("lists both kinds with per-kind detail and deep-links MCP editing", async () => {
+  it("is one page with both kinds: the embedded MCP editor beside REST detail", async () => {
     const client = api();
-    const onOpenMcpSettings = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <ConnectedAppsPanel
-        client={client}
-        managed={false}
-        onOpenMcpSettings={onOpenMcpSettings}
-      />,
-    );
+    render(<ConnectedAppsPanel client={client} managed={false} />);
 
+    // The MCP section is the full server editor, not a read-only list with a
+    // deep link to a separate page.
     expect(await screen.findByText("docs")).toBeInTheDocument();
-    expect(screen.getByText(/Healthy — 3 tools/)).toBeInTheDocument();
-    expect(screen.getByText("Sentry")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Save and verify/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText(/Namespace/)).toHaveValue("docs");
+    expect(
+      screen.queryByRole("button", { name: /Manage MCP servers/ }),
+    ).not.toBeInTheDocument();
+
+    expect(await screen.findByText("Sentry")).toBeInTheDocument();
     expect(
       screen.getByText(/api\.sentry\.example\/v2 · 2 operations · Credential configured/),
     ).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: /Manage MCP servers/ }));
-    expect(onOpenMcpSettings).toHaveBeenCalled();
   });
 
   it("managed: shows the read-only notice and no REST editing affordances", async () => {
-    render(
-      <ConnectedAppsPanel
-        client={api()}
-        managed
-        onOpenMcpSettings={() => undefined}
-      />,
-    );
+    render(<ConnectedAppsPanel client={api()} managed />);
 
     expect(
       await screen.findByText(/Managed by your organization/),
@@ -97,13 +110,7 @@ describe("ConnectedAppsPanel", () => {
   it("submits the PUT shape from the create form and never renders the value back", async () => {
     const client = api();
     const user = userEvent.setup();
-    render(
-      <ConnectedAppsPanel
-        client={client}
-        managed={false}
-        onOpenMcpSettings={() => undefined}
-      />,
-    );
+    render(<ConnectedAppsPanel client={client} managed={false} />);
 
     await user.click(
       await screen.findByRole("button", { name: /Add REST API/ }),
@@ -142,13 +149,7 @@ describe("ConnectedAppsPanel", () => {
   it("an edit with an untouched value keeps the stored credential", async () => {
     const client = api();
     const user = userEvent.setup();
-    render(
-      <ConnectedAppsPanel
-        client={client}
-        managed={false}
-        onOpenMcpSettings={() => undefined}
-      />,
-    );
+    render(<ConnectedAppsPanel client={client} managed={false} />);
 
     await user.click(await screen.findByRole("button", { name: /Edit/ }));
     await user.type(

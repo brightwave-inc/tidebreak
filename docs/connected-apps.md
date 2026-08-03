@@ -110,7 +110,9 @@ Settings phasing: the MCP servers page remains during the epic; the
 end state is one Connected apps page listing both kinds (per-kind detail —
 health and mounting for MCP, catalog and credential status for REST). The
 phasing is presentation only; the record is authoritative from its first
-slice.
+slice. The absorption has since completed: the standalone MCP servers page
+retired into the Connected apps page (its editor unchanged, `/settings/mcp`
+redirecting there), with no change to the record.
 
 ## Consumers
 

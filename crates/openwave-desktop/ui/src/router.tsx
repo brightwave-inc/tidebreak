@@ -106,6 +106,30 @@ const settingsIndexRoute = createRoute({
   component: SettingsIndexRedirect,
 });
 
+/**
+ * The standalone MCP servers page was absorbed into Connected apps; stale
+ * deep links and history entries still name its old path, so it lands there
+ * rather than on a blank route.
+ */
+function McpSettingsRedirect() {
+  const navigate = useNavigate();
+  useEffect(() => {
+    // Settings sections are registered from a runtime table, so TanStack's
+    // generated route union contains `/settings` but not each literal child.
+    const connectedAppsPath: string = "/settings/connected-apps";
+    void navigate({ to: connectedAppsPath, replace: true });
+  }, [navigate]);
+  return (
+    <p className="text-muted-foreground p-6 text-sm">Opening settings…</p>
+  );
+}
+
+const settingsMcpRedirectRoute = createRoute({
+  getParentRoute: () => settingsRoute,
+  path: "mcp",
+  component: McpSettingsRedirect,
+});
+
 const settingsSectionRoutes = SETTINGS_SECTIONS.map((section) =>
   createRoute({
     getParentRoute: () => settingsRoute,
@@ -118,7 +142,11 @@ export const routeTree = rootRoute.addChildren([
   homeRoute,
   allChatsRoute,
   chatRoute,
-  settingsRoute.addChildren([settingsIndexRoute, ...settingsSectionRoutes]),
+  settingsRoute.addChildren([
+    settingsIndexRoute,
+    settingsMcpRedirectRoute,
+    ...settingsSectionRoutes,
+  ]),
 ]);
 
 /**
