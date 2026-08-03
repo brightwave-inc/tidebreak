@@ -300,7 +300,8 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
             Some(Arc::new(
                 AnthropicProvider::new(String::new())
                     .with_base_url(base.to_string())
-                    .with_token_source(source),
+                    .with_token_source(source)
+                    .with_conversation_attribution(),
             ))
         }
         #[cfg(not(feature = "anthropic"))]

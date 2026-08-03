@@ -178,6 +178,14 @@ pub struct ChatRequest {
     /// provider. Direct adapters may ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderId>,
+    /// The conversation this request belongs to, for gateway-side attribution.
+    ///
+    /// Only a gateway route declares it, and only as a header: no provider
+    /// receives it as wire data, and a direct provider never sees it at all.
+    /// Absent, the gateway records the inference without a conversation, which
+    /// is what every request did before this existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<crate::id::ChatId>,
     /// Provider-specific model identifier (e.g. `claude-opus-4-8`).
     pub model: String,
     /// Whether the resolved model uses a reasoning-model request shape.

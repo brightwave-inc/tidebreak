@@ -1356,6 +1356,7 @@ impl Agent {
                 let fitted_tokens = context::estimate_transcript_tokens(&fitted);
                 let request = ChatRequest {
                     provider: self.config.provider.clone(),
+                    conversation: Some(chat.id),
                     model: self.config.model.clone(),
                     reasoning_model: self.config.reasoning_model,
                     system: self.config.system_prompt.clone(),
