@@ -460,6 +460,7 @@ async fn container_worker_service_cadence_completes_pending_teardown() {
                 run_id,
                 &SandboxTag::new().to_string(),
                 chrono::Utc::now() + chrono::Duration::seconds(60),
+                openwave_core::SandboxAdmissionMode::AttachedOnly,
             )
             .await
             .unwrap();
@@ -544,9 +545,74 @@ async fn drives_a_container_run_end_to_end_over_loopback() {
         // The container was provisioned once and torn down.
         assert_eq!(backend.provisions.load(Ordering::SeqCst), 1);
         assert_eq!(backend.destroys.load(Ordering::SeqCst), 1);
+
+        // The fail-closed detached gate: no precondition holds on a local
+        // container, so the durable admission decision the driver recorded is
+        // attached-only (issue #824).
+        let provision = store
+            .get_sandbox_provision(*run_id.as_uuid())
+            .await
+            .unwrap()
+            .expect("the run has a provisioning record");
+        assert_eq!(
+            provision.admission,
+            openwave_core::SandboxAdmissionMode::AttachedOnly,
+            "a local container run must be admitted attached-only"
+        );
     })
     .await
     .expect("test completed within its time bound");
+}
+
+/// The admission decision is a durable fact on the provisioning record: what
+/// was recorded is what reads back, and recovery derives the run's admission
+/// from the record rather than re-deciding — so a crash can never upgrade a
+/// run to detached, and a detached admission survives the host that made it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_admission_decision_is_durable_on_the_provisioning_record() {
+    let (_dir, store, _chat) = store().await;
+    let run_uuid = Uuid::new_v4();
+    assert!(matches!(
+        store
+            .begin_sandbox_provision(
+                run_uuid,
+                &SandboxTag::new().to_string(),
+                chrono::Utc::now() + chrono::Duration::seconds(600),
+                openwave_core::SandboxAdmissionMode::Detached,
+            )
+            .await
+            .unwrap(),
+        openwave_core::BeginSandboxProvisionOutcome::Started
+    ));
+    let record = store
+        .get_sandbox_provision(run_uuid)
+        .await
+        .unwrap()
+        .expect("the record exists");
+    assert_eq!(
+        record.admission,
+        openwave_core::SandboxAdmissionMode::Detached
+    );
+
+    // A second begin for the same run — the crash-recovery path — observes
+    // the recorded decision, not its own argument.
+    let openwave_core::BeginSandboxProvisionOutcome::Existing(existing) = store
+        .begin_sandbox_provision(
+            run_uuid,
+            &SandboxTag::new().to_string(),
+            chrono::Utc::now() + chrono::Duration::seconds(600),
+            openwave_core::SandboxAdmissionMode::AttachedOnly,
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("the second begin must observe the existing record");
+    };
+    assert_eq!(
+        existing.admission,
+        openwave_core::SandboxAdmissionMode::Detached,
+        "recovery reads the durable decision, never re-decides"
+    );
 }
 
 /// An agent loop that ends WITHOUT submitting a result — it exhausts its step
@@ -936,7 +1002,12 @@ async fn a_lapsed_intent_refuses_a_late_handle_commit() {
     let expired = chrono::Utc::now() - chrono::Duration::seconds(1);
     assert!(matches!(
         store
-            .begin_sandbox_provision(run_uuid, &tag.to_string(), expired)
+            .begin_sandbox_provision(
+                run_uuid,
+                &tag.to_string(),
+                expired,
+                openwave_core::SandboxAdmissionMode::AttachedOnly
+            )
             .await
             .unwrap(),
         openwave_core::BeginSandboxProvisionOutcome::Started
@@ -972,11 +1043,21 @@ async fn the_sweep_reclaims_a_lapsed_intent_and_preserves_live_ones() {
     let expired = chrono::Utc::now() - chrono::Duration::seconds(1);
     let open = chrono::Utc::now() + chrono::Duration::seconds(600);
     store
-        .begin_sandbox_provision(Uuid::new_v4(), &dead_tag.to_string(), expired)
+        .begin_sandbox_provision(
+            Uuid::new_v4(),
+            &dead_tag.to_string(),
+            expired,
+            openwave_core::SandboxAdmissionMode::AttachedOnly,
+        )
         .await
         .unwrap();
     store
-        .begin_sandbox_provision(Uuid::new_v4(), &live_tag.to_string(), open)
+        .begin_sandbox_provision(
+            Uuid::new_v4(),
+            &live_tag.to_string(),
+            open,
+            openwave_core::SandboxAdmissionMode::AttachedOnly,
+        )
         .await
         .unwrap();
 
@@ -1064,6 +1145,7 @@ async fn a_committed_handle_is_reconciled_not_reprovisioned() {
                 run_uuid,
                 &tag.to_string(),
                 chrono::Utc::now() + chrono::Duration::seconds(600),
+                openwave_core::SandboxAdmissionMode::AttachedOnly,
             )
             .await
             .unwrap();
@@ -1121,6 +1203,7 @@ async fn a_dead_drivers_container_run_is_recovered_to_completion() {
                 run_uuid,
                 &tag.to_string(),
                 chrono::Utc::now() + chrono::Duration::seconds(600),
+                openwave_core::SandboxAdmissionMode::AttachedOnly,
             )
             .await
             .unwrap();
@@ -1177,6 +1260,7 @@ async fn a_terminal_container_failure_enqueues_its_teardown() {
             run_uuid,
             &tag.to_string(),
             chrono::Utc::now() + chrono::Duration::seconds(600),
+            openwave_core::SandboxAdmissionMode::AttachedOnly,
         )
         .await
         .unwrap();
@@ -1272,6 +1356,7 @@ async fn a_late_result_is_retained_as_evidence_not_committed() {
             run_uuid,
             &SandboxTag::new().to_string(),
             chrono::Utc::now() + chrono::Duration::seconds(600),
+            openwave_core::SandboxAdmissionMode::AttachedOnly,
         )
         .await
         .unwrap();
@@ -1386,6 +1471,7 @@ async fn cancelling_an_unattached_container_child_enqueues_its_teardown() {
             run_uuid,
             &SandboxTag::new().to_string(),
             chrono::Utc::now() + chrono::Duration::seconds(600),
+            openwave_core::SandboxAdmissionMode::AttachedOnly,
         )
         .await
         .unwrap();

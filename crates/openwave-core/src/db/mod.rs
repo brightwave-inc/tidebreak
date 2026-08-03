@@ -840,8 +840,9 @@ impl Store for DbStore {
         run_id: uuid::Uuid,
         tag: &str,
         window_expires_at: chrono::DateTime<Utc>,
+        admission: crate::storage::SandboxAdmissionMode,
     ) -> Result<crate::storage::BeginSandboxProvisionOutcome> {
-        ops::sandbox_provision::begin(self, run_id, tag, window_expires_at).await
+        ops::sandbox_provision::begin(self, run_id, tag, window_expires_at, admission).await
     }
 
     async fn commit_sandbox_provision_handle(

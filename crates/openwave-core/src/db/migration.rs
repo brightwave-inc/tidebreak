@@ -106,6 +106,7 @@ impl MigratorTrait for Migrator {
             Box::new(RetainCancelledTurnOutput),
             Box::new(AddSandboxToolCallRetry),
             Box::new(AddConnectedApps),
+            Box::new(AddSandboxProvisionAdmission),
         ]
     }
 }
@@ -9294,6 +9295,7 @@ enum SandboxProvision {
     RunId,
     Tag,
     State,
+    Admission,
     Handle,
     LateResultEvidence,
     WindowExpiresAt,
@@ -10851,6 +10853,55 @@ impl MigrationTrait for AddConnectedApps {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .drop_table(Table::drop().table(ConnectedApp::Table).to_owned())
+            .await
+    }
+}
+
+/// Adds the durable admission decision to the sandbox provisioning record
+/// (issue #824): whether the run may keep working while its host is absent.
+///
+/// Fail closed by construction: the column defaults to `attached_only`, so
+/// every record written before this migration — and every future record whose
+/// caller does not decide otherwise — reads as attached-only. The value
+/// domain is enforced at the read boundary (anything unrecognized reads as
+/// `attached_only`) rather than by a CHECK, because SQLite cannot add a table
+/// constraint in place and a fail-open rebuild here would buy nothing.
+/// Purely additive, with a symmetric `down` and identical shape on SQLite and
+/// PostgreSQL.
+struct AddSandboxProvisionAdmission;
+
+impl MigrationName for AddSandboxProvisionAdmission {
+    fn name(&self) -> &str {
+        "m20260803_000044_add_sandbox_provision_admission"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddSandboxProvisionAdmission {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(SandboxProvision::Table)
+                    .add_column(
+                        ColumnDef::new(SandboxProvision::Admission)
+                            .string_len(16)
+                            .not_null()
+                            .default("attached_only"),
+                    )
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(SandboxProvision::Table)
+                    .drop_column(SandboxProvision::Admission)
+                    .to_owned(),
+            )
             .await
     }
 }

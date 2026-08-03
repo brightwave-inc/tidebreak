@@ -17,7 +17,9 @@ use sea_orm::sea_query::Expr;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait, TryInsertResult};
 
 use crate::error::Result;
-use crate::storage::{BeginSandboxProvisionOutcome, SandboxProvision, SandboxProvisionState};
+use crate::storage::{
+    BeginSandboxProvisionOutcome, SandboxAdmissionMode, SandboxProvision, SandboxProvisionState,
+};
 
 use super::super::entities::sandbox_provision;
 use super::super::{entities, store_err, DbStore};
@@ -26,6 +28,25 @@ const STATE_INTENDED: &str = "intended";
 const STATE_COMMITTED: &str = "committed";
 const STATE_TEARDOWN: &str = "teardown";
 const STATE_DONE: &str = "done";
+
+const ADMISSION_ATTACHED_ONLY: &str = "attached_only";
+const ADMISSION_DETACHED: &str = "detached";
+
+fn admission_to_str(admission: SandboxAdmissionMode) -> &'static str {
+    match admission {
+        SandboxAdmissionMode::AttachedOnly => ADMISSION_ATTACHED_ONLY,
+        SandboxAdmissionMode::Detached => ADMISSION_DETACHED,
+    }
+}
+
+fn admission_from_str(admission: &str) -> SandboxAdmissionMode {
+    match admission {
+        ADMISSION_DETACHED => SandboxAdmissionMode::Detached,
+        // Fail closed: a record written before the column existed, or any
+        // unrecognized value, is an attached-only admission.
+        _ => SandboxAdmissionMode::AttachedOnly,
+    }
+}
 
 fn state_from_str(state: &str) -> SandboxProvisionState {
     match state {
@@ -43,6 +64,7 @@ fn from_model(model: sandbox_provision::Model) -> SandboxProvision {
         run_id: model.run_id,
         tag: model.tag,
         state: state_from_str(&model.state),
+        admission: admission_from_str(&model.admission),
         handle: model.handle,
         late_result_evidence: model.late_result_evidence,
         window_expires_at: model.window_expires_at,
@@ -54,6 +76,7 @@ pub(in crate::db) async fn begin(
     run_id: uuid::Uuid,
     tag: &str,
     window_expires_at: chrono::DateTime<chrono::Utc>,
+    admission: SandboxAdmissionMode,
 ) -> Result<BeginSandboxProvisionOutcome> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
     let now = Utc::now();
@@ -65,6 +88,7 @@ pub(in crate::db) async fn begin(
         run_id: Set(run_id),
         tag: Set(tag.to_owned()),
         state: Set(STATE_INTENDED.to_owned()),
+        admission: Set(admission_to_str(admission).to_owned()),
         handle: Set(None),
         late_result_evidence: Set(None),
         window_expires_at: Set(window_expires_at),

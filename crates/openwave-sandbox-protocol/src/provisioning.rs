@@ -274,6 +274,20 @@ pub trait SandboxBackend: Send + Sync {
         let _ = live_tags;
         Ok(Vec::new())
     }
+
+    /// Whether this backend enforces a sandbox lifetime cap from **outside**
+    /// the sandbox, set at provisioning through
+    /// [`ProvisionRequest::lifetime_cap_secs`] to no more than the run's
+    /// absolute deadline.
+    ///
+    /// Detached admission requires this capability: without it, nothing bounds
+    /// an orphaned sandbox whose host never returns. The default is `false`
+    /// (fail closed) — a backend that does not declare the enforcement cannot
+    /// host a detached run. A local container runtime never overrides this: no
+    /// mechanism outside the container bounds its lifetime.
+    fn enforces_external_lifetime_cap(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
