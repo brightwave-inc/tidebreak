@@ -323,6 +323,8 @@ async fn run_conversion(
     let input = workdir.path().join(format!("slides.{extension}"));
     let out_dir = workdir.path().join("out");
     let profile = workdir.path().join("profile");
+    let profile_uri = file_uri(&profile)
+        .map_err(|error| ConversionError::Failed(format!("workspace: {error}")))?;
     tokio::fs::write(&input, bytes)
         .await
         .map_err(|error| ConversionError::Failed(format!("workspace: {error}")))?;
@@ -337,7 +339,7 @@ async fn run_conversion(
         .arg("--norestore")
         .arg("--nolockcheck")
         .arg("--nofirststartwizard")
-        .arg(format!("-env:UserInstallation={}", file_uri(&profile)))
+        .arg(format!("-env:UserInstallation={profile_uri}"))
         .arg("--convert-to")
         .arg("pdf")
         .arg("--outdir")
@@ -425,16 +427,15 @@ fn brief(detail: &str) -> String {
     cut
 }
 
-/// A `file:` URI for LibreOffice's `-env:UserInstallation` argument.
-fn file_uri(path: &Path) -> String {
-    #[cfg(windows)]
-    {
-        format!("file:///{}", path.display().to_string().replace('\\', "/"))
-    }
-    #[cfg(not(windows))]
-    {
-        format!("file://{}", path.display())
-    }
+/// A percent-encoded `file:` URI for LibreOffice's `UserInstallation` value.
+///
+/// Temp roots can contain spaces, `#`, or other URI-reserved characters.
+/// Passing the display path verbatim makes LibreOffice reject the value with
+/// "The string contains invalid characters" before it opens the deck.
+fn file_uri(path: &Path) -> Result<String, &'static str> {
+    url::Url::from_file_path(path)
+        .map(|uri| uri.into())
+        .map_err(|()| "could not encode the LibreOffice profile path")
 }
 
 /// Persist one converted PDF and prune the cache to its budget.
@@ -578,6 +579,20 @@ mod tests {
         );
         let system = PathBuf::from("/usr/bin/soffice");
         assert_eq!(resolve_soffice(None, || Some(system.clone())), Some(system));
+    }
+
+    #[test]
+    fn libreoffice_profile_uri_encodes_reserved_path_characters() {
+        let path = if cfg!(windows) {
+            Path::new(r"C:\OpenWave Preview\profile #1")
+        } else {
+            Path::new("/tmp/OpenWave Preview/profile #1")
+        };
+
+        let uri = file_uri(path).unwrap();
+
+        assert!(uri.starts_with("file:///"), "{uri}");
+        assert!(uri.contains("OpenWave%20Preview/profile%20%231"), "{uri}");
     }
 
     /// End-to-end proof against a real LibreOffice, when one is installed.
