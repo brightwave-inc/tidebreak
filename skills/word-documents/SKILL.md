@@ -1,7 +1,7 @@
 ---
 name: word-documents
 description: Create Word (DOCX) documents with python-docx — headings, styles, tables, page setup — validated by reopening before delivery.
-deps: { python: ["python-docx==1.1.2"] }
+deps: { python: ["python-docx==1.1.2"], host: ["libreoffice"] }
 ---
 
 # Word documents

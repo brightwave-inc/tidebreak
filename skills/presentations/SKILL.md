@@ -1,7 +1,7 @@
 ---
 name: presentations
 description: Build PowerPoint (PPTX) decks with python-pptx — layouts, placeholders, in-bounds geometry, overflow-free text — with visual QA before delivery.
-deps: { python: ["python-pptx==1.0.2"] }
+deps: { python: ["python-pptx==1.0.2"], host: ["libreoffice"] }
 ---
 
 # Presentations
