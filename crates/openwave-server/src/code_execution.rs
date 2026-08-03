@@ -1602,6 +1602,7 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
                 .into_iter()
                 .map(|entry| OutputArtifactEntry {
                     filename: entry.filename,
+                    output_id: entry.output_id.to_string(),
                     ordinal: entry.ordinal,
                     status: match entry.status {
                         openwave_core::OutputSyncStatus::Created => OutputArtifactStatus::Created,

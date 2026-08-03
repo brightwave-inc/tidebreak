@@ -381,6 +381,8 @@ export type ResultEntry = {
   meta: string | null;
   /** The document's media type, when the row is a document with one. */
   mediaType: string | null;
+  /** The durable output this row names, when the row is one. */
+  outputId: string | null;
 };
 
 /** One thing a listed call could not do. */
@@ -2140,17 +2142,19 @@ function parseResultEntry(value: unknown): ResultEntry | null {
   const detail = value.detail ?? null;
   const meta = value.meta ?? null;
   const mediaType = value.media_type ?? null;
+  const outputId = value.output_id ?? null;
   if (
     typeof label !== "string" ||
     label.length === 0 ||
     !(RESULT_ENTRY_KINDS as readonly unknown[]).includes(kind) ||
     !isOptionalString(detail) ||
     !isOptionalString(meta) ||
-    !isOptionalString(mediaType)
+    !isOptionalString(mediaType) ||
+    !isOptionalString(outputId)
   ) {
     return null;
   }
-  return { kind: kind as ResultEntryKind, label, detail, meta, mediaType };
+  return { kind: kind as ResultEntryKind, label, detail, meta, mediaType, outputId };
 }
 
 /**

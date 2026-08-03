@@ -220,6 +220,14 @@ pub struct ResultEntry {
     /// projections predate the field.
     #[serde(default)]
     pub media_type: Option<String>,
+    /// The durable output this row names, when the row is one.
+    ///
+    /// Data rather than display text: the renderer routes a click through its
+    /// own panel navigation and never prints the id. Present only on
+    /// [`ResultEntryKind::Output`] rows; `default` because retained
+    /// projections predate the field.
+    #[serde(default)]
+    pub output_id: Option<String>,
 }
 
 impl ResultEntry {
@@ -232,6 +240,7 @@ impl ResultEntry {
             detail: None,
             meta: None,
             media_type: None,
+            output_id: None,
         }
     }
 
@@ -253,6 +262,13 @@ impl ResultEntry {
     #[must_use]
     pub fn with_media_type(mut self, media_type: impl Into<String>) -> Self {
         self.media_type = Some(media_type.into());
+        self
+    }
+
+    /// Name the durable output this row is.
+    #[must_use]
+    pub fn with_output_id(mut self, output_id: impl Into<String>) -> Self {
+        self.output_id = Some(output_id.into());
         self
     }
 }
@@ -589,10 +605,18 @@ fn exec_output_entries(value: Option<&Value>) -> Vec<ResultEntry> {
             }
             let label = clamp(row.get("filename")?.as_str()?, MAX_RESULT_ENTRY_CHARS)?;
             let version = row.get("version")?.as_u64()?;
-            Some(
-                ResultEntry::new(ResultEntryKind::Output, label)
-                    .with_meta(format!("v{version} · {status}")),
-            )
+            // The media type is derived from the filename by the same rules
+            // output creation uses, so the transcript card and the outputs
+            // panel show one file with one icon.
+            let media_type = crate::deliverable::deliverable_media_type(&label)
+                .unwrap_or_else(|| crate::deliverable::binary_media_type_for_extension(&label));
+            let mut entry = ResultEntry::new(ResultEntryKind::Output, label)
+                .with_meta(format!("v{version} · {status}"))
+                .with_media_type(media_type);
+            if let Some(output_id) = row.get("output_id").and_then(Value::as_str) {
+                entry = entry.with_output_id(output_id);
+            }
+            Some(entry)
         })
         .take(MAX_RESULT_ENTRIES)
         .collect()
@@ -605,6 +629,7 @@ fn result_entry(value: &Value) -> Option<ResultEntry> {
         detail: entry_field(value.get("detail")),
         meta: entry_field(value.get("meta")),
         media_type: entry_field(value.get("media_type")),
+        output_id: entry_field(value.get("output_id")),
     })
 }
 
@@ -890,7 +915,7 @@ mod tests {
         let output = output_with_data(serde_json::json!({
             "exit_code": 0,
             "outputs": [
-                { "filename": "report.md", "version": 3, "status": "updated" },
+                { "filename": "report.md", "output_id": "output-report", "version": 3, "status": "updated" },
                 { "filename": "chart.png", "version": 1, "status": "created" },
                 { "filename": "data.csv", "version": 2, "status": "unchanged" },
                 { "filename": 7, "version": "x", "status": "created" },
@@ -914,6 +939,14 @@ mod tests {
         assert!(outputs
             .iter()
             .all(|entry| entry.kind == ResultEntryKind::Output));
+        // The routable id crosses when the scan recorded one — that is what
+        // makes the transcript card clickable — and the icon's media type is
+        // derived from the filename by the output-creation rules. A row
+        // without an id (older journal data) still renders, unrouted.
+        assert_eq!(outputs[0].output_id.as_deref(), Some("output-report"));
+        assert_eq!(outputs[0].media_type.as_deref(), Some("text/markdown"));
+        assert_eq!(outputs[1].output_id, None);
+        assert_eq!(outputs[1].media_type.as_deref(), Some("image/png"));
 
         // A pre-outputs journal row deserializes with the field defaulted.
         let stored: ToolResultPreview = serde_json::from_value(serde_json::json!({

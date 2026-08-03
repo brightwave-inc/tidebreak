@@ -48,10 +48,13 @@ export function areSamePanelType(a: PanelContent, b: PanelContent): boolean {
 export function isContentPanel(panel: PanelContent): boolean {
   switch (panel.type) {
     case "chat":
-    case "outputs":
     case "folders":
     case "apps":
       return false;
+    case "outputs":
+      // The outputs list is navigation; a single opened output is the thing
+      // you picked, and reads on the content side like a document does.
+      return panel.outputId !== undefined;
     case "document":
       return true;
   }

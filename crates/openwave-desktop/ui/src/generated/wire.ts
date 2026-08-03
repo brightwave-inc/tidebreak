@@ -1240,7 +1240,16 @@ meta: string | null,
  * own closed mapping with a generic fallback. `default` because retained
  * projections predate the field.
  */
-media_type: string | null, };
+media_type: string | null, 
+/**
+ * The durable output this row names, when the row is one.
+ *
+ * Data rather than display text: the renderer routes a click through its
+ * own panel navigation and never prints the id. Present only on
+ * [`ResultEntryKind::Output`] rows; `default` because retained
+ * projections predate the field.
+ */
+output_id: string | null, };
 
 /**
  * What one row of a listed result is, which is what picks its icon.
@@ -1374,7 +1383,7 @@ end_published_at: string | null, } | { "tool": "web_extract", url: string, };
  *
  * Each presentable variant names the egress a human is consenting to, so the
  * renderer can describe the action without ever seeing the model-authored
- * summary or arguments. `Unsupported` is the fail-closed default: a Sensitive
+ * arguments. `Unsupported` is the fail-closed default: a Sensitive
  * action the server can only reject, never approve.
  */
 export type ToolApprovalKind = "search_may_share_query_and_excerpts" | "web_search_may_share_query" | "web_extract_may_fetch_url" | "exec_may_run_networked_command" | "external_mcp_may_call_server" | "workspace_may_modify_files" | "unsupported";
