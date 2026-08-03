@@ -103,35 +103,39 @@
 
 .dark {
   /* --- OpenWave palette (oklch, dark mode) --- */
+  /* Deliberate divergence from Brightwave: cool near-neutral grays (hue ~262,
+     chroma <= 0.01) instead of the warm hue-85 ramp, which read brown at low
+     lightness. Elevation is carried by the lightness ramp alone:
+     page chrome 0.12 < popover 0.14 < card 0.16 < content surface 0.21. */
   color-scheme: dark;
 
-  --background: oklch(0.1993 0.01 85);
+  --background: oklch(0.21 0.008 262);
   --foreground: oklch(0.95 0 0);
-  --page-background: oklch(0.09 0 0);
+  --page-background: oklch(0.12 0.005 262);
 
-  --border: oklch(0.3 0.007 69);
-  --input: oklch(0.4 0.007 69);
+  --border: oklch(0.31 0.009 262);
+  --input: oklch(0.4 0.01 262);
   --ring: oklch(0.65 0.04 256.788);
 
   --primary: oklch(0.95 0 0);
-  --primary-foreground: oklch(0.09 0 0);
+  --primary-foreground: oklch(0.12 0.005 262);
 
-  --secondary: oklch(0.26 0.02 85);
+  --secondary: oklch(0.27 0.009 262);
   --secondary-foreground: oklch(0.75 0 0);
 
-  --muted: oklch(0.26 0.02 85);
-  --muted-foreground: oklch(0.65 0 0);
+  --muted: oklch(0.27 0.009 262);
+  --muted-foreground: oklch(0.68 0.006 262);
 
-  --accent: oklch(0.26 0.02 85);
+  --accent: oklch(0.27 0.009 262);
   --accent-foreground: var(--color-zinc-100);
 
-  --card: var(--color-neutral-950);
+  --card: oklch(0.16 0.006 262);
   --card-foreground: var(--color-neutral-200);
 
-  --popover: oklch(0.12 0.005 0);
-  --popover-foreground: oklch(0.9 0.03 97.54);
+  --popover: oklch(0.14 0.006 262);
+  --popover-foreground: oklch(0.92 0.003 262);
 
-  --destructive: oklch(0.68 0.22 27.325);
+  --destructive: oklch(0.55 0.21 27.325);
   --destructive-foreground: oklch(0.95 0.005 247.858);
 
   /* Semantic status — dark */
