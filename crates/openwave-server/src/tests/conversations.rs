@@ -577,6 +577,44 @@ async fn chat_settings_stick_to_the_next_chat() {
     // Untouched fields still seed from the sticky defaults.
     assert_eq!(explicit.model.as_deref(), Some("m-sticky"));
 
+    // An explicit creation choice is recorded like a mid-chat one: the home
+    // composer's pickers only ever reach `POST /chats`.
+    let after_explicit = make_chat(&router, &bearer).await;
+    assert_eq!(
+        after_explicit.permission_mode,
+        Some(openwave_core::PermissionMode::Plan)
+    );
+    assert_eq!(
+        after_explicit.network_policy,
+        openwave_core::NetworkPolicy::Off
+    );
+
+    // `GET /settings` exposes the same defaults, so a composer can display
+    // what an unspecified create will seed.
+    let settings: serde_json::Value = json_body(
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/settings")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        settings["chat_defaults"],
+        serde_json::json!({
+            "model": "m-sticky",
+            "reasoning_effort": "high",
+            "permission_mode": "plan",
+            "network_policy": {"mode": "off"},
+        })
+    );
+
     // Clearing the per-chat choice clears the sticky default with it.
     let cleared = patch_chat(
         &router,
@@ -1530,4 +1568,22 @@ async fn a_managed_ceiling_locks_over_ceiling_permission_modes() {
         seeded.permission_mode,
         Some(openwave_core::PermissionMode::Ask)
     );
+
+    // The settings surface reports the same clamped mode, so a composer never
+    // displays an autonomy the ceiling forbids.
+    let settings: serde_json::Value = json_body(
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/settings")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(settings["chat_defaults"]["permission_mode"], "ask");
 }

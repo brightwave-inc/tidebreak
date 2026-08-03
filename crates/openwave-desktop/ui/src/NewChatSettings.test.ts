@@ -1,56 +1,55 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
+
+import type { ApiClient } from "./api";
+import {
+  effectiveNewChatSettings,
+  useNewChatSettings,
+} from "./NewChatSettings";
 
 /**
- * The pre-chat choices are read back from storage a session later, so what is
- * stored there is untrusted input: a value this build no longer knows must
- * read as "unset" rather than reach chat creation, where it would be refused
- * by the server or — worse for a permission mode — mean something other than
- * what the reader chose.
+ * Persistence of the pre-chat choices lives on the server (the sticky
+ * `chat_default.*` settings), not in this store. What must hold here is the
+ * precedence the pickers and `POST /chats` both rely on: an explicit pick
+ * this visit beats the server default, an unpicked field follows it, and a
+ * failed defaults read degrades to the hard defaults instead of blocking.
  */
 describe("new chat settings", () => {
-  beforeEach(() => {
-    vi.resetModules();
-    window.localStorage.clear();
-  });
+  it("prefers this visit's pick, then the server default, then the hard default", async () => {
+    const client = {
+      getSettings: () =>
+        Promise.resolve({
+          model: null,
+          has_api_key: true,
+          chat_defaults: {
+            model: "anthropic::m-sticky",
+            reasoning_effort: "high",
+            permission_mode: "allow",
+            network_policy: { mode: "package_managers" },
+          },
+        }),
+    } as unknown as ApiClient;
 
-  it("recovers stored choices and drops ones it no longer recognizes", async () => {
-    window.localStorage.setItem("openwave.new-chat-permission-mode", "auto");
-    window.localStorage.setItem("openwave.new-chat-reasoning-effort", "sideways");
+    await useNewChatSettings.getState().loadDefaults(client);
+    let effective = effectiveNewChatSettings(useNewChatSettings.getState());
+    expect(effective.model).toBe("anthropic::m-sticky");
+    expect(effective.permissionMode).toBe("allow");
+    expect(effective.networkPolicy).toEqual({ mode: "package_managers" });
 
-    const { useNewChatSettings } = await import("./NewChatSettings");
-    const state = useNewChatSettings.getState();
+    useNewChatSettings.getState().setPermissionMode("plan");
+    effective = effectiveNewChatSettings(useNewChatSettings.getState());
+    expect(effective.permissionMode).toBe("plan");
+    // The explicit pick is what the create request will carry; the rest stay
+    // unsent and seed server-side.
+    expect(useNewChatSettings.getState().permissionMode).toBe("plan");
+    expect(useNewChatSettings.getState().networkPolicy).toBeNull();
 
-    expect(state.permissionMode).toBe("auto");
-    expect(state.reasoningEffort).toBeNull();
-    expect(state.networkPolicy).toEqual({ mode: "off" });
-  });
-
-  it("persists a choice so it outlives the visit that made it", async () => {
-    const { useNewChatSettings } = await import("./NewChatSettings");
-
-    useNewChatSettings.getState().setPermissionMode("allow");
-
-    expect(useNewChatSettings.getState().permissionMode).toBe("allow");
-    expect(window.localStorage.getItem("openwave.new-chat-permission-mode")).toBe(
-      "allow",
-    );
-  });
-
-  it("persists and validates the next chat's network policy", async () => {
-    const { useNewChatSettings } = await import("./NewChatSettings");
-
-    useNewChatSettings.getState().setNetworkPolicy({
-      mode: "package_managers",
-    });
-
-    expect(useNewChatSettings.getState().networkPolicy).toEqual({
-      mode: "package_managers",
-    });
-    expect(
-      JSON.parse(
-        window.localStorage.getItem("openwave.new-chat-network-policy")!,
-      ),
-    ).toEqual({ mode: "package_managers" });
+    // A failed refresh keeps the last known defaults on display.
+    const failing = {
+      getSettings: () => Promise.reject(new Error("offline")),
+    } as unknown as ApiClient;
+    await useNewChatSettings.getState().loadDefaults(failing);
+    effective = effectiveNewChatSettings(useNewChatSettings.getState());
+    expect(effective.networkPolicy).toEqual({ mode: "package_managers" });
   });
 });

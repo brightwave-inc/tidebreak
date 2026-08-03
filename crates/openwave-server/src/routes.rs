@@ -505,6 +505,28 @@ pub struct Settings {
     pub model: Option<String>,
     /// Whether a model API key is configured (never the key itself).
     pub has_api_key: bool,
+    /// The sticky new-chat defaults, so a composer for a chat that does not
+    /// exist yet can show what `POST /chats` will seed.
+    #[serde(default)]
+    pub chat_defaults: StickyChatDefaults,
+}
+
+/// The reader's last explicit per-chat choices — what an unspecified field of
+/// `POST /chats` seeds. A `None` field has no recorded choice and keeps the
+/// hard default (configured model, `ask`, no network).
+///
+/// The permission mode is reported clamped to any managed ceiling, so what a
+/// picker displays is what creation will actually seed.
+#[derive(Debug, Default, Serialize, Deserialize, ts_rs::TS)]
+pub struct StickyChatDefaults {
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default)]
+    pub permission_mode: Option<PermissionMode>,
+    #[serde(default)]
+    pub network_policy: Option<openwave_core::NetworkPolicy>,
 }
 
 /// Body of `PUT /settings`. Each field is a *double* option so an absent key is
@@ -531,6 +553,7 @@ pub async fn get_settings(State(state): State<AppState>) -> Result<Json<Settings
     Ok(Json(Settings {
         model: read_model(&*state.store).await?,
         has_api_key: has_api_key(&*state.secrets).await,
+        chat_defaults: read_sticky_chat_defaults(&state).await?,
     }))
 }
 
@@ -561,6 +584,7 @@ pub async fn put_settings(
     Ok(Json(Settings {
         model: read_model(&*state.store).await?,
         has_api_key: has_api_key(&*state.secrets).await,
+        chat_defaults: read_sticky_chat_defaults(&state).await?,
     }))
 }
 
@@ -1441,6 +1465,29 @@ async fn write_sticky_default<T: Serialize>(
     Ok(store.set_setting(key, &value).await?)
 }
 
+/// Read every sticky new-chat default, the permission mode clamped to any
+/// managed ceiling — what `POST /chats` will seed, and therefore what a
+/// composer should display before the chat exists.
+async fn read_sticky_chat_defaults(state: &AppState) -> Result<StickyChatDefaults, ServerError> {
+    let store = &*state.store;
+    let permission_mode = match read_sticky_default(store, STICKY_PERMISSION_MODE_KEY).await? {
+        // The managed ceiling clamps a sticky mode recorded before the
+        // policy arrived: a remembered `allow` under an `ask` ceiling seeds
+        // (and reads back) `ask`, mirroring the turn gate's treatment of
+        // stored over-ceiling modes.
+        Some(mode) => crate::managed_policy::resolve(store, &*state.os_policy)
+            .await?
+            .clamp_permission_mode(Some(mode)),
+        None => None,
+    };
+    Ok(StickyChatDefaults {
+        model: read_sticky_default(store, STICKY_MODEL_KEY).await?,
+        reasoning_effort: read_sticky_default(store, STICKY_REASONING_EFFORT_KEY).await?,
+        permission_mode,
+        network_policy: read_sticky_default(store, STICKY_NETWORK_POLICY_KEY).await?,
+    })
+}
+
 /// `POST /chats` — create a chat and return it (`201 Created`).
 ///
 /// Fields the request leaves unspecified seed from the sticky defaults — the
@@ -1464,6 +1511,22 @@ pub async fn create_chat(
     refuse_permission_mode_over_ceiling(&state, body.permission_mode).await?;
     if let Some(policy) = body.network_policy.as_mut() {
         crate::code_execution::normalize_network_policy(policy)?;
+    }
+    // An explicit choice at creation is as much "the last-chosen mode" as one
+    // made mid-chat — the home composer's pickers land here, never at PATCH —
+    // so record it the same way. Absent fields never clear a sticky default;
+    // only an explicit PATCH `null` does.
+    if let Some(model) = &body.model {
+        write_sticky_default(&*state.store, STICKY_MODEL_KEY, Some(model)).await?;
+    }
+    if let Some(effort) = &body.reasoning_effort {
+        write_sticky_default(&*state.store, STICKY_REASONING_EFFORT_KEY, Some(effort)).await?;
+    }
+    if let Some(mode) = &body.permission_mode {
+        write_sticky_default(&*state.store, STICKY_PERMISSION_MODE_KEY, Some(mode)).await?;
+    }
+    if let Some(policy) = &body.network_policy {
+        write_sticky_default(&*state.store, STICKY_NETWORK_POLICY_KEY, Some(policy)).await?;
     }
     let model = match body.model {
         Some(model) => Some(model),

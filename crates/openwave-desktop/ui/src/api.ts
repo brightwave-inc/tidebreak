@@ -54,6 +54,7 @@ import {
   type NetworkPolicy as WireNetworkPolicy,
   type ReasoningEffort as WireReasoningEffort,
   type Settings,
+  type StickyChatDefaults as WireStickyChatDefaults,
   type WebSearchConfigInfo as WireWebSearchConfigInfo,
   type WebSearchCredentialReadiness as WireWebSearchCredentialReadiness,
   type WebSearchProviderKind as WireWebSearchProviderKind,
@@ -159,6 +160,9 @@ export type PermissionMode = WirePermissionMode;
 
 /** Network access granted to code execution in one conversation workspace. */
 export type NetworkPolicy = WireNetworkPolicy;
+
+/** The sticky new-chat defaults an unspecified `POST /chats` field seeds. */
+export type StickyChatDefaults = WireStickyChatDefaults;
 
 export type ProviderInfo = WireProviderInfo;
 
