@@ -2,7 +2,7 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Chat } from "./api";
+import type { Chat, ConsentStatementSnapshot } from "./api";
 import { FoldersView } from "./FoldersView";
 import * as host from "./host";
 
@@ -11,7 +11,9 @@ vi.mock("./host", () => ({
   connectFolder: vi.fn(),
   disconnectFolder: vi.fn(),
   listApprovedFolders: vi.fn(),
+  listCapabilityConsents: vi.fn(),
   listConnectedFolders: vi.fn(),
+  revokeCapabilityConsent: vi.fn(),
 }));
 
 const chat = {
@@ -20,11 +22,31 @@ const chat = {
   project_id: null,
 } as unknown as Chat;
 
-function readWrite(
+function folder(rootId: string, displayName: string): host.ConnectedFolder {
+  return { rootId, displayName };
+}
+
+type FolderCapabilityVerb = Extract<
+  ConsentStatementSnapshot["verb"],
+  { kind: "capability" }
+>["capability"];
+
+let nextGrant = 0;
+
+function statement(
   rootId: string,
-  displayName: string,
-): host.ConnectedFolderAccess {
-  return { rootId, displayName, capabilities: ["read", "write"] };
+  capability: FolderCapabilityVerb,
+): ConsentStatementSnapshot {
+  nextGrant += 1;
+  return {
+    handle: { kind: "capability_grant", grant_id: `grant-${nextGrant}` },
+    level: { level: "chat", chat_id: chat.id },
+    level_title: null,
+    verb: { kind: "capability", capability },
+    resource: { kind: "host_root", root_id: rootId, display_name: null },
+    method: "folder_picker",
+    granted_at: "2026-07-30T12:00:00Z",
+  };
 }
 
 function deferred<T>() {
@@ -38,9 +60,11 @@ function deferred<T>() {
 beforeEach(() => {
   vi.mocked(host.listConnectedFolders).mockResolvedValue([]);
   vi.mocked(host.listApprovedFolders).mockResolvedValue([]);
+  vi.mocked(host.listCapabilityConsents).mockResolvedValue([]);
   vi.mocked(host.connectApprovedFolder).mockResolvedValue(null);
   vi.mocked(host.connectFolder).mockResolvedValue(null);
   vi.mocked(host.disconnectFolder).mockResolvedValue(false);
+  vi.mocked(host.revokeCapabilityConsent).mockResolvedValue(true);
 });
 
 afterEach(() => {
@@ -59,27 +83,73 @@ describe("FoldersView", () => {
     expect(host.listApprovedFolders).toHaveBeenCalledOnce();
   });
 
-  // The badge is the only place a reader learns whether the agent can change
-  // files in a folder, so it has to follow the host's answer rather than a
-  // constant the app chose.
-  it("shows each folder's access as the host reports it", async () => {
+  // Access is read off the same consent statements the Permissions surface
+  // shows, so the badge follows what the broker holds — including command
+  // reach, which the retired folder-capability model could not name.
+  it("derives each folder's access from its consent statements", async () => {
     vi.mocked(host.listConnectedFolders).mockResolvedValue([
-      readWrite("writable", "Drafts"),
-      { rootId: "read-only", displayName: "Archive", capabilities: ["read"] },
+      folder("writable", "Drafts"),
+      folder("read-only", "Archive"),
+    ]);
+    vi.mocked(host.listCapabilityConsents).mockResolvedValue([
+      statement("writable", "read_files"),
+      statement("writable", "write_files"),
+      statement("writable", "execute_commands"),
+      statement("read-only", "read_files"),
+      // Another chat's statement must not color this chat's badge.
+      {
+        ...statement("read-only", "write_files"),
+        level: { level: "chat", chat_id: "someone-else" },
+      },
     ]);
     render(<FoldersView chat={chat} />);
 
-    expect(await screen.findByText("Read and write")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Read, write, and commands"),
+    ).toBeInTheDocument();
     expect(screen.getByText("Read only")).toBeInTheDocument();
-    expect(screen.getAllByText("Read and write")).toHaveLength(1);
+    // Each statement is its own row, revocable in place.
+    expect(screen.getByText("Run commands")).toBeInTheDocument();
+    expect(screen.getByText("Write files")).toBeInTheDocument();
+  });
+
+  it("revokes one statement in place and reloads what the broker holds", async () => {
+    const write = statement("writable", "write_files");
+    vi.mocked(host.listConnectedFolders).mockResolvedValue([
+      folder("writable", "Drafts"),
+    ]);
+    vi.mocked(host.listCapabilityConsents)
+      .mockResolvedValueOnce([statement("writable", "read_files"), write])
+      .mockResolvedValue([statement("writable", "read_files")]);
+    const user = userEvent.setup();
+    render(<FoldersView chat={chat} />);
+
+    await screen.findByText("Write files");
+    const revokes = screen.getAllByRole("button", { name: "Revoke" });
+    expect(revokes).toHaveLength(2);
+    await user.click(revokes[1]);
+    // The confirmation says the folder stays connected before anything acts.
+    await user.click(
+      await screen.findByRole("button", { name: "Revoke", hidden: false }),
+    );
+
+    await waitFor(() =>
+      expect(host.revokeCapabilityConsent).toHaveBeenCalledWith(write),
+    );
+    await waitFor(() =>
+      expect(screen.queryByText("Write files")).not.toBeInTheDocument(),
+    );
+    // The folder itself was not disconnected.
+    expect(host.disconnectFolder).not.toHaveBeenCalled();
+    expect(screen.getByText("Drafts")).toBeInTheDocument();
   });
 
   it("offers approved folders that are not already connected", async () => {
     vi.mocked(host.listConnectedFolders)
-      .mockResolvedValueOnce([readWrite("connected", "Current project")])
+      .mockResolvedValueOnce([folder("connected", "Current project")])
       .mockResolvedValueOnce([
-        readWrite("connected", "Current project"),
-        readWrite("available", "Research"),
+        folder("connected", "Current project"),
+        folder("available", "Research"),
       ]);
     vi.mocked(host.listApprovedFolders).mockResolvedValue([
       { rootId: "connected", displayName: "Current project" },
@@ -123,8 +193,8 @@ describe("FoldersView", () => {
   it("ignores a late folder response after switching chats", async () => {
     const firstChat = { ...chat, id: "chat-a", title: "Chat A" };
     const secondChat = { ...chat, id: "chat-b", title: "Chat B" };
-    const firstResponse = deferred<host.ConnectedFolderAccess[]>();
-    const secondResponse = deferred<host.ConnectedFolderAccess[]>();
+    const firstResponse = deferred<host.ConnectedFolder[]>();
+    const secondResponse = deferred<host.ConnectedFolder[]>();
     vi.mocked(host.listConnectedFolders).mockImplementation((requestedChat) =>
       requestedChat.id === firstChat.id
         ? firstResponse.promise
@@ -134,10 +204,10 @@ describe("FoldersView", () => {
     const { rerender } = render(<FoldersView chat={firstChat} />);
     rerender(<FoldersView chat={secondChat} />);
 
-    secondResponse.resolve([readWrite("chat-b-root", "Chat B folder")]);
+    secondResponse.resolve([folder("chat-b-root", "Chat B folder")]);
     expect(await screen.findByText("Chat B folder")).toBeInTheDocument();
 
-    firstResponse.resolve([readWrite("chat-a-root", "Chat A folder")]);
+    firstResponse.resolve([folder("chat-a-root", "Chat A folder")]);
     await waitFor(() =>
       expect(screen.queryByText("Chat A folder")).not.toBeInTheDocument(),
     );

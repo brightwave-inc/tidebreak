@@ -7,19 +7,6 @@ export type ConnectedFolder = {
   displayName: string;
 };
 
-/** What the agent may do inside one connected folder. */
-export type FolderCapability = "read" | "write";
-
-/**
- * A connected folder and the access the host broker reports for it, checked
- * against the same authorization the agent's own operations go through. The app
- * must not substitute an assumption for this — a folder's access state is what
- * the broker would allow, not what the app asked for.
- */
-export type ConnectedFolderAccess = ConnectedFolder & {
-  capabilities: FolderCapability[];
-};
-
 export type FolderAccessDecision = "allow" | "decline";
 export type OutputWritebackDecision = "allow" | "decline";
 
@@ -33,9 +20,13 @@ export async function requestUserAttention(): Promise<void> {
   await invoke("request_user_attention");
 }
 
-export function listConnectedFolders(
-  chat: Chat,
-): Promise<ConnectedFolderAccess[]> {
+/**
+ * The folders this conversation can reach, by their safe identities. What
+ * each folder *allows* is not part of this answer: access is rendered from
+ * the same consent statements the Permissions surface shows
+ * ([`listCapabilityConsents`]), so both panels are groupings of one model.
+ */
+export function listConnectedFolders(chat: Chat): Promise<ConnectedFolder[]> {
   return invoke("list_connected_folders", { chatId: chat.id });
 }
 

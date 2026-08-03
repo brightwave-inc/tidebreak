@@ -33,8 +33,8 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { documentIcon } from "@/documentIcon";
 import type { ImportedDocument } from "@/documents";
-import { folderAccessLabel } from "./FolderAccess";
-import type { ConnectedFolderAccess } from "./host";
+import { folderAccessLabel, folderReach } from "./FolderAccess";
+import type { ChatFolderAccess } from "./useChatFolderAttachments";
 
 const MIN_COMPOSER_LINES = 1;
 export const MAX_COMPOSER_LINES = 6;
@@ -126,7 +126,7 @@ export type ComposerFiles = {
 };
 
 export type ComposerFolders = {
-  items: ConnectedFolderAccess[];
+  items: ChatFolderAccess[];
   working: boolean;
   error: string | null;
   onAttach?: () => void;
@@ -278,7 +278,7 @@ export function Composer({
     if (acceptTransfer(event.clipboardData)) event.preventDefault();
   }
 
-  async function removeFolder(folder: ConnectedFolderAccess) {
+  async function removeFolder(folder: ChatFolderAccess) {
     const accepted = await confirm({
       title: `Disconnect ${folder.displayName}?`,
       description: "The agent loses access to this folder.",
@@ -535,7 +535,7 @@ function FolderAttachmentChip({
   disabled,
   onRemove,
 }: {
-  folder: ConnectedFolderAccess;
+  folder: ChatFolderAccess;
   disabled: boolean;
   onRemove: () => void;
 }) {
@@ -552,7 +552,7 @@ function FolderAttachmentChip({
           {folder.displayName}
         </strong>
         <small className="text-[0.68rem]">
-          {folderAccessLabel(folder.capabilities)}
+          {folderAccessLabel(folderReach(folder.statements))}
         </small>
       </span>
       <button
