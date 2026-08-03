@@ -49,8 +49,9 @@ pub use package_cache::{
 pub use preview::{scan_preview_directory, PreviewScan};
 pub use remote::RemoteSessionPool;
 pub use skills::{
-    is_valid_skill_description, is_valid_skill_name, load_builtin_skills, parse_skill_manifest,
-    BuiltinSkill, SkillPackage, SkillParseError, SKILLS_DIR, SKILL_MANIFEST_FILE,
+    is_valid_skill_description, is_valid_skill_name, load_skills, merged_skills,
+    parse_skill_manifest, LoadedSkill, SkillOrigin, SkillPackage, SkillParseError, SKILLS_DIR,
+    SKILL_MANIFEST_FILE,
 };
 pub use tool::{ExecTool, EXEC_TOOL_NAME};
 pub use types::{

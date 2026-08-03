@@ -1,13 +1,19 @@
-//! Built-in skill packages staged into exec workspaces.
+//! Skill packages staged into exec workspaces.
 //!
-//! A skill is a directory whose `SKILL.md` teaches the model how to produce
-//! one kind of document through `exec`: which pinned libraries to install,
-//! the conventions for saving deliverables, and the quality checks to run
+//! A skill is a directory whose `SKILL.md` teaches the model how to do one
+//! kind of work through `exec`: which pinned libraries to install, the
+//! conventions for saving deliverables, and the quality checks to run
 //! before declaring the work done. The host stages each skill file into
 //! `<scratch>/.openwave/skills/<name>/SKILL.md` before a command runs and
 //! advertises only the parsed (name, description) catalog in the operating
 //! prompt; the instruction body reaches the model exclusively through
 //! `read_file`, never through prompt composition.
+//!
+//! Skills come from two sources: the built-in packages shipped with the
+//! application, and user-authored packages the host loads from a per-install
+//! directory. Both go through the same strict parser, and a name collision
+//! resolves in the built-in's favor so a user package can never shadow
+//! curated instructions.
 //!
 //! Parsing is deliberately strict. A malformed skill is skipped with a
 //! host-side warning instead of shipping a half-understood package: the
@@ -27,6 +33,19 @@ const MAX_DESCRIPTION_BYTES: usize = 200;
 const MAX_PYTHON_DEPS: usize = 8;
 const MAX_DEP_BYTES: usize = 100;
 
+/// Which source a validated skill package was loaded from.
+///
+/// Origin is host-derived from the load path, never from manifest content, so
+/// a user package cannot claim to be built-in. The prompt catalog uses it to
+/// attribute user-authored entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillOrigin {
+    /// Shipped with the application from a trusted resource directory.
+    Builtin,
+    /// Authored by the user in the per-install skills directory.
+    User,
+}
+
 /// Host-derived catalog entry parsed from a skill manifest's frontmatter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillPackage {
@@ -36,12 +55,14 @@ pub struct SkillPackage {
     pub description: String,
     /// Exactly pinned `package==version` Python requirements.
     pub python_deps: Vec<String>,
+    /// Where the package was loaded from.
+    pub origin: SkillOrigin,
 }
 
-/// One validated built-in skill: its catalog entry plus the exact manifest
-/// bytes to stage into workspaces.
+/// One validated skill: its catalog entry plus the exact manifest bytes to
+/// stage into workspaces.
 #[derive(Debug, Clone)]
-pub struct BuiltinSkill {
+pub struct LoadedSkill {
     /// The parsed frontmatter the prompt catalog is built from.
     pub package: SkillPackage,
     /// The full `SKILL.md` source, staged verbatim.
@@ -102,13 +123,17 @@ pub(crate) fn is_pinned_python_dep(dep: &str) -> bool {
 }
 
 /// Parse one `SKILL.md` source: strict frontmatter between `---` fences,
-/// then a non-empty markdown instruction body.
+/// then a non-empty markdown instruction body. `origin` records which source
+/// the caller is loading from; it never comes from the manifest itself.
 ///
 /// Recognized frontmatter keys are exactly `name`, `description`, and the
 /// optional single-line `deps: { python: ["package==version", ...] }`.
 /// Anything else — unknown keys, duplicates, an unpinned dependency, a
 /// control character in the description — rejects the whole manifest.
-pub fn parse_skill_manifest(source: &str) -> Result<SkillPackage, SkillParseError> {
+pub fn parse_skill_manifest(
+    source: &str,
+    origin: SkillOrigin,
+) -> Result<SkillPackage, SkillParseError> {
     if source.len() > crate::MAX_WORKSPACE_FILE_BYTES {
         return Err(invalid("manifest exceeds the workspace file limit"));
     }
@@ -167,6 +192,7 @@ pub fn parse_skill_manifest(source: &str) -> Result<SkillPackage, SkillParseErro
         name: name.to_owned(),
         description: description.to_owned(),
         python_deps: python_deps.unwrap_or_default(),
+        origin,
     })
 }
 
@@ -207,7 +233,8 @@ fn parse_python_deps(value: &str) -> Result<Vec<String>, SkillParseError> {
     Ok(deps)
 }
 
-/// Load every valid skill package under `source`, one directory per skill.
+/// Load every valid skill package under `source`, one directory per skill,
+/// tagging each with `origin`.
 ///
 /// A malformed package — an unreadable or oversized manifest, frontmatter the
 /// strict parser rejects, or a directory whose name disagrees with its
@@ -215,7 +242,7 @@ fn parse_python_deps(value: &str) -> Result<Vec<String>, SkillParseError> {
 /// prompt or fail an exec. The result is sorted by name for deterministic
 /// staging and catalog order.
 #[must_use]
-pub fn load_builtin_skills(source: &Path) -> Vec<BuiltinSkill> {
+pub fn load_skills(source: &Path, origin: SkillOrigin) -> Vec<LoadedSkill> {
     let mut skills = Vec::new();
     let entries = match std::fs::read_dir(source) {
         Ok(entries) => entries,
@@ -253,7 +280,7 @@ pub fn load_builtin_skills(source: &Path) -> Vec<BuiltinSkill> {
                 continue;
             }
         };
-        let package = match parse_skill_manifest(&manifest) {
+        let package = match parse_skill_manifest(&manifest, origin) {
             Ok(package) => package,
             Err(error) => {
                 tracing::warn!("skipping skill '{directory_name}': {error}");
@@ -267,9 +294,34 @@ pub fn load_builtin_skills(source: &Path) -> Vec<BuiltinSkill> {
             );
             continue;
         }
-        skills.push(BuiltinSkill { package, manifest });
+        skills.push(LoadedSkill { package, manifest });
     }
     skills.sort_by(|a, b| a.package.name.cmp(&b.package.name));
+    skills
+}
+
+/// The built-in skills plus the user-authored packages under `user_dir`,
+/// merged into one deterministic catalog.
+///
+/// User skills go through the same strict loader as built-ins. A user package
+/// whose name collides with a built-in is dropped with a warning — curated
+/// instructions can never be shadowed. A missing user directory is simply an
+/// empty user set, not an error, so embeddings without one stage exactly the
+/// built-ins. The result is sorted by name.
+#[must_use]
+pub fn merged_skills(builtins: &[LoadedSkill], user_dir: Option<&Path>) -> Vec<LoadedSkill> {
+    let mut skills = builtins.to_vec();
+    if let Some(dir) = user_dir.filter(|dir| dir.is_dir()) {
+        for user_skill in load_skills(dir, SkillOrigin::User) {
+            let name = &user_skill.package.name;
+            if builtins.iter().any(|skill| skill.package.name == *name) {
+                tracing::warn!("skipping user skill '{name}': a built-in skill owns that name");
+                continue;
+            }
+            skills.push(user_skill);
+        }
+        skills.sort_by(|a, b| a.package.name.cmp(&b.package.name));
+    }
     skills
 }
 
@@ -288,7 +340,7 @@ Instructions live here.\n";
 
     #[test]
     fn valid_manifest_parses_into_its_catalog_entry() {
-        let package = parse_skill_manifest(VALID).unwrap();
+        let package = parse_skill_manifest(VALID, SkillOrigin::Builtin).unwrap();
         assert_eq!(package.name, "pdf-documents");
         assert_eq!(
             package.description,
@@ -297,7 +349,12 @@ Instructions live here.\n";
         assert_eq!(package.python_deps, ["fpdf2==2.8.3", "pypdf==5.1.0"]);
 
         let no_deps = "---\nname: charts\ndescription: Plots.\n---\nBody.\n";
-        assert_eq!(parse_skill_manifest(no_deps).unwrap().python_deps, [""; 0]);
+        assert_eq!(
+            parse_skill_manifest(no_deps, SkillOrigin::Builtin)
+                .unwrap()
+                .python_deps,
+            [""; 0]
+        );
     }
 
     #[test]
@@ -330,7 +387,7 @@ Instructions live here.\n";
             ("empty body", "---\nname: a\ndescription: b\n---\n  \n"),
         ] {
             assert!(
-                parse_skill_manifest(source).is_err(),
+                parse_skill_manifest(source, SkillOrigin::Builtin).is_err(),
                 "{case} should be rejected"
             );
         }
@@ -351,10 +408,56 @@ Instructions live here.\n";
         std::fs::write(broken.join(SKILL_MANIFEST_FILE), "no frontmatter").unwrap();
         std::fs::write(source.path().join("stray-file"), "not a package").unwrap();
 
-        let skills = load_builtin_skills(source.path());
+        let skills = load_skills(source.path(), SkillOrigin::Builtin);
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].package.name, "pdf-documents");
+        assert_eq!(skills[0].package.origin, SkillOrigin::Builtin);
         assert_eq!(skills[0].manifest, VALID);
+    }
+
+    /// Contract: a user package goes through the same strict loader, carries
+    /// its origin, and can never shadow a built-in name.
+    #[test]
+    fn user_skills_merge_after_builtins_without_shadowing() {
+        let builtin_dir = tempfile::tempdir().unwrap();
+        let pdf = builtin_dir.path().join("pdf-documents");
+        std::fs::create_dir(&pdf).unwrap();
+        std::fs::write(pdf.join(SKILL_MANIFEST_FILE), VALID).unwrap();
+        let builtins = load_skills(builtin_dir.path(), SkillOrigin::Builtin);
+
+        let user_dir = tempfile::tempdir().unwrap();
+        // Collides with the built-in: dropped, the built-in manifest survives.
+        let shadow = user_dir.path().join("pdf-documents");
+        std::fs::create_dir(&shadow).unwrap();
+        std::fs::write(
+            shadow.join(SKILL_MANIFEST_FILE),
+            "---\nname: pdf-documents\ndescription: Impostor.\n---\nBody.\n",
+        )
+        .unwrap();
+        let own = user_dir.path().join("meeting-notes");
+        std::fs::create_dir(&own).unwrap();
+        std::fs::write(
+            own.join(SKILL_MANIFEST_FILE),
+            "---\nname: meeting-notes\ndescription: Summarize meetings my way.\n---\nBody.\n",
+        )
+        .unwrap();
+
+        let merged = merged_skills(&builtins, Some(user_dir.path()));
+        assert_eq!(
+            merged
+                .iter()
+                .map(|skill| (skill.package.name.as_str(), skill.package.origin))
+                .collect::<Vec<_>>(),
+            [
+                ("meeting-notes", SkillOrigin::User),
+                ("pdf-documents", SkillOrigin::Builtin),
+            ]
+        );
+        assert_eq!(merged[1].manifest, VALID);
+
+        // A missing user directory is an empty user set, not an error.
+        let missing = user_dir.path().join("does-not-exist");
+        assert_eq!(merged_skills(&builtins, Some(&missing)).len(), 1);
     }
 
     /// Contract: every skill shipped in the repository's `skills/` tree must
@@ -368,7 +471,7 @@ Instructions live here.\n";
             .filter_map(Result::ok)
             .filter(|entry| entry.path().is_dir())
             .count();
-        let skills = load_builtin_skills(&source);
+        let skills = load_skills(&source, SkillOrigin::Builtin);
         assert_eq!(
             skills.len(),
             directories,

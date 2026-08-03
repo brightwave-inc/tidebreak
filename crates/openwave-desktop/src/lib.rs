@@ -392,7 +392,10 @@ mod bundle_tests {
                 (target.as_str() == Some("skills/")).then(|| source.clone())
             })
             .expect("tauri.conf.json bundles a skills/ resource");
-        let skills = openwave_code_execution::load_builtin_skills(&manifest_dir.join(source));
+        let skills = openwave_code_execution::load_skills(
+            &manifest_dir.join(source),
+            openwave_code_execution::SkillOrigin::Builtin,
+        );
         let names: Vec<&str> = skills
             .iter()
             .map(|skill| skill.package.name.as_str())
