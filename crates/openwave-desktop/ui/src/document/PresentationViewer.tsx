@@ -88,8 +88,13 @@ export function PresentationViewer({ source, mediaType, className }: Props) {
   if (error !== null || data === null) {
     return (
       <PresentationNotice>
-        This presentation could not be converted for preview. Save as… exports
-        the original file.
+        <span className="block">
+          This presentation could not be converted for preview.
+        </span>
+        {error?.message ? (
+          <span className="mt-1 block">{error.message}</span>
+        ) : null}
+        <span className="mt-1 block">Save as… exports the original file.</span>
       </PresentationNotice>
     );
   }
@@ -122,13 +127,16 @@ function ConverterInstall({
   const [progress, setProgress] = useState<ConverterInstallProgress | null>(
     null,
   );
-  const startedRef = useRef(false);
   const onReadyRef = useRef(onReady);
   onReadyRef.current = onReady;
 
   useEffect(() => {
-    if (!running || startedRef.current) return;
-    startedRef.current = true;
+    if (!running) return;
+    // The install itself is a shared module-level operation, so effect
+    // re-runs (StrictMode mounts every effect twice) simply join the one
+    // in-flight install; `disposed` only keeps a dead mount's state setters
+    // quiet. The surviving run receives progress and completion regardless of
+    // which run started the install.
     let disposed = false;
     void installPresentationConverter((next) => {
       if (!disposed) setProgress(next);
@@ -163,7 +171,6 @@ function ConverterInstall({
           size="sm"
           className="mt-3"
           onClick={() => {
-            startedRef.current = false;
             setFailure(null);
             setRunning(true);
           }}

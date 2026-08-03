@@ -10,6 +10,8 @@ import {
   convertPresentationToPdf,
   installPresentationConverter,
   presentationPdfSource,
+  resetConverterInstallStateForTest,
+  warmPresentationConverter,
 } from "./officePdf";
 import type { FileBytesSource } from "./useFileDownload";
 
@@ -19,6 +21,7 @@ const PPTX =
 beforeEach(() => {
   invokeMock.mockReset();
   listenMock.mockReset();
+  resetConverterInstallStateForTest();
 });
 
 describe("presentation-to-PDF conversion", () => {
@@ -85,6 +88,63 @@ describe("presentation-to-PDF conversion", () => {
       { phase: "downloading", downloadedBytes: 1, totalBytes: 2 },
     ]);
     expect(unlisten).toHaveBeenCalled();
+  });
+
+  it("joins an in-flight install: one command, progress and completion to every caller", async () => {
+    // The regression this guards: StrictMode disposes the effect run that
+    // started the install, and the surviving run must still see progress and
+    // resolution rather than a bar frozen at zero.
+    let emit: ((event: { payload: unknown }) => void) | undefined;
+    listenMock.mockImplementation(
+      (_name: string, handler: (event: { payload: unknown }) => void) => {
+        emit = handler;
+        return Promise.resolve(vi.fn());
+      },
+    );
+    let settle: (() => void) | undefined;
+    invokeMock.mockImplementation(
+      () => new Promise<void>((resolve) => (settle = resolve)),
+    );
+
+    const first: unknown[] = [];
+    const second: unknown[] = [];
+    const install1 = installPresentationConverter((p) => first.push(p));
+    await Promise.resolve();
+    emit?.({
+      payload: { phase: "downloading", downloadedBytes: 8, totalBytes: 16 },
+    });
+    // A later mount joins mid-download and is caught up immediately.
+    const install2 = installPresentationConverter((p) => second.push(p));
+    emit?.({
+      payload: { phase: "installing", downloadedBytes: 0, totalBytes: null },
+    });
+    settle?.();
+    await Promise.all([install1, install2]);
+
+    expect(
+      invokeMock.mock.calls.filter(
+        ([name]) => name === "install_presentation_converter",
+      ),
+    ).toHaveLength(1);
+    expect(first).toEqual([
+      { phase: "downloading", downloadedBytes: 8, totalBytes: 16 },
+      { phase: "installing", downloadedBytes: 0, totalBytes: null },
+    ]);
+    expect(second).toEqual([
+      { phase: "downloading", downloadedBytes: 8, totalBytes: 16 },
+      { phase: "installing", downloadedBytes: 0, totalBytes: null },
+    ]);
+  });
+
+  it("requests the background warm-up once per app run", () => {
+    invokeMock.mockResolvedValue(undefined);
+    warmPresentationConverter();
+    warmPresentationConverter();
+    expect(
+      invokeMock.mock.calls.filter(
+        ([name]) => name === "warm_presentation_converter",
+      ),
+    ).toHaveLength(1);
   });
 
   it("derives the converted source from the original's immutable cache key", async () => {

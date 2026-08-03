@@ -226,6 +226,7 @@ pub fn run() {
             office_pdf::convert_presentation_to_pdf,
             office_install::install_presentation_converter,
             office_install::cancel_presentation_converter_install,
+            office_install::warm_presentation_converter,
             client_execution::resolve_folder_access_request,
             client_execution::output_writeback::resolve_output_writeback_request,
             host_access::connect_folder,

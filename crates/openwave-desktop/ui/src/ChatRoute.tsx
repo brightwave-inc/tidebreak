@@ -40,6 +40,7 @@ import { AppsPanel } from "./apps/AppsPanel";
 import { OutputDetailRoot } from "./outputs/OutputDetailRoot";
 import { OutputsView } from "./outputs/OutputsView";
 import { DocumentDetailRoot } from "./document-detail/DocumentDetailRoot";
+import { warmPresentationConverter } from "./document/officePdf";
 import { FoldersView } from "./FoldersView";
 import { hasNativeHost } from "./host";
 import { attachChatFiles, type AttachedFiles } from "./attachments";
@@ -243,6 +244,9 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         return;
       case "refresh_plan_approvals":
         signalRefresh("planApprovals");
+        return;
+      case "warm_presentation_converter":
+        warmPresentationConverter();
         return;
       case "turn_began":
         signalTurnLifecycle(effect.startsDifferentTurn ? "began" : "began_same_turn");

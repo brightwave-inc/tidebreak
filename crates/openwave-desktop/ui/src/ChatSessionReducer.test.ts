@@ -311,6 +311,37 @@ describe("published outputs", () => {
       },
     ]);
     expect(effects).toContainEqual({ type: "refresh_output_writebacks" });
+    // A markdown report is not a deck; no converter warm-up.
+    expect(effects).not.toContainEqual({ type: "warm_presentation_converter" });
+
+    // A published presentation starts the converter warm-up so the first
+    // preview click finds LibreOffice ready instead of a 300 MB download.
+    const deck = play([
+      TURN,
+      { type: "tool_call_started", call_id: "exec-3", name: "exec" },
+      {
+        type: "tool_call_completed",
+        call_id: "exec-3",
+        status: "completed",
+        result: {
+          ...execResult,
+          outputs: [
+            {
+              kind: "output" as const,
+              label: "deck.pptx",
+              detail: null,
+              meta: "v1 · created",
+              media_type:
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+              output_id: null,
+            },
+          ],
+        },
+      },
+    ]);
+    expect(deck.effects).toContainEqual({
+      type: "warm_presentation_converter",
+    });
 
     // A command that published nothing moves nothing.
     const quiet = play([

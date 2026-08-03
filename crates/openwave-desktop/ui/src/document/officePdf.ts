@@ -82,30 +82,84 @@ export type ConverterInstallProgress = {
   totalBytes: number | null;
 };
 
+// One install flows through one shared operation, however many components ask
+// for it. This matters beyond tidiness: React StrictMode mounts effects twice,
+// and a per-call listener owned by the first (immediately-disposed) effect run
+// used to swallow every progress event and the completion itself — the panel
+// sat on an indeterminate bar while the host downloaded and installed to the
+// end. Joining an in-flight install replays the latest progress and resolves
+// every caller when the one underlying command settles.
+let installInFlight: Promise<void> | null = null;
+let lastInstallProgress: ConverterInstallProgress | null = null;
+const installSubscribers = new Set<(p: ConverterInstallProgress) => void>();
+
 /**
  * Install the app's own LibreOffice (macOS): an exact pinned version from
  * TDF's official download service, digest-verified by the host before
- * unpacking. Resolves once the converter is ready; rejects with the host's
- * reason on failure or cancellation, which the host also remembers so the
- * viewer stops auto-retrying until the user asks again.
+ * unpacking. Joins the in-flight install if one is running. Resolves once the
+ * converter is ready; rejects with the host's reason on failure or
+ * cancellation, which the host also remembers so the viewer stops
+ * auto-retrying until the user asks again.
  */
 export async function installPresentationConverter(
   onProgress: (progress: ConverterInstallProgress) => void,
 ): Promise<void> {
-  const unlisten = await listen<ConverterInstallProgress>(
-    INSTALL_PROGRESS_EVENT,
-    (event) => onProgress(event.payload),
-  );
+  installSubscribers.add(onProgress);
+  if (lastInstallProgress !== null) onProgress(lastInstallProgress);
+  installInFlight ??= (async () => {
+    const unlisten = await listen<ConverterInstallProgress>(
+      INSTALL_PROGRESS_EVENT,
+      (event) => {
+        lastInstallProgress = event.payload;
+        for (const subscriber of [...installSubscribers]) {
+          subscriber(event.payload);
+        }
+      },
+    );
+    try {
+      await invoke("install_presentation_converter");
+    } finally {
+      unlisten();
+      installInFlight = null;
+      lastInstallProgress = null;
+    }
+  })();
   try {
-    await invoke("install_presentation_converter");
+    await installInFlight;
   } finally {
-    unlisten();
+    installSubscribers.delete(onProgress);
   }
 }
 
 /** Ask the in-flight managed install to stop; it rejects with the reason. */
 export async function cancelPresentationConverterInstall(): Promise<void> {
   await invoke("cancel_presentation_converter_install");
+}
+
+let warmRequested = false;
+
+/**
+ * Start the managed LibreOffice install in the background, ahead of the first
+ * preview — fired when a turn produces its first presentation output, so the
+ * download is under way (or done) before anyone clicks the deck. Once per app
+ * run here and again host-side; the host quietly refuses when a converter
+ * already resolves or an earlier install failed, so this can never re-download
+ * or block anything.
+ */
+export function warmPresentationConverter(): void {
+  if (warmRequested) return;
+  warmRequested = true;
+  void invoke("warm_presentation_converter").catch(() => {
+    // Best-effort by design; the preview path handles every converter state.
+  });
+}
+
+/** Test seam: drop the shared install/warm state between cases. */
+export function resetConverterInstallStateForTest(): void {
+  installInFlight = null;
+  lastInstallProgress = null;
+  installSubscribers.clear();
+  warmRequested = false;
 }
 
 /**
