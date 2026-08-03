@@ -134,7 +134,13 @@ The connector speaks a small, versioned HTTP surface on the gateway:
 - `/oauth/authorize`, `/oauth/token`, `/oauth/revoke` — the flow above.
 - Inference itself — invoked with `llm`-audience bearers on the gateway's
   protocol-compatible routes, through the same provider machinery as any
-  direct provider.
+  direct provider. A turn's request also declares which conversation it
+  belongs to, as an `x-model-gateway-conversation-id` header carrying the
+  chat's id, so the gateway's usage views group inference the way the app
+  does. The header is a per-route opt-in: only the gateway adapter sends it,
+  a direct provider never does, and it is a header rather than wire data, so
+  no model receives it. The chat id is the only thing declared — no title, no
+  content, no participant.
 - MCP — `{base}/mcp/{slug}` per mounted endpoint, each connection minting
   its own `mcp:<slug>` bearer from the session at connect time.
   Gateway-attested endpoints refuse sessions that arrive without the

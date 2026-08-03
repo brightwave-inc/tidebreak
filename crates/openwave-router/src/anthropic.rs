@@ -29,6 +29,11 @@ const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 
+/// Header a model-gateway deployment reads to group inference into one
+/// conversation. The gateway digests the value per user and harness; it is
+/// never forwarded upstream.
+const GATEWAY_CONVERSATION_HEADER: &str = "x-model-gateway-conversation-id";
+
 /// Description for the synthetic tool that carries a constrained response.
 ///
 /// The model is told what the call is for, because a forced tool with an opaque
@@ -47,6 +52,10 @@ pub struct AnthropicProvider {
     /// Per-request credential supplier for gateways that mint short-lived
     /// tokens. Takes precedence over `api_key` when present.
     token_source: Option<std::sync::Arc<dyn crate::BearerTokenSource>>,
+    /// Whether to declare the request's conversation to a model gateway.
+    /// Off for direct Anthropic, whose API has no such header and no business
+    /// learning how the host groups its chats.
+    conversation_attribution: bool,
 }
 
 impl AnthropicProvider {
@@ -57,6 +66,7 @@ impl AnthropicProvider {
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
             token_source: None,
+            conversation_attribution: false,
         }
     }
 
@@ -76,6 +86,18 @@ impl AnthropicProvider {
         source: std::sync::Arc<dyn crate::BearerTokenSource>,
     ) -> Self {
         self.token_source = Some(source);
+        self
+    }
+
+    /// Declare each request's conversation to the gateway this provider points
+    /// at, so its usage views can group inference the way the app does.
+    ///
+    /// Only for a model-gateway base URL. Anthropic's own API is not a party to
+    /// how the host organizes conversations, and the header would be sent to
+    /// whatever `base_url` names.
+    #[must_use]
+    pub fn with_conversation_attribution(mut self) -> Self {
+        self.conversation_attribution = true;
         self
     }
 }
@@ -102,12 +124,19 @@ impl ModelProvider for AnthropicProvider {
         // Setup failures (connection, auth, 4xx/5xx) surface here as `Err` so the
         // router can classify and fail over; the returned stream only yields
         // normalized events.
-        let response = self
+        let mut request = self
             .client
             .post(url)
             .header("x-api-key", &api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+        // A conversation is declared only where one is configured to be read.
+        // The id is a UUID, so it satisfies the gateway's bound on the value
+        // (1-256 ASCII graphic bytes) by construction.
+        if let (true, Some(conversation)) = (self.conversation_attribution, req.conversation) {
+            request = request.header(GATEWAY_CONVERSATION_HEADER, conversation.to_string());
+        }
+        let response = request
             .json(&body)
             .send()
             .await
@@ -1668,5 +1697,66 @@ mod tests {
         ];
         let shaped = anthropic_content(&blocks, &ImageAttachments::new()).unwrap();
         assert_eq!(shaped, serde_json::to_value(&blocks).unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_conversation_is_declared_to_a_gateway_and_withheld_from_anthropic() {
+        use axum::extract::State;
+        use axum::http::{header, HeaderMap};
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use axum::Router;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<HeaderMap>>>);
+
+        async fn capture(State(capture): State<Capture>, headers: HeaderMap) -> impl IntoResponse {
+            capture.0.lock().unwrap().push(headers);
+            (
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+            )
+        }
+
+        let capture_state = Capture::default();
+        let app = Router::new()
+            .fallback(post(capture))
+            .with_state(capture_state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let base_url = format!("http://{address}");
+
+        let conversation = openwave_core::id::ChatId::new();
+        let request = || ChatRequest {
+            model: "claude-opus-4-8".into(),
+            conversation: Some(conversation),
+            messages: vec![ChatMessage::text(Role::User, "hi")],
+            ..Default::default()
+        };
+
+        let gateway = AnthropicProvider::new("token")
+            .with_base_url(&base_url)
+            .with_conversation_attribution();
+        let mut stream = gateway.stream(request()).await.unwrap();
+        while stream.next().await.is_some() {}
+
+        // Same request, same conversation, an adapter that was not configured
+        // for a gateway: how the host groups its chats is not Anthropic's.
+        let direct = AnthropicProvider::new("key").with_base_url(&base_url);
+        let mut stream = direct.stream(request()).await.unwrap();
+        while stream.next().await.is_some() {}
+
+        let requests = capture_state.0.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].get(GATEWAY_CONVERSATION_HEADER).unwrap(),
+            conversation.to_string().as_str()
+        );
+        assert!(requests[1].get(GATEWAY_CONVERSATION_HEADER).is_none());
+        server.abort();
     }
 }
