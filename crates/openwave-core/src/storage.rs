@@ -41,7 +41,7 @@ use crate::model::{
     DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert,
     DocumentSummaryRecord, DocumentUpsert, ExecFileRejection, ExecFileRejectionRecord,
     ExecFileSnapshot, ExecFileSnapshotRecord, Message, MessageAttachment,
-    MessageDocumentAttachment, NetworkPolicy, PermissionMode, Project, ReasoningEffort,
+    MessageDocumentAttachment, NetworkPolicy, OwnerId, PermissionMode, Project, ReasoningEffort,
     RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord, ToolCallResolution,
     TurnAgentRunWait, TurnAgentRunWaitSet, TurnCheckpointProgress, TurnClientWait,
     TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnSteer,
@@ -1505,6 +1505,180 @@ pub trait Store: Send + Sync {
         permission_mode: Option<Option<PermissionMode>>,
         network_policy: Option<NetworkPolicy>,
     ) -> Result<bool>;
+
+    // ------------------------------------------------------------------
+    // Owner-scoped root surface (#853).
+    //
+    // Chats, projects, and documents are the ownership roots: everything
+    // else hangs off one of them by id. The scoped variants below take the
+    // requesting principal's durable [`OwnerId`] where the query is built,
+    // so a row belonging to someone else is indistinguishable from a row
+    // that does not exist. Request-facing callers (the server's routes) use
+    // this surface; system paths that act on already-authorized ids (turn
+    // workers, retirement scans) keep the unscoped methods.
+    //
+    // The defaults treat the store as single-owner — they ignore the owner
+    // and delegate to the unscoped method, which is exact for the local
+    // profile's in-process test stores. Any store that can hold rows for
+    // more than one owner must override every method in this block; the
+    // database-backed store does.
+    // ------------------------------------------------------------------
+
+    /// Persist a new chat owned by `owner`. When `chat.project_id` is set,
+    /// the project must belong to the same owner.
+    async fn create_chat_scoped(&self, owner: &OwnerId, chat: &Chat) -> Result<()> {
+        let _ = owner;
+        self.create_chat(chat).await
+    }
+
+    /// [`Store::create_chat_with_project_defaults`], attributing the chat to
+    /// `owner` and resolving defaults only from a project of the same owner.
+    async fn create_chat_with_project_defaults_scoped(
+        &self,
+        owner: &OwnerId,
+        chat: &Chat,
+    ) -> Result<Chat> {
+        let _ = owner;
+        self.create_chat_with_project_defaults(chat).await
+    }
+
+    /// Fetch `owner`'s chat by id; `None` when it does not exist **or**
+    /// belongs to someone else.
+    async fn get_chat_scoped(&self, owner: &OwnerId, id: ChatId) -> Result<Option<Chat>> {
+        let _ = owner;
+        self.get_chat(id).await
+    }
+
+    /// List `owner`'s chats, most-recently-created first.
+    async fn list_chats_scoped(&self, owner: &OwnerId) -> Result<Vec<Chat>> {
+        let _ = owner;
+        self.list_chats().await
+    }
+
+    /// [`Store::delete_chat`] restricted to `owner`'s chats; someone else's
+    /// chat reports [`DeleteChatOutcome::NotFound`].
+    async fn delete_chat_scoped(&self, owner: &OwnerId, id: ChatId) -> Result<DeleteChatOutcome> {
+        let _ = owner;
+        self.delete_chat(id).await
+    }
+
+    /// [`Store::get_chat_transcript`] restricted to `owner`'s chats.
+    async fn get_chat_transcript_scoped(
+        &self,
+        owner: &OwnerId,
+        id: ChatId,
+    ) -> Result<Option<ChatTranscriptSnapshot>> {
+        let _ = owner;
+        self.get_chat_transcript(id).await
+    }
+
+    /// [`Store::update_chat_metadata`] restricted to `owner`'s chats;
+    /// someone else's chat reports `false`.
+    #[allow(clippy::too_many_arguments)]
+    async fn update_chat_metadata_scoped(
+        &self,
+        owner: &OwnerId,
+        id: ChatId,
+        title: Option<Option<String>>,
+        model: Option<Option<String>>,
+        reasoning_effort: Option<Option<ReasoningEffort>>,
+        permission_mode: Option<Option<PermissionMode>>,
+        network_policy: Option<NetworkPolicy>,
+    ) -> Result<bool> {
+        let _ = owner;
+        self.update_chat_metadata(
+            id,
+            title,
+            model,
+            reasoning_effort,
+            permission_mode,
+            network_policy,
+        )
+        .await
+    }
+
+    /// Persist a new project owned by `owner`.
+    async fn create_project_scoped(&self, owner: &OwnerId, project: &Project) -> Result<()> {
+        let _ = owner;
+        self.create_project(project).await
+    }
+
+    /// Fetch `owner`'s project by id; `None` when it does not exist or
+    /// belongs to someone else.
+    async fn get_project_scoped(&self, owner: &OwnerId, id: ProjectId) -> Result<Option<Project>> {
+        let _ = owner;
+        self.get_project(id).await
+    }
+
+    /// List `owner`'s projects, most-recently-created first.
+    async fn list_projects_scoped(&self, owner: &OwnerId) -> Result<Vec<Project>> {
+        let _ = owner;
+        self.list_projects().await
+    }
+
+    /// [`Store::update_project_title`] restricted to `owner`'s projects.
+    async fn update_project_title_scoped(
+        &self,
+        owner: &OwnerId,
+        id: ProjectId,
+        title: Option<String>,
+    ) -> Result<bool> {
+        let _ = owner;
+        self.update_project_title(id, title).await
+    }
+
+    /// [`Store::delete_project`] restricted to `owner`'s projects; someone
+    /// else's project reports [`DeleteProjectOutcome::NotFound`].
+    async fn delete_project_scoped(
+        &self,
+        owner: &OwnerId,
+        id: ProjectId,
+    ) -> Result<DeleteProjectOutcome> {
+        let _ = owner;
+        self.delete_project(id).await
+    }
+
+    /// Fetch `owner`'s document by id; `None` when it does not exist or
+    /// belongs to someone else.
+    async fn get_document_scoped(
+        &self,
+        owner: &OwnerId,
+        id: DocumentId,
+    ) -> Result<Option<DocumentRecord>> {
+        let _ = owner;
+        self.get_document(id).await
+    }
+
+    /// [`Store::list_document_summaries`] restricted to `owner`'s documents.
+    async fn list_document_summaries_scoped(
+        &self,
+        owner: &OwnerId,
+        scope: DocumentScope,
+        after: Option<DocumentListCursor>,
+        limit: u64,
+    ) -> Result<Vec<DocumentSummaryRecord>> {
+        let _ = owner;
+        self.list_document_summaries(scope, after, limit).await
+    }
+
+    /// [`Store::delete_document`] restricted to `owner`'s documents; someone
+    /// else's document is left untouched, indistinguishable from absent.
+    async fn delete_document_scoped(&self, owner: &OwnerId, id: DocumentId) -> Result<()> {
+        let _ = owner;
+        self.delete_document(id).await
+    }
+
+    /// [`Store::accept_document_source`] attributing a new standalone
+    /// document to `owner`; a chat- or project-bound document must name a
+    /// parent that belongs to `owner`.
+    async fn accept_document_source_scoped(
+        &self,
+        owner: &OwnerId,
+        document: &DocumentSourceUpsert,
+    ) -> Result<DocumentRecord> {
+        let _ = owner;
+        self.accept_document_source(document).await
+    }
 
     /// Create a conversation output together with its first revision.
     ///

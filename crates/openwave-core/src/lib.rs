@@ -155,7 +155,7 @@ pub use model::{
     DelegatedFileReadClaim, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceBlob,
     DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, ExecFileChange, ExecFileRejection,
     ExecFileRejectionReason, ExecFileRejectionRecord, ExecFileSnapshot, ExecFileSnapshotRecord,
-    ExecUndoState, Message, MessageAttachment, MessageDocumentAttachment, NetworkPolicy,
+    ExecUndoState, Message, MessageAttachment, MessageDocumentAttachment, NetworkPolicy, OwnerId,
     PermissionMode, Project, ReasoningEffort, Role, RootAttachmentChange,
     RootAttachmentChangeAction, RootAttachmentChangeFailure, RootAttachmentChangePhase,
     RootAttachmentChangeTerminal, RootAttachmentOrigin, RootAttachmentSubjectKind,

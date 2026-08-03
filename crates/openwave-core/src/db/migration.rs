@@ -107,6 +107,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddSandboxToolCallRetry),
             Box::new(AddConnectedApps),
             Box::new(AddSandboxProvisionAdmission),
+            Box::new(AddOwnerAttribution),
         ]
     }
 }
@@ -9115,6 +9116,7 @@ enum Project {
     Title,
     AttachmentRevision,
     CreatedAt,
+    Owner,
 }
 
 #[derive(DeriveIden)]
@@ -9140,6 +9142,7 @@ enum Document {
     CreatedAt,
     UpdatedAt,
     IndexedAt,
+    Owner,
 }
 
 #[derive(DeriveIden)]
@@ -9357,6 +9360,7 @@ enum Chat {
     CitationFormat,
     AttachmentRevision,
     CreatedAt,
+    Owner,
 }
 
 #[derive(DeriveIden)]
@@ -10903,5 +10907,54 @@ impl MigrationTrait for AddSandboxProvisionAdmission {
                     .to_owned(),
             )
             .await
+    }
+}
+
+/// Gives every root aggregate — chat, project, document — a durable owner
+/// (#853). The owner column holds the storage key of the principal the row
+/// belongs to; owner-scoped store queries filter on it so one shared database
+/// can partition cleanly by user. Everything that existed before this
+/// migration belongs to the single local-profile owner, so the column's
+/// default is both the backfill and the value unscoped (local-profile) writers
+/// keep inserting.
+struct AddOwnerAttribution;
+
+impl MigrationName for AddOwnerAttribution {
+    fn name(&self) -> &str {
+        "m20260803_000045_add_owner_attribution"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddOwnerAttribution {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        for (table, column) in [
+            (Chat::Table.into_iden(), Chat::Owner.into_iden()),
+            (Project::Table.into_iden(), Project::Owner.into_iden()),
+            (Document::Table.into_iden(), Document::Owner.into_iden()),
+        ] {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(table)
+                        .add_column(ColumnDef::new(column).text().not_null().default("local"))
+                        .to_owned(),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        for (table, column) in [
+            (Chat::Table.into_iden(), Chat::Owner.into_iden()),
+            (Project::Table.into_iden(), Project::Owner.into_iden()),
+            (Document::Table.into_iden(), Document::Owner.into_iden()),
+        ] {
+            manager
+                .alter_table(Table::alter().table(table).drop_column(column).to_owned())
+                .await?;
+        }
+        Ok(())
     }
 }

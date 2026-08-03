@@ -1,10 +1,11 @@
 use sea_orm::{ActiveModelTrait, EntityTrait, Set, TransactionTrait};
 
 use crate::error::{AgentError, Result};
-use crate::model::{DocumentRecord, DocumentSourceUpsert};
+use crate::model::{DocumentRecord, DocumentSourceUpsert, OwnerId};
 
 use super::super::{
-    document_from_model, entities, store_err, validate_document_source_blob, DbStore,
+    document_from_model, document_scope_owner_on, entities, store_err,
+    validate_document_source_blob, DbStore,
 };
 use super::blob as blob_ops;
 use super::require_document_scope_write_lock;
@@ -12,11 +13,30 @@ use super::require_document_scope_write_lock;
 pub(in crate::db) async fn accept_source(
     store: &DbStore,
     source: &DocumentSourceUpsert,
+    owner: Option<&OwnerId>,
 ) -> Result<DocumentRecord> {
     validate_source_input(source)?;
 
     let transaction = store.conn.begin().await.map_err(store_err)?;
     require_document_scope_write_lock(&transaction, source.chat_id, source.project_id).await?;
+    // A parented document carries its parent's owner; through the scoped
+    // surface the parent must belong to the requester, and a standalone
+    // document belongs to whoever accepts it (#853).
+    let parent_owner =
+        document_scope_owner_on(&transaction, source.chat_id, source.project_id).await?;
+    if let (Some(owner), Some(parent_owner)) = (owner, parent_owner.as_deref()) {
+        if owner.as_str() != parent_owner {
+            // Someone else's parent is indistinguishable from a missing one.
+            return Err(match (source.chat_id, source.project_id) {
+                (Some(chat_id), _) => AgentError::Store(format!("chat {chat_id} not found")),
+                (None, Some(project_id)) => AgentError::ProjectNotFound(project_id),
+                (None, None) => unreachable!("a parent owner implies a parent id"),
+            });
+        }
+    }
+    let row_owner = parent_owner
+        .or_else(|| owner.map(|owner| owner.as_str().to_owned()))
+        .unwrap_or_else(|| OwnerId::LOCAL.to_owned());
     let existing = entities::document::Entity::find_by_id(source.id.0)
         .one(&transaction)
         .await
@@ -24,6 +44,7 @@ pub(in crate::db) async fn accept_source(
     if let Some(current) = existing.as_ref() {
         if current.chat_id != source.chat_id.map(|id| id.0)
             || current.project_id != source.project_id.map(|id| id.0)
+            || current.owner != row_owner
         {
             return Err(AgentError::Store(format!(
                 "document {} cannot move between document corpora",
@@ -49,6 +70,7 @@ pub(in crate::db) async fn accept_source(
             .as_ref()
             .map_or(source.updated_at, |current| current.created_at)),
         updated_at: Set(source.updated_at),
+        owner: Set(row_owner),
     };
     if existing.is_some() {
         active.update(&transaction).await.map_err(store_err)?;

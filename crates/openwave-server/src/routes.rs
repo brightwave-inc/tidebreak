@@ -42,6 +42,7 @@ use crate::exec_write_snapshot::{
 use crate::extract::{Json, Path, Query};
 use crate::mcp_config::{McpServersConfig, McpServersInfo};
 use crate::model_roles::{self, ModelRole};
+use crate::principal::AuthContext;
 use crate::providers::{self, ProviderCredential, ProviderInfo, ProviderKind, ProviderUpdate};
 use crate::state::AppState;
 use crate::view_frames::ViewFrameSource;
@@ -692,6 +693,7 @@ pub async fn post_undo_one_file_change(
 /// paths, or a reusable document identity.
 pub async fn get_file_change_preview(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path((chat_id, turn_id, snapshot_id, revision)): Path<(
         ChatId,
         TurnId,
@@ -699,7 +701,12 @@ pub async fn get_file_change_preview(
         ExecFilePreviewRevision,
     )>,
 ) -> Result<Response, ServerError> {
-    if state.store.get_chat(chat_id).await?.is_none() {
+    if state
+        .store
+        .get_chat_scoped(&auth.principal.owner_id(), chat_id)
+        .await?
+        .is_none()
+    {
         return Err(ServerError::not_found(format!("chat {chat_id} not found")));
     }
     let _permit = state
@@ -1302,6 +1309,7 @@ fn normalize_chat_title(title: Option<String>) -> Result<Option<String>, ServerE
 /// `POST /projects` — create a project and return it (`201 Created`).
 pub async fn create_project(
     State(state): State<AppState>,
+    auth: AuthContext,
     Json(body): Json<CreateProject>,
 ) -> Result<impl IntoResponse, ServerError> {
     let project = Project {
@@ -1311,25 +1319,34 @@ pub async fn create_project(
         root_attachments: Vec::new(),
         created_at: Utc::now(),
     };
-    state.store.create_project(&project).await?;
+    state
+        .store
+        .create_project_scoped(&auth.principal.owner_id(), &project)
+        .await?;
     Ok((StatusCode::CREATED, Json(project)))
 }
 
 /// `PATCH /projects/{id}` — update bounded human-facing project metadata.
 pub async fn patch_project(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path(id): Path<ProjectId>,
     Json(body): Json<ProjectUpdate>,
 ) -> Result<Json<Project>, ServerError> {
+    let owner = auth.principal.owner_id();
     let title = body.title.map(normalize_project_title).transpose()?;
     if let Some(title) = title {
-        if !state.store.update_project_title(id, title).await? {
+        if !state
+            .store
+            .update_project_title_scoped(&owner, id, title)
+            .await?
+        {
             return Err(ServerError::not_found(format!("project {id} not found")));
         }
     }
     state
         .store
-        .get_project(id)
+        .get_project_scoped(&owner, id)
         .await?
         .map(Json)
         .ok_or_else(|| ServerError::not_found(format!("project {id} not found")))
@@ -1338,18 +1355,25 @@ pub async fn patch_project(
 /// `GET /projects` — list projects, most-recently-created first.
 pub async fn list_projects(
     State(state): State<AppState>,
+    auth: AuthContext,
 ) -> Result<Json<Vec<Project>>, ServerError> {
-    Ok(Json(state.store.list_projects().await?))
+    Ok(Json(
+        state
+            .store
+            .list_projects_scoped(&auth.principal.owner_id())
+            .await?,
+    ))
 }
 
 /// `GET /projects/{id}` — fetch one project, or `404`.
 pub async fn get_project(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path(id): Path<ProjectId>,
 ) -> Result<Json<Project>, ServerError> {
     state
         .store
-        .get_project(id)
+        .get_project_scoped(&auth.principal.owner_id(), id)
         .await?
         .map(Json)
         .ok_or_else(|| ServerError::not_found(format!("project {id} not found")))
@@ -1360,9 +1384,14 @@ pub async fn get_project(
 /// lifecycle APIs first; this boundary never cascades them.
 pub async fn delete_project(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path(id): Path<ProjectId>,
 ) -> Result<StatusCode, ServerError> {
-    match state.store.delete_project(id).await? {
+    match state
+        .store
+        .delete_project_scoped(&auth.principal.owner_id(), id)
+        .await?
+    {
         DeleteProjectOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
         DeleteProjectOutcome::NotFound => {
             Err(ServerError::not_found(format!("project {id} not found")))
@@ -1402,14 +1431,16 @@ pub struct CreateChat {
 /// `POST /chats` — create a chat and return it (`201 Created`).
 pub async fn create_chat(
     State(state): State<AppState>,
+    auth: AuthContext,
     Json(mut body): Json<CreateChat>,
 ) -> Result<impl IntoResponse, ServerError> {
+    let owner = auth.principal.owner_id();
     // Return a product-facing 400 for an unknown project. The Store and schema
     // independently enforce the same membership invariant inside insertion.
     if let Some(project_id) = body.project_id {
         state
             .store
-            .get_project(project_id)
+            .get_project_scoped(&owner, project_id)
             .await?
             .ok_or_else(|| ServerError::not_found(format!("project {project_id} not found")))?;
     }
@@ -1430,7 +1461,10 @@ pub async fn create_chat(
         root_attachments: Vec::new(),
         created_at: Utc::now(),
     };
-    let chat = state.store.create_chat_with_project_defaults(&chat).await?;
+    let chat = state
+        .store
+        .create_chat_with_project_defaults_scoped(&owner, &chat)
+        .await?;
     Ok((StatusCode::CREATED, Json(chat)))
 }
 
@@ -1461,9 +1495,11 @@ pub struct ChatUpdate {
 /// `PATCH /chats/{id}` — update the human-facing title and/or model selection.
 pub async fn patch_chat(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path(id): Path<ChatId>,
     Json(mut body): Json<ChatUpdate>,
 ) -> Result<Json<Chat>, ServerError> {
+    let owner = auth.principal.owner_id();
     // Validate every supplied field before touching durable state. This keeps a
     // mixed request all-or-nothing from the user's point of view.
     if let Some(Some(model)) = body.model.as_mut() {
@@ -1480,13 +1516,14 @@ pub async fn patch_chat(
 
     let mut chat = state
         .store
-        .get_chat(id)
+        .get_chat_scoped(&owner, id)
         .await?
         .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))?;
 
     if !state
         .store
-        .update_chat_metadata(
+        .update_chat_metadata_scoped(
+            &owner,
             id,
             title.clone(),
             body.model.clone(),
@@ -1713,11 +1750,12 @@ impl ChatMessageSnapshot {
 /// an empty conversation.
 pub async fn list_chat_messages(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path(id): Path<ChatId>,
 ) -> Result<Json<ChatTranscript>, ServerError> {
     let transcript = state
         .store
-        .get_chat_transcript(id)
+        .get_chat_transcript_scoped(&auth.principal.owner_id(), id)
         .await?
         .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))?;
     let mut citations_by_message = std::collections::HashMap::new();
@@ -1795,18 +1833,27 @@ pub async fn list_chat_messages(
 }
 
 /// `GET /chats` — list chats, most-recently-created first.
-pub async fn list_chats(State(state): State<AppState>) -> Result<Json<Vec<Chat>>, ServerError> {
-    Ok(Json(state.store.list_chats().await?))
+pub async fn list_chats(
+    State(state): State<AppState>,
+    auth: AuthContext,
+) -> Result<Json<Vec<Chat>>, ServerError> {
+    Ok(Json(
+        state
+            .store
+            .list_chats_scoped(&auth.principal.owner_id())
+            .await?,
+    ))
 }
 
 /// `GET /chats/{id}` — fetch one chat, or `404`.
 pub async fn get_chat(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path(id): Path<ChatId>,
 ) -> Result<Json<Chat>, ServerError> {
     state
         .store
-        .get_chat(id)
+        .get_chat_scoped(&auth.principal.owner_id(), id)
         .await?
         .map(Json)
         .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))
@@ -1817,9 +1864,14 @@ pub async fn get_chat(
 /// caller must first finish cancellation and durable broker detachment.
 pub async fn delete_chat(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path(id): Path<ChatId>,
 ) -> Result<StatusCode, ServerError> {
-    match state.store.delete_chat(id).await? {
+    match state
+        .store
+        .delete_chat_scoped(&auth.principal.owner_id(), id)
+        .await?
+    {
         DeleteChatOutcome::Deleted => {
             state.blob_retirement_wake.notify_one();
             let scratch_root = state.config.data_dir.join("scratch");
@@ -2126,11 +2178,12 @@ fn foreground_activity(
 /// `GET /chats/{id}/agent-runs` — list renderer-safe execution state.
 pub async fn list_agent_runs(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path(id): Path<ChatId>,
 ) -> Result<Json<Vec<AgentRunSnapshot>>, ServerError> {
     state
         .store
-        .get_chat(id)
+        .get_chat_scoped(&auth.principal.owner_id(), id)
         .await?
         .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))?;
     let runs = state.store.list_agent_runs(id).await?;
@@ -2169,9 +2222,15 @@ pub async fn list_agent_runs(
 /// unrelated run identifier exists.
 pub async fn list_agent_run_activity(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path((chat_id, run_id)): Path<(ChatId, openwave_core::AgentRunId)>,
 ) -> Result<Json<Vec<AgentActivityHistoryItem>>, ServerError> {
-    if state.store.get_chat(chat_id).await?.is_none() {
+    if state
+        .store
+        .get_chat_scoped(&auth.principal.owner_id(), chat_id)
+        .await?
+        .is_none()
+    {
         return Err(ServerError::not_found(format!("chat {chat_id} not found")));
     }
     let run = state
@@ -2214,9 +2273,15 @@ pub enum AgentRunCancellationStatus {
 /// executor details.
 pub async fn post_agent_run_cancel(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path((chat_id, run_id)): Path<(ChatId, openwave_core::AgentRunId)>,
 ) -> Result<(StatusCode, Json<AgentRunCancellationSnapshot>), ServerError> {
-    if state.store.get_chat(chat_id).await?.is_none() {
+    if state
+        .store
+        .get_chat_scoped(&auth.principal.owner_id(), chat_id)
+        .await?
+        .is_none()
+    {
         return Err(ServerError::not_found(format!("chat {chat_id} not found")));
     }
     let Some(run) = state.store.get_agent_run(run_id).await? else {
@@ -2614,6 +2679,7 @@ mod image_capability_tests {
 /// with `model_image_input_unsupported`.
 pub async fn post_message(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path(id): Path<ChatId>,
     Json(body): Json<PostMessage>,
 ) -> Result<StatusCode, ServerError> {
@@ -2627,7 +2693,7 @@ pub async fn post_message(
     }
     let chat = state
         .store
-        .get_chat(id)
+        .get_chat_scoped(&auth.principal.owner_id(), id)
         .await?
         .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))?;
 
@@ -2751,6 +2817,7 @@ pub struct SteerBody {
 /// unavailable turn, and `400` for malformed input.
 pub async fn post_steer(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path(id): Path<ChatId>,
     Json(body): Json<SteerBody>,
 ) -> Result<StatusCode, ServerError> {
@@ -2765,7 +2832,12 @@ pub async fn post_steer(
             "steer content must be non-empty, contain no NUL characters, and fit the size limit",
         ));
     }
-    if state.store.get_chat(id).await?.is_none() {
+    if state
+        .store
+        .get_chat_scoped(&auth.principal.owner_id(), id)
+        .await?
+        .is_none()
+    {
         return Err(ServerError::not_found(format!("chat {id} not found")));
     }
     match state
@@ -2811,11 +2883,17 @@ pub struct CancelBody {
 
 pub async fn post_cancel(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path(id): Path<ChatId>,
     Json(body): Json<CancelBody>,
 ) -> Result<StatusCode, ServerError> {
     // Distinguish "unknown chat" (404) from "known chat, nothing running" (409).
-    if state.store.get_chat(id).await?.is_none() {
+    if state
+        .store
+        .get_chat_scoped(&auth.principal.owner_id(), id)
+        .await?
+        .is_none()
+    {
         return Err(ServerError::not_found(format!("chat {id} not found")));
     }
     if !state
@@ -3028,6 +3106,7 @@ pub(crate) fn grant_rungs_from_scopes(
 /// `GET /chats/{id}/approvals` — recover a bounded page of pending cards.
 pub(crate) async fn list_pending_approvals(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path(chat_id): Path<ChatId>,
     Query(query): Query<PendingApprovalsQuery>,
 ) -> Result<Json<Vec<PendingApprovalSnapshot>>, ServerError> {
@@ -3036,7 +3115,12 @@ pub(crate) async fn list_pending_approvals(
             "approval limit must be between 1 and 100",
         ));
     }
-    if state.store.get_chat(chat_id).await?.is_none() {
+    if state
+        .store
+        .get_chat_scoped(&auth.principal.owner_id(), chat_id)
+        .await?
+        .is_none()
+    {
         return Err(ServerError::not_found(format!("chat {chat_id} not found")));
     }
     let approvals = state
@@ -3141,11 +3225,17 @@ pub(crate) async fn delete_standing_grant(
 /// holding its slot until it finishes after the decision.
 pub async fn post_approval(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path((chat_id, call_id)): Path<(ChatId, CallId)>,
     Json(body): Json<ApprovalBody>,
 ) -> Result<StatusCode, ServerError> {
     // Confirm the chat exists so a typo'd id doesn't look like "not pending".
-    if state.store.get_chat(chat_id).await?.is_none() {
+    if state
+        .store
+        .get_chat_scoped(&auth.principal.owner_id(), chat_id)
+        .await?
+        .is_none()
+    {
         return Err(ServerError::not_found(format!("chat {chat_id} not found")));
     }
     let decision = match body.decision {
@@ -3233,12 +3323,17 @@ pub struct EventsQuery {
 /// browser accepts the handshake (RFC 6455).
 pub async fn chat_events(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path(id): Path<ChatId>,
     Query(query): Query<EventsQuery>,
     headers: axum::http::HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Result<Response, ServerError> {
-    let Some(chat) = state.store.get_chat(id).await? else {
+    let Some(chat) = state
+        .store
+        .get_chat_scoped(&auth.principal.owner_id(), id)
+        .await?
+    else {
         return Err(ServerError::not_found(format!("chat {id} not found")));
     };
     let upgrade = if offered_handshake_subprotocol(&headers) {
