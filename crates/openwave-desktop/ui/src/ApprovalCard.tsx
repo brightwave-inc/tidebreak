@@ -245,6 +245,9 @@ export function approvalAsk(
   if (preview?.tool === "exec") {
     return { title: "Run this command?", summaryLine: summary };
   }
+  if (preview?.tool === "write_file") {
+    return { title: "Write this file?", summaryLine: summary };
+  }
   return { title: summary, summaryLine: null };
 }
 
@@ -385,7 +388,9 @@ function spokenAction(preview: ToolActionPreview): string {
       ? [preview.command, ...preview.args].join(" ")
       : preview.tool === "web_extract"
         ? preview.url
-        : preview.query;
+        : preview.tool === "write_file"
+          ? preview.path
+          : preview.query;
   return spoken.length > SPOKEN_ACTION_CHARS
     ? `${spoken.slice(0, SPOKEN_ACTION_CHARS).trimEnd()}\u2026`
     : spoken;

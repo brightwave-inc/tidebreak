@@ -40,6 +40,15 @@ export function toolPreviewPresentation(
       .join("\n");
     return { headline, detail };
   }
+  if (preview.tool === "write_file") {
+    // The path is the resource under review: the card says where the write
+    // lands, and the content deliberately never crosses the boundary.
+    const headline = preview.path;
+    return {
+      headline,
+      detail: `${headline}\n# written into this chat's workspace`,
+    };
+  }
   if (preview.tool === "web_extract") {
     // The URL is the whole action: what leaves the device and where the
     // request goes are the same string, so the card shows it unabridged.

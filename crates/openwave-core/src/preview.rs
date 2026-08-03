@@ -75,6 +75,14 @@ pub enum ToolActionPreview {
     /// both what leaves the device and where the request goes — so the card
     /// shows it whole.
     WebExtract { url: String },
+    /// A file write inside the chat's private workspace. The path is the
+    /// resource under review — which file the call will create or replace —
+    /// and deliberately the only field: the content is not projected, so the
+    /// card names the target without carrying a document across the boundary.
+    WriteFile {
+        /// Workspace-relative destination path, never a host path.
+        path: String,
+    },
 }
 
 impl ToolActionPreview {
@@ -115,6 +123,13 @@ impl ToolActionPreview {
                     arguments.get("url")?.as_str()?.trim(),
                     MAX_ACTION_FIELD_CHARS,
                 )?,
+            }),
+            // A workspace write gated in Ask mode names the file it will touch.
+            // The content stays behind the boundary: the resource is the path,
+            // and the card's job is to say where the write lands, not to
+            // preview a document.
+            "write_file" => Some(Self::WriteFile {
+                path: clamp(arguments.get("path")?.as_str()?, MAX_ACTION_FIELD_CHARS)?,
             }),
             _ => None,
         }
@@ -168,6 +183,12 @@ impl ToolActionPreview {
                 .get("url")
                 .and_then(Value::as_str)
                 .is_some_and(|url| survives_clamp(url.trim())),
+            // Deliberately not exact: the preview names the path and omits the
+            // content, so it can never reproduce the call. A workspace write is
+            // one-shot anyway (its standing "yes" is the chat's Auto mode), and
+            // keeping it inexact means no narrow grant or judge candidacy can
+            // ever be built from a projection that lost the document.
+            "write_file" => false,
             // A tool with no variant projects nothing, so there is nothing a
             // narrower scope could name — and claiming otherwise would invite a
             // narrow grant with nothing to narrow to.
@@ -934,10 +955,7 @@ mod tests {
     #[test]
     fn only_tools_with_a_variant_project_anything() {
         for (tool, arguments) in [
-            (
-                "write_file",
-                serde_json::json!({ "path": "/Users/private" }),
-            ),
+            ("read_file", serde_json::json!({ "path": "notes.md" })),
             ("mcp__server__tool", serde_json::json!({ "any": "thing" })),
         ] {
             assert_eq!(ToolActionPreview::build(tool, &arguments), None);
@@ -959,6 +977,38 @@ mod tests {
                 None
             );
         }
+    }
+
+    /// A gated workspace write names the file it will touch, and nothing else.
+    ///
+    /// The card used to ask about "files in this chat's workspace" without
+    /// saying which one. The projection carries the path — the resource under
+    /// review — and deliberately not the content, so the action can never be
+    /// exactly describable: no narrow grant and no judge candidacy can be
+    /// built from a projection that lost the document.
+    #[test]
+    fn a_workspace_write_names_its_path_but_is_never_exact() {
+        let arguments = json!({ "path": "reports/q3.md", "content": "private document body" });
+        let preview = ToolActionPreview::build("write_file", &arguments);
+        assert_eq!(
+            preview,
+            Some(ToolActionPreview::WriteFile {
+                path: "reports/q3.md".into()
+            })
+        );
+        // Wire shape: the serialized preview carries the path and never the
+        // content, whatever the arguments held.
+        let json = serde_json::to_string(&preview.unwrap()).unwrap();
+        assert_eq!(json, r#"{"tool":"write_file","path":"reports/q3.md"}"#);
+        assert!(!ToolActionPreview::describes_exactly(
+            "write_file",
+            &arguments
+        ));
+        // Malformed arguments project nothing rather than an empty card.
+        assert_eq!(
+            ToolActionPreview::build("write_file", &json!({ "content": "x" })),
+            None
+        );
     }
 
     #[test]
