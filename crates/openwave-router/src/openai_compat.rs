@@ -161,7 +161,9 @@ impl ModelProvider for OpenAiCompatProvider {
             // The stream ended without a finish_reason (some local servers
             // omit it on clean close).
             if !state.stopped && !state.terminal {
-                yield state.end_of_stream();
+                for event in state.end_of_stream() {
+                    yield event;
+                }
             }
         };
         Ok(Box::pin(stream))
@@ -422,6 +424,10 @@ struct StreamState {
     /// Tool-call argument buffers keyed by the stream-local index.
     tool_calls: std::collections::BTreeMap<u32, ToolCallBuf>,
     usage: Usage,
+    /// Set once a `ProviderEvent::Usage` has gone out. The consumer sums usage
+    /// events, and some servers repeat cumulative counts on several chunks, so
+    /// the recorded total must be emitted exactly once per stream.
+    usage_emitted: bool,
     stopped: bool,
     /// Set once the stream has terminalized on an in-band error. It suppresses
     /// both later frames and the synthetic end-of-stream event below.
@@ -429,23 +435,36 @@ struct StreamState {
 }
 
 impl StreamState {
+    /// True once a usage total worth reporting has been recorded but not yet
+    /// emitted. Zero usage stays silent — a server that never reports usage
+    /// records zero, exactly as before.
+    fn has_unemitted_usage(&self) -> bool {
+        !self.usage_emitted && (self.usage.input_tokens > 0 || self.usage.output_tokens > 0)
+    }
+
     /// What the end of the byte stream means when no `finish_reason` arrived.
     ///
     /// Some local servers omit `finish_reason` on a clean close, so text alone
-    /// still gets the synthetic `Stop`. An *announced* tool call is different:
-    /// a silently dropped connection is indistinguishable from an omitted
-    /// `finish_reason` on the wire, and the call's argument JSON may be
+    /// still gets the synthetic `Stop` — preceded by any recorded usage, which
+    /// otherwise has no chunk left to carry it out. An *announced* tool call is
+    /// different: a silently dropped connection is indistinguishable from an
+    /// omitted `finish_reason` on the wire, and the call's argument JSON may be
     /// truncated mid-value, so the conservative reading fails the step rather
     /// than committing the fragment as a finished call.
-    fn end_of_stream(&self) -> ProviderEvent {
+    fn end_of_stream(&self) -> Vec<ProviderEvent> {
         if self.tool_calls.values().any(|call| call.started) {
-            ProviderEvent::Failed {
+            vec![ProviderEvent::Failed {
                 error: ProviderErrorInfo::provider("openai-compat stream ended mid-tool-call"),
-            }
+            }]
         } else {
-            ProviderEvent::Stop {
-                reason: StopReason::EndTurn,
+            let mut events = Vec::new();
+            if self.has_unemitted_usage() {
+                events.push(ProviderEvent::Usage(self.usage));
             }
+            events.push(ProviderEvent::Stop {
+                reason: StopReason::EndTurn,
+            });
+            events
         }
     }
 }
@@ -480,8 +499,12 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
     let mut events = Vec::new();
 
     if let Some(usage) = data.get("usage") {
-        // Chat Completions usage often arrives on the final chunk. OpenAI's
-        // `prompt_tokens` is the full prompt; cached details are optional.
+        // With `stream_options.include_usage`, native OpenAI reports usage in a
+        // trailing chunk with `"choices": []`, *after* the `finish_reason`
+        // chunk. Other servers attach it to the finish chunk itself. Record it
+        // either way; if the stream already stopped, this trailing chunk is the
+        // only chance to emit it. OpenAI's `prompt_tokens` is the full prompt;
+        // cached details are optional.
         let prompt = u32_at(usage, "prompt_tokens");
         let cached = usage
             .get("prompt_tokens_details")
@@ -493,6 +516,10 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
             cache_read_input_tokens: cached,
             cache_creation_input_tokens: 0,
         };
+        if state.stopped && state.has_unemitted_usage() {
+            state.usage_emitted = true;
+            events.push(ProviderEvent::Usage(state.usage));
+        }
     }
 
     let Some(choice) = data
@@ -574,7 +601,8 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
     }
 
     if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
-        if state.usage.input_tokens > 0 || state.usage.output_tokens > 0 {
+        if state.has_unemitted_usage() {
+            state.usage_emitted = true;
             events.push(ProviderEvent::Usage(state.usage));
         }
         events.push(ProviderEvent::Stop {
@@ -871,8 +899,8 @@ mod tests {
         let ending = state.end_of_stream();
         assert!(
             matches!(
-                &ending,
-                ProviderEvent::Failed { error } if error.kind == "provider"
+                ending.as_slice(),
+                [ProviderEvent::Failed { error }] if error.kind == "provider"
             ),
             "expected a failure, got {ending:?}"
         );
@@ -883,28 +911,85 @@ mod tests {
         let _ = normalize(&json!({"choices":[{"delta":{"content":"hi"}}]}), &mut state);
         assert_eq!(
             state.end_of_stream(),
-            ProviderEvent::Stop {
+            vec![ProviderEvent::Stop {
                 reason: StopReason::EndTurn
-            }
+            }]
         );
     }
 
     #[test]
     fn normalizes_text_usage_and_stop() {
+        // Native OpenAI with `stream_options.include_usage`: usage arrives in a
+        // trailing chunk with empty `choices`, after the finish chunk. This is
+        // the shape that used to lose usage entirely (#1089).
         let out = run(&[
             json!({"choices":[{"delta":{"content":"he"}}]}),
             json!({"choices":[{"delta":{"content":"llo"}}]}),
-            json!({"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":4}}}),
+            json!({"choices":[{"delta":{},"finish_reason":"stop"}]}),
+            json!({"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":4}}}),
         ]);
         assert_eq!(
             out,
             vec![
                 ProviderEvent::TextDelta { text: "he".into() },
                 ProviderEvent::TextDelta { text: "llo".into() },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn
+                },
                 ProviderEvent::Usage(Usage {
                     input_tokens: 6,
                     output_tokens: 2,
                     cache_read_input_tokens: 4,
+                    cache_creation_input_tokens: 0,
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn usage_on_the_finish_chunk_is_emitted_once() {
+        // Some compatible servers attach usage to the finish chunk itself, and
+        // a few repeat the cumulative total on a trailing chunk too. The total
+        // must go out exactly once — the consumer sums usage events.
+        let out = run(&[
+            json!({"choices":[{"delta":{"content":"hi"}}]}),
+            json!({"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}),
+            json!({"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2}}),
+        ]);
+        assert_eq!(
+            out,
+            vec![
+                ProviderEvent::TextDelta { text: "hi".into() },
+                ProviderEvent::Usage(Usage {
+                    input_tokens: 10,
+                    output_tokens: 2,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                }),
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn usage_without_a_finish_reason_survives_the_end_of_stream_fallback() {
+        // A server that reports usage but omits `finish_reason` on a clean
+        // close: the synthetic end-of-stream Stop must not drop the total.
+        let mut state = StreamState::default();
+        let _ = normalize(&json!({"choices":[{"delta":{"content":"hi"}}]}), &mut state);
+        let _ = normalize(
+            &json!({"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3}}),
+            &mut state,
+        );
+        assert_eq!(
+            state.end_of_stream(),
+            vec![
+                ProviderEvent::Usage(Usage {
+                    input_tokens: 7,
+                    output_tokens: 3,
+                    cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                 }),
                 ProviderEvent::Stop {
