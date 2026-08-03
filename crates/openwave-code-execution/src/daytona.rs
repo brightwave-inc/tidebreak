@@ -445,11 +445,30 @@ impl RemoteSandboxAdapter for DaytonaExecutionProvider {
         self.credential.fingerprint()
     }
 
+    fn egress_fingerprint(&self) -> [u8; 32] {
+        crate::remote::egress_policy_fingerprint(self.egress.as_ref())
+    }
+
     async fn create_session(
         &self,
         workspace_id: &str,
     ) -> Result<RemoteSession, CodeExecutionError> {
         self.create_sandbox(workspace_id).await
+    }
+
+    async fn destroy_sandbox(&self, session: &RemoteSession) -> Result<(), CodeExecutionError> {
+        validate_sandbox_id(&session.sandbox_id)?;
+        let response = self
+            .client
+            .delete(self.api_url(&format!("/sandbox/{}", session.sandbox_id)))
+            .bearer_auth(self.credential.as_str())
+            .send()
+            .await
+            .map_err(|_| CodeExecutionError::Unavailable("could not reach Daytona".into()))?;
+        if response.status() == StatusCode::NOT_FOUND || response.status().is_success() {
+            return Ok(());
+        }
+        Err(provider_status_error(response.status()))
     }
 
     async fn reconnect_session(
@@ -586,21 +605,6 @@ impl RemoteWorkspaceAdapter for DaytonaExecutionProvider {
         let truncated = entries.len() > MAX_WORKSPACE_LIST_ENTRIES;
         entries.truncate(MAX_WORKSPACE_LIST_ENTRIES);
         Ok(WorkspaceListing { entries, truncated })
-    }
-
-    async fn destroy_sandbox(&self, session: &RemoteSession) -> Result<(), CodeExecutionError> {
-        validate_sandbox_id(&session.sandbox_id)?;
-        let response = self
-            .client
-            .delete(self.api_url(&format!("/sandbox/{}", session.sandbox_id)))
-            .bearer_auth(self.credential.as_str())
-            .send()
-            .await
-            .map_err(|_| CodeExecutionError::Unavailable("could not reach Daytona".into()))?;
-        if response.status() == StatusCode::NOT_FOUND || response.status().is_success() {
-            return Ok(());
-        }
-        Err(provider_status_error(response.status()))
     }
 }
 
