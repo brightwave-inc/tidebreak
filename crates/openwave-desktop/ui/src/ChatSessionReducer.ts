@@ -6,6 +6,7 @@ import { TURN_CANCELLED_NOTICE } from "./MessageList";
 import type { ToolCallStatus } from "./ToolCallCard";
 import { toolApprovalPresentation } from "./ToolCallCard";
 import { upsertPendingApprovalCard } from "./ApprovalHistory";
+import { PRESENTATION_MEDIA_TYPES } from "./document/officePdf";
 
 /**
  * The pure state machine for one chat session's live event stream.
@@ -50,7 +51,13 @@ export type ChatSessionEffect =
   /** Replace the optimistic transcript with the authoritative one. */
   | { type: "hydrate_terminal_transcript" }
   /** A terminal boundary passed without hydration; stale loads must not land. */
-  | { type: "invalidate_terminal_hydration" };
+  | { type: "invalidate_terminal_hydration" }
+  /**
+   * A turn just produced its first presentation output; start the managed
+   * LibreOffice download now so the first preview click finds it ready (or at
+   * least under way) instead of starting a 300 MB fetch on demand.
+   */
+  | { type: "warm_presentation_converter" };
 
 export type ChatSessionTransition = {
   state: ChatSessionState;
@@ -292,6 +299,16 @@ export function reduceChatSessionEvent(
         (completedResult.outputs?.length ?? 0) > 0
       ) {
         effects.push({ type: "refresh_output_writebacks" });
+        // A deck exists now; the preview will want a converter shortly.
+        if (
+          completedResult.outputs?.some(
+            (output) =>
+              output.mediaType !== null &&
+              PRESENTATION_MEDIA_TYPES.has(output.mediaType),
+          )
+        ) {
+          effects.push({ type: "warm_presentation_converter" });
+        }
       }
       return {
         state: {

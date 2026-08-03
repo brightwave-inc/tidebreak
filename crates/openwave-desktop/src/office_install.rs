@@ -178,7 +178,14 @@ fn install_lock() -> &'static tokio::sync::Mutex<()> {
 /// preview stops auto-retrying until the user asks again.
 #[tauri::command]
 pub(crate) async fn install_presentation_converter(app: AppHandle) -> Result<(), String> {
-    let data_dir = crate::data_dir(&app)?;
+    ensure_installed(&app).await
+}
+
+/// The one install path both entry points share: serialize on the install
+/// lock, short-circuit if a concurrent caller already finished, run the
+/// install with a registered cancel flag, and remember the outcome.
+async fn ensure_installed(app: &AppHandle) -> Result<(), String> {
+    let data_dir = crate::data_dir(app)?;
     let _serialized = install_lock().lock().await;
     if managed_soffice(&data_dir).is_some() {
         // Another caller finished the install while this one waited.
@@ -192,13 +199,53 @@ pub(crate) async fn install_presentation_converter(app: AppHandle) -> Result<(),
         state.last_failure = None;
         state.cancel = Some(cancel.clone());
     }
-    let outcome = run_install(&app, &data_dir, &cancel).await;
+    let outcome = run_install(app, &data_dir, &cancel).await;
     {
         let mut state = state().lock().expect("install state lock");
         state.cancel = None;
         state.last_failure = outcome.as_ref().err().cloned();
     }
     outcome
+}
+
+/// Start the managed install in the background, ahead of the first preview.
+///
+/// The renderer fires this when a turn produces its first presentation
+/// output: by the time the user clicks the deck, the ~300 MB download is
+/// already under way or done, instead of starting at the moment a preview
+/// panel needs it. Deliberately quiet and non-binding — it never blocks
+/// anything, runs at most once per app run, and defers to every existing
+/// rule: a verified managed install, a *working* converter the user already
+/// has, or a remembered failure each make it a no-op. A broken launcher
+/// script on `PATH` (a package manager's leftover) does not count as a
+/// working converter here, exactly as it does not at conversion time.
+///
+/// Progress still goes out on [`INSTALL_PROGRESS_EVENT`], so a preview panel
+/// opened mid-warm-up joins the install (over the same lock) and shows the
+/// real download bar rather than starting a second download.
+#[tauri::command]
+pub(crate) fn warm_presentation_converter(app: AppHandle) {
+    if !supported() {
+        return;
+    }
+    static WARM_REQUESTED: AtomicBool = AtomicBool::new(false);
+    if WARM_REQUESTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        let Ok(data_dir) = crate::data_dir(&app) else {
+            return;
+        };
+        if managed_soffice(&data_dir).is_some() || last_failure().is_some() {
+            return;
+        }
+        if crate::office_pdf::workable_system_soffice().await {
+            return;
+        }
+        // Failures are remembered like any install failure; the preview
+        // surfaces the reason with a Try again instead of re-downloading.
+        let _ = ensure_installed(&app).await;
+    });
 }
 
 /// Flag the in-flight install to stop. The install command itself returns

@@ -120,6 +120,21 @@ pub(crate) async fn convert_presentation_to_pdf(
         }
     }
 
+    // One conversion at a time. Duplicate requests for the same deck arrive
+    // routinely (two panels, or a fetch retried around an aborted render) and
+    // used to race two cold LibreOffice launches — flaky in exactly the
+    // hard-to-reproduce way, and their `.partial` cache staging collided.
+    // Serialized, the second request waits and is answered from the cache the
+    // first one just wrote.
+    let _serialized = conversion_lock().lock().await;
+    if let Ok(cached) = tokio::fs::read(&cache_path).await {
+        if !cached.is_empty() {
+            return Ok(PresentationPdfResult::Converted {
+                pdf_base64: BASE64.encode(cached),
+            });
+        }
+    }
+
     let Some(soffice) = locate_soffice(&data_dir) else {
         return Ok(converter_missing());
     };
@@ -212,6 +227,42 @@ fn system_soffice() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Whether a system LibreOffice not only resolves but actually runs.
+///
+/// The install warm-up must not be talked out of downloading by a leftover
+/// launcher script on `PATH` — a Homebrew shim pointing at a removed
+/// `/Applications` bundle resolves as a file, spawns, and exits 126/127. One
+/// cheap `--version` probe (called at most once per app run) separates a
+/// converter that will work from remains that will not.
+pub(crate) async fn workable_system_soffice() -> bool {
+    let Some(candidate) = system_soffice() else {
+        return false;
+    };
+    let mut command = Command::new(&candidate);
+    command
+        .arg("--version")
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let Ok(child) = command.spawn() else {
+        return false;
+    };
+    matches!(
+        tokio::time::timeout(Duration::from_secs(20), child.wait_with_output()).await,
+        Ok(Ok(output)) if output.status.success()
+    )
+}
+
+/// Serializes conversions; see the call site for why concurrency here is a
+/// hazard rather than a win.
+fn conversion_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+    &LOCK
 }
 
 #[cfg(target_os = "macos")]
@@ -334,12 +385,22 @@ async fn run_conversion(
         if matches!(output.status.code(), Some(126) | Some(127)) {
             return Err(ConversionError::Spawn);
         }
+        // The reason travels to the failure card, so it names what actually
+        // happened: LibreOffice's own words when it said any, its exit status
+        // when it did not.
         let detail = String::from_utf8_lossy(&output.stderr);
-        let detail = detail.trim();
+        let detail = brief(detail.trim());
         return Err(ConversionError::Failed(if detail.is_empty() {
-            "The presentation could not be converted".to_owned()
+            format!(
+                "LibreOffice produced no PDF ({})",
+                if output.status.success() {
+                    "it exited cleanly without writing one".to_owned()
+                } else {
+                    output.status.to_string()
+                }
+            )
         } else {
-            format!("The presentation could not be converted: {detail}")
+            format!("LibreOffice failed: {detail}")
         }));
     }
     if produced_len > MAX_PDF_BYTES {
@@ -350,6 +411,18 @@ async fn run_conversion(
     tokio::fs::read(&produced)
         .await
         .map_err(|error| ConversionError::Failed(format!("conversion: {error}")))
+}
+
+/// The leading slice of a tool's stderr that fits a failure card. LibreOffice
+/// can dump pages; the first lines carry the diagnosis.
+fn brief(detail: &str) -> String {
+    const MAX_CHARS: usize = 400;
+    if detail.chars().count() <= MAX_CHARS {
+        return detail.to_owned();
+    }
+    let mut cut: String = detail.chars().take(MAX_CHARS).collect();
+    cut.push('…');
+    cut
 }
 
 /// A `file:` URI for LibreOffice's `-env:UserInstallation` argument.
