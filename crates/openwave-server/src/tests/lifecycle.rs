@@ -2089,11 +2089,28 @@ async fn resumed_worker_preserves_checkpoint_usage_and_step_budget() {
     resolve_parked_client_call(&*store, exhausted_chat.id, &exhausted_call).await;
     state.turn_job_wake.notify_one();
     let exhausted_events = wait_for_turn(&store, exhausted_chat.id).await;
+    // The checkpoint spent the whole step budget, so the resuming segment has
+    // zero steps left. It still owes the user a closing answer: the resume
+    // runs the tool-free wrap-up call instead of failing (#1181), and the
+    // wrap-up stays outside the budget in the durable accounting.
     assert!(matches!(
         exhausted_events.last().map(|event| &event.event),
-        Some(AgentEvent::TurnFailed { error }) if error.kind == "max_steps_exceeded"
+        Some(AgentEvent::TurnCompleted { usage, .. })
+            if *usage == Usage {
+                input_tokens: exhausted_progress.usage.input_tokens + 2,
+                output_tokens: exhausted_progress.usage.output_tokens + 1,
+                cache_read_input_tokens: exhausted_progress.usage.cache_read_input_tokens,
+                cache_creation_input_tokens: exhausted_progress.usage.cache_creation_input_tokens,
+            }
     ));
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let exhausted_turn = store
+        .list_turn_runs(exhausted_chat.id)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(exhausted_turn.model_steps, 2);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2283,11 +2300,12 @@ async fn worker_checkpoints_a_client_tool_and_resumes_after_its_result() {
         },
         openwave_core::ApprovalClass::ReadOnly,
     );
+    let exhausted_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
     let exhausted_state = AppState::new(
         Config::desktop(exhausted_dir.path()),
         exhausted_store.clone(),
         Arc::new(FixedResolver(Arc::new(ClientThenFinishProvider {
-            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+            requests: exhausted_requests.clone(),
         }))),
         Arc::new(MemSecrets::default()),
         Arc::new(exhausted_tools),
@@ -2299,7 +2317,7 @@ async fn worker_checkpoints_a_client_tool_and_resumes_after_its_result() {
     );
     let exhausted_token = exhausted_state.token.clone();
     spawn_turn_worker(&exhausted_state);
-    let exhausted_router = app(exhausted_state);
+    let exhausted_router = app(exhausted_state.clone());
     let exhausted_bearer = format!("Bearer {exhausted_token}");
     let exhausted_chat = make_chat(&exhausted_router, &exhausted_bearer).await;
     let exhausted_turn_id = TurnId::new();
@@ -2314,19 +2332,63 @@ async fn worker_checkpoints_a_client_tool_and_resumes_after_its_result() {
         .await,
         StatusCode::ACCEPTED
     );
+    // The client tool call landed on the last budgeted step. The turn still
+    // parks — refusing here would throw the call away — and the resuming
+    // zero-budget segment closes with the tool-free wrap-up call (#1181).
+    let exhausted_pending = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let pending = exhausted_store
+                .list_pending_client_tool_calls(exhausted_chat.id)
+                .await
+                .unwrap();
+            if let Some(call) = pending.into_iter().next() {
+                break call;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the last budgeted step still parks its client tool");
+    let exhausted_parked = exhausted_store
+        .get_turn_run(exhausted_turn_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(exhausted_parked.status, TurnRunStatus::WaitingForClient);
+    assert_eq!(exhausted_parked.model_steps, 1);
+    resolve_parked_client_call(
+        &*exhausted_store,
+        exhausted_chat.id,
+        &ClientToolCallRequest {
+            id: exhausted_pending.id,
+            chat_id: exhausted_pending.chat_id,
+            turn_id: exhausted_pending.turn_id,
+            provider_id: exhausted_pending.provider_id.clone(),
+            name: exhausted_pending.name.clone(),
+            arguments: exhausted_pending.arguments.clone(),
+        },
+    )
+    .await;
+    exhausted_state.turn_job_wake.notify_one();
     let exhausted_events = wait_for_turn(&exhausted_store, exhausted_chat.id).await;
     assert!(matches!(
         exhausted_events.last().map(|event| &event.event),
-        Some(AgentEvent::TurnFailed { error }) if error.kind == "max_steps_exceeded"
+        Some(AgentEvent::TurnCompleted { .. })
     ));
+    {
+        // The resumed segment had no steps left, so its one model call is the
+        // wrap-up: no tools advertised, tool result in the transcript.
+        let exhausted_requests = exhausted_requests.lock().unwrap();
+        assert_eq!(exhausted_requests.len(), 2);
+        assert!(exhausted_requests[1].tools.is_empty());
+    }
     let exhausted_turn = exhausted_store
         .get_turn_run(exhausted_turn_id)
         .await
         .unwrap()
         .unwrap();
+    // The wrap-up is outside the budget: only the tool step is counted.
     assert_eq!(exhausted_turn.model_steps, 1);
-    assert_eq!(exhausted_turn.usage.input_tokens, 5);
-    assert_eq!(exhausted_turn.usage.output_tokens, 2);
     assert!(exhausted_store
         .list_pending_client_tool_calls(exhausted_chat.id)
         .await

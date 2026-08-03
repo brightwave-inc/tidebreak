@@ -1270,16 +1270,14 @@ impl Agent {
         // turn boundary or a crash-recovery resume.
         let mut repeat_streak: Option<((String, String), usize)> = None;
 
-        // A turn with no budget at all has nothing to wrap up: there is no work
-        // in flight and no prose to preserve, so it stays the hard failure the
-        // worker's accounting expects.
-        if self.config.max_steps == 0 {
-            return Err(AgentError::msg("max steps per turn exceeded"));
-        }
-
         // One iteration past the budget is the wrap-up: the model is told the
         // turn is over and asked for a closing answer with no tools advertised,
         // so exhausting the budget ends in a real message rather than an error.
+        // A zero budget is the degenerate case of the same contract: a lease
+        // segment resuming after the budget was spent — a parked checkpoint on
+        // the last budgeted step, or a retried wrap-up failure — goes straight
+        // to the wrap-up call, which is safe to admit because it consumes no
+        // budget and cannot ask for another round (#1181).
         for step in 0..=self.config.max_steps {
             let wrap_up = step >= self.config.max_steps;
             // The wrap-up call is outside the budget. Counting it would let a
@@ -6211,15 +6209,15 @@ mod tests {
             store.clone(),
             AgentConfig {
                 model: "fake".into(),
-                max_steps: 0,
                 ..Default::default()
             },
         );
         let (failure_tx, failure_rx) = unbounded();
+        // An invalid first event ordinal fails execution before any event.
         let error = failing_agent
-            .run_claimed_turn(&chat, failed_turn_id, MessageId::new(), 1, &failure_tx)
+            .run_claimed_turn(&chat, failed_turn_id, MessageId::new(), 0, &failure_tx)
             .await
-            .expect_err("the zero-step guard fails execution");
+            .expect_err("the identity guard fails execution");
         drop(failure_tx);
         let failure_events = emitted_events(failure_rx.collect().await);
         assert!(failure_events.iter().all(|event| !matches!(

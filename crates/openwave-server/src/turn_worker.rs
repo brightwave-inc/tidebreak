@@ -537,7 +537,15 @@ impl TurnWorker {
         let mut checkpoint_usage = openwave_core::Usage::default();
         let mut checkpoint_steps = 0_usize;
         let mut continuation_instruction = None;
-        if remaining_steps == 0 {
+        // A segment arriving with zero remaining steps is not refused: the
+        // budget was spent by earlier segments — a checkpoint parked on the
+        // last budgeted step, or a wrap-up whose provider call failed
+        // retryably — and the agent runs the wrap-up-only attempt those
+        // segments still owe the user (#1181). The wrap-up is outside the
+        // budget by design, so `max_steps = 0` admits exactly one tool-free
+        // model call and nothing else. Only a turn that never had a budget in
+        // the first place stays a hard failure: there is no work to wrap up.
+        if remaining_steps == 0 && consumed_steps == 0 {
             return self
                 .record_failure(
                     &turn,
@@ -545,7 +553,7 @@ impl TurnWorker {
                     total_model_steps,
                     turn.usage,
                     "max_steps_exceeded",
-                    "max steps per turn were consumed before this lease segment",
+                    "the turn was configured with no step budget",
                 )
                 .await;
         }
@@ -930,7 +938,9 @@ impl TurnWorker {
                     steer_revision,
                     model_steps,
                 }) => {
-                    if model_steps == 0 || model_steps > remaining_steps {
+                    // A wrap-up-only attempt — dispatched with a zero budget —
+                    // is the one shape that legitimately reports zero steps.
+                    if model_steps > remaining_steps || (model_steps == 0 && remaining_steps != 0) {
                         return Err(AgentError::msg(format!(
                             "turn {} returned an invalid model-step count {model_steps}",
                             turn.id
@@ -1250,19 +1260,9 @@ impl TurnWorker {
                                 .await;
                         }
                     };
-                    if remaining_steps == 0 {
-                        drop(active);
-                        return self
-                            .record_failure(
-                                &turn,
-                                lease_token,
-                                total_model_steps,
-                                total_usage,
-                                "max_steps_exceeded",
-                                "max steps per turn exceeded before client tool execution",
-                            )
-                            .await;
-                    }
+                    // Parking on the last budgeted step is fine: the resuming
+                    // segment arrives with zero steps and runs the wrap-up,
+                    // which reads the client tool's result (#1181).
                     if !client_checkpoint_is_valid(
                         surface.tools.as_ref(),
                         turn.chat_id,
@@ -1471,19 +1471,9 @@ impl TurnWorker {
                                 .await;
                         }
                     };
-                    if remaining_steps == 0 {
-                        drop(active);
-                        return self
-                            .record_failure(
-                                &turn,
-                                lease_token,
-                                total_model_steps,
-                                total_usage,
-                                "max_steps_exceeded",
-                                "max steps per turn exceeded before sandbox delegation",
-                            )
-                            .await;
-                    }
+                    // Parking on the last budgeted step is fine: the resuming
+                    // segment arrives with zero steps and runs the wrap-up,
+                    // which reads the delegation's result (#1181).
                     if !sandbox_spawn_checkpoint_is_valid(surface.tools.as_ref(), &request) {
                         drop(active);
                         return self
@@ -1738,19 +1728,9 @@ impl TurnWorker {
                                 .await;
                         }
                     };
-                    if remaining_steps == 0 {
-                        drop(active);
-                        return self
-                            .record_failure(
-                                &turn,
-                                lease_token,
-                                total_model_steps,
-                                total_usage,
-                                "max_steps_exceeded",
-                                "max steps per turn exceeded before waiting for background agents",
-                            )
-                            .await;
-                    }
+                    // Parking on the last budgeted step is fine: the resuming
+                    // segment arrives with zero steps and runs the wrap-up,
+                    // which reads the children's results (#1181).
                     if !agent_wait_checkpoint_is_valid(surface.tools.as_ref(), &request) {
                         drop(active);
                         return self
@@ -1939,7 +1919,9 @@ impl TurnWorker {
                     usage,
                     model_steps,
                 }) => {
-                    if model_steps == 0 || model_steps > remaining_steps {
+                    // A wrap-up-only attempt reports zero steps when it fails,
+                    // exactly as it does when it completes.
+                    if model_steps > remaining_steps || (model_steps == 0 && remaining_steps != 0) {
                         return Err(AgentError::msg(format!(
                             "turn {} returned an invalid failed model-step count {model_steps}",
                             turn.id
