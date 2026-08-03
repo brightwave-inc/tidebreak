@@ -21,6 +21,7 @@ import { useTranscriptVisible } from "./TranscriptVisibility";
 import { useFolderAccessRequests } from "./useFolderAccessRequests";
 import { useOutputWritebackRequests } from "./useOutputWritebackRequests";
 import { useToolApprovals } from "./useToolApprovals";
+import { useStreamStalled } from "./useStreamStalled";
 import { useTurnControls } from "./useTurnControls";
 import { usePlanApprovals } from "./usePlanApprovals";
 import { useUserQuestions } from "./useUserQuestions";
@@ -91,6 +92,10 @@ export function ChatView({
   const messages = useChatSessionStore((session) => session.messages);
   const busy = useChatSessionStore((session) => session.busy);
   const activeTurnId = useChatSessionStore((session) => session.activeTurnId);
+  // Every applied stream event advances the seq cursor, so it doubles as the
+  // liveness signal for the stall-aware working indicator.
+  const lastSeq = useChatSessionStore((session) => session.lastSeq);
+  const streamStalled = useStreamStalled(busy, lastSeq);
   const backgroundAgentSpawnKeys = useMemo(
     () =>
       messages.flatMap((message) =>
@@ -288,6 +293,7 @@ export function ChatView({
           onLoadBackgroundAgentActivity={agentRuns.loadActivity}
           onViewBackgroundAgentOutput={onViewOutput}
           busy={busy}
+          streamStalled={streamStalled}
           scrollRef={attachScrollRef}
           contentRef={attachContentRef}
           maskClass={maskClass}

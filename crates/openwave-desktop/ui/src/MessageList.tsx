@@ -192,6 +192,8 @@ type MessageListProps = {
   ) => Promise<AgentActivityHistoryEntry[]>;
   onViewBackgroundAgentOutput?: () => void;
   busy: boolean;
+  /** The live turn's stream has gone quiet — see [useStreamStalled]. */
+  streamStalled?: boolean;
   scrollRef: Ref<HTMLDivElement>;
   /** Attached to the transcript content column so growth can drive auto-follow. */
   contentRef?: RefCallback<HTMLDivElement>;
@@ -261,6 +263,7 @@ export function MessageList({
   onLoadBackgroundAgentActivity = async () => [],
   onViewBackgroundAgentOutput,
   busy,
+  streamStalled = false,
   scrollRef,
   contentRef,
   maskClass,
@@ -427,6 +430,7 @@ export function MessageList({
           outputWritebackRequests.length +
           userQuestionRequests.length +
           planApprovalRequests.length,
+        streamStalled,
       ) && <AssistantWorkingIndicator />}
     </>
   );
@@ -1071,11 +1075,18 @@ export function refusalCopy(
 /**
  * The generic worker indicator fills only gaps where no more specific live or
  * user-action status is already visible. All copy remains renderer-owned.
+ *
+ * A partial assistant response normally suppresses the indicator — the
+ * streaming text is its own liveness signal. `streamStalled` reopens that one
+ * gap: when the live stream has gone quiet mid-response, the indicator
+ * returns under the partial text so a slow model reads differently from a
+ * hung one, and hides again the moment deltas resume.
  */
 export function shouldShowAssistantWorking(
   messages: readonly ChatMessage[],
   busy: boolean,
   pendingFolderAccessCount: number,
+  streamStalled = false,
 ): boolean {
   if (!busy || pendingFolderAccessCount > 0) return false;
   const hasSpecificPendingStatus = messages.some(
@@ -1091,7 +1102,10 @@ export function shouldShowAssistantWorking(
 
   const latest = messages[messages.length - 1];
   if (latest?.role === "assistant") {
-    return latest.text.trim().length === 0 && latest.sources.length === 0;
+    return (
+      streamStalled ||
+      (latest.text.trim().length === 0 && latest.sources.length === 0)
+    );
   }
   if (
     latest?.role === "system" ||
