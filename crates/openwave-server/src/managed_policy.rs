@@ -19,7 +19,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use openwave_core::{AgentError, Config, Result, Store};
+use openwave_core::{AgentError, Config, PermissionMode, Result, Store};
 use serde::{Deserialize, Serialize};
 
 const SETTING_KEY: &str = "managed_policy_v1";
@@ -27,6 +27,12 @@ const SETTING_KEY: &str = "managed_policy_v1";
 /// The key every OS artifact stores the asserted URL under: the Windows
 /// registry value and the macOS managed-preferences key share this name.
 const MANAGED_GATEWAY_URL_KEY: &str = "GatewayURL";
+
+/// The key an OS artifact stores the permission-mode ceiling under, shared by
+/// the Windows registry value and the macOS managed-preferences key. The value
+/// is a mode token (`plan`, `ask`, `auto`, `allow`); a chat may run at or
+/// below it, never above.
+const MANAGED_PERMISSION_MODE_KEY: &str = "MaximumPermissionMode";
 
 /// Which authority asserted the active policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
@@ -62,6 +68,14 @@ pub(crate) struct ManagedPolicy {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub(crate) pending_gateway_url: Option<String>,
+    /// The highest permission mode any chat may run under, when the OS policy
+    /// asserts one. A ceiling, not a fixed mode: the reader may always pick a
+    /// stricter mode, and clearing back to the default is always allowed.
+    /// Asserted per key, so it binds even when no gateway URL is deployed and
+    /// the profile is otherwise unmanaged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub(crate) permission_mode_ceiling: Option<PermissionMode>,
 }
 
 impl ManagedPolicy {
@@ -74,7 +88,27 @@ impl ManagedPolicy {
             source,
             misconfigured: true,
             pending_gateway_url: None,
+            permission_mode_ceiling: None,
         }
+    }
+
+    /// Clamp a chat's stored mode to the asserted ceiling. `None` reads as
+    /// the default (`Ask`), same as everywhere else the stored mode is
+    /// interpreted, so a ceiling below the default binds unset chats too.
+    pub(crate) fn clamp_permission_mode(
+        &self,
+        mode: Option<PermissionMode>,
+    ) -> Option<PermissionMode> {
+        match self.permission_mode_ceiling {
+            Some(ceiling) if mode.unwrap_or(PermissionMode::Ask) > ceiling => Some(ceiling),
+            _ => mode,
+        }
+    }
+
+    /// Whether the reader may select `mode` under this policy.
+    pub(crate) fn permits_permission_mode(&self, mode: PermissionMode) -> bool {
+        self.permission_mode_ceiling
+            .is_none_or(|ceiling| mode <= ceiling)
     }
 }
 
@@ -88,6 +122,15 @@ pub(crate) trait OsPolicySource: Send + Sync {
     /// artifact exists but cannot be read or decoded — [`resolve`] projects
     /// that as a misconfigured managed profile, never as unmanaged.
     fn gateway_url(&self) -> Result<Option<String>>;
+
+    /// The OS-asserted permission-mode ceiling, when the platform declares
+    /// one. Same error contract as [`Self::gateway_url`]: `Err` means an
+    /// artifact exists but its assertion cannot be honored — [`resolve`]
+    /// fails that closed by clamping to the default mode rather than
+    /// dropping the ceiling.
+    fn permission_mode_ceiling(&self) -> Result<Option<PermissionMode>> {
+        Ok(None)
+    }
 }
 
 /// The source that asserts nothing: non-desktop platforms, embeddings without
@@ -185,6 +228,34 @@ impl ManagedPreferencesSource {
             trusted_owner: 0,
         }
     }
+
+    /// Search the channels for one key's value, in precedence order.
+    ///
+    /// A broken channel falls through instead of aborting the search: an
+    /// unreadable user-channel artifact must not hide the device-channel
+    /// policy the organization actually deployed. Misconfigured is reported
+    /// only when no channel yields a usable value and at least one had a
+    /// present-but-broken artifact. Each key searches the channels
+    /// independently, matching CFPreferences' per-key domain search.
+    fn channel_value<T>(&self, extract: impl Fn(&[u8]) -> Result<Option<T>>) -> Result<Option<T>> {
+        let mut broken = None;
+        for path in &self.paths {
+            let outcome = trusted_plist_bytes(path, self.trusted_owner)
+                .and_then(|bytes| bytes.as_deref().map_or(Ok(None), &extract));
+            match outcome {
+                Ok(Some(value)) => return Ok(Some(value)),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!("managed-preferences channel skipped: {error}");
+                    broken.get_or_insert(error);
+                }
+            }
+        }
+        match broken {
+            Some(error) => Err(error),
+            None => Ok(None),
+        }
+    }
 }
 
 /// The account name of the effective uid, from the user database rather than
@@ -240,39 +311,24 @@ impl OsPolicySource for ManagedPreferencesSource {
     // If OpenWave ever adopts the App Sandbox, this must move to the
     // sandbox-safe CFPreferences API.
     fn gateway_url(&self) -> Result<Option<String>> {
-        let mut broken = None;
-        for path in &self.paths {
-            // A broken channel falls through instead of aborting the search:
-            // an unreadable user-channel artifact must not hide the
-            // device-channel policy the organization actually deployed.
-            // Misconfigured is reported only when no channel yields a usable
-            // value and at least one had a present-but-broken artifact.
-            match managed_plist_channel(path, self.trusted_owner) {
-                Ok(Some(url)) => return Ok(Some(url)),
-                Ok(None) => {}
-                Err(error) => {
-                    tracing::warn!("managed-preferences channel skipped: {error}");
-                    broken.get_or_insert(error);
-                }
-            }
-        }
-        match broken {
-            Some(error) => Err(error),
-            None => Ok(None),
-        }
+        self.channel_value(gateway_url_from_managed_plist)
+    }
+
+    fn permission_mode_ceiling(&self) -> Result<Option<PermissionMode>> {
+        self.channel_value(permission_mode_from_managed_plist)
     }
 }
 
-/// Read one managed-preferences channel: an absent file (or absent key) is
-/// `None`. Only a file owned by `trusted_owner` (root in production) is
-/// honored — MDM materializes these as root, and a plist planted by an
-/// unprivileged user must never assert device policy. Ownership is taken
-/// from the opened handle, so the check and the read cannot be raced apart.
+/// Read one managed-preferences channel's bytes: an absent file is `None`.
+/// Only a file owned by `trusted_owner` (root in production) is honored —
+/// MDM materializes these as root, and a plist planted by an unprivileged
+/// user must never assert device policy. Ownership is taken from the opened
+/// handle, so the check and the read cannot be raced apart.
 // Portable so unit tests exercise it on every platform; the production
 // caller is the macOS reader.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[cfg_attr(not(unix), allow(unused_variables))]
-fn managed_plist_channel(path: &Path, trusted_owner: u32) -> Result<Option<String>> {
+fn trusted_plist_bytes(path: &Path, trusted_owner: u32) -> Result<Option<Vec<u8>>> {
     use std::io::Read;
 
     let mut file = match std::fs::File::open(path) {
@@ -311,16 +367,16 @@ fn managed_plist_channel(path: &Path, trusted_owner: u32) -> Result<Option<Strin
             path.display()
         ))
     })?;
-    // A domain that forces other keys without GatewayURL asserts no gateway
-    // in this channel.
-    gateway_url_from_managed_plist(&bytes)
+    Ok(Some(bytes))
 }
 
-/// Extract `GatewayURL` from a managed-preferences plist (binary or XML).
-/// Split from the reader so the format is unit-testable without a profile.
+/// Extract one string key from a managed-preferences plist (binary or XML).
+/// A domain that forces other keys without this one asserts nothing for it
+/// in this channel — `None`, not an error. Split from the reader so the
+/// format is unit-testable without a profile.
 // Live via the reader only where the platform wires it; tested everywhere.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn gateway_url_from_managed_plist(bytes: &[u8]) -> Result<Option<String>> {
+fn string_from_managed_plist(bytes: &[u8], key: &str) -> Result<Option<String>> {
     let value = plist::Value::from_reader(std::io::Cursor::new(bytes))
         .map_err(|_| AgentError::config("managed preferences plist is unreadable"))?;
     let Some(dictionary) = value.as_dictionary() else {
@@ -328,15 +384,32 @@ fn gateway_url_from_managed_plist(bytes: &[u8]) -> Result<Option<String>> {
             "managed preferences plist is not a dictionary",
         ));
     };
-    match dictionary.get(MANAGED_GATEWAY_URL_KEY) {
+    match dictionary.get(key) {
         None => Ok(None),
         Some(value) => match value.as_string() {
-            Some(url) => asserted_gateway_url(url).map(Some),
-            None => Err(AgentError::config(
-                "managed preferences GatewayURL is not a string",
-            )),
+            Some(raw) => Ok(Some(raw.to_owned())),
+            None => Err(AgentError::config(format!(
+                "managed preferences {key} is not a string"
+            ))),
         },
     }
+}
+
+/// Extract and validate `GatewayURL` from a managed-preferences plist.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn gateway_url_from_managed_plist(bytes: &[u8]) -> Result<Option<String>> {
+    string_from_managed_plist(bytes, MANAGED_GATEWAY_URL_KEY)?
+        .map(|raw| asserted_gateway_url(&raw))
+        .transpose()
+}
+
+/// Extract and validate `MaximumPermissionMode` from a managed-preferences
+/// plist.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn permission_mode_from_managed_plist(bytes: &[u8]) -> Result<Option<PermissionMode>> {
+    string_from_managed_plist(bytes, MANAGED_PERMISSION_MODE_KEY)?
+        .map(|raw| asserted_permission_mode(&raw))
+        .transpose()
 }
 
 /// Machine policy from the Windows registry:
@@ -347,32 +420,47 @@ fn gateway_url_from_managed_plist(bytes: &[u8]) -> Result<Option<String>> {
 #[cfg(windows)]
 pub(crate) struct RegistryPolicySource;
 
+/// Read one string value from the machine policy key. An absent key or
+/// absent value asserts no policy for that name.
+#[cfg(windows)]
+fn registry_policy_value(name: &str) -> Result<Option<String>> {
+    // KEY_WOW64_64KEY pins the native 64-bit view: policy lives in the
+    // real Policies hive, and a future 32-bit build must not be silently
+    // redirected to Wow6432Node.
+    let key = match winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
+        .open_subkey_with_flags(
+            r"Software\Policies\Brightwave\OpenWave",
+            winreg::enums::KEY_READ | winreg::enums::KEY_WOW64_64KEY,
+        ) {
+        Ok(key) => key,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(AgentError::config(format!(
+                "managed policy registry key is unreadable: {error}"
+            )))
+        }
+    };
+    match key.get_value::<String, _>(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(AgentError::config(format!(
+            "managed policy registry value is unreadable: {error}"
+        ))),
+    }
+}
+
 #[cfg(windows)]
 impl OsPolicySource for RegistryPolicySource {
     fn gateway_url(&self) -> Result<Option<String>> {
-        // KEY_WOW64_64KEY pins the native 64-bit view: policy lives in the
-        // real Policies hive, and a future 32-bit build must not be silently
-        // redirected to Wow6432Node.
-        let key = match winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
-            .open_subkey_with_flags(
-                r"Software\Policies\Brightwave\OpenWave",
-                winreg::enums::KEY_READ | winreg::enums::KEY_WOW64_64KEY,
-            ) {
-            Ok(key) => key,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-            Err(error) => {
-                return Err(AgentError::config(format!(
-                    "managed policy registry key is unreadable: {error}"
-                )))
-            }
-        };
-        match key.get_value::<String, _>(MANAGED_GATEWAY_URL_KEY) {
-            Ok(value) => asserted_gateway_url(&value).map(Some),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(AgentError::config(format!(
-                "managed policy registry value is unreadable: {error}"
-            ))),
-        }
+        registry_policy_value(MANAGED_GATEWAY_URL_KEY)?
+            .map(|raw| asserted_gateway_url(&raw))
+            .transpose()
+    }
+
+    fn permission_mode_ceiling(&self) -> Result<Option<PermissionMode>> {
+        registry_policy_value(MANAGED_PERMISSION_MODE_KEY)?
+            .map(|raw| asserted_permission_mode(&raw))
+            .transpose()
     }
 }
 
@@ -391,8 +479,10 @@ impl PolicyFileSource {
     }
 }
 
-impl OsPolicySource for PolicyFileSource {
-    fn gateway_url(&self) -> Result<Option<String>> {
+impl PolicyFileSource {
+    /// Read and decode the policy file; an absent file asserts nothing.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn read(&self) -> Result<Option<PolicyFilePayload>> {
         let bytes = match std::fs::read(&self.path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
@@ -403,22 +493,54 @@ impl OsPolicySource for PolicyFileSource {
                 )))
             }
         };
-        gateway_url_from_policy_json(&bytes).map(Some)
+        decode_policy_json(&bytes).map(Some)
     }
 }
 
+impl OsPolicySource for PolicyFileSource {
+    fn gateway_url(&self) -> Result<Option<String>> {
+        self.read()?
+            .and_then(|file| file.gateway_url)
+            .map(|raw| asserted_gateway_url(&raw))
+            .transpose()
+    }
+
+    fn permission_mode_ceiling(&self) -> Result<Option<PermissionMode>> {
+        self.read()?
+            .and_then(|file| file.maximum_permission_mode)
+            .map(|raw| asserted_permission_mode(&raw))
+            .transpose()
+    }
+}
+
+/// The policy-file payload: `{"gateway_url": "https://…",
+/// "maximum_permission_mode": "ask"}`, each key optional but at least one
+/// required.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Deserialize)]
+struct PolicyFilePayload {
+    #[serde(default)]
+    gateway_url: Option<String>,
+    #[serde(default)]
+    maximum_permission_mode: Option<String>,
+}
+
 /// Decode the policy-file payload. Split from the reader so the format is
-/// testable without a filesystem.
+/// testable without a filesystem. A present file that names none of the
+/// recognized keys is a misconfiguration, not "no policy" — a deployed
+/// artifact whose keys are misspelled must fail closed, never read as the
+/// open experience.
 // Live via the reader only where the platform wires it; tested everywhere.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn gateway_url_from_policy_json(bytes: &[u8]) -> Result<String> {
-    #[derive(Deserialize)]
-    struct PolicyFile {
-        gateway_url: String,
-    }
-    let file: PolicyFile = serde_json::from_slice(bytes)
+fn decode_policy_json(bytes: &[u8]) -> Result<PolicyFilePayload> {
+    let file: PolicyFilePayload = serde_json::from_slice(bytes)
         .map_err(|_| AgentError::config("managed policy file is not the expected JSON shape"))?;
-    asserted_gateway_url(&file.gateway_url)
+    if file.gateway_url.is_none() && file.maximum_permission_mode.is_none() {
+        return Err(AgentError::config(
+            "managed policy file names no recognized policy keys",
+        ));
+    }
+    Ok(file)
 }
 
 /// The shared shape check for a value read from any OS artifact: registry
@@ -433,6 +555,19 @@ fn asserted_gateway_url(raw: &str) -> Result<String> {
         ));
     }
     Ok(value.to_string())
+}
+
+/// The shared token check for a permission-mode ceiling read from any OS
+/// artifact: trimmed, then held to the chat-mode vocabulary. Anything else —
+/// including blank — is a misconfiguration, never silently ignored.
+fn asserted_permission_mode(raw: &str) -> Result<PermissionMode> {
+    let value = raw.trim();
+    PermissionMode::from_str(value).ok_or_else(|| {
+        AgentError::config(format!(
+            "managed policy asserts an unknown permission mode {value:?}; \
+             expected one of plan, ask, auto, allow"
+        ))
+    })
 }
 
 /// The durable provisioned state, stored as one setting.
@@ -456,6 +591,30 @@ struct ProvisionedPolicy {
 /// removal becomes visible on the next `/policy` read without an app
 /// restart, and the artifacts are tiny.
 pub(crate) async fn resolve(
+    store: &dyn Store,
+    os_policy: &dyn OsPolicySource,
+) -> Result<ManagedPolicy> {
+    let mut policy = resolve_gateway(store, os_policy).await?;
+    // The ceiling is asserted per key, independent of the gateway verdict: an
+    // MDM profile can cap the mode without deploying a gateway URL, and the
+    // cap rides on whatever policy the gateway resolution produced. A broken
+    // ceiling value fails closed to the default mode — `Auto`/`Allow` stay
+    // locked out — rather than open or by bricking the profile.
+    policy.permission_mode_ceiling = match os_policy.permission_mode_ceiling() {
+        Ok(ceiling) => ceiling,
+        Err(error) => {
+            tracing::warn!(
+                "OS-managed permission-mode ceiling is present but unusable: {error}; \
+                 clamping to the default mode"
+            );
+            Some(PermissionMode::Ask)
+        }
+    };
+    Ok(policy)
+}
+
+/// The gateway half of [`resolve`]: managed verdict, URL, and authority.
+async fn resolve_gateway(
     store: &dyn Store,
     os_policy: &dyn OsPolicySource,
 ) -> Result<ManagedPolicy> {
@@ -487,6 +646,7 @@ pub(crate) async fn resolve(
         source: ManagedPolicySource::Unmanaged,
         misconfigured: false,
         pending_gateway_url: None,
+        permission_mode_ceiling: None,
     })
 }
 
@@ -500,6 +660,7 @@ fn asserted(source: ManagedPolicySource, gateway_url: &str) -> ManagedPolicy {
             source,
             misconfigured: false,
             pending_gateway_url: None,
+            permission_mode_ceiling: None,
         },
         Err(error) => {
             tracing::warn!("{source:?}-asserted gateway URL fails the contract: {error}");
@@ -725,6 +886,23 @@ mod tests {
         assert!(policy.managed && !policy.misconfigured);
         assert_eq!(policy.source, ManagedPolicySource::Os);
         assert_eq!(policy.gateway_url.as_deref(), Some("https://corp.gateway/"));
+        assert_eq!(policy.permission_mode_ceiling, None);
+
+        // The ceiling is per key: a file asserting only the mode cap leaves
+        // the gateway side unmanaged, and one asserting both carries both.
+        std::fs::write(&path, br#"{ "maximum_permission_mode": "ask" }"#).unwrap();
+        let policy = resolve(&*store, &reader).await.unwrap();
+        assert!(!policy.managed);
+        assert_eq!(policy.permission_mode_ceiling, Some(PermissionMode::Ask));
+
+        std::fs::write(
+            &path,
+            br#"{ "gateway_url": "https://corp.gateway", "maximum_permission_mode": "auto" }"#,
+        )
+        .unwrap();
+        let policy = resolve(&*store, &reader).await.unwrap();
+        assert!(policy.managed && !policy.misconfigured);
+        assert_eq!(policy.permission_mode_ceiling, Some(PermissionMode::Auto));
 
         for corrupt in [&b"not json"[..], br#"{ "gateway": "wrong shape" }"#] {
             std::fs::write(&path, corrupt).unwrap();
@@ -783,6 +961,77 @@ mod tests {
         ] {
             assert!(gateway_url_from_managed_plist(broken).is_err());
         }
+
+        // The mode ceiling shares the extraction path: same trimming, absent
+        // key is `None`, and a token outside the mode vocabulary refuses.
+        let capped = xml("<key>MaximumPermissionMode</key><string> auto </string>");
+        assert_eq!(
+            permission_mode_from_managed_plist(capped.as_bytes()).unwrap(),
+            Some(PermissionMode::Auto)
+        );
+        assert_eq!(
+            permission_mode_from_managed_plist(unrelated.as_bytes()).unwrap(),
+            None
+        );
+        let unknown = xml("<key>MaximumPermissionMode</key><string>yolo</string>");
+        assert!(permission_mode_from_managed_plist(unknown.as_bytes()).is_err());
+    }
+
+    /// The ceiling's failure direction: a present-but-broken assertion clamps
+    /// to the default mode instead of dropping the ceiling (open) or bricking
+    /// the profile, and a valid one rides on the resolved policy whatever the
+    /// gateway verdict was.
+    #[tokio::test]
+    async fn a_broken_ceiling_fails_closed_to_the_default_mode() {
+        struct CeilingOnly(Result<Option<PermissionMode>>);
+
+        impl OsPolicySource for CeilingOnly {
+            fn gateway_url(&self) -> Result<Option<String>> {
+                Ok(None)
+            }
+            fn permission_mode_ceiling(&self) -> Result<Option<PermissionMode>> {
+                match &self.0 {
+                    Ok(value) => Ok(*value),
+                    Err(error) => Err(AgentError::config(error.to_string())),
+                }
+            }
+        }
+
+        let (store, _directory) = test_store().await;
+        let policy = resolve(&*store, &CeilingOnly(Ok(Some(PermissionMode::Ask))))
+            .await
+            .unwrap();
+        assert!(!policy.managed);
+        assert_eq!(policy.permission_mode_ceiling, Some(PermissionMode::Ask));
+
+        let policy = resolve(
+            &*store,
+            &CeilingOnly(Err(AgentError::config("artifact present but unreadable"))),
+        )
+        .await
+        .unwrap();
+        assert_eq!(policy.permission_mode_ceiling, Some(PermissionMode::Ask));
+
+        // The clamp the gate applies: over-ceiling comes down (including the
+        // unset default when the ceiling sits below it), at-or-below stays
+        // the reader's choice.
+        assert_eq!(
+            policy.clamp_permission_mode(Some(PermissionMode::Allow)),
+            Some(PermissionMode::Ask)
+        );
+        assert_eq!(
+            policy.clamp_permission_mode(Some(PermissionMode::Plan)),
+            Some(PermissionMode::Plan)
+        );
+        assert_eq!(policy.clamp_permission_mode(None), None);
+        let plan_capped = ManagedPolicy {
+            permission_mode_ceiling: Some(PermissionMode::Plan),
+            ..policy
+        };
+        assert_eq!(
+            plan_capped.clamp_permission_mode(None),
+            Some(PermissionMode::Plan)
+        );
     }
 
     /// The channel-fallthrough decision, end to end through resolution: a

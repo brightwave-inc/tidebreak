@@ -761,7 +761,15 @@ misconfigured: boolean,
  * [`resolve`] always leaves it `None` — and only ever present while the
  * profile is unmanaged.
  */
-pending_gateway_url?: string, };
+pending_gateway_url?: string, 
+/**
+ * The highest permission mode any chat may run under, when the OS policy
+ * asserts one. A ceiling, not a fixed mode: the reader may always pick a
+ * stricter mode, and clearing back to the default is always allowed.
+ * Asserted per key, so it binds even when no gateway URL is deployed and
+ * the profile is otherwise unmanaged.
+ */
+permission_mode_ceiling?: PermissionMode, };
 
 /**
  * Which authority asserted the active policy.
@@ -1008,6 +1016,11 @@ export type PendingUserQuestions = { call_id: CallId, turn_id: TurnId, questions
  * Persisted per chat as the token from [`Self::as_str`] and read at turn
  * start, like the model selection: changing it mid-turn applies from the
  * next turn, and a reopened chat runs the way it ran before.
+ *
+ * The declaration order is ascending autonomy, and the derived `Ord` relies
+ * on it: `Plan < Ask < Auto < Allow`, matching [`Self::ALL`]. Managed-policy
+ * ceilings compare modes with it, so a new variant must slot into this
+ * scale, not just onto the end of the list.
  */
 export type PermissionMode = "plan" | "ask" | "auto" | "allow";
 

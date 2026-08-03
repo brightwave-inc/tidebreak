@@ -1365,3 +1365,74 @@ async fn patch_chat_rejects_empty_model_and_unknown_chat() {
     .await;
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }
+
+/// #923: a managed permission-mode ceiling refuses over-ceiling selections
+/// at the picker routes — create and patch alike — while stricter modes stay
+/// the reader's choice. The ceiling names a maximum, never a fixed mode.
+#[tokio::test]
+async fn a_managed_ceiling_locks_over_ceiling_permission_modes() {
+    struct CappedAtAsk;
+    impl crate::managed_policy::OsPolicySource for CappedAtAsk {
+        fn gateway_url(&self) -> openwave_core::Result<Option<String>> {
+            Ok(None)
+        }
+        fn permission_mode_ceiling(
+            &self,
+        ) -> openwave_core::Result<Option<openwave_core::PermissionMode>> {
+            Ok(Some(openwave_core::PermissionMode::Ask))
+        }
+    }
+
+    let (dir, store) = temp_db_store("ceiling.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
+    let mut state = AppState::new(
+        Config::desktop(dir.path()),
+        store,
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    state.os_policy = Arc::new(CappedAtAsk);
+    let bearer = format!("Bearer {}", state.token.clone());
+    let router = app(state);
+
+    let chat = make_chat(&router, &bearer).await;
+    let refused = patch_chat(
+        &router,
+        &bearer,
+        chat.id,
+        serde_json::json!({"permission_mode": "auto"}),
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+
+    let stricter = patch_chat(
+        &router,
+        &bearer,
+        chat.id,
+        serde_json::json!({"permission_mode": "plan"}),
+    )
+    .await;
+    assert_eq!(stricter.status(), StatusCode::OK);
+
+    let over_ceiling_creation = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/chats")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"permission_mode": "allow"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(over_ceiling_creation.status(), StatusCode::CONFLICT);
+}
