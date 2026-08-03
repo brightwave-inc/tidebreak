@@ -511,9 +511,15 @@ pub(crate) struct RestRosterApp {
 /// connected app with the id a manifest binding names — the namespace an
 /// `mcp_server`'s mounted tools carry, or a bounded sample of a `rest_api`
 /// record's operation ids.
+///
+/// A server without a live client (disabled, degraded, locked down) stays
+/// listed — authoring a binding against it is legitimate, and the grant and
+/// invoke gates enforce at call time — but its line says so, instead of
+/// promising mounted tool names that do not currently exist.
 fn connected_app_roster(
     definitions: &[McpServerDefinition],
     ids: &BTreeMap<String, ConnectedAppId>,
+    servers: &HashMap<String, ManagedServer>,
     rest: &[RestRosterApp],
 ) -> String {
     if definitions.is_empty() && rest.is_empty() {
@@ -527,9 +533,17 @@ fn connected_app_roster(
         let Some(id) = ids.get(&definition.name) else {
             continue;
         };
+        let unavailable = servers
+            .get(&definition.name)
+            .is_none_or(|server| server.client.is_none());
         roster.push_str(&format!(
-            "\n- {id} — {name}: tools are named `mcp__{name}__{{tool}}`",
-            name = definition.name
+            "\n- {id} — {name}: tools are named `mcp__{name}__{{tool}}`{status}",
+            name = definition.name,
+            status = if unavailable {
+                " (currently unavailable — configured but not connected)"
+            } else {
+                ""
+            }
         ));
     }
     for app in rest {
@@ -976,6 +990,15 @@ impl McpRuntime {
                 // otherwise a signed-out mount would block every unrelated
                 // settings save until it was deleted.
                 Err(error) if definition.gateway_endpoint.is_some() => {
+                    // The projected diagnostic is deliberately generic; keep
+                    // the real cause in the log (already URL- and
+                    // secret-free). The desktop installs no tracing
+                    // subscriber yet, so this surfaces under `openwave serve`
+                    // until it does.
+                    tracing::warn!(
+                        server = %definition.name,
+                        "gateway MCP mount degraded during replacement: {error}"
+                    );
                     servers.insert(
                         definition.name.clone(),
                         ManagedServer {
@@ -1085,15 +1108,24 @@ impl McpRuntime {
                     reconnect_lock: Arc::new(Mutex::new(())),
                     ui_views,
                 },
-                Err(error) => ManagedServer {
-                    client: None,
-                    health: McpHealth::Degraded,
-                    diagnostic: Some(connection_diagnostic(definition, &error)),
-                    reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
-                    epoch: self.fresh_epoch(),
-                    reconnect_lock: Arc::new(Mutex::new(())),
-                    ui_views: HashMap::new(),
-                },
+                Err(error) => {
+                    // As in `replace_strict`: the error chain is already URL-
+                    // and secret-free, and the warn serves `openwave serve`
+                    // until the desktop installs a tracing subscriber.
+                    tracing::warn!(
+                        server = %definition.name,
+                        "MCP server connection failed during permissive replacement: {error}"
+                    );
+                    ManagedServer {
+                        client: None,
+                        health: McpHealth::Degraded,
+                        diagnostic: Some(connection_diagnostic(definition, &error)),
+                        reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
+                        epoch: self.fresh_epoch(),
+                        reconnect_lock: Arc::new(Mutex::new(())),
+                        ui_views: HashMap::new(),
+                    }
+                }
             };
             servers.insert(definition.name.clone(), managed);
         }
@@ -1182,7 +1214,7 @@ impl McpRuntime {
         if let Some(inner) = registry.server_tool(CREATE_APP_TOOL) {
             registry.register(Box::new(CreateAppWithRoster {
                 inner,
-                roster: connected_app_roster(definitions, ids, rest),
+                roster: connected_app_roster(definitions, ids, servers, rest),
             }));
         }
         registry
@@ -1297,6 +1329,10 @@ impl McpRuntime {
                 Ok(self.info_locked(&state))
             }
             Err(error) => {
+                // As in `replace_strict`: the error chain is already URL- and
+                // secret-free, and the warn serves `openwave serve` until the
+                // desktop installs a tracing subscriber.
+                tracing::warn!(server = %name, "MCP server reconnect failed: {error}");
                 let diagnostic = connection_diagnostic(&definition, &error);
                 let mut state = self.state.lock().await;
                 if let Some(server) = state
@@ -1647,13 +1683,26 @@ fn validate_environment_name(server_name: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// The user-facing reason a server failed to connect.
+///
+/// Every returned string is fixed or interpolates a configured *name* only —
+/// never URL, token, or upstream error text. For gateway mounts the split
+/// follows where the failure happened: sign-in state, then resolution/token
+/// exchange (these fail as [`AgentError::Config`] inside the connectors and
+/// gateway runtime, before any wire I/O), then the wire itself (openwave-mcp
+/// failures arrive as non-`Config` classes).
 fn connection_diagnostic(definition: &McpServerDefinition, error: &AgentError) -> String {
     if definition.gateway_endpoint.is_some() {
         if openwave_connectors::is_sign_in_required(error) {
             return "Sign in to the model gateway to reconnect this server.".to_string();
         }
-        return "Could not connect to this gateway endpoint. Check the gateway connection \
-                and your entitlements."
+        if matches!(error, AgentError::Config(_)) {
+            return "Could not get access to this gateway endpoint. Check your \
+                    entitlements for it."
+                .to_string();
+        }
+        return "Could not connect to this gateway endpoint. Check that it is reachable \
+                and allows this kind of access."
             .to_string();
     }
     if let Some(name) = definition
@@ -2231,6 +2280,89 @@ mod tests {
             info.servers[0].diagnostic.as_deref(),
             Some("Sign in to the model gateway to reconnect this server.")
         );
+
+        // The degraded mount stays on the create_app roster, but its line
+        // stops promising mounted tool names it does not have.
+        let state = runtime.state.lock().await;
+        let roster = connected_app_roster(&state.definitions, &state.ids, &state.servers, &[]);
+        assert!(
+            roster.contains(
+                "tools are named `mcp__tools__{tool}` \
+                 (currently unavailable — configured but not connected)"
+            ),
+            "{roster}"
+        );
+    }
+
+    /// The two non-sign-in gateway failures are different problems with
+    /// different fixes, and the diagnostic must say which one happened: a
+    /// refused resolution/token exchange (`AgentError::Config`, before any
+    /// wire I/O) is an entitlement problem, while a reached-or-unreachable
+    /// endpoint (any other class) is an endpoint problem.
+    #[tokio::test]
+    async fn gateway_diagnostics_separate_refused_access_from_endpoint_failures() {
+        // The gateway refuses to mint `mcp:<slug>` access: no wire I/O ever
+        // happened, so "check the endpoint" would send the user the wrong way.
+        struct RefusedGateway;
+
+        #[async_trait::async_trait]
+        impl GatewayEndpoints for RefusedGateway {
+            async fn endpoint(&self, _slug: &str) -> Result<GatewayEndpointAccess> {
+                Err(AgentError::config(
+                    "model-gateway token request: the requested resource is not entitled",
+                ))
+            }
+        }
+
+        let (runtime, _store, _directory) =
+            test_runtime_with_gateway(Arc::new(RefusedGateway)).await;
+        let definitions = vec![gateway_definition("tools", "tools")];
+        let ids = ids_for(&definitions);
+        runtime.replace_permissive(definitions, ids).await;
+        let info = runtime.info().await;
+        assert_eq!(info.servers[0].health, McpHealth::Degraded);
+        assert_eq!(
+            info.servers[0].diagnostic.as_deref(),
+            Some("Could not get access to this gateway endpoint. Check your entitlements for it.")
+        );
+
+        // Resolution succeeded but the endpoint itself answers 403: the wire
+        // was reached, so entitlement language would be a lie.
+        struct ResolvedGateway(std::net::SocketAddr);
+
+        #[async_trait::async_trait]
+        impl GatewayEndpoints for ResolvedGateway {
+            async fn endpoint(&self, _slug: &str) -> Result<GatewayEndpointAccess> {
+                Ok(GatewayEndpointAccess {
+                    url: format!("http://{}/mcp", self.0),
+                    bearer_token: "session-token".to_string(),
+                })
+            }
+        }
+
+        let app = axum::Router::new().route(
+            "/mcp",
+            axum::routing::post(|| async { axum::http::StatusCode::FORBIDDEN }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let (runtime, _store, _directory) =
+            test_runtime_with_gateway(Arc::new(ResolvedGateway(address))).await;
+        let definitions = vec![gateway_definition("tools", "tools")];
+        let ids = ids_for(&definitions);
+        runtime.replace_permissive(definitions, ids).await;
+        let info = runtime.info().await;
+        assert_eq!(info.servers[0].health, McpHealth::Degraded);
+        assert_eq!(
+            info.servers[0].diagnostic.as_deref(),
+            Some(
+                "Could not connect to this gateway endpoint. Check that it is reachable \
+                 and allows this kind of access."
+            )
+        );
     }
 
     #[tokio::test]
@@ -2385,6 +2517,14 @@ mod tests {
         assert_eq!(info.servers[0].health, McpHealth::Healthy);
         assert_eq!(info.servers[0].tool_count, 1);
         assert!(runtime.snapshot().get("mcp__gateway__lookup").is_some());
+
+        // A connected server's roster line carries no availability caveat.
+        {
+            let state = runtime.state.lock().await;
+            let roster = connected_app_roster(&state.definitions, &state.ids, &state.servers, &[]);
+            assert!(roster.contains("tools are named `mcp__gateway__{tool}`"));
+            assert!(!roster.contains("currently unavailable"), "{roster}");
+        }
 
         // The declared view was prefetched at connect and is served from
         // memory, keyed by the configured namespace and declared URI.
