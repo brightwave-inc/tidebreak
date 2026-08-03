@@ -34,9 +34,12 @@
 # real container boundary.
 
 # ---- build stage -----------------------------------------------------------
-# Pinned to the workspace toolchain channel (stable) via the bookworm image; the
-# workspace's rust-toolchain.toml declares `stable`.
-FROM rust:1-bookworm AS build
+# The workspace toolchain channel (stable) via the bookworm image; the
+# workspace's rust-toolchain.toml declares `stable`. Digest-pinned so the
+# publish moment does not trust the mutable tag: this is rust:1-bookworm as of
+# 2026-08-03. Update the digest deliberately alongside toolchain bumps
+# (`docker buildx imagetools inspect rust:1-bookworm` prints the current one).
+FROM rust:1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa AS build
 WORKDIR /src
 
 # Copy the whole workspace. A dependency-only pre-build cache layer is a later
@@ -52,8 +55,9 @@ RUN cargo build --release --locked -p openwave-sandbox-agent
 
 # ---- slim runtime ----------------------------------------------------------
 # The agent binary and nothing else: the egress proxy's image, and the base the
-# documents variant layers onto.
-FROM debian:bookworm-slim AS slim
+# documents variant layers onto. Digest-pinned like the build stage: this is
+# debian:bookworm-slim as of 2026-08-03.
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
@@ -95,28 +99,25 @@ FROM slim AS documents
 
 USER root
 
-# The pip pins mirror the `deps` manifests of the document skills; keep them in
-# lockstep when a SKILL.md bumps a version. pypdfium2 backs the bundled
-# render_pdf.py helper. openpyxl comes from pip rather than apt so the installed
-# version matches the spreadsheets skill's pin (bookworm's python3-openpyxl is
-# older).
+# The pip pins live in documents-requirements.txt: the SKILL.md manifests'
+# exact versions plus their pinned transitive closure, every entry
+# hash-checked, so a substituted PyPI artifact fails the build instead of
+# shipping. Regenerate the file with scripts/generate-documents-requirements.py
+# when a SKILL.md bumps a version; the sandbox-image-pins test enforces the
+# lockstep. Pillow rides the hash-checked closure rather than apt so its
+# version is pinned with the rest.
+COPY crates/openwave-sandbox-agent/documents-requirements.txt /tmp/documents-requirements.txt
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        libreoffice-impress \
        libreoffice-writer \
        poppler-utils \
        python3 \
-       python3-pil \
        python3-pip \
     && python3 -m pip install --break-system-packages --no-cache-dir \
-       pypdfium2==4.30.0 \
-       fpdf2==2.8.3 \
-       pypdf==5.1.0 \
-       python-pptx==1.0.2 \
-       python-docx==1.1.2 \
-       openpyxl==3.1.5 \
-       matplotlib==3.10.0 \
-    && rm -rf /var/lib/apt/lists/* /root/.cache \
+       --require-hashes -r /tmp/documents-requirements.txt \
+    && rm -rf /var/lib/apt/lists/* /root/.cache /tmp/documents-requirements.txt \
     && mkdir -p /opt/openwave/exec-scripts
 
 COPY scripts/exec-documents/ /opt/openwave/exec-scripts/
