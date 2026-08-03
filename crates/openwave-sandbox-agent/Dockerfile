@@ -1,4 +1,4 @@
-# The OpenWave sandbox agent image.
+# The OpenWave sandbox agent images.
 #
 # Packages the `openwave-sandbox-agent` binary: the sandbox-side transport
 # server plus the in-container agent loop. The container's entrypoint runs the
@@ -7,15 +7,28 @@
 # run with the `egress-proxy` argument it serves the sandbox's network boundary
 # from its own dual-homed container (see `sandbox_docker` in openwave-server).
 #
+# Two runtime variants build from this file:
+#
+#   - `slim`      — the agent binary on a minimal Debian base. The egress proxy
+#                   runs from this layer's contents; nothing else is needed.
+#   - `documents` — `slim` plus LibreOffice (headless DOCX/PPTX/XLSX rendering
+#                   for the document skills' visual QA loop), the bundled exec
+#                   helper scripts, and the document skills' pinned Python
+#                   dependencies preinstalled system-wide, so a sandbox produces
+#                   documents without any in-run package install. This is the
+#                   default build target and the ref the local backend runs.
+#
 # Build context is the WORKSPACE ROOT, so the whole Cargo workspace and the
 # committed Cargo.lock are visible to a `--locked` build:
 #
 #   docker build -f crates/openwave-sandbox-agent/Dockerfile -t openwave-sandbox-agent .
+#   docker build -f crates/openwave-sandbox-agent/Dockerfile --target slim -t openwave-sandbox-agent-slim .
 #
-# Nothing verifies this image by digest today. The host runs whatever ref it is
-# configured with (`DockerConfig::image`), which accepts a digest-pinned ref but
-# does not require or check one. Treat the image's integrity as unverified on the
-# local backend.
+# Official images are published to GHCR by .github/workflows/publish-sandbox-image.yml
+# on version tags, and the local backend pins the published documents image by
+# digest (see `sandbox_docker` in openwave-server for the recorded pin and its
+# provenance). A locally built tag is the development fallback and carries no
+# digest verification.
 #
 # The scoped post-merge sandbox-resident lane builds and drives this image on a
 # real container boundary.
@@ -37,31 +50,17 @@ COPY . .
 # tools live in this crate and are the point of the image.)
 RUN cargo build --release --locked -p openwave-sandbox-agent
 
-# ---- runtime stage ---------------------------------------------------------
-# The document helpers need Python plus native renderers. The container remains
-# the isolation boundary; packages are installed at image-build time and no
-# helper performs a network request at runtime.
-FROM debian:bookworm-slim AS runtime
+# ---- slim runtime ----------------------------------------------------------
+# The agent binary and nothing else: the egress proxy's image, and the base the
+# documents variant layers onto.
+FROM debian:bookworm-slim AS slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-       ca-certificates \
-       libreoffice-impress \
-       libreoffice-writer \
-       poppler-utils \
-       python3 \
-       python3-openpyxl \
-       python3-pil \
-       python3-pip \
-    && python3 -m pip install --break-system-packages --no-cache-dir pypdfium2==4.30.0 \
-    && rm -rf /var/lib/apt/lists/* /root/.cache \
-    && mkdir -p /workspace /opt/openwave/exec-scripts
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /workspace
 
 COPY --from=build /src/target/release/openwave-sandbox-agent /usr/local/bin/openwave-sandbox-agent
-COPY scripts/exec-documents/ /opt/openwave/exec-scripts/
-
-RUN python3 /opt/openwave/exec-scripts/render_pdf.py --help >/dev/null \
-    && python3 /opt/openwave/exec-scripts/analyze_xlsx.py --help >/dev/null
 
 # The agent — and therefore every command the model runs through `exec` — runs as
 # an unprivileged user, so a container escape starts from an account that owns
@@ -79,10 +78,53 @@ RUN groupadd --gid 10001 openwave \
 ENV OPENWAVE_SANDBOX_LISTEN=0.0.0.0:8080
 # The in-container workspace root the exec and filesystem tools are scoped to.
 ENV OPENWAVE_SANDBOX_WORKSPACE=/workspace
-# The helper library path shown to the model-facing exec tool.
-ENV OPENWAVE_EXEC_SCRIPTS=/opt/openwave/exec-scripts
 EXPOSE 8080
 
 USER openwave:openwave
 
 ENTRYPOINT ["/usr/local/bin/openwave-sandbox-agent"]
+
+# ---- documents runtime (default) -------------------------------------------
+# The document helpers need Python plus native renderers, and the document
+# skills (skills/*/SKILL.md) each pin one Python library. Preinstalling those
+# exact pins system-wide means a background document run needs no in-sandbox
+# `pip install` — no package-manager egress, no per-run install latency. The
+# container remains the isolation boundary; packages are installed at
+# image-build time and no helper performs a network request at runtime.
+FROM slim AS documents
+
+USER root
+
+# The pip pins mirror the `deps` manifests of the document skills; keep them in
+# lockstep when a SKILL.md bumps a version. pypdfium2 backs the bundled
+# render_pdf.py helper. openpyxl comes from pip rather than apt so the installed
+# version matches the spreadsheets skill's pin (bookworm's python3-openpyxl is
+# older).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       libreoffice-impress \
+       libreoffice-writer \
+       poppler-utils \
+       python3 \
+       python3-pil \
+       python3-pip \
+    && python3 -m pip install --break-system-packages --no-cache-dir \
+       pypdfium2==4.30.0 \
+       fpdf2==2.8.3 \
+       pypdf==5.1.0 \
+       python-pptx==1.0.2 \
+       python-docx==1.1.2 \
+       openpyxl==3.1.5 \
+       matplotlib==3.10.0 \
+    && rm -rf /var/lib/apt/lists/* /root/.cache \
+    && mkdir -p /opt/openwave/exec-scripts
+
+COPY scripts/exec-documents/ /opt/openwave/exec-scripts/
+
+RUN python3 /opt/openwave/exec-scripts/render_pdf.py --help >/dev/null \
+    && python3 /opt/openwave/exec-scripts/analyze_xlsx.py --help >/dev/null
+
+# The helper library path shown to the model-facing exec tool.
+ENV OPENWAVE_EXEC_SCRIPTS=/opt/openwave/exec-scripts
+
+USER openwave:openwave

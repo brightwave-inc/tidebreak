@@ -1,0 +1,164 @@
+name: Publish sandbox agent images
+
+run-name: >-
+  ${{ github.event_name == 'workflow_dispatch'
+    && format('Publish sandbox images {0}', inputs.image_tag)
+    || format('Publish sandbox images {0}', github.ref_name) }}
+
+# Builds the two sandbox-agent image variants from
+# crates/openwave-sandbox-agent/Dockerfile and publishes them to GHCR:
+#
+#   ghcr.io/brightwave-inc/openwave-sandbox-agent            (slim)
+#   ghcr.io/brightwave-inc/openwave-sandbox-agent-documents  (documents, the
+#                                                             local backend's
+#                                                             default)
+#
+# Each publish is multi-arch (amd64 + arm64, built on native runners — the
+# development fleet is Apple Silicon, so an amd64-only image would run the
+# whole sandbox under emulation there). Version tags are treated as immutable:
+# a tag that already exists on GHCR fails the run rather than being repointed.
+# The final manifest-list digests land in the run summary; the local backend
+# records the documents digest as its verified pin (see `sandbox_docker` in
+# openwave-server for the recorded pin and the follow-up-PR step).
+#
+# Publishing uses the workflow's own GITHUB_TOKEN with packages:write only; no
+# repository secret is consumed. First-time note: a package created by this
+# workflow is private by default — making it publicly pullable (and linking it
+# to the repository) is a one-time manual toggle in the GHCR package settings.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: >-
+          Image tag to publish from the dispatched ref (vX.Y.Z, optionally with
+          a pre-release suffix such as v0.9.0-images.1)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openwave-sandbox-image-${{ github.event_name == 'workflow_dispatch' && inputs.image_tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  SLIM_REPOSITORY: ghcr.io/${{ github.repository_owner }}/openwave-sandbox-agent
+  DOCUMENTS_REPOSITORY: ghcr.io/${{ github.repository_owner }}/openwave-sandbox-agent-documents
+  IMAGE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.image_tag || github.ref_name }}
+
+jobs:
+  build:
+    name: build and push · ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Reject an invalid image tag
+        run: |
+          [[ "$IMAGE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || {
+            echo "Image tag must look like vX.Y.Z (optional pre-release suffix): $IMAGE_TAG" >&2
+            exit 1
+          }
+
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      # Version tags are immutable: refuse the whole build when the final
+      # manifest-list tag already exists, before any per-arch push mutates
+      # anything.
+      - name: Refuse to republish an existing version tag
+        run: |
+          for repository in "$SLIM_REPOSITORY" "$DOCUMENTS_REPOSITORY"; do
+            if docker manifest inspect "$repository:$IMAGE_TAG" >/dev/null 2>&1; then
+              echo "Refusing to overwrite existing image tag $repository:$IMAGE_TAG" >&2
+              exit 1
+            fi
+          done
+
+      - name: Build both image variants
+        run: |
+          docker build \
+            --file crates/openwave-sandbox-agent/Dockerfile \
+            --target slim \
+            --tag "$SLIM_REPOSITORY:$IMAGE_TAG-${{ matrix.arch }}" \
+            .
+          docker build \
+            --file crates/openwave-sandbox-agent/Dockerfile \
+            --target documents \
+            --tag "$DOCUMENTS_REPOSITORY:$IMAGE_TAG-${{ matrix.arch }}" \
+            .
+
+      - name: Smoke test the documents variant
+        run: |
+          docker run --rm --entrypoint python3 \
+            "$DOCUMENTS_REPOSITORY:$IMAGE_TAG-${{ matrix.arch }}" \
+            -c 'import fpdf, pypdf, pptx, docx, openpyxl, matplotlib, pypdfium2'
+          docker run --rm --entrypoint soffice \
+            "$DOCUMENTS_REPOSITORY:$IMAGE_TAG-${{ matrix.arch }}" \
+            --version
+
+      - name: Push per-architecture tags
+        run: |
+          docker push "$SLIM_REPOSITORY:$IMAGE_TAG-${{ matrix.arch }}"
+          docker push "$DOCUMENTS_REPOSITORY:$IMAGE_TAG-${{ matrix.arch }}"
+
+  manifest:
+    name: assemble multi-arch manifests
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Create the immutable version manifests
+        run: |
+          for repository in "$SLIM_REPOSITORY" "$DOCUMENTS_REPOSITORY"; do
+            if docker manifest inspect "$repository:$IMAGE_TAG" >/dev/null 2>&1; then
+              echo "Refusing to overwrite existing image tag $repository:$IMAGE_TAG" >&2
+              exit 1
+            fi
+            docker buildx imagetools create \
+              --tag "$repository:$IMAGE_TAG" \
+              "$repository:$IMAGE_TAG-amd64" \
+              "$repository:$IMAGE_TAG-arm64"
+          done
+
+      - name: Record published digests
+        run: |
+          {
+            echo "## Published sandbox agent images"
+            echo
+            for repository in "$SLIM_REPOSITORY" "$DOCUMENTS_REPOSITORY"; do
+              digest="$(docker buildx imagetools inspect \
+                "$repository:$IMAGE_TAG" \
+                --format '{{json .Manifest.Digest}}' | tr -d '"')"
+              echo "- \`$repository:$IMAGE_TAG\` → \`$digest\`"
+            done
+            echo
+            echo "Pin the documents digest as \`PUBLISHED_IMAGE_DIGEST\` in"
+            echo "\`crates/openwave-server/src/sandbox_docker.rs\` (one-line follow-up PR)."
+          } >> "$GITHUB_STEP_SUMMARY"

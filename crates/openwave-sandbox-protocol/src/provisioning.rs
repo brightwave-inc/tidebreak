@@ -288,6 +288,19 @@ pub trait SandboxBackend: Send + Sync {
     fn enforces_external_lifetime_cap(&self) -> bool {
         false
     }
+
+    /// Whether the agent image this backend provisions from is verified within
+    /// the topology's trust root before anything executes in it — for a
+    /// registry-backed backend, that the resolved image's content is pinned by
+    /// digest rather than reached through a mutable tag.
+    ///
+    /// Detached admission requires this capability (issue #1188): an image a
+    /// registry or daemon can silently swap under a tag is not a trust root.
+    /// The default is `false` (fail closed) — a backend that does not declare
+    /// the verification cannot host a detached run.
+    fn verifies_image_integrity(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

@@ -69,7 +69,9 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "is_false")]
     pub container_execution_enabled: bool,
     /// Optional container image override for sandbox-resident agent runs.
-    /// `None` uses the server's documented placeholder image.
+    /// `None` uses the server's default: the published documents agent image
+    /// pinned by digest, or the locally built development image while no
+    /// digest is recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container_image: Option<String>,
     /// Path to the self-host profile's static bearer-token file, mapping each
@@ -113,7 +115,7 @@ impl Config {
     /// `./.openwave` under the current directory — desktop/CLI clients should set
     /// this to the platform's app-data location),
     /// `OPENWAVE_CONTAINER_EXECUTION_ENABLED` (default `false`),
-    /// `OPENWAVE_CONTAINER_IMAGE` (defaulting to the server's placeholder
+    /// `OPENWAVE_CONTAINER_IMAGE` (defaulting to the server's default agent
     /// image), and `OPENWAVE_AUTH_TOKENS_FILE` (self-host only; required
     /// there).
     pub fn from_env() -> Result<Self> {

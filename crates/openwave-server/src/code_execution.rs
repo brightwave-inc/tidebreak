@@ -254,6 +254,18 @@ pub struct CodeExecutionConfig {
     /// open-internet creation they already had.
     #[serde(default)]
     pub egress: EgressConfig,
+    /// E2B template id to create sandboxes from. `None` keeps E2B's public
+    /// code-interpreter template; set it to the id of a template registered
+    /// from the official OpenWave documents image so document runs need no
+    /// in-sandbox package install.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub e2b_template: Option<String>,
+    /// Daytona snapshot name to create sandboxes from. `None` keeps Daytona's
+    /// default snapshot; set it to a snapshot registered from the official
+    /// OpenWave documents image (Daytona cannot pull an arbitrary OCI ref at
+    /// creation — registration is where the digest pin lives).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daytona_snapshot: Option<String>,
 }
 
 impl Default for CodeExecutionConfig {
@@ -262,6 +274,8 @@ impl Default for CodeExecutionConfig {
             provider: Some(CodeExecutionProviderKind::Local),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             egress: EgressConfig::Open,
+            e2b_template: None,
+            daytona_snapshot: None,
         }
     }
 }
@@ -272,6 +286,8 @@ impl CodeExecutionConfig {
             provider: None,
             timeout_ms: DEFAULT_TIMEOUT_MS,
             egress: EgressConfig::Open,
+            e2b_template: None,
+            daytona_snapshot: None,
         }
     }
 
@@ -315,8 +331,12 @@ fn configured_e2b(
     timeout: Duration,
     pool: RemoteSessionPool,
     egress: &EgressConfig,
+    template: Option<&str>,
 ) -> std::result::Result<E2BExecutionProvider, CodeExecutionError> {
-    let provider = E2BExecutionProvider::with_session_pool(credential, timeout, pool)?;
+    let mut provider = E2BExecutionProvider::with_session_pool(credential, timeout, pool)?;
+    if let Some(template) = template {
+        provider = provider.with_template(template);
+    }
     Ok(match resolve_egress_policy(egress)? {
         Some(policy) => provider.with_egress_policy(policy),
         None => provider,
@@ -331,8 +351,12 @@ fn configured_daytona(
     timeout: Duration,
     pool: RemoteSessionPool,
     egress: &EgressConfig,
+    snapshot: Option<&str>,
 ) -> std::result::Result<DaytonaExecutionProvider, CodeExecutionError> {
-    let provider = DaytonaExecutionProvider::with_session_pool(credential, timeout, pool)?;
+    let mut provider = DaytonaExecutionProvider::with_session_pool(credential, timeout, pool)?;
+    if let Some(snapshot) = snapshot {
+        provider = provider.with_snapshot(snapshot);
+    }
     match resolve_egress_policy(egress)? {
         Some(policy) => provider.with_egress_policy(policy),
         None => Ok(provider),
@@ -604,6 +628,15 @@ pub struct CodeExecutionConfigUpdate {
     /// no secret or endpoint is accepted here — only domain patterns and CIDRs.
     #[serde(default)]
     pub egress: Option<EgressConfig>,
+    /// Replace the E2B template id. An explicit null (or empty string) returns
+    /// to E2B's default template; absent leaves the current value unchanged.
+    #[serde(default, deserialize_with = "double_option")]
+    pub e2b_template: Option<Option<String>>,
+    /// Replace the Daytona snapshot name. An explicit null (or empty string)
+    /// returns to Daytona's default snapshot; absent leaves the current value
+    /// unchanged.
+    #[serde(default, deserialize_with = "double_option")]
+    pub daytona_snapshot: Option<Option<String>>,
 }
 
 fn double_option<'de, D, T>(deserializer: D) -> std::result::Result<Option<Option<T>>, D::Error>
@@ -688,6 +721,12 @@ pub async fn update_config(
     }
     if let Some(egress) = update.egress {
         config.egress = egress;
+    }
+    if let Some(template) = update.e2b_template {
+        config.e2b_template = template.filter(|value| !value.is_empty());
+    }
+    if let Some(snapshot) = update.daytona_snapshot {
+        config.daytona_snapshot = snapshot.filter(|value| !value.is_empty());
     }
     config.validate()?;
     write_config(store, &config).await?;
@@ -1488,6 +1527,7 @@ impl ConfiguredCodeExecutionProvider {
                     Duration::from_millis(config.timeout_ms),
                     self.remote_sessions.clone(),
                     &egress,
+                    config.e2b_template.as_deref(),
                 )?)
             }
             CodeExecutionProviderKind::Daytona => {
@@ -1502,6 +1542,7 @@ impl ConfiguredCodeExecutionProvider {
                     Duration::from_millis(config.timeout_ms),
                     self.remote_sessions.clone(),
                     &egress,
+                    config.daytona_snapshot.as_deref(),
                 )?)
             }
             _ => {
@@ -2711,6 +2752,8 @@ mod tests {
             provider: Some(CodeExecutionProviderKind::Local),
             timeout_ms: MIN_TIMEOUT_MS - 1,
             egress: EgressConfig::Open,
+            e2b_template: None,
+            daytona_snapshot: None,
         }
         .validate()
         .is_err());
@@ -2769,6 +2812,8 @@ mod tests {
             provider: Some(CodeExecutionProviderKind::E2b),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             egress: bad,
+            e2b_template: None,
+            daytona_snapshot: None,
         }
         .validate()
         .is_err());
@@ -2882,6 +2927,7 @@ mod tests {
             timeout,
             pool.clone(),
             &allowlist,
+            None,
         )
         .unwrap();
         assert_eq!(e2b.egress_policy(), Some(&expected));
@@ -2891,6 +2937,7 @@ mod tests {
             timeout,
             pool.clone(),
             &allowlist,
+            None,
         )
         .unwrap();
         assert_eq!(daytona.egress_policy(), Some(&expected));
@@ -2902,6 +2949,7 @@ mod tests {
             timeout,
             pool.clone(),
             &EgressConfig::Open,
+            None,
         )
         .unwrap();
         assert_eq!(open_e2b.egress_policy(), None);
@@ -2910,6 +2958,7 @@ mod tests {
             timeout,
             pool,
             &EgressConfig::Open,
+            None,
         )
         .unwrap();
         assert_eq!(open_daytona.egress_policy(), None);
@@ -2928,6 +2977,8 @@ mod tests {
                 provider: Some(None),
                 timeout_ms: Some(MIN_TIMEOUT_MS),
                 egress: None,
+                e2b_template: None,
+                daytona_snapshot: None,
             },
         )
         .await;
@@ -2946,6 +2997,8 @@ mod tests {
                 provider: Some(Some(CodeExecutionProviderKind::Local)),
                 timeout_ms: Some(MAX_TIMEOUT_MS),
                 egress: None,
+                e2b_template: None,
+                daytona_snapshot: None,
             },
         )
         .await;
