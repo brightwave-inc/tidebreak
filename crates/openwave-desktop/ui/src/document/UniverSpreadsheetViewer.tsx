@@ -65,7 +65,11 @@ export default function UniverSpreadsheetViewer({
   const highlightRangeRef = useRef(highlightRange);
   highlightRangeRef.current = highlightRange;
   const [errorType, setErrorType] = useState<"parse" | "load" | null>(null);
-  const univerWorker = useUniverWorker();
+  // Destructured because the hook returns a fresh object every render; the
+  // callbacks inside are stable, and only those may feed the init effect below
+  // — depending on the object itself would tear Univer down and remount it on
+  // every parent re-render (every composer keystroke, in practice).
+  const { parseWorkbook, isProcessing } = useUniverWorker();
   const { resolved: resolvedTheme } = useTheme();
   const resolvedThemeRef = useRef(resolvedTheme);
   resolvedThemeRef.current = resolvedTheme;
@@ -206,8 +210,7 @@ export default function UniverSpreadsheetViewer({
     setErrorType(null);
     let disposed = false;
 
-    univerWorker
-      .parseWorkbook(fileDownload.data, fileId, { isCsv })
+    parseWorkbook(fileDownload.data, fileId, { isCsv })
       .then(({ workbookData }) => {
         if (disposed || !containerRef.current) return;
 
@@ -310,7 +313,7 @@ export default function UniverSpreadsheetViewer({
         univerInstanceRef.current = null;
       }
     };
-  }, [fileDownload.data, fileId, isCsv, univerWorker]);
+  }, [fileDownload.data, fileId, isCsv, parseWorkbook]);
 
   // Apply a highlight that arrives after the canvas is up; one that arrives
   // before it is applied by the canvas poll above.
@@ -382,7 +385,7 @@ export default function UniverSpreadsheetViewer({
 
   return (
     <div className={cn("relative flex flex-col", className)} {...restProps}>
-      {univerWorker.isProcessing && (
+      {isProcessing && (
         <div className="bg-background/80 absolute inset-0 z-10 flex items-center justify-center">
           <ViewerMessage spinner>Reading spreadsheet…</ViewerMessage>
         </div>

@@ -17,7 +17,6 @@ import { loadChatApprovalHydration } from "./ChatApprovalHydration";
 import { useChatListStore } from "./ChatListStore";
 import {
   useComposerAttachments,
-  useComposerDraft,
   useComposerDrafts,
 } from "./ComposerDrafts";
 import { ChatSessionController } from "./ChatSessionController";
@@ -110,16 +109,18 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   const deletingChatId = useChatListStore((state) => state.deletingChatId);
   const busy = useChatSessionStore((session) => session.busy);
   const [hydrated, setHydrated] = useState(false);
-  const draft = useComposerDraft(chatId);
   const files = useComposerAttachments(chatId).files;
   const [attaching, setAttaching] = useState(false);
   const [attachError, setAttachError] = useState<string | null>(null);
   const images = useImageAttachments(client, chatId);
   const handleEventRef = useRef<(event: SequencedEvent) => void>(() => {});
   const terminalHydrationGenerationRef = useRef(0);
-  // Steering reads the draft synchronously, from outside a render.
-  const draftRef = useRef(draft);
-  draftRef.current = draft;
+  // Steering reads the draft synchronously, from outside a render. The route
+  // deliberately does not subscribe to the draft — a keystroke re-renders the
+  // chat pane (which subscribes in ChatView), not the whole panel arrangement —
+  // so the ref is seeded from the store and kept current by setComposerDraft,
+  // the only writer on this route.
+  const draftRef = useRef(useComposerDrafts.getState().drafts[chatId] ?? "");
 
   const chat = chats.find((candidate) => candidate.id === chatId) ?? null;
   const nativeHost = hasNativeHost();
@@ -294,7 +295,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   }
 
   async function onSend() {
-    await sendMessage(draft.trim());
+    await sendMessage(draftRef.current.trim());
   }
 
   /**
@@ -531,7 +532,6 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             hydrated={hydrated}
             nativeHost={nativeHost}
             deletingChat={deletingChatId !== null}
-            draft={draft}
             draftRef={draftRef}
             attachError={attachError}
             files={{

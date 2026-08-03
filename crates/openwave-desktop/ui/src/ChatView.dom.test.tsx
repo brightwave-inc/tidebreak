@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useRef, useState } from "react";
+import { useRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient, Chat } from "./api";
 import { ChatView, type ChatViewProps } from "./ChatView";
 import type { ComposerImages } from "./Composer";
 import { useChatSessionStore } from "./ChatSessionStore";
+import { useComposerDrafts } from "./ComposerDrafts";
 import { usePendingPrompts } from "./PendingPrompts";
 
 vi.mock("./host", () => ({
@@ -49,11 +50,11 @@ function noFiles() {
 }
 
 /**
- * The pane with the draft wired up the way the root wires it: state for
- * rendering, a ref for reading it at the moment guidance is sent.
+ * The pane with the draft wired up the way the root wires it: the store slice
+ * the pane subscribes to, and a ref for reading it at the moment guidance is
+ * sent.
  */
 function DraftingChatView(overrides: Partial<ChatViewProps> = {}) {
-  const [draft, setDraft] = useState("");
   const draftRef = useRef("");
   return (
     <ChatView
@@ -62,7 +63,6 @@ function DraftingChatView(overrides: Partial<ChatViewProps> = {}) {
       hydrated
       nativeHost={false}
       deletingChat={false}
-      draft={draft}
       draftRef={draftRef}
       composerModelMenu={null}
       composerImages={noImages()}
@@ -70,7 +70,7 @@ function DraftingChatView(overrides: Partial<ChatViewProps> = {}) {
       attachError={null}
       onDraftChange={(value) => {
         draftRef.current = value;
-        setDraft(value);
+        useComposerDrafts.getState().setDraft(chat.id, value);
       }}
       onSelectPrompt={vi.fn()}
       onSend={vi.fn(async () => {})}
@@ -86,7 +86,6 @@ function renderChatView(overrides: Partial<ChatViewProps> = {}) {
     hydrated: true,
     nativeHost: false,
     deletingChat: false,
-    draft: "",
     draftRef: { current: "" },
     composerModelMenu: null,
     composerImages: noImages(),
@@ -103,6 +102,7 @@ function renderChatView(overrides: Partial<ChatViewProps> = {}) {
 
 beforeEach(() => {
   useChatSessionStore.getState().reset();
+  useComposerDrafts.getState().clearDraft(chat.id);
   usePendingPrompts.setState({ chatId: null, userQuestions: [], folderAccess: [] });
 });
 afterEach(cleanup);
