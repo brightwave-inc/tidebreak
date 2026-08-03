@@ -19,11 +19,13 @@ import {
   connectApprovedFolder,
   connectFolder,
   disconnectFolder,
+  grantFolderCapability,
   listApprovedFolders,
   listCapabilityConsents,
   listConnectedFolders,
   revokeCapabilityConsent,
   type ConnectedFolder,
+  type WidenedFolderCapability,
 } from "./host";
 import {
   PICKER_BUSY_MESSAGE,
@@ -126,6 +128,20 @@ export function FoldersView({ chat }: { chat: Chat }) {
   async function addApprovedFolder(rootId: string) {
     await withPicker(PICKER_HOLDERS.confirmApprovedFolder, () =>
       connectApprovedFolder(chat, rootId),
+    );
+  }
+
+  /**
+   * Widen one attached folder by one capability. The consent ceremony is the
+   * native host dialog — the same trust boundary attach-time approval crosses
+   * — so this only runs the request and follows the broker's answer.
+   */
+  async function widenFolder(
+    rootId: string,
+    capability: WidenedFolderCapability,
+  ) {
+    await withPicker(PICKER_HOLDERS.grantFolderCapability, () =>
+      grantFolderCapability(chat, rootId, capability),
     );
   }
 
@@ -236,11 +252,19 @@ export function FoldersView({ chat }: { chat: Chat }) {
                     folder.rootId,
                     chat,
                   );
+                  const reach = folderReach(statements);
+                  // What the folder does not yet allow is offered next to what
+                  // it does, so the recovery for a read-only folder is visible
+                  // before a refused write, not after it. Read is not offered:
+                  // a folder without read consent is not listed here at all.
+                  const missing = (
+                    ["write_files", "execute_commands"] as const
+                  ).filter((capability) => !reach.includes(capability));
                   return (
                     <FolderCard
                       key={folder.rootId}
                       name={folder.displayName}
-                      reach={folderReach(statements)}
+                      reach={reach}
                       action={
                         <Button
                           variant="outline"
@@ -273,6 +297,26 @@ export function FoldersView({ chat }: { chat: Chat }) {
                             }
                           >
                             Revoke
+                          </Button>
+                        </div>
+                      ))}
+                      {missing.map((capability) => (
+                        <div
+                          key={capability}
+                          className="flex items-center justify-between gap-3"
+                        >
+                          <span className="text-sm text-muted-foreground/60">
+                            {verbLabel({ kind: "capability", capability })}
+                          </span>
+                          <Button
+                            variant="ghost"
+                            size="xs"
+                            disabled={working}
+                            onClick={() =>
+                              void widenFolder(folder.rootId, capability)
+                            }
+                          >
+                            Grant
                           </Button>
                         </div>
                       ))}

@@ -86,6 +86,27 @@ export function disconnectFolder(chat: Chat, rootId: string): Promise<boolean> {
   });
 }
 
+/** The reach the folders panel can add to an already-attached folder. Read is
+ * absent on purpose: a folder whose read consent was revoked no longer
+ * appears in the panel, so its recovery is the re-attach ceremony. */
+export type WidenedFolderCapability = "write_files" | "execute_commands";
+
+/**
+ * Ask to add one capability to a folder this chat already has attached. The
+ * consent ceremony is native — a host dialog naming the chat, the folder, and
+ * exactly what is being allowed — and the approval is recorded by the broker
+ * as a fresh permission-dialog grant. Resolves `null` when the user cancels.
+ */
+export function grantFolderCapability(
+  chat: Chat,
+  rootId: string,
+  capability: WidenedFolderCapability,
+): Promise<boolean | null> {
+  return invoke("grant_folder_capability", {
+    request: { chatId: chat.id, rootId, capability },
+  });
+}
+
 export function resolveFolderAccessRequest(
   chatId: string,
   callId: string,

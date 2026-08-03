@@ -512,6 +512,95 @@ pub(crate) async fn connect_approved_folder(
     .map(Some)
 }
 
+/// The capabilities the folders panel may ask to add to an attached folder.
+///
+/// Read is deliberately absent: a folder whose read consent was revoked no
+/// longer appears in the panel at all, so the recovery for that is the
+/// ordinary re-attach ceremony, not a widening of something still visible.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WidenedFolderCapability {
+    WriteFiles,
+    ExecuteCommands,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct GrantFolderCapabilityRequest {
+    chat_id: Uuid,
+    root_id: RootId,
+    capability: WidenedFolderCapability,
+}
+
+/// Grant one more capability to a folder this chat already has attached.
+///
+/// The same shape as attach-time consent: a native dialog names the chat, the
+/// folder, and exactly what is being allowed, and the broker records the
+/// approval as a fresh permission-dialog grant. The folder identity comes
+/// from the broker's own listing for this conversation, never from renderer
+/// strings, and the broker independently re-checks that the root is live and
+/// attached before minting anything.
+#[tauri::command]
+pub(crate) async fn grant_folder_capability(
+    app: AppHandle,
+    state: State<'_, HostAccess>,
+    request: GrantFolderCapabilityRequest,
+) -> Result<Option<bool>, String> {
+    let context = state.context(request.chat_id).await?;
+    let chat_label = conversation_label(&state, request.chat_id).await?;
+    let result = state
+        .broker
+        .operation(OperationEnvelope {
+            protocol_version: openwave_host_broker::PROTOCOL_VERSION,
+            request_id: openwave_host_broker::RequestId::new(),
+            context: context.execution,
+            request: OperationRequest::ListRoots,
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    let OperationResult::ListRoots { roots } = result else {
+        return Err("host broker returned an unexpected response".to_owned());
+    };
+    let root = roots
+        .into_iter()
+        .find(|root| root.root_id == request.root_id)
+        .ok_or_else(|| "the folder is no longer connected".to_owned())?;
+
+    let _consent = state
+        .picker
+        .try_lock()
+        .map_err(|_| "a folder permission prompt is already open".to_owned())?;
+    if !confirm_folder_widening(&app, &chat_label, &root.display_name, request.capability).await? {
+        return Ok(None);
+    }
+
+    // Resolve authority again after the user responds so a deleted or changed
+    // conversation cannot reuse the earlier context.
+    let _root_change = state.root_changes.lock().await;
+    let context = state.context(request.chat_id).await?;
+    let capability = match request.capability {
+        WidenedFolderCapability::WriteFiles => Capability::WriteFiles,
+        WidenedFolderCapability::ExecuteCommands => Capability::ExecuteCommands,
+    };
+    let result = state
+        .broker
+        .control(ControlRequest::GrantRootCapability(
+            openwave_host_broker::GrantRootCapabilityRequest {
+                subject: context.subject,
+                conversation_id: context.chat_id,
+                root_id: request.root_id,
+                capability,
+                consent_method: openwave_host_broker::ConsentMethod::PermissionDialog,
+            },
+        ))
+        .await
+        .map_err(|error| error.to_string())?;
+    let ControlResult::GrantRootCapability(result) = result else {
+        return Err("host broker returned an unexpected response".to_owned());
+    };
+    Ok(Some(result.granted))
+}
+
 #[tauri::command]
 pub(crate) async fn disconnect_folder(
     state: State<'_, HostAccess>,
@@ -599,6 +688,38 @@ async fn confirm_folder_attachment(
         .title("Connect folder")
         .buttons(MessageDialogButtons::OkCancelCustom(
             "Connect".to_owned(),
+            "Cancel".to_owned(),
+        ));
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.parent(&window);
+    }
+    dialog.show(move |approved| {
+        let _ = tx.send(approved);
+    });
+    rx.await
+        .map_err(|_| "folder permission prompt closed unexpectedly".to_owned())
+}
+
+async fn confirm_folder_widening(
+    app: &AppHandle,
+    chat_label: &str,
+    display_name: &str,
+    capability: WidenedFolderCapability,
+) -> Result<bool, String> {
+    let folder_label = safe_dialog_label(display_name);
+    let allowed = match capability {
+        WidenedFolderCapability::WriteFiles => "write files in",
+        WidenedFolderCapability::ExecuteCommands => "run commands in",
+    };
+    let (tx, rx) = oneshot::channel();
+    let mut dialog = app
+        .dialog()
+        .message(format!(
+            "Allow the chat “{chat_label}” to {allowed} the connected folder “{folder_label}”?"
+        ))
+        .title("Grant folder access")
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Allow".to_owned(),
             "Cancel".to_owned(),
         ));
     if let Some(window) = app.get_webview_window("main") {

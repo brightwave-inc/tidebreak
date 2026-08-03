@@ -25,6 +25,7 @@ export type NativePickerLatchStore = {
 export const PICKER_HOLDERS = {
   connectFolder: "connect-folder",
   confirmApprovedFolder: "confirm-approved-folder",
+  grantFolderCapability: "grant-folder-capability",
   importSource: "import-source",
   exportOutput: "export-output",
   attachImage: "attach-image",

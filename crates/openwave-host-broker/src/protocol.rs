@@ -101,6 +101,16 @@ pub enum ControlRequest {
     /// operation id — the grant id already names the exact row, so a retry
     /// observes `revoked: false` and nothing can be withdrawn twice.
     RevokeGrant(RevokeGrantRequest),
+    /// Widen what an already-connected root allows for one subject.
+    ///
+    /// The inverse of [`ControlRequest::RevokeGrant`] at the same statement
+    /// granularity: one capability over one registered root, backed by a fresh
+    /// trusted consent interaction. It cannot register a root or attach one —
+    /// the folder must already be attached to the requesting conversation, so
+    /// this only ever deepens reach the user can already see in the folders
+    /// panel. No operation id — an equivalent live grant makes a retry observe
+    /// `granted: false`, so nothing can be minted twice.
+    GrantRootCapability(GrantRootCapabilityRequest),
 }
 
 /// Strict payload for a native-picker root registration.
@@ -190,6 +200,23 @@ pub struct RevokeGrantRequest {
     /// indistinguishable from a grant that does not exist.
     pub subject: GrantSubject,
     pub grant_id: GrantId,
+}
+
+/// Strict payload for widening one attached root by one capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantRootCapabilityRequest {
+    /// Trusted subject receiving the grant; must match `conversation_id` when
+    /// conversation-scoped, exactly as attachment mutations require.
+    pub subject: GrantSubject,
+    /// Conversation whose attachment authorizes the widening.
+    pub conversation_id: Uuid,
+    pub root_id: RootId,
+    pub capability: Capability,
+    /// Fresh trusted consent for the widening. Only
+    /// [`crate::ConsentMethod::PermissionDialog`] is accepted: the broker
+    /// refuses to record an interaction the desktop did not actually hold.
+    pub consent_method: ConsentMethod,
 }
 
 /// Capability-checked agent operations.
@@ -347,6 +374,7 @@ pub enum ControlResult {
     LookupRootAttachmentReceipt(LookupRootAttachmentReceiptResult),
     RevokeRoot(RevokeRootResult),
     RevokeGrant(RevokeGrantResult),
+    GrantRootCapability(GrantRootCapabilityResult),
 }
 
 /// One currently authorized host root for native local execution.
@@ -524,6 +552,17 @@ pub struct RevokeRootResult {
 #[serde(deny_unknown_fields)]
 pub struct RevokeGrantResult {
     pub revoked: bool,
+}
+
+/// Result of an idempotent single-capability widening.
+///
+/// `granted` is `false` when an equivalent live grant already covers the
+/// request — a retry after a lost response, or a capability the subject never
+/// lost. Either way the subject holds the capability afterwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantRootCapabilityResult {
+    pub granted: bool,
 }
 
 /// Portable kind of one addressable directory entry.

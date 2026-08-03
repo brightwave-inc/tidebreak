@@ -33,13 +33,14 @@ use crate::{
     path_policy::RootIdentity,
     protocol::{
         ControlEnvelope, ControlRequest, ControlResponseEnvelope, ControlResult, DirectoryEntry,
-        EntryKind, ErrorCode, ErrorResponse, GrantStatementSummary, HelloResult,
-        LookupRegisterRootReceiptRequest, LookupRegisterRootReceiptResult,
-        LookupRootAttachmentReceiptRequest, LookupRootAttachmentReceiptResult, OperationEnvelope,
-        OperationRequest, OperationResponseEnvelope, OperationResult, PathRequest,
-        ReadFileBinaryResult, ReadFileResult, RegisterRootReceipt, RegisterRootRequest,
-        RegisterRootResult, ResolveExecRootsRequest, ResolvedExecRoot, Response, ResponseEnvelope,
-        RevokeGrantRequest, RevokeGrantResult, RevokeRootRequest, RevokeRootResult, RootAccess,
+        EntryKind, ErrorCode, ErrorResponse, GrantRootCapabilityRequest, GrantRootCapabilityResult,
+        GrantStatementSummary, HelloResult, LookupRegisterRootReceiptRequest,
+        LookupRegisterRootReceiptResult, LookupRootAttachmentReceiptRequest,
+        LookupRootAttachmentReceiptResult, OperationEnvelope, OperationRequest,
+        OperationResponseEnvelope, OperationResult, PathRequest, ReadFileBinaryResult,
+        ReadFileResult, RegisterRootReceipt, RegisterRootRequest, RegisterRootResult,
+        ResolveExecRootsRequest, ResolvedExecRoot, Response, ResponseEnvelope, RevokeGrantRequest,
+        RevokeGrantResult, RevokeRootRequest, RevokeRootResult, RootAccess,
         RootAttachmentMutationKind, RootAttachmentMutationReceipt, RootAttachmentMutationRequest,
         RootAttachmentMutationResult, RootSummary, WriteFileMode, WriteFileRequest,
         WriteFileResult, MAX_READ_FILE_BINARY_BYTES, PROTOCOL_VERSION,
@@ -457,6 +458,21 @@ impl ControlAudit {
                 operation_id: None,
                 target: AuditTarget::Subject,
             }),
+            ControlRequest::GrantRootCapability(request) => Some(Self {
+                actor: AuditActor::Control {
+                    subject: request.subject,
+                    conversation_id: Some(request.conversation_id),
+                },
+                mutates: true,
+                operation: AuditOperation::GrantRootCapability,
+                grant_id: None,
+                // Naturally idempotent: an equivalent live grant makes a retry
+                // a no-op, so there is no separate mutation identity.
+                operation_id: None,
+                target: AuditTarget::Root {
+                    root_id: request.root_id,
+                },
+            }),
         }
     }
 
@@ -718,6 +734,9 @@ impl Controller {
             ControlRequest::RevokeGrant(request) => {
                 self.revoke_grant(request).map(ControlResult::RevokeGrant)
             }
+            ControlRequest::GrantRootCapability(request) => self
+                .grant_root_capability(request)
+                .map(ControlResult::GrantRootCapability),
         }
     }
 
@@ -1086,6 +1105,63 @@ impl Controller {
                 .map_err(error_response)?;
         }
         Ok(RevokeGrantResult { revoked })
+    }
+
+    /// Widen one attached root by one capability, with fresh consent.
+    ///
+    /// The mirror of [`Broker::revoke_grant`] at the same statement
+    /// granularity, for the folders panel's "allow write to this folder"
+    /// affordance. The boundary is deliberately narrow: the root must be live
+    /// (a set-aside root's directory cannot be confirmed) and already attached
+    /// to the requesting conversation, so this can deepen reach over a folder
+    /// the user is looking at but can never introduce a folder or attachment.
+    /// `Grant::from_consent` rejects capability/scope vocabulary that does not
+    /// describe an operation class, so only the per-root capabilities — read,
+    /// write, exec — can be minted here.
+    fn grant_root_capability(
+        &self,
+        request: GrantRootCapabilityRequest,
+    ) -> Result<GrantRootCapabilityResult, ErrorResponse> {
+        validate_subject_conversation(request.subject, request.conversation_id)
+            .map_err(error_response)?;
+        // A widening records a consent interaction the desktop actually held.
+        // The picker methods describe choosing a folder, not answering a
+        // capability question, and `CarriedForward` describes a migration.
+        if !matches!(request.consent_method, ConsentMethod::PermissionDialog) {
+            return Err(error_response(BrokerError::InvalidConsentMethod));
+        }
+        let mut state = self.lock_state().map_err(error_response)?;
+        let mut next = state.clone();
+        if !next.roots.contains_key(&request.root_id) {
+            return Err(error_response(BrokerError::UnknownRoot));
+        }
+        if !has_root_attachment(&next, request.conversation_id, request.root_id) {
+            return Err(error_response(BrokerError::Denied));
+        }
+        let already_granted = next.grants.iter().any(|grant| {
+            grant.subject() == request.subject
+                && grant.capability() == request.capability
+                && matches!(*grant.scope(), Scope::Root { root_id } if root_id == request.root_id)
+        });
+        if already_granted {
+            return Ok(GrantRootCapabilityResult { granted: false });
+        }
+        next.grants.push(
+            Grant::from_consent(
+                GrantId::new(),
+                request.subject,
+                request.capability,
+                Scope::Root {
+                    root_id: request.root_id,
+                },
+                ConsentRecord::new(request.consent_method, Utc::now()),
+            )
+            .map_err(BrokerError::from)
+            .map_err(error_response)?,
+        );
+        self.commit_state(&mut state, next)
+            .map_err(error_response)?;
+        Ok(GrantRootCapabilityResult { granted: true })
     }
 
     fn commit_state(

@@ -454,6 +454,112 @@ fn revoking_read_cascades_to_exec() {
     assert!(remaining.contains(&Capability::ListRoots));
 }
 
+/// The widening boundary: an attached read-only folder can regain write
+/// through a fresh permission-dialog consent — and only through one. The
+/// request cannot reach an unattached conversation, an unknown root, or claim
+/// a consent interaction the picker methods describe, and a retry after the
+/// grant stands is a no-op rather than a duplicate statement.
+#[test]
+fn granting_write_to_an_attached_root_requires_fresh_dialog_consent() {
+    let (_temp, broker, path) = setup();
+    let controller = broker.controller();
+    let conversation = Uuid::new_v4();
+    let subject = GrantSubject::conversation(conversation).unwrap();
+    let root_id = register(&controller, subject, conversation, path, OperationId::new())
+        .root
+        .root_id;
+    let context = ExecutionContext::standalone(conversation).unwrap();
+    let write_grant = |grants: Vec<GrantStatementSummary>| {
+        grants
+            .into_iter()
+            .find(|grant| grant.capability == Capability::WriteFiles)
+    };
+    let widen = |subject, conversation_id, root_id, consent_method| {
+        unwrap_response(controller.handle(ControlEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: crate::RequestId::new(),
+            request: ControlRequest::GrantRootCapability(GrantRootCapabilityRequest {
+                subject,
+                conversation_id,
+                root_id,
+                capability: Capability::WriteFiles,
+                consent_method,
+            }),
+        }))
+    };
+
+    // The pre-v3 shape: write consent was never recorded for this root.
+    let original = write_grant(grant_statements(&controller)).unwrap();
+    assert!(revoke_grant(&controller, subject, original.grant_id));
+    let listed_write = || {
+        let OperationResult::ListRoots { roots } =
+            operate(&broker.operator(), context, OperationRequest::ListRoots).unwrap()
+        else {
+            panic!("unexpected operation result")
+        };
+        roots[0].capabilities.contains(&Capability::WriteFiles)
+    };
+    assert!(!listed_write());
+
+    // Wrong consent vocabulary, wrong conversation, wrong root: all refused.
+    assert!(widen(subject, conversation, root_id, ConsentMethod::FolderPicker).is_err());
+    let stranger = Uuid::new_v4();
+    assert_eq!(
+        widen(
+            GrantSubject::conversation(stranger).unwrap(),
+            stranger,
+            root_id,
+            ConsentMethod::PermissionDialog,
+        )
+        .unwrap_err()
+        .code,
+        ErrorCode::Denied
+    );
+    assert!(widen(
+        subject,
+        conversation,
+        RootId::new(),
+        ConsentMethod::PermissionDialog
+    )
+    .is_err());
+    assert!(!listed_write());
+
+    // The real widening mints one statement with dialog provenance, and the
+    // same `authorize()` rows the listing reads now allow writing.
+    assert_eq!(
+        widen(
+            subject,
+            conversation,
+            root_id,
+            ConsentMethod::PermissionDialog
+        )
+        .unwrap(),
+        ControlResult::GrantRootCapability(GrantRootCapabilityResult { granted: true })
+    );
+    assert!(listed_write());
+    let minted = write_grant(grant_statements(&controller)).unwrap();
+    assert_eq!(minted.consent_method, ConsentMethod::PermissionDialog);
+
+    // A retry observes the standing grant instead of minting a second row.
+    assert_eq!(
+        widen(
+            subject,
+            conversation,
+            root_id,
+            ConsentMethod::PermissionDialog
+        )
+        .unwrap(),
+        ControlResult::GrantRootCapability(GrantRootCapabilityResult { granted: false })
+    );
+    assert_eq!(
+        grant_statements(&controller)
+            .into_iter()
+            .filter(|grant| grant.capability == Capability::WriteFiles)
+            .count(),
+        1
+    );
+}
+
 #[test]
 fn an_empty_conversation_lists_no_roots_without_needing_a_grant() {
     let (_temp, broker, _path) = setup();
