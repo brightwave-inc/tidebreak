@@ -16,7 +16,8 @@
 //! delete leaves the credential in place.
 
 use openwave_code_execution::{DAYTONA_CREDENTIAL_KEY, E2B_CREDENTIAL_KEY};
-use openwave_core::SecretProvider;
+use openwave_core::connected_app::ConnectedAppKind;
+use openwave_core::{Result, SecretProvider, Store};
 use openwave_web_search::WebSearchProviderKind;
 
 use crate::providers::{ProviderKind, LEGACY_ANTHROPIC_API_KEY};
@@ -58,9 +59,40 @@ pub enum RehomeOutcome {
     Lost(String),
 }
 
-/// Every key the application may store a credential under.
-#[must_use]
-pub fn stored_secret_keys() -> Vec<String> {
+/// Every key the application may store a credential under: the fixed
+/// per-feature keys, plus one dynamic `connected_app.{id}.credential` key per
+/// stored `rest_api` record that references a credential.
+///
+/// The dynamic keys are why this reads the store: they exist only as records,
+/// so a static list cannot name them, and a re-home pass that skipped them
+/// would silently leave every REST credential owned by the old signature. A
+/// store that cannot be read fails the enumeration rather than shrinking it —
+/// an incomplete key list is exactly the silent loss this exists to prevent.
+pub async fn stored_secret_keys(store: &dyn Store) -> Result<Vec<String>> {
+    let mut keys = static_secret_keys();
+    for record in store.list_connected_apps().await? {
+        if record.kind != ConnectedAppKind::RestApi {
+            continue;
+        }
+        // Lenient on purpose: a definition written by a future shape fails
+        // the closed parse, but its credential reference must still be
+        // re-homed — so the reference is read out of the raw JSON instead.
+        let Some(secret_name) = record
+            .definition
+            .get("credential")
+            .and_then(|credential| credential.get("secret_name"))
+            .and_then(|name| name.as_str())
+        else {
+            continue;
+        };
+        keys.push(secret_name.to_string());
+    }
+    Ok(keys)
+}
+
+/// The fixed keys features store credentials under, independent of profile
+/// state.
+fn static_secret_keys() -> Vec<String> {
     let mut keys: Vec<String> = ProviderKind::ALL
         .iter()
         .map(|kind| kind.credential_key())
@@ -77,9 +109,19 @@ pub fn stored_secret_keys() -> Vec<String> {
 
 /// Re-home every stored credential, reporting each key in the order of
 /// [`stored_secret_keys`].
-pub async fn rehome_secrets(secrets: &dyn SecretProvider) -> Vec<(String, RehomeOutcome)> {
+pub async fn rehome_secrets(
+    store: &dyn Store,
+    secrets: &dyn SecretProvider,
+) -> Result<Vec<(String, RehomeOutcome)>> {
+    Ok(rehome_keys(secrets, stored_secret_keys(store).await?).await)
+}
+
+async fn rehome_keys(
+    secrets: &dyn SecretProvider,
+    keys: Vec<String>,
+) -> Vec<(String, RehomeOutcome)> {
     let mut outcomes = Vec::new();
-    for key in stored_secret_keys() {
+    for key in keys {
         let outcome = rehome_one(secrets, &key).await;
         outcomes.push((key, outcome));
     }
@@ -157,7 +199,7 @@ mod tests {
         secrets.set_secret(&key, "sk-ant-123").await.unwrap();
         secrets.ops.lock().unwrap().clear();
 
-        let outcomes = rehome_secrets(&secrets).await;
+        let outcomes = rehome_keys(&secrets, static_secret_keys()).await;
 
         let ops = secrets.ops.lock().unwrap().clone();
         assert_eq!(ops, vec![format!("delete {key}"), format!("set {key}")]);
@@ -189,7 +231,7 @@ mod tests {
         };
         secrets.set_secret(&key, "sk-ant-123").await.unwrap();
 
-        let outcomes = rehome_secrets(&secrets).await;
+        let outcomes = rehome_keys(&secrets, static_secret_keys()).await;
 
         assert_eq!(
             secrets.get_secret(&key).await.unwrap().as_deref(),
@@ -209,7 +251,7 @@ mod tests {
     /// this test until its key is listed.
     #[test]
     fn every_credentialed_provider_kind_is_covered() {
-        let keys = stored_secret_keys();
+        let keys = static_secret_keys();
 
         for kind in ProviderKind::ALL {
             assert!(keys.contains(&kind.credential_key()), "{kind:?}");

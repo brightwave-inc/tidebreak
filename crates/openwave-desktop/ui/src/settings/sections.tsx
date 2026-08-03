@@ -1,6 +1,7 @@
 import type { ComponentType, FunctionComponent } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
+  Blocks,
   Cpu,
   Globe,
   KeyRound,
@@ -17,6 +18,7 @@ import { useManagedPolicy } from "@/managedPolicy";
 import { useTheme } from "@/theme";
 import { AppearancePanel } from "./AppearancePanel";
 import { CodeExecutionPanel } from "./CodeExecutionPanel";
+import { ConnectedAppsPanel } from "./ConnectedAppsPanel";
 import { GatewayPanel } from "./GatewayPanel";
 import { McpPanel } from "./McpPanel";
 import { PermissionsPanel } from "./PermissionsPanel";
@@ -90,6 +92,22 @@ function McpSection() {
   return <McpPanel client={client} managed={managed} />;
 }
 
+function ConnectedAppsSection() {
+  const { client } = useApp();
+  const { managed } = useManagedPolicy();
+  const navigate = useNavigate();
+  // Settings sections are registered from a runtime table, so TanStack's
+  // generated route union contains `/settings` but not each literal child.
+  const mcpPath: string = "/settings/mcp";
+  return (
+    <ConnectedAppsPanel
+      client={client}
+      managed={managed}
+      onOpenMcpSettings={() => void navigate({ to: mcpPath })}
+    />
+  );
+}
+
 function PermissionsSection() {
   const { client } = useApp();
   return <PermissionsPanel client={client} />;
@@ -154,6 +172,12 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     label: "Code execution",
     icon: SquareTerminal,
     Component: CodeExecutionSection,
+  },
+  {
+    path: "connected-apps",
+    label: "Connected apps",
+    icon: Blocks,
+    Component: ConnectedAppsSection,
   },
   { path: "mcp", label: "MCP servers", icon: PlugZap, Component: McpSection },
   {

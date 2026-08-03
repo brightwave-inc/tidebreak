@@ -563,6 +563,62 @@ export type CodeExecutionProviderKind = "local" | "e2b" | "daytona";
 export type ConnectedAppId = string;
 
 /**
+ * One connected app, projected per kind for the Settings listing.
+ *
+ * Closed and renderer-safe: an `mcp_server` entry carries the runtime's
+ * health projection, a `rest_api` entry carries catalog and credential
+ * *status* — never transport definitions, documents, or values.
+ */
+export type ConnectedAppInfo = { "kind": "mcp_server", 
+/**
+ * The record id app bindings name.
+ */
+id: ConnectedAppId, 
+/**
+ * Display name — also the namespace the server's tools mount under.
+ */
+name: string, health: McpHealth, tool_count: number, diagnostic: string | null, } | { "kind": "rest_api", 
+/**
+ * The record id app bindings name.
+ */
+id: ConnectedAppId, name: string, base_url: string, 
+/**
+ * Operations the ingested catalog declares.
+ */
+operation_count: number, 
+/**
+ * Hex SHA-256 of the raw OpenAPI document the catalog was ingested
+ * from.
+ */
+document_sha256: string, credential_status: RestCredentialStatus, 
+/**
+ * Where the stored credential value is placed at request time, when
+ * one is referenced. The placement (and a custom header *name*) is
+ * configuration; the value never appears on this surface.
+ */
+placement: CredentialPlacement | null, updated_at: string, };
+
+/**
+ * The renderer's listing of every configured connected app, across kinds.
+ */
+export type ConnectedAppsInfo = { 
+/**
+ * MCP entries in the runtime's configuration order, then REST entries in
+ * storage order (oldest first).
+ */
+apps: Array<ConnectedAppInfo>, };
+
+/**
+ * Where the resolved credential value is placed on the request.
+ *
+ * Externally tagged and closed: `"bearer"` or `{"header": "X-Api-Key"}`; an
+ * unknown variant refuses to deserialize. A named header must be a valid
+ * header token and may name `Authorization` explicitly, but never a header
+ * the executor owns or that alters routing (see [`RestExecuteError::ForbiddenHeader`]).
+ */
+export type CredentialPlacement = "bearer" | { "header": string };
+
+/**
  * Conservative, user-inspectable capabilities for one model served by an
  * OpenAI-compatible endpoint.
  */
@@ -1221,6 +1277,11 @@ export type RendererToolStatus = "completed" | "failed";
  * (or whether) to map it to a local picker location.
  */
 export type RequestedFolderHint = "documents" | "downloads";
+
+/**
+ * Whether a `rest_api` record's referenced credential currently resolves.
+ */
+export type RestCredentialStatus = "none" | "configured" | "missing";
 
 /**
  * One thing a call surfaced.

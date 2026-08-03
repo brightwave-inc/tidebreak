@@ -39,6 +39,7 @@ mod app_invoke;
 mod app_library;
 mod chat_titling;
 mod configuration;
+mod connected_apps;
 mod conversations;
 mod documents;
 mod image_attachment;

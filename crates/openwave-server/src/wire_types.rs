@@ -356,6 +356,9 @@ mod tests {
             &cfg, &mut out,
         );
         generate::collect_from::<crate::mcp_config::McpServersInfo>(&cfg, &mut out);
+        // The Connected apps settings listing: per-kind health/catalog
+        // projections and credential *status* — never definitions or values.
+        generate::collect_from::<crate::routes::ConnectedAppsInfo>(&cfg, &mut out);
         // Named separately because `serde(flatten)` inlines it into
         // `McpServerInfo` rather than referencing it, so the walk never reaches
         // it — and the renderer uses it on its own as the PUT body shape.

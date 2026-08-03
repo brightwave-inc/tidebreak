@@ -57,6 +57,18 @@ impl RestApiDefinition {
     }
 }
 
+/// The profile secret-store key a `rest_api` record's credential value lives
+/// under, derived from the record id and nothing else.
+///
+/// Deriving the key server-side is what keeps the settings surface from ever
+/// writing — or deleting — a secret another feature owns: a record cannot
+/// point its credential at an arbitrary store key and have the CRUD routes
+/// act on it. [`crate::secret_rehome`] enumerates these keys from the stored
+/// records so re-homed profiles keep their REST credentials.
+pub(crate) fn rest_credential_secret_key(id: ConnectedAppId) -> String {
+    format!("connected_app.{id}.credential")
+}
+
 /// Parse a `rest_api` record's definition JSON, failing closed per record.
 pub(crate) fn parse_rest_api_definition(
     definition: &serde_json::Value,
