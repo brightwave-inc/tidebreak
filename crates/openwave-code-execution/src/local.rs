@@ -1852,6 +1852,152 @@ mod tests {
         );
     }
 
+    /// The composed end-to-end proof the shared cache exists for: under the
+    /// default no-network policy, a sandboxed `pip install --user --no-index
+    /// --find-links "$OPENWAVE_PACKAGE_CACHE"` resolves a pinned package
+    /// purely from artifacts the host promoted through the real verification
+    /// path, and the package imports in a later invocation of the same chat.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn offline_pip_install_resolves_from_the_promoted_shared_cache() {
+        const PYTHON: &str = "/usr/bin/python3";
+        // A wheel is a zip archive with recorded member hashes; building one
+        // directly keeps the fixture fully offline while staying a real,
+        // valid wheel that pip verifies and installs like any registry
+        // artifact.
+        const BUILD_WHEEL: &str = r#"
+import base64, csv, hashlib, io, sys, zipfile
+dest = sys.argv[1]
+files = {
+    "openwaveproof/__init__.py": b"MARKER = 'offline-cache-proof'\n",
+    "openwaveproof-1.0.0.dist-info/METADATA": b"Metadata-Version: 2.1\nName: openwaveproof\nVersion: 1.0.0\n",
+    "openwaveproof-1.0.0.dist-info/WHEEL": b"Wheel-Version: 1.0\nGenerator: openwave-test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+}
+record = "openwaveproof-1.0.0.dist-info/RECORD"
+rows = []
+with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as archive:
+    for name, data in files.items():
+        archive.writestr(name, data)
+        digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+        rows.append((name, f"sha256={digest}", str(len(data))))
+    rows.append((record, "", ""))
+    out = io.StringIO()
+    csv.writer(out, lineterminator="\n").writerows(rows)
+    archive.writestr(record, out.getvalue())
+"#;
+
+        // The proof can only be as healthy as the host interpreter (see the
+        // confinement test above): without a working system python and pip
+        // there is nothing here to prove about the cache.
+        let pip_works = std::process::Command::new(PYTHON)
+            .args(["-m", "pip", "--version"])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if !pip_works {
+            eprintln!("skipping: host python/pip unusable in this environment");
+            return;
+        }
+        let Some(runtime_key) =
+            crate::package_cache::SharedPackageCache::runtime_key(Path::new(PYTHON)).await
+        else {
+            eprintln!("skipping: host interpreter yields no runtime key");
+            return;
+        };
+
+        let scratch = tempfile::tempdir().unwrap();
+        let workspace = "chat-offline-install";
+        fs::create_dir(scratch.path().join(workspace)).unwrap();
+
+        // Build the wheel into a staging directory and promote it through the
+        // same verification pass `populate_with_pip` runs after its download,
+        // so the manifest the sandboxed install relies on is real, not
+        // hand-forged.
+        let staging = scratch.path().join("staging");
+        fs::create_dir(&staging).unwrap();
+        let built = std::process::Command::new(PYTHON)
+            .args(["-c", BUILD_WHEEL])
+            .arg(staging.join("openwaveproof-1.0.0-py3-none-any.whl"))
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "wheel fixture build failed: {}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let cache = crate::package_cache::SharedPackageCache::open(
+            &scratch.path().join(crate::package_cache::PACKAGE_CACHE_DIR),
+            &runtime_key,
+        )
+        .unwrap();
+        let report = cache.verify_and_promote(&staging).unwrap();
+        assert_eq!(report.promoted, 1, "the staged wheel must promote");
+        assert!(cache.is_ready());
+        let wheels = fs::canonicalize(cache.wheels_dir()).unwrap();
+
+        // `NetworkPolicy::Off` is the provider default: no broker, and no
+        // network allowance in the profile. The curl probe pins that the
+        // install ran with the network actually off, not merely unused.
+        let provider = LocalExecutionProvider::new(scratch.path(), Duration::from_secs(120))
+            .unwrap()
+            .with_shared_package_cache(Some(wheels));
+        // A python whose stdlib carries the EXTERNALLY-MANAGED marker needs
+        // `--break-system-packages` (its bundled pip understands the flag);
+        // passing it unconditionally would fail the older pips that don't.
+        let externally_managed = std::process::Command::new(PYTHON)
+            .args([
+                "-c",
+                "import os, sysconfig; \
+                 print(os.path.exists(os.path.join(sysconfig.get_path('stdlib'), 'EXTERNALLY-MANAGED')))",
+            ])
+            .output()
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim() == "True")
+            .unwrap_or(false);
+        let break_flag = if externally_managed {
+            " --break-system-packages"
+        } else {
+            ""
+        };
+        let install = format!(
+            "if /usr/bin/curl -fsS --max-time 1 https://example.com >/dev/null 2>&1; \
+             then echo network-open; else echo network-blocked; fi; \
+             {PYTHON} -m pip install --user --quiet --no-index \
+             --disable-pip-version-check --no-input{break_flag} \
+             --find-links \"$OPENWAVE_PACKAGE_CACHE\" openwaveproof==1.0.0"
+        );
+        let response = provider
+            .execute(request(workspace, "call-offline-install", &install))
+            .await
+            .unwrap();
+        // The Xcode python shim failing to start is an environment defect,
+        // not a cache finding — skip it loudly, as the confinement test does.
+        if response.stderr.contains("unable to locate xcodebuild") {
+            eprintln!("skipping: Xcode python shim cannot start on this host");
+            return;
+        }
+        assert_eq!(
+            response.exit_code,
+            Some(0),
+            "stdout: {} stderr: {}",
+            response.stdout,
+            response.stderr
+        );
+        assert!(response.stdout.contains("network-blocked"));
+
+        // A later invocation of the same chat imports the installed package
+        // from its persistent per-chat HOME.
+        let imported = provider
+            .execute(request(
+                workspace,
+                "call-offline-import",
+                &format!("{PYTHON} -c \"import openwaveproof; print(openwaveproof.MARKER)\""),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(imported.exit_code, Some(0), "stderr: {}", imported.stderr);
+        assert_eq!(imported.stdout.trim(), "offline-cache-proof");
+    }
+
     /// The invariant staging rests on: a staged grant is writable only at the
     /// overlay. A command that names the user's folder directly — which is the
     /// path the model has always been given — is refused rather than silently
