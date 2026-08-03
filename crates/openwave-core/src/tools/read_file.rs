@@ -15,6 +15,7 @@ use super::private_scratch::{file_name, line_count, read_utf8_file, relative_pat
 pub struct ReadFile;
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(super) struct Arguments {
     #[schemars(description = "Private-scratch-relative file path.")]
     path: String,
