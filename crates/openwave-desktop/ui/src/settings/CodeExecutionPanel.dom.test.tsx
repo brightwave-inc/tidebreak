@@ -36,6 +36,40 @@ const OPEN_EGRESS: CodeExecutionConfigInfo["egress"] = {
   ],
 };
 
+/**
+ * Today's server position: no provider is admitted for detached runs, and the
+ * local row names the three structural gaps.
+ */
+const NO_DETACHED: CodeExecutionConfigInfo["detached_admission"] = [
+  {
+    provider: "local",
+    admitted: false,
+    denials: [
+      "no_scoped_model_token",
+      "no_external_lifetime_cap",
+      "image_not_verified",
+    ],
+  },
+  {
+    provider: "e2b",
+    admitted: false,
+    denials: [
+      "no_scoped_model_token",
+      "no_external_lifetime_cap",
+      "image_not_verified",
+    ],
+  },
+  {
+    provider: "daytona",
+    admitted: false,
+    denials: [
+      "no_scoped_model_token",
+      "no_external_lifetime_cap",
+      "image_not_verified",
+    ],
+  },
+];
+
 function clientFor(
   config: CodeExecutionConfigInfo,
   credentials: CodeExecutionCredentialReadiness[] = [
@@ -79,6 +113,7 @@ describe("CodeExecutionPanel", () => {
         available: false,
         has_credential: false,
         egress: OPEN_EGRESS,
+      detached_admission: NO_DETACHED,
       });
 
     render(<CodeExecutionPanel client={client} />);
@@ -122,6 +157,7 @@ describe("CodeExecutionPanel", () => {
         available: true,
         has_credential: true,
         egress: OPEN_EGRESS,
+      detached_admission: NO_DETACHED,
       },
       [
         { provider: "e2b", has_credential: true },
@@ -148,6 +184,7 @@ describe("CodeExecutionPanel", () => {
       available: true,
       has_credential: true,
       egress: OPEN_EGRESS,
+      detached_admission: NO_DETACHED,
     });
 
     render(<CodeExecutionPanel client={client} />);
@@ -168,6 +205,7 @@ describe("CodeExecutionPanel", () => {
       available: true,
       has_credential: true,
       egress: OPEN_EGRESS,
+      detached_admission: NO_DETACHED,
     });
 
     render(<CodeExecutionPanel client={client} />);
@@ -188,6 +226,7 @@ describe("CodeExecutionPanel", () => {
       available: true,
       has_credential: false,
       egress: OPEN_EGRESS,
+      detached_admission: NO_DETACHED,
     });
 
     render(<CodeExecutionPanel client={client} />);
@@ -199,5 +238,33 @@ describe("CodeExecutionPanel", () => {
 
     await screen.findByRole("alert");
     expect(putCodeExecutionConfig).not.toHaveBeenCalled();
+  });
+
+  it("explains per provider why detached runs are unavailable, in plain language", async () => {
+    const { client } = clientFor({
+      provider: "local",
+      timeout_ms: 20_000,
+      available: true,
+      has_credential: false,
+      egress: OPEN_EGRESS,
+      detached_admission: NO_DETACHED,
+    });
+
+    render(<CodeExecutionPanel client={client} />);
+
+    // One "Not available" badge per provider, and the typed denial reasons
+    // are rendered as honest sentences — never raw enum names.
+    expect(await screen.findAllByText("Not available")).toHaveLength(3);
+    expect(
+      screen.getAllByText(/token limited to a single run/i).length,
+    ).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText(/limits how long it can live/i).length,
+    ).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText(/isn't yet verified against a trusted source/i)
+        .length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryByText(/no_scoped_model_token/)).toBeNull();
   });
 });

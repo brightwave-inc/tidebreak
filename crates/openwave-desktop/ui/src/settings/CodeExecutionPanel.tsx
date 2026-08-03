@@ -216,6 +216,13 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
             />
           </SettingsSection>
 
+          <SettingsSection
+            title="Detached background runs"
+            description="A detached run keeps working in its sandbox even when this app is closed. It is only allowed when every safety precondition holds; until then, background runs stay attached and end with the app."
+          >
+            <DetachedAdmissionDisclosure rows={config.detached_admission} />
+          </SettingsSection>
+
           {/* One save for the whole surface: it stores every key typed above
               and the selection together, so a provider cannot go active in a
               pass that failed to save its key. */}
@@ -242,6 +249,76 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
 
 type EgressEnforcementRow =
   CodeExecutionConfigInfo["egress"]["enforcement"][number];
+
+type DetachedAdmissionRow =
+  CodeExecutionConfigInfo["detached_admission"][number];
+type DetachedAdmissionDenialReason = DetachedAdmissionRow["denials"][number];
+
+/**
+ * Each typed denial reason mapped to an honest sentence: what is missing, and
+ * what would change it. The reasons come from the server's real admission
+ * evaluator, so this list is exactly what the gate would deny a run for —
+ * the surface never composes its own judgement.
+ */
+const DETACHED_DENIAL_SENTENCES: Record<DetachedAdmissionDenialReason, string> =
+  {
+    no_scoped_model_token:
+      "The model gateway can't yet issue a token limited to a single run, so a detached run would have to carry a long-lived credential. This clears when the gateway can mint run-scoped tokens.",
+    no_external_lifetime_cap:
+      "Nothing outside the sandbox limits how long it can live, so a run this app never reconnects to would keep running unbounded. This needs a provider that enforces a time limit at creation.",
+    image_not_verified:
+      "The sandbox image isn't yet verified against a trusted source before it runs.",
+    host_authority_tool_surface:
+      "The run's tools could reach an operation that needs your approval mid-run, and a detached run has no one to ask.",
+    credentials_without_external_egress:
+      "The run would carry third-party credentials without an externally enforced network boundary keeping them from leaving.",
+  };
+
+const DETACHED_PROVIDER_LABEL: Record<
+  DetachedAdmissionRow["provider"],
+  string
+> = {
+  local: "Local native sandbox",
+  e2b: "E2B cloud sandbox",
+  daytona: "Daytona cloud sandbox",
+};
+
+/**
+ * Per-provider detached-admission disclosure: for each execution provider,
+ * whether a detached run would be allowed, and — when it wouldn't — every
+ * unmet precondition in plain language, so the user can see why detached
+ * execution is unavailable and what would change it.
+ */
+function DetachedAdmissionDisclosure({
+  rows,
+}: {
+  rows: CodeExecutionConfigInfo["detached_admission"];
+}) {
+  return (
+    <div className="flex flex-col gap-3">
+      {rows.map((row) => (
+        <div key={row.provider} className="flex flex-col gap-1 text-sm">
+          <div className="flex items-center gap-2">
+            <Badge variant={row.admitted ? "success" : "warning"} size="sm">
+              {row.admitted ? "Available" : "Not available"}
+            </Badge>
+            <span className="font-medium text-foreground">
+              {DETACHED_PROVIDER_LABEL[row.provider]}
+            </span>
+          </div>
+          {!row.admitted && (
+            <ul className="ml-5 list-disc text-muted-foreground">
+              {row.denials.map((denial) => (
+                <li key={denial}>{DETACHED_DENIAL_SENTENCES[denial]}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 
 /**
  * How each enforcement status reads: the badge never claims a boundary a
