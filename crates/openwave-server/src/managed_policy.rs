@@ -34,6 +34,13 @@ const MANAGED_GATEWAY_URL_KEY: &str = "GatewayURL";
 /// below it, never above.
 const MANAGED_PERMISSION_MODE_KEY: &str = "MaximumPermissionMode";
 
+/// The key an OS artifact stores the local-MCP allowance under, shared by the
+/// Windows registry value and the macOS managed-preferences key. When true,
+/// managed policy leaves local stdio MCP servers to the user; remote manual
+/// (`url`) servers stay locked. Absent reads as false — deny is the managed
+/// default, and the organization opts in explicitly.
+const MANAGED_ALLOW_LOCAL_MCP_KEY: &str = "AllowLocalMcpServers";
+
 /// Which authority asserted the active policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
@@ -76,6 +83,11 @@ pub(crate) struct ManagedPolicy {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub(crate) permission_mode_ceiling: Option<PermissionMode>,
+    /// True when the OS policy explicitly allows local stdio MCP servers on a
+    /// managed profile. False by default — the managed lockdown covers every
+    /// manual transport unless the organization opts in — and carries no
+    /// meaning while unmanaged, where nothing is locked to begin with.
+    pub(crate) allow_local_mcp_servers: bool,
 }
 
 impl ManagedPolicy {
@@ -89,6 +101,7 @@ impl ManagedPolicy {
             misconfigured: true,
             pending_gateway_url: None,
             permission_mode_ceiling: None,
+            allow_local_mcp_servers: false,
         }
     }
 
@@ -129,6 +142,14 @@ pub(crate) trait OsPolicySource: Send + Sync {
     /// fails that closed by clamping to the default mode rather than
     /// dropping the ceiling.
     fn permission_mode_ceiling(&self) -> Result<Option<PermissionMode>> {
+        Ok(None)
+    }
+
+    /// The OS-asserted local-MCP allowance, when the platform declares one.
+    /// Same error contract as [`Self::gateway_url`]: `Err` means an artifact
+    /// exists but its assertion cannot be honored — [`resolve`] fails that
+    /// closed to deny rather than honoring a broken opt-in.
+    fn allow_local_mcp_servers(&self) -> Result<Option<bool>> {
         Ok(None)
     }
 }
@@ -317,6 +338,10 @@ impl OsPolicySource for ManagedPreferencesSource {
     fn permission_mode_ceiling(&self) -> Result<Option<PermissionMode>> {
         self.channel_value(permission_mode_from_managed_plist)
     }
+
+    fn allow_local_mcp_servers(&self) -> Result<Option<bool>> {
+        self.channel_value(allow_local_mcp_from_managed_plist)
+    }
 }
 
 /// Read one managed-preferences channel's bytes: an absent file is `None`.
@@ -377,14 +402,7 @@ fn trusted_plist_bytes(path: &Path, trusted_owner: u32) -> Result<Option<Vec<u8>
 // Live via the reader only where the platform wires it; tested everywhere.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn string_from_managed_plist(bytes: &[u8], key: &str) -> Result<Option<String>> {
-    let value = plist::Value::from_reader(std::io::Cursor::new(bytes))
-        .map_err(|_| AgentError::config("managed preferences plist is unreadable"))?;
-    let Some(dictionary) = value.as_dictionary() else {
-        return Err(AgentError::config(
-            "managed preferences plist is not a dictionary",
-        ));
-    };
-    match dictionary.get(key) {
+    match value_from_managed_plist(bytes, key)? {
         None => Ok(None),
         Some(value) => match value.as_string() {
             Some(raw) => Ok(Some(raw.to_owned())),
@@ -393,6 +411,19 @@ fn string_from_managed_plist(bytes: &[u8], key: &str) -> Result<Option<String>> 
             ))),
         },
     }
+}
+
+/// Look one key up in a managed-preferences plist (binary or XML).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn value_from_managed_plist(bytes: &[u8], key: &str) -> Result<Option<plist::Value>> {
+    let value = plist::Value::from_reader(std::io::Cursor::new(bytes))
+        .map_err(|_| AgentError::config("managed preferences plist is unreadable"))?;
+    let Some(dictionary) = value.as_dictionary() else {
+        return Err(AgentError::config(
+            "managed preferences plist is not a dictionary",
+        ));
+    };
+    Ok(dictionary.get(key).cloned())
 }
 
 /// Extract and validate `GatewayURL` from a managed-preferences plist.
@@ -410,6 +441,23 @@ fn permission_mode_from_managed_plist(bytes: &[u8]) -> Result<Option<PermissionM
     string_from_managed_plist(bytes, MANAGED_PERMISSION_MODE_KEY)?
         .map(|raw| asserted_permission_mode(&raw))
         .transpose()
+}
+
+/// Extract `AllowLocalMcpServers` from a managed-preferences plist: a native
+/// plist boolean as profile tooling authors it, or the shared string token
+/// for hand-built artifacts.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn allow_local_mcp_from_managed_plist(bytes: &[u8]) -> Result<Option<bool>> {
+    match value_from_managed_plist(bytes, MANAGED_ALLOW_LOCAL_MCP_KEY)? {
+        None => Ok(None),
+        Some(plist::Value::Boolean(flag)) => Ok(Some(flag)),
+        Some(value) => match value.as_string() {
+            Some(raw) => asserted_policy_flag(raw).map(Some),
+            None => Err(AgentError::config(format!(
+                "managed preferences {MANAGED_ALLOW_LOCAL_MCP_KEY} is not a boolean"
+            ))),
+        },
+    }
 }
 
 /// Machine policy from the Windows registry:
@@ -462,6 +510,12 @@ impl OsPolicySource for RegistryPolicySource {
             .map(|raw| asserted_permission_mode(&raw))
             .transpose()
     }
+
+    fn allow_local_mcp_servers(&self) -> Result<Option<bool>> {
+        registry_policy_value(MANAGED_ALLOW_LOCAL_MCP_KEY)?
+            .map(|raw| asserted_policy_flag(&raw))
+            .transpose()
+    }
 }
 
 /// A JSON policy file: `{"gateway_url": "https://…"}`. Linux wires this at
@@ -511,11 +565,15 @@ impl OsPolicySource for PolicyFileSource {
             .map(|raw| asserted_permission_mode(&raw))
             .transpose()
     }
+
+    fn allow_local_mcp_servers(&self) -> Result<Option<bool>> {
+        Ok(self.read()?.and_then(|file| file.allow_local_mcp_servers))
+    }
 }
 
 /// The policy-file payload: `{"gateway_url": "https://…",
-/// "maximum_permission_mode": "ask"}`, each key optional but at least one
-/// required.
+/// "maximum_permission_mode": "ask", "allow_local_mcp_servers": true}`, each
+/// key optional but at least one required.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Deserialize)]
 struct PolicyFilePayload {
@@ -523,6 +581,8 @@ struct PolicyFilePayload {
     gateway_url: Option<String>,
     #[serde(default)]
     maximum_permission_mode: Option<String>,
+    #[serde(default)]
+    allow_local_mcp_servers: Option<bool>,
 }
 
 /// Decode the policy-file payload. Split from the reader so the format is
@@ -535,7 +595,10 @@ struct PolicyFilePayload {
 fn decode_policy_json(bytes: &[u8]) -> Result<PolicyFilePayload> {
     let file: PolicyFilePayload = serde_json::from_slice(bytes)
         .map_err(|_| AgentError::config("managed policy file is not the expected JSON shape"))?;
-    if file.gateway_url.is_none() && file.maximum_permission_mode.is_none() {
+    if file.gateway_url.is_none()
+        && file.maximum_permission_mode.is_none()
+        && file.allow_local_mcp_servers.is_none()
+    {
         return Err(AgentError::config(
             "managed policy file names no recognized policy keys",
         ));
@@ -568,6 +631,22 @@ fn asserted_permission_mode(raw: &str) -> Result<PermissionMode> {
              expected one of plan, ask, auto, allow"
         ))
     })
+}
+
+/// The shared token check for a boolean policy value read from an OS artifact
+/// that carries strings (the registry's `REG_SZ`, a hand-authored plist):
+/// trimmed, then held to `true`/`false`. Anything else — including blank — is
+/// a misconfiguration, never silently ignored.
+// Live via the readers only where the platform wires it; tested everywhere.
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+fn asserted_policy_flag(raw: &str) -> Result<bool> {
+    match raw.trim() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        value => Err(AgentError::config(format!(
+            "managed policy asserts an unknown flag value {value:?}; expected true or false"
+        ))),
+    }
 }
 
 /// The durable provisioned state, stored as one setting.
@@ -610,6 +689,19 @@ pub(crate) async fn resolve(
             Some(PermissionMode::Ask)
         }
     };
+    // Same per-key shape for the local-MCP allowance, with the opposite
+    // failure direction: an opt-in whose artifact is broken fails closed to
+    // the deny default rather than granting the allowance.
+    policy.allow_local_mcp_servers = match os_policy.allow_local_mcp_servers() {
+        Ok(flag) => flag.unwrap_or(false),
+        Err(error) => {
+            tracing::warn!(
+                "OS-managed local-MCP allowance is present but unusable: {error}; \
+                 failing closed to deny"
+            );
+            false
+        }
+    };
     Ok(policy)
 }
 
@@ -647,6 +739,7 @@ async fn resolve_gateway(
         misconfigured: false,
         pending_gateway_url: None,
         permission_mode_ceiling: None,
+        allow_local_mcp_servers: false,
     })
 }
 
@@ -661,6 +754,7 @@ fn asserted(source: ManagedPolicySource, gateway_url: &str) -> ManagedPolicy {
             misconfigured: false,
             pending_gateway_url: None,
             permission_mode_ceiling: None,
+            allow_local_mcp_servers: false,
         },
         Err(error) => {
             tracing::warn!("{source:?}-asserted gateway URL fails the contract: {error}");
@@ -903,6 +997,16 @@ mod tests {
         let policy = resolve(&*store, &reader).await.unwrap();
         assert!(policy.managed && !policy.misconfigured);
         assert_eq!(policy.permission_mode_ceiling, Some(PermissionMode::Auto));
+        // The local-MCP allowance defaults to deny; the org asserts it as a
+        // native JSON boolean alongside whatever else the file carries.
+        assert!(!policy.allow_local_mcp_servers);
+        std::fs::write(
+            &path,
+            br#"{ "gateway_url": "https://corp.gateway", "allow_local_mcp_servers": true }"#,
+        )
+        .unwrap();
+        let policy = resolve(&*store, &reader).await.unwrap();
+        assert!(policy.managed && policy.allow_local_mcp_servers);
 
         for corrupt in [&b"not json"[..], br#"{ "gateway": "wrong shape" }"#] {
             std::fs::write(&path, corrupt).unwrap();
@@ -975,6 +1079,26 @@ mod tests {
         );
         let unknown = xml("<key>MaximumPermissionMode</key><string>yolo</string>");
         assert!(permission_mode_from_managed_plist(unknown.as_bytes()).is_err());
+
+        // The local-MCP allowance reads the native plist boolean profiles
+        // author, or the shared string token; absent is `None`, and a token
+        // outside true/false refuses.
+        let allowed = xml("<key>AllowLocalMcpServers</key><true/>");
+        assert_eq!(
+            allow_local_mcp_from_managed_plist(allowed.as_bytes()).unwrap(),
+            Some(true)
+        );
+        let token = xml("<key>AllowLocalMcpServers</key><string> true </string>");
+        assert_eq!(
+            allow_local_mcp_from_managed_plist(token.as_bytes()).unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            allow_local_mcp_from_managed_plist(unrelated.as_bytes()).unwrap(),
+            None
+        );
+        let bad_flag = xml("<key>AllowLocalMcpServers</key><string>yes</string>");
+        assert!(allow_local_mcp_from_managed_plist(bad_flag.as_bytes()).is_err());
     }
 
     /// The ceiling's failure direction: a present-but-broken assertion clamps

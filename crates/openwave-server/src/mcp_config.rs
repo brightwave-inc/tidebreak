@@ -49,6 +49,33 @@ const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(30);
 pub(crate) const MANAGED_DISABLED_DIAGNOSTIC: &str =
     "Disabled by managed policy. Gateway-managed MCP endpoints remain available.";
 
+/// How far managed policy locks the manual transports right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ManualLockdown {
+    /// Unmanaged: nothing is locked.
+    Open,
+    /// Managed with `AllowLocalMcpServers`: local stdio servers are the
+    /// user's; remote manual (`url`) servers stay locked, because a
+    /// credentialed remote endpoint outside the gateway is exactly the
+    /// egress the entitlement list exists to answer for.
+    RemoteManual,
+    /// The managed default: every manual transport is locked.
+    AllManual,
+}
+
+impl ManualLockdown {
+    /// The lockdown a resolved policy asserts.
+    pub(crate) fn for_policy(policy: &crate::managed_policy::ManagedPolicy) -> Self {
+        if !policy.managed {
+            Self::Open
+        } else if policy.allow_local_mcp_servers {
+            Self::RemoteManual
+        } else {
+            Self::AllManual
+        }
+    }
+}
+
 /// Validated external servers selected by the legacy boot file.
 #[derive(Default)]
 pub(crate) struct ConfiguredMcpServers(Vec<McpServerDefinition>);
@@ -597,26 +624,26 @@ impl McpRuntime {
         }
     }
 
-    /// Whether managed policy currently locks the manual transports.
+    /// How far managed policy currently locks the manual transports.
     ///
     /// Read per operation rather than cached at boot, like every other policy
     /// consumer, so an MDM push or removal takes effect without a restart. An
-    /// unreadable policy fails closed to locked — the same judgment the BYOK
-    /// boot paths make.
-    async fn manual_transports_locked(&self) -> bool {
+    /// unreadable policy fails closed to the full lockdown — the same judgment
+    /// the BYOK boot paths make.
+    async fn manual_lockdown(&self) -> ManualLockdown {
         match crate::managed_policy::resolve(&*self.store, &*self.os_policy).await {
-            Ok(policy) => policy.managed,
+            Ok(policy) => ManualLockdown::for_policy(&policy),
             Err(error) => {
                 tracing::warn!(
                     "managed policy is unreadable; locking manual MCP transports: {error}"
                 );
-                true
+                ManualLockdown::AllManual
             }
         }
     }
 
-    /// The names in `candidate` that would add or change a manual (stdio or
-    /// HTTP) server relative to what is already configured.
+    /// The names in `candidate` that would add or change a manual server the
+    /// lockdown covers, relative to what is already configured.
     ///
     /// Managed lockdown refuses these rather than every manual definition in
     /// the body: a profile that carried manual servers before it was managed
@@ -627,12 +654,16 @@ impl McpRuntime {
     ///
     /// "Unchanged" is the whole definition, by equality: a flipped `enabled`,
     /// a renamed server, a widened timeout are all edits.
-    async fn manual_additions(&self, candidate: &McpServersConfig) -> Vec<String> {
+    async fn manual_additions(
+        &self,
+        candidate: &McpServersConfig,
+        lockdown: ManualLockdown,
+    ) -> Vec<String> {
         let existing = &self.state.lock().await.definitions;
         candidate
             .servers
             .iter()
-            .filter(|server| server.gateway_endpoint.is_none())
+            .filter(|server| manual_lockdown_applies(server, lockdown))
             .filter(|server| !existing.iter().any(|current| current == *server))
             .map(|server| server.name.clone())
             .collect()
@@ -649,18 +680,18 @@ impl McpRuntime {
     ///
     /// Returns whether anything was taken down.
     pub(crate) async fn enforce_manual_lockdown(&self) -> bool {
-        if !self.manual_transports_locked().await {
-            return false;
+        match self.manual_lockdown().await {
+            ManualLockdown::Open => false,
+            lockdown => self.take_down_locked_manual_servers(lockdown).await,
         }
-        self.take_down_locked_manual_servers().await
     }
 
-    async fn take_down_locked_manual_servers(&self) -> bool {
+    async fn take_down_locked_manual_servers(&self, lockdown: ManualLockdown) -> bool {
         let mut state = self.state.lock().await;
         let locked: Vec<String> = state
             .definitions
             .iter()
-            .filter(|definition| definition.gateway_endpoint.is_none())
+            .filter(|definition| manual_lockdown_applies(definition, lockdown))
             .map(|definition| definition.name.clone())
             .collect();
         let mut torn_down = false;
@@ -732,9 +763,12 @@ impl McpRuntime {
         }
         // The boot file is a host-environment artifact: on a managed
         // profile it is exactly the channel the lockdown exists to
-        // close, so it is inert rather than partially honored. The
-        // warning is the operator's diagnostic for the silence.
-        if !boot.is_empty() && self.manual_transports_locked().await {
+        // close, so it is inert rather than partially honored — unless
+        // the org's `AllowLocalMcpServers` opt-in re-opens the local
+        // channel, in which case any remote (`url`) definitions it names
+        // are still forced down per definition below. The warning is the
+        // operator's diagnostic for the silence.
+        if !boot.is_empty() && self.manual_lockdown().await == ManualLockdown::AllManual {
             tracing::warn!(
                 "{CONFIG_ENV} is ignored on a managed profile; \
                  mount MCP endpoints from the model gateway instead"
@@ -816,7 +850,10 @@ impl McpRuntime {
     /// keeps the tests that predate the policy check reading as they did.
     #[cfg(test)]
     pub(crate) async fn replace(&self, config: McpServersConfig) -> Result<McpServersInfo> {
-        match self.replace_under_policy(config, false).await? {
+        match self
+            .replace_under_policy(config, ManualLockdown::Open)
+            .await?
+        {
             McpReplaceOutcome::Replaced(info) => Ok(info),
             McpReplaceOutcome::RefusedManual(_) => {
                 unreachable!("an unmanaged replacement is never refused")
@@ -842,14 +879,12 @@ impl McpRuntime {
     pub(crate) async fn replace_under_policy(
         &self,
         config: McpServersConfig,
-        managed: bool,
+        lockdown: ManualLockdown,
     ) -> Result<McpReplaceOutcome> {
         let _mutation = self.mutation.lock().await;
-        if managed {
-            let refused = self.manual_additions(&config).await;
-            if !refused.is_empty() {
-                return Ok(McpReplaceOutcome::RefusedManual(refused));
-            }
+        let refused = self.manual_additions(&config, lockdown).await;
+        if !refused.is_empty() {
+            return Ok(McpReplaceOutcome::RefusedManual(refused));
         }
         Ok(McpReplaceOutcome::Replaced(
             self.replace_committed(config).await?,
@@ -922,10 +957,10 @@ impl McpRuntime {
                 .collect()
         };
         let gateway = &*self.gateway;
-        let locked = self.manual_transports_locked().await;
+        let lockdown = self.manual_lockdown().await;
         let mut servers = HashMap::new();
         let connections = join_all(definitions.iter().map(|definition| async move {
-            if connects(definition, locked) {
+            if connects(definition, lockdown) {
                 definition.connect_with_views(gateway).await.map(Some)
             } else {
                 Ok(None)
@@ -969,7 +1004,7 @@ impl McpRuntime {
                     ManagedServer {
                         client: None,
                         health: McpHealth::Disabled,
-                        diagnostic: managed_lockdown_diagnostic(definition, locked),
+                        diagnostic: managed_lockdown_diagnostic(definition, lockdown),
                         reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
                         epoch: self.fresh_epoch(),
                         reconnect_lock: Arc::new(Mutex::new(())),
@@ -1020,10 +1055,10 @@ impl McpRuntime {
         ids: BTreeMap<String, ConnectedAppId>,
     ) {
         let gateway = &*self.gateway;
-        let locked = self.manual_transports_locked().await;
+        let lockdown = self.manual_lockdown().await;
         let mut servers = HashMap::new();
         let connections = join_all(definitions.iter().map(|definition| async move {
-            if connects(definition, locked) {
+            if connects(definition, lockdown) {
                 definition.connect_with_views(gateway).await.map(Some)
             } else {
                 Ok(None)
@@ -1035,7 +1070,7 @@ impl McpRuntime {
                 Ok(None) => ManagedServer {
                     client: None,
                     health: McpHealth::Disabled,
-                    diagnostic: managed_lockdown_diagnostic(definition, locked),
+                    diagnostic: managed_lockdown_diagnostic(definition, lockdown),
                     reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
                     epoch: self.fresh_epoch(),
                     reconnect_lock: Arc::new(Mutex::new(())),
@@ -1167,7 +1202,7 @@ impl McpRuntime {
         // blocking unrelated servers. A waiter captures the current epoch, so
         // it returns the first attempt's result instead of launching a duplicate
         // child after the lock becomes available.
-        let locked = self.manual_transports_locked().await;
+        let lockdown = self.manual_lockdown().await;
         let (reconnect_lock, requested_epoch) = {
             let state = self.state.lock().await;
             let definition = state
@@ -1175,7 +1210,7 @@ impl McpRuntime {
                 .iter()
                 .find(|definition| definition.name == name)
                 .ok_or_else(|| AgentError::config("MCP server not found"))?;
-            if manual_lockdown_applies(definition, locked) {
+            if manual_lockdown_applies(definition, lockdown) {
                 return Err(AgentError::config(MANAGED_DISABLED_DIAGNOSTIC));
             }
             if !definition.enabled {
@@ -1202,7 +1237,7 @@ impl McpRuntime {
             // Re-checked against the definition as it stands now: a
             // replacement may have swapped this name onto a manual transport
             // while this caller waited for the per-server lock.
-            if manual_lockdown_applies(&definition, locked) {
+            if manual_lockdown_applies(&definition, lockdown) {
                 return Err(AgentError::config(MANAGED_DISABLED_DIAGNOSTIC));
             }
             if !definition.enabled {
@@ -1298,19 +1333,19 @@ impl McpRuntime {
     pub(crate) async fn supervise(self: Arc<Self>) {
         loop {
             tokio::time::sleep(HEALTH_INTERVAL).await;
-            let locked = self.manual_transports_locked().await;
+            let lockdown = self.manual_lockdown().await;
             // Policy may have flipped since the last sweep. Enforce the effect
             // before probing: a server that is now locked must be taken down,
             // not merely left out of the probe set.
-            if locked {
-                self.take_down_locked_manual_servers().await;
+            if lockdown != ManualLockdown::Open {
+                self.take_down_locked_manual_servers(lockdown).await;
             }
             let probes = {
                 let state = self.state.lock().await;
                 state
                     .definitions
                     .iter()
-                    .filter(|definition| connects(definition, locked))
+                    .filter(|definition| connects(definition, lockdown))
                     .filter_map(|definition| {
                         state.servers.get(&definition.name).map(|server| {
                             (
@@ -1402,24 +1437,32 @@ impl McpRuntime {
 /// Managed policy forces every manual transport down whatever its stored flag
 /// says; the definition itself is left untouched, so lifting the policy
 /// restores exactly what the profile had.
-fn connects(definition: &McpServerDefinition, manual_locked: bool) -> bool {
-    definition.enabled && !manual_lockdown_applies(definition, manual_locked)
+fn connects(definition: &McpServerDefinition, lockdown: ManualLockdown) -> bool {
+    definition.enabled && !manual_lockdown_applies(definition, lockdown)
 }
 
-/// Whether the managed lockdown applies to this definition: manual transports
-/// only. A gateway mount is the sanctioned path and is never forced down.
-fn manual_lockdown_applies(definition: &McpServerDefinition, manual_locked: bool) -> bool {
-    manual_locked && definition.gateway_endpoint.is_none()
+/// Whether the managed lockdown applies to this definition. A gateway mount
+/// is the sanctioned path and is never forced down; under the org's
+/// `AllowLocalMcpServers` opt-in a local stdio (`command`) server is spared
+/// while a remote (`url`) one stays covered.
+fn manual_lockdown_applies(definition: &McpServerDefinition, lockdown: ManualLockdown) -> bool {
+    if definition.gateway_endpoint.is_some() {
+        return false;
+    }
+    match lockdown {
+        ManualLockdown::Open => false,
+        ManualLockdown::RemoteManual => definition.command.is_none(),
+        ManualLockdown::AllManual => true,
+    }
 }
 
 /// The diagnostic a forced-down manual server carries, so the settings list
 /// says why it is off instead of showing an unexplained disabled row.
 fn managed_lockdown_diagnostic(
     definition: &McpServerDefinition,
-    manual_locked: bool,
+    lockdown: ManualLockdown,
 ) -> Option<String> {
-    manual_lockdown_applies(definition, manual_locked)
-        .then(|| MANAGED_DISABLED_DIAGNOSTIC.to_string())
+    manual_lockdown_applies(definition, lockdown).then(|| MANAGED_DISABLED_DIAGNOSTIC.to_string())
 }
 
 fn validate_servers(servers: &[McpServerDefinition]) -> Result<()> {
@@ -1752,6 +1795,13 @@ mod tests {
     async fn test_runtime_with_gateway(
         gateway: Arc<dyn GatewayEndpoints>,
     ) -> (Arc<McpRuntime>, Arc<dyn Store>, tempfile::TempDir) {
+        test_runtime_with(gateway, Arc::new(crate::managed_policy::NoOsPolicy)).await
+    }
+
+    async fn test_runtime_with(
+        gateway: Arc<dyn GatewayEndpoints>,
+        os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
+    ) -> (Arc<McpRuntime>, Arc<dyn Store>, tempfile::TempDir) {
         let directory = tempfile::tempdir().unwrap();
         let store: Arc<dyn Store> = Arc::new(
             DbStore::connect(&format!(
@@ -1766,7 +1816,7 @@ mod tests {
                 Arc::new(ToolRegistry::new()),
                 store.clone(),
                 gateway,
-                Arc::new(crate::managed_policy::NoOsPolicy),
+                os_policy,
             )),
             store,
             directory,
@@ -2448,6 +2498,79 @@ mod tests {
         runtime.initialize(boot).await.unwrap();
         assert!(runtime.info().await.servers.is_empty());
         assert!(store.list_connected_apps().await.unwrap().is_empty());
+    }
+
+    /// The org's `AllowLocalMcpServers` opt-in narrows the managed lockdown
+    /// to remote manual servers. A local stdio definition is the user's again
+    /// — the runtime attempts its child (the fixture command doesn't exist,
+    /// so it degrades) instead of forcing it down — and its edits are
+    /// admitted, while a `url` server stays forced down with the managed
+    /// diagnostic and adding one is still refused.
+    #[tokio::test]
+    async fn allow_local_mcp_scopes_the_lockdown_to_remote_transports() {
+        struct ManagedAllowingLocal;
+
+        impl crate::managed_policy::OsPolicySource for ManagedAllowingLocal {
+            fn gateway_url(&self) -> Result<Option<String>> {
+                Ok(Some("https://corp.gateway".to_string()))
+            }
+            fn allow_local_mcp_servers(&self) -> Result<Option<bool>> {
+                Ok(Some(true))
+            }
+        }
+
+        let (runtime, store, _directory) =
+            test_runtime_with(Arc::new(NoGateway), Arc::new(ManagedAllowingLocal)).await;
+        let mut local = disabled_definition("local_docs", "/bin/docs");
+        local.enabled = true;
+        let remote = http_definition("remote", "http://127.0.0.1:9/mcp");
+        seed_records(&store, &[local.clone(), remote.clone()]).await;
+
+        runtime
+            .initialize(ConfiguredMcpServers::default())
+            .await
+            .unwrap();
+        let info = runtime.info().await;
+        assert_eq!(info.servers[0].health, McpHealth::Degraded);
+        assert_ne!(
+            info.servers[0].diagnostic.as_deref(),
+            Some(MANAGED_DISABLED_DIAGNOSTIC)
+        );
+        assert_eq!(info.servers[1].health, McpHealth::Disabled);
+        assert_eq!(
+            info.servers[1].diagnostic.as_deref(),
+            Some(MANAGED_DISABLED_DIAGNOSTIC)
+        );
+
+        // The admission check draws the same line: a body adding another
+        // remote server is refused by name, while one that only edits the
+        // stdio definition (disabling it) lands.
+        let extra_remote = http_definition("extra_remote", "http://127.0.0.1:9/mcp");
+        let outcome = runtime
+            .replace_under_policy(
+                McpServersConfig {
+                    servers: vec![local.clone(), remote.clone(), extra_remote],
+                },
+                ManualLockdown::RemoteManual,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            McpReplaceOutcome::RefusedManual(refused) if refused == ["extra_remote"]
+        ));
+
+        local.enabled = false;
+        let outcome = runtime
+            .replace_under_policy(
+                McpServersConfig {
+                    servers: vec![local, remote],
+                },
+                ManualLockdown::RemoteManual,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, McpReplaceOutcome::Replaced(_)));
     }
 
     /// The v:2 canonical-form invariants that keep consent honest: derived

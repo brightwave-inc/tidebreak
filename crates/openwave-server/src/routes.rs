@@ -104,7 +104,9 @@ pub async fn get_mcp_servers(
 /// validated or connected — so a refused write leaves the configuration
 /// exactly as it was. Gateway-endpoint mounts remain the sanctioned path, and
 /// manual servers already on file may still ride along a save unchanged (they
-/// run forced-disabled) or be removed.
+/// run forced-disabled) or be removed. An org that deploys the
+/// `AllowLocalMcpServers` policy key narrows the lockdown to remote (`url`)
+/// servers, leaving local stdio servers to the user.
 pub async fn put_mcp_servers(
     State(state): State<AppState>,
     Json(body): Json<McpServersConfig>,
@@ -118,8 +120,8 @@ pub async fn put_mcp_servers(
     // Once validation/startup begins, finish the durable/live commit even if
     // the HTTP client disconnects and drops this handler future.
     let runtime = state.mcp.clone();
-    let managed = policy.managed;
-    let mutation = tokio::spawn(async move { runtime.replace_under_policy(body, managed).await });
+    let lockdown = crate::mcp_config::ManualLockdown::for_policy(&policy);
+    let mutation = tokio::spawn(async move { runtime.replace_under_policy(body, lockdown).await });
     let outcome = mutation
         .await
         .map_err(|_| ServerError::internal("MCP settings update task failed"))?
