@@ -777,6 +777,25 @@ impl BearerTokenSource for GatewayTokenSource {
     async fn bearer_token(&self) -> Result<String> {
         self.0.access_token(RESOURCE_LLM).await
     }
+
+    /// A chat's inference rides a token minted inside that chat's
+    /// attestation context, so the gateway records its tool calls as
+    /// observations and attested MCP endpoints can match them. Requests
+    /// with no conversation — titling, judging, other maintenance — keep
+    /// the shared token: there is no chat for an observation to serve.
+    async fn bearer_token_for(
+        &self,
+        conversation: Option<openwave_core::id::ChatId>,
+    ) -> Result<String> {
+        match conversation {
+            Some(chat) => {
+                self.0
+                    .attested_access_token(RESOURCE_LLM, &chat.to_string())
+                    .await
+            }
+            None => self.bearer_token().await,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1119,6 +1138,21 @@ mod tests {
         // A fresh token is cached: no second refresh inside the expiry leeway.
         assert_eq!(source.bearer_token().await.unwrap(), token);
         assert_eq!(gateway.refreshes.load(Ordering::SeqCst), 1);
+
+        // A conversation mints inside that chat's attestation context: cached
+        // per chat, distinct across chats, and never the shared token.
+        let chat = openwave_core::id::ChatId::new();
+        let attested = source.bearer_token_for(Some(chat)).await.unwrap();
+        assert_ne!(attested, token);
+        assert_eq!(source.bearer_token_for(Some(chat)).await.unwrap(), attested);
+        let other = source
+            .bearer_token_for(Some(openwave_core::id::ChatId::new()))
+            .await
+            .unwrap();
+        assert_ne!(other, attested);
+        // No conversation — titling, judging, maintenance — keeps the shared
+        // token and records nothing.
+        assert_eq!(source.bearer_token_for(None).await.unwrap(), token);
 
         // The route set includes the gateway with its synced models claimed.
         // A legacy provider row — even one pointing at a different deployment

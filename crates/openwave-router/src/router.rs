@@ -34,6 +34,19 @@ use crate::OpenAiCompatProvider;
 pub trait BearerTokenSource: Send + Sync {
     /// A currently valid token, refreshing if the cached one is near expiry.
     async fn bearer_token(&self) -> Result<String>;
+
+    /// The token for a request that belongs to `conversation`. Sources that
+    /// scope credentials per conversation override this — the model gateway
+    /// mints inside a per-conversation attestation context, which is what
+    /// lets its attested MCP endpoints match the tool calls this inference
+    /// emits. Everything else serves the shared token.
+    async fn bearer_token_for(
+        &self,
+        conversation: Option<openwave_core::id::ChatId>,
+    ) -> Result<String> {
+        let _ = conversation;
+        self.bearer_token().await
+    }
 }
 
 /// Vertex-specific route data. The credential fingerprint is already an
