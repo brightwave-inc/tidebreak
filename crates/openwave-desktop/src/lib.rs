@@ -23,6 +23,7 @@ mod documents;
 mod host_access;
 mod image_attachments;
 mod media_type;
+mod office_install;
 mod office_pdf;
 mod updater;
 
@@ -220,6 +221,8 @@ pub fn run() {
             deliverables::restore_output_revision,
             deliverables::delete_output,
             office_pdf::convert_presentation_to_pdf,
+            office_install::install_presentation_converter,
+            office_install::cancel_presentation_converter_install,
             client_execution::resolve_folder_access_request,
             client_execution::output_writeback::resolve_output_writeback_request,
             host_access::connect_folder,

@@ -12,6 +12,7 @@
  * viewer shows an install hint while the original file stays exportable.
  */
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 import type { FileBytesSource } from "@/document/useFileDownload";
 
@@ -21,17 +22,33 @@ export const PRESENTATION_MEDIA_TYPES = new Set([
   "application/vnd.oasis.opendocument.presentation",
 ]);
 
-/** LibreOffice is not installed (or its remains cannot start). */
+/**
+ * LibreOffice is not installed (or its remains cannot start).
+ *
+ * On macOS the host can install its own copy: `installable` says so, and
+ * `installFailure` carries the reason the last managed install this app run
+ * failed or was cancelled. While a failure is recorded the viewer shows the
+ * hint and waits for an explicit retry rather than re-downloading.
+ */
 export class ConverterMissingError extends Error {
-  constructor() {
+  readonly installable: boolean;
+  readonly installFailure: string | null;
+
+  constructor(installable = false, installFailure: string | null = null) {
     super("No presentation converter is installed");
     this.name = "ConverterMissingError";
+    this.installable = installable;
+    this.installFailure = installFailure;
   }
 }
 
 type PresentationPdfResponse =
   | { status: "converted"; pdfBase64: string }
-  | { status: "converterMissing" };
+  | {
+      status: "converterMissing";
+      installable: boolean;
+      installFailure: string | null;
+    };
 
 /**
  * Convert one presentation's bytes to PDF on the host.
@@ -47,9 +64,48 @@ export async function convertPresentationToPdf(
     request: { contentBase64: encodeBase64(bytes), mediaType },
   })) as PresentationPdfResponse;
   if (response.status === "converterMissing") {
-    throw new ConverterMissingError();
+    throw new ConverterMissingError(
+      response.installable,
+      response.installFailure,
+    );
   }
   return decodeBase64(response.pdfBase64);
+}
+
+const INSTALL_PROGRESS_EVENT = "presentation-converter-install-progress";
+
+/** How far the managed LibreOffice install has got. */
+export type ConverterInstallProgress = {
+  /** `downloading` is determinate; `installing` (verify + unpack) is not. */
+  phase: "downloading" | "installing";
+  downloadedBytes: number;
+  totalBytes: number | null;
+};
+
+/**
+ * Install the app's own LibreOffice (macOS): an exact pinned version from
+ * TDF's official download service, digest-verified by the host before
+ * unpacking. Resolves once the converter is ready; rejects with the host's
+ * reason on failure or cancellation, which the host also remembers so the
+ * viewer stops auto-retrying until the user asks again.
+ */
+export async function installPresentationConverter(
+  onProgress: (progress: ConverterInstallProgress) => void,
+): Promise<void> {
+  const unlisten = await listen<ConverterInstallProgress>(
+    INSTALL_PROGRESS_EVENT,
+    (event) => onProgress(event.payload),
+  );
+  try {
+    await invoke("install_presentation_converter");
+  } finally {
+    unlisten();
+  }
+}
+
+/** Ask the in-flight managed install to stop; it rejects with the reason. */
+export async function cancelPresentationConverterInstall(): Promise<void> {
+  await invoke("cancel_presentation_converter_install");
 }
 
 /**
