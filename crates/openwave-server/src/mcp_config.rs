@@ -467,14 +467,29 @@ impl openwave_core::Tool for CreateAppWithRoster {
     }
 }
 
+/// How many of a `rest_api` record's operation ids the roster lists before
+/// eliding the rest — enough to author against without letting a 256-entry
+/// catalog balloon the tool description.
+const ROSTER_OPERATION_IDS: usize = 20;
+
+/// One configured `rest_api` connected app's roster inputs: the record id a
+/// binding names and the operation ids its catalog declares.
+pub(crate) struct RestRosterApp {
+    pub(crate) id: ConnectedAppId,
+    pub(crate) name: String,
+    pub(crate) operation_ids: Vec<String>,
+}
+
 /// The roster text appended to `create_app`'s description: every configured
-/// `mcp_server` connected app with the id a manifest binding names and the
-/// namespace its mounted tools carry.
+/// connected app with the id a manifest binding names — the namespace an
+/// `mcp_server`'s mounted tools carry, or a bounded sample of a `rest_api`
+/// record's operation ids.
 fn connected_app_roster(
     definitions: &[McpServerDefinition],
     ids: &BTreeMap<String, ConnectedAppId>,
+    rest: &[RestRosterApp],
 ) -> String {
-    if definitions.is_empty() {
+    if definitions.is_empty() && rest.is_empty() {
         return "\n\nNo connected apps are configured, so only manifests with an \
                 empty bindings list can be created."
             .to_owned();
@@ -488,6 +503,23 @@ fn connected_app_roster(
         roster.push_str(&format!(
             "\n- {id} — {name}: tools are named `mcp__{name}__{{tool}}`",
             name = definition.name
+        ));
+    }
+    for app in rest {
+        let mut listed: Vec<&str> = app
+            .operation_ids
+            .iter()
+            .take(ROSTER_OPERATION_IDS)
+            .map(String::as_str)
+            .collect();
+        if app.operation_ids.len() > ROSTER_OPERATION_IDS {
+            listed.push("…");
+        }
+        roster.push_str(&format!(
+            "\n- {id} — {name} (rest_api): bind with `operation_ids` from: {operations}",
+            id = app.id,
+            name = app.name,
+            operations = listed.join(", ")
         ));
     }
     roster
@@ -653,7 +685,7 @@ impl McpRuntime {
             torn_down = true;
         }
         if torn_down {
-            let registry = self.registry_for(&state);
+            let registry = self.registry_for(&state).await;
             *self
                 .tools
                 .write()
@@ -1039,7 +1071,8 @@ impl McpRuntime {
         ids: BTreeMap<String, ConnectedAppId>,
         servers: HashMap<String, ManagedServer>,
     ) {
-        let registry = self.registry_with(&definitions, &ids, &servers);
+        let rest = self.rest_roster().await;
+        let registry = self.registry_with(&definitions, &ids, &servers, &rest);
         let mut state = self.state.lock().await;
         state.definitions = definitions;
         state.ids = ids;
@@ -1050,11 +1083,43 @@ impl McpRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(registry);
     }
 
+    /// Every stored `rest_api` connected app's roster inputs, read from the
+    /// store when a registry is (re)built. The roster is authoring
+    /// legibility, never the gate, so an unreadable store or an unparseable
+    /// definition degrades to an absent roster line rather than failing the
+    /// registry rebuild.
+    async fn rest_roster(&self) -> Vec<RestRosterApp> {
+        let records = match self.store.list_connected_apps().await {
+            Ok(records) => records,
+            Err(error) => {
+                tracing::warn!("could not read connected apps for the create_app roster: {error}");
+                return Vec::new();
+            }
+        };
+        records
+            .into_iter()
+            .filter(|record| record.kind == ConnectedAppKind::RestApi)
+            .filter_map(|record| {
+                let operations = record
+                    .definition
+                    .get("catalog")?
+                    .get("operations")?
+                    .as_object()?;
+                Some(RestRosterApp {
+                    id: record.id,
+                    name: record.name,
+                    operation_ids: operations.keys().cloned().collect(),
+                })
+            })
+            .collect()
+    }
+
     /// [`registry_with`](Self::registry_with) over the already-published
     /// state, for the paths that refresh connections without changing the
     /// configuration.
-    fn registry_for(&self, state: &RuntimeState) -> ToolRegistry {
-        self.registry_with(&state.definitions, &state.ids, &state.servers)
+    async fn registry_for(&self, state: &RuntimeState) -> ToolRegistry {
+        let rest = self.rest_roster().await;
+        self.registry_with(&state.definitions, &state.ids, &state.servers, &rest)
     }
 
     fn registry_with(
@@ -1062,6 +1127,7 @@ impl McpRuntime {
         definitions: &[McpServerDefinition],
         ids: &BTreeMap<String, ConnectedAppId>,
         servers: &HashMap<String, ManagedServer>,
+        rest: &[RestRosterApp],
     ) -> ToolRegistry {
         let mut registry = self.base_tools.clone();
         for (name, server) in servers {
@@ -1081,7 +1147,7 @@ impl McpRuntime {
         if let Some(inner) = registry.server_tool(CREATE_APP_TOOL) {
             registry.register(Box::new(CreateAppWithRoster {
                 inner,
-                roster: connected_app_roster(definitions, ids),
+                roster: connected_app_roster(definitions, ids, rest),
             }));
         }
         registry
@@ -1188,7 +1254,7 @@ impl McpRuntime {
                 server.ui_views = ui_views;
                 server.reconnect_backoff = INITIAL_RECONNECT_BACKOFF;
                 server.epoch = self.fresh_epoch();
-                let registry = self.registry_for(&state);
+                let registry = self.registry_for(&state).await;
                 *self
                     .tools
                     .write()
@@ -1215,7 +1281,7 @@ impl McpRuntime {
                 } else {
                     return Ok(self.info_locked(&state));
                 }
-                let registry = self.registry_for(&state);
+                let registry = self.registry_for(&state).await;
                 *self
                     .tools
                     .write()
@@ -1299,7 +1365,7 @@ impl McpRuntime {
             server.ui_views = HashMap::new();
             server.reconnect_backoff = backoff;
         }
-        let registry = self.registry_for(&state);
+        let registry = self.registry_for(&state).await;
         *self
             .tools
             .write()

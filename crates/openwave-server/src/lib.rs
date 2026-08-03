@@ -21,6 +21,7 @@ mod bus;
 mod chat_titling;
 /// Host-owned code-execution provider selection and policy.
 pub mod code_execution;
+mod connected_apps;
 mod desktop_schema;
 mod document_decode;
 mod durable_oplog;

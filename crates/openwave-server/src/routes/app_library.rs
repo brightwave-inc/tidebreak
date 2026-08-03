@@ -74,7 +74,7 @@ pub async fn get_app_library(
     State(state): State<AppState>,
 ) -> Result<Json<AppLibrary>, ServerError> {
     let records = state.store.list_apps(MAX_LISTED_APPS).await?;
-    let current = state.mcp.app_fingerprints().await;
+    let current = crate::connected_apps::current_app_fingerprints(&state).await?;
     let mut apps = Vec::with_capacity(records.len());
     for record in records {
         // The same computation the grant surface performs, so the badge is

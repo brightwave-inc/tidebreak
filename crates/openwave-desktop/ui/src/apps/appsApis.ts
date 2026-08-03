@@ -4,6 +4,7 @@ import type {
   AppGrantState,
   AppInvokeResult,
   AppLibrary,
+  AppRestInvokeResult,
   AppViewSessionInfo,
 } from "@/api";
 
@@ -24,6 +25,12 @@ export type AppsApis = {
   revoke(appId: string): Promise<void>;
   viewSession(appId: string): Promise<AppViewSessionInfo>;
   invoke(appId: string, tool: string, args: unknown): Promise<AppInvokeResult>;
+  invokeOperation(
+    appId: string,
+    operationId: string,
+    parameters?: unknown,
+    body?: unknown,
+  ): Promise<AppRestInvokeResult>;
 };
 
 export function appsApisFromClient(client: ApiClient): AppsApis {
@@ -37,5 +44,7 @@ export function appsApisFromClient(client: ApiClient): AppsApis {
     revoke: (appId) => client.revokeAppGrant(appId),
     viewSession: (appId) => client.createAppViewFrame(appId),
     invoke: (appId, tool, args) => client.invokeApp(appId, tool, args),
+    invokeOperation: (appId, operationId, parameters, body) =>
+      client.invokeAppOperation(appId, operationId, parameters, body),
   };
 }

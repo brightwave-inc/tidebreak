@@ -3,7 +3,9 @@
 use super::*;
 
 use openwave_core::id::{AppId, AppRevisionId};
-use openwave_core::local_app::{AppBinding, AppManifest, CreateApp, NewAppRevision};
+use openwave_core::local_app::{
+    AppBinding, AppManifest, AppToolsBinding, CreateApp, NewAppRevision,
+};
 use serde_json::json;
 
 /// The MCP client's call-result bound and the marker its clamp leaves.
@@ -104,10 +106,10 @@ async fn create_pinned_app(store: &Arc<dyn Store>, tools: &[&str]) -> AppId {
                 id: AppRevisionId::new(),
                 manifest: AppManifest {
                     name: "Invoke fixture".into(),
-                    bindings: vec![AppBinding {
+                    bindings: vec![AppBinding::Tools(AppToolsBinding {
                         app: connected_app_id(store, "srv").await,
                         tools: tools.iter().map(|tool| (*tool).to_owned()).collect(),
-                    }],
+                    })],
                 },
                 byte_len: 1,
                 sha256: [0; 32],
@@ -393,10 +395,10 @@ async fn a_widened_manifest_requires_fresh_consent_for_the_new_tools() {
                 id: AppRevisionId::new(),
                 manifest: AppManifest {
                     name: "Invoke fixture".into(),
-                    bindings: vec![AppBinding {
+                    bindings: vec![AppBinding::Tools(AppToolsBinding {
                         app: connected_app_id(&store, "srv").await,
                         tools: vec!["mcp__srv__viewer".into(), "mcp__srv__unpinned".into()],
-                    }],
+                    })],
                 },
                 byte_len: 1,
                 sha256: [0; 32],
@@ -579,4 +581,340 @@ async fn gate_opened_dispatch_refuses_every_non_mcp_surface() {
         }
     }
     assert_eq!(log.calls.load(Ordering::SeqCst), 0);
+}
+
+// --- REST operation bindings ---
+
+use std::net::IpAddr;
+
+use base64::Engine as _;
+use openwave_core::connected_app::{ConnectedApp, ConnectedAppKind};
+use openwave_core::id::ConnectedAppId;
+use openwave_core::local_app::AppOperationsBinding;
+
+use crate::rest_executor::{
+    RestExecuteError, RestExecutor, RestHostResolver, RestOperationResponse, RestTransport,
+    RestTransportRequest,
+};
+
+/// What the fake REST transport observed and how it should answer next.
+#[derive(Default)]
+struct RestCallLog {
+    calls: AtomicUsize,
+    last_url: Mutex<Option<String>>,
+    last_headers: Mutex<Vec<(String, String)>>,
+    fail_next: AtomicBool,
+}
+
+/// A transport seam standing in for the network: the real [`RestExecutor`]
+/// still validates against the catalog, admits the base URL, vets the
+/// resolved addresses, and injects the credential — only the wire is fake.
+struct FakeRestTransport(Arc<RestCallLog>);
+
+#[async_trait]
+impl RestTransport for FakeRestTransport {
+    async fn execute(
+        &self,
+        request: &RestTransportRequest,
+    ) -> std::result::Result<RestOperationResponse, RestExecuteError> {
+        self.0.calls.fetch_add(1, Ordering::SeqCst);
+        *self.0.last_url.lock().unwrap() = Some(request.url.to_string());
+        *self.0.last_headers.lock().unwrap() = request.headers.clone();
+        if self.0.fail_next.swap(false, Ordering::SeqCst) {
+            return Err(RestExecuteError::Timeout);
+        }
+        Ok(RestOperationResponse {
+            status: 200,
+            content_type: Some("application/json".into()),
+            body: br#"{"issues":[]}"#.to_vec(),
+        })
+    }
+}
+
+/// Resolves every host to a public address so admission always vets cleanly.
+struct PublicResolver;
+
+#[async_trait]
+impl RestHostResolver for PublicResolver {
+    async fn resolve(&self, _host: &str) -> std::result::Result<Vec<IpAddr>, RestExecuteError> {
+        Ok(vec![IpAddr::V4(std::net::Ipv4Addr::new(93, 184, 216, 34))])
+    }
+}
+
+/// An authenticated API whose REST dispatch runs the real governed executor
+/// over the fake transport, with the credential value seeded in the secret
+/// store.
+async fn rest_test_app(
+    log: Arc<RestCallLog>,
+) -> (Router, String, Arc<dyn Store>, tempfile::TempDir) {
+    let (dir, store) = temp_db_store("rest-invoke.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
+    let mut state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    state
+        .secrets
+        .set_secret("issues-token", "sk-test-rest")
+        .await
+        .unwrap();
+    state.rest_dispatch = Arc::new(RestExecutor::new(
+        FakeRestTransport(log),
+        PublicResolver,
+        state.secrets.clone(),
+    ));
+    let bearer = format!("Bearer {}", state.token);
+    (app(state), bearer, store, dir)
+}
+
+/// Replace the profile's `rest_api` records with one record for `id`,
+/// pointing at `base_url` with a catalog ingested from an inline spec.
+async fn seed_rest_record(store: &Arc<dyn Store>, id: ConnectedAppId, base_url: &str) {
+    let spec = json!({
+        "openapi": "3.0.3",
+        "info": { "title": "Issues", "version": "1" },
+        "paths": {
+            "/issues": {
+                "get": {
+                    "operationId": "listIssues",
+                    "parameters": [
+                        { "name": "q", "in": "query", "schema": { "type": "string" } }
+                    ]
+                }
+            },
+            "/issues/{id}": {
+                "get": {
+                    "operationId": "getIssue",
+                    "parameters": [
+                        { "name": "id", "in": "path", "required": true,
+                          "schema": { "type": "string" } }
+                    ]
+                }
+            }
+        }
+    });
+    let catalog =
+        crate::openapi_catalog::ingest_openapi_document(spec.to_string().as_bytes()).unwrap();
+    store
+        .replace_connected_apps(
+            ConnectedAppKind::RestApi,
+            &[ConnectedApp {
+                id,
+                name: "issues".into(),
+                kind: ConnectedAppKind::RestApi,
+                definition: json!({
+                    "base_url": base_url,
+                    "catalog": catalog,
+                    "credential": {
+                        "secret_name": "issues-token",
+                        "placement": "bearer"
+                    },
+                }),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            }],
+        )
+        .await
+        .unwrap();
+}
+
+/// Create an app whose current manifest pins exactly `operation_ids` under
+/// the given `rest_api` connected app.
+async fn create_operation_app(
+    store: &Arc<dyn Store>,
+    connected: ConnectedAppId,
+    operation_ids: &[&str],
+) -> AppId {
+    let app_id = AppId::new();
+    store
+        .create_app(&CreateApp {
+            id: app_id,
+            revision: NewAppRevision {
+                id: AppRevisionId::new(),
+                manifest: AppManifest {
+                    name: "REST fixture".into(),
+                    bindings: vec![AppBinding::Operations(AppOperationsBinding {
+                        app: connected,
+                        operation_ids: operation_ids.iter().map(|id| (*id).to_owned()).collect(),
+                    })],
+                },
+                byte_len: 1,
+                sha256: [0; 32],
+                turn_id: None,
+                producing_run_id: None,
+                chat_id: None,
+                created_at: chrono::Utc::now(),
+            },
+        })
+        .await
+        .unwrap();
+    app_id
+}
+
+/// The whole `rest_api` ladder over the API: an ungranted or malformed invoke
+/// never reaches the transport; consent projects the operation vocabulary and
+/// opens the gate; a granted invoke runs the real governed executor — catalog
+/// validation, URL assembly, credential injection — over the fake wire and
+/// crosses back as opaque base64 passthrough; an executor failure is an
+/// `is_error` result, not a 500; and editing the record's definition
+/// invalidates the grant on the very next invoke.
+#[tokio::test]
+async fn rest_invokes_walk_the_ladder_and_round_trip_through_the_governed_executor() {
+    let log = Arc::new(RestCallLog::default());
+    let (router, bearer, store, _dir) = rest_test_app(log.clone()).await;
+    let connected = ConnectedAppId::new();
+    seed_rest_record(&store, connected, "https://api.example.com/v2").await;
+    let app_id = create_operation_app(&store, connected, &["listIssues"]).await;
+
+    // Fail-closed before consent, and on every malformed or unpinned shape.
+    let refusals = [
+        (
+            json!({"operation_id": "listIssues"}),
+            StatusCode::FORBIDDEN,
+            "consent_required",
+        ),
+        (
+            json!({"operation_id": "getIssue"}),
+            StatusCode::FORBIDDEN,
+            "not_pinned",
+        ),
+        (
+            json!({"operation_id": "listIssues", "tool": "mcp__srv__viewer"}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_invoke_request",
+        ),
+        (
+            json!({}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_invoke_request",
+        ),
+        (
+            json!({"operation_id": "listIssues", "arguments": {"q": "open"}}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_invoke_request",
+        ),
+    ];
+    for (body, status, kind) in refusals {
+        let response = invoke(&router, &bearer, app_id, body.clone()).await;
+        assert_eq!(response.status(), status, "{body}");
+        let info: AgentErrorInfo = json_body(response).await;
+        assert_eq!(info.kind, kind, "{body}");
+    }
+    assert_eq!(log.calls.load(Ordering::SeqCst), 0);
+
+    // Consent projects the operation vocabulary under the app's display name.
+    let response = grant_request(&router, &bearer, "POST", app_id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let state: serde_json::Value = json_body(response).await;
+    assert_eq!(state["granted"], json!(true));
+    assert_eq!(state["bindings"][0]["name"], json!("issues"));
+    assert_eq!(state["bindings"][0]["operation_ids"], json!(["listIssues"]));
+    assert_eq!(state["bindings"][0]["tools"], json!(null));
+
+    // A granted invoke round-trips: the executor assembled the declared URL,
+    // injected the referenced credential, and the response crosses as opaque
+    // base64 passthrough.
+    let response = invoke(
+        &router,
+        &bearer,
+        app_id,
+        json!({"operation_id": "listIssues", "parameters": {"q": "open"}}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let result: serde_json::Value = json_body(response).await;
+    assert_eq!(result["status"], json!(200));
+    assert_eq!(result["content_type"], json!("application/json"));
+    assert_eq!(result["is_error"], json!(false));
+    let body = base64::engine::general_purpose::STANDARD
+        .decode(result["body_base64"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(body, br#"{"issues":[]}"#);
+    assert_eq!(log.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        log.last_url.lock().unwrap().as_deref(),
+        Some("https://api.example.com/v2/issues?q=open")
+    );
+    assert!(log
+        .last_headers
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(name, value)| name == "authorization" && value == "Bearer sk-test-rest"));
+
+    // An executor failure past the gate is the app's to present: an is_error
+    // result with the closed refusal text, never a 500.
+    log.fail_next.store(true, Ordering::SeqCst);
+    let response = invoke(
+        &router,
+        &bearer,
+        app_id,
+        json!({"operation_id": "listIssues"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let result: serde_json::Value = json_body(response).await;
+    assert_eq!(result["is_error"], json!(true));
+    assert_eq!(result["error"], json!("request exceeded its time budget"));
+    assert_eq!(result.get("status"), None);
+
+    // Editing the record's definition (a moved base URL) invalidates the
+    // grant on the next invoke, and the projection says why.
+    seed_rest_record(&store, connected, "https://api.elsewhere.example/v2").await;
+    let response = invoke(
+        &router,
+        &bearer,
+        app_id,
+        json!({"operation_id": "listIssues"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let info: AgentErrorInfo = json_body(response).await;
+    assert_eq!(info.kind, "consent_required");
+    let response = grant_request(&router, &bearer, "GET", app_id).await;
+    let state: serde_json::Value = json_body(response).await;
+    assert_eq!(state["granted"], json!(false));
+    assert_eq!(state["bindings"][0]["definition_changed"], json!(true));
+
+    // Fresh consent re-pins to the moved definition and reopens the gate.
+    consent(&router, &bearer, app_id).await;
+    let response = invoke(
+        &router,
+        &bearer,
+        app_id,
+        json!({"operation_id": "listIssues"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(log
+        .last_url
+        .lock()
+        .unwrap()
+        .as_deref()
+        .unwrap()
+        .starts_with("https://api.elsewhere.example/v2/issues"));
+}
+
+/// Consent has nothing coherent to record when a pinned operation is not in
+/// the record's current catalog: the sheet conflicts instead of granting a
+/// pin that could never execute.
+#[tokio::test]
+async fn consent_conflicts_when_a_pinned_operation_left_the_catalog() {
+    let log = Arc::new(RestCallLog::default());
+    let (router, bearer, store, _dir) = rest_test_app(log.clone()).await;
+    let connected = ConnectedAppId::new();
+    seed_rest_record(&store, connected, "https://api.example.com/v2").await;
+    let app_id = create_operation_app(&store, connected, &["retiredOp"]).await;
+
+    let response = grant_request(&router, &bearer, "POST", app_id).await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let info: AgentErrorInfo = json_body(response).await;
+    assert!(info.message.contains("retiredOp"), "{}", info.message);
 }

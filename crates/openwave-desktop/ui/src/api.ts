@@ -453,6 +453,24 @@ export type AppInvokeResult = {
   is_error: boolean;
 };
 
+/**
+ * Result of a granted REST-operation invoke — {@link AppInvokeResult}'s
+ * sibling for `rest_api` bindings, hand-written for the same reason.
+ *
+ * An executed operation is opaque passthrough: whatever HTTP status the API
+ * answered (4xx/5xx included) with `is_error: false` and the raw response
+ * body base64-encoded in `body_base64` so binary responses survive JSON. A
+ * refused or failed execution is `is_error: true` with the server's closed
+ * refusal text in `error` and no response fields.
+ */
+export type AppRestInvokeResult = {
+  status?: number;
+  content_type?: string;
+  body_base64?: string;
+  is_error: boolean;
+  error?: string;
+};
+
 export type { AppInvokeRefusalKind };
 
 const APP_INVOKE_REFUSAL_KINDS: readonly AppInvokeRefusalKind[] = [
@@ -996,12 +1014,38 @@ export class ApiClient {
     tool: string,
     args: unknown,
   ): Promise<AppInvokeResult> {
+    return (await this.postAppInvoke(appId, {
+      tool,
+      arguments: args,
+    })) as AppInvokeResult;
+  }
+
+  /**
+   * Execute one of an app's pinned REST operations outside any turn — the
+   * `operation_id` sibling of {@link invokeApp}, with the same opaque
+   * passthrough and refusal contract. The response body crosses base64-
+   * encoded in `body_base64` (see {@link AppRestInvokeResult}).
+   */
+  async invokeAppOperation(
+    appId: string,
+    operationId: string,
+    parameters?: unknown,
+    body?: unknown,
+  ): Promise<AppRestInvokeResult> {
+    const request: Record<string, unknown> = { operation_id: operationId };
+    if (parameters !== undefined) request.parameters = parameters;
+    if (body !== undefined) request.body = body;
+    return (await this.postAppInvoke(appId, request)) as AppRestInvokeResult;
+  }
+
+  /** The shared invoke POST: one route, typed refusals surfaced as errors. */
+  private async postAppInvoke(appId: string, request: unknown): Promise<unknown> {
     const response = await fetch(
       `${this.baseUrl}/apps/${encodeURIComponent(appId)}/invoke`,
       {
         method: "POST",
         headers: this.headers(true),
-        body: JSON.stringify({ tool, arguments: args }),
+        body: JSON.stringify(request),
       },
     );
     if (!response.ok) {
@@ -1025,7 +1069,7 @@ export class ApiClient {
       }
       await throwIfNotOk(response);
     }
-    return (await response.json()) as AppInvokeResult;
+    return await response.json();
   }
 
   createProject(title: string): Promise<Project> {

@@ -38,13 +38,14 @@ pub(super) fn create_app() -> ToolSpec {
         crate::local_app::CREATE_APP_TOOL,
         "Publish a local mini-app the user can reopen from their Apps library: a \
          complete self-contained HTML document plus a manifest naming the app and \
-         pinning the exact mounted MCP tools it may call through the host. Each \
-         manifest binding names a connected app by its id and lists full mounted \
-         tool names (`mcp__{namespace}__{tool}`) under it; the configured \
-         connected apps and their ids are listed at the end of this description. \
-         The app renders in a sandboxed frame with no network access; pinned \
-         tools run only after the user grants them. Pass the app_id from an \
-         earlier create_app result to publish a new revision of that app — \
-         revisions append, never overwrite.",
+         pinning the exact capabilities it may call through the host. Each \
+         manifest binding names a connected app by its id and lists either full \
+         mounted tool names (`mcp__{namespace}__{tool}`, for mcp_server apps) or \
+         declared OpenAPI operationIds (`operation_ids`, for rest_api apps) under \
+         it; the configured connected apps and their ids are listed at the end of \
+         this description. The app renders in a sandboxed frame with no network \
+         access; pinned capabilities run only after the user grants them. Pass \
+         the app_id from an earlier create_app result to publish a new revision \
+         of that app — revisions append, never overwrite.",
     )
 }

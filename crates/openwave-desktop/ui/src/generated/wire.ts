@@ -138,6 +138,10 @@ revisions: Array<AppRevisionSummary>, };
 
 /**
  * One current-manifest binding, projected for the consent sheet.
+ *
+ * Exactly one of `tools` and `operation_ids` is present, matching the
+ * binding's vocabulary: mounted MCP tools for an `mcp_server` binding,
+ * declared operations for a `rest_api` binding.
  */
 export type AppGrantBindingState = { 
 /**
@@ -150,13 +154,19 @@ app: ConnectedAppId,
  */
 name: string | null, 
 /**
- * Full mounted tool names the current manifest pins under this app.
+ * Full mounted tool names the current manifest pins under this app, for
+ * an `mcp_server` binding.
  */
-tools: Array<string>, 
+tools: Array<string> | null, 
 /**
- * Whether the live grant covers every listed tool under this connected
- * app and the app's current definition still matches the granted
- * fingerprint.
+ * Catalog `operationId`s the current manifest pins under this app, for a
+ * `rest_api` binding.
+ */
+operation_ids: Array<string> | null, 
+/**
+ * Whether the live grant covers every listed capability under this
+ * connected app and the app's current definition still matches the
+ * granted fingerprint.
  */
 granted: boolean, 
 /**
@@ -172,14 +182,15 @@ definition_changed: boolean, };
  *
  * `bindings` follows the app's **current** revision's manifest — ids and
  * names only. The definitions behind the connected apps, and any environment
- * or token values they select, are deliberately absent from this projection.
+ * or credential values they select, are deliberately absent from this
+ * projection.
  */
 export type AppGrantState = { 
 /**
  * Whether a live grant fully covers the current manifest with every
  * bound definition unchanged since consent — the "no sheet needed"
  * verdict. When `false`, (re-)consent is required before every pinned
- * tool is invokable.
+ * capability is invokable.
  */
 granted: boolean, 
 /**
@@ -1374,7 +1385,7 @@ end_published_at: string | null, } | { "tool": "web_extract", url: string, };
  *
  * Each presentable variant names the egress a human is consenting to, so the
  * renderer can describe the action without ever seeing the model-authored
- * summary or arguments. `Unsupported` is the fail-closed default: a Sensitive
+ * arguments. `Unsupported` is the fail-closed default: a Sensitive
  * action the server can only reject, never approve.
  */
 export type ToolApprovalKind = "search_may_share_query_and_excerpts" | "web_search_may_share_query" | "web_extract_may_fetch_url" | "exec_may_run_networked_command" | "external_mcp_may_call_server" | "workspace_may_modify_files" | "unsupported";
