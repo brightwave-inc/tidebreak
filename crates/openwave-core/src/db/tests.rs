@@ -89,6 +89,7 @@ async fn create_chat_before_agent_run_split(store: &DbStore, chat: &Chat) {
         network_policy: sea_orm::ActiveValue::NotSet,
         attachment_revision: Set(chat.attachment_revision),
         created_at: Set(chat.created_at),
+        owner: sea_orm::ActiveValue::NotSet,
     })
     .exec_without_returning(&store.conn)
     .await
@@ -461,6 +462,7 @@ async fn project_membership_fk_and_attachment_insertions_are_atomic() {
         network_policy: Set(r#"{"mode":"off"}"#.into()),
         attachment_revision: Set(0),
         created_at: Set(Utc::now()),
+        owner: sea_orm::ActiveValue::NotSet,
     };
     assert!(orphan.insert(&store.conn).await.is_err());
 
@@ -485,6 +487,7 @@ async fn project_membership_fk_and_attachment_insertions_are_atomic() {
         title: Set(None),
         attachment_revision: Set(MAX_ATTACHMENT_REVISION + 1),
         created_at: Set(Utc::now()),
+        owner: sea_orm::ActiveValue::NotSet,
     };
     assert!(direct_excessive.insert(&store.conn).await.is_err());
 
@@ -582,6 +585,7 @@ async fn chats_stored_before_the_effort_scale_widened_still_load() {
             network_policy: Set(r#"{"mode":"off"}"#.into()),
             attachment_revision: Set(0),
             created_at: Set(chat.created_at),
+            owner: sea_orm::ActiveValue::NotSet,
         }
         .insert(&store.conn)
         .await
@@ -10541,4 +10545,244 @@ async fn cancellation_with_partial_output_commits_a_durable_message() {
         1,
         "a retried acknowledgement must not duplicate the output message"
     );
+}
+
+/// The #853 scoping contract: two principals' root aggregates are disjoint
+/// under the owner-scoped surface — reads, lists, mutations, and creation
+/// against another owner's parent all behave as if the other owner's rows do
+/// not exist — while the unscoped surface still sees everything and keeps
+/// attributing new rows to the local owner.
+#[tokio::test]
+async fn owner_scoped_queries_partition_root_aggregates() {
+    let (_dir, store) = temp_store().await;
+    let alice = OwnerId::new("user:alice").unwrap();
+    let bob = OwnerId::new("user:bob").unwrap();
+    let local = OwnerId::local();
+
+    let project = sample_project();
+    store.create_project_scoped(&alice, &project).await.unwrap();
+    let mut chat = sample_chat();
+    chat.project_id = Some(project.id);
+    store.create_chat_scoped(&alice, &chat).await.unwrap();
+
+    // Chats: partitioned reads, lists, and mutations.
+    assert_eq!(
+        store
+            .get_chat_scoped(&alice, chat.id)
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(&chat)
+    );
+    assert_eq!(store.get_chat_scoped(&bob, chat.id).await.unwrap(), None);
+    assert_eq!(
+        store.list_chats_scoped(&alice).await.unwrap(),
+        vec![chat.clone()]
+    );
+    assert_eq!(store.list_chats_scoped(&bob).await.unwrap(), Vec::new());
+    assert_eq!(
+        store.delete_chat_scoped(&bob, chat.id).await.unwrap(),
+        DeleteChatOutcome::NotFound
+    );
+    assert!(!store
+        .update_chat_metadata_scoped(
+            &bob,
+            chat.id,
+            Some(Some("stolen".into())),
+            None,
+            None,
+            None,
+            None
+        )
+        .await
+        .unwrap());
+    assert!(store
+        .get_chat_transcript_scoped(&bob, chat.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .get_chat_transcript_scoped(&alice, chat.id)
+        .await
+        .unwrap()
+        .is_some());
+    // The failed cross-owner mutation left the row untouched.
+    assert_eq!(
+        store
+            .get_chat_scoped(&alice, chat.id)
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(&chat)
+    );
+
+    // Projects: partitioned, and unusable as another owner's chat parent.
+    assert_eq!(
+        store.get_project_scoped(&bob, project.id).await.unwrap(),
+        None
+    );
+    assert_eq!(store.list_projects_scoped(&bob).await.unwrap(), Vec::new());
+    assert!(!store
+        .update_project_title_scoped(&bob, project.id, Some("stolen".into()))
+        .await
+        .unwrap());
+    assert_eq!(
+        store.delete_project_scoped(&bob, project.id).await.unwrap(),
+        DeleteProjectOutcome::NotFound
+    );
+    let mut cross_owner_chat = sample_chat();
+    cross_owner_chat.project_id = Some(project.id);
+    assert!(store
+        .create_chat_scoped(&bob, &cross_owner_chat)
+        .await
+        .is_err());
+    assert!(store
+        .create_chat_with_project_defaults_scoped(&bob, &cross_owner_chat)
+        .await
+        .is_err());
+
+    // Documents: inherit the parent's owner and partition with it.
+    let source = DocumentSourceUpsert {
+        id: DocumentId::new(),
+        chat_id: Some(chat.id),
+        project_id: None,
+        source_uri: None,
+        media_type: "text/plain".into(),
+        title: None,
+        source_blob: DocumentSourceBlob::from_bytes(b"alice's notes"),
+        canonical_text: "alice's notes".into(),
+        updated_at: Utc::now(),
+    };
+    let document = store
+        .accept_document_source_scoped(&alice, &source)
+        .await
+        .unwrap();
+    assert!(store
+        .get_document_scoped(&alice, document.id)
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        store.get_document_scoped(&bob, document.id).await.unwrap(),
+        None
+    );
+    assert_eq!(
+        store
+            .list_document_summaries_scoped(&bob, DocumentScope::Chat(chat.id), None, 10)
+            .await
+            .unwrap(),
+        Vec::new()
+    );
+    assert_eq!(
+        store
+            .list_document_summaries_scoped(&alice, DocumentScope::Chat(chat.id), None, 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    // A cross-owner accept against alice's chat is indistinguishable from a
+    // missing parent; a cross-owner delete leaves the row in place.
+    assert!(store
+        .accept_document_source_scoped(&bob, &source)
+        .await
+        .is_err());
+    store
+        .delete_document_scoped(&bob, document.id)
+        .await
+        .unwrap();
+    assert!(store
+        .get_document_scoped(&alice, document.id)
+        .await
+        .unwrap()
+        .is_some());
+
+    // The unscoped surface still sees everything, and unscoped creation
+    // attributes to the local owner.
+    assert_eq!(store.list_chats().await.unwrap().len(), 1);
+    let loose = sample_chat();
+    store.create_chat(&loose).await.unwrap();
+    assert_eq!(
+        store
+            .get_chat_scoped(&local, loose.id)
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(&loose)
+    );
+    assert_eq!(store.get_chat_scoped(&alice, loose.id).await.unwrap(), None);
+}
+
+/// The owner-attribution migration backfills every pre-existing chat,
+/// project, and document to the local owner, so a migrated desktop database
+/// behaves identically through the scoped surface.
+#[tokio::test]
+async fn owner_attribution_migration_backfills_existing_rows_to_the_local_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        dir.path().join("owner-backfill.db").display()
+    );
+    let conn = Database::connect(&url).await.unwrap();
+    let before_owner_attribution = u32::try_from(
+        migration::Migrator::migrations()
+            .iter()
+            .position(|migration| migration.name() == "m20260803_000045_add_owner_attribution")
+            .expect("the owner-attribution migration is registered"),
+    )
+    .unwrap();
+    migration::Migrator::up(&conn, Some(before_owner_attribution))
+        .await
+        .unwrap();
+
+    let chat_id = ChatId::new();
+    let project_id = ProjectId::new();
+    let document_id = DocumentId::new();
+    conn.execute_unprepared(&format!(
+        "INSERT INTO chat (id, attachment_revision, created_at) \
+         VALUES (X'{}', 0, '2023-11-14 22:13:20+00:00')",
+        chat_id.0.simple()
+    ))
+    .await
+    .unwrap();
+    conn.execute_unprepared(&format!(
+        "INSERT INTO project (id, attachment_revision, created_at) \
+         VALUES (X'{}', 0, '2023-11-14 22:13:20+00:00')",
+        project_id.0.simple()
+    ))
+    .await
+    .unwrap();
+    conn.execute_unprepared(&format!(
+        "INSERT INTO document (id, media_type, canonical_text, created_at, updated_at) \
+         VALUES (X'{}', 'text/plain', 'legacy', \
+          '2023-11-14 22:13:20+00:00', '2023-11-14 22:13:20+00:00')",
+        document_id.0.simple()
+    ))
+    .await
+    .unwrap();
+
+    migration::Migrator::up(&conn, None).await.unwrap();
+    let store = DbStore { conn };
+    let local = OwnerId::local();
+    let someone_else = OwnerId::new("user:alice").unwrap();
+    assert!(store
+        .get_chat_scoped(&local, chat_id)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(store
+        .get_project_scoped(&local, project_id)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(store
+        .get_document_scoped(&local, document_id)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(store
+        .get_chat_scoped(&someone_else, chat_id)
+        .await
+        .unwrap()
+        .is_none());
 }

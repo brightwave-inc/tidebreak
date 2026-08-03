@@ -27,6 +27,61 @@ use crate::id::{
 /// replacements predictably small.
 pub const MAX_ROOT_ATTACHMENTS: usize = 32;
 
+/// The durable owner key of a root aggregate (chat, project, document).
+///
+/// This is the storage-side identity of a principal (#853): the server maps
+/// the authenticated principal onto an `OwnerId` and every owner-scoped store
+/// query filters on it. The desktop profile has exactly one principal — the
+/// person at the machine — whose key is [`OwnerId::local`]; named users on a
+/// shared deployment map to distinct keys that can never collide with it.
+///
+/// The key is an identity label, not a secret: it lives in owner columns and
+/// is kept greppable and log-safe.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OwnerId(std::sync::Arc<str>);
+
+impl OwnerId {
+    /// The durable key of the single local-profile owner. Existing rows from
+    /// before owner attribution are backfilled to this owner.
+    pub const LOCAL: &'static str = "local";
+
+    /// The one person at the machine on the desktop/local profile.
+    #[must_use]
+    pub fn local() -> Self {
+        Self(Self::LOCAL.into())
+    }
+
+    /// Validate and intern an owner key: 1–96 visible ASCII characters.
+    pub fn new(id: &str) -> crate::error::Result<Self> {
+        let valid = !id.is_empty() && id.len() <= 96 && id.bytes().all(|b| b.is_ascii_graphic());
+        if valid {
+            Ok(Self(id.into()))
+        } else {
+            Err(crate::error::AgentError::Store(format!(
+                "invalid owner id {id:?}: expected 1-96 visible ASCII characters"
+            )))
+        }
+    }
+
+    /// The exact durable key, as stored in owner columns.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether this is the local-profile owner.
+    #[must_use]
+    pub fn is_local(&self) -> bool {
+        &*self.0 == Self::LOCAL
+    }
+}
+
+impl std::fmt::Display for OwnerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Largest attachment revision represented exactly by every supported client.
 ///
 /// JSON numbers become JavaScript `number` values in the desktop renderer, so

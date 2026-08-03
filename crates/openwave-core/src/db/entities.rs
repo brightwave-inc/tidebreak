@@ -46,6 +46,7 @@ pub mod document {
         pub canonical_text: String,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
+        pub owner: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -65,6 +66,7 @@ pub mod project {
         pub title: Option<String>,
         pub attachment_revision: i64,
         pub created_at: DateTimeUtc,
+        pub owner: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -98,6 +100,7 @@ pub mod chat {
         pub network_policy: String,
         pub attachment_revision: i64,
         pub created_at: DateTimeUtc,
+        pub owner: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

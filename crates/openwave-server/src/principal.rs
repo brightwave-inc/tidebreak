@@ -22,7 +22,7 @@ use std::sync::Arc;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::http::StatusCode;
-use openwave_core::{AgentError, Result};
+use openwave_core::{AgentError, OwnerId, Result};
 
 /// The authenticated identity a request acts as.
 ///
@@ -40,6 +40,24 @@ pub enum Principal {
     /// A named user on a shared deployment, resolved from a configured
     /// credential (today the self-host token file — see [`crate::auth`]).
     User(UserId),
+}
+
+impl Principal {
+    /// The durable storage key this principal's rows are attributed to and
+    /// scoped by (#853).
+    ///
+    /// The local owner maps to the fixed [`OwnerId::local`] key; a named user
+    /// maps to `user:<id>`. The prefix keeps the two namespaces disjoint —
+    /// [`UserId`] rejects `:`, so no operator-assigned user id can collide
+    /// with `local` or with another user's key.
+    #[must_use]
+    pub fn owner_id(&self) -> OwnerId {
+        match self {
+            Self::LocalOwner => OwnerId::local(),
+            Self::User(id) => OwnerId::new(&format!("user:{id}"))
+                .expect("a validated user id forms a valid owner key"),
+        }
+    }
 }
 
 /// The operator-assigned identifier of a named user on a shared deployment.
