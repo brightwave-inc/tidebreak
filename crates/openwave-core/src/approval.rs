@@ -173,9 +173,6 @@ impl ToolApprovalKind {
             Self::WebExtractMayFetchUrl => "web_extract_may_fetch_url",
             Self::ExecMayRunNetworkedCommand => "exec_may_run_networked_command",
             Self::ExternalMcpMayCallServer => "external_mcp_may_call_server",
-            // Never stored: the kind is not standing-grantable (the chat's
-            // permission mode is the wider consent). Named anyway so the key
-            // vocabulary stays total.
             Self::WorkspaceMayModifyFiles => "workspace_may_modify_files",
             Self::Unsupported => "unsupported",
         }
@@ -237,17 +234,32 @@ impl ToolApprovalKind {
     ///
     /// MCP is intentionally one-shot: its configured executable can change
     /// while retaining a model-visible namespace, so reusing consent by name
-    /// would silently widen authority. Workspace edits are one-shot for the
-    /// opposite reason: their standing "yes" already exists as the chat's
-    /// `Auto` permission mode, and a second spelling of the same consent
-    /// would drift from the first.
+    /// would silently widen authority. Workspace edits are grantable, but only
+    /// about a place ([`GrantScope::PathSubtree`], enforced by
+    /// [`Self::grantable_at`]): their whole-tool "yes" already exists as the
+    /// chat's `Auto` permission mode, and a second spelling of the same
+    /// consent would drift from the first.
     #[must_use]
     pub const fn is_standing_grantable(self) -> bool {
-        self.is_approvable()
-            && !matches!(
-                self,
-                Self::ExternalMcpMayCallServer | Self::WorkspaceMayModifyFiles
-            )
+        self.is_approvable() && !matches!(self, Self::ExternalMcpMayCallServer)
+    }
+
+    /// Whether a standing grant of `scope` may exist for this kind.
+    ///
+    /// The place rung and the shape rungs answer different questions — where
+    /// a write may land versus what a command may look like — so each kind
+    /// admits only the rungs that describe its own action. A workspace edit
+    /// can be granted about a place and nothing wider; every other grantable
+    /// kind keeps the shape rungs and cannot borrow the place one.
+    #[must_use]
+    pub const fn grantable_at(self, scope: &GrantScope) -> bool {
+        if !self.is_standing_grantable() {
+            return false;
+        }
+        match self {
+            Self::WorkspaceMayModifyFiles => matches!(scope, GrantScope::PathSubtree { .. }),
+            _ => !matches!(scope, GrantScope::PathSubtree { .. }),
+        }
     }
 }
 
@@ -459,10 +471,10 @@ impl GrantLevel {
 /// without re-prompting.
 ///
 /// Deny-by-default, like the host broker's capability grants: a grant covers
-/// exactly one chat and one approvable tool. Resource-level sub-scoping (a path
-/// subtree, a single connector) is deliberately deferred until
-/// [`ApprovalRequest`] carries a structured resource — see the follow-up on the
-/// capability-model issue.
+/// exactly one chat (or project) and one approvable tool, narrowed further by
+/// its [`GrantScope`] — including [`GrantScope::PathSubtree`], the rung that
+/// names a workspace place now that [`ApprovalRequest`] carries a structured
+/// resource ([`ToolActionPreview::WriteFile`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StandingGrant {
     level: GrantLevel,
@@ -500,6 +512,17 @@ pub enum GrantScope {
     /// for `cargo test` cannot be stretched to something that merely starts
     /// with those letters or that smuggles a shell in behind them.
     CommandPrefix { tokens: Vec<String> },
+    /// Every write landing in one workspace place: the named path itself, or
+    /// anything below it.
+    ///
+    /// This is the rung that says *where* rather than *what* — "stop asking
+    /// about writes under `reports/`", not "stop asking about this document".
+    /// The prefix is a run of workspace-relative path segments, matched
+    /// segment-wise against the canonical `path` argument so `reports/` can
+    /// never be stretched over `reports-old/`, and only against a path the
+    /// preview reproduced in full
+    /// ([`ToolActionPreview::names_place_exactly`]).
+    PathSubtree { prefix: String },
     /// Every call to the tool.
     WholeTool,
 }
@@ -519,6 +542,13 @@ impl GrantScope {
     /// asking.
     #[must_use]
     pub fn covers_call(&self, tool_name: &str, arguments: &serde_json::Value) -> bool {
+        // A place is matched on the canonical path argument, not on the
+        // projection: the write's document never reaches the preview, so the
+        // whole-call fidelity gate below can never pass for it, and does not
+        // need to — consent about a place is indifferent to the document.
+        if let Self::PathSubtree { prefix } = self {
+            return covers_workspace_place(prefix, tool_name, arguments);
+        }
         if !ToolActionPreview::describes_exactly(tool_name, arguments) {
             // Nothing describable to match, so only the widest scope can
             // apply — and it applies to a call the renderer could not show,
@@ -542,6 +572,8 @@ impl GrantScope {
             Self::ExactAction(granted) => *granted == action,
             // Only a command has an executable or a token run to name.
             Self::AnyArgsFor { .. } | Self::CommandPrefix { .. } => false,
+            // Handled on canonical arguments above, before the fidelity gate.
+            Self::PathSubtree { .. } => unreachable!("place scopes return early"),
         }
     }
 
@@ -578,6 +610,8 @@ impl GrantScope {
                 openwave_shell_policy::CommandRuleKind::Exact,
                 exec_argv(command, args),
             ),
+            // A place names workspace writes, never a command.
+            Self::PathSubtree { .. } => unreachable!("place scopes return early"),
         };
         let Ok(rule) = rule else {
             return false;
@@ -600,6 +634,20 @@ impl GrantScope {
     /// alternative, which is the widest thing on the ladder.
     #[must_use]
     pub fn ladder_for(tool_name: &str, arguments: &serde_json::Value) -> Vec<Self> {
+        // A workspace write never describes itself exactly — the document is
+        // not projected — so its ladder is built from the place instead, and
+        // only when the path arrived intact. Falling through to the whole-tool
+        // default would offer the one workspace rung that must not exist: the
+        // chat's `Auto` mode already spells that consent.
+        if tool_name == "write_file" {
+            if !ToolActionPreview::names_place_exactly(tool_name, arguments) {
+                return Vec::new();
+            }
+            return match ToolActionPreview::build(tool_name, arguments) {
+                Some(action) => Self::ladder_for_action(&action),
+                None => Vec::new(),
+            };
+        }
         if !ToolActionPreview::describes_exactly(tool_name, arguments) {
             return vec![Self::WholeTool];
         }
@@ -607,6 +655,20 @@ impl GrantScope {
             return vec![Self::WholeTool];
         };
         Self::ladder_for_action(&action)
+    }
+
+    /// The rungs of [`Self::ladder_for`] a grant of `kind` may actually hold,
+    /// per [`ToolApprovalKind::grantable_at`]. This is the ladder a card may
+    /// offer: a rung appears only when granting it would mint.
+    #[must_use]
+    pub fn mintable_ladder_for(
+        kind: ToolApprovalKind,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+    ) -> Vec<Self> {
+        let mut ladder = Self::ladder_for(tool_name, arguments);
+        ladder.retain(|scope| kind.grantable_at(scope));
+        ladder
     }
 
     /// The ladder for an action already projected from a parked call.
@@ -642,6 +704,12 @@ impl GrantScope {
             ladder.dedup();
             return ladder;
         }
+        // A write's ladder names places, narrowest first: exactly this path,
+        // then the directory that holds it. There is deliberately no
+        // whole-workspace rung — that consent already exists as `Auto` mode.
+        if let ToolActionPreview::WriteFile { path } = &action {
+            return place_ladder(path);
+        }
         vec![Self::ExactAction(action), Self::WholeTool]
     }
 }
@@ -652,6 +720,74 @@ fn exec_argv(command: &str, args: &[String]) -> Vec<String> {
     argv.push(command.to_owned());
     argv.extend(args.iter().cloned());
     argv
+}
+
+/// The canonical segments of a workspace-relative path, or `None` for a path
+/// no place grant should reason about.
+///
+/// Canonical means what the workspace itself would resolve: empty and `.`
+/// segments dropped, so a grant for `reports` covers `./reports/q1.md` rather
+/// than being dodged by a cosmetic respelling. Anything that could point
+/// outside the workspace — an absolute path, a `..` — yields `None`, and a
+/// call carrying one keeps asking instead of matching anything.
+fn place_segments(path: &str) -> Option<Vec<&str>> {
+    if path.starts_with('/') {
+        return None;
+    }
+    let segments: Vec<&str> = path
+        .split('/')
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .collect();
+    if segments.is_empty() || segments.contains(&"..") {
+        return None;
+    }
+    Some(segments)
+}
+
+/// Whether a place grant's prefix covers the workspace write about to run.
+///
+/// Matched on the canonical `path` argument, segment-wise — `reports` never
+/// covers `reports-old/q1.md` — and only when the path reached the preview
+/// intact, so a grant given for the place the card showed cannot be stretched
+/// over paths that merely clamp to it.
+fn covers_workspace_place(prefix: &str, tool_name: &str, arguments: &serde_json::Value) -> bool {
+    if !ToolActionPreview::names_place_exactly(tool_name, arguments) {
+        return false;
+    }
+    let Some(path) = arguments.get("path").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let (Some(prefix), Some(path)) = (place_segments(prefix), place_segments(path)) else {
+        return false;
+    };
+    path.len() >= prefix.len()
+        && prefix
+            .iter()
+            .zip(path.iter())
+            .all(|(granted, requested)| granted == requested)
+}
+
+/// The place rungs for one workspace write, narrowest first.
+///
+/// Rebuilt from the (possibly clamped) preview on recovery, which cannot say
+/// whether a path exactly at the clamp bound was truncated — so a path at the
+/// bound gets no ladder, and no rung is ever offered for an approximate place.
+fn place_ladder(path: &str) -> Vec<GrantScope> {
+    if path.chars().count() >= crate::preview::MAX_ACTION_FIELD_CHARS {
+        return Vec::new();
+    }
+    let Some(segments) = place_segments(path) else {
+        return Vec::new();
+    };
+    let mut ladder = vec![GrantScope::PathSubtree {
+        prefix: segments.join("/"),
+    }];
+    if segments.len() > 1 {
+        ladder.push(GrantScope::PathSubtree {
+            prefix: segments[..segments.len() - 1].join("/"),
+        });
+    }
+    ladder
 }
 
 impl StandingGrant {
@@ -673,7 +809,9 @@ impl StandingGrant {
 
     /// Record consent limited to `scope`.
     ///
-    /// Returns `None` on the same terms as [`StandingGrant::new`].
+    /// Returns `None` on the same terms as [`StandingGrant::new`], and also
+    /// for a kind/scope pairing [`ToolApprovalKind::grantable_at`] refuses —
+    /// a workspace edit can be granted about a place and nothing wider.
     #[must_use]
     pub fn scoped(
         level: GrantLevel,
@@ -682,7 +820,7 @@ impl StandingGrant {
         scope: GrantScope,
         granted_at: DateTime<Utc>,
     ) -> Option<Self> {
-        if !kind.is_standing_grantable() {
+        if !kind.grantable_at(&scope) {
             return None;
         }
         Some(Self {
@@ -1430,5 +1568,129 @@ mod standing_grant_tests {
 
         grants.clear();
         assert!(!grants.covers(chat, None, "search", kind, &no_args()));
+    }
+
+    /// Canonical `write_file` arguments; the document rides along untouched
+    /// because a place grant is indifferent to it.
+    fn write_args(path: &str) -> serde_json::Value {
+        serde_json::json!({ "path": path, "content": "drafted text" })
+    }
+
+    fn place_grant(chat: ChatId, prefix: &str) -> StandingGrant {
+        StandingGrant::scoped(
+            GrantLevel::Chat { chat_id: chat },
+            "write_file",
+            ToolApprovalKind::WorkspaceMayModifyFiles,
+            GrantScope::PathSubtree {
+                prefix: prefix.into(),
+            },
+            Utc::now(),
+        )
+        .expect("a workspace write is grantable about a place")
+    }
+
+    #[test]
+    fn a_place_grant_covers_writes_under_it_and_nothing_else() {
+        let chat = ChatId::new();
+        let kind = ToolApprovalKind::WorkspaceMayModifyFiles;
+        let grants = StandingGrants::from_grants(vec![place_grant(chat, "reports")]);
+        let covers = |path: &str| grants.covers(chat, None, "write_file", kind, &write_args(path));
+
+        assert!(covers("reports/q1.md"));
+        assert!(covers("reports/2026/q1.md"));
+        // Matching is canonical, segment-wise: a cosmetic respelling of the
+        // same place is covered, a sibling that merely shares letters is not.
+        assert!(covers("./reports//q1.md"));
+        assert!(!covers("reports-old/q1.md"));
+        assert!(!covers("notes.md"));
+        // Anything that could point outside the workspace keeps asking.
+        assert!(!covers("reports/../secret.md"));
+        assert!(!covers("/reports/q1.md"));
+        // A path the preview could not reproduce was never the one granted.
+        let long = "x".repeat(crate::preview::MAX_ACTION_FIELD_CHARS + 1);
+        assert!(!covers(&format!("reports/{long}.md")));
+        // A place grant is scoped to the tool that writes, not borrowed by a
+        // command that mentions the same path.
+        assert!(!grants.covers(
+            chat,
+            None,
+            "exec",
+            ToolApprovalKind::ExecMayRunNetworkedCommand,
+            &exec_args("touch", &["reports/q1.md"]),
+        ));
+    }
+
+    #[test]
+    fn a_workspace_write_is_grantable_only_about_a_place() {
+        let level = GrantLevel::Chat {
+            chat_id: ChatId::new(),
+        };
+        let kind = ToolApprovalKind::WorkspaceMayModifyFiles;
+        // The whole-tool "yes" already exists as the chat's Auto mode.
+        assert!(StandingGrant::new(level, "write_file", kind, Utc::now()).is_none());
+        assert!(StandingGrant::scoped(
+            level,
+            "write_file",
+            kind,
+            GrantScope::ExactAction(ToolActionPreview::WriteFile {
+                path: "notes.md".into()
+            }),
+            Utc::now(),
+        )
+        .is_none());
+        // And the place rung belongs to workspace writes alone.
+        assert!(StandingGrant::scoped(
+            level,
+            "exec",
+            ToolApprovalKind::ExecMayRunNetworkedCommand,
+            GrantScope::PathSubtree {
+                prefix: "reports".into()
+            },
+            Utc::now(),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn the_write_ladder_names_the_file_then_its_directory() {
+        assert_eq!(
+            GrantScope::ladder_for("write_file", &write_args("reports/q1.md")),
+            vec![
+                GrantScope::PathSubtree {
+                    prefix: "reports/q1.md".into()
+                },
+                GrantScope::PathSubtree {
+                    prefix: "reports".into()
+                },
+            ]
+        );
+        // A root-level file has no directory rung, and there is deliberately
+        // no whole-workspace rung to fall back to.
+        assert_eq!(
+            GrantScope::ladder_for("write_file", &write_args("notes.md")),
+            vec![GrantScope::PathSubtree {
+                prefix: "notes.md".into()
+            }]
+        );
+        // Nothing is offered for a place the card could not show faithfully.
+        let long = "x".repeat(crate::preview::MAX_ACTION_FIELD_CHARS + 1);
+        assert_eq!(
+            GrantScope::ladder_for("write_file", &write_args(&long)),
+            Vec::<GrantScope>::new()
+        );
+        assert_eq!(
+            GrantScope::ladder_for("write_file", &write_args("reports/../q1.md")),
+            Vec::<GrantScope>::new()
+        );
+        // An unknown Workspace-class tool has no place to name, and the
+        // whole-tool default must not leak through the mintable ladder.
+        assert_eq!(
+            GrantScope::mintable_ladder_for(
+                ToolApprovalKind::WorkspaceMayModifyFiles,
+                "third_party_editor",
+                &no_args(),
+            ),
+            Vec::<GrantScope>::new()
+        );
     }
 }

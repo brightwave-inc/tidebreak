@@ -9073,7 +9073,12 @@ async fn workspace_approval_folds_storage_but_recovers_class_and_kind() {
         crate::ToolApprovalKind::WorkspaceMayModifyFiles
     );
     assert!(approval.kind.is_approvable());
-    assert!(!approval.kind.is_standing_grantable());
+    // Grantable about a place, and nothing wider — the whole-tool rung is the
+    // chat's Auto mode, not a standing grant.
+    assert!(approval.kind.grantable_at(&crate::GrantScope::PathSubtree {
+        prefix: "notes.md".into()
+    }));
+    assert!(!approval.kind.grantable_at(&crate::GrantScope::WholeTool));
 }
 
 #[tokio::test]

@@ -108,6 +108,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddConnectedApps),
             Box::new(AddSandboxProvisionAdmission),
             Box::new(AddOwnerAttribution),
+            Box::new(WidenStandingGrantKinds),
         ]
     }
 }
@@ -7663,6 +7664,25 @@ impl MigrationName for WidenStandingGrantScope {
 
 const STANDING_GRANT_REBUILD: &str = "standing_tool_grant_rebuild";
 
+/// The closed `approval_kind` vocabulary a standing-grant row may carry.
+///
+/// The original list stopped at the first three grantable kinds; the wide one
+/// adds web extraction (grantable since the ladder widened past exec, but
+/// unstorable until now) and workspace writes (grantable about a place since
+/// the place rung).
+fn standing_grant_kind_keys(wide: bool) -> Vec<&'static str> {
+    let mut keys = vec![
+        crate::ToolApprovalKind::SearchMayShareQueryAndExcerpts.standing_grant_key(),
+        crate::ToolApprovalKind::WebSearchMayShareQuery.standing_grant_key(),
+        crate::ToolApprovalKind::ExecMayRunNetworkedCommand.standing_grant_key(),
+    ];
+    if wide {
+        keys.push(crate::ToolApprovalKind::WebExtractMayFetchUrl.standing_grant_key());
+        keys.push(crate::ToolApprovalKind::WorkspaceMayModifyFiles.standing_grant_key());
+    }
+    keys
+}
+
 /// Exactly one of `chat_id` / `project_id` names the level.
 fn standing_grant_level_check(widened: bool) -> SimpleExpr {
     if widened {
@@ -7677,7 +7697,7 @@ fn standing_grant_level_check(widened: bool) -> SimpleExpr {
     }
 }
 
-fn standing_grant_rebuild_table(widened: bool) -> TableCreateStatement {
+fn standing_grant_rebuild_table(widened: bool, wide_kinds: bool) -> TableCreateStatement {
     let mut table = Table::create();
     table
         .table(Alias::new(STANDING_GRANT_REBUILD))
@@ -7729,11 +7749,9 @@ fn standing_grant_rebuild_table(widened: bool) -> TableCreateStatement {
             Func::char_length(Expr::col(StandingToolGrant::ToolName))
                 .between(1, crate::model::ToolCallRecord::MAX_LABEL_LEN as i32),
         )
-        .check(Expr::col(StandingToolGrant::ApprovalKind).is_in([
-            crate::ToolApprovalKind::SearchMayShareQueryAndExcerpts.standing_grant_key(),
-            crate::ToolApprovalKind::WebSearchMayShareQuery.standing_grant_key(),
-            crate::ToolApprovalKind::ExecMayRunNetworkedCommand.standing_grant_key(),
-        ]));
+        .check(
+            Expr::col(StandingToolGrant::ApprovalKind).is_in(standing_grant_kind_keys(wide_kinds)),
+        );
     if widened {
         table
             .col(ColumnDef::new(StandingToolGrant::ProjectId).uuid())
@@ -7787,8 +7805,50 @@ async fn rebuild_standing_grant_sqlite(
         // table behind and make the next attempt fail on "already exists".
         // Cheaper to make the step idempotent than to test for the stranding.
         format!("DROP TABLE IF EXISTS {STANDING_GRANT_REBUILD}"),
-        standing_grant_rebuild_table(widened).to_string(SqliteQueryBuilder),
+        standing_grant_rebuild_table(widened, false).to_string(SqliteQueryBuilder),
         copy,
+        "DROP TABLE standing_tool_grant".to_owned(),
+        format!("ALTER TABLE {STANDING_GRANT_REBUILD} RENAME TO standing_tool_grant"),
+        standing_grant_rebuild_index().to_string(SqliteQueryBuilder),
+        "COMMIT".to_owned(),
+        "PRAGMA foreign_keys=ON".to_owned(),
+    ];
+    manager
+        .get_connection()
+        .execute_unprepared(&format!("{};", statements.join(";\n")))
+        .await?;
+    Ok(())
+}
+
+/// SQLite rebuild for the kind-vocabulary migration: the level shape stays
+/// widened on both sides; only the `approval_kind` check (and, when
+/// narrowing, the rows the narrow check refuses) changes.
+async fn rebuild_standing_grant_kinds_sqlite(
+    manager: &SchemaManager<'_>,
+    wide_kinds: bool,
+) -> Result<(), DbErr> {
+    let shared = "source_call_id, chat_id, tool_name, approval_kind, scope, granted_at, project_id";
+    // A row carrying a kind the narrow check refuses cannot be respelled
+    // without inventing a consent nobody gave, so narrowing drops it.
+    let kind_filter = if wide_kinds {
+        String::new()
+    } else {
+        let legacy = standing_grant_kind_keys(false)
+            .into_iter()
+            .map(|key| format!("'{key}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(" WHERE approval_kind IN ({legacy})")
+    };
+    let statements = vec![
+        "PRAGMA foreign_keys=OFF".to_owned(),
+        "BEGIN IMMEDIATE".to_owned(),
+        format!("DROP TABLE IF EXISTS {STANDING_GRANT_REBUILD}"),
+        standing_grant_rebuild_table(true, wide_kinds).to_string(SqliteQueryBuilder),
+        format!(
+            "INSERT INTO {STANDING_GRANT_REBUILD} ({shared}) \
+             SELECT {shared} FROM standing_tool_grant{kind_filter}"
+        ),
         "DROP TABLE standing_tool_grant".to_owned(),
         format!("ALTER TABLE {STANDING_GRANT_REBUILD} RENAME TO standing_tool_grant"),
         standing_grant_rebuild_index().to_string(SqliteQueryBuilder),
@@ -7848,10 +7908,104 @@ impl MigrationTrait for WidenStandingGrantScope {
     }
 }
 
+/// Widens the standing-grant `approval_kind` vocabulary (issue #939): the
+/// place rung lets a workspace write be remembered about a location, and the
+/// column's closed check has to admit its kind before such a grant can be
+/// stored. Web extraction joins in the same pass — it has been grantable
+/// since the ladder widened past exec, but this check silently predated it,
+/// so "always allow" for a web page failed at the insert.
+///
+/// The `down` deletes rows carrying the new kinds first: they have no
+/// representation in the narrow vocabulary, and respelling them would invent
+/// a consent nobody gave.
+struct WidenStandingGrantKinds;
+
+impl MigrationName for WidenStandingGrantKinds {
+    fn name(&self) -> &str {
+        "m20260803_000046_widen_standing_grant_kinds"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for WidenStandingGrantKinds {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if manager.get_database_backend() == DatabaseBackend::Sqlite {
+            return rebuild_standing_grant_kinds_sqlite(manager, true).await;
+        }
+        let kinds = render_postgres_check(
+            Expr::col(StandingToolGrant::ApprovalKind).is_in(standing_grant_kind_keys(true)),
+        );
+        let statements = [
+            // The baseline's kind constraint is unnamed, so find it by the
+            // column it constrains. No other check on this table mentions
+            // `approval_kind`, and the named replacement is added only after
+            // this drop.
+            "DO $$
+             DECLARE name text;
+             BEGIN
+                 FOR name IN
+                     SELECT conname FROM pg_constraint
+                     WHERE conrelid = 'standing_tool_grant'::regclass
+                       AND contype = 'c'
+                       AND pg_get_constraintdef(oid) LIKE '%approval_kind%'
+                 LOOP
+                     EXECUTE format('ALTER TABLE standing_tool_grant DROP CONSTRAINT %I', name);
+                 END LOOP;
+             END $$"
+                .to_owned(),
+            format!(
+                "ALTER TABLE standing_tool_grant ADD CONSTRAINT chk_standing_tool_grant_kind \
+                 CHECK ({kinds})"
+            ),
+        ];
+        for statement in statements {
+            manager
+                .get_connection()
+                .execute_unprepared(&statement)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let legacy = standing_grant_kind_keys(false)
+            .into_iter()
+            .map(|key| format!("'{key}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        manager
+            .get_connection()
+            .execute_unprepared(&format!(
+                "DELETE FROM standing_tool_grant WHERE approval_kind NOT IN ({legacy})"
+            ))
+            .await?;
+        if manager.get_database_backend() == DatabaseBackend::Sqlite {
+            return rebuild_standing_grant_kinds_sqlite(manager, false).await;
+        }
+        let kinds = render_postgres_check(
+            Expr::col(StandingToolGrant::ApprovalKind).is_in(standing_grant_kind_keys(false)),
+        );
+        let statements = [
+            "ALTER TABLE standing_tool_grant DROP CONSTRAINT chk_standing_tool_grant_kind"
+                .to_owned(),
+            format!(
+                "ALTER TABLE standing_tool_grant ADD CONSTRAINT chk_standing_tool_grant_kind \
+                 CHECK ({kinds})"
+            ),
+        ];
+        for statement in statements {
+            manager
+                .get_connection()
+                .execute_unprepared(&statement)
+                .await?;
+        }
+        Ok(())
+    }
+}
+
 /// Retires the semantic index stage: a parsed document is ready the moment its
 /// canonical text is published, because there is no derived vector store left
-/// to publish into.
-///
+/// to publish into.///
 /// Index jobs are deleted rather than cancelled — they describe a stage that no
 /// longer exists. Documents whose canonical output was already published (or
 /// that never had raw bytes to parse) are promoted to `ready`, including rows

@@ -22,6 +22,7 @@ const TOOL_LABELS: Partial<Record<RendererToolName, string>> = {
   search: "Document search",
   web_search: "Web search",
   web_extract: "Web pages",
+  write_file: "Workspace files",
 };
 
 export function toolGrantLabel(action: RendererToolName): string {
@@ -67,8 +68,9 @@ export function grantScopeLabel(
       if (scope.tool === "web_extract") {
         return scope.url;
       }
-      // Workspace writes are never standing-grantable, so no stored grant can
-      // carry this scope today; named anyway so the vocabulary stays total.
+      // Retained for old durable grants: workspace writes are granted about a
+      // place (`path_subtree`) rather than exactly, so no current mint stores
+      // this scope; named anyway so the vocabulary stays total.
       if (scope.tool === "write_file") {
         return scope.path;
       }
@@ -78,6 +80,8 @@ export function grantScopeLabel(
       return `${scope.command} …`;
     case "command_prefix":
       return `${scope.tokens.join(" ")} …`;
+    case "path_subtree":
+      return `Writes under ${scope.prefix}`;
     case "whole_tool":
       switch (action) {
         case "exec":

@@ -195,6 +195,25 @@ impl ToolActionPreview {
             _ => false,
         }
     }
+
+    /// Whether the call's *place* — the workspace path a location-scoped grant
+    /// is built from and matched against — reaches the preview intact.
+    ///
+    /// Weaker than [`Self::describes_exactly`] on purpose: a workspace write
+    /// never describes itself exactly (the document is not projected), but a
+    /// grant about a place does not need the document. It needs the path, all
+    /// of it, so a grant keyed on a clamped path cannot be stretched over
+    /// other paths sharing its first [`MAX_ACTION_FIELD_CHARS`] characters.
+    #[must_use]
+    pub fn names_place_exactly(tool_name: &str, arguments: &Value) -> bool {
+        match tool_name {
+            "write_file" => arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .is_some_and(survives_clamp),
+            _ => false,
+        }
+    }
 }
 
 /// What one row of a listed result is, which is what picks its icon.

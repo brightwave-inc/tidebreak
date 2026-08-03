@@ -356,6 +356,27 @@ export function grantLadder(
           ]
         : [];
     }
+    if ("path_prefix" in grant) {
+      if (preview?.tool !== "write_file") return [];
+      // The concrete place comes from the parked call's own path; the rung
+      // only says how many segments of it were offered.
+      const segments = placeSegments(preview.path);
+      const count = grant.path_prefix.segments;
+      if (count < 1 || count > segments.length) return [];
+      const place = bounded(segments.slice(0, count).join("/"));
+      return [
+        {
+          kind: "decide",
+          key: `place-${count}`,
+          label:
+            count === segments.length
+              ? `Yes, and always allow writing \u201c${place}\u201d`
+              : `Yes, and always allow writes under \u201c${place}/\u201d`,
+          decision: "approve",
+          grant,
+        },
+      ];
+    }
     if (preview?.tool !== "exec") return [];
     const argv = [preview.command, ...preview.args];
     const tokens = grant.command_prefix.tokens;
@@ -391,7 +412,20 @@ function spokenAction(preview: ToolActionPreview): string {
         : preview.tool === "write_file"
           ? preview.path
           : preview.query;
+  return bounded(spoken);
+}
+
+function bounded(spoken: string): string {
   return spoken.length > SPOKEN_ACTION_CHARS
     ? `${spoken.slice(0, SPOKEN_ACTION_CHARS).trimEnd()}\u2026`
     : spoken;
+}
+
+/**
+ * The canonical segments of a workspace-relative path, matching how the
+ * server names a place: empty and `.` segments dropped, so the label shows
+ * the place the grant will actually cover.
+ */
+export function placeSegments(path: string): string[] {
+  return path.split("/").filter((segment) => segment !== "" && segment !== ".");
 }

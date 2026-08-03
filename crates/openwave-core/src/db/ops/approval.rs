@@ -249,11 +249,7 @@ pub(in crate::db) async fn request_and_append_event(
         tool_name: request.tool_name.clone(),
         class: request.class,
         kind: request.kind,
-        grant_scopes: if request.kind.is_standing_grantable() {
-            GrantScope::ladder_for(&call.name, &call.arguments)
-        } else {
-            Vec::new()
-        },
+        grant_scopes: GrantScope::mintable_ladder_for(request.kind, &call.name, &call.arguments),
         preview: request.preview.clone(),
     };
     let turn = entities::turn_run::Entity::find_by_id(request.turn_id.0)
@@ -923,6 +919,13 @@ fn approval_from_model(model: &entities::tool_call::Model) -> Result<ToolApprova
         }
         Some("search_may_share_query_and_excerpts") if model.name == "web_search" => {
             ToolApprovalKind::WebSearchMayShareQuery
+        }
+        // The page-fetch kind folds into the search spelling the same way; the
+        // missing recovery arm made a restarted card consent to "sharing a
+        // query" while fetching a URL, and stored any "always allow" under the
+        // search key where no later web_extract call could find it.
+        Some("search_may_share_query_and_excerpts") if model.name == "web_extract" => {
+            ToolApprovalKind::WebExtractMayFetchUrl
         }
         Some("search_may_share_query_and_excerpts") => {
             ToolApprovalKind::SearchMayShareQueryAndExcerpts
