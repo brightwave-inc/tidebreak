@@ -2476,3 +2476,105 @@ async fn client_execution_api_validates_scope_identity_and_terminal_payloads() {
     .await;
     assert_eq!(oversized.status(), StatusCode::BAD_REQUEST);
 }
+
+/// The native-only surface requires a principal, not just the capability:
+/// presenting only the client-executor credential names nobody and is
+/// rejected before any handler runs.
+#[tokio::test]
+async fn client_executor_credential_alone_is_rejected() {
+    let (router, _token, _store, _dir) = test_app().await;
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/sandbox-file-reads/pending")
+                .header(
+                    crate::auth::CLIENT_EXECUTOR_HEADER,
+                    crate::state::TEST_CLIENT_EXECUTOR_TOKEN,
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// The auth middleware is the one place a principal is minted: the bearer
+/// resolves to the local owner without the executor capability, the native
+/// credential upgrades the capability bit on that principal, and the
+/// capability alone cannot reach a handler. Probes the real middlewares in
+/// the production layering (bearer outermost).
+#[tokio::test]
+async fn auth_middleware_resolves_principal_and_capability() {
+    use crate::principal::{AuthContext, Principal};
+
+    let (_app, token, state, _store, _dir) = test_app_with_state().await;
+    let whoami = |auth: AuthContext| async move {
+        format!(
+            "{}|{}",
+            matches!(auth.principal, Principal::LocalOwner),
+            auth.client_executor
+        )
+    };
+    let native = axum::Router::new()
+        .route("/native", axum::routing::get(whoami))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::auth::require_client_executor_token,
+        ));
+    let probe = axum::Router::new()
+        .route("/whoami", axum::routing::get(whoami))
+        .merge(native)
+        .route_layer(axum::middleware::from_fn_with_state(
+            state,
+            crate::auth::require_token,
+        ));
+    let bearer = format!("Bearer {token}");
+
+    let request = |uri: &str, with_executor: bool| {
+        let mut builder = Request::builder()
+            .uri(uri)
+            .header(header::AUTHORIZATION, &bearer);
+        if with_executor {
+            builder = builder.header(
+                crate::auth::CLIENT_EXECUTOR_HEADER,
+                crate::state::TEST_CLIENT_EXECUTOR_TOKEN,
+            );
+        }
+        builder.body(Body::empty()).unwrap()
+    };
+
+    let response = probe
+        .clone()
+        .oneshot(request("/whoami", false))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1024).await.unwrap();
+    assert_eq!(&body[..], b"true|false", "bearer resolves the local owner");
+
+    let response = probe
+        .clone()
+        .oneshot(request("/native", false))
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "a principal without the native credential lacks the capability"
+    );
+
+    let response = probe
+        .clone()
+        .oneshot(request("/native", true))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1024).await.unwrap();
+    assert_eq!(
+        &body[..],
+        b"true|true",
+        "the native credential marks the capability on the same principal"
+    );
+}

@@ -19,6 +19,7 @@ use axum::http::{
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
+use crate::principal::{AuthContext, Principal};
 use crate::state::AppState;
 
 /// Handshake subprotocol the server selects when the client offered it.
@@ -40,13 +41,21 @@ pub const CLIENT_EXECUTOR_HEADER: HeaderName =
 /// `Sec-WebSocket-Protocol: openwave-token.<token>`.
 pub async fn require_token(
     State(state): State<AppState>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
     let presented = extract_token(request.headers());
 
     match presented {
         Some(token) if constant_time_eq(token.as_bytes(), state.token.as_bytes()) => {
+            // The per-launch bearer is loopback-only and handed to one client,
+            // so the verified caller *is* the local owner. This is the only
+            // place a principal is minted; handlers learn it through the
+            // fail-closed `AuthContext` extractor.
+            request.extensions_mut().insert(AuthContext {
+                principal: Principal::LocalOwner,
+                client_executor: false,
+            });
             next.run(request).await
         }
         _ => StatusCode::UNAUTHORIZED.into_response(),
@@ -54,9 +63,14 @@ pub async fn require_token(
 }
 
 /// Require the second credential held only by the trusted native host.
+///
+/// The credential is a capability, not a principal: it marks the bit on the
+/// [`AuthContext`] the bearer middleware already attached, and fails closed if
+/// no context is present — the native credential alone names nobody and must
+/// never admit a request by itself.
 pub async fn require_client_executor_token(
     State(state): State<AppState>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
     let presented = request
@@ -67,6 +81,13 @@ pub async fn require_client_executor_token(
         Some(token)
             if constant_time_eq(token.as_bytes(), state.client_executor_token.as_bytes()) =>
         {
+            let Some(auth) = request.extensions().get::<AuthContext>().copied() else {
+                return StatusCode::UNAUTHORIZED.into_response();
+            };
+            request.extensions_mut().insert(AuthContext {
+                client_executor: true,
+                ..auth
+            });
             next.run(request).await
         }
         _ => StatusCode::UNAUTHORIZED.into_response(),
