@@ -6066,6 +6066,81 @@ async fn turn_failure_receipt_recovers_exact_retries_after_the_turn_advances() {
     );
 }
 
+/// CI-observed wedge: a worker that loses the failure-resolution race to the
+/// lease scanner retries its exact request after the wall clock has passed its
+/// requested retry time. That caller must learn the lease is no longer its to
+/// resolve (`Ok(None)`), not receive the future-retry invariant error forever.
+#[tokio::test]
+async fn stale_lease_failure_with_passed_retry_time_reports_the_lost_race() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+    let accepted = match store
+        .accept_turn(turn_id, chat.id, "gpt-5", "hello")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    set_turn_max_attempts(&store, turn_id, 2).await;
+    let claimed_at = accepted.available_at + chrono::Duration::seconds(1);
+    let worker_token = uuid::Uuid::new_v4();
+    let lease_expires_at = claimed_at + chrono::Duration::minutes(2);
+    store
+        .claim_turn_run(worker_token, claimed_at, lease_expires_at)
+        .await
+        .unwrap()
+        .turn
+        .unwrap();
+
+    // The scanner claims past the worker's lease, which retries the turn on a
+    // scan lease, then expires that lease too, terminalizing the turn out from
+    // under the worker.
+    let scan_at = lease_expires_at + chrono::Duration::microseconds(1);
+    let retried = store
+        .claim_turn_run(
+            uuid::Uuid::new_v4(),
+            scan_at,
+            scan_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .turn
+        .unwrap();
+    let second_scan_at =
+        retried.lease_expires_at.unwrap() + chrono::Duration::microseconds(1);
+    let scanned = store
+        .claim_turn_run(
+            uuid::Uuid::new_v4(),
+            second_scan_at,
+            second_scan_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap();
+    assert!(scanned.terminal_event.is_some());
+
+    // The worker retries its exact failure request; its retry time is now in
+    // the past relative to both the request and the database clock.
+    assert_eq!(
+        store
+            .record_turn_run_failure(
+                turn_id,
+                worker_token,
+                second_scan_at + chrono::Duration::seconds(1),
+                TurnFailureRetry::RetryAt(claimed_at + chrono::Duration::seconds(2)),
+                0,
+                Usage::default(),
+                "provider_unavailable",
+                Some("temporary outage"),
+            )
+            .await
+            .unwrap(),
+        None
+    );
+}
+
 #[tokio::test]
 async fn turn_failure_exhaustion_retains_retry_intent_and_rolls_back_atomically() {
     let (_dir, store) = temp_store().await;
