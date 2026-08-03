@@ -19,6 +19,7 @@ import {
   connectApprovedFolder,
   connectFolder,
   disconnectFolder,
+  forgetFolder,
   grantFolderCapability,
   listApprovedFolders,
   listCapabilityConsents,
@@ -60,6 +61,12 @@ export function FoldersView({ chat }: { chat: Chat }) {
   const refreshGeneration = useRef(0);
   const folderAccess = useRefreshSignals((state) => state.folderAccess);
   const { confirm, dialog: confirmDialog } = useConfirm();
+  const connectedFolders = folders.filter(
+    (folder) => folder.status === "connected",
+  );
+  const unavailableFolders = folders.filter(
+    (folder) => folder.status === "unavailable",
+  );
   const connectedIds = new Set(folders.map((folder) => folder.rootId));
   const availableFolders = approvedFolders.filter(
     (folder) => !connectedIds.has(folder.rootId),
@@ -165,6 +172,32 @@ export function FoldersView({ chat }: { chat: Chat }) {
     }
   }
 
+  /**
+   * Withdraw an unreachable folder's approval everywhere. The restore path
+   * is deliberately not a button: the attachment and grants are riding out
+   * the outage, so the folder comes back on its own when its directory does.
+   */
+  async function forgetUnavailableFolder(folder: ConnectedFolder) {
+    const accepted = await confirm({
+      title: `Forget ${folder.displayName}?`,
+      description:
+        "Withdraws OpenWave's approval for this folder everywhere, for every chat. If the folder comes back, connect it again from scratch.",
+      confirmLabel: "Forget",
+      destructive: true,
+    });
+    if (!accepted) return;
+    setWorking(true);
+    setError(null);
+    try {
+      await forgetFolder(folder.rootId);
+      useRefreshSignals.getState().signal("folderAccess");
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setWorking(false);
+    }
+  }
+
   async function revokeStatement(
     folder: ConnectedFolder,
     statement: ConsentStatementSnapshot,
@@ -244,9 +277,9 @@ export function FoldersView({ chat }: { chat: Chat }) {
           </Empty>
         ) : (
           <>
-            {folders.length > 0 && (
+            {connectedFolders.length > 0 && (
               <FolderSection label="Connected">
-                {folders.map((folder) => {
+                {connectedFolders.map((folder) => {
                   const statements = folderStatements(
                     consents,
                     folder.rootId,
@@ -323,6 +356,43 @@ export function FoldersView({ chat }: { chat: Chat }) {
                     </FolderCard>
                   );
                 })}
+              </FolderSection>
+            )}
+
+            {unavailableFolders.length > 0 && (
+              <FolderSection label="Unavailable">
+                {unavailableFolders.map((folder) => (
+                  <FolderCard
+                    key={folder.rootId}
+                    name={folder.displayName}
+                    action={
+                      <div className="flex shrink-0 gap-1">
+                        <Button
+                          variant="outline"
+                          size="xs"
+                          disabled={working}
+                          onClick={() => void removeFolder(folder)}
+                        >
+                          Disconnect
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="xs"
+                          disabled={working}
+                          onClick={() => void forgetUnavailableFolder(folder)}
+                        >
+                          Forget
+                        </Button>
+                      </div>
+                    }
+                  >
+                    <p className="text-sm text-muted-foreground">
+                      OpenWave can’t reach this folder right now. It stays
+                      connected and returns on its own once the folder is back
+                      — or forget it to withdraw its access everywhere.
+                    </p>
+                  </FolderCard>
+                ))}
               </FolderSection>
             )}
 

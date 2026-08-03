@@ -73,6 +73,17 @@ pub enum ControlRequest {
     /// same safe folder identity as [`ControlRequest::ListApprovedRoots`] —
     /// display names, never absolute paths — and confers no authority.
     ListGrantStatements,
+    /// List safe summaries of set-aside roots: approvals whose directory the
+    /// broker could not reopen when it loaded.
+    ///
+    /// A trusted-host management operation like
+    /// [`ControlRequest::ListApprovedRoots`], which deliberately omits these
+    /// roots because nothing can be attached to them. Without this listing a
+    /// set-aside root simply vanishes from every product surface — the user
+    /// cannot tell an unplugged drive from a deliberate detach, and a folder
+    /// deleted for good keeps its approval with nothing to withdraw it. Safe
+    /// identities only: display names and reasons, never absolute paths.
+    ListUnavailableRoots,
     /// Resolve exact product-attached roots for one local-exec invocation.
     ///
     /// This trusted-host operation returns absolute paths and must never be
@@ -366,6 +377,7 @@ pub enum ControlResult {
     Hello(HelloResult),
     ListApprovedRoots { roots: Vec<RootSummary> },
     ListGrantStatements { grants: Vec<GrantStatementSummary> },
+    ListUnavailableRoots { roots: Vec<UnavailableRootSummary> },
     ResolveExecRoots { roots: Vec<ResolvedExecRoot> },
     RegisterRoot(RegisterRootResult),
     LookupRegisterRootReceipt(LookupRegisterRootReceiptResult),
@@ -446,6 +458,49 @@ pub struct GrantStatementSummary {
     pub root_display_name: Option<String>,
     pub consent_method: ConsentMethod,
     pub granted_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Why a persisted root could not be reopened.
+///
+/// The causes are recorded rather than acted on: an unmounted volume reports
+/// itself as missing on some hosts and as an I/O failure on others, so no
+/// cause here is reliable enough to justify destroying an approval on its
+/// own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum UnavailableRootReason {
+    /// Nothing exists at the approved path.
+    Missing,
+    /// The path exists but the broker may no longer open it.
+    PermissionDenied,
+    /// Host I/O failed for some other reason, including a device that is
+    /// present but not ready.
+    HostIo,
+    /// The path resolves to a directory the current policy would not approve.
+    Rejected,
+    /// A different directory now occupies the approved path. Consent named the
+    /// original directory, and rebinding it to whatever replaced it would hand
+    /// out authority the user never gave.
+    Replaced,
+}
+
+/// One set-aside root, by its safe identity.
+///
+/// `owner` is the subject that originally established the approval — the one
+/// [`ControlRequest::RevokeRoot`] requires — exposed so the trusted desktop
+/// can offer to forget a folder that is gone for good. Attachments travel in
+/// conversation IDs the product already holds; the absolute path never
+/// crosses the transport.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnavailableRootSummary {
+    pub root_id: RootId,
+    pub display_name: String,
+    pub reason: UnavailableRootReason,
+    pub owner: GrantSubject,
+    /// Conversations whose attachment is riding out the outage with the root.
+    pub attached_conversations: Vec<Uuid>,
 }
 
 /// One reachable folder together with what the broker would actually allow on

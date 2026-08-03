@@ -61,10 +61,15 @@ export function useChatFolderAttachments(
       ([folders, consents]) => {
         if (generation !== refreshGeneration.current) return;
         setItems(
-          folders.map((folder) => ({
-            ...folder,
-            statements: folderStatements(consents, folder.rootId, chat),
-          })),
+          folders
+            // The composer chips are working controls for the current turn;
+            // an unavailable folder cannot serve it. The full Folders panel
+            // is where the set-aside state is shown and acted on.
+            .filter((folder) => folder.status === "connected")
+            .map((folder) => ({
+              ...folder,
+              statements: folderStatements(consents, folder.rootId, chat),
+            })),
         );
       },
       (reason) => {

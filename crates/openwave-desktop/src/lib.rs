@@ -237,6 +237,7 @@ pub fn run() {
             host_access::list_connected_folders,
             host_access::grant_folder_capability,
             host_access::disconnect_folder,
+            host_access::forget_folder,
             updater::desktop_update_state,
             updater::check_for_update,
             updater::restart_for_update

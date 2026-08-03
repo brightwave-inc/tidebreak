@@ -42,8 +42,9 @@ use crate::{
         ResolveExecRootsRequest, ResolvedExecRoot, Response, ResponseEnvelope, RevokeGrantRequest,
         RevokeGrantResult, RevokeRootRequest, RevokeRootResult, RootAccess,
         RootAttachmentMutationKind, RootAttachmentMutationReceipt, RootAttachmentMutationRequest,
-        RootAttachmentMutationResult, RootSummary, WriteFileMode, WriteFileRequest,
-        WriteFileResult, MAX_READ_FILE_BINARY_BYTES, PROTOCOL_VERSION,
+        RootAttachmentMutationResult, RootSummary, UnavailableRootReason, UnavailableRootSummary,
+        WriteFileMode, WriteFileRequest, WriteFileResult, MAX_READ_FILE_BINARY_BYTES,
+        PROTOCOL_VERSION,
     },
     Capability, ConsentMethod, ConsentRecord, ExecutionContext, Grant, GrantError, GrantId,
     GrantSubject, OperationId, RelativePath, RequestId, RootAttachment, RootId, RootPolicy,
@@ -199,47 +200,26 @@ struct UnavailableRoot {
     attachments: Vec<RootAttachment>,
 }
 
-/// Why a persisted root could not be reopened.
-///
-/// The causes are recorded rather than acted on: an unmounted volume reports
-/// itself as missing on some hosts and as an I/O failure on others, so no cause
-/// here is reliable enough to justify destroying an approval on its own.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum UnavailableRootReason {
-    /// Nothing exists at the approved path.
-    Missing,
-    /// The path exists but the broker may no longer open it.
-    PermissionDenied,
-    /// Host I/O failed for some other reason, including a device that is
-    /// present but not ready.
-    HostIo,
-    /// The path resolves to a directory the current policy would not approve.
-    Rejected,
-    /// A different directory now occupies the approved path. Consent named the
-    /// original directory, and rebinding it to whatever replaced it would hand
-    /// out authority the user never gave.
-    Replaced,
+/// The transport reason vocabulary, derived here where the policy error is
+/// observed. The causes are recorded rather than acted on — see the enum's
+/// own docs in [`crate::protocol`].
+fn unavailable_reason(error: &RootPolicyError) -> UnavailableRootReason {
+    match error {
+        RootPolicyError::Io(error) => match error.kind() {
+            io::ErrorKind::NotFound => UnavailableRootReason::Missing,
+            io::ErrorKind::PermissionDenied => UnavailableRootReason::PermissionDenied,
+            _ => UnavailableRootReason::HostIo,
+        },
+        _ => UnavailableRootReason::Rejected,
+    }
 }
 
-impl UnavailableRootReason {
-    fn from_policy_error(error: &RootPolicyError) -> Self {
-        match error {
-            RootPolicyError::Io(error) => match error.kind() {
-                io::ErrorKind::NotFound => Self::Missing,
-                io::ErrorKind::PermissionDenied => Self::PermissionDenied,
-                _ => Self::HostIo,
-            },
-            _ => Self::Rejected,
-        }
-    }
-
-    const fn error_code(self) -> ErrorCode {
-        match self {
-            Self::Missing => ErrorCode::NotFound,
-            Self::PermissionDenied => ErrorCode::Denied,
-            Self::HostIo => ErrorCode::HostIo,
-            Self::Rejected | Self::Replaced => ErrorCode::InvalidRoot,
-        }
+const fn unavailable_error_code(reason: UnavailableRootReason) -> ErrorCode {
+    match reason {
+        UnavailableRootReason::Missing => ErrorCode::NotFound,
+        UnavailableRootReason::PermissionDenied => ErrorCode::Denied,
+        UnavailableRootReason::HostIo => ErrorCode::HostIo,
+        UnavailableRootReason::Rejected | UnavailableRootReason::Replaced => ErrorCode::InvalidRoot,
     }
 }
 
@@ -351,7 +331,8 @@ impl ControlAudit {
             // records that matter their retention.
             ControlRequest::Hello
             | ControlRequest::ListApprovedRoots
-            | ControlRequest::ListGrantStatements => None,
+            | ControlRequest::ListGrantStatements
+            | ControlRequest::ListUnavailableRoots => None,
             ControlRequest::ResolveExecRoots(request) => Some(Self {
                 actor: AuditActor::Control {
                     subject: match request.context.project_id() {
@@ -706,6 +687,11 @@ impl Controller {
                 let state = self.lock_state().map_err(error_response)?;
                 list_grant_statements(&state)
                     .map(|grants| ControlResult::ListGrantStatements { grants })
+            }
+            ControlRequest::ListUnavailableRoots => {
+                let state = self.lock_state().map_err(error_response)?;
+                list_unavailable_roots(&state)
+                    .map(|roots| ControlResult::ListUnavailableRoots { roots })
             }
             ControlRequest::ResolveExecRoots(request) => {
                 let state = self.lock_state().map_err(error_response)?;
@@ -2326,7 +2312,7 @@ fn unavailable_root_event(root: &UnavailableRoot) -> AuditEvent {
         outcome: AuditOutcome::Failed,
         capability: None,
         grant_id: None,
-        error_code: Some(root.reason.error_code()),
+        error_code: Some(unavailable_error_code(root.reason)),
         item_count: None,
         bytes: None,
     }
@@ -2427,6 +2413,41 @@ fn list_grant_statements(state: &State) -> Result<Vec<GrantStatementSummary>, Er
             .then_with(|| left.grant_id.to_string().cmp(&right.grant_id.to_string()))
     });
     Ok(statements)
+}
+
+/// Every set-aside root, by its safe identity.
+///
+/// The management-surface companion to [`list_approved_roots`], which omits
+/// these roots because they cannot be attached. Display names are recovered
+/// from the approved path's basename — the same identity a live registration
+/// would carry — and the owner and riding attachments are included so the
+/// trusted desktop can tell an outage from a detach and address a deliberate
+/// [`ControlRequest::RevokeRoot`] at the registering subject.
+fn list_unavailable_roots(state: &State) -> Result<Vec<UnavailableRootSummary>, ErrorResponse> {
+    if state.unavailable.len() > MAX_LIST_ROOTS {
+        return Err(error_response(BrokerError::RootListTooLarge));
+    }
+    let mut roots = state
+        .unavailable
+        .iter()
+        .map(|root| UnavailableRootSummary {
+            root_id: root.id,
+            display_name: root_display_name(&root.path),
+            reason: root.reason,
+            owner: root.owner,
+            attached_conversations: root
+                .attachments
+                .iter()
+                .map(|attachment| attachment.conversation_id())
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+    roots.sort_by(|left, right| {
+        left.display_name
+            .cmp(&right.display_name)
+            .then_with(|| left.root_id.to_string().cmp(&right.root_id.to_string()))
+    });
+    Ok(roots)
 }
 
 fn list_roots(

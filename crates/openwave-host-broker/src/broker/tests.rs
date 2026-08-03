@@ -222,6 +222,19 @@ fn list_approved(controller: &Controller) -> Vec<RootSummary> {
     roots
 }
 
+fn list_unavailable(controller: &Controller) -> Vec<UnavailableRootSummary> {
+    let result = unwrap_response(controller.handle(ControlEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: crate::RequestId::new(),
+        request: ControlRequest::ListUnavailableRoots,
+    }))
+    .unwrap();
+    let ControlResult::ListUnavailableRoots { roots } = result else {
+        panic!("unexpected control result")
+    };
+    roots
+}
+
 fn resolve_exec(
     controller: &Controller,
     context: ExecutionContext,
@@ -2648,6 +2661,65 @@ fn an_unreachable_root_is_set_aside_rather_than_blocking_the_others() {
     assert!(roots
         .iter()
         .any(|root| root.root_id == offline.root.root_id));
+}
+
+/// The set-aside product surface: while a root's directory is gone the
+/// listing names it safely — reason, owner, and the attachments riding out
+/// the outage — where the approved-roots listing deliberately omits it, and a
+/// deliberate revocation by the owner forgets it for good rather than letting
+/// the approval linger forever.
+#[test]
+fn set_aside_roots_are_listed_for_the_product_and_forgettable() {
+    let (temp, broker, path, state_dir) = durable_setup();
+    let conversation = Uuid::new_v4();
+    let subject = GrantSubject::conversation(conversation).unwrap();
+    let root_id = register(
+        &broker.controller(),
+        subject,
+        conversation,
+        path.clone(),
+        OperationId::new(),
+    )
+    .root
+    .root_id;
+    drop(broker);
+    let stashed = path.with_file_name("Documents-offline");
+    std::fs::rename(&path, &stashed).unwrap();
+
+    let broker = Broker::open(test_policy(&temp), &state_dir).unwrap();
+    let controller = broker.controller();
+    assert!(list_approved(&controller).is_empty());
+    assert_eq!(
+        list_unavailable(&controller),
+        vec![UnavailableRootSummary {
+            root_id,
+            display_name: "Documents".to_owned(),
+            reason: UnavailableRootReason::Missing,
+            owner: subject,
+            attached_conversations: vec![conversation],
+        }]
+    );
+
+    // Forgetting is the owner's deliberate instruction, and it reaches the
+    // set-aside registration: grants, attachment, and listing all go.
+    assert_eq!(
+        revoke(&controller, OperationId::new(), subject, root_id),
+        RevokeRootResult { revoked: true }
+    );
+    assert!(list_unavailable(&controller).is_empty());
+    // The subject-wide ListRoots grant is not the root's; everything scoped to
+    // the forgotten root is gone.
+    assert!(grant_statements(&controller)
+        .iter()
+        .all(|grant| matches!(grant.scope, Scope::Subject)));
+    drop(controller);
+    drop(broker);
+
+    // The directory coming back does not resurrect the forgotten approval.
+    std::fs::rename(&stashed, &path).unwrap();
+    let broker = Broker::open(test_policy(&temp), &state_dir).unwrap();
+    assert!(list_approved(&broker.controller()).is_empty());
+    assert!(list_unavailable(&broker.controller()).is_empty());
 }
 
 #[test]

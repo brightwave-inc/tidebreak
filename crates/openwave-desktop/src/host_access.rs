@@ -237,11 +237,25 @@ pub(crate) struct ConnectApprovedFolderRequest {
     root_id: RootId,
 }
 
+/// Whether the broker can currently reach a listed folder.
+///
+/// `Unavailable` is the set-aside state: the approval and attachment stand,
+/// but the directory could not be reopened — an unplugged drive, a moved
+/// folder. The distinction is the product surface for it; without this a
+/// set-aside folder is indistinguishable from one the user detached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FolderStatus {
+    Connected,
+    Unavailable,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ConnectedFolder {
     pub(crate) root_id: RootId,
     pub(crate) display_name: String,
+    pub(crate) status: FolderStatus,
 }
 
 #[tauri::command]
@@ -311,14 +325,38 @@ pub(crate) async fn list_connected_folders(
     // it from the same consent statements the Permissions surface shows
     // (`list_capability_consents`), so both panels are groupings of one model
     // and the desktop keeps no folder-capability vocabulary of its own.
-    Ok(roots
+    let mut folders = roots
         .into_iter()
         .filter(|root| product_roots.contains(&root.root_id.as_uuid()))
         .map(|root| ConnectedFolder {
             root_id: root.root_id,
             display_name: root.display_name,
+            status: FolderStatus::Connected,
         })
-        .collect())
+        .collect::<Vec<_>>();
+    // A set-aside root — one the broker could not reopen — used to vanish
+    // from this listing entirely, leaving an unplugged drive looking exactly
+    // like a deliberate detach. It stays visible instead, marked unavailable,
+    // so the panel can say what happened and offer to forget it.
+    let result = state
+        .broker
+        .control(ControlRequest::ListUnavailableRoots)
+        .await
+        .map_err(|error| error.to_string())?;
+    let ControlResult::ListUnavailableRoots { roots } = result else {
+        return Err("host broker returned an unexpected response".to_owned());
+    };
+    folders.extend(
+        roots
+            .into_iter()
+            .filter(|root| product_roots.contains(&root.root_id.as_uuid()))
+            .map(|root| ConnectedFolder {
+                root_id: root.root_id,
+                display_name: root.display_name,
+                status: FolderStatus::Unavailable,
+            }),
+    );
+    Ok(folders)
 }
 
 #[tauri::command]
@@ -616,6 +654,57 @@ pub(crate) async fn disconnect_folder(
     .await
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ForgetFolderRequest {
+    root_id: RootId,
+}
+
+/// Withdraw the host approval for a folder the broker can no longer reach.
+///
+/// The remove half of the set-aside surface: a folder that is gone for good
+/// would otherwise keep its grants and attachments indefinitely, since the
+/// broker only ever deletes a registration on an explicit revocation and
+/// nothing sent one. Deliberately restricted to set-aside roots — a live
+/// folder's exit is the ordinary per-chat disconnect — and addressed at the
+/// registering subject the broker reports, which `RevokeRoot` requires.
+#[tauri::command]
+pub(crate) async fn forget_folder(
+    state: State<'_, HostAccess>,
+    request: ForgetFolderRequest,
+) -> Result<bool, String> {
+    let _root_change = state.root_changes.lock().await;
+    let result = state
+        .broker
+        .control(ControlRequest::ListUnavailableRoots)
+        .await
+        .map_err(|error| error.to_string())?;
+    let ControlResult::ListUnavailableRoots { roots } = result else {
+        return Err("host broker returned an unexpected response".to_owned());
+    };
+    let root = roots
+        .into_iter()
+        .find(|root| root.root_id == request.root_id)
+        .ok_or_else(|| {
+            "the folder is not unavailable — disconnect it from its chats instead".to_owned()
+        })?;
+    let result = state
+        .broker
+        .control(ControlRequest::RevokeRoot(
+            openwave_host_broker::RevokeRootRequest {
+                operation_id: openwave_host_broker::OperationId::new(),
+                subject: root.owner,
+                root_id: request.root_id,
+            },
+        ))
+        .await
+        .map_err(|error| error.to_string())?;
+    let ControlResult::RevokeRoot(result) = result else {
+        return Err("host broker returned an unexpected response".to_owned());
+    };
+    Ok(result.revoked)
+}
+
 async fn approved_folders(state: &HostAccess) -> Result<Vec<ConnectedFolder>, String> {
     Ok(approved_roots(state)
         .await?
@@ -623,6 +712,7 @@ async fn approved_folders(state: &HostAccess) -> Result<Vec<ConnectedFolder>, St
         .map(|root| ConnectedFolder {
             root_id: root.root_id,
             display_name: root.display_name,
+            status: FolderStatus::Connected,
         })
         .collect())
 }
