@@ -34,6 +34,9 @@ mod managed_policy;
 mod mcp_config;
 mod model_registry;
 mod model_roles;
+/// OpenAPI ingest into the bounded operation catalog a `rest_api` connected
+/// app stores and the governed REST executor validates against.
+pub mod openapi_catalog;
 mod pairing;
 mod principal;
 mod provider;
