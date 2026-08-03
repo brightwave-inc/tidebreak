@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use openwave_egress::EgressPolicy;
 use sha2::{Digest as _, Sha256};
 use tokio::sync::Mutex;
 
@@ -19,7 +20,7 @@ pub struct RemoteSessionPool {
 
 #[derive(Default)]
 struct PoolState {
-    sessions: HashMap<SessionKey, Arc<Mutex<Option<RemoteSession>>>>,
+    sessions: HashMap<SessionKey, Arc<Mutex<Option<PooledSession>>>>,
     receipts: HashMap<ReceiptKey, ExecutionReceipt>,
     /// Content digests of files already staged into each workspace's live
     /// sandbox, bound to the exact sandbox instance they were uploaded to. A
@@ -52,6 +53,39 @@ pub(crate) struct RemoteSession {
     pub(crate) access_token: Option<String>,
 }
 
+/// A pooled session bound to the egress policy its sandbox was created under.
+///
+/// Managed sandboxes compile egress into creation-time network controls, so a
+/// live sandbox does not follow later policy edits. Recording the creation
+/// policy's fingerprint here lets the pool notice the mismatch and replace the
+/// sandbox instead of silently reusing one with stale egress.
+struct PooledSession {
+    session: RemoteSession,
+    egress: [u8; 32],
+}
+
+/// Stable identity of the egress policy a provider compiles into sandbox
+/// creation. `None` is today's open-internet creation.
+pub(crate) fn egress_policy_fingerprint(policy: Option<&EgressPolicy>) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    match policy {
+        None => hasher.update(b"open"),
+        Some(EgressPolicy::BlockAll) => hasher.update(b"block-all"),
+        Some(EgressPolicy::Allowlist(allowlist)) => {
+            hasher.update(b"allowlist");
+            for domain in allowlist.domains() {
+                hasher.update(b"\nd:");
+                hasher.update(domain.to_string().as_bytes());
+            }
+            for cidr in allowlist.cidrs() {
+                hasher.update(b"\nc:");
+                hasher.update(cidr.to_string().as_bytes());
+            }
+        }
+    }
+    hasher.finalize().into()
+}
+
 pub(crate) enum RemoteSessionError {
     Missing,
     Provider(CodeExecutionError),
@@ -68,8 +102,17 @@ pub(crate) trait RemoteSandboxAdapter: Send + Sync {
     fn kind(&self) -> CodeExecutionProviderKind;
     fn credential_fingerprint(&self) -> [u8; 32];
 
+    /// Fingerprint of the egress policy this adapter compiles into sandbox
+    /// creation. A pooled sandbox created under a different fingerprint is
+    /// stale — its network controls no longer reflect the effective policy —
+    /// and must be replaced rather than reused.
+    fn egress_fingerprint(&self) -> [u8; 32];
+
     async fn create_session(&self, workspace_id: &str)
         -> Result<RemoteSession, CodeExecutionError>;
+
+    /// Destroy the remote sandbox. A sandbox that is already gone is success.
+    async fn destroy_sandbox(&self, session: &RemoteSession) -> Result<(), CodeExecutionError>;
 
     async fn reconnect_session(
         &self,
@@ -104,9 +147,6 @@ pub(crate) trait RemoteWorkspaceAdapter: RemoteSandboxAdapter {
         session: &RemoteSession,
         path: Option<&WorkspaceFilePath>,
     ) -> Result<WorkspaceListing, RemoteSessionError>;
-
-    /// Destroy the remote sandbox. A sandbox that is already gone is success.
-    async fn destroy_sandbox(&self, session: &RemoteSession) -> Result<(), CodeExecutionError>;
 }
 
 impl RemoteSessionPool {
@@ -152,7 +192,7 @@ impl RemoteSessionPool {
         provider: CodeExecutionProviderKind,
         credential: [u8; 32],
         workspace_id: &str,
-    ) -> Arc<Mutex<Option<RemoteSession>>> {
+    ) -> Arc<Mutex<Option<PooledSession>>> {
         let key = SessionKey {
             provider,
             credential,
@@ -319,20 +359,35 @@ where
 
 async fn connected_session<A>(
     adapter: &A,
-    slot: &mut Option<RemoteSession>,
+    slot: &mut Option<PooledSession>,
     workspace_id: &str,
 ) -> Result<RemoteSession, CodeExecutionError>
 where
     A: RemoteSandboxAdapter + ?Sized,
 {
+    let egress = adapter.egress_fingerprint();
+    // A sandbox compiled under a different egress policy is stale: reusing it
+    // would keep enforcing the old policy (a chat whose network was off keeps
+    // failing DNS after the user opens it, and the reverse silently widens
+    // egress). Replace it. The destroy is best-effort — a sandbox the destroy
+    // could not reach expires on its own TTL.
+    if let Some(pooled) = slot.as_ref() {
+        if pooled.egress != egress {
+            let _ = adapter.destroy_sandbox(&pooled.session).await;
+            *slot = None;
+        }
+    }
     let active = match slot.as_ref() {
-        Some(existing) => match adapter.reconnect_session(existing).await? {
+        Some(pooled) => match adapter.reconnect_session(&pooled.session).await? {
             Some(connected) => connected,
             None => adapter.create_session(workspace_id).await?,
         },
         None => adapter.create_session(workspace_id).await?,
     };
-    *slot = Some(active.clone());
+    *slot = Some(PooledSession {
+        session: active.clone(),
+        egress,
+    });
     Ok(active)
 }
 
@@ -380,9 +435,16 @@ where
     let Some(existing) = slot.as_ref() else {
         return Ok(false);
     };
-    match adapter.reconnect_session(existing).await? {
+    let egress = existing.egress;
+    match adapter.reconnect_session(&existing.session).await? {
         Some(connected) => {
-            *slot = Some(connected);
+            // Reconnecting does not change the sandbox's creation-time egress,
+            // so the recorded fingerprint carries over; a mismatch with the
+            // effective policy is resolved by the next operation.
+            *slot = Some(PooledSession {
+                session: connected,
+                egress,
+            });
             Ok(true)
         }
         None => {
@@ -416,16 +478,16 @@ where
         )
         .await;
     let mut slot = slot.lock().await;
-    let Some(session) = slot.take() else {
+    let Some(pooled) = slot.take() else {
         return Ok(());
     };
-    match adapter.destroy_sandbox(&session).await {
+    match adapter.destroy_sandbox(&pooled.session).await {
         Ok(()) => {
             pool.clear_staged(&key).await;
             Ok(())
         }
         Err(error) => {
-            *slot = Some(session);
+            *slot = Some(pooled);
             Err(error)
         }
     }
