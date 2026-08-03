@@ -1131,6 +1131,28 @@ pub enum SandboxProvisionState {
     Done,
 }
 
+/// Whether one sandbox-resident run may keep working while its host is
+/// absent — a durable decision made at admission, never revisited by a
+/// disconnect.
+///
+/// Fail closed: the default everywhere is [`AttachedOnly`], a record written
+/// before this field existed reads as [`AttachedOnly`], and `Detached` can
+/// only be recorded by an admission gate whose preconditions all held. The
+/// wire-facing `AdmissionMode` a sandbox receives in its run init is derived
+/// from this record, never from code.
+///
+/// [`AttachedOnly`]: SandboxAdmissionMode::AttachedOnly
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SandboxAdmissionMode {
+    /// The default: the run must not work while unattached; it checkpoints
+    /// and waits for its host.
+    #[default]
+    AttachedOnly,
+    /// The run was admitted to keep working through host absence, within its
+    /// bounds.
+    Detached,
+}
+
 /// One container run's durable provisioning record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxProvision {
@@ -1142,6 +1164,10 @@ pub struct SandboxProvision {
     pub tag: String,
     /// Where the record stands.
     pub state: SandboxProvisionState,
+    /// The run's durable admission decision. Reconciliation and reattachment
+    /// derive the sandbox's admission mode from this field, so a crash can
+    /// never upgrade a run to detached.
+    pub admission: SandboxAdmissionMode,
     /// The backend's own reference for the sandbox, present once committed.
     pub handle: Option<String>,
     /// A well-formed result that arrived after the run was already terminal:
@@ -1856,11 +1882,16 @@ pub trait Store: Send + Sync {
     /// backend is asked to create anything. Returns the existing record instead
     /// when one is already present, so a restarted host reconciles rather than
     /// provisioning a second sandbox for the same single-attempt run.
+    ///
+    /// `admission` is the run's durable admission decision, recorded on the
+    /// intent so it survives crashes and disconnects; every later derivation
+    /// of the sandbox's admission mode reads the record, never the caller.
     async fn begin_sandbox_provision(
         &self,
         _run_id: uuid::Uuid,
         _tag: &str,
         _window_expires_at: chrono::DateTime<chrono::Utc>,
+        _admission: SandboxAdmissionMode,
     ) -> Result<BeginSandboxProvisionOutcome> {
         agent_run_storage_unavailable()
     }

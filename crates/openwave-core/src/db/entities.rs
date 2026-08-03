@@ -310,6 +310,10 @@ pub mod sandbox_provision {
         pub tag: String,
         /// `intended` | `committed` | `teardown` | `done`.
         pub state: String,
+        /// `attached_only` | `detached` — the run's durable admission
+        /// decision, recorded before the create call. Fail closed: anything
+        /// unrecognized reads as `attached_only`.
+        pub admission: String,
         /// The backend's sandbox reference, `NULL` until committed.
         pub handle: Option<String>,
         /// A well-formed result that arrived after the run was already

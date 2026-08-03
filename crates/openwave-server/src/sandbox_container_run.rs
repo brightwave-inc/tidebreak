@@ -43,7 +43,7 @@ use futures::StreamExt;
 use openwave_core::{
     AgentConfig, AgentError, AgentRun, AgentRunExecutionLocation, AgentRunId, AgentRunStatus,
     BeginSandboxProvisionOutcome, ChatMessage, ChatRequest, ProviderEvent, Result, Role,
-    SandboxProvisionState, Store, SubmitAgentRunResultOutcome,
+    SandboxAdmissionMode, SandboxProvisionState, Store, SubmitAgentRunResultOutcome,
 };
 use openwave_sandbox_protocol::{
     events::EventPayload,
@@ -62,6 +62,7 @@ use uuid::Uuid;
 
 use crate::durable_oplog::DurableOperationStore;
 use crate::resolver::ProviderResolver;
+use crate::sandbox_admission::{evaluate_detached_admission, DetachedPreconditions};
 
 /// The provider attribution stamped on reverse operations from a local
 /// container. Untrusted attribution rendered on consent prompts, never a claim
@@ -374,16 +375,42 @@ impl SandboxContainerRunner {
             }
         };
 
+        // The detached-admission gate (issue #824), evaluated before any
+        // durable state is written and recorded on the provisioning intent:
+        // every precondition from docs/sandbox-providers.md must hold or the
+        // run is admitted attached-only. Today every input is the unmet state
+        // for a local container — no run-scoped token issuer (slice 2), no
+        // external lifetime cap (the backend's fail-closed declaration), no
+        // image verification within a trust root (#1188) — so the decision is
+        // structurally a denial; what this establishes is that the mode is a
+        // recorded decision, never a constant.
+        let admission_decision = evaluate_detached_admission(DetachedPreconditions {
+            // No issuer of run-scoped, short-lived model tokens exists yet;
+            // the host is the model proxy and holds the only credentials.
+            scoped_model_token_available: false,
+            external_lifetime_cap: self.backend.enforces_external_lifetime_cap(),
+            image_verified: false,
+            // The container capability host grants ModelInference only; no
+            // reverse capability reaches a host-authority operation.
+            host_authority_tool_surface: false,
+            // No third-party credential is ever delivered into a container
+            // run today.
+            carries_third_party_credentials: false,
+            external_egress_enforcement: false,
+        });
+        let mut admission = admission_decision.mode();
+
         // Durable provisioning intent — carrying the host-minted correlation
-        // tag and its window — committed before the create call, so a crash on
-        // either side of the create converges through the window lapse and the
-        // tag sweep instead of leaking a container or double-provisioning.
+        // tag, its window, and the admission decision — committed before the
+        // create call, so a crash on either side of the create converges
+        // through the window lapse and the tag sweep instead of leaking a
+        // container or double-provisioning.
         let run_uuid = *run_id.as_uuid();
         let tag = SandboxTag::new();
         let window_expires_at = chrono::Utc::now() + chrono_duration(self.config.provision_window)?;
         let handle = match self
             .store
-            .begin_sandbox_provision(run_uuid, &tag.to_string(), window_expires_at)
+            .begin_sandbox_provision(run_uuid, &tag.to_string(), window_expires_at, admission)
             .await?
         {
             BeginSandboxProvisionOutcome::Started => {
@@ -432,6 +459,11 @@ impl SandboxContainerRunner {
                 }
             }
             BeginSandboxProvisionOutcome::Existing(record) => {
+                // The durable record's admission decision wins over anything
+                // this process would decide: no admission decision is
+                // revisited by a disconnect or a crash, and recovery can
+                // never upgrade a run to detached.
+                admission = record.admission;
                 match (record.state, record.handle) {
                     // A prior attempt of this same claim committed a handle and
                     // then lost its own commit: reconcile the container that
@@ -466,7 +498,15 @@ impl SandboxContainerRunner {
         // From here on a container exists, so every terminal path must drive its
         // teardown obligation.
         let outcome = self
-            .attach_and_drive(&run, lease_token, protocol_run_id, config, task, &handle)
+            .attach_and_drive(
+                &run,
+                lease_token,
+                protocol_run_id,
+                config,
+                task,
+                &handle,
+                admission,
+            )
             .await;
         self.teardown(run_uuid, &handle).await;
         outcome
@@ -513,6 +553,7 @@ impl SandboxContainerRunner {
         Ok((config, network_policy))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn attach_and_drive(
         &self,
         run: &AgentRun,
@@ -521,6 +562,7 @@ impl SandboxContainerRunner {
         config: AgentConfig,
         task: String,
         handle: &SandboxHandle,
+        admission: SandboxAdmissionMode,
     ) -> Result<SandboxContainerRunOutcome> {
         let run_id = run.id;
         // One capability host per run, shared across every connection: it holds
@@ -562,7 +604,15 @@ impl SandboxContainerRunner {
                 .deadline_at
                 .map(|deadline| deadline.timestamp().max(0).unsigned_abs())
                 .unwrap_or_default(),
-            admission: AdmissionMode::AttachedOnly,
+            // Derived from the durable admission decision — never a constant:
+            // absent an admitting record, this is attached-only. A detached
+            // init additionally requires the scoped token a later slice
+            // delivers, and the gate refuses detached admission until one can
+            // be minted.
+            admission: match admission {
+                SandboxAdmissionMode::AttachedOnly => AdmissionMode::AttachedOnly,
+                SandboxAdmissionMode::Detached => AdmissionMode::Detached,
+            },
             policy: PolicySnapshot {
                 egress_allowlist: Vec::new(),
                 granted_capabilities: vec![Capability::ModelInference],
