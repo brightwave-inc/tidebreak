@@ -2,7 +2,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { AppDetail, AppGrantState } from "@/api";
+import { AppInvokeRefusalError, type AppDetail, type AppGrantState } from "@/api";
 import { AppDetailView } from "./AppDetailView";
 import type { AppsApis } from "./appsApis";
 
@@ -135,6 +135,107 @@ describe("AppDetailView", () => {
       },
       "*",
     );
+  });
+
+  it("drives one REST operation round trip through the bridge", async () => {
+    const apis = apisWith(GRANTED);
+    render(<AppDetailView appId="app-1" apis={apis} onBack={() => {}} />);
+
+    const frame = (await screen.findByTitle(
+      "App: Fixture app",
+    )) as HTMLIFrameElement;
+    const contentWindow = frame.contentWindow!;
+    const posted = vi.spyOn(contentWindow, "postMessage");
+
+    // The frame asks for a REST operation; the parent forwards it to the
+    // same invoke route and posts the REST result back verbatim.
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          jsonrpc: "2.0",
+          id: 4,
+          method: "operations/call",
+          params: {
+            operation_id: "listIssues",
+            parameters: { state: "open" },
+            body: { page: 2 },
+          },
+        },
+        source: contentWindow,
+      }),
+    );
+    await waitFor(() => expect(posted).toHaveBeenCalled());
+    expect(apis.invokeOperation).toHaveBeenCalledWith(
+      "app-1",
+      "listIssues",
+      { state: "open" },
+      { page: 2 },
+    );
+    expect(posted).toHaveBeenCalledWith(
+      {
+        jsonrpc: "2.0",
+        id: 4,
+        result: {
+          status: 200,
+          content_type: "application/json",
+          body_base64: "e30=",
+          is_error: false,
+        },
+      },
+      "*",
+    );
+  });
+
+  it("re-gates behind the sheet when an operation call refuses with consent_required", async () => {
+    const apis = apisWith(GRANTED);
+    apis.grantState = vi
+      .fn()
+      .mockResolvedValueOnce(GRANTED)
+      .mockResolvedValue(STALE);
+    apis.invokeOperation = vi
+      .fn()
+      .mockRejectedValue(
+        new AppInvokeRefusalError("consent_required", "Consent required"),
+      );
+    render(<AppDetailView appId="app-1" apis={apis} onBack={() => {}} />);
+
+    const frame = (await screen.findByTitle(
+      "App: Fixture app",
+    )) as HTMLIFrameElement;
+    const contentWindow = frame.contentWindow!;
+    const posted = vi.spyOn(contentWindow, "postMessage");
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          jsonrpc: "2.0",
+          id: 5,
+          method: "operations/call",
+          params: { operation_id: "listIssues" },
+        },
+        source: contentWindow,
+      }),
+    );
+
+    // The frame sees a typed JSON-RPC error; the host refetches the grant
+    // and drops the frame back behind the consent sheet.
+    await waitFor(() =>
+      expect(posted).toHaveBeenCalledWith(
+        {
+          jsonrpc: "2.0",
+          id: 5,
+          error: {
+            code: -32000,
+            message: "Consent required",
+            data: { kind: "consent_required" },
+          },
+        },
+        "*",
+      ),
+    );
+    expect(
+      await screen.findByRole("button", { name: "Allow access" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByTitle(/^App:/)).not.toBeInTheDocument();
   });
 
   it("gates an ungranted app behind the sheet, marks staleness, and consents body-less", async () => {
