@@ -205,6 +205,13 @@ fn grant_scope(
             ApprovalGrantRung::CommandPrefix { tokens },
             Some(action @ ToolActionPreview::Exec { .. }),
         ) if action_is_exact => command_prefix_scope(action, tokens)?,
+        // A place rung does not need whole-call fidelity: the write's document
+        // never reaches the preview, and consent about a place is indifferent
+        // to it. The ladder itself refuses a path that may have been clamped.
+        (
+            ApprovalGrantRung::PathPrefix { segments },
+            Some(action @ ToolActionPreview::WriteFile { .. }),
+        ) => path_prefix_scope(action, segments)?,
         _ => return None,
     };
     let available = match action {
@@ -229,6 +236,24 @@ fn command_prefix_scope(
         .into_iter()
         .find(|scope| {
             matches!(scope, GrantScope::CommandPrefix { tokens: offered } if offered.len() == tokens)
+        })
+}
+
+/// Rebuild a place rung from the parked call, on the same terms as
+/// [`command_prefix_scope`]: the renderer sends only a segment count, the
+/// concrete prefix comes from the call's own ladder, and a count the ladder
+/// never offered mints nothing.
+fn path_prefix_scope(
+    action: &openwave_core::ToolActionPreview,
+    segments: usize,
+) -> Option<GrantScope> {
+    openwave_core::GrantScope::ladder_for_action(action)
+        .into_iter()
+        .find(|scope| {
+            matches!(
+                scope,
+                GrantScope::PathSubtree { prefix } if prefix.split('/').count() == segments
+            )
         })
 }
 
@@ -1111,6 +1136,141 @@ mod tests {
             ApprovalRequiredPublication::Ordinary
         ));
         drop(pending.decision);
+    }
+
+    /// Reproduces the dead "always allow" for web pages: the recovered kind
+    /// folded to the search spelling, so the grant was stored under a key no
+    /// later `web_extract` call ever looked up — and the grant table's closed
+    /// `approval_kind` check predated the correct key, so the fixed spelling
+    /// also needs the kind-widening migration to be storable at all.
+    #[tokio::test]
+    async fn a_web_extract_grant_is_stored_under_its_own_kind_and_covers_the_page() {
+        let (store, request) =
+            setup_with_arguments("web_extract", json!({ "url": "https://example.com/a" })).await;
+        let broker = ApprovalBroker::new(store.clone());
+        let _pending = broker.register(request.clone(), None).await;
+        assert_eq!(
+            broker
+                .resolve_with_grant(
+                    request.chat_id,
+                    request.call_id,
+                    ApprovalDecision::Approve,
+                    Some(crate::routes::ApprovalGrantRung::ExactAction),
+                )
+                .await
+                .unwrap(),
+            ResolveApprovalOutcome::Resolved
+        );
+        let grants = store.list_standing_tool_grants().await.unwrap();
+        assert_eq!(grants.len(), 1);
+        assert_eq!(
+            grants[0].grant.kind(),
+            openwave_core::ToolApprovalKind::WebExtractMayFetchUrl
+        );
+
+        // The durable grant now covers the exact page it named.
+        let covered = request_for(
+            &store,
+            request.chat_id,
+            "web_extract",
+            json!({ "url": "https://example.com/a" }),
+        )
+        .await;
+        let registration = broker.register(covered, None).await;
+        assert!(matches!(
+            registration.publication,
+            ApprovalRequiredPublication::StandingGrant
+        ));
+        assert!(matches!(
+            registration.decision.await,
+            ApprovalDecision::Approve
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_workspace_write_can_be_remembered_for_its_place() {
+        let (store, mut request) = setup_with_arguments(
+            "write_file",
+            json!({ "path": "reports/q1.md", "content": "draft" }),
+        )
+        .await;
+        request.class = ApprovalClass::Workspace;
+        let broker = ApprovalBroker::new(store.clone());
+        let _pending = broker.register(request.clone(), None).await;
+
+        // The whole-tool rung must not exist for a workspace write: that
+        // consent is the chat's Auto mode, not a standing grant.
+        assert_eq!(
+            broker
+                .resolve_with_grant(
+                    request.chat_id,
+                    request.call_id,
+                    ApprovalDecision::Approve,
+                    Some(crate::routes::ApprovalGrantRung::WholeTool),
+                )
+                .await
+                .unwrap(),
+            ResolveApprovalOutcome::GrantNotAvailable
+        );
+        // A segment count the ladder never offered mints nothing.
+        assert_eq!(
+            broker
+                .resolve_with_grant(
+                    request.chat_id,
+                    request.call_id,
+                    ApprovalDecision::Approve,
+                    Some(crate::routes::ApprovalGrantRung::PathPrefix { segments: 3 }),
+                )
+                .await
+                .unwrap(),
+            ResolveApprovalOutcome::GrantNotAvailable
+        );
+        // The directory rung — one segment of `reports/q1.md`.
+        assert_eq!(
+            broker
+                .resolve_with_grant(
+                    request.chat_id,
+                    request.call_id,
+                    ApprovalDecision::Approve,
+                    Some(crate::routes::ApprovalGrantRung::PathPrefix { segments: 1 }),
+                )
+                .await
+                .unwrap(),
+            ResolveApprovalOutcome::Resolved
+        );
+
+        // The next write under the granted place runs without a card…
+        let covered = request_for(
+            &store,
+            request.chat_id,
+            "write_file",
+            json!({ "path": "reports/q2.md", "content": "another draft" }),
+        )
+        .await;
+        let registration = broker.register(covered, None).await;
+        assert!(matches!(
+            registration.publication,
+            ApprovalRequiredPublication::StandingGrant
+        ));
+        assert!(matches!(
+            registration.decision.await,
+            ApprovalDecision::Approve
+        ));
+
+        // …and a write anywhere else parks on the card as before.
+        let uncovered = request_for(
+            &store,
+            request.chat_id,
+            "write_file",
+            json!({ "path": "notes.md", "content": "elsewhere" }),
+        )
+        .await;
+        let registration = broker.register(uncovered, None).await;
+        assert!(matches!(
+            registration.publication,
+            ApprovalRequiredPublication::Ordinary
+        ));
+        drop(registration.decision);
     }
 
     #[tokio::test]

@@ -287,7 +287,7 @@ export type ApprovalClass = "read_only" | "workspace" | "sensitive";
  * arguments the call is parked on. A grant can therefore only ever describe
  * the action that was actually under review.
  */
-export type ApprovalGrantRung = "exact_action" | { "command_prefix": { tokens: number, } } | "whole_tool";
+export type ApprovalGrantRung = "exact_action" | { "command_prefix": { tokens: number, } } | { "path_prefix": { segments: number, } } | "whole_tool";
 
 /**
  * Opaque renderer identity for one assistant-message citation.
@@ -857,7 +857,7 @@ export type GrantLevel = { "level": "chat", chat_id: ChatId, } | { "level": "pro
  * narrower variants exist because "don't ask me about commands again" is a
  * much larger thing to agree to than "don't ask me about `cargo` again".
  */
-export type GrantScope = { "scope": "exact_action" } & ToolActionPreview | { "scope": "any_args_for", command: string, } | { "scope": "command_prefix", tokens: Array<string>, } | { "scope": "whole_tool" };
+export type GrantScope = { "scope": "exact_action" } & ToolActionPreview | { "scope": "any_args_for", command: string, } | { "scope": "command_prefix", tokens: Array<string>, } | { "scope": "path_subtree", prefix: string, } | { "scope": "whole_tool" };
 
 /**
  * Renderer-safe mirror of the host broker's capability vocabulary.

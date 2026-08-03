@@ -2876,6 +2876,12 @@ pub enum ApprovalGrantRung {
     /// call's own arguments and honors the length only if it appears there,
     /// so a client cannot invent a prefix the card never showed.
     CommandPrefix { tokens: usize },
+    /// A leading run of a workspace write's path segments — the file itself,
+    /// or the directory that holds it.
+    ///
+    /// Named by segment count on the same terms as [`Self::CommandPrefix`]:
+    /// the concrete place comes from the parked call, never from the client.
+    PathPrefix { segments: usize },
     /// Every call to this tool.
     WholeTool,
 }
@@ -2954,13 +2960,14 @@ pub(crate) fn approval_grant_rungs(
     action: Option<&openwave_core::ToolActionPreview>,
     action_is_exact: bool,
 ) -> Vec<ApprovalGrantRung> {
-    if !kind.is_standing_grantable() {
-        return Vec::new();
-    }
-    let scopes = match action {
+    let mut scopes = match action {
         Some(action) => openwave_core::GrantScope::ladder_for_action(action),
         None => vec![openwave_core::GrantScope::WholeTool],
     };
+    // A rung appears only when granting it would mint: the kind admits only
+    // the rungs that describe its own action, so a workspace edit offers its
+    // place rungs and an ungrantable kind offers nothing.
+    scopes.retain(|scope| kind.grantable_at(scope));
     grant_rungs_from_scopes(&scopes, action_is_exact)
 }
 
@@ -2978,6 +2985,11 @@ pub(crate) fn grant_rungs_from_scopes(
             openwave_core::GrantScope::CommandPrefix { tokens } => {
                 Some(ApprovalGrantRung::CommandPrefix {
                     tokens: tokens.len(),
+                })
+            }
+            openwave_core::GrantScope::PathSubtree { prefix } => {
+                Some(ApprovalGrantRung::PathPrefix {
+                    segments: prefix.split('/').count(),
                 })
             }
             openwave_core::GrantScope::WholeTool => Some(ApprovalGrantRung::WholeTool),

@@ -3082,11 +3082,7 @@ impl Agent {
                 tool_name: call.name.clone(),
                 class: approval_class,
                 kind,
-                grant_scopes: if kind.is_standing_grantable() {
-                    GrantScope::ladder_for(&call.name, &arguments)
-                } else {
-                    Vec::new()
-                },
+                grant_scopes: GrantScope::mintable_ladder_for(kind, &call.name, &arguments),
                 preview,
             };
             let authorized_by_standing_grant = matches!(
