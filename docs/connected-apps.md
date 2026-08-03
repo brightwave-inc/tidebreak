@@ -81,16 +81,30 @@ The consent sheet leads with the app's display name ("Sentry") and lists
 pinned capabilities under it — a legibility improvement over leading with
 mounted tool names.
 
-## Migration invariant: fingerprints survive the absorption
+## Migration: hard cut, grants dropped, re-consent expected
 
 Absorbing MCP definitions into the connected-app record is a forward
-migration of storage, and one invariant is named here so no slice
-improvises it: **the `v:1` server-definition fingerprint is computed from
-definition fields, never from where or how the definition is stored.** A
-migration that preserves fields preserves every existing app grant. If it
-is ever violated, the failure mode is benign by construction — grants go
-stale and users re-consent — but wholesale re-consent churn is a bug, not
-an acceptable cost.
+migration of storage, and it is deliberately a **hard cut**. Local apps
+shipped days before this design and have, to a near certainty, no granted
+users; the migration spends that fact rather than preserving what almost
+nobody holds:
+
+- The absorption **drops any pre-existing app grants** instead of
+  translating them. An affected app simply re-presents its consent sheet
+  on next open — the design's failure direction is "re-ask", never
+  "widen", so the worst case is one click per app per user, and this is
+  also the honest choice: the epic changes what a grant *names* (an app
+  identity rather than a raw server namespace), and consent given under
+  the old vocabulary should be re-asked under the new one, not silently
+  reinterpreted.
+- No legacy `{ server, tools[] }` vocabulary survives the migration —
+  manifests and grants are app-keyed from the first slice, with no
+  dual-reading compatibility layer anywhere in runtime code.
+- Fingerprints remain **computed from definition fields, never from
+  storage** — that is what makes a fingerprint identify the thing the
+  user agreed to — but the canonical form is free to change (a `v:2`
+  form keyed to the new record shape is expected). No hash-stability
+  fixture across the migration is required.
 
 Settings phasing: the MCP servers page remains during the epic; the
 end state is one Connected apps page listing both kinds (per-kind detail —
