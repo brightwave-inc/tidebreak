@@ -19,11 +19,12 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::connected_app::ConnectedAppKind;
 use crate::error::Result;
 use crate::id::{AppId, AppRevisionId, TurnId};
 use crate::local_app::{
-    publish_app_bundle, validate_app_manifest, AppManifest, AppRecord, CreateApp, NewAppRevision,
-    MAX_APP_BUNDLE_BYTES,
+    mounted_tool_under, publish_app_bundle, validate_app_manifest, AppManifest, AppRecord,
+    CreateApp, NewAppRevision, MAX_APP_BUNDLE_BYTES,
 };
 use crate::preview::{ResultEntry, ResultEntryKind};
 use crate::storage::Store;
@@ -48,7 +49,9 @@ pub(super) struct Arguments {
     bundle_html: String,
     #[schemars(
         description = "The app's manifest: its display name and the exact mounted \
-                       MCP tools it may call, grouped by server."
+                       MCP tools it may call, grouped by connected app. Each binding \
+                       names a connected app by id (the tool description lists the \
+                       configured ids) and the full mounted tool names under it."
     )]
     manifest: AppManifest,
     #[serde(default)]
@@ -93,6 +96,59 @@ impl CreateAppTool {
             .find(|call| call.id == call_id)
             .map(|call| call.turn_id)
             .ok_or_else(|| ToolOutput::error("this call is not recorded in this conversation"))
+    }
+
+    /// Check that every manifest binding names a configured `mcp_server`
+    /// connected app and that each pinned tool is a mounted name under that
+    /// app's namespace.
+    async fn check_bindings(&self, manifest: &AppManifest) -> std::result::Result<(), String> {
+        if manifest.bindings.is_empty() {
+            return Ok(());
+        }
+        let connected = self
+            .store
+            .list_connected_apps()
+            .await
+            .map_err(|_| "could not read the configured connected apps".to_owned())?;
+        for binding in &manifest.bindings {
+            let Some(app) = connected.iter().find(|app| app.id == binding.app) else {
+                let configured: Vec<String> = connected
+                    .iter()
+                    .filter(|app| app.kind == ConnectedAppKind::McpServer)
+                    .map(|app| format!("{} ({})", app.id, app.name))
+                    .collect();
+                return Err(if configured.is_empty() {
+                    format!(
+                        "connected app {} is not configured, and no connected apps \
+                         are; only an empty bindings list is valid",
+                        binding.app
+                    )
+                } else {
+                    format!(
+                        "connected app {} is not configured; bind one of: {}",
+                        binding.app,
+                        configured.join(", ")
+                    )
+                });
+            };
+            if app.kind != ConnectedAppKind::McpServer {
+                return Err(format!(
+                    "connected app {} ({}) is a {} app; only mcp_server apps \
+                     contribute mounted tools",
+                    app.id, app.name, app.kind
+                ));
+            }
+            for tool in &binding.tools {
+                if mounted_tool_under(&app.name, tool).is_none() {
+                    return Err(format!(
+                        "tool {tool:?} is not mounted under connected app {} — its \
+                         tools are named `mcp__{}__{{tool}}`",
+                        app.id, app.name
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn success(record: &AppRecord, ordinal: u32, created: bool) -> ToolOutput {
@@ -142,6 +198,13 @@ impl Tool for CreateAppTool {
             return Ok(ToolOutput::error(format!(
                 "invalid app manifest: {message}"
             )));
+        }
+        // Resolve every binding against the configured connected apps at the
+        // authoring door, so a wrong id or namespace fails here with a
+        // teachable error instead of at the user's first open. The invoke
+        // gate re-checks all of this live; this is legibility, not the gate.
+        if let Err(message) = self.check_bindings(&args.manifest).await {
+            return Ok(ToolOutput::error(message));
         }
         let bundle = args.bundle_html.as_bytes();
         if bundle.is_empty() {
@@ -261,7 +324,7 @@ mod tests {
     use serde_json::json;
 
     use crate::db::DbStore;
-    use crate::id::{CallId, ChatId, TurnId};
+    use crate::id::{CallId, ChatId, ConnectedAppId, TurnId};
     use crate::local_app::app_revision_relative_path;
     use crate::model::{Chat, ToolCallExecution, ToolCallRecord, ToolCallStatus};
     use crate::preview::ToolResultPreview;
@@ -275,6 +338,7 @@ mod tests {
         chat_id: ChatId,
         turn_id: TurnId,
         profile_dir: PathBuf,
+        sentry: ConnectedAppId,
     }
 
     async fn fixture() -> Fixture {
@@ -287,6 +351,22 @@ mod tests {
             .await
             .unwrap(),
         );
+        // One configured connected app for bindings to resolve against.
+        let sentry = ConnectedAppId::new();
+        store
+            .replace_connected_apps(
+                ConnectedAppKind::McpServer,
+                &[crate::connected_app::ConnectedApp {
+                    id: sentry,
+                    name: "sentry".into(),
+                    kind: ConnectedAppKind::McpServer,
+                    definition: json!({ "name": "sentry", "command": "sentry-mcp" }),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                }],
+            )
+            .await
+            .unwrap();
         let chat = Chat {
             id: ChatId::new(),
             project_id: None,
@@ -314,6 +394,7 @@ mod tests {
             chat_id: chat.id,
             turn_id,
             profile_dir,
+            sentry,
         }
     }
 
@@ -349,13 +430,13 @@ mod tests {
         }
     }
 
-    fn arguments(app_id: Option<Uuid>) -> Value {
+    fn arguments_bound_to(connected: ConnectedAppId, app_id: Option<Uuid>) -> Value {
         let mut arguments = json!({
             "bundle_html": "<!doctype html><h1>Triage</h1>",
             "manifest": {
                 "name": "Sentry triage",
                 "bindings": [
-                    { "server": "sentry", "tools": ["mcp__sentry__list_issues"] }
+                    { "app": connected, "tools": ["mcp__sentry__list_issues"] }
                 ],
             },
         });
@@ -370,7 +451,11 @@ mod tests {
         let fixture = fixture().await;
         let (call_id, ctx) = fixture.recorded_call().await;
 
-        let first = fixture.tool.execute(&ctx, arguments(None)).await.unwrap();
+        let first = fixture
+            .tool
+            .execute(&ctx, arguments_bound_to(fixture.sentry, None))
+            .await
+            .unwrap();
         assert!(!first.is_error, "{}", first.content);
         let app_id = AppId::for_call(call_id);
         assert!(first.content.contains(&app_id.to_string()));
@@ -384,7 +469,11 @@ mod tests {
 
         // Re-executing the exact call reports the same record instead of
         // forking a second app or a second revision.
-        let retried = fixture.tool.execute(&ctx, arguments(None)).await.unwrap();
+        let retried = fixture
+            .tool
+            .execute(&ctx, arguments_bound_to(fixture.sentry, None))
+            .await
+            .unwrap();
         assert!(!retried.is_error, "{}", retried.content);
         assert!(retried.content.contains(&app_id.to_string()));
         assert_eq!(fixture.store.list_apps(10).await.unwrap().len(), 1);
@@ -392,7 +481,7 @@ mod tests {
         assert_eq!(record.revision_count, 1);
 
         // The same call id must not be able to publish different content.
-        let mut different = arguments(None);
+        let mut different = arguments_bound_to(fixture.sentry, None);
         different["bundle_html"] = json!("<!doctype html><h1>Changed</h1>");
         let refused = fixture.tool.execute(&ctx, different).await.unwrap();
         assert!(refused.is_error);
@@ -401,7 +490,10 @@ mod tests {
         let (_, append_ctx) = fixture.recorded_call().await;
         let appended = fixture
             .tool
-            .execute(&append_ctx, arguments(Some(app_id.0)))
+            .execute(
+                &append_ctx,
+                arguments_bound_to(fixture.sentry, Some(app_id.0)),
+            )
             .await
             .unwrap();
         assert!(!appended.is_error, "{}", appended.content);
@@ -414,7 +506,10 @@ mod tests {
         let missing_app = Uuid::new_v4();
         let refused = fixture
             .tool
-            .execute(&wrong_ctx, arguments(Some(missing_app)))
+            .execute(
+                &wrong_ctx,
+                arguments_bound_to(fixture.sentry, Some(missing_app)),
+            )
             .await
             .unwrap();
         assert!(refused.is_error);
@@ -434,7 +529,7 @@ mod tests {
 
         // A manifest pinning a name that could never match a mounted tool.
         let (_, ctx) = fixture.recorded_call().await;
-        let mut bad_manifest = arguments(None);
+        let mut bad_manifest = arguments_bound_to(fixture.sentry, None);
         bad_manifest["manifest"]["bindings"][0]["tools"] = json!(["list_issues"]);
         let refused = fixture.tool.execute(&ctx, bad_manifest).await.unwrap();
         assert!(refused.is_error);
@@ -442,7 +537,7 @@ mod tests {
 
         // An oversized bundle is refused before anything is written.
         let (_, ctx) = fixture.recorded_call().await;
-        let mut oversized = arguments(None);
+        let mut oversized = arguments_bound_to(fixture.sentry, None);
         oversized["bundle_html"] = json!("x".repeat(MAX_APP_BUNDLE_BYTES + 1));
         assert!(
             fixture
@@ -458,7 +553,7 @@ mod tests {
             ToolCtx::without_private_scratch(fixture.chat_id, None).with_call_id(CallId::new());
         let refused = fixture
             .tool
-            .execute(&foreign_ctx, arguments(None))
+            .execute(&foreign_ctx, arguments_bound_to(fixture.sentry, None))
             .await
             .unwrap();
         assert!(refused.is_error);
@@ -470,7 +565,11 @@ mod tests {
     async fn the_projection_carries_the_name_and_ordinal_and_never_the_bundle() {
         let fixture = fixture().await;
         let (_, ctx) = fixture.recorded_call().await;
-        let output = fixture.tool.execute(&ctx, arguments(None)).await.unwrap();
+        let output = fixture
+            .tool
+            .execute(&ctx, arguments_bound_to(fixture.sentry, None))
+            .await
+            .unwrap();
         assert!(!output.is_error, "{}", output.content);
 
         let preview = ToolResultPreview::build(crate::local_app::CREATE_APP_TOOL, &output)

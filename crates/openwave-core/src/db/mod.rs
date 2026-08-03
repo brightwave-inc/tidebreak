@@ -17,6 +17,7 @@ use sea_orm_migration::MigratorTrait;
 use serde_json::Value;
 
 use crate::approval::{ApprovalDecision, ApprovalRequest, ToolApproval};
+use crate::connected_app::{ConnectedApp, ConnectedAppKind};
 use crate::deliverable::{CreateOutput, NewOutputRevision, OutputRecord, OutputRevision};
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
@@ -672,6 +673,18 @@ impl Store for DbStore {
 
     async fn delete_app_grant(&self, app_id: AppId) -> Result<bool> {
         ops::app::delete_app_grant(self, app_id).await
+    }
+
+    async fn list_connected_apps(&self) -> Result<Vec<ConnectedApp>> {
+        ops::connected_app::list_connected_apps(self).await
+    }
+
+    async fn replace_connected_apps(
+        &self,
+        kind: ConnectedAppKind,
+        apps: &[ConnectedApp],
+    ) -> Result<()> {
+        ops::connected_app::replace_connected_apps(self, kind, apps).await
     }
 
     async fn save_context_checkpoint(

@@ -31,9 +31,10 @@ An app revision is an untrusted **bundle** and a trusted **manifest**:
   prefetched MCP view). It is assumed hostile: prompt injection anywhere in a
   conversation can author it.
 - The manifest is small, structural JSON: a display name and
-  `bindings: [{ server, tools[] }]` naming mounted tool names under their
-  configured server namespaces. The manifest — not the bundle — is what the
-  user consents to and what the host enforces per call.
+  `bindings: [{ app, tools[] }]` naming mounted tool names under the
+  connected-app records ([connected-apps.md](connected-apps.md)) that
+  contribute them. The manifest — not the bundle — is what the user consents
+  to and what the host enforces per call.
 
 The containment story is inherited from MCP App views and unchanged: the frame
 is served by the host with its own strict CSP (`default-src 'none'`,
@@ -87,9 +88,10 @@ standing grant would silently widen. None of that maps onto a profile-scoped
 app driven by a human click. Local apps therefore get their own consent
 object, designed against the same threat:
 
-- An **app grant** records, per app: the granted `(server, tools[])` set and a
-  **fingerprint of each bound server's definition** (command, args, cwd,
-  selected env names, URL — whatever the transport carries).
+- An **app grant** records, per app: the granted `(app, tools[])` set — keyed
+  by connected-app record id — and a **fingerprint of each bound app's
+  definition** (namespace, command, args, cwd, selected env names, URL —
+  whatever the transport carries).
 - The grant is created by explicit user consent on a sheet that lists every
   binding. It is revocable from the Apps library.
 - Every invoke checks, live: the tool is in the current revision's manifest,

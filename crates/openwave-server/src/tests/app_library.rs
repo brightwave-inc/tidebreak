@@ -48,7 +48,7 @@ async fn library_lists_grant_verdicts_and_deletion_removes_the_row() {
                 manifest: AppManifest {
                     name: "Library fixture".into(),
                     bindings: vec![AppBinding {
-                        server: "cmd".into(),
+                        app: connected_app_id(&store, "cmd").await,
                         tools: vec!["mcp__cmd__doit".into()],
                     }],
                 },

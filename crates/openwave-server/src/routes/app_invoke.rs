@@ -209,12 +209,14 @@ fn require_pinned(revision: &AppRevision, tool: &str) -> Result<(), AppInvokeErr
 /// missing or stale grant is a re-prompt, never an error:
 ///
 /// 1. A grant exists for the app.
-/// 2. It covers the invoked `(server, tool)` pair as the *current* revision's
-///    manifest binds it — so a revision that widens the manifest exceeds the
-///    grant by construction, with no special-casing.
-/// 3. Every granted server's current definition fingerprint equals the
-///    granted one. A reconfigured server invalidates the whole grant: consent
-///    named a definition, not a name, and must never outlive it.
+/// 2. It covers the invoked `(connected app, tool)` pair as the *current*
+///    revision's manifest binds it — so a revision that widens the manifest
+///    exceeds the grant by construction, with no special-casing.
+/// 3. Every granted connected app's current definition fingerprint equals the
+///    granted one. A reconfigured or deleted record invalidates the whole
+///    grant: consent named a definition, not a name, and must never outlive
+///    it. The fingerprint covers the namespace too, so a renamed record can
+///    never keep a grant that now describes different mounted names.
 async fn require_app_grant(
     state: &AppState,
     app: &AppRecord,
@@ -229,29 +231,33 @@ async fn require_app_grant(
         )));
     };
     // The pin check has already passed, so exactly one current-manifest
-    // binding names this tool; its server is the namespace the grant must
+    // binding names this tool; its connected app is the record the grant must
     // cover the tool under.
-    let server = revision
+    let connected_app = revision
         .manifest
         .bindings
         .iter()
         .find(|binding| binding.tools.iter().any(|pinned| pinned == tool))
-        .map(|binding| binding.server.as_str())
-        .unwrap_or_default();
-    let covered = grant.bindings.iter().any(|binding| {
-        binding.server == server && binding.tools.iter().any(|granted| granted == tool)
+        .map(|binding| binding.app);
+    let covered = connected_app.is_some_and(|connected_app| {
+        grant.bindings.iter().any(|binding| {
+            binding.app == connected_app && binding.tools.iter().any(|granted| granted == tool)
+        })
     });
     if !covered {
         return Err(consent_required(format!(
             "the app grant does not cover {tool:?}"
         )));
     }
-    let current = state.mcp.definition_fingerprints().await;
+    let current = state.mcp.app_fingerprints().await;
     for binding in &grant.bindings {
-        if current.get(&binding.server) != Some(&binding.fingerprint) {
+        let matches = current
+            .get(&binding.app)
+            .is_some_and(|app| app.fingerprint == binding.fingerprint);
+        if !matches {
             return Err(consent_required(format!(
-                "MCP server {:?} was reconfigured after consent; the grant is stale",
-                binding.server
+                "connected app {} was reconfigured after consent; the grant is stale",
+                binding.app
             )));
         }
     }

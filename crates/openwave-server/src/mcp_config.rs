@@ -17,6 +17,9 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use futures::future::join_all;
+use openwave_core::connected_app::{ConnectedApp, ConnectedAppKind};
+use openwave_core::id::ConnectedAppId;
+use openwave_core::local_app::CREATE_APP_TOOL;
 use openwave_core::{AgentError, Result, Store, ToolRegistry};
 use openwave_mcp::{McpClient, McpProbe, MAX_SERVER_NAME_BYTES};
 use serde::{Deserialize, Serialize};
@@ -24,7 +27,6 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 
 const CONFIG_ENV: &str = "OPENWAVE_MCP_CONFIG";
-const SETTING_KEY: &str = "mcp_servers_v1";
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 pub(crate) const MAX_CONFIG_BODY_BYTES: usize = 1024 * 1024;
 const MAX_SERVERS: usize = 32;
@@ -294,14 +296,16 @@ impl McpServerDefinition {
 }
 
 /// SHA-256 fingerprint of a server definition as configured, the value an app
-/// grant pins each bound server to.
+/// grant pins each bound connected app to.
 ///
 /// The digest is taken over the UTF-8 bytes of a compact JSON object with
 /// **exactly these keys, in exactly this order** (serde serializes struct
 /// fields in declaration order, and every key is always present):
 ///
 /// ```json
-/// {"v":1,
+/// {"v":2,
+///  "kind":"mcp_server",
+///  "namespace":string,
 ///  "transport":"stdio"|"http"|"gateway",
 ///  "command":string|null,
 ///  "args":[string,...],
@@ -318,10 +322,15 @@ impl McpServerDefinition {
 /// values and resolved secrets never enter the canonical form, so the
 /// fingerprint can never be a value oracle. `bearer_token_env_set` records
 /// only whether a bearer name is selected. `cwd` is the configured path,
-/// lossily UTF-8. `name`, `enabled`, and `request_timeout_ms` are deliberately
-/// excluded: the grant binding already keys the fingerprint by server name,
-/// and toggling or re-timing a server does not change *what* the user
-/// consented to run.
+/// lossily UTF-8. The `v:1` form excluded the server name because grants were
+/// keyed by it; app-keyed grants pin a record id instead, so `namespace`
+/// (the configured name, which decides which `mcp__{namespace}__…` mounted
+/// names the binding covers) is now part of what the user consented to.
+/// `kind` roots the form in the connected-app vocabulary so no two kinds can
+/// collide on a canonical serialization. `enabled` and `request_timeout_ms`
+/// stay excluded: toggling or re-timing a server does not change *what* the
+/// user consented to run. Fingerprints are always computed from definition
+/// fields, never from storage.
 ///
 /// **This canonical form is a compatibility surface.** Persisted grants store
 /// the digest; changing the form (or the meaning of any field in it)
@@ -332,6 +341,8 @@ pub(crate) fn definition_fingerprint(definition: &McpServerDefinition) -> [u8; 3
     #[derive(Serialize)]
     struct CanonicalDefinition<'a> {
         v: u32,
+        kind: &'static str,
+        namespace: &'a str,
         transport: &'static str,
         command: Option<&'a str>,
         args: &'a [String],
@@ -348,7 +359,9 @@ pub(crate) fn definition_fingerprint(definition: &McpServerDefinition) -> [u8; 3
     let mut env_from: Vec<&str> = definition.env_from.iter().map(String::as_str).collect();
     env_from.sort_unstable();
     let canonical = CanonicalDefinition {
-        v: 1,
+        v: 2,
+        kind: "mcp_server",
+        namespace: &definition.name,
         transport: if definition.gateway_endpoint.is_some() {
             "gateway"
         } else if definition.url.is_some() {
@@ -415,6 +428,71 @@ pub(crate) struct McpServersInfo {
     pub(crate) servers: Vec<McpServerInfo>,
 }
 
+/// One configured connected app's current namespace and definition
+/// fingerprint, the pair grant enforcement compares per record id.
+pub(crate) struct McpAppFingerprint {
+    /// The configured server name — the namespace its tools mount under.
+    pub(crate) name: String,
+    /// [`definition_fingerprint`] of the current definition.
+    pub(crate) fingerprint: [u8; 32],
+}
+
+/// `create_app` re-registered with the live connected-app roster appended to
+/// its description. Manifest bindings name records by opaque id, which the
+/// model cannot derive from mounted tool names; the roster is where those ids
+/// come from. Everything else delegates to the shared tool.
+struct CreateAppWithRoster {
+    inner: Arc<dyn openwave_core::Tool>,
+    roster: String,
+}
+
+#[async_trait::async_trait]
+impl openwave_core::Tool for CreateAppWithRoster {
+    fn spec(&self) -> openwave_core::ToolSpec {
+        let mut spec = self.inner.spec();
+        spec.description.push_str(&self.roster);
+        spec
+    }
+
+    fn approval_class(&self) -> openwave_core::ApprovalClass {
+        self.inner.approval_class()
+    }
+
+    async fn execute(
+        &self,
+        ctx: &openwave_core::ToolCtx,
+        args: serde_json::Value,
+    ) -> Result<openwave_core::ToolOutput> {
+        self.inner.execute(ctx, args).await
+    }
+}
+
+/// The roster text appended to `create_app`'s description: every configured
+/// `mcp_server` connected app with the id a manifest binding names and the
+/// namespace its mounted tools carry.
+fn connected_app_roster(
+    definitions: &[McpServerDefinition],
+    ids: &BTreeMap<String, ConnectedAppId>,
+) -> String {
+    if definitions.is_empty() {
+        return "\n\nNo connected apps are configured, so only manifests with an \
+                empty bindings list can be created."
+            .to_owned();
+    }
+    let mut roster =
+        String::from("\n\nConfigured connected apps (set each binding's `app` to an id):");
+    for definition in definitions {
+        let Some(id) = ids.get(&definition.name) else {
+            continue;
+        };
+        roster.push_str(&format!(
+            "\n- {id} — {name}: tools are named `mcp__{name}__{{tool}}`",
+            name = definition.name
+        ));
+    }
+    roster
+}
+
 struct ManagedServer {
     client: Option<McpClient>,
     health: McpHealth,
@@ -436,6 +514,11 @@ pub(crate) struct UiViewDocument {
 
 struct RuntimeState {
     definitions: Vec<McpServerDefinition>,
+    /// The connected-app record id behind each configured server name. App
+    /// manifests and grants bind these ids; the id survives edits to the
+    /// definition and dies with the record, so a name-keyed lookup here is
+    /// only ever a projection detail, never the consent key.
+    ids: BTreeMap<String, ConnectedAppId>,
     servers: HashMap<String, ManagedServer>,
 }
 
@@ -471,6 +554,7 @@ impl McpRuntime {
             tools: RwLock::new(base_tools),
             state: Mutex::new(RuntimeState {
                 definitions: Vec::new(),
+                ids: BTreeMap::new(),
                 servers: HashMap::new(),
             }),
             mutation: Mutex::new(()),
@@ -569,7 +653,7 @@ impl McpRuntime {
             torn_down = true;
         }
         if torn_down {
-            let registry = self.registry_for(&state.servers);
+            let registry = self.registry_for(&state);
             *self
                 .tools
                 .write()
@@ -578,36 +662,54 @@ impl McpRuntime {
         torn_down
     }
 
-    /// Load persisted definitions when present, otherwise the legacy boot file.
+    /// Load persisted `mcp_server` connected-app records when present,
+    /// otherwise the legacy boot file.
     ///
     /// A boot file remains fail-closed. Persisted definitions degrade in place
     /// so the Settings UI remains available to repair a missing executable or
     /// selected environment variable.
     pub(crate) async fn initialize(&self, boot: ConfiguredMcpServers) -> Result<()> {
-        match self.store.get_setting(SETTING_KEY).await? {
-            Some(value) => {
-                let config: McpServersConfig = serde_json::from_value(value).map_err(|error| {
-                    AgentError::config(format!("invalid saved MCP config: {error}"))
-                })?;
-                validate_servers(&config.servers)?;
-                self.replace_permissive(config.servers).await;
-                Ok(())
+        let records: Vec<ConnectedApp> = self
+            .store
+            .list_connected_apps()
+            .await?
+            .into_iter()
+            .filter(|record| record.kind == ConnectedAppKind::McpServer)
+            .collect();
+        if !records.is_empty() {
+            let mut ids = BTreeMap::new();
+            let mut definitions = Vec::with_capacity(records.len());
+            for record in records {
+                let mut definition: McpServerDefinition = serde_json::from_value(record.definition)
+                    .map_err(|error| {
+                        AgentError::config(format!(
+                            "invalid saved connected-app definition {:?}: {error}",
+                            record.name
+                        ))
+                    })?;
+                // The record's name is authoritative for the namespace; the
+                // stored definition mirrors it and is repaired if they ever
+                // disagree.
+                definition.name = record.name.clone();
+                ids.insert(record.name, record.id);
+                definitions.push(definition);
             }
-            None => {
-                // The boot file is a host-environment artifact: on a managed
-                // profile it is exactly the channel the lockdown exists to
-                // close, so it is inert rather than partially honored. The
-                // warning is the operator's diagnostic for the silence.
-                if !boot.is_empty() && self.manual_transports_locked().await {
-                    tracing::warn!(
-                        "{CONFIG_ENV} is ignored on a managed profile; \
-                         mount MCP endpoints from the model gateway instead"
-                    );
-                    return Ok(());
-                }
-                self.replace_strict(boot.0, false).await.map(|_| ())
-            }
+            validate_servers(&definitions)?;
+            self.replace_permissive(definitions, ids).await;
+            return Ok(());
         }
+        // The boot file is a host-environment artifact: on a managed
+        // profile it is exactly the channel the lockdown exists to
+        // close, so it is inert rather than partially honored. The
+        // warning is the operator's diagnostic for the silence.
+        if !boot.is_empty() && self.manual_transports_locked().await {
+            tracing::warn!(
+                "{CONFIG_ENV} is ignored on a managed profile; \
+                 mount MCP endpoints from the model gateway instead"
+            );
+            return Ok(());
+        }
+        self.replace_strict(boot.0, false).await.map(|_| ())
     }
 
     /// One prefetched MCP Apps view document, when the named server is
@@ -617,17 +719,27 @@ impl McpRuntime {
         state.servers.get(server)?.ui_views.get(uri).cloned()
     }
 
-    /// The current definition fingerprint of every configured server, by name.
+    /// The current namespace and definition fingerprint of every configured
+    /// connected app, by record id.
     ///
     /// Read live per call — never cached across a request — so grant
-    /// enforcement always compares against the definition a name resolves to
+    /// enforcement always compares against the definition an id resolves to
     /// *now*, including a definition swapped in while the app stayed open.
-    pub(crate) async fn definition_fingerprints(&self) -> BTreeMap<String, [u8; 32]> {
+    pub(crate) async fn app_fingerprints(&self) -> BTreeMap<ConnectedAppId, McpAppFingerprint> {
         let state = self.state.lock().await;
         state
             .definitions
             .iter()
-            .map(|definition| (definition.name.clone(), definition_fingerprint(definition)))
+            .filter_map(|definition| {
+                let id = state.ids.get(&definition.name)?;
+                Some((
+                    *id,
+                    McpAppFingerprint {
+                        name: definition.name.clone(),
+                        fingerprint: definition_fingerprint(definition),
+                    },
+                ))
+            })
             .collect()
     }
 
@@ -732,12 +844,51 @@ impl McpRuntime {
         Ok(self.info().await)
     }
 
+    /// Assign the connected-app record id behind each candidate name: a name
+    /// already configured keeps its record id (so editing a definition
+    /// invalidates grants by fingerprint, not by identity), a new name mints a
+    /// fresh one, and a removed name's record — and with it every binding
+    /// naming its id — simply stops resolving.
+    async fn assign_app_ids(
+        &self,
+        definitions: &[McpServerDefinition],
+    ) -> BTreeMap<String, ConnectedAppId> {
+        let state = self.state.lock().await;
+        definitions
+            .iter()
+            .map(|definition| {
+                let id = state
+                    .ids
+                    .get(&definition.name)
+                    .copied()
+                    .unwrap_or_else(ConnectedAppId::new);
+                (definition.name.clone(), id)
+            })
+            .collect()
+    }
+
     async fn replace_strict(
         &self,
         definitions: Vec<McpServerDefinition>,
         persist: bool,
     ) -> Result<()> {
         validate_servers(&definitions)?;
+        let ids = if persist {
+            self.assign_app_ids(&definitions).await
+        } else {
+            // The legacy boot file configures servers without persisting
+            // records; ids derived from the configured names keep app grants
+            // valid across restarts of a boot-file profile.
+            definitions
+                .iter()
+                .map(|definition| {
+                    (
+                        definition.name.clone(),
+                        ConnectedAppId::for_boot_server(&definition.name),
+                    )
+                })
+                .collect()
+        };
         let gateway = &*self.gateway;
         let locked = self.manual_transports_locked().await;
         let mut servers = HashMap::new();
@@ -809,20 +960,33 @@ impl McpRuntime {
             );
         }
         if persist {
+            let now = chrono::Utc::now();
+            let records: Vec<ConnectedApp> = definitions
+                .iter()
+                .map(|definition| {
+                    Ok(ConnectedApp {
+                        id: ids[&definition.name],
+                        name: definition.name.clone(),
+                        kind: ConnectedAppKind::McpServer,
+                        definition: serde_json::to_value(definition)?,
+                        created_at: now,
+                        updated_at: now,
+                    })
+                })
+                .collect::<Result<_>>()?;
             self.store
-                .set_setting(
-                    SETTING_KEY,
-                    &serde_json::to_value(McpServersConfig {
-                        servers: definitions.clone(),
-                    })?,
-                )
+                .replace_connected_apps(ConnectedAppKind::McpServer, &records)
                 .await?;
         }
-        self.publish(definitions, servers).await;
+        self.publish(definitions, ids, servers).await;
         Ok(())
     }
 
-    async fn replace_permissive(&self, definitions: Vec<McpServerDefinition>) {
+    async fn replace_permissive(
+        &self,
+        definitions: Vec<McpServerDefinition>,
+        ids: BTreeMap<String, ConnectedAppId>,
+    ) {
         let gateway = &*self.gateway;
         let locked = self.manual_transports_locked().await;
         let mut servers = HashMap::new();
@@ -866,17 +1030,19 @@ impl McpRuntime {
             };
             servers.insert(definition.name.clone(), managed);
         }
-        self.publish(definitions, servers).await;
+        self.publish(definitions, ids, servers).await;
     }
 
     async fn publish(
         &self,
         definitions: Vec<McpServerDefinition>,
+        ids: BTreeMap<String, ConnectedAppId>,
         servers: HashMap<String, ManagedServer>,
     ) {
-        let registry = self.registry_for(&servers);
+        let registry = self.registry_with(&definitions, &ids, &servers);
         let mut state = self.state.lock().await;
         state.definitions = definitions;
+        state.ids = ids;
         state.servers = servers;
         *self
             .tools
@@ -884,7 +1050,19 @@ impl McpRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(registry);
     }
 
-    fn registry_for(&self, servers: &HashMap<String, ManagedServer>) -> ToolRegistry {
+    /// [`registry_with`](Self::registry_with) over the already-published
+    /// state, for the paths that refresh connections without changing the
+    /// configuration.
+    fn registry_for(&self, state: &RuntimeState) -> ToolRegistry {
+        self.registry_with(&state.definitions, &state.ids, &state.servers)
+    }
+
+    fn registry_with(
+        &self,
+        definitions: &[McpServerDefinition],
+        ids: &BTreeMap<String, ConnectedAppId>,
+        servers: &HashMap<String, ManagedServer>,
+    ) -> ToolRegistry {
         let mut registry = self.base_tools.clone();
         for (name, server) in servers {
             if let Some(client) = &server.client {
@@ -897,6 +1075,14 @@ impl McpRuntime {
                     );
                 }
             }
+        }
+        // Manifest bindings name connected apps by record id; the roster on
+        // the `create_app` description is where the model learns those ids.
+        if let Some(inner) = registry.server_tool(CREATE_APP_TOOL) {
+            registry.register(Box::new(CreateAppWithRoster {
+                inner,
+                roster: connected_app_roster(definitions, ids),
+            }));
         }
         registry
     }
@@ -1002,7 +1188,7 @@ impl McpRuntime {
                 server.ui_views = ui_views;
                 server.reconnect_backoff = INITIAL_RECONNECT_BACKOFF;
                 server.epoch = self.fresh_epoch();
-                let registry = self.registry_for(&state.servers);
+                let registry = self.registry_for(&state);
                 *self
                     .tools
                     .write()
@@ -1029,7 +1215,7 @@ impl McpRuntime {
                 } else {
                     return Ok(self.info_locked(&state));
                 }
-                let registry = self.registry_for(&state.servers);
+                let registry = self.registry_for(&state);
                 *self
                     .tools
                     .write()
@@ -1113,7 +1299,7 @@ impl McpRuntime {
             server.ui_views = HashMap::new();
             server.reconnect_backoff = backoff;
         }
-        let registry = self.registry_for(&state.servers);
+        let registry = self.registry_for(&state);
         *self
             .tools
             .write()
@@ -1389,6 +1575,48 @@ mod tests {
         let config: McpServersConfig = serde_json::from_str(json)?;
         validate_servers(&config.servers)?;
         Ok(ConfiguredMcpServers(config.servers))
+    }
+
+    /// Fresh boot-style ids for a test's definitions.
+    fn ids_for(definitions: &[McpServerDefinition]) -> BTreeMap<String, ConnectedAppId> {
+        definitions
+            .iter()
+            .map(|definition| (definition.name.clone(), ConnectedAppId::new()))
+            .collect()
+    }
+
+    /// The persisted `mcp_server` definitions, read back through the
+    /// connected-app record the way `initialize` does.
+    async fn saved_definitions(store: &Arc<dyn Store>) -> Vec<McpServerDefinition> {
+        store
+            .list_connected_apps()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|record| record.kind == ConnectedAppKind::McpServer)
+            .map(|record| serde_json::from_value(record.definition).unwrap())
+            .collect()
+    }
+
+    /// Persist definitions as connected-app records, the way a settings save
+    /// would, without connecting anything.
+    async fn seed_records(store: &Arc<dyn Store>, definitions: &[McpServerDefinition]) {
+        let now = chrono::Utc::now();
+        let records: Vec<ConnectedApp> = definitions
+            .iter()
+            .map(|definition| ConnectedApp {
+                id: ConnectedAppId::new(),
+                name: definition.name.clone(),
+                kind: ConnectedAppKind::McpServer,
+                definition: serde_json::to_value(definition).unwrap(),
+                created_at: now,
+                updated_at: now,
+            })
+            .collect();
+        store
+            .replace_connected_apps(ConnectedAppKind::McpServer, &records)
+            .await
+            .unwrap();
     }
 
     /// The signed-out stand-in: every resolution demands a session.
@@ -1680,11 +1908,10 @@ mod tests {
         first.await.unwrap().unwrap();
         second.await.unwrap().unwrap();
 
-        let saved: McpServersConfig =
-            serde_json::from_value(store.get_setting(SETTING_KEY).await.unwrap().unwrap()).unwrap();
+        let saved = saved_definitions(&store).await;
         let live = runtime.info().await;
-        assert_eq!(saved.servers[0].name, "second");
-        assert_eq!(live.servers[0].definition, saved.servers[0]);
+        assert_eq!(saved[0].name, "second");
+        assert_eq!(live.servers[0].definition, saved[0]);
     }
 
     #[tokio::test]
@@ -1728,7 +1955,9 @@ mod tests {
         let (runtime, _store, _directory) = test_runtime().await;
         let mut definition = disabled_definition("docs", "/usr/bin/true");
         definition.enabled = true;
-        runtime.replace_permissive(vec![definition]).await;
+        let definitions = vec![definition];
+        let ids = ids_for(&definitions);
+        runtime.replace_permissive(definitions, ids).await;
         let reconnect_lock = runtime
             .state
             .lock()
@@ -1875,7 +2104,10 @@ mod tests {
     async fn signed_out_gateway_mounts_degrade_to_a_sign_in_diagnostic() {
         let (runtime, _store, _directory) = test_runtime().await;
         runtime
-            .replace_permissive(vec![gateway_definition("tools", "tools")])
+            .replace_permissive(
+                vec![gateway_definition("tools", "tools")],
+                ids_for(&[gateway_definition("tools", "tools")]),
+            )
             .await;
         let info = runtime.info().await;
         assert_eq!(info.servers[0].health, McpHealth::Degraded);
@@ -1906,9 +2138,7 @@ mod tests {
             Some("Sign in to the model gateway to reconnect this server.")
         );
         assert_eq!(info.servers[1].health, McpHealth::Disabled);
-        let saved: McpServersConfig =
-            serde_json::from_value(store.get_setting(SETTING_KEY).await.unwrap().unwrap()).unwrap();
-        assert_eq!(saved.servers.len(), 2);
+        assert_eq!(saved_definitions(&store).await.len(), 2);
 
         // A non-gateway failure keeps save-and-verify semantics: reject and
         // change nothing.
@@ -1920,10 +2150,8 @@ mod tests {
             .err()
             .unwrap();
         assert!(error.to_string().contains("failed to start"));
-        let saved: McpServersConfig =
-            serde_json::from_value(store.get_setting(SETTING_KEY).await.unwrap().unwrap()).unwrap();
         assert_eq!(
-            saved.servers.len(),
+            saved_definitions(&store).await.len(),
             2,
             "rejected candidate must not persist"
         );
@@ -2112,16 +2340,7 @@ mod tests {
         let (runtime, store, _directory) = test_runtime().await;
         let mut manual = disabled_definition("private_docs", "/bin/docs");
         manual.enabled = true;
-        store
-            .set_setting(
-                SETTING_KEY,
-                &serde_json::to_value(McpServersConfig {
-                    servers: vec![manual, gateway_definition("tools", "tools")],
-                })
-                .unwrap(),
-            )
-            .await
-            .unwrap();
+        seed_records(&store, &[manual, gateway_definition("tools", "tools")]).await;
         crate::managed_policy::provision(&*store, "https://corp.gateway")
             .await
             .unwrap();
@@ -2162,7 +2381,48 @@ mod tests {
         let boot = parse(r#"{"servers":[{"name":"docs","command":"/bin/docs"}]}"#).unwrap();
         runtime.initialize(boot).await.unwrap();
         assert!(runtime.info().await.servers.is_empty());
-        assert!(store.get_setting(SETTING_KEY).await.unwrap().is_none());
+        assert!(store.list_connected_apps().await.unwrap().is_empty());
+    }
+
+    /// The v:2 canonical-form invariants that keep consent honest: derived
+    /// from definition fields only, never a value oracle, covering the
+    /// namespace (which decides what mounted names a grant reaches), and
+    /// indifferent to toggles that don't change what the user consented to.
+    #[test]
+    fn fingerprints_derive_from_fields_cover_the_namespace_and_leak_no_values() {
+        let mut definition = disabled_definition("docs", "/bin/docs");
+        definition.env.insert("TOKEN".into(), "secret-a".into());
+        let baseline = definition_fingerprint(&definition);
+
+        let mut toggled = definition.clone();
+        toggled.enabled = true;
+        toggled.request_timeout_ms += 1;
+        assert_eq!(
+            definition_fingerprint(&toggled),
+            baseline,
+            "enabling or re-timing is not a change of what the user consented to"
+        );
+
+        let mut rotated = definition.clone();
+        rotated.env.insert("TOKEN".into(), "secret-b".into());
+        assert_eq!(
+            definition_fingerprint(&rotated),
+            baseline,
+            "environment values never enter the canonical form"
+        );
+
+        let mut renamed = definition.clone();
+        renamed.name = "docs2".into();
+        assert_ne!(
+            definition_fingerprint(&renamed),
+            baseline,
+            "app-keyed grants no longer key by name, so the namespace is \
+             part of what a grant pins"
+        );
+
+        let mut swapped = definition.clone();
+        swapped.command = Some("/bin/other".into());
+        assert_ne!(definition_fingerprint(&swapped), baseline);
     }
 
     #[test]

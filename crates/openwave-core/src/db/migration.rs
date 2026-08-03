@@ -105,6 +105,7 @@ impl MigratorTrait for Migrator {
             Box::new(ExtendUserQuestions),
             Box::new(RetainCancelledTurnOutput),
             Box::new(AddSandboxToolCallRetry),
+            Box::new(AddConnectedApps),
         ]
     }
 }
@@ -9249,6 +9250,18 @@ enum AppGrant {
 }
 
 #[derive(DeriveIden)]
+enum ConnectedApp {
+    Table,
+    Id,
+    Name,
+    Kind,
+    DefinitionJson,
+    Position,
+    CreatedAt,
+    UpdatedAt,
+}
+
+#[derive(DeriveIden)]
 enum OutputRevisionCitation {
     Table,
     Id,
@@ -10647,5 +10660,197 @@ impl MigrationTrait for AddSandboxToolCallRetry {
             )
             .await?;
         Ok(())
+    }
+}
+
+/// Introduces the profile-scoped `connected_app` record (docs/connected-apps.md,
+/// #1341) and absorbs the persisted MCP server configuration into it: one
+/// `mcp_server`-kind row per server from the `mcp_servers_v1` setting, which is
+/// then deleted as a source of truth.
+///
+/// The absorption is deliberately a **hard cut**:
+///
+/// - Every `app_grant` row is dropped rather than translated. Grants now name
+///   a connected-app identity instead of a raw server namespace, and consent
+///   given under the old vocabulary is re-asked under the new one — the
+///   affected app simply re-presents its consent sheet on next open.
+/// - Stored app manifests are rewritten from `{server, tools[]}` to
+///   `{app, tools[]}` bindings keyed by the absorbed record's id. A binding
+///   whose server is no longer configured is dropped — narrowing, never
+///   widening, and the invoke gate would have refused it either way.
+///
+/// `down` drops the table and index only. The data cut is irreversible by
+/// design: dropped grants cannot be resurrected (consent must be re-asked
+/// regardless), and rewritten manifests keep the app-keyed vocabulary.
+struct AddConnectedApps;
+
+impl MigrationName for AddConnectedApps {
+    fn name(&self) -> &str {
+        "m20260803_000043_add_connected_apps"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddConnectedApps {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(ConnectedApp::Table)
+                    .col(
+                        ColumnDef::new(ConnectedApp::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(ConnectedApp::Name).string().not_null())
+                    .col(ColumnDef::new(ConnectedApp::Kind).string().not_null())
+                    .col(
+                        ColumnDef::new(ConnectedApp::DefinitionJson)
+                            .json_binary()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(ConnectedApp::Position).integer().not_null())
+                    .col(
+                        ColumnDef::new(ConnectedApp::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ConnectedApp::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        // For `mcp_server` rows the name is the mount namespace; two records
+        // may not claim one namespace. Scoped by kind so a REST entry may
+        // share a display name with a server.
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_connected_app_kind_name")
+                    .table(ConnectedApp::Table)
+                    .col(ConnectedApp::Kind)
+                    .col(ConnectedApp::Name)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+
+        let conn = manager.get_connection();
+        let backend = manager.get_database_backend();
+        let mut ids_by_name = std::collections::BTreeMap::new();
+        let setting = conn
+            .query_one_raw(sea_orm::Statement::from_string(
+                backend,
+                "SELECT value_json FROM setting WHERE key = 'mcp_servers_v1'",
+            ))
+            .await?;
+        if let Some(row) = setting {
+            let config: serde_json::Value = row.try_get("", "value_json")?;
+            let servers = config
+                .get("servers")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let now = chrono::Utc::now();
+            for (position, server) in servers.iter().enumerate() {
+                // The definition row keeps the full server object verbatim
+                // (including its name, which the record's name mirrors), so
+                // the absorption cannot reinterpret any transport field.
+                let Some(name) = server.get("name").and_then(serde_json::Value::as_str) else {
+                    continue;
+                };
+                let id = uuid::Uuid::new_v4();
+                ids_by_name.insert(name.to_owned(), id);
+                manager
+                    .exec_stmt(
+                        Query::insert()
+                            .into_table(ConnectedApp::Table)
+                            .columns([
+                                ConnectedApp::Id,
+                                ConnectedApp::Name,
+                                ConnectedApp::Kind,
+                                ConnectedApp::DefinitionJson,
+                                ConnectedApp::Position,
+                                ConnectedApp::CreatedAt,
+                                ConnectedApp::UpdatedAt,
+                            ])
+                            .values_panic([
+                                id.into(),
+                                name.into(),
+                                "mcp_server".into(),
+                                sea_orm::Value::Json(Some(Box::new(server.clone()))).into(),
+                                (position as i32).into(),
+                                now.into(),
+                                now.into(),
+                            ])
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+        }
+
+        let revisions = conn
+            .query_all_raw(sea_orm::Statement::from_string(
+                backend,
+                "SELECT id, manifest_json FROM app_revision",
+            ))
+            .await?;
+        for row in revisions {
+            let revision_id: uuid::Uuid = row.try_get("", "id")?;
+            let manifest: serde_json::Value = row.try_get("", "manifest_json")?;
+            let Some(bindings) = manifest
+                .get("bindings")
+                .and_then(serde_json::Value::as_array)
+            else {
+                continue;
+            };
+            let translated: Vec<serde_json::Value> = bindings
+                .iter()
+                .filter_map(|binding| {
+                    let Some(server) = binding.get("server").and_then(serde_json::Value::as_str)
+                    else {
+                        // Not the legacy shape; leave it untouched.
+                        return Some(binding.clone());
+                    };
+                    let app_id = ids_by_name.get(server)?;
+                    Some(serde_json::json!({
+                        "app": app_id,
+                        "tools": binding.get("tools").cloned()
+                            .unwrap_or_else(|| serde_json::Value::Array(Vec::new())),
+                    }))
+                })
+                .collect();
+            let mut rewritten = manifest.clone();
+            rewritten["bindings"] = serde_json::Value::Array(translated);
+            if rewritten != manifest {
+                manager
+                    .exec_stmt(
+                        Query::update()
+                            .table(AppRevision::Table)
+                            .value(
+                                AppRevision::ManifestJson,
+                                sea_orm::Value::Json(Some(Box::new(rewritten))),
+                            )
+                            .and_where(Expr::col(AppRevision::Id).eq(revision_id))
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+        }
+
+        conn.execute_unprepared("DELETE FROM app_grant").await?;
+        conn.execute_unprepared("DELETE FROM setting WHERE key = 'mcp_servers_v1'")
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(ConnectedApp::Table).to_owned())
+            .await
     }
 }

@@ -40,9 +40,11 @@ export function AppConsentSheet({
       ) : (
         <ul className="flex flex-col gap-2" aria-label="Requested tool access">
           {state.bindings.map((binding) => (
-            <li key={binding.server} className="flex flex-col gap-1">
+            <li key={binding.app} className="flex flex-col gap-1">
               <div className="flex items-center gap-2 text-sm">
-                <span className="font-medium">{binding.server}</span>
+                <span className="font-medium">
+                  {binding.name ?? "Unknown connected app"}
+                </span>
                 {binding.granted && (
                   <span className="text-muted-foreground flex items-center gap-1 text-xs">
                     <ShieldCheck className="size-3" aria-hidden="true" />
@@ -52,7 +54,7 @@ export function AppConsentSheet({
                 {binding.definition_changed && (
                   <span className="text-warning flex items-center gap-1 text-xs">
                     <TriangleAlert className="size-3" aria-hidden="true" />
-                    Server reconfigured since you agreed
+                    Reconfigured since you agreed
                   </span>
                 )}
               </div>

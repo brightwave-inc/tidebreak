@@ -12,6 +12,7 @@ use sea_orm::{DatabaseBackend, Statement};
 
 mod agent_run;
 mod app;
+mod connected_app;
 mod context_checkpoint;
 mod delegated_file_read;
 mod message_attachment;
