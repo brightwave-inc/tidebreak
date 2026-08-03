@@ -84,7 +84,7 @@ fn quoted_host(host: &str) -> String {
 /// Render the host-configured exec time limit in the most readable exact
 /// unit; the value is validated host state, so it composes without quoting.
 fn render_timeout(timeout_ms: u64) -> String {
-    if timeout_ms % 1000 == 0 {
+    if timeout_ms.is_multiple_of(1000) {
         format!("{} seconds", timeout_ms / 1000)
     } else {
         format!("{timeout_ms} milliseconds")
