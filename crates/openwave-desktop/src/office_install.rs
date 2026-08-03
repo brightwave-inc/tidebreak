@@ -44,6 +44,7 @@
 //! rest of the app run and reported alongside the install hint. Nothing
 //! re-downloads on its own; the user's explicit retry clears the memory.
 
+#[cfg(target_os = "macos")]
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,20 +53,28 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "macos")]
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Emitter as _};
+use tauri::AppHandle;
+#[cfg(target_os = "macos")]
+use tauri::Emitter as _;
 
 /// The exact LibreOffice version this build installs and trusts.
 pub(crate) const LIBREOFFICE_VERSION: &str = "25.8.7";
 
 /// Shown in UI copy and used for the disk-space check; the aarch64 dmg is
 /// 299,584,229 bytes and the copied bundle about 816 MB.
+#[cfg(target_os = "macos")]
 const REQUIRED_FREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Progress events the preview panel renders as a determinate bar.
+#[cfg(target_os = "macos")]
 pub(crate) const INSTALL_PROGRESS_EVENT: &str = "presentation-converter-install-progress";
 
 struct PinnedArtifact {
+    // Read only by the macOS install path; other platforms carry the pinned
+    // shape (`PINNED = None`) without an installer to consume the URL.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     url: &'static str,
     sha256: &'static str,
 }
@@ -458,6 +467,7 @@ async fn download(
 }
 
 /// SHA-256 of a file's contents, streamed, as lowercase hex.
+#[cfg(target_os = "macos")]
 fn sha256_hex_of_file(path: &Path) -> std::io::Result<String> {
     let mut file = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();
