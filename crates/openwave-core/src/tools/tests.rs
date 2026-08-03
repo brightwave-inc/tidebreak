@@ -73,7 +73,8 @@ async fn built_in_tool_schemas_preserve_their_provider_contracts() {
                     "description": "Private-scratch-relative file path."
                 }
             },
-            "required": ["path"]
+            "required": ["path"],
+            "additionalProperties": false
         })
     );
     assert_eq!(
@@ -85,7 +86,8 @@ async fn built_in_tool_schemas_preserve_their_provider_contracts() {
                     "type": "string",
                     "description": "Private-scratch-relative directory (optional)."
                 }
-            }
+            },
+            "additionalProperties": false
         })
     );
     assert_eq!(
@@ -102,9 +104,25 @@ async fn built_in_tool_schemas_preserve_their_provider_contracts() {
                     "description": "File contents to write."
                 }
             },
-            "required": ["path", "content"]
+            "required": ["path", "content"],
+            "additionalProperties": false
         })
     );
+}
+
+#[tokio::test]
+async fn unknown_arguments_are_refused_not_ignored() {
+    let output = ReadFile
+        .execute(
+            &ToolCtx::without_private_scratch(ChatId::new(), None),
+            json!({"path": "note.txt", "encoding": "utf-8"}),
+        )
+        .await
+        .unwrap();
+
+    assert!(output.is_error);
+    assert!(output.content.contains("invalid arguments:"));
+    assert!(output.content.contains("unknown field"));
 }
 
 #[tokio::test]

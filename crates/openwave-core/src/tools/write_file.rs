@@ -15,6 +15,7 @@ use super::private_scratch::{file_name, relative_path, write_utf8_file};
 pub struct WriteFile;
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(super) struct Arguments {
     #[schemars(description = "Private-scratch-relative file path.")]
     path: String,

@@ -15,6 +15,7 @@ use super::private_scratch::{list_directory, relative_path};
 pub struct ListDir;
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(super) struct Arguments {
     #[serde(default)]
     #[schemars(
