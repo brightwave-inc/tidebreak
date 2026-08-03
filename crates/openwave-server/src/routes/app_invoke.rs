@@ -456,10 +456,14 @@ async fn require_app_grant(
 /// `mcp__{server}__{tool}` shape — which no built-in server tool does — and
 /// must resolve to a server-executed registration; a client-executed contract
 /// has no executor here and refuses. The execution context is deliberately
-/// inert: no chat owns this call and no scratch is attached, so even though
-/// `McpTool::execute` ignores its context, nothing dispatched from here could
-/// reach a workspace capability. Results cross back through the MCP client's
-/// own 1 MiB call-result clamp.
+/// inert: no chat owns this call and no scratch is attached, so nothing
+/// dispatched from here could reach a workspace capability. The synthetic
+/// chat id is process-stable rather than per-call: gateway tools resolve a
+/// per-chat call credential from it, and a fresh id per invoke would mint a
+/// fresh gateway attestation context per invoke — pure token churn, since an
+/// app invoke has no model emission to attest and gateway-attested tools
+/// refuse it regardless (the recorded Direct-endpoints-only limitation).
+/// Results cross back through the MCP client's own 1 MiB call-result clamp.
 pub(crate) async fn dispatch_mounted_tool(
     state: &AppState,
     tool_name: &str,
@@ -476,7 +480,8 @@ pub(crate) async fn dispatch_mounted_tool(
     }
     let registry = state.mcp.snapshot();
     let tool = registry.get(tool_name).ok_or_else(unknown)?;
-    let ctx = ToolCtx::without_private_scratch(ChatId::new(), None);
+    static APP_INVOKE_CHAT: std::sync::LazyLock<ChatId> = std::sync::LazyLock::new(ChatId::new);
+    let ctx = ToolCtx::without_private_scratch(*APP_INVOKE_CHAT, None);
     let output = tool.execute(&ctx, arguments).await?;
     Ok(AppInvokeResult {
         content: output.content,

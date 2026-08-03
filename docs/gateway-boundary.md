@@ -132,6 +132,12 @@ The connector speaks a small, versioned HTTP surface on the gateway:
   the gateway settings panel. A `404` means an older gateway; the section
   hides instead of erroring.
 - `/oauth/authorize`, `/oauth/token`, `/oauth/revoke` — the flow above.
+  A refresh grant may also declare an `attestation_context_id`: a
+  client-minted random UUID naming the chat's attestation context, one per
+  chat plus one shared connect context for MCP handshakes. It correlates a
+  chat's inference tokens with its MCP tokens so gateway-attested endpoints
+  can match tool calls against model-emitted observations; it carries no
+  chat content and is meaningless outside the session it is pinned to.
 - Inference itself — invoked with `llm`-audience bearers on the gateway's
   protocol-compatible routes, through the same provider machinery as any
   direct provider. A turn's request also declares which conversation it
@@ -141,10 +147,15 @@ The connector speaks a small, versioned HTTP surface on the gateway:
   a direct provider never does, and it is a header rather than wire data, so
   no model receives it. The chat id is the only thing declared — no title, no
   content, no participant.
-- MCP — `{base}/mcp/{slug}` per mounted endpoint, each connection minting
-  its own `mcp:<slug>` bearer from the session at connect time.
-  Gateway-attested endpoints refuse sessions that arrive without the
-  gateway's attestation; that check is the gateway's, not the client's.
+- MCP — `{base}/mcp/{slug}` per mounted endpoint. The connection minting
+  its `mcp:<slug>` bearer at connect time rides the shared connect
+  attestation context, and each `tools/call` presents a bearer minted
+  inside the calling chat's context instead. Gateway-attested endpoints
+  accept the handshake on any context-bearing token but a tool call only
+  when it consumes the matching model-emitted observation; that check is
+  the gateway's, not the client's. Chats on non-gateway models and
+  local-app invokes carry no matching observation, so attested endpoints
+  refuse those calls by design.
 
 Everything here degrades independently: a gateway that is down fails model
 sync, inference, and MCP connects with visible errors, while the local

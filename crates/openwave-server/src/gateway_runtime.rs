@@ -658,11 +658,19 @@ impl GatewayRuntime {
     }
 }
 
+/// Attestation-context key for connect-time MCP traffic — `initialize` and
+/// `tools/list` belong to no chat, but a gateway-attested endpoint refuses
+/// any token minted without a context, so the handshake rides a shared one.
+/// Not a UUID, so it can never collide with a chat key.
+const MCP_CONNECT_CONTEXT_KEY: &str = "mcp:connect";
+
 #[async_trait]
 impl crate::mcp_config::GatewayEndpoints for GatewayRuntime {
     /// Resolve a gateway MCP endpoint from the signed-in session: its URL
     /// under the configured base, and a fresh `mcp:<slug>` bearer minted (or
-    /// served from cache) inside the connector's rotation lock.
+    /// served from cache) inside the connector's rotation lock. The bearer
+    /// carries the shared connect context, which is what lets an attested
+    /// endpoint accept the handshake and list its tools.
     async fn endpoint(&self, slug: &str) -> Result<crate::mcp_config::GatewayEndpointAccess> {
         let connection = self
             .connection()
@@ -670,8 +678,25 @@ impl crate::mcp_config::GatewayEndpoints for GatewayRuntime {
             .ok_or_else(|| AgentError::config("no model gateway is configured"))?;
         Ok(crate::mcp_config::GatewayEndpointAccess {
             url: connection.mcp_endpoint_url(slug)?,
-            bearer_token: connection.mcp_access_token(slug).await?,
+            bearer_token: connection
+                .attested_mcp_access_token(slug, MCP_CONNECT_CONTEXT_KEY)
+                .await?,
         })
+    }
+
+    /// A `tools/call` from a chat rides a token minted inside that chat's
+    /// attestation context — the same context the chat's inference tokens
+    /// carry — so an attested endpoint can match the call against the
+    /// observation that inference recorded. Direct endpoints ignore the
+    /// context, so every gateway mount dispatches this way.
+    async fn call_bearer(&self, slug: &str, chat: openwave_core::id::ChatId) -> Result<String> {
+        let connection = self
+            .connection()
+            .await?
+            .ok_or_else(|| AgentError::config("no model gateway is configured"))?;
+        connection
+            .attested_mcp_access_token(slug, &chat.to_string())
+            .await
     }
 }
 
@@ -839,6 +864,10 @@ mod tests {
         /// When set, `/api/v1/cli/apps` answers 500 — the outage shape the
         /// endpoint-mount reconcile must degrade quietly on.
         apps_fail: std::sync::atomic::AtomicBool,
+        /// `(resource, attestation_context_id)` per refresh grant, in order.
+        minted: std::sync::Mutex<Vec<(String, Option<String>)>>,
+        /// `(method, authorization)` per MCP endpoint request, in order.
+        mcp_requests: std::sync::Mutex<Vec<(String, String)>>,
     }
 
     /// One entitled connected app aggregating the fixture's `tools` MCP
@@ -878,6 +907,10 @@ mod tests {
         );
         let sequence = gateway.refreshes.fetch_add(1, Ordering::SeqCst);
         let resource = form.get("resource").cloned().unwrap_or_default();
+        gateway.minted.lock().unwrap().push((
+            resource.clone(),
+            form.get("attestation_context_id").cloned(),
+        ));
         Json(json!({
             "access_token": format!("mg_at_{resource}_{sequence}"),
             "token_type": "Bearer",
@@ -927,15 +960,25 @@ mod tests {
 
     /// Minimal Streamable HTTP MCP endpoint that requires an `mcp:tools`
     /// session bearer, exactly as the gateway's `/mcp/{slug}` route does.
-    async fn mcp_endpoint(headers: HeaderMap, body: String) -> Response {
+    async fn mcp_endpoint(
+        State(gateway): State<Arc<FakeGateway>>,
+        headers: HeaderMap,
+        body: String,
+    ) -> Response {
         let bearer = headers
             .get("authorization")
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default();
         assert!(bearer.starts_with("Bearer mg_at_mcp:tools_"), "{bearer}");
         let request: Value = serde_json::from_str(&body).unwrap();
+        let method = request["method"].as_str().unwrap_or_default().to_string();
+        gateway
+            .mcp_requests
+            .lock()
+            .unwrap()
+            .push((method.clone(), bearer.to_string()));
         let id = request.get("id").cloned().unwrap_or_default();
-        let result = match request["method"].as_str().unwrap_or_default() {
+        let result = match method.as_str() {
             "initialize" => json!({
                 "protocolVersion": openwave_mcp::PROTOCOL_VERSION,
                 "capabilities": {"tools": {}},
@@ -947,6 +990,9 @@ mod tests {
                     "description": "Look something up",
                     "inputSchema": {"type": "object"}
                 }]
+            }),
+            "tools/call" => json!({
+                "content": [{"type": "text", "text": "ok"}]
             }),
             _ => json!({}),
         };
@@ -1350,7 +1396,8 @@ mod tests {
 
     #[tokio::test]
     async fn mounts_a_gateway_endpoint_from_the_signed_in_session() {
-        let address = serve(Arc::new(FakeGateway::default())).await;
+        let gateway = Arc::new(FakeGateway::default());
+        let address = serve(gateway.clone()).await;
         let base = format!("http://{address}");
         let (runtime, store, _directory) = signed_in_runtime(&base).await;
 
@@ -1382,6 +1429,67 @@ mod tests {
             crate::mcp_config::McpHealth::Healthy
         );
         assert!(mcp.snapshot().get("mcp__tools__lookup").is_some());
+
+        // The handshake rode a context-bearing token: an attested endpoint
+        // refuses any request minted without one, so the connect mint is what
+        // makes attested mounts able to list their tools at all.
+        let connect_context = {
+            let minted = gateway.minted.lock().unwrap();
+            let (_, context) = minted
+                .iter()
+                .find(|(resource, _)| resource == "mcp:tools")
+                .expect("the mount minted an mcp:tools token")
+                .clone();
+            context.expect("the connect mint carries an attestation context")
+        };
+
+        // A tool call from a chat presents that chat's bearer, minted inside
+        // the same attestation context the chat's inference tokens carry —
+        // the invariant that lets an attested endpoint match the call against
+        // the observation the inference recorded.
+        let chat = openwave_core::id::ChatId::new();
+        let snapshot = mcp.snapshot();
+        let tool = snapshot.get("mcp__tools__lookup").unwrap();
+        let ctx = openwave_core::ToolCtx::without_private_scratch(chat, None);
+        tool.execute(&ctx, json!({})).await.unwrap();
+
+        let source = runtime
+            .route_token_source()
+            .await
+            .expect("signed-in runtime offers a token source");
+        source.bearer_token_for(Some(chat)).await.unwrap();
+        {
+            let minted = gateway.minted.lock().unwrap();
+            let chat_mcp = minted
+                .iter()
+                .filter(|(resource, _)| resource == "mcp:tools")
+                .nth(1)
+                .map(|(_, context)| context.clone().unwrap())
+                .expect("the tool call minted a second mcp:tools token");
+            let chat_llm = minted
+                .iter()
+                .find(|(resource, _)| resource == "llm")
+                .map(|(_, context)| context.clone().unwrap())
+                .expect("the chat's inference minted an llm token");
+            assert_ne!(chat_mcp, connect_context);
+            assert_eq!(chat_mcp, chat_llm);
+        }
+        {
+            let requests = gateway.mcp_requests.lock().unwrap();
+            let handshake: Vec<&str> = requests
+                .iter()
+                .filter(|(method, _)| method == "initialize" || method == "tools/list")
+                .map(|(_, bearer)| bearer.as_str())
+                .collect();
+            assert!(!handshake.is_empty());
+            let call = requests
+                .iter()
+                .find(|(method, _)| method == "tools/call")
+                .map(|(_, bearer)| bearer.as_str())
+                .expect("the tool call reached the endpoint");
+            assert!(handshake.iter().all(|bearer| *bearer == handshake[0]));
+            assert_ne!(call, handshake[0]);
+        }
 
         // Sign-out degrades the mount to a secret-free sign-in diagnostic and
         // keeps the definition; the tool leaves the registry.

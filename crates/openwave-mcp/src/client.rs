@@ -73,6 +73,22 @@ pub struct McpServerInfo {
     pub version: String,
 }
 
+/// Per-call bearer supplier for tool invocations, resolved from the chat a
+/// call belongs to.
+///
+/// The connection's own bearer is fixed at connect time and shared by every
+/// chat in the process — right for `initialize` and `tools/list`, but a
+/// gateway-attested MCP endpoint only accepts a `tools/call` whose token
+/// carries the calling chat's attestation context. A client given one of
+/// these asks it before each `tools/call`; everything else keeps the
+/// connection bearer.
+#[async_trait]
+pub trait CallBearerSource: Send + Sync {
+    /// The bearer for a call from `chat`, or `None` to keep the connection's
+    /// own bearer. Implementations must never log or echo the token.
+    async fn call_bearer(&self, chat: openwave_core::id::ChatId) -> Result<Option<String>>;
+}
+
 /// A connected external MCP server whose tools can be mounted into OpenWave.
 ///
 /// The configured `server_name` is a stable local namespace, independent of the
@@ -84,6 +100,7 @@ pub struct McpClient {
     server_info: McpServerInfo,
     tools: Vec<MountedTool>,
     session: Arc<Mutex<Session>>,
+    call_bearer: Option<Arc<dyn CallBearerSource>>,
 }
 
 impl McpClient {
@@ -267,6 +284,7 @@ impl McpClient {
             server_info: initialized.server_info,
             tools,
             session: Arc::new(Mutex::new(session)),
+            call_bearer: None,
         })
     }
 
@@ -382,9 +400,19 @@ impl McpClient {
                 server_name: self.server_name.clone(),
                 ui_resource_uri: tool.ui_resource_uri.clone(),
                 session: Arc::clone(&self.session),
+                call_bearer: self.call_bearer.clone(),
             }));
         }
         refused
+    }
+
+    /// Ask `source` for a per-chat bearer before each `tools/call` mounted
+    /// from this client. Set before [`Self::mount`]; already-mounted tools
+    /// keep the connection bearer.
+    #[must_use]
+    pub fn with_call_bearer_source(mut self, source: Arc<dyn CallBearerSource>) -> Self {
+        self.call_bearer = Some(source);
+        self
     }
 }
 
@@ -433,6 +461,19 @@ impl Session {
     }
 
     async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
+        self.request_with_bearer(method, params, None).await
+    }
+
+    /// [`Self::request`] with a per-request bearer override on the HTTP
+    /// transport — a gateway-attested `tools/call` rides the calling chat's
+    /// token rather than the connection's. The stdio transport has no
+    /// bearer, so an override there is ignored.
+    async fn request_with_bearer(
+        &mut self,
+        method: &str,
+        params: Value,
+        bearer: Option<&str>,
+    ) -> Result<Value> {
         let id = self.next_id;
         self.next_id = self
             .next_id
@@ -464,7 +505,7 @@ impl Session {
             Wire::Http(http) => {
                 timeout(
                     request_timeout,
-                    http.request(id, &request, tools_list_changed),
+                    http.request(id, &request, tools_list_changed, bearer),
                 )
                 .await
             }
@@ -951,6 +992,7 @@ struct McpTool {
     /// host can surface the declared MCP Apps view for this tool's results.
     ui_resource_uri: Option<String>,
     session: Arc<Mutex<Session>>,
+    call_bearer: Option<Arc<dyn CallBearerSource>>,
 }
 
 #[async_trait]
@@ -963,14 +1005,27 @@ impl Tool for McpTool {
         ApprovalClass::Sensitive
     }
 
-    async fn execute(&self, _ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
+    async fn execute(&self, ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
+        // Resolved before the session lock: a bearer mint may be a network
+        // round trip, and holding the shared session across it would stall
+        // every other chat's calls to this server.
+        let bearer = match &self.call_bearer {
+            Some(source) => source.call_bearer(ctx.chat_id).await.map_err(|error| {
+                mcp_message(format!(
+                    "MCP server {} could not resolve a call credential: {error}",
+                    self.server_name
+                ))
+            })?,
+            None => None,
+        };
         let result = self
             .session
             .lock()
             .await
-            .request(
+            .request_with_bearer(
                 "tools/call",
                 json!({"name": self.remote_name, "arguments": args}),
+                bearer.as_deref(),
             )
             .await
             .map_err(|error| {
