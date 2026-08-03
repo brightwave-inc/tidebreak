@@ -2,11 +2,10 @@ import { useEffect, useState } from "react";
 import { Bot, ChevronDown, ChevronRight, FileOutput, Square } from "lucide-react";
 
 import type { AgentActivityHistoryEntry, AgentRun } from "./api";
+import { AgentActivityTimeline, useAgentRunActivity } from "./AgentActivityTimeline";
 import {
   AGENT_RUN_STATUS_GROUPS,
-  agentActivityHistoryLabel,
   agentRunStatusDetail,
-  getAgentActivityOutcomeDotClass,
   getAgentRunDotClass,
   RUNNING_AGENT_STATUSES,
 } from "./AgentRunDisplay";
@@ -33,6 +32,8 @@ type BackgroundAgentListProps = {
   onLoadActivity: (runId: string) => Promise<AgentActivityHistoryEntry[]>;
   /** Open the outputs surface, when a completed run produced a result. */
   onViewOutput?: () => void;
+  /** Open one run's dedicated panel beside the conversation. */
+  onOpen?: (runId: string) => void;
 };
 
 /**
@@ -49,6 +50,7 @@ export function BackgroundAgentList({
   onCancel,
   onLoadActivity,
   onViewOutput,
+  onOpen,
 }: BackgroundAgentListProps) {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const sandboxRuns = runs.filter((run) => run.tier === "background");
@@ -141,6 +143,7 @@ export function BackgroundAgentList({
                         onCancel={onCancel}
                         onLoadActivity={onLoadActivity}
                         onViewOutput={onViewOutput}
+                        onOpen={onOpen}
                       />
                     ))}
                   </div>
@@ -163,17 +166,12 @@ export function BackgroundAgentList({
   );
 }
 
-type ActivityState = {
-  loading: boolean;
-  error: boolean;
-  loaded: boolean;
-  items: AgentActivityHistoryEntry[];
-};
-
 /**
  * One background run: its live status on a line, expandable into the ordered
  * timeline of what it has done, with a Stop control while it is cancellable and
- * a link to its output once it finishes with one.
+ * a link to its output once it finishes with one. When the panel navigation is
+ * wired, the row itself opens the run's dedicated panel; the chevron keeps the
+ * inline timeline for a quick glance without leaving the transcript.
  */
 function BackgroundAgentRow({
   run,
@@ -181,21 +179,23 @@ function BackgroundAgentRow({
   onCancel,
   onLoadActivity,
   onViewOutput,
+  onOpen,
 }: {
   run: AgentRun;
   label: string;
   onCancel: (runId: string) => Promise<void>;
   onLoadActivity: (runId: string) => Promise<AgentActivityHistoryEntry[]>;
   onViewOutput?: () => void;
+  onOpen?: (runId: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [stopping, setStopping] = useState(false);
-  const [activity, setActivity] = useState<ActivityState>({
-    loading: false,
-    error: false,
-    loaded: false,
-    items: [],
-  });
+  const activity = useAgentRunActivity(
+    run.id,
+    run.updated_at,
+    expanded,
+    onLoadActivity,
+  );
 
   // The Stop control is offered only while a fresh cancel would still change
   // anything. A run that is already `cancelling` shows a settled "Stopping".
@@ -210,28 +210,6 @@ function BackgroundAgentRow({
   useEffect(() => {
     if (!stoppable) setStopping(false);
   }, [stoppable]);
-
-  // Re-read the timeline whenever the row is open and the run advances, so a
-  // live run's steps settle in place without a manual refresh.
-  useEffect(() => {
-    if (!expanded) return;
-    let cancelled = false;
-    setActivity((state) => ({ ...state, loading: !state.loaded, error: false }));
-    onLoadActivity(run.id)
-      .then((items) => {
-        if (!cancelled) {
-          setActivity({ loading: false, error: false, loaded: true, items });
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setActivity((state) => ({ ...state, loading: false, error: true }));
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [expanded, run.id, run.updated_at, onLoadActivity]);
 
   const handleStop = async () => {
     setStopping(true);
@@ -251,10 +229,11 @@ function BackgroundAgentRow({
       <div className="flex min-w-0 items-center gap-2">
         <button
           type="button"
-          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          className="shrink-0"
           onClick={() => setExpanded((open) => !open)}
           aria-expanded={expanded}
           aria-controls={contentId}
+          aria-label={expanded ? "Hide activity" : "Show activity"}
         >
           <ChevronDown
             className={cn(
@@ -263,6 +242,14 @@ function BackgroundAgentRow({
             )}
             aria-hidden="true"
           />
+        </button>
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          onClick={() =>
+            onOpen ? onOpen(run.id) : setExpanded((open) => !open)
+          }
+        >
           <span
             className={cn("size-2 shrink-0 rounded-full", getAgentRunDotClass(run.status))}
             aria-hidden="true"
@@ -307,50 +294,4 @@ function BackgroundAgentRow({
       )}
     </div>
   );
-}
-
-function AgentActivityTimeline({ state }: { state: ActivityState }) {
-  if (state.error) {
-    return (
-      <p className="text-xs text-muted-foreground" role="status">
-        Activity history is unavailable.
-      </p>
-    );
-  }
-  if (state.items.length === 0) {
-    return (
-      <p className="text-xs text-muted-foreground" role="status">
-        {state.loading && !state.loaded
-          ? "Loading activity…"
-          : "No recorded activity yet."}
-      </p>
-    );
-  }
-  return (
-    <ol className="flex flex-col gap-2 border-l-2 border-border py-0.5 pl-3" role="list">
-      {state.items.map((entry, index) => (
-        <li key={`${entry.at}:${index}`} className="flex items-center gap-2 text-xs">
-          <span
-            className={cn(
-              "size-1.5 shrink-0 rounded-full",
-              getAgentActivityOutcomeDotClass(entry.outcome),
-            )}
-            aria-hidden="true"
-          />
-          <span className="min-w-0 flex-1 truncate text-foreground">
-            {agentActivityHistoryLabel(entry)}
-          </span>
-          <time className="shrink-0 text-muted-foreground" dateTime={entry.at}>
-            {formatActivityTime(entry.at)}
-          </time>
-        </li>
-      ))}
-    </ol>
-  );
-}
-
-function formatActivityTime(at: string): string {
-  const parsed = new Date(at);
-  if (Number.isNaN(parsed.getTime())) return "";
-  return parsed.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
