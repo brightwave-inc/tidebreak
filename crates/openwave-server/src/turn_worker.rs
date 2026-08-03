@@ -533,7 +533,7 @@ impl TurnWorker {
                 )
                 .await;
         }
-        let Some(chat) = self.store.get_chat(turn.chat_id).await? else {
+        let Some(mut chat) = self.store.get_chat(turn.chat_id).await? else {
             return self
                 .record_failure(
                     &turn,
@@ -545,6 +545,13 @@ impl TurnWorker {
                 )
                 .await;
         };
+        // A managed permission-mode ceiling binds at the gate, not only the
+        // picker: a stored mode that predates the policy, or one written past
+        // the route check, is clamped here before anything downstream reads
+        // it. Resolved per turn, like the model, so an MDM push takes effect
+        // on the next turn without a restart.
+        let managed = crate::managed_policy::resolve(&*self.store, &*self.os_policy).await?;
+        chat.permission_mode = managed.clamp_permission_mode(chat.permission_mode);
         let exec_folders = match self.exec_folder_context.as_ref() {
             Some(provider) => match provider.folder_grants_for_chat(&chat, turn.id).await {
                 Ok(folders) => folders,

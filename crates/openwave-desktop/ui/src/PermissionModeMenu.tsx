@@ -1,12 +1,14 @@
 import {
   Check,
   ChevronDown,
+  Lock,
   NotebookPen,
   ShieldCheck,
   Sparkles,
   Zap,
 } from "lucide-react";
 import type { PermissionMode } from "./api";
+import { useManagedPolicy } from "./managedPolicy";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -69,6 +71,11 @@ const PERMISSION_MODE_SCALE: {
 /** The stored mode a chat runs under when none is set. */
 export const DEFAULT_PERMISSION_MODE: PermissionMode = "ask";
 
+/** Position on the autonomy scale, for comparing a mode against a ceiling. */
+function autonomyRank(mode: PermissionMode): number {
+  return PERMISSION_MODE_SCALE.findIndex((option) => option.value === mode);
+}
+
 export function permissionModeOption(mode: PermissionMode | null) {
   const value = mode ?? DEFAULT_PERMISSION_MODE;
   return (
@@ -87,6 +94,13 @@ export function permissionModeOption(mode: PermissionMode | null) {
  * background: the row reads as one set of controls, and the one that has been
  * dialed up should stand out within it without becoming a second kind of
  * object.
+ *
+ * A managed profile may assert a permission-mode ceiling. Modes above it
+ * render locked — decided elsewhere rather than silently missing — and the
+ * server enforces the same ceiling at the chat routes and the turn gate, so
+ * this is legibility, not the lockdown itself. A stored mode already above
+ * the ceiling displays as the ceiling, matching what the turn actually runs
+ * under.
  */
 export function PermissionModeMenu({
   value,
@@ -97,7 +111,14 @@ export function PermissionModeMenu({
   disabled?: boolean;
   onChange: (mode: PermissionMode) => void | Promise<void>;
 }) {
-  const current = permissionModeOption(value);
+  const ceiling = useManagedPolicy().permission_mode_ceiling ?? null;
+  const ceilingRank = ceiling === null ? null : autonomyRank(ceiling);
+  const overCeiling = (mode: PermissionMode) =>
+    ceilingRank !== null && autonomyRank(mode) > ceilingRank;
+  const effective = overCeiling(value ?? DEFAULT_PERMISSION_MODE)
+    ? ceiling
+    : value;
+  const current = permissionModeOption(effective);
   const CurrentIcon = current.icon;
   return (
     <DropdownMenu>
@@ -121,11 +142,12 @@ export function PermissionModeMenu({
       <DropdownMenuContent align="end" side="top" className="w-72">
         {PERMISSION_MODE_SCALE.map((option) => {
           const selected = current.value === option.value;
+          const locked = overCeiling(option.value);
           const OptionIcon = option.icon;
           return (
             <DropdownMenuItem
               key={option.value}
-              disabled={disabled}
+              disabled={disabled || locked}
               onSelect={() => {
                 if (selected) return;
                 void onChange(option.value);
@@ -137,17 +159,23 @@ export function PermissionModeMenu({
                   <OptionIcon
                     className={cn(
                       "size-4",
-                      option.elevated
+                      option.elevated && !locked
                         ? "text-warning-foreground"
                         : "text-muted-foreground",
                     )}
                   />
                   {option.label}
                 </span>
-                {selected && <Check className="size-4" />}
+                {locked ? (
+                  <Lock aria-label="Locked" className="size-4" />
+                ) : (
+                  selected && <Check className="size-4" />
+                )}
               </div>
               <span className="text-muted-foreground pl-6 text-xs">
-                {option.description}
+                {locked
+                  ? "Locked by your organization's policy."
+                  : option.description}
               </span>
             </DropdownMenuItem>
           );

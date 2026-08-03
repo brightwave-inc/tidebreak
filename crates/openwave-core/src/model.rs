@@ -1039,7 +1039,12 @@ impl ReasoningEffort {
 /// Persisted per chat as the token from [`Self::as_str`] and read at turn
 /// start, like the model selection: changing it mid-turn applies from the
 /// next turn, and a reopened chat runs the way it ran before.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+///
+/// The declaration order is ascending autonomy, and the derived `Ord` relies
+/// on it: `Plan < Ask < Auto < Allow`, matching [`Self::ALL`]. Managed-policy
+/// ceilings compare modes with it, so a new variant must slot into this
+/// scale, not just onto the end of the list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionMode {
     /// The agent explores read-only and designs a plan instead of acting.

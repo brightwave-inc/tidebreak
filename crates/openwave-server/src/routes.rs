@@ -924,6 +924,36 @@ async fn has_api_key(secrets: &dyn SecretProvider) -> bool {
     false
 }
 
+/// Refuse selecting a permission mode above the managed ceiling.
+///
+/// The picker-facing half of the lockdown: the authoritative clamp lives at
+/// the turn gate, which also catches chats whose stored mode predates the
+/// policy. Selecting a mode at or below the ceiling stays open — the policy
+/// names a maximum, not a fixed mode.
+async fn refuse_permission_mode_over_ceiling(
+    state: &AppState,
+    requested: Option<PermissionMode>,
+) -> Result<(), ServerError> {
+    let Some(mode) = requested else {
+        return Ok(());
+    };
+    let policy = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
+    if !policy.permits_permission_mode(mode) {
+        return Err(ServerError::conflict_kind(
+            "permission_mode_locked",
+            format!(
+                "permission mode `{}` exceeds the maximum this managed profile allows (`{}`)",
+                mode.as_str(),
+                policy
+                    .permission_mode_ceiling
+                    .unwrap_or(PermissionMode::Allow)
+                    .as_str()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Refuse a BYOK credential write on a managed profile.
 ///
 /// The gateway session is a managed profile's only model credential; stored
@@ -1386,6 +1416,7 @@ pub async fn create_chat(
     if let Some(model) = body.model.as_mut() {
         *model = validate_model_selection(&state, model, false).await?;
     }
+    refuse_permission_mode_over_ceiling(&state, body.permission_mode).await?;
     crate::code_execution::normalize_network_policy(&mut body.network_policy)?;
     let chat = Chat {
         id: ChatId::new(),
@@ -1441,6 +1472,10 @@ pub async fn patch_chat(
     if let Some(policy) = body.network_policy.as_mut() {
         crate::code_execution::normalize_network_policy(policy)?;
     }
+    // A `null` (clear back to the default) is always allowed: the ceiling
+    // caps what the reader may select, and the turn gate clamps whatever the
+    // default resolves to.
+    refuse_permission_mode_over_ceiling(&state, body.permission_mode.flatten()).await?;
     let title = body.title.map(normalize_chat_title).transpose()?;
 
     let mut chat = state
