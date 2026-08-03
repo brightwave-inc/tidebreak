@@ -259,6 +259,48 @@ impl GatewayRuntime {
         })
     }
 
+    /// Mount newly entitled gateway MCP endpoints into the configured server
+    /// set — mount-by-default for a managed profile, where the organization
+    /// already curated the entitlements.
+    ///
+    /// The entitlement source is the same `/api/v1/cli/apps` read the
+    /// settings panel lists, so server and UI cannot disagree about what is
+    /// entitled. Endpoints the user explicitly unmounted are remembered by
+    /// the MCP runtime and never re-mounted here; a repeat reconcile with no
+    /// new entitlements changes nothing. Every state where a reconcile cannot
+    /// run — unmanaged profile, misconfigured policy, no session for the
+    /// policy's deployment, a gateway predating the apps surface — is
+    /// "nothing to do", not an error, so callers may run this on every
+    /// trigger without gating.
+    pub(crate) async fn reconcile_endpoint_mounts(
+        &self,
+        mcp: &crate::mcp_config::McpRuntime,
+    ) -> Result<()> {
+        let policy = self.policy().await?;
+        let Some(connection) = self.connection_for(&policy).await? else {
+            return Ok(());
+        };
+        if connection.stored_credentials().await?.is_none() {
+            return Ok(());
+        }
+        let Some(apps) = connection.apps().await? else {
+            return Ok(());
+        };
+        let entitled: Vec<String> = apps
+            .into_iter()
+            .flat_map(|app| app.mcp_endpoint_slugs)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if entitled.is_empty() {
+            return Ok(());
+        }
+        if mcp.auto_mount_gateway_endpoints(&entitled).await? {
+            tracing::info!("auto-mounted newly entitled gateway MCP endpoints");
+        }
+        Ok(())
+    }
+
     /// Start a browser sign-in and return the URL to open.
     ///
     /// A pending pairing wins the target: the sign-in runs against the
@@ -272,10 +314,13 @@ impl GatewayRuntime {
     /// unmanaged one keeps the legible refusal.
     ///
     /// The exchange completes in a background task: on success the session is
-    /// stored (after any pairing commit) and the entitled models synced; on
-    /// failure the status surface carries the bounded error until the next
-    /// attempt.
-    pub(crate) async fn begin_sign_in(self: &Arc<Self>) -> Result<String> {
+    /// stored (after any pairing commit), the entitled models synced, and the
+    /// entitled MCP endpoints auto-mounted into `mcp`; on failure the status
+    /// surface carries the bounded error until the next attempt.
+    pub(crate) async fn begin_sign_in(
+        self: &Arc<Self>,
+        mcp: Arc<crate::mcp_config::McpRuntime>,
+    ) -> Result<String> {
         let policy = self.policy().await?;
         let pairing = self.pending_pairing.lock().await.clone();
         let connection = match &pairing {
@@ -336,6 +381,14 @@ impl GatewayRuntime {
                             // explicit refresh affordance, not a failed
                             // sign-in.
                             let _ = runtime.sync_models().await;
+                            // Likewise: mount-by-default must never fail a
+                            // sign-in, and the background sync retries it.
+                            if let Err(error) = runtime.reconcile_endpoint_mounts(&mcp).await {
+                                tracing::warn!(
+                                    "gateway endpoint auto-mount after sign-in failed \
+                                     (the background sync will retry): {error}"
+                                );
+                            }
                             SignInProgress::Idle
                         }
                         Err(error) => SignInProgress::Failed {
@@ -536,10 +589,21 @@ impl GatewayRuntime {
     /// deployment — is "nothing to do", not an error: the loop waits for the
     /// state to change rather than exiting, because sign-in, pairing, and MDM
     /// pushes can all happen at any time.
-    pub(crate) async fn sync_models_periodically(self: Arc<Self>) {
+    ///
+    /// The same tick reconciles the entitled MCP endpoint mounts into `mcp`:
+    /// the boot-with-stored-session case lands on the immediate first tick,
+    /// and an admin's new entitlement reaches the tool surface within the
+    /// sync interval. Each half fails independently — a failed entitlement
+    /// fetch degrades to "no reconcile this tick", never touching the
+    /// configuration.
+    pub(crate) async fn sync_models_periodically(
+        self: Arc<Self>,
+        mcp: Arc<crate::mcp_config::McpRuntime>,
+    ) {
         // One warning per outage, not one per retry: the failure state can
         // legitimately persist for hours on an offline laptop.
         let mut warned = false;
+        let mut mount_warned = false;
         loop {
             let delay = match self.sync_models_if_connected().await {
                 Ok(synced) => {
@@ -562,6 +626,16 @@ impl GatewayRuntime {
                     MODEL_SYNC_RETRY
                 }
             };
+            match self.reconcile_endpoint_mounts(&mcp).await {
+                Ok(()) => mount_warned = false,
+                Err(error) if mount_warned => {
+                    tracing::debug!("gateway endpoint auto-mount still failing: {error}");
+                }
+                Err(error) => {
+                    tracing::warn!("gateway endpoint auto-mount failed (will retry): {error}");
+                    mount_warned = true;
+                }
+            }
             tokio::time::sleep(delay).await;
         }
     }
@@ -743,6 +817,36 @@ mod tests {
         refreshes: AtomicUsize,
         /// Every refresh token posted to `/oauth/revoke`, in order.
         revoked: std::sync::Mutex<Vec<String>>,
+        /// When set, `/api/v1/cli/apps` answers 500 — the outage shape the
+        /// endpoint-mount reconcile must degrade quietly on.
+        apps_fail: std::sync::atomic::AtomicBool,
+    }
+
+    /// One entitled connected app aggregating the fixture's `tools` MCP
+    /// endpoint, the shape `/api/v1/cli/apps` serves.
+    async fn apps(State(gateway): State<Arc<FakeGateway>>, headers: HeaderMap) -> Response {
+        if gateway.apps_fail.load(Ordering::SeqCst) {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "apps are down",
+            )
+                .into_response();
+        }
+        let bearer = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert!(bearer.starts_with("Bearer mg_at_control_"), "{bearer}");
+        Json(json!({
+            "apps": [{
+                "id": "app-1",
+                "name": "Tools",
+                "app_kind": "mcp_endpoint",
+                "enabled": true,
+                "mcp_endpoint_slugs": ["tools"]
+            }]
+        }))
+        .into_response()
     }
 
     async fn token(
@@ -859,6 +963,7 @@ mod tests {
             .route("/oauth/token", post(token))
             .route("/oauth/revoke", post(revoke))
             .route("/api/v1/cli/models", get(models))
+            .route("/api/v1/cli/apps", get(apps))
             .route("/mcp/{slug}", post(mcp_endpoint))
             .with_state(gateway);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -922,6 +1027,20 @@ mod tests {
         signed_in_runtime_at(base_url, base_url).await
     }
 
+    /// An MCP runtime resolving gateway endpoints through `runtime`, the way
+    /// the server wires the two together.
+    fn mcp_for(
+        runtime: &Arc<GatewayRuntime>,
+        store: &Arc<dyn Store>,
+    ) -> Arc<crate::mcp_config::McpRuntime> {
+        Arc::new(crate::mcp_config::McpRuntime::new(
+            Arc::new(openwave_core::ToolRegistry::new()),
+            store.clone(),
+            runtime.clone(),
+            Arc::new(crate::managed_policy::NoOsPolicy),
+        ))
+    }
+
     #[tokio::test]
     async fn syncs_entitled_models_into_the_snapshot() {
         let address = serve(Arc::new(FakeGateway::default())).await;
@@ -964,7 +1083,11 @@ mod tests {
         let base = format!("http://{address}");
         let (runtime, store, _directory) = signed_in_runtime(&base).await;
 
-        let task = tokio::spawn(runtime.clone().sync_models_periodically());
+        let task = tokio::spawn(
+            runtime
+                .clone()
+                .sync_models_periodically(mcp_for(&runtime, &store)),
+        );
         let synced = async {
             loop {
                 if let Some(snapshot) = providers::read_gateway_snapshot(&*store).await.unwrap() {
@@ -1197,12 +1320,7 @@ mod tests {
         let base = format!("http://{address}");
         let (runtime, store, _directory) = signed_in_runtime(&base).await;
 
-        let mcp = Arc::new(crate::mcp_config::McpRuntime::new(
-            Arc::new(openwave_core::ToolRegistry::new()),
-            store.clone(),
-            runtime.clone(),
-            Arc::new(crate::managed_policy::NoOsPolicy),
-        ));
+        let mcp = mcp_for(&runtime, &store);
         let definition = crate::mcp_config::McpServerDefinition {
             name: "tools".to_string(),
             command: None,
@@ -1252,6 +1370,58 @@ mod tests {
         assert!(mcp.snapshot().get("mcp__tools__lookup").is_none());
     }
 
+    /// Mount-by-default, end to end: a reconcile against the entitled apps
+    /// list mounts the endpoint enabled and connected, and a second
+    /// reconcile with unchanged entitlements is a strict no-op — the
+    /// persisted records are untouched, not rewritten to the same shape.
+    #[tokio::test]
+    async fn reconcile_auto_mounts_a_newly_entitled_endpoint_exactly_once() {
+        let address = serve(Arc::new(FakeGateway::default())).await;
+        let base = format!("http://{address}");
+        let (runtime, store, _directory) = signed_in_runtime(&base).await;
+        let mcp = mcp_for(&runtime, &store);
+
+        runtime.reconcile_endpoint_mounts(&mcp).await.unwrap();
+        let info = mcp.info().await;
+        assert_eq!(info.servers.len(), 1);
+        assert_eq!(info.servers[0].definition.name, "tools");
+        assert_eq!(
+            info.servers[0].definition.gateway_endpoint.as_deref(),
+            Some("tools")
+        );
+        assert!(info.servers[0].definition.enabled);
+        assert_eq!(
+            info.servers[0].health,
+            crate::mcp_config::McpHealth::Healthy
+        );
+        assert!(mcp.snapshot().get("mcp__tools__lookup").is_some());
+
+        let records = store.list_connected_apps().await.unwrap();
+        runtime.reconcile_endpoint_mounts(&mcp).await.unwrap();
+        assert_eq!(
+            store.list_connected_apps().await.unwrap(),
+            records,
+            "a reconcile with no new entitlements must not rewrite the records"
+        );
+    }
+
+    /// A failing entitlements fetch degrades to "no reconcile this tick":
+    /// the error surfaces to the caller (which logs and retries) and the
+    /// configuration is untouched.
+    #[tokio::test]
+    async fn a_failing_entitlements_fetch_leaves_the_configuration_untouched() {
+        let gateway = Arc::new(FakeGateway::default());
+        gateway.apps_fail.store(true, Ordering::SeqCst);
+        let address = serve(gateway).await;
+        let base = format!("http://{address}");
+        let (runtime, store, _directory) = signed_in_runtime(&base).await;
+        let mcp = mcp_for(&runtime, &store);
+
+        assert!(runtime.reconcile_endpoint_mounts(&mcp).await.is_err());
+        assert!(mcp.info().await.servers.is_empty());
+        assert!(store.list_connected_apps().await.unwrap().is_empty());
+    }
+
     /// The sign-in surface on an unmanaged profile exists exactly while a
     /// pending pairing is parked: it targets the pairing's gateway, commits
     /// nothing by merely starting, and a dismissal restores the refusal —
@@ -1274,20 +1444,15 @@ mod tests {
             Arc::new(MockSecrets::default()),
             Arc::new(crate::managed_policy::NoOsPolicy),
         );
-        let mcp = Arc::new(crate::mcp_config::McpRuntime::new(
-            Arc::new(openwave_core::ToolRegistry::new()),
-            store.clone(),
-            runtime.clone(),
-            Arc::new(crate::managed_policy::NoOsPolicy),
-        ));
+        let mcp = mcp_for(&runtime, &store);
 
         // Unmanaged with nothing pending: the legible refusal.
-        assert!(runtime.begin_sign_in().await.is_err());
+        assert!(runtime.begin_sign_in(mcp.clone()).await.is_err());
 
         runtime
             .register_pending_pairing(base.clone(), mcp.clone(), None)
             .await;
-        let url = runtime.begin_sign_in().await.unwrap();
+        let url = runtime.begin_sign_in(mcp.clone()).await.unwrap();
         assert!(
             url.starts_with(&format!("{base}oauth/authorize")),
             "sign-in must target the pending gateway: {url}"
@@ -1304,7 +1469,7 @@ mod tests {
             runtime.status().await.unwrap().sign_in,
             SignInProgress::Idle
         );
-        assert!(runtime.begin_sign_in().await.is_err());
+        assert!(runtime.begin_sign_in(mcp).await.is_err());
     }
 
     #[tokio::test]
@@ -1533,7 +1698,11 @@ mod tests {
 
         // The sign-in surface is managed-only, and the refusal names the
         // remedy.
-        let error = runtime.begin_sign_in().await.err().unwrap();
+        let error = runtime
+            .begin_sign_in(mcp_for(&runtime, &store))
+            .await
+            .err()
+            .unwrap();
         assert!(
             error.to_string().contains("pair via your gateway"),
             "{error}"

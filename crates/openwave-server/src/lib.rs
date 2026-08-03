@@ -964,7 +964,11 @@ async fn bind_inner(
     let blob_orphan_auditor = tokio::spawn(blob_orphan_auditor.run());
     let approval_judge_worker = tokio::spawn(approval_judge_worker.run());
     let mcp_supervisor = tokio::spawn(mcp_runtime.clone().supervise());
-    let gateway_model_sync = tokio::spawn(gateway_runtime.clone().sync_models_periodically());
+    let gateway_model_sync = tokio::spawn(
+        gateway_runtime
+            .clone()
+            .sync_models_periodically(mcp_runtime.clone()),
+    );
 
     Ok(Server {
         local_addr,
