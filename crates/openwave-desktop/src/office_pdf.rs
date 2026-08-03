@@ -2,9 +2,11 @@
 //!
 //! There is no presentation engine in the renderer, so slides are shown the
 //! way most tools outside PowerPoint show them: converted to PDF and drawn by
-//! the PDF viewer. Conversion runs a LibreOffice the user already has
-//! installed — nothing is bundled or downloaded — and its absence is a
-//! first-class state the renderer turns into an install hint, not an error.
+//! the PDF viewer. Conversion prefers the app's own managed LibreOffice
+//! (downloaded and digest-verified by [`crate::office_install`] the first
+//! time a preview needs it, on macOS), then falls back to one the user
+//! installed. Its absence is a first-class state the renderer turns into a
+//! download or an install hint, not an error.
 //!
 //! The converter processes untrusted bytes, so the invocation is contained
 //! the way the rest of the app treats external processes: an empty
@@ -59,12 +61,29 @@ pub(crate) struct PresentationPdfRequest {
 }
 
 /// Outcome of a conversion request. A missing converter is a state the
-/// renderer designs for (install hint + download remains), not a failure.
+/// renderer designs for, not a failure: on macOS it triggers the managed
+/// download (unless one already failed this run), elsewhere the install hint.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase", tag = "status")]
 pub(crate) enum PresentationPdfResult {
-    Converted { pdf_base64: String },
-    ConverterMissing,
+    Converted {
+        pdf_base64: String,
+    },
+    ConverterMissing {
+        /// Whether this platform can install its own LibreOffice.
+        installable: bool,
+        /// Why the last managed install this app run failed (or was
+        /// cancelled), if it did. While present the renderer shows the hint
+        /// and waits for an explicit retry instead of re-downloading.
+        install_failure: Option<String>,
+    },
+}
+
+fn converter_missing() -> PresentationPdfResult {
+    PresentationPdfResult::ConverterMissing {
+        installable: crate::office_install::supported(),
+        install_failure: crate::office_install::last_failure(),
+    }
 }
 
 /// Convert one presentation's bytes to PDF with the user's LibreOffice.
@@ -90,7 +109,8 @@ pub(crate) async fn convert_presentation_to_pdf(
         return Err("That file is too large to preview".to_owned());
     }
 
-    let cache_dir = crate::data_dir(&app)?.join(CACHE_DIRECTORY);
+    let data_dir = crate::data_dir(&app)?;
+    let cache_dir = data_dir.join(CACHE_DIRECTORY);
     let cache_path = cache_dir.join(format!("{}.pdf", content_key(&bytes)));
     if let Ok(cached) = tokio::fs::read(&cache_path).await {
         if !cached.is_empty() {
@@ -100,8 +120,8 @@ pub(crate) async fn convert_presentation_to_pdf(
         }
     }
 
-    let Some(soffice) = locate_soffice() else {
-        return Ok(PresentationPdfResult::ConverterMissing);
+    let Some(soffice) = locate_soffice(&data_dir) else {
+        return Ok(converter_missing());
     };
 
     let pdf = match run_conversion(&soffice, &bytes, extension).await {
@@ -109,7 +129,7 @@ pub(crate) async fn convert_presentation_to_pdf(
         // The resolved path failed to spawn — a stale launcher script or a
         // half-removed install. To the user that is the same state as no
         // LibreOffice at all: the install hint is the actionable message.
-        Err(ConversionError::Spawn) => return Ok(PresentationPdfResult::ConverterMissing),
+        Err(ConversionError::Spawn) => return Ok(converter_missing()),
         Err(ConversionError::Failed(reason)) => return Err(reason),
     };
 
@@ -152,13 +172,31 @@ fn content_key(bytes: &[u8]) -> String {
     key
 }
 
-/// Find a LibreOffice the user installed, checking the platform's standard
-/// application location before `PATH`.
+/// Find a LibreOffice to convert with: the app's own verified managed
+/// install first, then one the user installed system-wide, then `PATH`.
 ///
-/// A hit here is a candidate, not a guarantee — package managers leave
-/// launcher scripts behind after the application is removed — so spawn
-/// failure downstream is folded back into the missing-converter state.
-fn locate_soffice() -> Option<PathBuf> {
+/// The managed install leads because it is the copy whose provenance this
+/// app verified; a system hit is a candidate, not a guarantee — package
+/// managers leave launcher scripts behind after the application is removed —
+/// so spawn failure downstream is folded back into the missing-converter
+/// state.
+fn locate_soffice(data_dir: &Path) -> Option<PathBuf> {
+    resolve_soffice(
+        crate::office_install::managed_soffice(data_dir),
+        system_soffice,
+    )
+}
+
+/// The resolution order, as a seam: a managed install wins outright and the
+/// system is not probed at all behind one.
+fn resolve_soffice(
+    managed: Option<PathBuf>,
+    system: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    managed.or_else(system)
+}
+
+fn system_soffice() -> Option<PathBuf> {
     for candidate in standard_install_paths() {
         if candidate.is_file() {
             return Some(candidate);
@@ -391,13 +429,29 @@ mod tests {
         assert_eq!(input_extension("application/pdf"), None);
     }
 
+    /// A verified managed install answers resolution outright; the system is
+    /// only probed when there is none. Probing order matters because the
+    /// system scan reads `PATH` and can resolve stale launcher scripts.
+    #[test]
+    fn managed_install_preempts_the_system_scan() {
+        let managed = PathBuf::from("/data/tools/libreoffice/x/soffice");
+        assert_eq!(
+            resolve_soffice(Some(managed.clone()), || {
+                panic!("system scan ran despite a managed install")
+            }),
+            Some(managed)
+        );
+        let system = PathBuf::from("/usr/bin/soffice");
+        assert_eq!(resolve_soffice(None, || Some(system.clone())), Some(system));
+    }
+
     /// End-to-end proof against a real LibreOffice, when one is installed.
     /// Skips silently otherwise — CI runners and most dev machines carry no
     /// LibreOffice, and its absence is exactly the state the feature designs
     /// for, not a test failure.
     #[tokio::test]
     async fn converts_a_real_deck_when_libreoffice_is_installed() {
-        let Some(soffice) = locate_soffice() else {
+        let Some(soffice) = system_soffice() else {
             eprintln!("skipping: no LibreOffice installed");
             return;
         };

@@ -2,17 +2,26 @@
  * The presentation viewer: the original deck converted to PDF and drawn with
  * the PDF engine, behind a thin strip saying so.
  *
- * The conversion needs a LibreOffice the user installed. Its absence gets a
- * card with the install hint rather than an error — the deck itself is fine
- * and still exports — and a failed conversion gets its own card so a corrupt
- * file never reads as a broken app.
+ * The conversion needs LibreOffice. On macOS the app installs its own copy
+ * the first time a preview needs one — visibly and cancellably, with a
+ * determinate download bar — an exact pinned version the host verifies
+ * against a pinned digest before unpacking. A failed or cancelled install
+ * turns into the install hint with the reason and an explicit retry; nothing
+ * re-downloads on its own. Platforms without a managed install keep the
+ * install-it-yourself hint, and a failed conversion gets its own card so a
+ * corrupt file never reads as a broken app.
  */
 import { Loader2Icon, PresentationIcon } from "lucide-react";
-import { lazy, useMemo } from "react";
+import { lazy, useEffect, useMemo, useRef, useState } from "react";
 
+import { Button } from "@/components/ui/button";
+import { Progress } from "@/components/ui/progress";
 import {
+  cancelPresentationConverterInstall,
   ConverterMissingError,
+  installPresentationConverter,
   presentationPdfSource,
+  type ConverterInstallProgress,
 } from "@/document/officePdf";
 import {
   useFileDownload,
@@ -33,11 +42,16 @@ interface Props {
 }
 
 export function PresentationViewer({ source, mediaType, className }: Props) {
-  const pdfSource = useMemo(
-    () => presentationPdfSource(source, mediaType),
+  // Bumped when the managed install completes, so the conversion that found
+  // no converter is retried under a fresh cache key.
+  const [attempt, setAttempt] = useState(0);
+  const pdfSource = useMemo(() => {
+    const converted = presentationPdfSource(source, mediaType);
+    return attempt === 0
+      ? converted
+      : { ...converted, cacheKey: `${converted.cacheKey}#${attempt}` };
     // The source object is rebuilt each render; its cache key is its identity.
-    [source.cacheKey, mediaType],
-  );
+  }, [source.cacheKey, mediaType, attempt]);
   const { data, isLoading, error } = useFileDownload(pdfSource, {
     parseAs: "arrayBuffer",
   });
@@ -54,6 +68,15 @@ export function PresentationViewer({ source, mediaType, className }: Props) {
   }
 
   if (error instanceof ConverterMissingError) {
+    if (error.installable) {
+      return (
+        <ConverterInstall
+          key={attempt}
+          initialFailure={error.installFailure}
+          onReady={() => setAttempt((current) => current + 1)}
+        />
+      );
+    }
     return (
       <PresentationNotice>
         Install LibreOffice to preview presentations. The file itself is fine —
@@ -79,6 +102,116 @@ export function PresentationViewer({ source, mediaType, className }: Props) {
       <PdfViewer source={pdfSource} className={cn("min-h-0", className)} />
     </div>
   );
+}
+
+/**
+ * The managed LibreOffice install, as the preview panel sees it: starts on
+ * its own unless an earlier attempt this run already failed, shows a
+ * determinate download bar, and can be cancelled. Failure lands on the hint
+ * with the reason; only the explicit retry starts another download.
+ */
+function ConverterInstall({
+  initialFailure,
+  onReady,
+}: {
+  initialFailure: string | null;
+  onReady: () => void;
+}) {
+  const [failure, setFailure] = useState<string | null>(initialFailure);
+  const [running, setRunning] = useState(initialFailure === null);
+  const [progress, setProgress] = useState<ConverterInstallProgress | null>(
+    null,
+  );
+  const startedRef = useRef(false);
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
+
+  useEffect(() => {
+    if (!running || startedRef.current) return;
+    startedRef.current = true;
+    let disposed = false;
+    void installPresentationConverter((next) => {
+      if (!disposed) setProgress(next);
+    })
+      .then(() => {
+        if (!disposed) onReadyRef.current();
+      })
+      .catch((error: unknown) => {
+        if (disposed) return;
+        setFailure(error instanceof Error ? error.message : String(error));
+        setRunning(false);
+        setProgress(null);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [running]);
+
+  if (!running) {
+    return (
+      <PresentationNotice>
+        <span className="block">
+          Couldn’t set up the presentation preview
+          {failure ? `: ${failure}` : "."}
+        </span>
+        <span className="mt-1 block">
+          The file itself is fine — Save as… exports it unchanged. You can also
+          install LibreOffice yourself.
+        </span>
+        <Button
+          variant="outline"
+          size="sm"
+          className="mt-3"
+          onClick={() => {
+            startedRef.current = false;
+            setFailure(null);
+            setRunning(true);
+          }}
+        >
+          Try again
+        </Button>
+      </PresentationNotice>
+    );
+  }
+
+  const downloading = progress?.phase !== "installing";
+  const percent =
+    progress?.phase === "downloading" && progress.totalBytes
+      ? Math.min(100, (progress.downloadedBytes / progress.totalBytes) * 100)
+      : null;
+
+  return (
+    <div className="flex grow items-center justify-center p-6">
+      <div className="flex w-full max-w-sm flex-col items-center gap-3 text-center">
+        <PresentationIcon className="size-6 text-muted-foreground" />
+        <p className="text-sm text-muted-foreground" role="status">
+          {downloading
+            ? "Preparing presentation preview — downloading LibreOffice (~300 MB)…"
+            : "Setting up LibreOffice…"}
+        </p>
+        <Progress value={percent ?? undefined} className="w-56" />
+        {percent !== null && progress?.totalBytes ? (
+          <p className="text-xs text-muted-foreground">
+            {formatMegabytes(progress.downloadedBytes)} of{" "}
+            {formatMegabytes(progress.totalBytes)} MB
+          </p>
+        ) : null}
+        {downloading ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => void cancelPresentationConverterInstall()}
+          >
+            Cancel
+          </Button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function formatMegabytes(bytes: number): string {
+  return Math.round(bytes / (1024 * 1024)).toString();
 }
 
 function PresentationNotice({ children }: { children: React.ReactNode }) {
