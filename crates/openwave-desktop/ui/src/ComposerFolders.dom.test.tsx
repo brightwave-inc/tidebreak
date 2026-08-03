@@ -24,6 +24,7 @@ it("attaches and confirms revoking a folder from the ordinary chat composer", as
           {
             rootId: "root-1",
             displayName: "Research",
+            status: "connected",
             statements: (["read_files", "write_files"] as const).map(
               (capability, index) => ({
                 handle: {

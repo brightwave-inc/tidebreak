@@ -63,12 +63,14 @@ it("connects and revokes a chat folder through the existing host flow", async ()
       {
         rootId: "root-1",
         displayName: "Research",
+        status: "connected",
       },
     ])
     .mockResolvedValueOnce([]);
   vi.mocked(host.connectFolder).mockResolvedValue({
     rootId: "root-1",
     displayName: "Research",
+    status: "connected",
   });
   vi.mocked(host.disconnectFolder).mockResolvedValue(true);
   const user = userEvent.setup();

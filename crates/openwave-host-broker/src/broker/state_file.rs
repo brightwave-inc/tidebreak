@@ -14,12 +14,12 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    has_physical_root_alias, root_display_name, scope_targets_root, BrokerError, MutationRecord,
-    RegisteredRoot, State, UnavailableRoot, UnavailableRootReason,
+    has_physical_root_alias, root_display_name, scope_targets_root, unavailable_reason,
+    BrokerError, MutationRecord, RegisteredRoot, State, UnavailableRoot,
 };
 use crate::{
     path_policy::RootIdentity, Capability, ConsentMethod, ConsentRecord, Grant, GrantId,
-    GrantSubject, OperationId, RootAttachment, RootId, RootPolicy, Scope,
+    GrantSubject, OperationId, RootAttachment, RootId, RootPolicy, Scope, UnavailableRootReason,
 };
 
 const STATE_VERSION: u32 = 4;
@@ -145,10 +145,7 @@ impl StateFile {
                     );
                 }
                 Ok(_) => unavailable.push(set_aside(item, UnavailableRootReason::Replaced)),
-                Err(error) => unavailable.push(set_aside(
-                    item,
-                    UnavailableRootReason::from_policy_error(&error),
-                )),
+                Err(error) => unavailable.push(set_aside(item, unavailable_reason(&error))),
             }
         }
 

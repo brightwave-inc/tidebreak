@@ -866,6 +866,7 @@ fn connected_folder(root: RootSummary) -> ConnectedFolder {
     ConnectedFolder {
         root_id: root.root_id,
         display_name: root.display_name,
+        status: crate::host_access::FolderStatus::Connected,
     }
 }
 

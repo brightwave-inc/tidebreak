@@ -10,6 +10,7 @@ vi.mock("./host", () => ({
   connectApprovedFolder: vi.fn(),
   connectFolder: vi.fn(),
   disconnectFolder: vi.fn(),
+  forgetFolder: vi.fn(),
   grantFolderCapability: vi.fn(),
   listApprovedFolders: vi.fn(),
   listCapabilityConsents: vi.fn(),
@@ -23,8 +24,12 @@ const chat = {
   project_id: null,
 } as unknown as Chat;
 
-function folder(rootId: string, displayName: string): host.ConnectedFolder {
-  return { rootId, displayName };
+function folder(
+  rootId: string,
+  displayName: string,
+  status: host.FolderStatus = "connected",
+): host.ConnectedFolder {
+  return { rootId, displayName, status };
 }
 
 type FolderCapabilityVerb = Extract<
@@ -65,6 +70,7 @@ beforeEach(() => {
   vi.mocked(host.connectApprovedFolder).mockResolvedValue(null);
   vi.mocked(host.connectFolder).mockResolvedValue(null);
   vi.mocked(host.disconnectFolder).mockResolvedValue(false);
+  vi.mocked(host.forgetFolder).mockResolvedValue(true);
   vi.mocked(host.grantFolderCapability).mockResolvedValue(null);
   vi.mocked(host.revokeCapabilityConsent).mockResolvedValue(true);
 });
@@ -183,6 +189,39 @@ describe("FoldersView", () => {
     expect(screen.getAllByRole("button", { name: "Grant" })).toHaveLength(1);
   });
 
+  it("distinguishes an unavailable folder and lets it be forgotten for good", async () => {
+    vi.mocked(host.listConnectedFolders)
+      .mockResolvedValueOnce([
+        folder("live", "Drafts"),
+        folder("unplugged", "External archive", "unavailable"),
+      ])
+      .mockResolvedValue([folder("live", "Drafts")]);
+    vi.mocked(host.listCapabilityConsents).mockResolvedValue([
+      statement("live", "read_files"),
+    ]);
+    const user = userEvent.setup();
+    render(<FoldersView chat={chat} />);
+
+    // A set-aside folder no longer vanishes: it is its own group, marked and
+    // explained, distinct from both connected and previously approved.
+    expect(await screen.findByText("External archive")).toBeInTheDocument();
+    expect(screen.getByText("Unavailable")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Available on this Mac"),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Forget" }));
+    // Forgetting is destructive across every chat, so it confirms first.
+    await user.click(await screen.findByRole("button", { name: "Forget" }));
+    await waitFor(() =>
+      expect(host.forgetFolder).toHaveBeenCalledWith("unplugged"),
+    );
+    await waitFor(() =>
+      expect(screen.queryByText("External archive")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText("Drafts")).toBeInTheDocument();
+  });
+
   it("changes nothing when native widening consent is canceled", async () => {
     vi.mocked(host.listConnectedFolders).mockResolvedValue([
       folder("read-only", "Archive"),
@@ -209,12 +248,13 @@ describe("FoldersView", () => {
         folder("available", "Research"),
       ]);
     vi.mocked(host.listApprovedFolders).mockResolvedValue([
-      { rootId: "connected", displayName: "Current project" },
-      { rootId: "available", displayName: "Research" },
+      { rootId: "connected", displayName: "Current project", status: "connected" },
+      { rootId: "available", displayName: "Research", status: "connected" },
     ]);
     vi.mocked(host.connectApprovedFolder).mockResolvedValue({
       rootId: "available",
       displayName: "Research",
+      status: "connected",
     });
     const user = userEvent.setup();
     render(<FoldersView chat={chat} />);
@@ -235,7 +275,7 @@ describe("FoldersView", () => {
 
   it("leaves an approved folder unattached when native consent is canceled", async () => {
     vi.mocked(host.listApprovedFolders).mockResolvedValue([
-      { rootId: "available", displayName: "Research" },
+      { rootId: "available", displayName: "Research", status: "connected" },
     ]);
     const user = userEvent.setup();
     render(<FoldersView chat={chat} />);
