@@ -50,7 +50,7 @@ mod server;
 mod stdio;
 
 pub use client::{
-    McpClient, McpProbe, McpServerInfo, ResourceContent, DEFAULT_REQUEST_TIMEOUT,
+    CallBearerSource, McpClient, McpProbe, McpServerInfo, ResourceContent, DEFAULT_REQUEST_TIMEOUT,
     MAX_SERVER_NAME_BYTES,
 };
 pub use http::validate_http_url;

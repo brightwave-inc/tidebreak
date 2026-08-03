@@ -86,8 +86,9 @@ impl HttpWire {
         expected_id: u64,
         message: &Value,
         tools_list_changed: &mut bool,
+        bearer: Option<&str>,
     ) -> Result<Value> {
-        let response = self.post(message).await?;
+        let response = self.post(message, bearer).await?;
         let status = response.status();
         if status == reqwest::StatusCode::ACCEPTED {
             return Err(mcp_message(
@@ -128,12 +129,27 @@ impl HttpWire {
     /// Send one notification. Streamable HTTP servers acknowledge with an
     /// empty 202; any success status is accepted and the body is ignored.
     pub(crate) async fn notify(&mut self, message: &Value) -> Result<()> {
-        let response = self.post(message).await?;
+        let response = self.post(message, None).await?;
         check_status(response.status())?;
         self.absorb_session_id(&response)
     }
 
-    async fn post(&self, message: &Value) -> Result<reqwest::Response> {
+    /// POST one message. A `bearer` override replaces the connection's own
+    /// Authorization for this request only — a gateway-attested `tools/call`
+    /// must present the calling chat's token — and is validated exactly like
+    /// the connect-time token so it can never smuggle header syntax.
+    async fn post(&self, message: &Value, bearer: Option<&str>) -> Result<reqwest::Response> {
+        let authorization = match bearer {
+            Some(token) => {
+                if token.is_empty() || token.bytes().any(|byte| byte.is_ascii_control()) {
+                    return Err(mcp_message(
+                        "external server bearer token must be a non-empty header-safe value",
+                    ));
+                }
+                Some(format!("Bearer {token}"))
+            }
+            None => self.authorization.clone(),
+        };
         let mut request = self
             .client
             .post(self.url.clone())
@@ -143,7 +159,7 @@ impl HttpWire {
             )
             .header(PROTOCOL_VERSION_HEADER, PROTOCOL_VERSION)
             .json(message);
-        if let Some(authorization) = &self.authorization {
+        if let Some(authorization) = &authorization {
             request = request.header(reqwest::header::AUTHORIZATION, authorization);
         }
         if let Some(session_id) = &self.session_id {

@@ -209,6 +209,30 @@ impl std::fmt::Debug for McpServerDefinition {
 #[async_trait::async_trait]
 pub(crate) trait GatewayEndpoints: Send + Sync {
     async fn endpoint(&self, slug: &str) -> Result<GatewayEndpointAccess>;
+
+    /// The bearer for one `tools/call` from `chat`. The gateway runtime
+    /// mints inside the chat's attestation context so gateway-attested
+    /// endpoints can match the call against the observation the chat's
+    /// inference recorded; the default keeps the connect-time bearer for
+    /// implementations that don't distinguish.
+    async fn call_bearer(&self, slug: &str, chat: openwave_core::id::ChatId) -> Result<String> {
+        let _ = chat;
+        Ok(self.endpoint(slug).await?.bearer_token)
+    }
+}
+
+/// [`openwave_mcp::CallBearerSource`] over the gateway resolver for one
+/// mounted endpoint: each `tools/call` presents the calling chat's token.
+struct GatewayCallBearer {
+    gateway: Arc<dyn GatewayEndpoints>,
+    slug: String,
+}
+
+#[async_trait::async_trait]
+impl openwave_mcp::CallBearerSource for GatewayCallBearer {
+    async fn call_bearer(&self, chat: openwave_core::id::ChatId) -> Result<Option<String>> {
+        self.gateway.call_bearer(&self.slug, chat).await.map(Some)
+    }
 }
 
 /// One resolved gateway endpoint: where to connect and the bearer to present.
@@ -246,7 +270,7 @@ impl McpServerDefinition {
         Ok(command)
     }
 
-    async fn connect(&self, gateway: &dyn GatewayEndpoints) -> Result<McpClient> {
+    async fn connect(&self, gateway: &Arc<dyn GatewayEndpoints>) -> Result<McpClient> {
         if let Some(slug) = &self.gateway_endpoint {
             // Resolved per connection: a reconnect always presents a token
             // that is fresh at that moment, so expiry is survived by the
@@ -259,7 +283,15 @@ impl McpServerDefinition {
                 INITIALIZATION_TIMEOUT,
                 Duration::from_millis(self.request_timeout_ms),
             )
-            .await;
+            .await
+            .map(|client| {
+                // Dispatch rides per-chat tokens; the connect-time bearer
+                // serves only the handshake and discovery above.
+                client.with_call_bearer_source(std::sync::Arc::new(GatewayCallBearer {
+                    gateway: Arc::clone(gateway),
+                    slug: slug.clone(),
+                }))
+            });
         }
         if let Some(url) = &self.url {
             let bearer_token = self.resolve_bearer_token()?;
@@ -289,7 +321,7 @@ impl McpServerDefinition {
     /// degrades; tools are unaffected).
     async fn connect_with_views(
         &self,
-        gateway: &dyn GatewayEndpoints,
+        gateway: &Arc<dyn GatewayEndpoints>,
     ) -> Result<(McpClient, HashMap<String, UiViewDocument>)> {
         let client = self.connect(gateway).await?;
         let uris: HashSet<String> = client
@@ -1110,7 +1142,7 @@ impl McpRuntime {
                 })
                 .collect()
         };
-        let gateway = &*self.gateway;
+        let gateway = &self.gateway;
         let lockdown = self.manual_lockdown().await;
         let mut servers = HashMap::new();
         let connections = join_all(definitions.iter().map(|definition| async move {
@@ -1220,7 +1252,7 @@ impl McpRuntime {
         definitions: Vec<McpServerDefinition>,
         ids: BTreeMap<String, ConnectedAppId>,
     ) {
-        let gateway = &*self.gateway;
+        let gateway = &self.gateway;
         let lockdown = self.manual_lockdown().await;
         let mut servers = HashMap::new();
         let connections = join_all(definitions.iter().map(|definition| async move {
@@ -1430,7 +1462,7 @@ impl McpRuntime {
             server.diagnostic = None;
             (definition, server.epoch)
         };
-        match definition.connect_with_views(&*self.gateway).await {
+        match definition.connect_with_views(&self.gateway).await {
             Ok((client, ui_views)) => {
                 let mut state = self.state.lock().await;
                 // A settings replacement may have won while the process started.
@@ -2276,7 +2308,8 @@ mod tests {
             }}]}}"#
         ))
         .unwrap();
-        let error = config.0[0].connect(&NoGateway).await.err().unwrap();
+        let gateway: Arc<dyn GatewayEndpoints> = Arc::new(NoGateway);
+        let error = config.0[0].connect(&gateway).await.err().unwrap();
         assert!(error.to_string().contains(MISSING));
         assert!(error.to_string().contains("is not set"));
         assert!(!error.to_string().contains("secret-value"));
@@ -2694,7 +2727,8 @@ mod tests {
         assert!(std::env::var_os(MISSING).is_none());
         let mut definition = http_definition("gateway", "http://127.0.0.1:1/mcp");
         definition.bearer_token_env = Some(MISSING.to_string());
-        let error = definition.connect(&NoGateway).await.err().unwrap();
+        let gateway: Arc<dyn GatewayEndpoints> = Arc::new(NoGateway);
+        let error = definition.connect(&gateway).await.err().unwrap();
         assert!(error.to_string().contains(MISSING));
         assert!(error.to_string().contains("is not set"));
 
