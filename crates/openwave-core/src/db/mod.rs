@@ -1557,6 +1557,13 @@ impl Store for DbStore {
         ops::conversation::list_messages(self, chat_id).await
     }
 
+    async fn list_cancelled_output_message_ids(
+        &self,
+        chat_id: ChatId,
+    ) -> Result<Vec<crate::MessageId>> {
+        ops::conversation::list_cancelled_output_message_ids(self, chat_id).await
+    }
+
     async fn list_message_attachments(&self, chat_id: ChatId) -> Result<Vec<MessageAttachment>> {
         ops::message_attachment::list_for_chat(self, chat_id).await
     }

@@ -2718,6 +2718,16 @@ pub trait Store: Send + Sync {
     /// List a chat's messages in creation order.
     async fn list_messages(&self, chat_id: ChatId) -> Result<Vec<Message>>;
 
+    /// Output message ids of the chat's cancelled turns (#1182).
+    ///
+    /// Context assembly appends an interruption note to these messages so the
+    /// model is told the user stopped the response there, rather than left to
+    /// infer it from a mid-sentence cut. Best-effort: the default keeps stores
+    /// without turn state serving unannotated transcripts.
+    async fn list_cancelled_output_message_ids(&self, _chat_id: ChatId) -> Result<Vec<MessageId>> {
+        Ok(Vec::new())
+    }
+
     /// List a chat's image attachments, ordered by message then position.
     ///
     /// The block transcript is rebuilt on load rather than stored, so this is
