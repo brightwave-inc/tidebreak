@@ -514,5 +514,7 @@ jobs:
           cache-dependency-path: crates/openwave-desktop/ui/pnpm-lock.yaml
       - name: Install UI dependencies
         run: pnpm install --frozen-lockfile
-      - name: Test and build
-        run: pnpm test & pnpm build & wait
+      - name: Test
+        run: pnpm test
+      - name: Build
+        run: pnpm build
