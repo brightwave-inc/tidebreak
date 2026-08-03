@@ -12,6 +12,13 @@ shape, wrong type, or a URL failing that contract — never falls back to the
 open experience: the profile resolves managed-but-misconfigured with no
 usable gateway, and the server logs a warning naming what is broken.
 
+Each platform's artifact may also carry `AllowLocalMcpServers`. On a managed
+profile manual MCP configuration is locked and gateway-managed endpoint
+mounts are the only sanctioned path; this key is the org's explicit opt-out
+for local tooling. When it is `true`, local stdio (`command`) MCP servers
+are left to the user, while remote (`url`) servers remain locked. Absent
+means `false`, and a present-but-broken value fails closed to deny.
+
 ## macOS — managed preferences
 
 Deploy a configuration profile that forces a preference for the app's bundle
@@ -20,6 +27,8 @@ identifier:
 - Domain: `io.brightwave.openwave` (release builds; debug builds read
   `io.brightwave.openwave.dev`)
 - Key: `GatewayURL` (string)
+- Key: `AllowLocalMcpServers` (boolean, optional; also accepted as the
+  string `true`/`false`)
 
 OpenWave reads the forced-preferences domain that `cfprefsd` materializes
 under `/Library/Managed Preferences`, honoring the user channel before the
@@ -33,6 +42,7 @@ Deploy (GPO or Intune) a machine-scoped registry value:
 
 - Key: `HKLM\Software\Policies\Brightwave\OpenWave`
 - Value: `GatewayURL` (`REG_SZ`)
+- Value: `AllowLocalMcpServers` (`REG_SZ`, optional; `true` or `false`)
 
 The native 64-bit view of the hive is read explicitly.
 
@@ -41,14 +51,15 @@ The native 64-bit view of the hive is read explicitly.
 Install a JSON file:
 
 - Path: `/etc/openwave/managed-policy.json`
-- Schema: `{ "gateway_url": "https://gateway.example.com" }`
+- Schema: `{ "gateway_url": "https://gateway.example.com",
+  "allow_local_mcp_servers": false }` (the second key is optional)
+
+An absent file means no OS policy; an unreadable or malformed file resolves
+managed-but-misconfigured, as above.
 
 Deploy it root-owned and not world-writable, as `/etc` content should be.
 Unlike the macOS reader, the file reader does not verify ownership today —
 the permissions are deployment guidance, not an enforced guarantee.
-
-An absent file means no OS policy; an unreadable or malformed file resolves
-managed-but-misconfigured, as above.
 
 ## Developer flow — the sqlite policy toggle
 

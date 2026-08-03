@@ -953,7 +953,14 @@ pending_gateway_url?: string,
  * Asserted per key, so it binds even when no gateway URL is deployed and
  * the profile is otherwise unmanaged.
  */
-permission_mode_ceiling?: PermissionMode, };
+permission_mode_ceiling?: PermissionMode, 
+/**
+ * True when the OS policy explicitly allows local stdio MCP servers on a
+ * managed profile. False by default — the managed lockdown covers every
+ * manual transport unless the organization opts in — and carries no
+ * meaning while unmanaged, where nothing is locked to begin with.
+ */
+allow_local_mcp_servers: boolean, };
 
 /**
  * Which authority asserted the active policy.
