@@ -1220,6 +1220,10 @@ impl Store for DbStore {
         ops::turn::list_turn_runs(self, chat_id).await
     }
 
+    async fn count_active_work(&self) -> Result<crate::storage::ActiveWorkSnapshot> {
+        ops::active_work::count_active_work(self).await
+    }
+
     async fn accept_turn(
         &self,
         id: TurnId,

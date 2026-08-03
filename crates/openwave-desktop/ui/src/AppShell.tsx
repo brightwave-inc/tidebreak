@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Outlet, useNavigate } from "@tanstack/react-router";
+import { isTauri } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import {
   ApiClient,
@@ -30,7 +32,7 @@ import { useChatPromptWatcher } from "./useChatPromptWatcher";
 import { useShellShortcuts, type ShellShortcutHandlers } from "./ShellShortcuts";
 import { ShortcutsDialog } from "./ShortcutsDialog";
 import { useUiStore } from "./UiStore";
-import { useDesktopUpdates } from "./updates";
+import { UPDATE_CHECK_REQUESTED_EVENT, useDesktopUpdates } from "./updates";
 
 /** Move focus to whichever composer the current route has on screen. */
 function focusComposer(): void {
@@ -98,6 +100,29 @@ export function AppShell() {
   const { confirm, dialog: confirmDialog } = useConfirm();
   const desktopUpdates = useDesktopUpdates();
   const zoom = useInterfaceZoom();
+
+  // The native "Check for Updates…" menu item lands the reader on the
+  // Updates settings panel and runs the same explicit check the panel's
+  // button does, so the result (up to date, or an update staged) is visible.
+  const checkForUpdateRef = useRef(desktopUpdates.check);
+  checkForUpdateRef.current = desktopUpdates.check;
+  useEffect(() => {
+    if (!isTauri()) return;
+    let cancelled = false;
+    let unlisten: UnlistenFn | undefined;
+    void listen(UPDATE_CHECK_REQUESTED_EVENT, () => {
+      const updatesPath: string = "/settings/updates";
+      void navigate({ to: updatesPath });
+      void checkForUpdateRef.current();
+    }).then((stop) => {
+      if (cancelled) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [navigate]);
 
   // Shell shortcuts are defined here because these actions outlive any one
   // route: toggling the frame, starting a chat, reaching the composer, and
@@ -362,6 +387,7 @@ export function AppShell() {
           commitRename: (target) => void commitChatRename(target),
           cancelRename: cancelChatRename,
           updateState: desktopUpdates.state,
+          updateUpToDate: desktopUpdates.upToDate,
           checkForUpdate: desktopUpdates.check,
           restartForUpdate: onRestartForUpdate,
         }}

@@ -3,6 +3,8 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 const UPDATE_STATE_EVENT = "desktop-update-state";
+/** Raised by the native "Check for Updates…" menu item. */
+export const UPDATE_CHECK_REQUESTED_EVENT = "desktop-update-check-requested";
 const UPDATE_CONTROL_ERROR = "Update controls are temporarily unavailable.";
 const UPDATE_RESTART_ERROR = "Could not restart OpenWave. Try again.";
 
@@ -17,6 +19,8 @@ export type DesktopUpdatesController = {
   state: DesktopUpdateState;
   check: () => Promise<DesktopUpdateState>;
   restart: () => Promise<void>;
+  /** The most recent explicit check confirmed the app is current. */
+  upToDate: boolean;
 };
 
 export const INITIAL_UPDATE_STATE: DesktopUpdateState = {
@@ -59,6 +63,14 @@ async function restartForDesktopUpdate(): Promise<void> {
 
 export function useDesktopUpdates(): DesktopUpdatesController {
   const [state, setState] = useState<DesktopUpdateState>(INITIAL_UPDATE_STATE);
+  const [upToDate, setUpToDate] = useState(false);
+
+  // "Up to date" is a claim about the last explicit check, not a standing
+  // state; anything that contradicts it (a staged update, an error, a new
+  // check in flight) clears it.
+  useEffect(() => {
+    if (state.status !== "idle" || state.error) setUpToDate(false);
+  }, [state.error, state.status]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -89,6 +101,7 @@ export function useDesktopUpdates(): DesktopUpdatesController {
   }, []);
 
   const check = useCallback(async () => {
+    setUpToDate(false);
     setState((current) =>
       current.enabled
         ? { ...current, status: "checking", error: null }
@@ -96,6 +109,7 @@ export function useDesktopUpdates(): DesktopUpdatesController {
     );
     const next = await checkForDesktopUpdate();
     setState(next);
+    setUpToDate(next.enabled && next.status === "idle" && !next.error);
     return next;
   }, []);
 
@@ -110,5 +124,5 @@ export function useDesktopUpdates(): DesktopUpdatesController {
     }
   }, []);
 
-  return { state, check, restart };
+  return { state, check, restart, upToDate };
 }

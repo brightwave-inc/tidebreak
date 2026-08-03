@@ -2973,3 +2973,85 @@ async fn m0021_maps_existing_execution_rows_onto_tier_and_location() {
     assert_eq!(child.parent_id, Some(foreground_id));
     assert_eq!(child.input.as_deref(), Some("legacy delegated task"));
 }
+
+#[tokio::test]
+async fn active_work_counts_gate_host_quiescence() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+
+    // The always-present foreground coordinator run never blocks quiescence:
+    // a freshly created chat reports no active work.
+    assert!(store.count_active_work().await.unwrap().is_quiescent());
+
+    let turn_id = TurnId::new();
+    store
+        .accept_turn(turn_id, chat.id, "gpt-5", "hello")
+        .await
+        .unwrap();
+
+    let spawn_call_id = CallId::new();
+    let child_id = AgentRunId::sandbox_for_spawn_call(spawn_call_id);
+    let now = Utc::now();
+    crate::db::entities::agent_run::ActiveModel {
+        id: Set(child_id.0),
+        chat_id: Set(chat.id.0),
+        parent_id: Set(Some(AgentRunId::foreground_for_chat(chat.id).0)),
+        parent_depth: Set(Some(0)),
+        spawn_call_id: Set(Some(spawn_call_id.0)),
+        tier: Set(AgentRunTier::Background.as_str().into()),
+        execution_location: Set(crate::model::AgentRunExecutionLocation::InProcess
+            .as_str()
+            .into()),
+        depth: Set(1),
+        status: Set(AgentRunStatus::Queued.as_str().into()),
+        input: Set(Some("delegated background task".into())),
+        model: Set(None),
+        attempt_count: Set(0),
+        max_attempts: Set(AgentRun::DEFAULT_MAX_ATTEMPTS),
+        claim_count: Set(0),
+        available_at: Set(now),
+        deadline_at: Set(Some(now + AgentRun::DEFAULT_MAX_DURATION)),
+        lease_token: Set(None),
+        lease_expires_at: Set(None),
+        started_at: Set(None),
+        finished_at: Set(None),
+        last_error_code: Set(None),
+        last_error_detail: Set(None),
+        created_at: Set(now),
+        updated_at: Set(now),
+    }
+    .insert(&store.conn)
+    .await
+    .unwrap();
+
+    let busy = store.count_active_work().await.unwrap();
+    assert_eq!(busy.active_turns, 1);
+    assert_eq!(busy.live_background_runs, 1);
+    assert!(!busy.is_quiescent());
+
+    // Settled rows drop out of both counts.
+    let mut settled_turn: crate::db::entities::turn_run::ActiveModel =
+        crate::db::entities::turn_run::Entity::find_by_id(turn_id.0)
+            .one(&store.conn)
+            .await
+            .unwrap()
+            .unwrap()
+            .into();
+    settled_turn.status = Set(TurnRunStatus::Cancelled.as_str().into());
+    settled_turn.finished_at = Set(Some(now));
+    settled_turn.update(&store.conn).await.unwrap();
+
+    let mut settled_run: crate::db::entities::agent_run::ActiveModel =
+        crate::db::entities::agent_run::Entity::find_by_id((child_id.0, chat.id.0, 1))
+            .one(&store.conn)
+            .await
+            .unwrap()
+            .unwrap()
+            .into();
+    settled_run.status = Set(AgentRunStatus::Cancelled.as_str().into());
+    settled_run.finished_at = Set(Some(now));
+    settled_run.update(&store.conn).await.unwrap();
+
+    assert!(store.count_active_work().await.unwrap().is_quiescent());
+}

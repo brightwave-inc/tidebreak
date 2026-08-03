@@ -39,6 +39,8 @@ export type AppContextValue = {
   commitRename: (chat: Chat) => void;
   cancelRename: () => void;
   updateState: DesktopUpdateState;
+  /** The most recent explicit update check confirmed the app is current. */
+  updateUpToDate: boolean;
   checkForUpdate: () => Promise<DesktopUpdateState>;
   restartForUpdate: () => Promise<void>;
 };

@@ -101,10 +101,12 @@ function AppearanceSection() {
 }
 
 function UpdatesSection() {
-  const { updateState, checkForUpdate, restartForUpdate } = useApp();
+  const { updateState, updateUpToDate, checkForUpdate, restartForUpdate } =
+    useApp();
   return (
     <UpdatesPanel
       state={updateState}
+      upToDate={updateUpToDate}
       onCheck={checkForUpdate}
       onRestart={restartForUpdate}
     />

@@ -229,9 +229,12 @@ pub fn run() {
             updater::check_for_update,
             updater::restart_for_update
         ])
+        .on_menu_event(|app, event| updater::handle_menu_event(app, event))
         .setup(move |app| {
             let handle = app.handle().clone();
             deep_link::install(&handle);
+            #[cfg(target_os = "macos")]
+            updater::install_update_menu(app)?;
             updater::spawn_update_loop(handle.clone());
             let data = data_dir(&handle)?;
             let home = home_dir(&handle)?;
