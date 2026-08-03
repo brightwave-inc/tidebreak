@@ -1385,22 +1385,69 @@ pub struct CreateChat {
     /// Optional project to file this chat under; omitted for a loose chat.
     #[serde(default)]
     pub project_id: Option<ProjectId>,
-    /// Optional model for this chat; omitted to use the configured default.
+    /// Optional model for this chat; omitted seeds the sticky default, else
+    /// the configured default.
     #[serde(default)]
     pub model: Option<String>,
     /// Optional reasoning-effort override for this chat; honored only by models
-    /// that expose the control.
+    /// that expose the control. Omitted seeds the sticky default.
     #[serde(default)]
     pub reasoning_effort: Option<ReasoningEffort>,
-    /// Optional permission mode for this chat; omitted means `ask`.
+    /// Optional permission mode for this chat; omitted seeds the sticky
+    /// default (clamped to any managed ceiling), else `ask`.
     #[serde(default)]
     pub permission_mode: Option<PermissionMode>,
     /// Code-execution network access for this conversation workspace.
+    /// Omitted seeds the sticky default, else no network.
     #[serde(default)]
-    pub network_policy: openwave_core::NetworkPolicy,
+    pub network_policy: Option<openwave_core::NetworkPolicy>,
+}
+
+/// Settings keys holding the sticky new-chat defaults: the reader's last
+/// explicit per-chat choice at these routes, replayed into the next chat.
+///
+/// Deployment-scoped like every other setting. `model` deliberately gets its
+/// own key rather than reusing the global `model` selection: seeding is a
+/// creation-time copy into the new chat, so picking a model in one chat never
+/// retargets existing chats that ride the configured default.
+const STICKY_MODEL_KEY: &str = "chat_default.model";
+const STICKY_REASONING_EFFORT_KEY: &str = "chat_default.reasoning_effort";
+const STICKY_PERMISSION_MODE_KEY: &str = "chat_default.permission_mode";
+const STICKY_NETWORK_POLICY_KEY: &str = "chat_default.network_policy";
+
+/// Read one sticky new-chat default. A stored value this build no longer
+/// recognizes reads as unset rather than failing the create.
+async fn read_sticky_default<T: serde::de::DeserializeOwned>(
+    store: &dyn Store,
+    key: &str,
+) -> openwave_core::Result<Option<T>> {
+    Ok(store
+        .get_setting(key)
+        .await?
+        .and_then(|value| serde_json::from_value(value).ok()))
+}
+
+/// Record (or clear, with `None`) one sticky new-chat default.
+async fn write_sticky_default<T: Serialize>(
+    store: &dyn Store,
+    key: &str,
+    value: Option<&T>,
+) -> Result<(), ServerError> {
+    let value = match value {
+        Some(value) => serde_json::to_value(value)
+            .map_err(|_| ServerError::internal("could not encode a sticky chat default"))?,
+        None => serde_json::Value::Null,
+    };
+    Ok(store.set_setting(key, &value).await?)
 }
 
 /// `POST /chats` — create a chat and return it (`201 Created`).
+///
+/// Fields the request leaves unspecified seed from the sticky defaults — the
+/// reader's last explicit choice at these same routes — so a new chat starts
+/// the way the reader configured the previous one instead of resetting to the
+/// hard defaults. A brand-new install has no sticky state and keeps today's
+/// defaults (`ask`, network off, configured model).
 pub async fn create_chat(
     State(state): State<AppState>,
     store: ScopedStore,
@@ -1415,15 +1462,57 @@ pub async fn create_chat(
         *model = validate_model_selection(&state, model, false).await?;
     }
     refuse_permission_mode_over_ceiling(&state, body.permission_mode).await?;
-    crate::code_execution::normalize_network_policy(&mut body.network_policy)?;
+    if let Some(policy) = body.network_policy.as_mut() {
+        crate::code_execution::normalize_network_policy(policy)?;
+    }
+    let model = match body.model {
+        Some(model) => Some(model),
+        // A sticky selection that no longer validates — deregistered model,
+        // disabled or uncredentialed provider — falls back to the configured
+        // default instead of failing the create or pinning a dead model.
+        None => match read_sticky_default::<String>(&*state.store, STICKY_MODEL_KEY).await? {
+            Some(sticky) => validate_model_selection(&state, &sticky, false).await.ok(),
+            None => None,
+        },
+    };
+    let reasoning_effort = match body.reasoning_effort {
+        Some(effort) => Some(effort),
+        None => read_sticky_default(&*state.store, STICKY_REASONING_EFFORT_KEY).await?,
+    };
+    let permission_mode = match body.permission_mode {
+        Some(mode) => Some(mode),
+        // The managed ceiling clamps a sticky mode recorded before the policy
+        // arrived: a remembered `allow` under an `ask` ceiling seeds `ask`,
+        // mirroring how the turn gate treats stored over-ceiling modes.
+        None => match read_sticky_default(&*state.store, STICKY_PERMISSION_MODE_KEY).await? {
+            Some(sticky) => crate::managed_policy::resolve(&*state.store, &*state.os_policy)
+                .await?
+                .clamp_permission_mode(Some(sticky)),
+            None => None,
+        },
+    };
+    let network_policy = match body.network_policy {
+        Some(policy) => policy,
+        None => {
+            let mut sticky = read_sticky_default(&*state.store, STICKY_NETWORK_POLICY_KEY)
+                .await?
+                .unwrap_or_default();
+            // Stored values were normalized at write; a stale one that no
+            // longer passes falls back to no network rather than failing.
+            if crate::code_execution::normalize_network_policy(&mut sticky).is_err() {
+                sticky = openwave_core::NetworkPolicy::default();
+            }
+            sticky
+        }
+    };
     let chat = Chat {
         id: ChatId::new(),
         project_id: body.project_id,
         title: normalize_chat_title(body.title)?,
-        model: body.model,
-        reasoning_effort: body.reasoning_effort,
-        permission_mode: body.permission_mode,
-        network_policy: body.network_policy,
+        model,
+        reasoning_effort,
+        permission_mode,
+        network_policy,
         attachment_revision: 0,
         root_attachments: Vec::new(),
         created_at: Utc::now(),
@@ -1491,6 +1580,21 @@ pub async fn patch_chat(
         .await?
     {
         return Err(ServerError::not_found(format!("chat {id} not found")));
+    }
+    // Each explicit choice here becomes the sticky default a new chat seeds
+    // from; an explicit clear (`null`) clears the sticky default the same way,
+    // back to the hard default. Recorded server-side so every client benefits.
+    if let Some(model) = &body.model {
+        write_sticky_default(&*state.store, STICKY_MODEL_KEY, model.as_ref()).await?;
+    }
+    if let Some(effort) = &body.reasoning_effort {
+        write_sticky_default(&*state.store, STICKY_REASONING_EFFORT_KEY, effort.as_ref()).await?;
+    }
+    if let Some(mode) = &body.permission_mode {
+        write_sticky_default(&*state.store, STICKY_PERMISSION_MODE_KEY, mode.as_ref()).await?;
+    }
+    if let Some(policy) = &body.network_policy {
+        write_sticky_default(&*state.store, STICKY_NETWORK_POLICY_KEY, Some(policy)).await?;
     }
     if let Some(title) = title {
         chat.title = title;
