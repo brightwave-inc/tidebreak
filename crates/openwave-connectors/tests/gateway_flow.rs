@@ -65,6 +65,11 @@ struct FakeGateway {
     corrupt_state: AtomicBool,
     /// Serve 404 for `/api/v1/cli/apps`, like a gateway that predates it.
     apps_unsupported: AtomicBool,
+    /// Attestation context ids observed on refresh grants, in order.
+    contexts_seen: Mutex<Vec<String>>,
+    /// Reject the next unseen attestation context with `invalid_target`,
+    /// like a context row pinned to a superseded session.
+    reject_next_context: AtomicBool,
 }
 
 impl FakeGateway {
@@ -171,6 +176,18 @@ async fn token(
             if form.get("client_name").map(String::as_str) != Some("openwave") {
                 return invalid_grant();
             }
+            // Context validation precedes refresh consumption, as on the real
+            // gateway: a rejected context aborts the grant without rotating.
+            if let Some(context) = form.get("attestation_context_id") {
+                if uuid::Uuid::parse_str(context).is_err() {
+                    return invalid_target();
+                }
+                let unseen = !gateway.contexts_seen.lock().unwrap().contains(context);
+                if unseen && gateway.reject_next_context.swap(false, Ordering::SeqCst) {
+                    return invalid_target();
+                }
+                gateway.contexts_seen.lock().unwrap().push(context.clone());
+            }
             let Some(refresh) = form.get("refresh_token") else {
                 return StatusCode::BAD_REQUEST.into_response();
             };
@@ -192,6 +209,17 @@ fn invalid_grant() -> Response {
     (
         StatusCode::BAD_REQUEST,
         Json(json!({"error": "invalid_grant"})),
+    )
+        .into_response()
+}
+
+fn invalid_target() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "error": "invalid_target",
+            "error_description": "The requested attestation context is unavailable.",
+        })),
     )
         .into_response()
 }
@@ -444,6 +472,99 @@ async fn sign_out_revokes_remotely_and_clears_the_vault() {
         .await
         .expect_err("signed-out connection must fail");
     assert!(is_sign_in_required(&error), "{error}");
+}
+
+#[tokio::test]
+async fn attested_tokens_share_a_context_per_key_and_cache_per_resource() {
+    let (gateway, connection) = signed_in_connection().await;
+    let exchanges = gateway.token_requests.load(Ordering::SeqCst);
+
+    // Two resources under one key ride the same client-minted context —
+    // the property that lets an attested endpoint match the tool call
+    // against the observation the same chat's inference recorded.
+    let llm = connection
+        .attested_access_token(RESOURCE_LLM, "chat-a")
+        .await
+        .unwrap();
+    let mcp = connection
+        .attested_mcp_access_token("primary", "chat-a")
+        .await
+        .unwrap();
+    assert_ne!(llm, mcp);
+    assert_eq!(gateway.token_requests.load(Ordering::SeqCst), exchanges + 2);
+
+    // Same key + resource is served from the in-memory cache.
+    assert_eq!(
+        connection
+            .attested_access_token(RESOURCE_LLM, "chat-a")
+            .await
+            .unwrap(),
+        llm
+    );
+    assert_eq!(gateway.token_requests.load(Ordering::SeqCst), exchanges + 2);
+
+    // A different key mints a different context.
+    connection
+        .attested_access_token(RESOURCE_LLM, "chat-b")
+        .await
+        .unwrap();
+    let contexts = gateway.contexts_seen.lock().unwrap().clone();
+    assert_eq!(contexts.len(), 3);
+    assert_eq!(contexts[0], contexts[1]);
+    assert_ne!(contexts[0], contexts[2]);
+
+    // Attested mints never landed in the persisted per-resource cache: a
+    // plain llm token still needs its own refresh, and that refresh works —
+    // proof the rotated refresh token was persisted by the attested path.
+    let count = gateway.token_requests.load(Ordering::SeqCst);
+    let plain = connection.access_token(RESOURCE_LLM).await.unwrap();
+    assert_ne!(plain, llm);
+    assert_eq!(gateway.token_requests.load(Ordering::SeqCst), count + 1);
+}
+
+#[tokio::test]
+async fn a_rejected_attestation_context_remints_under_a_fresh_id() {
+    let (gateway, connection) = signed_in_connection().await;
+    gateway.reject_next_context.store(true, Ordering::SeqCst);
+
+    // The first mint's context is refused (as a context pinned to a
+    // superseded session would be); the connection remints under a fresh
+    // id without surfacing an error or consuming the refresh token.
+    connection
+        .attested_access_token(RESOURCE_LLM, "chat-a")
+        .await
+        .unwrap();
+    assert_eq!(gateway.contexts_seen.lock().unwrap().len(), 1);
+
+    // The session survived the rejected grant.
+    connection.access_token(RESOURCE_CONTROL).await.unwrap();
+}
+
+#[tokio::test]
+async fn attested_state_resets_with_the_stored_session() {
+    let (gateway, connection) = signed_in_connection().await;
+    connection
+        .attested_access_token(RESOURCE_LLM, "chat-a")
+        .await
+        .unwrap();
+
+    // Sign in again: same user, same gateway, new session. The same chat
+    // must not reuse the old context id — the gateway pins contexts to the
+    // session they were first used with.
+    let pending = connection.auth().start_sign_in().await.unwrap();
+    let url = pending.authorization_url().to_string();
+    let finish = tokio::spawn(pending.finish(Duration::from_secs(5)));
+    browser().get(&url).send().await.unwrap();
+    let session = finish.await.unwrap().unwrap();
+    connection.store_session(&session).await.unwrap();
+
+    connection
+        .attested_access_token(RESOURCE_LLM, "chat-a")
+        .await
+        .unwrap();
+    let contexts = gateway.contexts_seen.lock().unwrap().clone();
+    assert_eq!(contexts.len(), 2);
+    assert_ne!(contexts[0], contexts[1]);
 }
 
 #[tokio::test]

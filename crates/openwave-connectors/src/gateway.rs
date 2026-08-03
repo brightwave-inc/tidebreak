@@ -7,7 +7,7 @@
 //! explicit installation pin so a swapped-out deployment behind the same URL
 //! is detected instead of silently trusted.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -356,11 +356,19 @@ impl GatewayAuth {
     /// Exchange the refresh token for a token bound to `resource`, rotating
     /// the refresh token. `invalid_grant` — an expired, revoked, or reused
     /// token — maps to a sign-in-required error.
+    ///
+    /// `attestation_context_id` is a client-minted UUID the gateway creates
+    /// on first use and pins to the session: an inference call with a token
+    /// minted inside a context records tool-call observations, and a
+    /// gateway-attested MCP endpoint only accepts calls whose token carries
+    /// the matching context. The gateway rejects a context pinned to another
+    /// session as `invalid_target`.
     pub async fn refresh(
         &self,
         refresh_token: &str,
         resource: &str,
         expected_installation: &str,
+        attestation_context_id: Option<&str>,
     ) -> Result<TokenSet> {
         let mut form: Vec<(&str, &str)> = vec![
             ("grant_type", "refresh_token"),
@@ -369,6 +377,9 @@ impl GatewayAuth {
         ];
         if let Some(client_name) = self.config.client_name.as_deref() {
             form.push(("client_name", client_name));
+        }
+        if let Some(context) = attestation_context_id {
+            form.push(("attestation_context_id", context));
         }
         let token = self.request_token(&form).await?;
         if token.resource != resource || token.installation_id != expected_installation {
@@ -481,6 +492,20 @@ impl GatewayAuth {
                 .is_some_and(|error| error.error == "invalid_grant")
             {
                 return Err(sign_in_required("the gateway session is no longer valid"));
+            }
+            // Kept distinguishable so an attested mint can tell a rejected
+            // context (remintable under a fresh id) from other failures.
+            if error
+                .as_ref()
+                .is_some_and(|error| error.error == "invalid_target")
+            {
+                let detail = error
+                    .and_then(|error| error.error_description)
+                    .unwrap_or_else(|| "the requested target is unavailable".to_string());
+                return Err(gateway_error(
+                    "token request",
+                    format!("invalid_target: {detail}"),
+                ));
             }
             let detail = error
                 .and_then(|error| error.error_description.or(Some(error.error)))
@@ -620,6 +645,29 @@ pub struct GatewayConnection {
     auth: GatewayAuth,
     vault: CredentialVault,
     token_motion: Mutex<()>,
+    /// Attestation contexts and the access tokens minted inside them.
+    /// Memory-only by design: context ids are pinned server-side to the
+    /// session they were first used with, so persisting them would carry
+    /// stale ids across sign-ins, and the tokens expire within minutes
+    /// anyway. Locked only while `token_motion` is held, so the two locks
+    /// have a fixed order.
+    attested: Mutex<AttestedTokens>,
+}
+
+/// The client-minted attestation context id for each caller key, plus the
+/// fresh access tokens minted inside each context, keyed by
+/// `(resource, context id)`.
+#[derive(Default)]
+struct AttestedTokens {
+    contexts: HashMap<String, String>,
+    tokens: HashMap<(String, String), CachedAccessToken>,
+}
+
+/// True when a token request failed because the gateway refused the
+/// requested target — for an attested mint, a context id pinned to a
+/// superseded session. Reminting under a fresh id recovers.
+fn is_attestation_context_rejected(error: &AgentError) -> bool {
+    matches!(error, AgentError::Config(message) if message.contains("invalid_target"))
 }
 
 impl GatewayConnection {
@@ -629,6 +677,7 @@ impl GatewayConnection {
             auth,
             vault,
             token_motion: Mutex::new(()),
+            attested: Mutex::new(AttestedTokens::default()),
         }
     }
 
@@ -647,6 +696,8 @@ impl GatewayConnection {
     /// state left to ever revoke it.
     pub async fn store_session(&self, session: &AuthorizedSession) -> Result<()> {
         let _guard = self.token_motion.lock().await;
+        // Attestation contexts are pinned to the session being replaced.
+        *self.attested.lock().await = AttestedTokens::default();
         // An unreadable stored blob is skipped, as in sign-out: it carries no
         // usable refresh token to revoke.
         if let Ok(Some(superseded)) = self.vault.load().await {
@@ -744,6 +795,7 @@ impl GatewayConnection {
                 &credentials.refresh_token,
                 resource,
                 &credentials.installation_id,
+                None,
             )
             .await?;
         credentials.refresh_token = token.refresh_token.clone();
@@ -757,6 +809,104 @@ impl GatewayConnection {
         );
         self.vault.save(&credentials).await?;
         Ok(token.access_token)
+    }
+
+    /// A fresh access token for `resource`, minted inside the attestation
+    /// context named by `context_key` — a caller-chosen stable key,
+    /// typically a chat id. Tokens for the same key share one gateway
+    /// context across resources; that shared context is what lets a
+    /// gateway-attested MCP endpoint match a tool call against the
+    /// observation recorded by the same chat's inference.
+    ///
+    /// The context id is a client-minted UUID the gateway creates on first
+    /// use and pins to the current session. The registry and the tokens
+    /// minted inside it live in memory only and reset when the stored
+    /// session changes; a context id somehow left over from a superseded
+    /// session is rejected by the gateway, and one remint under a fresh id
+    /// self-heals that without a sign-out.
+    pub async fn attested_access_token(&self, resource: &str, context_key: &str) -> Result<String> {
+        let _guard = self.token_motion.lock().await;
+        let Some(mut credentials) = self.vault.load().await? else {
+            return Err(sign_in_required("no gateway session is stored"));
+        };
+        if !self.matches_deployment(&credentials) {
+            return Err(sign_in_required(
+                "the stored gateway session belongs to a different gateway deployment",
+            ));
+        }
+        let mut attested = self.attested.lock().await;
+        attested.tokens.retain(|_, cached| cached.is_fresh());
+        let context = attested
+            .contexts
+            .entry(context_key.to_string())
+            .or_insert_with(|| uuid::Uuid::new_v4().to_string())
+            .clone();
+        if let Some(cached) = attested
+            .tokens
+            .get(&(resource.to_string(), context.clone()))
+        {
+            return Ok(cached.token.clone());
+        }
+        let (context, token) = match self
+            .mint_attested(&mut credentials, resource, &context)
+            .await
+        {
+            Ok(token) => (context, token),
+            Err(error) if is_attestation_context_rejected(&error) => {
+                let fresh = uuid::Uuid::new_v4().to_string();
+                attested.tokens.retain(|(_, held), _| held != &context);
+                attested
+                    .contexts
+                    .insert(context_key.to_string(), fresh.clone());
+                let token = self
+                    .mint_attested(&mut credentials, resource, &fresh)
+                    .await?;
+                (fresh, token)
+            }
+            Err(error) => return Err(error),
+        };
+        attested.tokens.insert(
+            (resource.to_string(), context),
+            CachedAccessToken {
+                token: token.access_token.clone(),
+                expires_at_unix: token.expires_at_unix,
+                scope: token.scope.clone(),
+            },
+        );
+        Ok(token.access_token)
+    }
+
+    /// A fresh access token bound to `mcp:<slug>` inside the attestation
+    /// context named by `context_key`; see [`Self::attested_access_token`].
+    pub async fn attested_mcp_access_token(&self, slug: &str, context_key: &str) -> Result<String> {
+        validate_mcp_endpoint_slug(slug)?;
+        self.attested_access_token(&format!("mcp:{slug}"), context_key)
+            .await
+    }
+
+    /// One rotating refresh bound to `resource` inside `context`. The
+    /// rotated refresh token is persisted; the minted access token is not —
+    /// attested tokens are per-context and expire within minutes, so
+    /// storing them would grow the keychain blob without ever serving a
+    /// future process.
+    async fn mint_attested(
+        &self,
+        credentials: &mut GatewayCredentials,
+        resource: &str,
+        context: &str,
+    ) -> Result<TokenSet> {
+        let token = self
+            .auth
+            .refresh(
+                &credentials.refresh_token,
+                resource,
+                &credentials.installation_id,
+                Some(context),
+            )
+            .await?;
+        credentials.refresh_token = token.refresh_token.clone();
+        self.vault.save(credentials).await?;
+        Ok(token)
     }
 
     /// Live identity check with a `control` token.
@@ -799,6 +949,7 @@ impl GatewayConnection {
     /// refresh-token expiry.
     pub async fn sign_out(&self) -> Result<()> {
         let _guard = self.token_motion.lock().await;
+        *self.attested.lock().await = AttestedTokens::default();
         if let Some(credentials) = self.vault.load().await? {
             self.revoke_stored(&credentials).await;
         }
