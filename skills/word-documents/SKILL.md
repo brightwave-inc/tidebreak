@@ -65,11 +65,16 @@ change it only when the user asks for a distinct document.
    to write is actually there (headings present, table dimensions right,
    no empty required sections). A file that fails to reopen is not a
    deliverable.
-2. When LibreOffice is available in the sandbox, render pages for a visual
-   check with the bundled helper:
+2. Render pages for a visual check with the bundled helper:
    `python3 .openwave/exec-scripts/render_office.py output/<file>.docx`
-   (images land in `preview/`; at most 3 are returned per exec call). If the
-   helper reports LibreOffice is missing, rely on the reopen check and say
-   the visual pass was not possible.
+   (images land in `preview/`; at most 3 are returned per exec call; the
+   renderer needs `pypdfium2` and `pillow`, installable with pip). The
+   helper converts through a sandbox LibreOffice when one exists; otherwise
+   it renders the PDF the host converts after every successful command that
+   saved the document — the workspace sync notes name it (under
+   `.openwave/render/`), and on a managed sandbox you must list that PDF in
+   the helper call's `files` to stage it in. Only when the sync notes say
+   office rendering is unavailable on the host, rely on the reopen check
+   and say the visual pass was not possible.
 
 Only declare the document done after validation passes.

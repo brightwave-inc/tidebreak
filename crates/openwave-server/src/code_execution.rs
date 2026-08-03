@@ -821,6 +821,9 @@ pub struct ConfiguredCodeExecutionProvider {
     /// without a restart. `None` disables user skills entirely.
     user_skills_dir: Option<PathBuf>,
     folder_grant_resolver: Option<Arc<dyn ExecFolderGrantResolver>>,
+    /// Host-provided office-to-PDF converter feeding the model's visual QA
+    /// loop. `None` (headless embeddings) degrades to an honest sync note.
+    office_converter: Option<Arc<dyn openwave_code_execution::HostOfficeConverter>>,
     /// Cross-process exclusion for the blobs a write-back snapshot publishes.
     blob_writes: Option<Arc<BlobWriteGuard>>,
     remote_sessions: RemoteSessionPool,
@@ -982,6 +985,7 @@ impl ConfiguredCodeExecutionProvider {
             skills: Arc::new(Vec::new()),
             user_skills_dir: None,
             folder_grant_resolver: None,
+            office_converter: None,
             blob_writes: None,
             remote_sessions: RemoteSessionPool::default(),
             write_overlays: Mutex::new(HashMap::new()),
@@ -1202,6 +1206,18 @@ impl ConfiguredCodeExecutionProvider {
         resolver: Option<Arc<dyn ExecFolderGrantResolver>>,
     ) -> Self {
         self.folder_grant_resolver = resolver;
+        self
+    }
+
+    /// Install the host office-to-PDF converter that renders office outputs
+    /// for the model's visual QA loop. Non-desktop embeddings leave this
+    /// absent and the render pass degrades to an honest note.
+    #[must_use]
+    pub fn with_office_converter(
+        mut self,
+        converter: Option<Arc<dyn openwave_code_execution::HostOfficeConverter>>,
+    ) -> Self {
+        self.office_converter = converter;
         self
     }
 
@@ -1704,6 +1720,18 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
             if let Some(inspector) = inspector {
                 response.sync_notes.extend(inspector.notes().await);
             }
+            // Local exec writes output/ directly into scratch; convert any
+            // office files there so the skill's visual QA loop has a PDF to
+            // render, exactly like the remote pull path below.
+            if response.exit_code == Some(0) && !response.timed_out {
+                response.sync_notes.extend(
+                    openwave_code_execution::render_office_outputs(
+                        self.office_converter.as_deref(),
+                        &host_dir,
+                    )
+                    .await,
+                );
+            }
             return Ok(response);
         };
         // A staging that fails outright fails the execution: a listed path
@@ -1726,6 +1754,19 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
             Err(error) => notes.push(format!(
                 "output files were not copied back to private scratch: {error}"
             )),
+        }
+        // The pull just landed any office outputs in host scratch; convert
+        // them there so the model can render page images next call. The
+        // sandbox itself has no LibreOffice — the host is where the converter
+        // lives, for every provider.
+        if response.exit_code == Some(0) && !response.timed_out {
+            notes.extend(
+                openwave_code_execution::render_office_outputs(
+                    self.office_converter.as_deref(),
+                    &host_dir,
+                )
+                .await,
+            );
         }
         // A failed command plus an empty or thin staged set usually means the
         // command's inputs were never listed; one bounded line points there.

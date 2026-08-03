@@ -18,6 +18,7 @@ mod http;
 mod local;
 #[cfg(target_os = "macos")]
 mod network;
+pub mod office_render;
 mod output;
 pub mod overlay;
 pub mod package_cache;
@@ -36,6 +37,9 @@ pub use host_paths::{
     ScratchDir, ScratchEntry, ScratchEntryKind, ScratchRefusal,
 };
 pub use local::LocalExecutionProvider;
+pub use office_render::{
+    render_office_outputs, HostOfficeConverter, OfficeConvertError, OFFICE_RENDER_DIR,
+};
 pub use overlay::{
     materialize_file, materialized_file_matches, sweep_abandoned_overlays,
     MaterializationPrecondition, MaterializedChange, MaterializedChangeKind, NativeTrash,
@@ -50,8 +54,8 @@ pub use preview::{scan_preview_directory, PreviewScan};
 pub use remote::RemoteSessionPool;
 pub use skills::{
     is_valid_skill_description, is_valid_skill_name, load_skills, merged_skills,
-    parse_skill_manifest, LoadedSkill, SkillOrigin, SkillPackage, SkillParseError, SKILLS_DIR,
-    SKILL_MANIFEST_FILE,
+    parse_skill_manifest, HostDep, LoadedSkill, SkillOrigin, SkillPackage, SkillParseError,
+    SKILLS_DIR, SKILL_MANIFEST_FILE,
 };
 pub use tool::{ExecTool, EXEC_TOOL_NAME};
 pub use types::{
