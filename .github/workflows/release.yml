@@ -552,7 +552,14 @@ jobs:
               bundle: {
                 targets: ["app", "dmg"],
                 macOS: { signingIdentity: process.env.APPLE_SIGNING_IDENTITY }
-              }
+              },
+              // Release bundles register only the real scheme. The dev scheme
+              // stays in tauri.conf.json for debug bundles, but a release
+              // binary refuses openwave-dev:// links by design — if its
+              // Info.plist also claimed the scheme, Launch Services would
+              // route dev pairing links to the installed app, which then
+              // drops them, shadowing whatever debug bundle should answer.
+              plugins: { "deep-link": { desktop: { schemes: ["openwave"] } } }
             }));
           '
 
