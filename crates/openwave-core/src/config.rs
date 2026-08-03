@@ -72,6 +72,13 @@ pub struct Config {
     /// `None` uses the server's documented placeholder image.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container_image: Option<String>,
+    /// Path to the self-host profile's static bearer-token file, mapping each
+    /// token to the user it authenticates (format documented in the server's
+    /// auth module). Consulted only by [`Profile::SelfHost`], which requires
+    /// it; the desktop profile authenticates with its per-launch bearer and
+    /// ignores this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_tokens_file: Option<PathBuf>,
 }
 
 impl Config {
@@ -86,6 +93,7 @@ impl Config {
             exec_skills_dir: None,
             container_execution_enabled: false,
             container_image: None,
+            auth_tokens_file: None,
         }
     }
 
@@ -93,14 +101,17 @@ impl Config {
     /// `OPENWAVE_PROFILE` (default `desktop`), `OPENWAVE_DATA_DIR` (default
     /// `./.openwave` under the current directory — desktop/CLI clients should set
     /// this to the platform's app-data location),
-    /// `OPENWAVE_CONTAINER_EXECUTION_ENABLED` (default `false`), and
-    /// `OPENWAVE_CONTAINER_IMAGE` (defaulting to the server's placeholder image).
+    /// `OPENWAVE_CONTAINER_EXECUTION_ENABLED` (default `false`),
+    /// `OPENWAVE_CONTAINER_IMAGE` (defaulting to the server's placeholder
+    /// image), and `OPENWAVE_AUTH_TOKENS_FILE` (self-host only; required
+    /// there).
     pub fn from_env() -> Result<Self> {
         Self::from_vars(
             std::env::var("OPENWAVE_PROFILE").ok(),
             std::env::var_os("OPENWAVE_DATA_DIR"),
             std::env::var("OPENWAVE_CONTAINER_EXECUTION_ENABLED").ok(),
             std::env::var("OPENWAVE_CONTAINER_IMAGE").ok(),
+            std::env::var_os("OPENWAVE_AUTH_TOKENS_FILE"),
         )
     }
 
@@ -116,6 +127,7 @@ impl Config {
         data_dir: Option<OsString>,
         container_execution_enabled: Option<String>,
         container_image: Option<String>,
+        auth_tokens_file: Option<OsString>,
     ) -> Result<Self> {
         let profile = match profile.filter(|value| !value.is_empty()).as_deref() {
             None | Some("desktop") => Profile::Desktop,
@@ -138,6 +150,9 @@ impl Config {
                 })?,
             };
         let container_image = container_image.filter(|value| !value.is_empty());
+        let auth_tokens_file = auth_tokens_file
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from);
         Ok(Self {
             profile,
             data_dir,
@@ -147,6 +162,7 @@ impl Config {
             exec_skills_dir: None,
             container_execution_enabled,
             container_image,
+            auth_tokens_file,
         })
     }
 
@@ -194,7 +210,7 @@ mod tests {
     fn empty_data_dir_var_falls_back_to_the_default() {
         // `OPENWAVE_DATA_DIR=` (set but empty) must behave like unset, not point
         // the store at `openwave.db` in the current directory.
-        let config = Config::from_vars(None, Some(OsString::new()), None, None).unwrap();
+        let config = Config::from_vars(None, Some(OsString::new()), None, None, None).unwrap();
         let expected = std::env::current_dir().unwrap().join(".openwave");
         assert_eq!(config.data_dir, expected);
         assert_eq!(config.profile, Profile::Desktop);
@@ -205,6 +221,7 @@ mod tests {
         let config = Config::from_vars(
             Some(String::new()),
             Some(OsString::from("/data")),
+            None,
             None,
             None,
         )
@@ -219,15 +236,20 @@ mod tests {
             Some(OsString::from("/data")),
             None,
             None,
+            Some(OsString::from("/etc/openwave/tokens")),
         )
         .unwrap();
         assert_eq!(config.profile, Profile::SelfHost);
         assert_eq!(config.data_dir, PathBuf::from("/data"));
+        assert_eq!(
+            config.auth_tokens_file,
+            Some(PathBuf::from("/etc/openwave/tokens"))
+        );
     }
 
     #[test]
     fn unknown_profile_var_is_an_error() {
-        assert!(Config::from_vars(Some("bogus".into()), None, None, None).is_err());
+        assert!(Config::from_vars(Some("bogus".into()), None, None, None, None).is_err());
     }
 
     #[test]
@@ -245,6 +267,7 @@ mod tests {
         assert_eq!(config.exec_skills_dir, None);
         assert!(!config.container_execution_enabled);
         assert_eq!(config.container_image, None);
+        assert_eq!(config.auth_tokens_file, None);
     }
 
     #[test]
@@ -262,6 +285,7 @@ mod tests {
             Some(OsString::from("/data")),
             Some("true".into()),
             Some("openwave-sandbox-agent:dev".into()),
+            None,
         )
         .unwrap();
         assert!(config.container_execution_enabled);
@@ -269,6 +293,6 @@ mod tests {
             config.container_image.as_deref(),
             Some("openwave-sandbox-agent:dev")
         );
-        assert!(Config::from_vars(None, None, Some("yes".into()), None).is_err());
+        assert!(Config::from_vars(None, None, Some("yes".into()), None, None).is_err());
     }
 }

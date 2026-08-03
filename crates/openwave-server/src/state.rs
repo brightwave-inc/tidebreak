@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use openwave_core::{
     AgentConfig, AgentError, AgentRunId, BlobStore, CallId, CancelToken, ChatId, Config,
-    FsBlobStore, Result, SecretProvider, SteerInbox, Store, ToolRegistry, TurnId,
+    FsBlobStore, Profile, Result, SecretProvider, SteerInbox, Store, ToolRegistry, TurnId,
 };
 use tokio::sync::{Notify, Semaphore};
 use uuid::Uuid;
@@ -71,7 +71,13 @@ pub struct AppState {
     /// Per-turn agent tuning (model, limits, …).
     pub agent_config: AgentConfig,
     /// The secret every request must present as `Authorization: Bearer <token>`.
+    /// Authenticates the local owner on the desktop profile; on self-host it
+    /// names nobody and admits nobody.
     pub token: Arc<str>,
+    /// The self-host profile's named bearer tokens (credential → user).
+    /// Loaded from `Config::auth_tokens_file` at assembly; empty on desktop,
+    /// where `require_token` never consults it.
+    pub(crate) principal_tokens: Arc<crate::auth::TokenMap>,
     /// A second per-launch secret required for native-only operations.
     pub(crate) client_executor_token: Arc<str>,
     /// Stable private identity owning native attachment reconciliation work.
@@ -112,7 +118,7 @@ impl AppState {
             agent_config,
             Uuid::new_v4(),
         )
-        .expect("a generated client executor id is non-nil");
+        .expect("state assembly with a generated executor id only fails on a self-host config whose token file is missing or invalid");
         state.root_attachment_routes_enabled = false;
         state
     }
@@ -132,6 +138,23 @@ impl AppState {
         if client_executor_id.is_nil() {
             return Err(AgentError::config("client executor id must not be nil"));
         }
+        // Resolve the profile's principal-naming credentials up front, so a
+        // self-host server that could authenticate nobody fails assembly
+        // instead of starting and rejecting every request.
+        let principal_tokens = match config.profile {
+            Profile::SelfHost => {
+                let path = config.auth_tokens_file.as_deref().ok_or_else(|| {
+                    AgentError::config(
+                        "self-host requires OPENWAVE_AUTH_TOKENS_FILE (named bearer tokens \
+                         mapping token to user; see the auth module docs)",
+                    )
+                })?;
+                Arc::new(crate::auth::TokenMap::load(path)?)
+            }
+            // Desktop (and any future single-user embedding) authenticates
+            // with the per-launch bearer only.
+            _ => Arc::default(),
+        };
         let blobs: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(config.data_dir.join("blobs")));
         let blob_writes = Arc::new(BlobWriteGuard::new(config.data_dir.join("blob-locks")));
         let os_policy: Arc<dyn crate::managed_policy::OsPolicySource> =
@@ -165,6 +188,7 @@ impl AppState {
             file_preview_permits: Arc::new(Semaphore::new(2)),
             agent_config,
             token: Uuid::new_v4().to_string().into(),
+            principal_tokens,
             client_executor_token: mint_client_executor_token(),
             client_executor_id,
             root_attachment_routes_enabled: true,
