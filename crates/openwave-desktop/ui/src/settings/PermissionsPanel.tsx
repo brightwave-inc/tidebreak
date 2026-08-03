@@ -7,7 +7,7 @@ import type {
   RendererToolName,
 } from "../api";
 import { useConfirm } from "../components/ConfirmDialog";
-import { listCapabilityConsents } from "../host";
+import { listCapabilityConsents, revokeCapabilityConsent } from "../host";
 import { Button } from "@/components/ui/button";
 import { SettingsError, SettingsPanel, SettingsSection } from "./primitives";
 
@@ -223,17 +223,9 @@ function StatementRow({
           </p>
         )}
       </div>
-      {statement.handle.kind === "tool_grant" ? (
-        <Button variant="ghost" size="sm" disabled={busy} onClick={onRevoke}>
-          Revoke
-        </Button>
-      ) : (
-        // Capability statements are not individually revocable yet; the
-        // Folders surface disconnects the whole folder. Read model first.
-        <span className="text-muted-foreground text-xs">
-          Managed with its folder
-        </span>
-      )}
+      <Button variant="ghost" size="sm" disabled={busy} onClick={onRevoke}>
+        Revoke
+      </Button>
     </div>
   );
 }
@@ -264,31 +256,36 @@ export function PermissionsPanel({ client }: { client: ApiClient }) {
   }, [reload]);
 
   async function revoke(statement: ConsentStatementSnapshot) {
-    if (statement.handle.kind !== "tool_grant") return;
-    const callId = statement.handle.call_id;
     const confirmed = await confirm({
       title: "Revoke this approval?",
-      description: `The agent will ask again before ${verbLabel(
-        statement.verb,
-      ).toLowerCase()} covered by “${resourceLabel(
-        statement,
-      )}” in ${levelLabel(statement).toLowerCase()}.`,
+      description:
+        statement.verb.kind === "capability" &&
+        statement.verb.capability === "read_files"
+          ? `The agent loses “${verbLabel(statement.verb).toLowerCase()}” for “${resourceLabel(
+              statement,
+            )}” in ${levelLabel(
+              statement,
+            ).toLowerCase()} — and command access to it, which depends on reading.`
+          : `The agent will ask again before ${verbLabel(
+              statement.verb,
+            ).toLowerCase()} covered by “${resourceLabel(
+              statement,
+            )}” in ${levelLabel(statement).toLowerCase()}.`,
       confirmLabel: "Revoke",
       destructive: true,
     });
     if (!confirmed) return;
     setBusyId(handleKey(statement));
     try {
-      await client.revokeStandingGrant(callId);
-      setStatements(
-        (current) =>
-          current?.filter(
-            (existing) =>
-              existing.handle.kind !== "tool_grant" ||
-              existing.handle.call_id !== callId,
-          ) ?? null,
-      );
-      setError(null);
+      if (statement.handle.kind === "tool_grant") {
+        await client.revokeStandingGrant(statement.handle.call_id);
+      } else {
+        await revokeCapabilityConsent(statement);
+      }
+      // Reload rather than filter locally: revoking a folder's read access
+      // also withdraws its dependent command access, and the list should show
+      // exactly what the broker now holds.
+      await reload();
     } catch {
       setError("The approval could not be revoked. Try again.");
     } finally {

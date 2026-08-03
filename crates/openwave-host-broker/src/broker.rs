@@ -39,10 +39,10 @@ use crate::{
         OperationRequest, OperationResponseEnvelope, OperationResult, PathRequest,
         ReadFileBinaryResult, ReadFileResult, RegisterRootReceipt, RegisterRootRequest,
         RegisterRootResult, ResolveExecRootsRequest, ResolvedExecRoot, Response, ResponseEnvelope,
-        RevokeRootRequest, RevokeRootResult, RootAccess, RootAttachmentMutationKind,
-        RootAttachmentMutationReceipt, RootAttachmentMutationRequest, RootAttachmentMutationResult,
-        RootSummary, WriteFileMode, WriteFileRequest, WriteFileResult, MAX_READ_FILE_BINARY_BYTES,
-        PROTOCOL_VERSION,
+        RevokeGrantRequest, RevokeGrantResult, RevokeRootRequest, RevokeRootResult, RootAccess,
+        RootAttachmentMutationKind, RootAttachmentMutationReceipt, RootAttachmentMutationRequest,
+        RootAttachmentMutationResult, RootSummary, WriteFileMode, WriteFileRequest,
+        WriteFileResult, MAX_READ_FILE_BINARY_BYTES, PROTOCOL_VERSION,
     },
     Capability, ConsentMethod, ConsentRecord, ExecutionContext, Grant, GrantError, GrantId,
     GrantSubject, OperationId, RelativePath, RequestId, RootAttachment, RootId, RootPolicy,
@@ -331,6 +331,8 @@ struct ControlAudit {
     operation: AuditOperation,
     operation_id: Option<OperationId>,
     target: AuditTarget,
+    /// Grant this request names directly, for single-grant revocation.
+    grant_id: Option<GrantId>,
     /// This request can change consent or host state, so its record must be
     /// durable before it runs.
     mutates: bool,
@@ -364,6 +366,7 @@ impl ControlAudit {
                 // user folder-aware execution while buying no coverage.
                 mutates: false,
                 operation: AuditOperation::ResolveExecRoots,
+                grant_id: None,
                 operation_id: None,
                 target: AuditTarget::Subject,
             }),
@@ -374,6 +377,7 @@ impl ControlAudit {
                 },
                 mutates: true,
                 operation: AuditOperation::RegisterRoot,
+                grant_id: None,
                 operation_id: Some(request.operation_id),
                 target: AuditTarget::selected_folder(&request.path),
             }),
@@ -384,6 +388,7 @@ impl ControlAudit {
                 },
                 mutates: false,
                 operation: AuditOperation::LookupRegisterRootReceipt,
+                grant_id: None,
                 operation_id: Some(request.operation_id),
                 target: AuditTarget::Subject,
             }),
@@ -394,6 +399,7 @@ impl ControlAudit {
                 },
                 mutates: true,
                 operation: AuditOperation::AttachRoot,
+                grant_id: None,
                 operation_id: Some(request.operation_id),
                 target: AuditTarget::Root {
                     root_id: request.root_id,
@@ -406,6 +412,7 @@ impl ControlAudit {
                 },
                 mutates: true,
                 operation: AuditOperation::DetachRoot,
+                grant_id: None,
                 operation_id: Some(request.operation_id),
                 target: AuditTarget::Root {
                     root_id: request.root_id,
@@ -418,6 +425,7 @@ impl ControlAudit {
                 },
                 mutates: false,
                 operation: AuditOperation::LookupRootAttachmentReceipt,
+                grant_id: None,
                 operation_id: Some(request.operation_id),
                 target: AuditTarget::Root {
                     root_id: request.root_id,
@@ -430,10 +438,24 @@ impl ControlAudit {
                 },
                 mutates: true,
                 operation: AuditOperation::RevokeRoot,
+                grant_id: None,
                 operation_id: Some(request.operation_id),
                 target: AuditTarget::Root {
                     root_id: request.root_id,
                 },
+            }),
+            ControlRequest::RevokeGrant(request) => Some(Self {
+                actor: AuditActor::Control {
+                    subject: request.subject,
+                    conversation_id: None,
+                },
+                mutates: true,
+                operation: AuditOperation::RevokeGrant,
+                grant_id: Some(request.grant_id),
+                // Naturally idempotent: the grant id names the exact row, so
+                // there is no separate mutation identity to correlate.
+                operation_id: None,
+                target: AuditTarget::Subject,
             }),
         }
     }
@@ -449,7 +471,7 @@ impl ControlAudit {
             target: self.target.clone(),
             outcome: AuditOutcome::Attempted,
             capability: None,
-            grant_id: None,
+            grant_id: self.grant_id,
             error_code: None,
             item_count: None,
             bytes: None,
@@ -645,7 +667,7 @@ impl Controller {
             target: metadata.target,
             outcome: audit_outcome(error),
             capability: None,
-            grant_id: None,
+            grant_id: metadata.grant_id,
             error_code: error.map(|error| error.code),
             item_count: None,
             bytes: None,
@@ -692,6 +714,9 @@ impl Controller {
                 .map(ControlResult::LookupRootAttachmentReceipt),
             ControlRequest::RevokeRoot(request) => {
                 self.revoke_root(request).map(ControlResult::RevokeRoot)
+            }
+            ControlRequest::RevokeGrant(request) => {
+                self.revoke_grant(request).map(ControlResult::RevokeGrant)
             }
         }
     }
@@ -1036,6 +1061,31 @@ impl Controller {
         self.commit_state(&mut state, next)
             .map_err(error_response)?;
         result
+    }
+
+    /// Withdraw one capability grant, live or dormant.
+    ///
+    /// Deriving the boundary from statements means the rows `authorize()`
+    /// consults are exactly the rows the consent surface shows, so a
+    /// statement-level "revoke" is a plain removal of that row — with one
+    /// dependency kept honest: exec reach is only ever additional on top of
+    /// read, so revoking a folder's `ReadFiles` takes its `ExecuteCommands`
+    /// with it, while revoking exec alone leaves the folder readable.
+    fn revoke_grant(
+        &self,
+        request: RevokeGrantRequest,
+    ) -> Result<RevokeGrantResult, ErrorResponse> {
+        let mut state = self.lock_state().map_err(error_response)?;
+        let mut next = state.clone();
+        let revoked = remove_grant_statement(&mut next.grants, request.subject, request.grant_id)
+            || next.unavailable.iter_mut().any(|root| {
+                remove_grant_statement(&mut root.grants, request.subject, request.grant_id)
+            });
+        if revoked {
+            self.commit_state(&mut state, next)
+                .map_err(error_response)?;
+        }
+        Ok(RevokeGrantResult { revoked })
     }
 
     fn commit_state(
@@ -2072,6 +2122,48 @@ fn subject_has_root_grant(state: &State, subject: GrantSubject, root_id: RootId)
             && grant.capability() == Capability::ReadFiles
             && matches!(grant.scope(), Scope::Root { root_id: granted } if *granted == root_id)
     })
+}
+
+/// Remove one grant (and what depends on it) from a grant table.
+///
+/// `false` when no grant with this identity belongs to `subject` — a
+/// mismatched subject is indistinguishable from an absent grant, so the
+/// caller cannot probe another subject's rows. When the removed grant is a
+/// folder's `ReadFiles`, that folder's `ExecuteCommands` grants for the same
+/// subject go with it: exec reach is only ever additional on top of read.
+fn remove_grant_statement(
+    grants: &mut Vec<Grant>,
+    subject: GrantSubject,
+    grant_id: GrantId,
+) -> bool {
+    let Some(index) = grants
+        .iter()
+        .position(|grant| grant.id() == grant_id && grant.subject() == subject)
+    else {
+        return false;
+    };
+    let removed = grants.remove(index);
+    if removed.capability() == Capability::ReadFiles {
+        if let Scope::Root { root_id } | Scope::PathSubtree { root_id, .. } = *removed.scope() {
+            let still_readable = grants.iter().any(|grant| {
+                grant.subject() == subject
+                    && grant.capability() == Capability::ReadFiles
+                    && matches!(
+                        *grant.scope(),
+                        Scope::Root { root_id: granted } | Scope::PathSubtree { root_id: granted, .. }
+                            if granted == root_id
+                    )
+            });
+            if !still_readable {
+                grants.retain(|grant| {
+                    !(grant.subject() == subject
+                        && grant.capability() == Capability::ExecuteCommands
+                        && matches!(*grant.scope(), Scope::Root { root_id: granted } if granted == root_id))
+                });
+            }
+        }
+    }
+    true
 }
 
 fn ensure_subject_grants(

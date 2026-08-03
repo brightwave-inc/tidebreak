@@ -8,7 +8,10 @@ import { PermissionsPanel } from "./PermissionsPanel";
 const listCapabilityConsents = vi.hoisted(() =>
   vi.fn<() => Promise<ConsentStatementSnapshot[]>>(),
 );
-vi.mock("../host", () => ({ listCapabilityConsents }));
+const revokeCapabilityConsent = vi.hoisted(() =>
+  vi.fn<() => Promise<boolean>>(),
+);
+vi.mock("../host", () => ({ listCapabilityConsents, revokeCapabilityConsent }));
 
 const execStatement: ConsentStatementSnapshot = {
   handle: {
@@ -62,7 +65,15 @@ afterEach(() => {
 
 describe("PermissionsPanel", () => {
   it("revokes a tool grant after confirmation and drops the row", async () => {
-    const client = api();
+    const listConsentStatements = vi.fn().mockResolvedValue([execStatement]);
+    const client = api({
+      listConsentStatements,
+      revokeStandingGrant: vi.fn().mockImplementation(() => {
+        // The reload after a revocation reads back what the server now holds.
+        listConsentStatements.mockResolvedValue([]);
+        return Promise.resolve(undefined);
+      }),
+    });
     render(<PermissionsPanel client={client} />);
 
     // The statement renders under its chat, worded as the width of the consent.
@@ -85,20 +96,39 @@ describe("PermissionsPanel", () => {
     );
   });
 
-  it("renders a broker capability grant beside tool grants, without a revoke control", async () => {
+  it("revokes a broker capability grant through the host and reloads the list", async () => {
     listCapabilityConsents.mockResolvedValue([folderWriteStatement]);
+    revokeCapabilityConsent.mockImplementation(() => {
+      // The reloaded list is what the broker now holds.
+      listCapabilityConsents.mockResolvedValue([]);
+      return Promise.resolve(true);
+    });
     const client = api();
     render(<PermissionsPanel client={client} />);
 
-    // Both halves of the read model land in the same chat group: the folder
-    // by its safe display name with its capability verb and picker
-    // provenance, and only the tool grant offers revocation here.
+    // Both halves of the read model land in the same chat group, and both
+    // offer the same revocation control.
     await screen.findByText("Documents");
     screen.getByText("cargo …");
     screen.getByText("Write files");
     screen.getByText(/with the folder picker/);
-    screen.getByText("Managed with its folder");
-    expect(screen.getAllByRole("button", { name: "Revoke" })).toHaveLength(1);
+    const revokes = screen.getAllByRole("button", { name: "Revoke" });
+    expect(revokes).toHaveLength(2);
+
+    // The capability row is listed after the tool grant in its group.
+    await userEvent.click(revokes[1]);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Revoke", hidden: false }),
+    );
+    await waitFor(() =>
+      expect(revokeCapabilityConsent).toHaveBeenCalledWith(
+        folderWriteStatement,
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.queryByText("Documents")).not.toBeInTheDocument(),
+    );
+    expect(client.revokeStandingGrant).not.toHaveBeenCalled();
   });
 
   it("names a project statement as reaching past the chat that made it", async () => {

@@ -470,6 +470,48 @@ async fn capability_statement(
     })
 }
 
+/// One statement-level revocation, named exactly as the consent surface
+/// listed it: the broker's stable grant identity plus the level the statement
+/// reaches, from which the owning subject is rebuilt.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RevokeCapabilityConsentRequest {
+    grant_id: openwave_host_broker::GrantId,
+    level: openwave_core::GrantLevel,
+}
+
+/// Withdraw one host-broker capability grant from the Permissions surface.
+///
+/// The subject is derived from the statement's level rather than looked up:
+/// a grant whose chat or project was deleted still conveys authority, and the
+/// consent surface exists precisely so such a statement can be withdrawn. A
+/// mismatched level revokes nothing and reports `false`.
+#[tauri::command]
+pub(crate) async fn revoke_capability_consent(
+    state: State<'_, HostAccess>,
+    request: RevokeCapabilityConsentRequest,
+) -> Result<bool, String> {
+    let subject = match request.level {
+        openwave_core::GrantLevel::Chat { chat_id } => GrantSubject::conversation(chat_id.0),
+        openwave_core::GrantLevel::Project { project_id } => GrantSubject::project(project_id.0),
+    }
+    .map_err(|_| "invalid consent statement".to_owned())?;
+    let result = state
+        .broker
+        .control(ControlRequest::RevokeGrant(
+            openwave_host_broker::RevokeGrantRequest {
+                subject,
+                grant_id: request.grant_id,
+            },
+        ))
+        .await
+        .map_err(|error| error.to_string())?;
+    let ControlResult::RevokeGrant(result) = result else {
+        return Err("host broker returned an unexpected response".to_owned());
+    };
+    Ok(result.revoked)
+}
+
 #[tauri::command]
 pub(crate) async fn connect_approved_folder(
     app: AppHandle,

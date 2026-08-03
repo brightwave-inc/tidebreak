@@ -54,6 +54,26 @@ export function listCapabilityConsents(): Promise<ConsentStatementSnapshot[]> {
   return invoke("list_capability_consents");
 }
 
+/**
+ * Withdraw one host-broker capability grant by the statement that names it.
+ * Returns whether anything was revoked; `false` means the grant was already
+ * gone. Resolving `false` outside the native host keeps a stray browser call
+ * from claiming a revocation nothing performed.
+ */
+export function revokeCapabilityConsent(
+  statement: ConsentStatementSnapshot,
+): Promise<boolean> {
+  if (!isTauri() || statement.handle.kind !== "capability_grant") {
+    return Promise.resolve(false);
+  }
+  return invoke("revoke_capability_consent", {
+    request: {
+      grantId: statement.handle.grant_id,
+      level: statement.level,
+    },
+  });
+}
+
 export function connectFolder(chat: Chat): Promise<ConnectedFolder | null> {
   return invoke("connect_folder", {
     request: { chatId: chat.id },

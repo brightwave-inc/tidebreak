@@ -226,6 +226,7 @@ pub fn run() {
             host_access::connect_approved_folder,
             host_access::list_approved_folders,
             host_access::list_capability_consents,
+            host_access::revoke_capability_consent,
             host_access::list_connected_folders,
             host_access::disconnect_folder,
             updater::desktop_update_state,
