@@ -82,6 +82,17 @@ pub struct Config {
 }
 
 impl Config {
+    /// The per-install directory user-authored skill packages are read from.
+    ///
+    /// Derived from [`Config::data_dir`] rather than configured separately:
+    /// every embedding has a data directory, and keeping user skills beside
+    /// the rest of the app's data makes them one readable, editable,
+    /// shareable tree (`{data_dir}/skills/<name>/SKILL.md`).
+    #[must_use]
+    pub fn user_skills_dir(&self) -> PathBuf {
+        self.data_dir.join("skills")
+    }
+
     /// A desktop-profile config rooted at `data_dir`.
     pub fn desktop(data_dir: impl Into<PathBuf>) -> Self {
         Self {

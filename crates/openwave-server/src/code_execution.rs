@@ -776,7 +776,11 @@ pub struct ConfiguredCodeExecutionProvider {
     document_scripts_source: Option<PathBuf>,
     /// Built-in skills validated once at configuration and staged into every
     /// exec workspace; the prompt catalog is derived from the same load.
-    skills: Arc<Vec<openwave_code_execution::BuiltinSkill>>,
+    skills: Arc<Vec<openwave_code_execution::LoadedSkill>>,
+    /// Per-install directory of user-authored skill packages, re-read at each
+    /// staging so an added or edited skill is picked up on the next turn
+    /// without a restart. `None` disables user skills entirely.
+    user_skills_dir: Option<PathBuf>,
     folder_grant_resolver: Option<Arc<dyn ExecFolderGrantResolver>>,
     /// Cross-process exclusion for the blobs a write-back snapshot publishes.
     blob_writes: Option<Arc<BlobWriteGuard>>,
@@ -937,6 +941,7 @@ impl ConfiguredCodeExecutionProvider {
             scratch_root: scratch_root.into(),
             document_scripts_source: None,
             skills: Arc::new(Vec::new()),
+            user_skills_dir: None,
             folder_grant_resolver: None,
             blob_writes: None,
             remote_sessions: RemoteSessionPool::default(),
@@ -979,17 +984,49 @@ impl ConfiguredCodeExecutionProvider {
         self.skills = Arc::new(
             source
                 .as_deref()
-                .map(openwave_code_execution::load_builtin_skills)
+                .map(|source| {
+                    openwave_code_execution::load_skills(
+                        source,
+                        openwave_code_execution::SkillOrigin::Builtin,
+                    )
+                })
                 .unwrap_or_default(),
         );
         self
     }
 
+    /// Install the per-install directory user-authored skill packages are
+    /// loaded from. The directory is created here (best effort) so the user
+    /// has a place to drop a skill; its contents are re-read at each staging,
+    /// so a new or edited skill takes effect on the next turn.
+    #[must_use]
+    pub fn with_user_skills(mut self, source: Option<PathBuf>) -> Self {
+        if let Some(source) = source.as_deref() {
+            if let Err(error) = std::fs::create_dir_all(source) {
+                tracing::warn!(
+                    "user skills directory {} could not be created: {error}",
+                    source.display()
+                );
+            }
+        }
+        self.user_skills_dir = source;
+        self
+    }
+
+    /// The built-in skills merged with a fresh read of the user skills
+    /// directory. Built-ins were validated once at configuration; user
+    /// packages go through the same strict loader here, so one staging and
+    /// the catalog derived from it always agree. The read is a handful of
+    /// small files at most.
+    fn current_skills(&self) -> Vec<openwave_code_execution::LoadedSkill> {
+        openwave_code_execution::merged_skills(&self.skills, self.user_skills_dir.as_deref())
+    }
+
     /// The host-derived (name, description) catalog for prompt composition.
     pub(crate) fn skill_catalog(&self) -> Vec<openwave_code_execution::SkillPackage> {
-        self.skills
-            .iter()
-            .map(|skill| skill.package.clone())
+        self.current_skills()
+            .into_iter()
+            .map(|skill| skill.package)
             .collect()
     }
 
@@ -1004,7 +1041,8 @@ impl ConfiguredCodeExecutionProvider {
     /// `execute` re-prepares (with the provider-correct mirroring flag)
     /// before any command runs.
     pub(crate) async fn stage_turn_workspace(&self, chat_id: ChatId) {
-        if self.skills.is_empty() {
+        let skills = self.current_skills();
+        if skills.is_empty() {
             return;
         }
         let host_dir = self.scratch_root.join(chat_id.to_string());
@@ -1012,7 +1050,7 @@ impl ConfiguredCodeExecutionProvider {
             &host_dir,
             false,
             self.document_scripts_source.as_deref(),
-            &self.skills,
+            &skills,
         )
         .await
         {
@@ -1070,6 +1108,9 @@ impl ConfiguredCodeExecutionProvider {
     /// dependencies, spawned once per process when a networked local exec
     /// shows the cache could be used. Failure clears the latch so a later
     /// exec retries; conversations keep their network install path either way.
+    /// User-authored skills are deliberately excluded: the pass runs once,
+    /// user pins change under it, and their installs use the ordinary
+    /// networked path like any other package.
     fn spawn_package_cache_population(&self, cache: SharedPackageCache) {
         use std::sync::atomic::Ordering;
         let pin_sets = self
@@ -1578,11 +1619,12 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
             request = request.with_folder_grants(grants)?;
         }
         let host_dir = self.scratch_root.join(request.workspace_id.as_str());
+        let skills = self.current_skills();
         prepare_execution_directories(
             &host_dir,
             kind != CodeExecutionProviderKind::Local,
             self.document_scripts_source.as_deref(),
-            &self.skills,
+            &skills,
         )
         .await?;
         if let Some(blobs) = self.blobs.as_deref() {
@@ -1628,10 +1670,8 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
         // workspace would otherwise surface as a baffling not-found inside the
         // sandbox. Entries a listed directory had to leave behind individually
         // ride along as notes instead.
-        let mut staged_paths = implicit_staged_paths(
-            self.document_scripts_source.is_some(),
-            !self.skills.is_empty(),
-        );
+        let mut staged_paths =
+            implicit_staged_paths(self.document_scripts_source.is_some(), !skills.is_empty());
         staged_paths.extend(request.files.iter().cloned());
         let mut notes =
             sync::stage_listed_paths(lifecycle, &request.workspace_id, &host_dir, &staged_paths)
@@ -1879,7 +1919,7 @@ async fn prepare_execution_directories(
     host_dir: &std::path::Path,
     mirrored: bool,
     document_scripts_source: Option<&std::path::Path>,
-    skills: &[openwave_code_execution::BuiltinSkill],
+    skills: &[openwave_code_execution::LoadedSkill],
 ) -> std::result::Result<(), CodeExecutionError> {
     // The scratch directory itself is host-owned and named after the chat, but
     // everything inside it is writable by local exec, which can plant
@@ -1917,14 +1957,15 @@ async fn prepare_execution_directories(
     Ok(())
 }
 
-/// Stage the validated built-in skills into `.openwave/skills/<name>/`.
+/// Stage the validated skills (built-in and user-authored) into
+/// `.openwave/skills/<name>/`.
 ///
 /// Each destination is resolved a component at a time for the same reason the
 /// helper install is: `.openwave/` is writable by local exec, so a planted
 /// symlink must not relocate the staged files. Content was validated at
 /// configuration; a failure here means the workspace itself is unusable.
 async fn install_skills(
-    skills: &[openwave_code_execution::BuiltinSkill],
+    skills: &[openwave_code_execution::LoadedSkill],
     host_dir: &std::path::Path,
 ) -> std::result::Result<(), CodeExecutionError> {
     for skill in skills {
@@ -1945,9 +1986,7 @@ async fn install_skills(
             )
             .await
             .map_err(|_| {
-                CodeExecutionError::Sandbox(format!(
-                    "bundled skill '{name}' could not be installed"
-                ))
+                CodeExecutionError::Sandbox(format!("skill '{name}' could not be installed"))
             })?;
     }
     Ok(())
@@ -2491,11 +2530,12 @@ mod tests {
             std::fs::write(source.path().join(name), format!("helper:{name}")).unwrap();
         }
 
-        let skill = openwave_code_execution::BuiltinSkill {
+        let skill = openwave_code_execution::LoadedSkill {
             package: openwave_code_execution::SkillPackage {
                 name: "pdf-documents".into(),
                 description: "Produce PDFs.".into(),
                 python_deps: vec!["fpdf2==2.8.3".into()],
+                origin: openwave_code_execution::SkillOrigin::Builtin,
             },
             manifest: "---\nname: pdf-documents\n---\nbody".into(),
         };
@@ -2554,7 +2594,8 @@ mod tests {
             Arc::new(NoSecrets),
             scratch_root.path(),
         )
-        .with_skills(Some(source.path().to_owned()));
+        .with_skills(Some(source.path().to_owned()))
+        .with_user_skills(Some(scratch_root.path().join("user-skills")));
         let chat_id = ChatId::new();
 
         provider.stage_turn_workspace(chat_id).await;
@@ -2570,6 +2611,45 @@ mod tests {
         // Idempotent: the first exec re-prepares the same tree.
         provider.stage_turn_workspace(chat_id).await;
         assert_eq!(std::fs::read_to_string(&staged).unwrap(), manifest);
+
+        // A skill the user drops in after configuration is picked up by the
+        // next staging without a restart, and the catalog attributes it.
+        let user_manifest = "---\nname: meeting-notes\ndescription: My way.\n---\nBody.\n";
+        let user_skill = scratch_root
+            .path()
+            .join("user-skills")
+            .join("meeting-notes");
+        std::fs::create_dir_all(&user_skill).unwrap();
+        std::fs::write(
+            user_skill.join(openwave_code_execution::SKILL_MANIFEST_FILE),
+            user_manifest,
+        )
+        .unwrap();
+        provider.stage_turn_workspace(chat_id).await;
+        let staged_user = scratch_root
+            .path()
+            .join(chat_id.to_string())
+            .join(openwave_code_execution::SKILLS_DIR)
+            .join("meeting-notes")
+            .join(openwave_code_execution::SKILL_MANIFEST_FILE);
+        assert_eq!(
+            std::fs::read_to_string(&staged_user).unwrap(),
+            user_manifest
+        );
+        assert_eq!(
+            provider
+                .skill_catalog()
+                .iter()
+                .map(|skill| (skill.name.as_str(), skill.origin))
+                .collect::<Vec<_>>(),
+            [
+                ("meeting-notes", openwave_code_execution::SkillOrigin::User),
+                (
+                    "presentations",
+                    openwave_code_execution::SkillOrigin::Builtin
+                ),
+            ]
+        );
 
         // A skill-less configuration (headless embeddings) stages nothing.
         let bare =
@@ -2591,11 +2671,12 @@ mod tests {
         }
         let workspace = tempfile::tempdir().unwrap();
 
-        let skill = openwave_code_execution::BuiltinSkill {
+        let skill = openwave_code_execution::LoadedSkill {
             package: openwave_code_execution::SkillPackage {
                 name: "pdf-documents".into(),
                 description: "Produce PDFs.".into(),
                 python_deps: Vec::new(),
+                origin: openwave_code_execution::SkillOrigin::Builtin,
             },
             manifest: "---\nname: pdf-documents\n---\nbody".into(),
         };
