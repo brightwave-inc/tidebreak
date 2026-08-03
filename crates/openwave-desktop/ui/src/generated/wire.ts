@@ -1367,14 +1367,18 @@ start_published_at: string | null,
 /**
  * Latest publication date the search will accept.
  */
-end_published_at: string | null, } | { "tool": "web_extract", url: string, };
+end_published_at: string | null, } | { "tool": "web_extract", url: string, } | { "tool": "write_file", 
+/**
+ * Workspace-relative destination path, never a host path.
+ */
+path: string, };
 
 /**
  * Closed immutable consent semantics stored with each approval request.
  *
  * Each presentable variant names the egress a human is consenting to, so the
  * renderer can describe the action without ever seeing the model-authored
- * summary or arguments. `Unsupported` is the fail-closed default: a Sensitive
+ * arguments. `Unsupported` is the fail-closed default: a Sensitive
  * action the server can only reject, never approve.
  */
 export type ToolApprovalKind = "search_may_share_query_and_excerpts" | "web_search_may_share_query" | "web_extract_may_fetch_url" | "exec_may_run_networked_command" | "external_mcp_may_call_server" | "workspace_may_modify_files" | "unsupported";
