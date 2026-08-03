@@ -135,14 +135,17 @@ fn exec_scripts_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(directory)
 }
 
+/// The document skills every packaged build must carry; boot fails without
+/// them, and the bundle test below pins the resource map that ships them.
+const REQUIRED_SKILLS: [&str; 5] = [
+    "charts",
+    "pdf-documents",
+    "presentations",
+    "spreadsheets",
+    "word-documents",
+];
+
 fn exec_skills_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    const REQUIRED_SKILLS: [&str; 5] = [
-        "charts",
-        "pdf-documents",
-        "presentations",
-        "spreadsheets",
-        "word-documents",
-    ];
     let directory = app
         .path()
         .resource_dir()
@@ -360,6 +363,39 @@ async fn boot_server(
         .await;
     });
     server.serve().await.map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod bundle_tests {
+    use super::REQUIRED_SKILLS;
+
+    /// Packaged-style skill resolution, pinned at test time: the
+    /// `tauri.conf.json` resource map must stage a skills tree into the app
+    /// bundle, and that tree must yield every skill `exec_skills_dir`
+    /// requires. Dropping the resource line or breaking a manifest would
+    /// otherwise surface only as a packaged-app boot failure.
+    #[test]
+    fn bundled_resources_carry_all_required_skills() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let conf: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(manifest_dir.join("tauri.conf.json")).unwrap(),
+        )
+        .unwrap();
+        let source = conf["bundle"]["resources"]
+            .as_object()
+            .expect("tauri.conf.json maps bundle resources")
+            .iter()
+            .find_map(|(source, target)| {
+                (target.as_str() == Some("skills/")).then(|| source.clone())
+            })
+            .expect("tauri.conf.json bundles a skills/ resource");
+        let skills = openwave_code_execution::load_builtin_skills(&manifest_dir.join(source));
+        let names: Vec<&str> = skills
+            .iter()
+            .map(|skill| skill.package.name.as_str())
+            .collect();
+        assert_eq!(names, REQUIRED_SKILLS);
+    }
 }
 
 #[cfg(test)]

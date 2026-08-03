@@ -993,6 +993,33 @@ impl ConfiguredCodeExecutionProvider {
             .collect()
     }
 
+    /// Stage the chat's workspace at turn start, before the model runs.
+    ///
+    /// The operating prompt tells the model to `read_file` a skill's
+    /// `SKILL.md` *before* producing that kind of document, so the staging
+    /// that `execute` performs on the first command comes strictly too late:
+    /// the read races ahead of any exec and finds nothing. This runs the same
+    /// idempotent preparation when the turn surface is composed. Best-effort
+    /// on purpose — prompt enrichment is not an authority boundary, and
+    /// `execute` re-prepares (with the provider-correct mirroring flag)
+    /// before any command runs.
+    pub(crate) async fn stage_turn_workspace(&self, chat_id: ChatId) {
+        if self.skills.is_empty() {
+            return;
+        }
+        let host_dir = self.scratch_root.join(chat_id.to_string());
+        if let Err(error) = prepare_execution_directories(
+            &host_dir,
+            false,
+            self.document_scripts_source.as_deref(),
+            &self.skills,
+        )
+        .await
+        {
+            tracing::warn!("turn-start workspace staging failed for chat {chat_id}: {error}");
+        }
+    }
+
     /// The shared package cache keyspace for the local sandbox interpreter.
     ///
     /// The wheel-compatibility runtime key is probed from the same interpreter
@@ -2499,10 +2526,62 @@ mod tests {
         );
     }
 
+    /// Turn-start staging pins the contract the prompt catalog relies on:
+    /// every advertised skill's `SKILL.md` is readable in the chat's private
+    /// scratch — the directory the `read_file` surface resolves against —
+    /// before any exec has run.
+    #[tokio::test]
+    async fn turn_start_staging_makes_skills_readable_before_any_exec() {
+        let (store, _database) = test_store().await;
+        let store = Arc::new(store);
+        let scratch_root = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let manifest = "---\n\
+            name: presentations\n\
+            description: Create PowerPoint decks.\n\
+            ---\n\
+            Body.\n";
+        let skill_dir = source.path().join("presentations");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join(openwave_code_execution::SKILL_MANIFEST_FILE),
+            manifest,
+        )
+        .unwrap();
+
+        let provider = ConfiguredCodeExecutionProvider::new(
+            store.clone(),
+            Arc::new(NoSecrets),
+            scratch_root.path(),
+        )
+        .with_skills(Some(source.path().to_owned()));
+        let chat_id = ChatId::new();
+
+        provider.stage_turn_workspace(chat_id).await;
+
+        let staged = scratch_root
+            .path()
+            .join(chat_id.to_string())
+            .join(openwave_code_execution::SKILLS_DIR)
+            .join("presentations")
+            .join(openwave_code_execution::SKILL_MANIFEST_FILE);
+        assert_eq!(std::fs::read_to_string(&staged).unwrap(), manifest);
+
+        // Idempotent: the first exec re-prepares the same tree.
+        provider.stage_turn_workspace(chat_id).await;
+        assert_eq!(std::fs::read_to_string(&staged).unwrap(), manifest);
+
+        // A skill-less configuration (headless embeddings) stages nothing.
+        let bare =
+            ConfiguredCodeExecutionProvider::new(store, Arc::new(NoSecrets), scratch_root.path());
+        let bare_chat = ChatId::new();
+        bare.stage_turn_workspace(bare_chat).await;
+        assert!(!scratch_root.path().join(bare_chat.to_string()).exists());
+    }
+
     /// Local exec is confined to the scratch directory but can create entries
     /// in it, including a symlink aimed at the host. Both preparation writes
-    /// run on that directory before the next command, unsandboxed.
-    #[cfg(unix)]
+    /// run on that directory before the next command, unsandboxed.    #[cfg(unix)]
     #[tokio::test]
     async fn preparation_does_not_write_through_a_planted_symlink() {
         let outside = tempfile::tempdir().unwrap();
