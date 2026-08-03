@@ -529,12 +529,6 @@ async fn record_turn_run_failure_inner(
             terminal_event: sequenced_event,
         }));
     }
-    if requested_retry_at.is_some_and(|retry_at| retry_at <= requested_at) {
-        return Err(AgentError::Store(
-            "turn retry time must be after failure resolution time".into(),
-        ));
-    }
-
     let journal_chat_id = journal_chat_id(store, id, true).await?;
     if journal_chat_id.is_none() {
         return Ok(None);
@@ -558,11 +552,6 @@ async fn record_turn_run_failure_inner(
         requested_at,
         super::super::agent_run::database_now(&transaction).await?,
     );
-    if requested_retry_at.is_some_and(|retry_at| retry_at <= now) {
-        return Err(AgentError::Store(
-            "turn retry time must be after failure resolution time".into(),
-        ));
-    }
     if let Some(existing) = exact_turn_failure_on(
         &transaction,
         id,
@@ -617,6 +606,17 @@ async fn record_turn_run_failure_inner(
     {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
+    }
+    // Enforce the future-retry invariant only for a caller that still holds
+    // the live lease. A worker retrying its exact failure request after losing
+    // the resolution race to the lease scanner arrives here with a retry time
+    // the wall clock may have passed; erroring before the stale-lease checks
+    // above would wedge that worker in a permanent retry loop instead of
+    // telling it the turn is no longer its to resolve.
+    if requested_retry_at.is_some_and(|retry_at| retry_at <= now) {
+        return Err(AgentError::Store(
+            "turn retry time must be after failure resolution time".into(),
+        ));
     }
     if model_steps < turn.model_steps {
         return Err(AgentError::Store(
