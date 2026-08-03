@@ -57,6 +57,7 @@ pub struct LocalExecutionProvider {
     scratch_root: PathBuf,
     timeout: Duration,
     document_scripts_dir: Option<PathBuf>,
+    shared_package_cache: Option<PathBuf>,
     network_policy: NetworkPolicy,
 }
 
@@ -91,6 +92,7 @@ impl LocalExecutionProvider {
             scratch_root: scratch_root.into(),
             timeout,
             document_scripts_dir: None,
+            shared_package_cache: None,
             network_policy: NetworkPolicy::Off,
         })
     }
@@ -106,6 +108,15 @@ impl LocalExecutionProvider {
     #[must_use]
     pub fn with_document_scripts(mut self, directory: Option<PathBuf>) -> Self {
         self.document_scripts_dir = directory;
+        self
+    }
+
+    /// Expose the host-verified shared package cache's wheels directory as a
+    /// read-only subtree. The profile never lists it as writable, so no
+    /// conversation can plant an artifact another conversation would consume.
+    #[must_use]
+    pub fn with_shared_package_cache(mut self, directory: Option<PathBuf>) -> Self {
+        self.shared_package_cache = directory;
         self
     }
 
@@ -331,6 +342,15 @@ impl CodeExecutionProvider for LocalExecutionProvider {
                 })
             })
             .transpose()?;
+        let shared_package_cache = self
+            .shared_package_cache
+            .as_ref()
+            .map(|path| {
+                fs::canonicalize(path).map_err(|_| {
+                    CodeExecutionError::Sandbox("shared package cache is unavailable".into())
+                })
+            })
+            .transpose()?;
         let result = run_native(
             &request,
             &workspace,
@@ -338,6 +358,7 @@ impl CodeExecutionProvider for LocalExecutionProvider {
             &env_home,
             self.timeout,
             document_scripts_dir.as_deref(),
+            shared_package_cache.as_deref(),
             &folder_grants,
             &self.network_policy,
         )
@@ -740,6 +761,7 @@ async fn run_native(
     env_home: &Path,
     timeout: Duration,
     document_scripts_dir: Option<&Path>,
+    shared_package_cache: Option<&Path>,
     folder_grants: &[CanonicalExecFolderGrant],
     network_policy: &NetworkPolicy,
 ) -> Result<CodeExecutionResponse, CodeExecutionError> {
@@ -754,6 +776,7 @@ async fn run_native(
         env_home,
         developer_dir.as_deref(),
         document_scripts_dir,
+        shared_package_cache,
         folder_grants,
         broker.as_ref().map(LocalEgressBroker::port),
     )?;
@@ -794,6 +817,15 @@ async fn run_native(
     }
     if let Some(directory) = document_scripts_dir {
         command.env("OPENWAVE_EXEC_SCRIPTS", directory);
+    }
+    if let Some(directory) = shared_package_cache {
+        // `PIP_FIND_LINKS` makes every pip invocation consider the verified
+        // local wheels alongside (or, with `--no-index`, instead of) the
+        // registry; the OpenWave-named variable is what the operating prompt
+        // steers offline installs with.
+        command
+            .env(crate::package_cache::PACKAGE_CACHE_ENV, directory)
+            .env("PIP_FIND_LINKS", directory);
     }
     configure_unix_limits(&mut command, timeout);
 
@@ -863,6 +895,7 @@ async fn run_native(
     _env_home: &Path,
     _timeout: Duration,
     _document_scripts_dir: Option<&Path>,
+    _shared_package_cache: Option<&Path>,
     _folder_grants: &[()],
     _network_policy: &NetworkPolicy,
 ) -> Result<CodeExecutionResponse, CodeExecutionError> {
@@ -944,6 +977,7 @@ fn macos_profile(
     env_home: &Path,
     developer_dir: Option<&Path>,
     document_scripts_dir: Option<&Path>,
+    shared_package_cache: Option<&Path>,
     folder_grants: &[CanonicalExecFolderGrant],
     broker_port: Option<u16>,
 ) -> Result<String, CodeExecutionError> {
@@ -1038,6 +1072,13 @@ fn macos_profile(
         .map(sandbox_subpath)
         .transpose()?
         .unwrap_or_default();
+    // The shared package cache joins the read-only allowances and is
+    // deliberately absent from every write clause below: sandboxes consume
+    // verified artifacts, only the host's trusted acquisition writes them.
+    let package_cache = shared_package_cache
+        .map(sandbox_subpath)
+        .transpose()?
+        .unwrap_or_default();
     // `folder_grants` is the canonical, host-resolved list prepared above.
     // Command, arguments, cwd, and every other model-authored field are
     // deliberately absent from these profile clauses.
@@ -1088,7 +1129,7 @@ fn macos_profile(
          (allow file-read*)\n\
          (deny file-read*\n  {denied})\n\
          (allow file-read-metadata\n  {runtime_metadata}\n  {grant_metadata})\n\
-         (allow file-read*\n  {literals}\n  {runtimes}\n  {selected_runtime}\n  {document_scripts}\n  {granted_reads}\n  {workspace}\n  {env_home})\n\
+         (allow file-read*\n  {literals}\n  {runtimes}\n  {selected_runtime}\n  {document_scripts}\n  {package_cache}\n  {granted_reads}\n  {workspace}\n  {env_home})\n\
          (allow file-write*\n  {granted_writes}\n  {workspace}\n  {env_home}\n  (literal \"/dev/null\"))\n"
     ))
 }
@@ -1619,6 +1660,9 @@ mod tests {
             Some(Path::new(
                 "/Applications/OpenWave.app/Contents/Resources/exec-scripts",
             )),
+            Some(Path::new(
+                "/Users/test/.code-execution-package-cache/cp39-darwin-arm64/wheels",
+            )),
             &[],
             None,
         )
@@ -1631,14 +1675,19 @@ mod tests {
         assert!(profile.contains("(allow process-fork)"));
         assert!(profile.contains("we\\\"ird\\\\workspace"));
         assert!(profile.contains("Resources/exec-scripts"));
+        // The shared package cache is readable and never writable: verified
+        // artifacts flow from the host in, never from a sandbox out.
+        assert!(profile.contains(".code-execution-package-cache/cp39-darwin-arm64/wheels"));
         let write_rule = profile
             .split("(allow file-write*")
             .nth(1)
             .expect("profile has a write rule");
         assert!(!write_rule.contains("Resources/exec-scripts"));
+        assert!(!write_rule.contains(".code-execution-package-cache"));
         assert!(macos_profile(
             Path::new("/Users/test/control\nworkspace"),
             Path::new("/Users/test/env-home"),
+            None,
             None,
             None,
             &[],
@@ -1649,6 +1698,7 @@ mod tests {
         let proxied = macos_profile(
             Path::new("/Users/test/workspace"),
             Path::new("/Users/test/env-home"),
+            None,
             None,
             None,
             &[],
@@ -1675,6 +1725,7 @@ mod tests {
         let profile = macos_profile(
             Path::new("/Users/test/workspace"),
             Path::new("/Users/test/env-home"),
+            None,
             None,
             None,
             &grants,
@@ -1755,6 +1806,50 @@ mod tests {
         let response = provider.execute(request).await.unwrap();
         assert_eq!(response.exit_code, Some(0), "stderr: {}", response.stderr);
         assert_eq!(response.stdout, "visibleungranted-blocked");
+    }
+
+    /// The cross-conversation containment the shared cache rests on: a
+    /// sandbox can consume verified artifacts but can neither modify them nor
+    /// plant new ones, so no conversation can poison what another installs.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn shared_package_cache_is_readable_and_never_writable_in_the_sandbox() {
+        let scratch = tempfile::tempdir().unwrap();
+        let workspace = "chat-cache";
+        fs::create_dir(scratch.path().join(workspace)).unwrap();
+        let cache = crate::package_cache::SharedPackageCache::open(
+            &scratch.path().join(crate::package_cache::PACKAGE_CACHE_DIR),
+            "cp39-darwin-arm64",
+        )
+        .unwrap();
+        let staging = scratch.path().join("staging");
+        fs::create_dir(&staging).unwrap();
+        fs::write(staging.join("fpdf2-2.8.3-py3-none-any.whl"), b"wheel-bytes").unwrap();
+        cache.verify_and_promote(&staging).unwrap();
+        let wheels = fs::canonicalize(cache.wheels_dir()).unwrap();
+
+        let provider = LocalExecutionProvider::new(scratch.path(), Duration::from_secs(3))
+            .unwrap()
+            .with_shared_package_cache(Some(wheels.clone()));
+        let script = format!(
+            "cat \"$OPENWAVE_PACKAGE_CACHE/fpdf2-2.8.3-py3-none-any.whl\"; \
+             if printf poison > '{planted}' 2>/dev/null; then printf ' cache-writable'; else printf ' cache-readonly'; fi; \
+             if printf poison > '{tampered}' 2>/dev/null; then printf ' wheel-writable'; else printf ' wheel-readonly'; fi",
+            planted = wheels.join("planted-1.0-py3-none-any.whl").display(),
+            tampered = wheels.join("fpdf2-2.8.3-py3-none-any.whl").display(),
+        );
+        let response = provider
+            .execute(request(workspace, "call-cache", &script))
+            .await
+            .unwrap();
+
+        assert_eq!(response.exit_code, Some(0), "stderr: {}", response.stderr);
+        assert_eq!(response.stdout, "wheel-bytes cache-readonly wheel-readonly");
+        assert!(!wheels.join("planted-1.0-py3-none-any.whl").exists());
+        assert_eq!(
+            fs::read(wheels.join("fpdf2-2.8.3-py3-none-any.whl")).unwrap(),
+            b"wheel-bytes"
+        );
     }
 
     /// The invariant staging rests on: a staged grant is writable only at the

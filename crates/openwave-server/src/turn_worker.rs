@@ -148,15 +148,18 @@ pub(crate) fn freeze_foreground_turn_surface(
         &[],
         &openwave_core::NetworkPolicy::default(),
         false,
+        false,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn freeze_foreground_turn_surface_with_folders(
     tools: Arc<ToolRegistry>,
     base_agent_config: &AgentConfig,
     exec_folders: &[crate::code_execution::ResolvedExecFolderGrant],
     skills: &[openwave_code_execution::SkillPackage],
     network_policy: &openwave_core::NetworkPolicy,
+    offline_package_cache: bool,
     plan_mode: bool,
 ) -> ForegroundTurnSurface {
     let mut agent_config = base_agent_config.clone();
@@ -165,6 +168,7 @@ fn freeze_foreground_turn_surface_with_folders(
         exec_folders,
         skills,
         network_policy,
+        offline_package_cache,
         plan_mode,
     ));
     ForegroundTurnSurface {
@@ -582,12 +586,17 @@ impl TurnWorker {
             .as_ref()
             .map(|provider| provider.skill_catalog())
             .unwrap_or_default();
+        let offline_package_cache = match self.exec_folder_context.as_ref() {
+            Some(provider) => provider.offline_package_cache_ready().await,
+            None => false,
+        };
         let surface = freeze_foreground_turn_surface_with_folders(
             tools,
             &self.agent_config,
             &exec_folders,
             &skills,
             &chat.network_policy,
+            offline_package_cache,
             matches!(
                 chat.permission_mode,
                 Some(openwave_core::PermissionMode::Plan)
