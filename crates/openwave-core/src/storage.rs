@@ -179,6 +179,35 @@ pub enum DeleteProjectOutcome {
     NotEmpty,
 }
 
+/// Counts of in-flight work the embedding host process must stay alive to
+/// supervise.
+///
+/// A host that wants to restart itself (for example to install an update)
+/// reads this to decide whether the process is quiescent. The counts are
+/// deliberately strict: every non-terminal turn counts, including turns parked
+/// on the client, and every live background-tier run counts regardless of
+/// execution location. In-process background runs do not survive a host
+/// restart — their lease expires and the claim-scan reaper fails them — so a
+/// loose definition here would silently kill work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActiveWorkSnapshot {
+    /// Turns in any non-terminal [`crate::TurnRunStatus`], across every chat.
+    pub active_turns: u64,
+    /// Background-tier agent runs in any non-terminal
+    /// [`crate::AgentRunStatus`], across every chat. Foreground coordinator
+    /// runs are excluded: their live work is already counted as turns.
+    pub live_background_runs: u64,
+}
+
+impl ActiveWorkSnapshot {
+    /// True when the host supervises no in-flight work and may restart
+    /// without interrupting or stranding anything.
+    #[must_use]
+    pub const fn is_quiescent(self) -> bool {
+        self.active_turns == 0 && self.live_background_runs == 0
+    }
+}
+
 /// Fixed lifecycle vocabulary exposed for a historical tool card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
@@ -2322,6 +2351,14 @@ pub trait Store: Send + Sync {
 
     /// List a chat's durable turn history in deterministic creation-time order.
     async fn list_turn_runs(&self, _chat_id: ChatId) -> Result<Vec<TurnRun>> {
+        turn_storage_unavailable()
+    }
+
+    /// Count in-flight work across every chat: non-terminal turns plus live
+    /// background-tier agent runs. See [`ActiveWorkSnapshot`] for what counts
+    /// and why the definition is strict. Callers gating a host restart must
+    /// treat an error as "not quiescent".
+    async fn count_active_work(&self) -> Result<ActiveWorkSnapshot> {
         turn_storage_unavailable()
     }
 

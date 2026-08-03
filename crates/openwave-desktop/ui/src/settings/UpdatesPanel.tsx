@@ -29,14 +29,16 @@ export function updateStateSummary(state: DesktopUpdateState): string {
 
 export function UpdatesPanel({
   state,
+  upToDate = false,
   onCheck,
   onRestart,
 }: {
   state: DesktopUpdateState;
+  /** The most recent explicit check confirmed the app is current. */
+  upToDate?: boolean;
   onCheck: () => Promise<DesktopUpdateState>;
   onRestart: () => Promise<void>;
 }) {
-  const [manualResult, setManualResult] = useState<string | null>(null);
   const [version, setVersion] = useState<string | null>(null);
   const busy = state.status === "checking" || state.status === "downloading";
 
@@ -55,33 +57,20 @@ export function UpdatesPanel({
     };
   }, []);
 
-  useEffect(() => {
-    if (busy || state.status === "ready" || state.error) {
-      setManualResult(null);
-    }
-  }, [busy, state.error, state.status]);
-
-  async function check() {
-    setManualResult(null);
-    const next = await onCheck();
-    if (next.enabled && next.status === "idle" && !next.error) {
-      setManualResult("OpenWave is up to date.");
-    }
-  }
 
   return (
     <SettingsPanel
       title="Updates"
-      description="OpenWave checks shortly after launch and every five minutes. Updates are downloaded in the background, but OpenWave only restarts when you choose."
+      description="OpenWave checks shortly after launch and every five minutes, and downloads updates in the background. A downloaded update installs on its own once nothing is running and the app is in the background; while agent work is in flight or the app is in use, it waits for you to restart."
       busy={busy}
     >
       <SettingsSection title="Automatic updates">
         <p className="text-sm text-muted-foreground" aria-live="polite">
           {updateStateSummary(state)}
         </p>
-        {manualResult && (
+        {upToDate && (
           <p className="text-sm text-muted-foreground" role="status">
-            {manualResult}
+            OpenWave is up to date.
           </p>
         )}
         {state.error && <SettingsError>{state.error}</SettingsError>}
@@ -96,7 +85,7 @@ export function UpdatesPanel({
               type="button"
               variant="outline"
               disabled={!state.enabled || busy}
-              onClick={() => void check()}
+              onClick={() => void onCheck()}
             >
               <RefreshCw className={busy ? "animate-spin" : undefined} />
               {state.status === "checking"

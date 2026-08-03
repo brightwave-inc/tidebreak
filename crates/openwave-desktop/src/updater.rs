@@ -11,6 +11,14 @@
 //! artifact when the feed has moved on, and the restart path re-resolves once
 //! more at click time so the app never installs an older artifact than the
 //! newest published release it can reach.
+//!
+//! A staged update is also installed autonomously, but only when doing so
+//! cannot interrupt work: the app must be quiescent (the embedded server
+//! reports no non-terminal turns and no live background runs — in-process
+//! background runs do not survive a restart) and unfocused (no window has
+//! focus, so nobody is typing into it), sustained across consecutive samples.
+//! While the app stays busy or in use, the update waits for the explicit
+//! restart button exactly as before.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -23,12 +31,22 @@ use tauri_plugin_updater::{Update, UpdaterExt};
 use crate::host_access::HostAccess;
 
 const UPDATE_STATE_EVENT: &str = "desktop-update-state";
+/// Raised to the renderer when the native "Check for Updates…" menu item is
+/// chosen; the UI opens the Updates settings panel and runs an explicit check
+/// there so the outcome (up to date, or an update staged) is visible.
+const UPDATE_CHECK_REQUESTED_EVENT: &str = "desktop-update-check-requested";
+const MENU_CHECK_FOR_UPDATES_ID: &str = "check-for-updates";
 const UPDATE_CHECK_STARTUP_DELAY: Duration = Duration::from_secs(15);
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const UPDATE_CHECK_ERROR: &str = "Could not check for updates. Try again later.";
 const UPDATE_PREPARE_ERROR: &str = "Could not prepare the update. Try again later.";
 const UPDATE_WITHDRAWN_ERROR: &str =
     "The downloaded update is no longer published. OpenWave will keep checking.";
+const AUTO_RESTART_POLL_INTERVAL: Duration = Duration::from_secs(60);
+/// Consecutive clean samples required before an autonomous restart, so a
+/// restart never fires on the instant between a user's send and the turn row
+/// becoming visible, or right as focus is returning.
+const AUTO_RESTART_REQUIRED_STREAK: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -279,17 +297,120 @@ async fn run_update_check(app: AppHandle) -> DesktopUpdateState {
     current_update_state(&app)
 }
 
+/// Install the app's native menu with a "Check for Updates…" item in the
+/// standard macOS placement: the application submenu, directly under "About".
+/// The rest of the default menu is kept intact. Other platforms keep the
+/// stock menu untouched.
+#[cfg(target_os = "macos")]
+pub(crate) fn install_update_menu(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem};
+
+    let handle = app.handle();
+    let menu = Menu::default(handle)?;
+    if let Some(app_submenu) = menu
+        .items()?
+        .first()
+        .and_then(|item| item.as_submenu().cloned())
+    {
+        let check = MenuItem::with_id(
+            handle,
+            MENU_CHECK_FOR_UPDATES_ID,
+            "Check for Updates…",
+            true,
+            None::<&str>,
+        )?;
+        app_submenu.insert(&check, 1)?;
+    }
+    app.set_menu(menu)?;
+    Ok(())
+}
+
+pub(crate) fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
+    if event.id().as_ref() == MENU_CHECK_FOR_UPDATES_ID {
+        if let Err(error) = app.emit(UPDATE_CHECK_REQUESTED_EVENT, ()) {
+            eprintln!("openwave-desktop: could not raise the update-check request: {error}");
+        }
+    }
+}
+
 pub(crate) fn spawn_update_loop(app: AppHandle) {
     if !updates_enabled() {
         return;
     }
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(UPDATE_CHECK_STARTUP_DELAY).await;
-        loop {
-            run_update_check(app.clone()).await;
-            tokio::time::sleep(UPDATE_CHECK_INTERVAL).await;
+    tauri::async_runtime::spawn({
+        let app = app.clone();
+        async move {
+            tokio::time::sleep(UPDATE_CHECK_STARTUP_DELAY).await;
+            loop {
+                run_update_check(app.clone()).await;
+                tokio::time::sleep(UPDATE_CHECK_INTERVAL).await;
+            }
         }
     });
+    tauri::async_runtime::spawn(async move {
+        let mut streak = 0u32;
+        loop {
+            tokio::time::sleep(AUTO_RESTART_POLL_INTERVAL).await;
+            let (next, fire) = advance_auto_restart_streak(streak, auto_restart_gate(&app).await);
+            streak = next;
+            if fire {
+                // On success this call never returns: the process relaunches.
+                if let Err(error) = take_staged_and_restart(app.clone()).await {
+                    eprintln!("openwave-desktop: autonomous update restart deferred: {error}");
+                    streak = 0;
+                }
+            }
+        }
+    });
+}
+
+/// One autonomous-restart sample: an installable update is staged, the
+/// embedded server supervises no in-flight work, and no window has focus.
+/// Every failure to know is treated as "in use".
+async fn auto_restart_gate(app: &AppHandle) -> bool {
+    {
+        let manager = app.state::<UpdateManager>();
+        let state = manager
+            .state
+            .lock()
+            .expect("update state mutex poisoned")
+            .clone();
+        let has_staged = manager
+            .staged
+            .lock()
+            .expect("staged update mutex poisoned")
+            .is_some();
+        if !can_restart(&state, has_staged) {
+            return false;
+        }
+    }
+
+    if app
+        .webview_windows()
+        .values()
+        .any(|window| window.is_focused().unwrap_or(true))
+    {
+        return false;
+    }
+
+    match app.state::<HostAccess>().store() {
+        Some(store) => store
+            .count_active_work()
+            .await
+            .map(|snapshot| snapshot.is_quiescent())
+            .unwrap_or(false),
+        None => false,
+    }
+}
+
+/// Advance the consecutive-clean-sample counter; fire only once the streak
+/// reaches [`AUTO_RESTART_REQUIRED_STREAK`]. Any dirty sample resets it.
+fn advance_auto_restart_streak(streak: u32, sample_ok: bool) -> (u32, bool) {
+    if !sample_ok {
+        return (0, false);
+    }
+    let next = streak.saturating_add(1);
+    (next, next >= AUTO_RESTART_REQUIRED_STREAK)
 }
 
 #[tauri::command]
@@ -355,6 +476,13 @@ async fn resolve_latest_for_install(
 
 #[tauri::command]
 pub(crate) async fn restart_for_update(app: AppHandle) -> Result<(), String> {
+    take_staged_and_restart(app).await
+}
+
+/// Take the staged update, converge it on the newest published release, and
+/// restart into it. Shared by the explicit restart button and the autonomous
+/// quiescent-restart path. On success this never returns.
+async fn take_staged_and_restart(app: AppHandle) -> Result<(), String> {
     let staged = {
         let manager = app.state::<UpdateManager>();
         let state = manager
@@ -446,6 +574,15 @@ mod tests {
         state.status = DesktopUpdateStatus::Ready;
         state.enabled = false;
         assert!(!can_restart(&state, true));
+    }
+
+    #[test]
+    fn autonomous_restart_requires_a_sustained_clean_window() {
+        assert_eq!(advance_auto_restart_streak(0, false), (0, false));
+        assert_eq!(advance_auto_restart_streak(0, true), (1, false));
+        assert_eq!(advance_auto_restart_streak(1, true), (2, true));
+        // Any dirty sample resets the streak entirely.
+        assert_eq!(advance_auto_restart_streak(1, false), (0, false));
     }
 
     #[test]

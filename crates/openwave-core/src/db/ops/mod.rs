@@ -5,6 +5,7 @@ use crate::id::{CallId, ChatId, ProjectId, TurnId};
 
 use super::{entities, store_err};
 
+pub(in crate::db) mod active_work;
 pub(in crate::db) mod agent_run;
 pub(in crate::db) mod app;
 pub(in crate::db) mod approval;
