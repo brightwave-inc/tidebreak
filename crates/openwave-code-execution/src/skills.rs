@@ -84,7 +84,7 @@ pub fn is_valid_skill_description(description: &str) -> bool {
         && !description.chars().any(char::is_control)
 }
 
-fn is_pinned_python_dep(dep: &str) -> bool {
+pub(crate) fn is_pinned_python_dep(dep: &str) -> bool {
     if dep.is_empty() || dep.len() > MAX_DEP_BYTES {
         return false;
     }

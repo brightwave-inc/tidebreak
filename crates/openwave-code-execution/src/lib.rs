@@ -20,6 +20,7 @@ mod local;
 mod network;
 mod output;
 pub mod overlay;
+pub mod package_cache;
 mod preview;
 mod receipt;
 mod remote;
@@ -41,6 +42,9 @@ pub use overlay::{
     OverlayInspector, OverlayOutcome, OverlaySlot, PreparedWriteSnapshot, PriorContents,
     RejectedChange, RejectedChangeReason, StagedChange, TrashSink, WriteOverlay, WriteSnapshotSink,
     OVERLAY_DIR,
+};
+pub use package_cache::{
+    PromotionReport, SharedPackageCache, PACKAGE_CACHE_DIR, PACKAGE_CACHE_ENV,
 };
 pub use preview::{scan_preview_directory, PreviewScan};
 pub use remote::RemoteSessionPool;

@@ -19,10 +19,10 @@ use openwave_code_execution::{
     DaytonaExecutionProvider, E2BCredential, E2BExecutionProvider, ExecFolderAccess,
     ExecFolderGrant, ExecutionId, ExecutionWorkspaceId, LocalExecutionProvider,
     MaterializationPrecondition, MaterializedChangeKind, OutputArtifactEntry, OutputArtifactScan,
-    OutputArtifactStatus, PreviewScan, RejectedChangeReason, RemoteSessionPool, StagedUpload,
-    WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing, WriteOverlay, WriteSnapshotSink,
-    DAYTONA_CREDENTIAL_KEY, DOCUMENT_SCRIPTS_DIR, DOCUMENT_SCRIPT_FILES, E2B_CREDENTIAL_KEY,
-    PACKAGE_MANAGER_DOMAINS,
+    OutputArtifactStatus, PreviewScan, RejectedChangeReason, RemoteSessionPool, SharedPackageCache,
+    StagedUpload, WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing, WriteOverlay,
+    WriteSnapshotSink, DAYTONA_CREDENTIAL_KEY, DOCUMENT_SCRIPTS_DIR, DOCUMENT_SCRIPT_FILES,
+    E2B_CREDENTIAL_KEY, PACKAGE_CACHE_DIR, PACKAGE_MANAGER_DOMAINS,
 };
 use openwave_core::{
     exec_attachment_file_name, BlobStore, CallId, Chat, ChatId, ExecFileRejectionReason,
@@ -43,6 +43,23 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 20_000;
 pub const MIN_TIMEOUT_MS: u64 = 1_000;
 pub const MAX_TIMEOUT_MS: u64 = 120_000;
 const MAX_NETWORK_ALLOWED_HOSTS: usize = 64;
+
+/// The interpreter the local sandbox resolves from its fixed PATH; host-side
+/// cache acquisition runs the same one, so cached wheels are compatible with
+/// the sandbox runtime by construction.
+const SANDBOX_PYTHON: &str = "/usr/bin/python3";
+
+/// Whether a per-chat policy admits package-registry downloads, mirroring the
+/// operating prompt's truth table.
+fn permits_package_installs(policy: &NetworkPolicy) -> bool {
+    match policy {
+        NetworkPolicy::Off => false,
+        NetworkPolicy::PackageManagers | NetworkPolicy::Open => true,
+        NetworkPolicy::AllowedHosts {
+            package_managers, ..
+        } => *package_managers,
+    }
+}
 
 /// Validate and canonicalize one user-authored per-chat network policy.
 ///
@@ -687,6 +704,12 @@ pub struct ConfiguredCodeExecutionProvider {
     /// when the turn ends; every `exec` in between finds it here and points the
     /// sandbox at the staged copy instead of the user's folder.
     write_overlays: Mutex<HashMap<ChatId, StagedTurn>>,
+    /// The shared package cache's runtime key, probed from the sandbox
+    /// interpreter once per process. `None` disables the cache.
+    package_cache_runtime: tokio::sync::OnceCell<Option<String>>,
+    /// Whether a host-side cache population pass is running or has succeeded;
+    /// cleared again on failure so a later exec can retry.
+    package_cache_population: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// One turn's staging for one chat.
@@ -835,6 +858,8 @@ impl ConfiguredCodeExecutionProvider {
             blob_writes: None,
             remote_sessions: RemoteSessionPool::default(),
             write_overlays: Mutex::new(HashMap::new()),
+            package_cache_runtime: tokio::sync::OnceCell::new(),
+            package_cache_population: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -883,6 +908,89 @@ impl ConfiguredCodeExecutionProvider {
             .iter()
             .map(|skill| skill.package.clone())
             .collect()
+    }
+
+    /// The shared package cache keyspace for the local sandbox interpreter.
+    ///
+    /// The wheel-compatibility runtime key is probed from the same interpreter
+    /// the sandbox runs, once per process; `None` (an unusable interpreter, a
+    /// non-macOS host, or an unopenable cache directory) disables the cache
+    /// without affecting execution.
+    async fn shared_package_cache(&self) -> Option<SharedPackageCache> {
+        if !cfg!(target_os = "macos") {
+            return None;
+        }
+        let key = self
+            .package_cache_runtime
+            .get_or_init(|| async {
+                SharedPackageCache::runtime_key(std::path::Path::new(SANDBOX_PYTHON)).await
+            })
+            .await
+            .clone()?;
+        SharedPackageCache::open(&self.scratch_root.join(PACKAGE_CACHE_DIR), &key).ok()
+    }
+
+    /// Whether verified offline package installs are currently possible on the
+    /// selected provider, for truthful operating-prompt steering.
+    pub(crate) async fn offline_package_cache_ready(&self) -> bool {
+        let Ok(config) = read_config(&*self.store).await else {
+            return false;
+        };
+        if config.provider != Some(CodeExecutionProviderKind::Local) {
+            return false;
+        }
+        match self.shared_package_cache().await {
+            Some(cache) => cache.is_ready(),
+            None => false,
+        }
+    }
+
+    /// Best-effort host-side acquisition of the built-in skills' pinned
+    /// dependencies, spawned once per process when a networked local exec
+    /// shows the cache could be used. Failure clears the latch so a later
+    /// exec retries; conversations keep their network install path either way.
+    fn spawn_package_cache_population(&self, cache: SharedPackageCache) {
+        use std::sync::atomic::Ordering;
+        let pin_sets = self
+            .skills
+            .iter()
+            .map(|skill| skill.package.python_deps.clone())
+            .filter(|pins| !pins.is_empty())
+            .collect::<Vec<_>>();
+        if pin_sets.is_empty() {
+            return;
+        }
+        if self.package_cache_population.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let latch = self.package_cache_population.clone();
+        tokio::spawn(async move {
+            let mut failed = false;
+            // Per-skill acquisition: each skill's pins resolve as one
+            // consistent closure, and one unresolvable skill cannot sink the
+            // others' artifacts.
+            for pins in pin_sets {
+                match cache
+                    .populate_with_pip(std::path::Path::new(SANDBOX_PYTHON), &pins)
+                    .await
+                {
+                    Ok(report) => tracing::info!(
+                        promoted = report.promoted,
+                        refused = report.refused,
+                        invalidated = report.invalidated,
+                        evicted = report.evicted,
+                        "shared package cache population pass finished"
+                    ),
+                    Err(error) => {
+                        failed = true;
+                        tracing::warn!(%error, "shared package cache population failed");
+                    }
+                }
+            }
+            if failed {
+                latch.store(false, Ordering::SeqCst);
+            }
+        });
     }
 
     /// Install the native bridge that resolves product root IDs through the
@@ -1189,14 +1297,23 @@ impl ConfiguredCodeExecutionProvider {
             return Err(CodeExecutionError::NotConfigured);
         };
         let resolved: Box<dyn CodeExecutionProvider> = match provider {
-            CodeExecutionProviderKind::Local => Box::new(
-                LocalExecutionProvider::new(
-                    &self.scratch_root,
-                    Duration::from_millis(config.timeout_ms),
-                )?
-                .with_network_policy(network_policy.cloned().unwrap_or_default())
-                .with_document_scripts(self.document_scripts_source.clone()),
-            ),
+            CodeExecutionProviderKind::Local => {
+                // Mounted only once verified artifacts exist; an empty or
+                // unusable cache leaves execution exactly as it was.
+                let package_cache = match self.shared_package_cache().await {
+                    Some(cache) if cache.is_ready() => Some(cache.wheels_dir()),
+                    _ => None,
+                };
+                Box::new(
+                    LocalExecutionProvider::new(
+                        &self.scratch_root,
+                        Duration::from_millis(config.timeout_ms),
+                    )?
+                    .with_network_policy(network_policy.cloned().unwrap_or_default())
+                    .with_document_scripts(self.document_scripts_source.clone())
+                    .with_shared_package_cache(package_cache),
+                )
+            }
             CodeExecutionProviderKind::E2b => {
                 let credential = E2BCredential::load(&*self.secrets)
                     .await?
@@ -1313,6 +1430,17 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
                 CodeExecutionError::InvalidRequest("execution conversation does not exist".into())
             })?;
         let (kind, provider) = self.resolve(Some(&chat.network_policy)).await?;
+        if kind == CodeExecutionProviderKind::Local
+            && permits_package_installs(&chat.network_policy)
+        {
+            // A networked local exec is the signal that installs are wanted:
+            // the same pins a conversation installs under its per-chat HOME
+            // are acquired host-side into the shared cache, so a later
+            // conversation can install them with the network off.
+            if let Some(cache) = self.shared_package_cache().await {
+                self.spawn_package_cache_population(cache);
+            }
+        }
         if kind == CodeExecutionProviderKind::Local && cfg!(target_os = "macos") {
             // Authority is resolved again here rather than reused from the
             // turn's prompt snapshot, so a revocation mid-turn fails closed.
