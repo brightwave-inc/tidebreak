@@ -63,6 +63,11 @@ plist = "=1.10.0"
 # minimal misconfigured state; these warnings are the admin's field
 # diagnostic for what exactly is broken.
 tracing = "=0.1.44"
+# The shared subscriber both entry points (desktop shell, `openwave serve`)
+# install via [`logging::init_logging`]. Default features stay off: `ansi` and
+# `tracing-log` would pull crates the lockfile doesn't already resolve, and a
+# plain profile log file wants neither.
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "env-filter"] }
 # Bounded unified diffs for the post-turn connected-folder change summary.
 similar = "=2.7.0"
 # Private, automatically removed inputs and outputs for ephemeral document previews.

@@ -89,6 +89,9 @@ fn profile_config() -> Result<Config> {
 /// Bind the server and run its accept loop, announcing where to reach it.
 async fn serve() -> Result<()> {
     let config = profile_config()?;
+    // Tracing events land in `logs/openwave.log` under the profile data dir
+    // (plus stderr in debug builds); see `openwave_server::logging`.
+    openwave_server::logging::init_logging(&config.data_dir);
     let server = openwave_server::bind_configured(config).await?;
     // The address and token are the client's entry point: the parent process that
     // launched the daemon reads them from stdout to connect. The token is a secret,

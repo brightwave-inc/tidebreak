@@ -250,6 +250,10 @@ pub fn run() {
             updater::install_update_menu(app)?;
             updater::spawn_update_loop(handle.clone());
             let data = data_dir(&handle)?;
+            // Before anything that can warn: the embedded server's tracing
+            // events land in `logs/openwave.log` under the profile data dir
+            // (stderr-only if that file cannot be created).
+            openwave_server::logging::init_logging(&data);
             let home = home_dir(&handle)?;
             let host_access = host_access::HostAccess::new(handle.clone(), data.clone(), home)?;
             app.manage(host_access);
