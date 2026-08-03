@@ -51,6 +51,7 @@ const unmanaged: import("./api").ManagedPolicy = {
   managed: false,
   source: "unmanaged",
   misconfigured: false,
+allow_local_mcp_servers: false,
 };
 const getPolicy = vi.fn(async () => unmanaged);
 const getGatewayStatus = vi.fn(async () => ({
@@ -488,6 +489,7 @@ describe("app shell", () => {
       gateway_url: "https://gateway.example/",
       source: "os",
       misconfigured: false,
+    allow_local_mcp_servers: false,
     });
     const user = userEvent.setup();
     await mountApp();

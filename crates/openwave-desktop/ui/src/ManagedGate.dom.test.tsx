@@ -14,6 +14,7 @@ const managed: ManagedPolicy = {
   gateway_url: "https://gateway.example/",
   source: "os",
   misconfigured: false,
+allow_local_mcp_servers: false,
 };
 
 const signedOut: GatewayStatus = {
@@ -148,6 +149,7 @@ describe("ManagedGate", () => {
       managed: false,
       source: "unmanaged",
       misconfigured: false,
+    allow_local_mcp_servers: false,
     };
     // The profile starts open, then a deep-link pairing provisions it and the
     // session already satisfies the new policy.
@@ -184,6 +186,7 @@ describe("ManagedGate", () => {
         managed: false,
         source: "unmanaged",
         misconfigured: false,
+      allow_local_mcp_servers: false,
       } satisfies ManagedPolicy)
       .mockResolvedValue(managed);
     const client = api({
@@ -211,6 +214,7 @@ describe("ManagedGate", () => {
         managed: false,
         source: "unmanaged",
         misconfigured: false,
+        allow_local_mcp_servers: false,
         pending_gateway_url: "https://new-gw.example/",
       } satisfies ManagedPolicy),
       getGatewayStatus: vi.fn().mockResolvedValue({
@@ -254,6 +258,7 @@ describe("ManagedGate", () => {
         managed: false,
         source: "unmanaged",
         misconfigured: false,
+        allow_local_mcp_servers: false,
         pending_gateway_url: "https://new-gw.example/",
       } satisfies ManagedPolicy),
       getGatewayStatus: vi.fn().mockResolvedValue({
@@ -265,6 +270,7 @@ describe("ManagedGate", () => {
         managed: false,
         source: "unmanaged",
         misconfigured: false,
+      allow_local_mcp_servers: false,
       } satisfies ManagedPolicy),
     });
     const user = userEvent.setup();
@@ -286,6 +292,7 @@ describe("ManagedGate", () => {
       gateway_url: "https://gateway.example/",
       source: "provisioned",
       misconfigured: false,
+      allow_local_mcp_servers: false,
       pending_gateway_url: "https://new-gw.example/",
     };
     const client = api({
@@ -475,6 +482,7 @@ describe("ManagedGate", () => {
       managed: false,
       source: "unmanaged",
       misconfigured: false,
+    allow_local_mcp_servers: false,
     };
     const client = api({
       getPolicy: vi

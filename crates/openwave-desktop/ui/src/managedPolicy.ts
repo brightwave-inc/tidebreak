@@ -9,6 +9,7 @@ const UNMANAGED: ManagedPolicy = {
   managed: false,
   source: "unmanaged",
   misconfigured: false,
+allow_local_mcp_servers: false,
 };
 
 /**
