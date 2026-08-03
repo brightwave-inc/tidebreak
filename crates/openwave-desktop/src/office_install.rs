@@ -264,6 +264,73 @@ pub(crate) fn cancel_presentation_converter_install() {
     }
 }
 
+/// The desktop's host-tool broker: skill-declared host dependencies resolve
+/// through the same managed installer, warm-up guard, and failure memory the
+/// preview panel uses, so there is exactly one install path however the need
+/// arrives — turn staging, the preview, or an explicit retry.
+pub(crate) struct DesktopHostToolBroker {
+    app: AppHandle,
+}
+
+impl DesktopHostToolBroker {
+    pub(crate) fn new(app: AppHandle) -> Self {
+        Self { app }
+    }
+}
+
+#[async_trait::async_trait]
+impl openwave_code_execution::HostToolBroker for DesktopHostToolBroker {
+    fn ensure(&self, tool: openwave_code_execution::HostDep) {
+        match tool {
+            // The warm-up already embodies the discipline `ensure` promises:
+            // returns immediately, at most one download per app run, no-op
+            // when a working converter exists or a failure is remembered.
+            openwave_code_execution::HostDep::LibreOffice => {
+                warm_presentation_converter(self.app.clone());
+            }
+        }
+    }
+
+    async fn status(
+        &self,
+        tool: openwave_code_execution::HostDep,
+    ) -> openwave_code_execution::HostToolStatus {
+        match tool {
+            openwave_code_execution::HostDep::LibreOffice => libreoffice_status(&self.app).await,
+        }
+    }
+}
+
+/// The current truth about LibreOffice on this machine, in the same
+/// resolution order conversion uses: the verified managed install, then a
+/// working system one. "Working" is probed, not assumed, exactly as the
+/// warm-up does — a leftover launcher script must not report Available.
+async fn libreoffice_status(app: &AppHandle) -> openwave_code_execution::HostToolStatus {
+    use openwave_code_execution::HostToolStatus;
+    let Ok(data_dir) = crate::data_dir(app) else {
+        return HostToolStatus::Unavailable("the app data directory is unavailable".into());
+    };
+    if managed_soffice(&data_dir).is_some() {
+        return HostToolStatus::Available;
+    }
+    if crate::office_pdf::workable_system_soffice().await {
+        return HostToolStatus::Available;
+    }
+    if state().lock().expect("install state lock").cancel.is_some() {
+        return HostToolStatus::Installing;
+    }
+    if let Some(reason) = last_failure() {
+        return HostToolStatus::Unavailable(reason);
+    }
+    if supported() {
+        HostToolStatus::Unavailable("LibreOffice is not installed yet".into())
+    } else {
+        HostToolStatus::Unavailable(
+            "automatic LibreOffice install is not supported on this platform".into(),
+        )
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]

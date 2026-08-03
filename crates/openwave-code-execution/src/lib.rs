@@ -14,6 +14,7 @@ mod credential;
 mod daytona;
 mod e2b;
 pub mod host_paths;
+pub mod host_tools;
 mod http;
 mod local;
 #[cfg(target_os = "macos")]
@@ -36,6 +37,7 @@ pub use host_paths::{
     resolve_scratch_directory, try_resolve_scratch_directory, FilePrecondition, FileStamp,
     ScratchDir, ScratchEntry, ScratchEntryKind, ScratchRefusal,
 };
+pub use host_tools::{HostToolBroker, HostToolStatus};
 pub use local::LocalExecutionProvider;
 pub use office_render::{
     render_office_outputs, HostOfficeConverter, OfficeConvertError, OFFICE_RENDER_DIR,

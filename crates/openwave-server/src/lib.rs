@@ -667,6 +667,7 @@ pub async fn bind(config: Config) -> Result<Server> {
         mcp_config::ConfiguredMcpServers::default(),
         None,
         None,
+        None,
     )
     .await
 }
@@ -677,7 +678,7 @@ pub async fn bind(config: Config) -> Result<Server> {
 /// to use [`bind`] when process-environment configuration is undesirable.
 pub async fn bind_configured(config: Config) -> Result<Server> {
     let mcp_servers = mcp_config::ConfiguredMcpServers::from_env()?;
-    bind_inner(config, None, mcp_servers, None, None).await
+    bind_inner(config, None, mcp_servers, None, None, None).await
 }
 
 /// Bind the API with a stable app-private native executor identity.
@@ -697,6 +698,7 @@ pub async fn bind_with_desktop_executor(
         mcp_config::ConfiguredMcpServers::default(),
         None,
         None,
+        None,
     )
     .await
 }
@@ -711,7 +713,15 @@ pub async fn bind_configured_with_desktop_executor(
         return Err(AgentError::config("client executor id must not be nil"));
     }
     let mcp_servers = mcp_config::ConfiguredMcpServers::from_env()?;
-    bind_inner(config, Some(client_executor_id), mcp_servers, None, None).await
+    bind_inner(
+        config,
+        Some(client_executor_id),
+        mcp_servers,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 /// Desktop binding with the native bridges only the product app can provide:
@@ -723,6 +733,7 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants(
     client_executor_id: Uuid,
     folder_grant_resolver: Arc<dyn code_execution::ExecFolderGrantResolver>,
     office_converter: Option<Arc<dyn openwave_code_execution::HostOfficeConverter>>,
+    host_tool_broker: Option<Arc<dyn openwave_code_execution::HostToolBroker>>,
 ) -> Result<Server> {
     if client_executor_id.is_nil() {
         return Err(AgentError::config("client executor id must not be nil"));
@@ -734,6 +745,7 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants(
         mcp_servers,
         Some(folder_grant_resolver),
         office_converter,
+        host_tool_broker,
     )
     .await
 }
@@ -770,6 +782,7 @@ async fn bind_inner(
     mcp_servers: mcp_config::ConfiguredMcpServers,
     folder_grant_resolver: Option<Arc<dyn code_execution::ExecFolderGrantResolver>>,
     office_converter: Option<Arc<dyn openwave_code_execution::HostOfficeConverter>>,
+    host_tool_broker: Option<Arc<dyn openwave_code_execution::HostToolBroker>>,
 ) -> Result<Server> {
     // Desktop live delivery remains process-local. Turns, steering, and tool
     // approvals are durable, while one process still owns the complete data
@@ -838,7 +851,8 @@ async fn bind_inner(
         .with_skills(config.exec_skills_dir.clone())
         .with_user_skills(Some(config.user_skills_dir()))
         .with_folder_grant_resolver(folder_grant_resolver)
-        .with_office_converter(office_converter),
+        .with_office_converter(office_converter)
+        .with_host_tool_broker(host_tool_broker),
     );
     let foreground_web_search =
         Box::new(web_search::foreground_tool(store.clone(), secrets.clone()));
