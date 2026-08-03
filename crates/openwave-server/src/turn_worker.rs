@@ -584,11 +584,17 @@ impl TurnWorker {
             },
             None => Vec::new(),
         };
-        let skills = self
-            .exec_folder_context
-            .as_ref()
-            .map(|provider| provider.skill_catalog())
-            .unwrap_or_default();
+        let skills = match self.exec_folder_context.as_ref() {
+            Some(provider) => {
+                // The prompt's skill catalog directs the model to read each
+                // staged SKILL.md before its first exec, so the workspace has
+                // to be staged now — waiting for the first exec to stage it
+                // loses that race and the read fails with not-found.
+                provider.stage_turn_workspace(chat.id).await;
+                provider.skill_catalog()
+            }
+            None => Vec::new(),
+        };
         let offline_package_cache = match self.exec_folder_context.as_ref() {
             Some(provider) => provider.offline_package_cache_ready().await,
             None => false,
