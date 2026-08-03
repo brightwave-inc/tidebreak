@@ -37,6 +37,7 @@ import {
   type GatewayStatus as WireGatewayStatus,
   type SignInProgress,
   type StandingGrantSnapshot,
+  type ConsentStatementSnapshot,
   type GrantLevel,
   type GrantScope,
   type McpServerInfo as WireMcpServerInfo,
@@ -87,6 +88,7 @@ export type {
   GrantLevel,
   GrantScope,
   StandingGrantSnapshot,
+  ConsentStatementSnapshot,
   ChatToolActivityStatus,
   TranscriptRole,
   RendererToolName,
@@ -1550,6 +1552,15 @@ export class ApiClient {
   /** Every standing "don't ask again", newest first, across all chats. */
   listStandingGrants(): Promise<StandingGrantSnapshot[]> {
     return this.json(`/grants`, { headers: this.headers() });
+  }
+
+  /**
+   * The server's rows of the unified consent read model: every standing tool
+   * grant as one consent statement. The capability half comes from the host
+   * broker over the Tauri boundary and joins these rows renderer-side.
+   */
+  listConsentStatements(): Promise<ConsentStatementSnapshot[]> {
+    return this.json(`/consent/statements`, { headers: this.headers() });
   }
 
   /** Withdraw a standing grant; later matching calls ask again. */

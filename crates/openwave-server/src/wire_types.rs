@@ -320,6 +320,7 @@ mod tests {
         // validators narrow *from* — see the aliases in api.ts.
         generate::collect_from::<crate::routes::PendingApprovalSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::StandingGrantSnapshot>(&cfg, &mut out);
+        generate::collect_from::<crate::consent::ConsentStatementSnapshot>(&cfg, &mut out);
         // The app-invoke refusal envelope. The invoke payloads themselves are
         // opaque passthrough for the sandboxed frame and stay hand-written;
         // only the refusal is generated, because the renderer branches on its

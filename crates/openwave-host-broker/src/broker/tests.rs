@@ -353,6 +353,54 @@ fn an_empty_conversation_lists_no_roots_without_needing_a_grant() {
 }
 
 #[test]
+fn grant_statements_report_every_minted_consent_with_safe_folder_identity() {
+    let (_temp, broker, path) = setup();
+    let controller = broker.controller();
+    let conversation = Uuid::new_v4();
+    let subject = GrantSubject::conversation(conversation).unwrap();
+    register(&controller, subject, conversation, path, OperationId::new());
+
+    let result = unwrap_response(controller.handle(ControlEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: crate::RequestId::new(),
+        request: ControlRequest::ListGrantStatements,
+    }))
+    .unwrap();
+    let ControlResult::ListGrantStatements { grants } = result else {
+        panic!("unexpected control result")
+    };
+
+    // One picker consent mints exactly the four-capability bundle, and every
+    // statement carries the provenance the consent surface renders.
+    let mut capabilities = grants
+        .iter()
+        .map(|grant| grant.capability)
+        .collect::<Vec<_>>();
+    capabilities.sort_by_key(|capability| format!("{capability:?}"));
+    assert_eq!(
+        capabilities,
+        vec![
+            Capability::ExecuteCommands,
+            Capability::ListRoots,
+            Capability::ReadFiles,
+            Capability::WriteFiles,
+        ]
+    );
+    for grant in &grants {
+        assert_eq!(grant.subject, subject);
+        assert_eq!(grant.consent_method, ConsentMethod::FolderPicker);
+        match &grant.scope {
+            Scope::Subject => assert_eq!(grant.root_display_name, None),
+            Scope::Root { .. } | Scope::PathSubtree { .. } => {
+                // The safe identity is the registered folder's basename, the
+                // same name the approved-roots listing exposes — never a path.
+                assert_eq!(grant.root_display_name.as_deref(), Some("Documents"));
+            }
+        }
+    }
+}
+
+#[test]
 fn approved_roots_can_be_explicitly_attached_to_another_standalone_conversation() {
     let (_temp, broker, path) = setup();
     let first_conversation = Uuid::new_v4();

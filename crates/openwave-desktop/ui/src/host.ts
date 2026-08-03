@@ -1,6 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { Chat } from "./api";
+import type { Chat, ConsentStatementSnapshot } from "./api";
 
 export type ConnectedFolder = {
   rootId: string;
@@ -41,6 +41,17 @@ export function listConnectedFolders(
 
 export function listApprovedFolders(): Promise<ConnectedFolder[]> {
   return invoke("list_approved_folders");
+}
+
+/**
+ * The capability half of the unified consent read model: every host-broker
+ * grant over connected folders, in the same statement shape the server serves
+ * for standing tool grants. Empty outside the native host — a browser build
+ * has no broker and therefore no capability consent to report.
+ */
+export function listCapabilityConsents(): Promise<ConsentStatementSnapshot[]> {
+  if (!isTauri()) return Promise.resolve([]);
+  return invoke("list_capability_consents");
 }
 
 export function connectFolder(chat: Chat): Promise<ConnectedFolder | null> {
