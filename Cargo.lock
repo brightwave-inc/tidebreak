@@ -4196,6 +4196,7 @@ dependencies = [
  "tower",
  "tower-http 0.7.0",
  "tracing",
+ "tracing-subscriber",
  "ts-rs",
  "unicode-general-category",
  "uuid",

@@ -34,6 +34,7 @@ mod exec_write_snapshot;
 mod extract;
 mod foreground_prompt;
 mod gateway_runtime;
+pub mod logging;
 mod managed_policy;
 mod mcp_config;
 mod model_registry;
