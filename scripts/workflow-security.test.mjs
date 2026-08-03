@@ -166,13 +166,18 @@ test("heavy CI is opt-in on pull requests and automatic elsewhere", () => {
   assert.doesNotMatch(desktopCargo, /document-parsers/);
 });
 
-test("UI tests and production build run as a single parallel step", () => {
+test("UI tests and production build each gate the UI lane", () => {
   const ci = workflows["ci.yml"];
   const ui = workflowJob(ci, "ui");
 
   assert.match(ui, /if:.*needs\.changes\.outputs\.ui == 'true'/);
   assert.match(ui, /run: pnpm install --frozen-lockfile/);
-  assert.match(ui, /pnpm test & pnpm build & wait/);
+  // Sequential steps, one command each: a backgrounded `a & b & wait` swallows
+  // the children's exit codes, so a failing test or build reported success
+  // (#1376). Each step's status must reach the job directly.
+  assert.match(ui, /run: pnpm test/);
+  assert.match(ui, /run: pnpm build/);
+  assert.doesNotMatch(ui, /& wait/);
   assert.doesNotMatch(ci, /matrix\.task/);
 });
 
