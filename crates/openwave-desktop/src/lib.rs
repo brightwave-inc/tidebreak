@@ -304,7 +304,7 @@ async fn boot_server(
     data_dir: PathBuf,
 ) -> Result<(), String> {
     let client_executor_id = app.state::<host_access::HostAccess>().client_executor_id();
-    let mut config = Config::desktop(data_dir);
+    let mut config = Config::desktop(data_dir.clone());
     config.exec_scripts_dir = Some(exec_scripts_dir(&app)?);
     config.exec_skills_dir = Some(exec_skills_dir(&app)?);
     // The effective identifier — including the debug-build override — keys
@@ -321,10 +321,14 @@ async fn boot_server(
     let folder_grants = Arc::new(host_access::DesktopExecFolderGrantResolver::new(
         app.clone(),
     ));
+    // The exec provider renders office outputs with the same managed/system
+    // LibreOffice the preview panel converts with.
+    let office_converter = Arc::new(office_pdf::ExecOfficeConverter::new(data_dir));
     let server = openwave_server::bind_configured_with_desktop_executor_and_folder_grants(
         config,
         client_executor_id,
         folder_grants,
+        Some(office_converter),
     )
     .await
     .map_err(|e| e.to_string())?;

@@ -479,6 +479,68 @@ async fn prune_cache(cache_dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Host converter registered with the embedded server's exec provider.
+///
+/// The same LibreOffice resolution, containment, and on-disk conversion cache
+/// as the preview panel above, exposed behind the exec render seam so the
+/// model's office visual-QA loop and the preview panel can never disagree
+/// about which converter this machine has.
+pub(crate) struct ExecOfficeConverter {
+    data_dir: PathBuf,
+}
+
+impl ExecOfficeConverter {
+    pub(crate) fn new(data_dir: PathBuf) -> Self {
+        Self { data_dir }
+    }
+}
+
+#[async_trait::async_trait]
+impl openwave_code_execution::HostOfficeConverter for ExecOfficeConverter {
+    async fn convert_to_pdf(
+        &self,
+        bytes: &[u8],
+        extension: &str,
+    ) -> Result<Vec<u8>, openwave_code_execution::OfficeConvertError> {
+        use openwave_code_execution::OfficeConvertError;
+        if bytes.is_empty() || bytes.len() > MAX_BINARY_DELIVERABLE_BYTES {
+            return Err(OfficeConvertError::Failed(
+                "the document is empty or too large to convert".into(),
+            ));
+        }
+        let cache_dir = self.data_dir.join(CACHE_DIRECTORY);
+        let cache_path = cache_dir.join(format!("{}.pdf", content_key(bytes)));
+        if let Ok(cached) = tokio::fs::read(&cache_path).await {
+            if !cached.is_empty() {
+                return Ok(cached);
+            }
+        }
+        // Serialize with the preview panel's conversions: two cold
+        // LibreOffice launches race, and both callers share one cache.
+        let _serialized = conversion_lock().lock().await;
+        if let Ok(cached) = tokio::fs::read(&cache_path).await {
+            if !cached.is_empty() {
+                return Ok(cached);
+            }
+        }
+        let Some(soffice) = locate_soffice(&self.data_dir) else {
+            return Err(OfficeConvertError::ConverterMissing);
+        };
+        match run_conversion(&soffice, bytes, extension).await {
+            Ok(pdf) => {
+                // Cache best-effort, shared with the preview panel: the same
+                // deck previewed and QA-rendered converts once.
+                let _ = store_cached_pdf(&cache_dir, &cache_path, &pdf).await;
+                Ok(pdf)
+            }
+            // A resolved path that will not spawn is the same state as no
+            // LibreOffice at all.
+            Err(ConversionError::Spawn) => Err(OfficeConvertError::ConverterMissing),
+            Err(ConversionError::Failed(reason)) => Err(OfficeConvertError::Failed(reason)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
