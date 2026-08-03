@@ -324,9 +324,31 @@ fn provisioning_wire_shapes() {
         run_id: RunId::new(),
         tag: SandboxTag::new(),
         lifetime_cap_secs: Some(3600),
+        network_policy: openwave_sandbox_protocol::SandboxNetworkPolicy {
+            allow_all_public: false,
+            allowed_hosts: vec!["api.example.com".to_owned()],
+            https_only_hosts: vec!["pypi.org".to_owned()],
+        },
     };
     roundtrip(&request);
-    golden(&request, &[("/lifetime_cap_secs", json!(3600))]);
+    golden(
+        &request,
+        &[
+            ("/lifetime_cap_secs", json!(3600)),
+            ("/network_policy/allowed_hosts/0", json!("api.example.com")),
+            ("/network_policy/https_only_hosts/0", json!("pypi.org")),
+        ],
+    );
+
+    // A request that predates the policy field deserializes to deny-all, so an
+    // older caller provisions a no-egress sandbox rather than an open one.
+    let legacy: ProvisionRequest = serde_json::from_value(json!({
+        "run_id": RunId::new(),
+        "tag": SandboxTag::new(),
+        "lifetime_cap_secs": null,
+    }))
+    .unwrap();
+    assert!(legacy.network_policy.denies_everything());
 
     let handle = SandboxHandle {
         reference: "container-abc".to_owned(),

@@ -55,7 +55,7 @@ use openwave_sandbox_protocol::{
         ReverseResult, RunProvenance,
     },
     AttachRequest, BackendError, CapabilityHost, ConnectError, ProvisionRequest, SandboxAddress,
-    SandboxBackend, SandboxHandle, SandboxTag, WireClient,
+    SandboxBackend, SandboxHandle, SandboxNetworkPolicy, SandboxTag, WireClient,
 };
 use tokio::net::TcpStream;
 use uuid::Uuid;
@@ -357,9 +357,11 @@ impl SandboxContainerRunner {
         // Resolve the run's model through the host's registry BEFORE any
         // container exists, and fail closed if it does not resolve: the in-process
         // worker gates every egress on the registry, and a container run must
-        // egress under the same policy rather than a looser one.
-        let config = match self.resolve_model_config(&run).await {
-            Ok(config) => config,
+        // egress under the same policy rather than a looser one. The chat's
+        // network policy is compiled here too — the sandbox's egress proxy
+        // enforces exactly the authority the owning conversation granted.
+        let (config, network_policy) = match self.resolve_model_config(&run).await {
+            Ok(resolved) => resolved,
             Err(error) => {
                 return self
                     .fail(
@@ -393,6 +395,7 @@ impl SandboxContainerRunner {
                         // A local container has no external lifetime cap, which
                         // is why the run is attached-only.
                         lifetime_cap_secs: None,
+                        network_policy,
                     })
                     .await;
                 match provisioned {
@@ -470,11 +473,16 @@ impl SandboxContainerRunner {
     }
 
     /// Resolve the run's frozen model selection into an egress config under the
-    /// host's model-registry policy, exactly as the in-process worker does.
+    /// host's model-registry policy, exactly as the in-process worker does, and
+    /// compile the owning chat's network policy into the closed form the
+    /// sandbox backend enforces.
     ///
     /// Fails closed: an absent or unregistered model refuses the run rather than
     /// egressing on an empty or unvetted selection.
-    async fn resolve_model_config(&self, run: &AgentRun) -> Result<AgentConfig> {
+    async fn resolve_model_config(
+        &self,
+        run: &AgentRun,
+    ) -> Result<(AgentConfig, SandboxNetworkPolicy)> {
         let Some(model) = run.model.clone().filter(|model| !model.is_empty()) else {
             return Err(AgentError::config(
                 "container agent run has no frozen model selection",
@@ -501,7 +509,8 @@ impl SandboxContainerRunner {
             config.model = model;
             config.reasoning_effort = chat.reasoning_effort;
         }
-        Ok(config)
+        let network_policy = crate::sandbox_docker::compile_network_policy(&chat.network_policy);
+        Ok((config, network_policy))
     }
 
     async fn attach_and_drive(

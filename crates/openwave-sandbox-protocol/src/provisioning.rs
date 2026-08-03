@@ -49,6 +49,77 @@ pub struct ProvisionRequest {
     /// outside the sandbox. `None` means the backend cannot cap lifetime, which
     /// (per the design) makes the run attached-only.
     pub lifetime_cap_secs: Option<u64>,
+    /// The egress the sandbox is granted, in the compiled deny-by-default form.
+    /// Absent on the wire means [`SandboxNetworkPolicy::deny_all`], so a caller
+    /// that predates the field provisions a sandbox with no egress rather than
+    /// an unrestricted one.
+    #[serde(default)]
+    pub network_policy: SandboxNetworkPolicy,
+}
+
+/// The egress a provisioned sandbox may perform, compiled by the host into a
+/// closed allowlist before it reaches a backend.
+///
+/// This is deliberately *not* the host's own policy vocabulary: destination
+/// classes (for example the package-manager registry set) are expanded by the
+/// host into exact hosts, so an enforcement point — a backend, or the egress
+/// proxy a backend stands up — needs no class knowledge and no dependency
+/// beyond this crate. The default is deny-everything.
+///
+/// A destination is permitted when [`permits`](Self::permits) says so; private,
+/// loopback, and link-local address space is the enforcement point's own
+/// obligation to refuse regardless of this policy.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxNetworkPolicy {
+    /// Permit every public destination. Enforcement points must still refuse
+    /// private, loopback, and link-local address space.
+    #[serde(default)]
+    pub allow_all_public: bool,
+    /// Exact lowercase DNS hosts permitted on any port. Never wildcards: the
+    /// host refuses wildcard entries at compile time rather than shipping them.
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+    /// Exact lowercase DNS hosts permitted on port 443 only — the compiled
+    /// expansion of a registry destination class.
+    #[serde(default)]
+    pub https_only_hosts: Vec<String>,
+}
+
+impl SandboxNetworkPolicy {
+    /// The deny-everything policy (also `Default`).
+    #[must_use]
+    pub fn deny_all() -> Self {
+        Self::default()
+    }
+
+    /// Permit every public destination.
+    #[must_use]
+    pub fn open() -> Self {
+        Self {
+            allow_all_public: true,
+            allowed_hosts: Vec::new(),
+            https_only_hosts: Vec::new(),
+        }
+    }
+
+    /// Whether this policy denies every destination.
+    #[must_use]
+    pub fn denies_everything(&self) -> bool {
+        !self.allow_all_public && self.allowed_hosts.is_empty() && self.https_only_hosts.is_empty()
+    }
+
+    /// Whether `host:port` is permitted. `host` is matched case-insensitively
+    /// against the exact entries; no wildcard or suffix matching exists here.
+    #[must_use]
+    pub fn permits(&self, host: &str, port: u16) -> bool {
+        if self.allow_all_public {
+            return true;
+        }
+        let matches = |entry: &String| entry.eq_ignore_ascii_case(host);
+        self.allowed_hosts.iter().any(matches)
+            || (port == 443 && self.https_only_hosts.iter().any(matches))
+    }
 }
 
 /// An opaque, backend-specific handle to a provisioned sandbox.

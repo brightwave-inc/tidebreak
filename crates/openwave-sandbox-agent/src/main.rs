@@ -40,7 +40,7 @@
 use std::env;
 use std::time::Duration;
 
-use openwave_sandbox_agent::{run_agent, Supervisor};
+use openwave_sandbox_agent::{run_agent, EgressProxy, EgressProxyConfig, Supervisor};
 use openwave_sandbox_protocol::{reverse::Capability, SandboxRun, TransportSecret};
 
 /// Default listener address; the container publishes this port.
@@ -67,6 +67,13 @@ async fn main() {
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    // The same binary is the image's second face: `egress-proxy` serves the
+    // sandbox's network boundary from the one dual-homed container instead of
+    // running the agent loop. It honors the same lifetime cap, so a proxy whose
+    // host never returns dies on its own exactly like a stranded sandbox.
+    if env::args().nth(1).as_deref() == Some("egress-proxy") {
+        return run_egress_proxy().await;
+    }
     let listen = env::var("OPENWAVE_SANDBOX_LISTEN").unwrap_or_else(|_| DEFAULT_LISTEN.to_owned());
     let workspace =
         env::var("OPENWAVE_SANDBOX_WORKSPACE").unwrap_or_else(|_| DEFAULT_WORKSPACE.to_owned());
@@ -115,6 +122,32 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         () = lifetime_elapsed(cap) => {
             let secs = cap.unwrap_or_default().as_secs();
             eprintln!("openwave-sandbox-agent: lifetime cap of {secs}s reached; exiting");
+        }
+    }
+    Ok(())
+}
+
+/// Serve the egress-proxy mode until the lifetime cap (if any) elapses.
+async fn run_egress_proxy() -> Result<(), Box<dyn std::error::Error>> {
+    let config = EgressProxyConfig::from_env();
+    if config.policy.denies_everything() {
+        eprintln!("openwave-sandbox-agent egress-proxy: policy denies all egress");
+    }
+    let proxy = EgressProxy::bind(config).await?;
+    eprintln!(
+        "openwave-sandbox-agent egress-proxy listening on {} (relay: {})",
+        proxy.egress_addr()?,
+        match proxy.relay_addr() {
+            Some(addr) => addr?.to_string(),
+            None => "off".to_owned(),
+        }
+    );
+    let cap = lifetime_cap(env::var(LIFETIME_CAP_ENV).ok().as_deref());
+    tokio::select! {
+        () = proxy.serve() => {}
+        () = lifetime_elapsed(cap) => {
+            let secs = cap.unwrap_or_default().as_secs();
+            eprintln!("openwave-sandbox-agent egress-proxy: lifetime cap of {secs}s reached; exiting");
         }
     }
     Ok(())

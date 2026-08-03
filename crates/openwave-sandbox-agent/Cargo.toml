@@ -20,6 +20,9 @@ openwave-sandbox-protocol = { path = "../openwave-sandbox-protocol" }
 # provider vocabulary, not the host-side persistence stack. `default-features =
 # false` keeps sea-orm, the keychain, and the fs tools out of the container image.
 openwave-core = { path = "../openwave-core", default-features = false }
+# Destination hygiene for the egress-proxy mode: dependency-free by charter, so
+# it costs the container image nothing.
+openwave-egress = { path = "../openwave-egress" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "process", "time"] }
 async-trait = { workspace = true }
 serde = { workspace = true }

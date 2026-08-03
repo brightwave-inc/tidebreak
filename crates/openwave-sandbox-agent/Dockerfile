@@ -3,7 +3,9 @@
 # Packages the `openwave-sandbox-agent` binary: the sandbox-side transport
 # server plus the in-container agent loop. The container's entrypoint runs the
 # agent server on the listener port the host dials (default 8080, publishable by
-# the local container backend in issue #874).
+# the local container backend in issue #874). The same image has a second face:
+# run with the `egress-proxy` argument it serves the sandbox's network boundary
+# from its own dual-homed container (see `sandbox_docker` in openwave-server).
 #
 # Build context is the WORKSPACE ROOT, so the whole Cargo workspace and the
 # committed Cargo.lock are visible to a `--locked` build:

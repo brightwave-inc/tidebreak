@@ -126,6 +126,7 @@ fn provision_request() -> ProvisionRequest {
         run_id: RunId::new(),
         tag: crate::ids::SandboxTag::new(),
         lifetime_cap_secs: None,
+        network_policy: Default::default(),
     }
 }
 

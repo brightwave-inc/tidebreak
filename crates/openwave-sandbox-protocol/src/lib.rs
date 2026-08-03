@@ -76,7 +76,8 @@ pub use protocol::{
     MAX_MODEL_COMPLETION_BYTES, MAX_MODEL_PROMPT_BYTES, PROTOCOL_VERSION,
 };
 pub use provisioning::{
-    BackendError, ProvisionRequest, SandboxAddress, SandboxBackend, SandboxHandle, TransportSecret,
+    BackendError, ProvisionRequest, SandboxAddress, SandboxBackend, SandboxHandle,
+    SandboxNetworkPolicy, TransportSecret,
 };
 pub use reverse::{
     Capability, CapabilityResponder, ControlFrame, GrantSet, ModelInferenceParams,
