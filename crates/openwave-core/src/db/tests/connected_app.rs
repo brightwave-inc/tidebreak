@@ -75,7 +75,16 @@ async fn absorption_migrates_servers_rekeys_manifests_and_drops_grants() {
     let database = dir.path().join("upgrade.db");
     let url = format!("sqlite://{}?mode=rwc", database.display());
     let conn = Database::connect(&url).await.unwrap();
-    let before_absorption = u32::try_from(migration::Migrator::migrations().len() - 1).unwrap();
+    // Stop right before the absorption migration by name, not by position:
+    // migrations registered after it must not push the cut out from under
+    // this test's legacy seed data.
+    let before_absorption = u32::try_from(
+        migration::Migrator::migrations()
+            .iter()
+            .position(|migration| migration.name() == "m20260803_000043_add_connected_apps")
+            .expect("the absorption migration is registered"),
+    )
+    .unwrap();
     migration::Migrator::up(&conn, Some(before_absorption))
         .await
         .unwrap();
