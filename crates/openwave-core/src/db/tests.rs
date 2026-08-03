@@ -8950,7 +8950,6 @@ async fn claimed_sensitive_call_with(
         class: ApprovalClass::Sensitive,
         kind: crate::ToolApprovalKind::for_tool_name(&call.name),
         preview: None,
-        summary: "search requires approval".into(),
     };
     (turn_id, lease_token, call, request)
 }

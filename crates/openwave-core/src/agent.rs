@@ -3018,7 +3018,6 @@ impl Agent {
                 ApprovalClass::Sensitive => !matches!(mode, PermissionMode::Allow),
             };
         if gate_required && !bypass_by_explicit_grant {
-            let summary = format!("{} requires approval", call.name);
             let kind = durable_approval
                 .map(|approval| approval.kind)
                 .unwrap_or(kind_for_call);
@@ -3063,7 +3062,6 @@ impl Agent {
                     class: approval_class,
                     kind,
                     preview: preview.clone(),
-                    summary: summary.clone(),
                     auto_judge,
                 },
                 journal,
@@ -3089,7 +3087,6 @@ impl Agent {
                     Vec::new()
                 },
                 preview,
-                summary,
             };
             let authorized_by_standing_grant = matches!(
                 registration.publication,
@@ -10761,7 +10758,6 @@ mod tests {
                     class: ApprovalClass::Sensitive,
                     kind: ToolApprovalKind::for_tool_name(&call.name),
                     preview: None,
-                    summary: "search requires approval".into(),
                 },
                 Utc::now(),
             )
@@ -10963,7 +10959,6 @@ mod tests {
                     class: ApprovalClass::Sensitive,
                     kind: ToolApprovalKind::for_tool_name(&call.name),
                     preview: None,
-                    summary: "persisted write requires approval".into(),
                 },
                 Utc::now(),
             )

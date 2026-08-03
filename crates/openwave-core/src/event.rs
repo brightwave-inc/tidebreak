@@ -98,8 +98,6 @@ pub enum AgentEvent {
         /// Absent on journal rows written before previews existed.
         #[serde(default)]
         preview: Option<crate::preview::ToolActionPreview>,
-        /// A short, human-readable summary of what will happen.
-        summary: String,
     },
     /// The human decided on a parked tool call.
     ApprovalDecided {
@@ -325,7 +323,6 @@ mod tests {
                     args: vec!["status".into()],
                     cwd: ".".into(),
                 }),
-                summary: "Run a command".into(),
             },
             AgentEvent::ApprovalDecided {
                 call_id: CallId(id(2)),
@@ -476,6 +473,34 @@ mod tests {
             loaded,
             journal_samples(),
             "a stored journal row no longer round-trips to the value it was written from"
+        );
+    }
+
+    /// `ApprovalRequired` rows written before the free-text `summary` field was
+    /// retired still carry it in `event.payload`; the extra key must stay
+    /// ignorable, or one such row makes a whole chat's history unreadable.
+    #[test]
+    fn approval_rows_with_the_retired_summary_field_still_load() {
+        let legacy = serde_json::json!({
+            "type": "approval_required",
+            "call_id": id(2),
+            "tool_name": "exec",
+            "class": "sensitive",
+            "kind": "exec_may_run_networked_command",
+            "summary": "exec requires approval",
+        });
+        let loaded: AgentEvent = serde_json::from_value(legacy).expect("legacy row deserializes");
+        assert_eq!(
+            loaded,
+            AgentEvent::ApprovalRequired {
+                auto_judging: false,
+                call_id: CallId(id(2)),
+                tool_name: "exec".into(),
+                class: ApprovalClass::Sensitive,
+                kind: crate::approval::ToolApprovalKind::ExecMayRunNetworkedCommand,
+                grant_scopes: Vec::new(),
+                preview: None,
+            }
         );
     }
 }

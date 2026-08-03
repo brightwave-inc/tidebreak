@@ -222,7 +222,6 @@ pub(in crate::db) async fn request_and_append_event(
             Vec::new()
         },
         preview: request.preview.clone(),
-        summary: request.summary.clone(),
     };
     let turn = entities::turn_run::Entity::find_by_id(request.turn_id.0)
         .one(&transaction)
