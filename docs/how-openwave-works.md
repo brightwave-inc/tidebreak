@@ -745,28 +745,47 @@ new session and publish its tool surface only for subsequent turns.
 ### Self-host
 
 The `Profile::SelfHost` shape and PostgreSQL database implementation exist, and
-CI exercises the durable turn state machine against PostgreSQL. The server still
-rejects the self-host profile at startup, and document/blob PostgreSQL parity is
-not comprehensively tested. Production Postgres wiring, remote secret custody,
-object storage, and multi-process ownership remain future integration work.
+CI exercises the durable turn state machine against PostgreSQL. Document/blob
+PostgreSQL parity is not comprehensively tested, and production Postgres
+wiring, remote secret custody, object storage, and multi-process ownership
+remain future integration work. Building `openwave-server` with its `postgres`
+feature compiles the driver in; the store then opens from
+`OPENWAVE_DATABASE_URL`.
 
-**Authorization is the gate on this profile, and it is not built.** The API has
-no per-user authorization at all: `auth.rs` is a per-launch bearer on a loopback
-port, which answers "is this the client this process handed a token to" — a
-capability check on a local process, not a principal. No route is owner-scoped;
-`require_chat` checks that a chat *exists* and nothing else, and the document,
-project, and settings surfaces are the same. Identity work (#578) is deliberately
-attributive only and states that no read path consults it, so it does not close
-this.
+**Authorization — the gate this profile was blocked on (#853) — is built.**
+The pieces, each enforced where it cannot silently drift:
 
-That is the right trade for a local-first desktop, where the bearer is
-per-launch, loopback-only, and belongs to the one person at the machine. It stops
-being right the moment more than one person's data shares a store: an existence
-check that passes for any authenticated caller is an authorization bug as soon as
-callers differ. Finishing this profile without resolving a principal in the
-request path and scoping queries by owner would ship a multi-user server whose
-every mode degrades to "any authenticated caller can see everything". Tracked as
-a gate in #853, which any shared-deployment work should be blocked on.
+- **The token names someone.** Self-host authenticates with static named
+  bearer tokens from an operator file (`OPENWAVE_AUTH_TOKENS_FILE`; format in
+  the server's `auth` module docs). The middleware resolves every credential
+  to a typed `Principal`; a token that names no one is rejected there, and
+  the desktop's per-launch capability token names nobody on a shared
+  deployment, so it authenticates nobody. Gateway-derived identity (#578) can
+  later replace the file behind the same credential-to-principal seam.
+- **Queries are owner-scoped where they are built.** Chats, projects, and
+  documents carry an owner column; route handlers reach storage only through
+  a `ScopedStore` view bound to the request's authenticated principal, on
+  which the unscoped root queries do not exist. Another owner's row answers
+  as absent — reads, mutations, transcripts, and the WebSocket event surface
+  alike. Standing tool grants are scoped through the chat or project they
+  cover. A conformance suite drives two named principals across the route
+  surface and asserts complete disjointness.
+- **Boot fails closed.** `connect_store` refuses to open a self-host store
+  unless the principal-naming authenticator is configured and names at least
+  one user, so a shared store can never exist behind an API that cannot tell
+  its callers apart.
+
+One deliberate exception, accepted rather than deferred: **settings are
+deployment-scoped, not per-user.** The settings table configures the
+deployment itself — enabled providers and credentials, model roles,
+web-search and code-execution configuration, managed policy — and the issue
+itself observed that a credential able to reconfigure the app is not
+containable per-user by a row filter. Every named user on a self-host
+deployment shares (and can change) that configuration, so the profile is for
+mutually trusting users of one operator's deployment — a household or a small
+team — not for adversarial tenants. Per-user preference settings can split
+out of the deployment table if that boundary is ever needed; multi-tenant
+isolation is explicitly not claimed.
 
 ## Where the code lives
 
@@ -836,10 +855,10 @@ The main next steps are:
   sandbox-safe capabilities without widening exact delegated-file or spawn
   authority;
 - add richer parsers;
-- resolve a principal in the request path and scope queries by owner (#853)
-  before finishing the self-host profile, which is otherwise a multi-user server
-  with no per-user authorization;
-- finish the self-host profile rather than only testing Postgres state logic;
+- finish the self-host profile — the request path resolves a principal and
+  queries are owner-scoped (#853), so what remains is production integration:
+  Postgres document/blob parity, remote secret custody, object storage, and
+  multi-process ownership;
 - add health-aware provider failover;
 - add output deletion, version history, richer formats, and durable export
   receipts without widening the native write boundary;

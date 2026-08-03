@@ -3032,13 +3032,14 @@ pub(crate) struct StandingGrantSnapshot {
     pub granted_at: chrono::DateTime<Utc>,
 }
 
-/// `GET /grants` — every standing grant, newest first, across all chats.
+/// `GET /grants` — the principal's standing grants, newest first, across all
+/// of their chats.
 ///
 /// The settings surface for "what the agent can do without asking": a grant
 /// the reader cannot find is a one-way door, and this is where it is found.
-/// Grants themselves are not owner-keyed yet (#853 slice 5); the provenance
-/// titles are resolved through the requesting principal's own chats and
-/// projects, so this route never reads another owner's titles.
+/// Grants are owner-scoped through the chat or project their level points at
+/// (#853), and the provenance titles resolve through the same principal's
+/// chats and projects.
 pub(crate) async fn list_standing_grants(
     store: ScopedStore,
 ) -> Result<Json<Vec<StandingGrantSnapshot>>, ServerError> {

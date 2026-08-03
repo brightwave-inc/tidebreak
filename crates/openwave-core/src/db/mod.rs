@@ -1837,11 +1837,26 @@ impl Store for DbStore {
     }
 
     async fn list_standing_tool_grants(&self) -> Result<Vec<crate::approval::StandingGrantRecord>> {
-        ops::approval::list_standing_grants(self).await
+        ops::approval::list_standing_grants(self, None).await
+    }
+
+    async fn list_standing_tool_grants_scoped(
+        &self,
+        owner: &OwnerId,
+    ) -> Result<Vec<crate::approval::StandingGrantRecord>> {
+        ops::approval::list_standing_grants(self, Some(owner)).await
     }
 
     async fn revoke_standing_tool_grant(&self, source_call_id: CallId) -> Result<bool> {
-        ops::approval::revoke_standing_grant(self, source_call_id).await
+        ops::approval::revoke_standing_grant(self, source_call_id, None).await
+    }
+
+    async fn revoke_standing_tool_grant_scoped(
+        &self,
+        owner: &OwnerId,
+        source_call_id: CallId,
+    ) -> Result<bool> {
+        ops::approval::revoke_standing_grant(self, source_call_id, Some(owner)).await
     }
 
     async fn claim_client_tool_call(

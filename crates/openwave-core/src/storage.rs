@@ -1680,6 +1680,30 @@ pub trait Store: Send + Sync {
         self.accept_document_source(document).await
     }
 
+    /// [`Store::list_standing_tool_grants`] restricted to grants whose chat
+    /// or project belongs to `owner`. A grant's owner is its level's owner:
+    /// grants are created inside an owner-scoped chat and cascade-deleted
+    /// with their chat or project, so the derivation cannot drift.
+    async fn list_standing_tool_grants_scoped(
+        &self,
+        owner: &OwnerId,
+    ) -> Result<Vec<crate::approval::StandingGrantRecord>> {
+        let _ = owner;
+        self.list_standing_tool_grants().await
+    }
+
+    /// [`Store::revoke_standing_tool_grant`] restricted to `owner`'s grants;
+    /// someone else's grant is left standing and reports `false`,
+    /// indistinguishable from a grant that never existed.
+    async fn revoke_standing_tool_grant_scoped(
+        &self,
+        owner: &OwnerId,
+        source_call_id: CallId,
+    ) -> Result<bool> {
+        let _ = owner;
+        self.revoke_standing_tool_grant(source_call_id).await
+    }
+
     /// Create a conversation output together with its first revision.
     ///
     /// The caller has already written the revision's bytes to conversation

@@ -7,12 +7,14 @@
 //! simply does not exist on this type, and the inner handle never escapes it,
 //! so route code cannot express a query that crosses owners (#853).
 //!
-//! Non-root operations (turns, agent runs, events, approvals, grants) hang
-//! off a root by id and pass through unchanged; the handler authorizes the
-//! root through this view first, exactly as the store's scoping model
-//! prescribes. System paths that act on already-authorized ids — turn
-//! workers, retirement scans, post-commit signalling — are not requests and
-//! keep the separate unscoped handle on [`AppState`].
+//! Non-root operations (turns, agent runs, events, approvals) hang off a
+//! root by id and pass through unchanged; the handler authorizes the root
+//! through this view first, exactly as the store's scoping model prescribes.
+//! Standing grants, which span chats, are owner-scoped directly through the
+//! chat or project their level points at. System paths that act on
+//! already-authorized ids — turn workers, retirement scans, post-commit
+//! signalling — are not requests and keep the separate unscoped handle on
+//! [`AppState`].
 //!
 //! The extractor fails closed like [`AuthContext`] itself: on a route the
 //! auth middleware does not cover it answers `401`, never a defaulted owner.
@@ -194,9 +196,11 @@ impl ScopedStore {
 
     // ------------------------------------------------------------------
     // Non-root operations — keyed by ids that hang off a root the handler
-    // has already authorized through this view. Settings and standing
-    // grants are not per-owner yet (#853 slice 5); they pass through so the
-    // route surface still has exactly one store seam.
+    // has already authorized through this view. Standing grants are the
+    // exception: their reads and revocations are owner-scoped here, since
+    // the grant list is a cross-chat surface with no per-request root to
+    // authorize first. Settings stay deployment-scoped by design (#853) —
+    // see the self-host section of `docs/how-openwave-works.md`.
     // ------------------------------------------------------------------
 
     /// [`Store::get_turn_run`].
@@ -291,16 +295,22 @@ impl ScopedStore {
             .await
     }
 
-    /// [`Store::list_standing_tool_grants`].
+    /// The standing grants reachable through the principal's own chats and
+    /// projects, newest first.
     pub async fn list_standing_tool_grants(
         &self,
     ) -> Result<Vec<openwave_core::StandingGrantRecord>> {
-        self.store.list_standing_tool_grants().await
+        self.store
+            .list_standing_tool_grants_scoped(&self.owner)
+            .await
     }
 
-    /// [`Store::revoke_standing_tool_grant`].
+    /// Withdraw one of the principal's standing grants. Someone else's grant
+    /// is left standing and reports `false`, indistinguishable from absent.
     pub async fn revoke_standing_tool_grant(&self, source_call_id: CallId) -> Result<bool> {
-        self.store.revoke_standing_tool_grant(source_call_id).await
+        self.store
+            .revoke_standing_tool_grant_scoped(&self.owner, source_call_id)
+            .await
     }
 
     /// [`Store::list_events`].

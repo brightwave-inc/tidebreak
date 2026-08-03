@@ -1078,8 +1078,13 @@ fn agent_deps(
 
 /// Open the durable store the profile selects.
 ///
-/// Only the desktop profile (SQLite under `data_dir`) is wired today; the
-/// self-host Postgres store lands with that profile's slice.
+/// Desktop opens SQLite under `data_dir`. Self-host opens the database named
+/// by `OPENWAVE_DATABASE_URL` (PostgreSQL; build with the `postgres` feature
+/// to compile the driver in) — and only after the profile's principal-naming
+/// authenticator loads. A shared store must never open behind an API that
+/// cannot tell its callers apart, so a self-host config without a valid
+/// token file refuses to boot here, before the store exists, on every path
+/// that opens it (#853).
 async fn connect_store(config: &Config) -> Result<Arc<dyn Store>> {
     match config.profile {
         Profile::Desktop => {
@@ -1088,8 +1093,25 @@ async fn connect_store(config: &Config) -> Result<Arc<dyn Store>> {
             let store = desktop_schema::connect(config).await?;
             Ok(Arc::new(store))
         }
+        Profile::SelfHost => {
+            let tokens = config.auth_tokens_file.as_deref().ok_or_else(|| {
+                AgentError::config(
+                    "refusing to open a shared store without a principal-naming \
+                     authenticator: self-host requires OPENWAVE_AUTH_TOKENS_FILE \
+                     (format in the auth module docs)",
+                )
+            })?;
+            // Load and discard: boot proves the authenticator names someone
+            // before the shared store exists. State assembly re-loads the
+            // same file as the request path's credential map.
+            auth::TokenMap::load(tokens)?;
+            let store = openwave_core::DbStore::connect(&config.database_url()?).await?;
+            Ok(Arc::new(store))
+        }
+        // An unknown future profile has chosen neither a store nor an
+        // authenticator; fail closed rather than defaulting to either.
         _ => Err(AgentError::config(
-            "only the desktop profile is supported for now",
+            "no store backend is wired for this profile",
         )),
     }
 }
