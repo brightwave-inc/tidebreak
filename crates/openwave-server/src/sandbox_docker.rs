@@ -997,11 +997,13 @@ fn is_no_such_container(stderr: &[u8]) -> bool {
 }
 
 /// Whether a runtime error names a network that does not exist — the idempotent
-/// case for network removal, across Docker and podman phrasings.
+/// case for network removal. Docker phrases it `network <name> not found` (the
+/// name sits between the words, so the match is on the bare suffix); podman
+/// uses `unable to find network` / `no such network`.
 fn is_no_such_network(stderr: &[u8]) -> bool {
     let text = String::from_utf8_lossy(stderr).to_ascii_lowercase();
     text.contains("no such network")
-        || text.contains("network not found")
+        || text.contains("not found")
         || text.contains("unable to find network")
 }
 
@@ -1391,6 +1393,23 @@ mod tests {
         assert!(is_no_such_container(b"Error: No such container: abc"));
         assert!(is_no_such_container(b"error: no such object abc"));
         assert!(!is_no_such_container(b"Error: container is restarting"));
+    }
+
+    /// The missing-network phrasings that make repeated teardown idempotent.
+    /// Docker interpolates the name between "network" and "not found", which is
+    /// exactly the case a stricter phrase match gets wrong.
+    #[test]
+    fn missing_network_is_recognized_across_runtimes() {
+        assert!(is_no_such_network(
+            b"Error response from daemon: network openwave-net-abc not found"
+        ));
+        assert!(is_no_such_network(b"Error: no such network abc"));
+        assert!(is_no_such_network(
+            b"Error: unable to find network with name or ID abc: network not found"
+        ));
+        assert!(!is_no_such_network(
+            b"Error response from daemon: network openwave-net-abc has active endpoints"
+        ));
     }
 
     // --- Live-Docker tests, skipped cleanly when no runtime is present. ---
