@@ -8,9 +8,12 @@
 
 use std::sync::Arc;
 
+use openwave_code_execution::CodeExecutionProviderKind;
 use openwave_core::{AgentRunExecutionLocation, Config, SandboxAdmissionMode};
+use openwave_sandbox_protocol::provisioning::SandboxBackend;
 
 use crate::sandbox_docker::{DockerConfig, DockerSandboxBackend};
+use crate::scoped_model_token::{GatewayScopedTokenIssuer, ScopedModelTokenIssuer};
 
 /// Container backend and admission route resolved once during server startup.
 pub(crate) struct SandboxContainerAdmission {
@@ -172,6 +175,66 @@ pub(crate) fn evaluate_detached_admission(
     } else {
         DetachedAdmission::Denied(denials)
     }
+}
+
+/// The preconditions the current run shape establishes, given the two facts
+/// owned by other components: token issuance (the issuer's honest
+/// availability) and the backend's external lifetime cap.
+///
+/// The remaining fields are the run shape every sandbox run has today — the
+/// container capability host grants ModelInference only, so no reverse
+/// capability reaches a host-authority operation, and no third-party
+/// credential is ever delivered into a run. Image verification within a trust
+/// root does not exist yet (#1188). The runner and the settings surface both
+/// read this one function, so what settings says a provider is missing is by
+/// construction what the gate would deny it for.
+pub(crate) fn structural_preconditions(
+    scoped_model_token_available: bool,
+    external_lifetime_cap: bool,
+) -> DetachedPreconditions {
+    DetachedPreconditions {
+        scoped_model_token_available,
+        external_lifetime_cap,
+        // No image verification within a trust root yet (#1188).
+        image_verified: false,
+        // The container capability host grants ModelInference only; no
+        // reverse capability reaches a host-authority operation.
+        host_authority_tool_surface: false,
+        // No third-party credential is ever delivered into a sandbox run.
+        carries_third_party_credentials: false,
+        external_egress_enforcement: false,
+    }
+}
+
+/// Per-provider detached-admission evaluation for the settings surface: what
+/// the gate would decide for a run hosted by each execution provider, from
+/// declared capabilities only — nothing is provisioned to answer this.
+///
+/// The token-issuer fact is deployment-wide (the gateway either can mint
+/// run-scoped tokens or it cannot); the lifetime-cap fact is per backend. The
+/// local provider reads the real Docker backend's declaration. E2B and
+/// Daytona have no sandbox backend at all today — they are exec adapters, not
+/// hosts for background agent runs — so no capability is established for them
+/// and the fail-closed evaluation names everything missing.
+pub(crate) fn settings_detached_admissions(
+    config: &Config,
+) -> Vec<(CodeExecutionProviderKind, DetachedAdmission)> {
+    let scoped_token = GatewayScopedTokenIssuer.available();
+    let local_lifetime_cap =
+        DockerSandboxBackend::new(docker_config(config)).enforces_external_lifetime_cap();
+    [
+        (CodeExecutionProviderKind::Local, local_lifetime_cap),
+        (CodeExecutionProviderKind::E2b, false),
+        (CodeExecutionProviderKind::Daytona, false),
+    ]
+    .into_iter()
+    .map(|(provider, lifetime_cap)| {
+        (
+            provider,
+            evaluate_detached_admission(structural_preconditions(scoped_token, lifetime_cap)),
+        )
+    })
+    .collect()
 }
 
 #[cfg(test)]

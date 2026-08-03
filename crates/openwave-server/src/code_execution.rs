@@ -349,6 +349,12 @@ pub struct CodeExecutionConfigInfo {
     /// status, so the renderer can present the policy and disclose which
     /// providers actually restrict egress today.
     pub egress: CodeExecutionEgressInfo,
+    /// Per-provider detached-admission evaluation: for each execution
+    /// provider, whether the fail-closed gate (issue #824) would admit a
+    /// detached run it hosted, and every named precondition it fails. Derived
+    /// by running the real admission evaluator over each provider's declared
+    /// capabilities — the settings surface and the gate cannot disagree.
+    pub detached_admission: Vec<DetachedAdmissionProviderInfo>,
 }
 
 /// Renderer-safe egress policy plus per-provider enforcement disclosure.
@@ -412,6 +418,75 @@ pub struct CodeExecutionEgressEnforcement {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub requirement: Option<String>,
+}
+
+/// One provider's detached-admission verdict, renderer-safe.
+///
+/// `denials` is what the real evaluator returned for this provider's declared
+/// capabilities: empty exactly when `admitted`. The rows exist even for
+/// providers that cannot host background runs at all — every precondition is
+/// simply unestablished for them, and the fail-closed evaluation names each.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+pub struct DetachedAdmissionProviderInfo {
+    pub provider: CodeExecutionProviderKind,
+    /// Whether the gate would admit a detached run hosted by this provider.
+    pub admitted: bool,
+    /// Every unmet precondition, named — not just the first.
+    pub denials: Vec<DetachedAdmissionDenialReason>,
+}
+
+/// Wire mirror of the admission gate's typed denial reasons
+/// ([`crate::sandbox_admission::DetachedAdmissionDenial`]), so the renderer
+/// maps each to user-facing language instead of receiving prose the server
+/// composed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum DetachedAdmissionDenialReason {
+    /// No issuer of short-lived, scoped, revocable model tokens.
+    NoScopedModelToken,
+    /// Nothing outside the sandbox bounds its lifetime.
+    NoExternalLifetimeCap,
+    /// The agent image is not verified within the topology's trust root.
+    ImageNotVerified,
+    /// The tool surface reaches a host-authority operation.
+    HostAuthorityToolSurface,
+    /// Third-party credentials without externally enforced egress policy.
+    CredentialsWithoutExternalEgress,
+}
+
+impl From<crate::sandbox_admission::DetachedAdmissionDenial> for DetachedAdmissionDenialReason {
+    fn from(denial: crate::sandbox_admission::DetachedAdmissionDenial) -> Self {
+        use crate::sandbox_admission::DetachedAdmissionDenial as Denial;
+        match denial {
+            Denial::NoScopedModelToken => Self::NoScopedModelToken,
+            Denial::NoExternalLifetimeCap => Self::NoExternalLifetimeCap,
+            Denial::ImageNotVerified => Self::ImageNotVerified,
+            Denial::HostAuthorityToolSurface => Self::HostAuthorityToolSurface,
+            Denial::CredentialsWithoutExternalEgress => Self::CredentialsWithoutExternalEgress,
+        }
+    }
+}
+
+/// Project the per-provider admission evaluation into the settings payload.
+fn detached_admission_info(
+    host_config: &openwave_core::Config,
+) -> Vec<DetachedAdmissionProviderInfo> {
+    use crate::sandbox_admission::DetachedAdmission;
+    crate::sandbox_admission::settings_detached_admissions(host_config)
+        .into_iter()
+        .map(|(provider, decision)| match decision {
+            DetachedAdmission::Admitted => DetachedAdmissionProviderInfo {
+                provider,
+                admitted: true,
+                denials: Vec::new(),
+            },
+            DetachedAdmission::Denied(denials) => DetachedAdmissionProviderInfo {
+                provider,
+                admitted: false,
+                denials: denials.into_iter().map(Into::into).collect(),
+            },
+        })
+        .collect()
 }
 
 /// The precondition Daytona's per-sandbox egress boundary is gated on. The
@@ -557,6 +632,7 @@ async fn write_config(store: &dyn Store, config: &CodeExecutionConfig) -> Result
 }
 
 pub async fn config_info(
+    host_config: &openwave_core::Config,
     store: &dyn Store,
     secrets: &dyn SecretProvider,
 ) -> Result<CodeExecutionConfigInfo> {
@@ -577,6 +653,7 @@ pub async fn config_info(
         available,
         has_credential,
         egress: CodeExecutionEgressInfo::from_config(config.egress),
+        detached_admission: detached_admission_info(host_config),
     })
 }
 
@@ -594,6 +671,7 @@ pub async fn credentials_info(secrets: &dyn SecretProvider) -> CodeExecutionCred
 }
 
 pub async fn update_config(
+    host_config: &openwave_core::Config,
     store: &dyn Store,
     secrets: &dyn SecretProvider,
     update: CodeExecutionConfigUpdate,
@@ -610,7 +688,9 @@ pub async fn update_config(
     }
     config.validate()?;
     write_config(store, &config).await?;
-    config_info(store, secrets).await.map_err(Into::into)
+    config_info(host_config, store, secrets)
+        .await
+        .map_err(Into::into)
 }
 
 pub async fn write_credential(
@@ -2664,8 +2744,10 @@ mod tests {
     #[tokio::test]
     async fn configuration_can_disable_and_reenable_local_execution() {
         let (store, _dir) = test_store().await;
+        let host_config = openwave_core::Config::desktop(_dir.path());
         let secrets = NoSecrets;
         let disabled = update_config(
+            &host_config,
             &store,
             &secrets,
             CodeExecutionConfigUpdate {
@@ -2683,6 +2765,7 @@ mod tests {
         assert!(!disabled.available);
 
         let local = update_config(
+            &host_config,
             &store,
             &secrets,
             CodeExecutionConfigUpdate {

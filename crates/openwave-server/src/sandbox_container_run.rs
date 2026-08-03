@@ -304,23 +304,15 @@ impl SandboxContainerRunner {
 
     /// The detached-admission preconditions this process can establish for a
     /// local container run, each derived from the component that owns the fact
-    /// — never a constant.
+    /// — never a constant. The same shared shape backs the settings surface,
+    /// so what settings names as missing is what this gate denies for.
     fn detached_preconditions(&self) -> DetachedPreconditions {
-        DetachedPreconditions {
+        crate::sandbox_admission::structural_preconditions(
             // The real fact from the configured issuer: true only when a
             // run-scoped, short-lived, revocable token can actually be minted.
-            scoped_model_token_available: self.token_issuer.available(),
-            external_lifetime_cap: self.backend.enforces_external_lifetime_cap(),
-            // No image verification within a trust root yet (#1188).
-            image_verified: false,
-            // The container capability host grants ModelInference only; no
-            // reverse capability reaches a host-authority operation.
-            host_authority_tool_surface: false,
-            // No third-party credential is ever delivered into a container
-            // run today.
-            carries_third_party_credentials: false,
-            external_egress_enforcement: false,
-        }
+            self.token_issuer.available(),
+            self.backend.enforces_external_lifetime_cap(),
+        )
     }
 
     /// Claim and drive the container-located run `run_id` to a terminal state.

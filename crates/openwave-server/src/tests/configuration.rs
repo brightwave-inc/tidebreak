@@ -575,6 +575,31 @@ async fn code_execution_config_route_is_authenticated_and_preserves_explicit_dis
     assert!(initial["available"].is_boolean());
     assert_eq!(initial["has_credential"], false);
 
+    // The detached-admission wire shape: one row per execution provider, each
+    // carrying the gate's named denial reasons. No provider is admitted today,
+    // and the local row names exactly the structural gaps — the scoped-token
+    // issuer, the external lifetime cap, and image verification.
+    let admission = initial["detached_admission"]
+        .as_array()
+        .expect("detached_admission is an array");
+    assert_eq!(
+        admission
+            .iter()
+            .map(|row| row["provider"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>(),
+        ["local", "e2b", "daytona"]
+    );
+    let local = &admission[0];
+    assert_eq!(local["admitted"], false);
+    assert_eq!(
+        local["denials"],
+        serde_json::json!([
+            "no_scoped_model_token",
+            "no_external_lifetime_cap",
+            "image_not_verified"
+        ])
+    );
+
     let unauthenticated_credentials = router
         .clone()
         .oneshot(

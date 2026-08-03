@@ -503,7 +503,15 @@ export type CodeExecutionConfigInfo = { provider?: CodeExecutionProviderKind, ti
  * status, so the renderer can present the policy and disclose which
  * providers actually restrict egress today.
  */
-egress: CodeExecutionEgressInfo, };
+egress: CodeExecutionEgressInfo, 
+/**
+ * Per-provider detached-admission evaluation: for each execution
+ * provider, whether the fail-closed gate (issue #824) would admit a
+ * detached run it hosted, and every named precondition it fails. Derived
+ * by running the real admission evaluator over each provider's declared
+ * capabilities — the settings surface and the gate cannot disagree.
+ */
+detached_admission: Array<DetachedAdmissionProviderInfo>, };
 
 /**
  * Renderer-safe readiness for one managed provider's fixed credential slot.
@@ -583,6 +591,32 @@ context_window: number,
  * Maximum output sent to the endpoint.
  */
 max_output_tokens: number, };
+
+/**
+ * Wire mirror of the admission gate's typed denial reasons
+ * ([`crate::sandbox_admission::DetachedAdmissionDenial`]), so the renderer
+ * maps each to user-facing language instead of receiving prose the server
+ * composed.
+ */
+export type DetachedAdmissionDenialReason = "no_scoped_model_token" | "no_external_lifetime_cap" | "image_not_verified" | "host_authority_tool_surface" | "credentials_without_external_egress";
+
+/**
+ * One provider's detached-admission verdict, renderer-safe.
+ *
+ * `denials` is what the real evaluator returned for this provider's declared
+ * capabilities: empty exactly when `admitted`. The rows exist even for
+ * providers that cannot host background runs at all — every precondition is
+ * simply unestablished for them, and the fail-closed evaluation names each.
+ */
+export type DetachedAdmissionProviderInfo = { provider: CodeExecutionProviderKind, 
+/**
+ * Whether the gate would admit a detached run hosted by this provider.
+ */
+admitted: boolean, 
+/**
+ * Every unmet precondition, named — not just the first.
+ */
+denials: Array<DetachedAdmissionDenialReason>, };
 
 /**
  * Identifies an authoritative source document.

@@ -586,7 +586,7 @@ pub async fn get_code_execution_config(
     State(state): State<AppState>,
 ) -> Result<Json<CodeExecutionConfigInfo>, ServerError> {
     Ok(Json(
-        code_execution::config_info(&*state.store, &*state.secrets).await?,
+        code_execution::config_info(&state.config, &*state.store, &*state.secrets).await?,
     ))
 }
 
@@ -596,7 +596,7 @@ pub async fn put_code_execution_config(
     Json(body): Json<CodeExecutionConfigUpdate>,
 ) -> Result<Json<CodeExecutionConfigInfo>, ServerError> {
     Ok(Json(
-        code_execution::update_config(&*state.store, &*state.secrets, body).await?,
+        code_execution::update_config(&state.config, &*state.store, &*state.secrets, body).await?,
     ))
 }
 
