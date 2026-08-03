@@ -49,6 +49,20 @@ const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(30);
 pub(crate) const MANAGED_DISABLED_DIAGNOSTIC: &str =
     "Disabled by managed policy. Gateway-managed MCP endpoints remain available.";
 
+/// Persisted memory of the gateway endpoints the user explicitly unmounted:
+/// the setting's value is a JSON array of endpoint slugs, nothing more —
+/// the shape is closed and versioned by the key. A slug is recorded when a
+/// committed settings replacement removes its mount, cleared when one
+/// configures it again, and never touched by auto-mount, so "the user turned
+/// this off" survives restarts without a second copy of the configuration.
+pub(crate) const GATEWAY_ENDPOINT_UNMOUNTS_KEY: &str = "gateway.endpoint_unmounts_v1";
+
+/// Upper bound on remembered unmounts. Entitled slugs are already bounded by
+/// the gateway and configured mounts by [`MAX_SERVERS`]; this only caps what
+/// years of shifting entitlements could accumulate. Oldest entries fall off
+/// first — an ancient unmount degrading to a re-mount the user can undo.
+const MAX_REMEMBERED_UNMOUNTS: usize = 256;
+
 /// How far managed policy locks the manual transports right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ManualLockdown {
@@ -911,6 +925,132 @@ impl McpRuntime {
         Ok(self.info().await)
     }
 
+    /// Mount every entitled gateway endpoint that is neither configured nor
+    /// remembered as explicitly unmounted, appending a fresh enabled
+    /// `gateway_endpoint` definition for each through the same
+    /// mutation-locked commit a settings save uses — so an auto-mount can
+    /// never interleave with a concurrent PUT. Returns whether anything was
+    /// mounted; with nothing to add there is no store write and no registry
+    /// churn, so repeat reconciles are free.
+    ///
+    /// Gateway mounts are the sanctioned transport under managed policy (the
+    /// admission check refuses only manual additions), so no lockdown branch
+    /// is needed here. An unreadable unmount memory fails closed — no
+    /// mounting — rather than resurrecting an endpoint the user turned off.
+    pub(crate) async fn auto_mount_gateway_endpoints(&self, entitled: &[String]) -> Result<bool> {
+        let _mutation = self.mutation.lock().await;
+        let mut servers = self.state.lock().await.definitions.clone();
+        let unmounts = read_endpoint_unmounts(&*self.store).await?;
+        let mut configured: HashSet<String> = servers
+            .iter()
+            .filter_map(|definition| definition.gateway_endpoint.clone())
+            .collect();
+        let mut taken: HashSet<String> = servers
+            .iter()
+            .map(|definition| definition.name.clone())
+            .collect();
+        let before = servers.len();
+        for slug in entitled {
+            if configured.contains(slug) || unmounts.iter().any(|unmounted| unmounted == slug) {
+                continue;
+            }
+            // The gateway is trusted for entitlements, not for shapes: a slug
+            // outside the endpoint contract is skipped, never persisted.
+            if openwave_connectors::validate_mcp_endpoint_slug(slug).is_err() {
+                tracing::warn!(
+                    slug = %slug,
+                    "entitled gateway MCP endpoint slug is invalid; not auto-mounting"
+                );
+                continue;
+            }
+            if servers.len() >= MAX_SERVERS {
+                tracing::warn!(
+                    slug = %slug,
+                    "MCP server list is full; not auto-mounting this gateway endpoint"
+                );
+                continue;
+            }
+            let name = gateway_mount_name(slug, &taken);
+            taken.insert(name.clone());
+            configured.insert(slug.clone());
+            servers.push(McpServerDefinition {
+                name,
+                command: None,
+                args: Vec::new(),
+                env: BTreeMap::new(),
+                env_from: Vec::new(),
+                cwd: None,
+                url: None,
+                bearer_token_env: None,
+                gateway_endpoint: Some(slug.clone()),
+                request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
+                enabled: true,
+            });
+        }
+        if servers.len() == before {
+            return Ok(false);
+        }
+        self.replace_committed(McpServersConfig { servers }).await?;
+        Ok(true)
+    }
+
+    /// Record the gateway-endpoint intent a committed settings replacement
+    /// expressed, against the set published just before it: a mount removed
+    /// is an explicit unmount (auto-mount only ever adds, so a removal seen
+    /// here is always deliberate), and a slug configured again clears its
+    /// memory so a manual remount stays remounted. Best-effort by design:
+    /// the replacement itself has already committed, so a failed memory
+    /// write degrades to a possible future auto-remount, never a failed
+    /// save. Callers hold the mutation lock and have not yet published the
+    /// new state.
+    async fn remember_endpoint_unmounts(&self, new_definitions: &[McpServerDefinition]) {
+        let new_slugs: HashSet<&str> = new_definitions
+            .iter()
+            .filter_map(|definition| definition.gateway_endpoint.as_deref())
+            .collect();
+        let removed: Vec<String> = {
+            let state = self.state.lock().await;
+            state
+                .definitions
+                .iter()
+                .filter_map(|definition| definition.gateway_endpoint.as_deref())
+                .filter(|slug| !new_slugs.contains(slug))
+                .map(str::to_string)
+                .collect()
+        };
+        let mut memory = match read_endpoint_unmounts(&*self.store).await {
+            Ok(memory) => memory,
+            // The write below repairs the malformed value; losing it degrades
+            // to auto-remounts the user can undo, unlike failing every save.
+            Err(error) => {
+                tracing::warn!("gateway unmount memory is unreadable; rebuilding it: {error}");
+                Vec::new()
+            }
+        };
+        let before = memory.clone();
+        memory.retain(|slug| !new_slugs.contains(slug.as_str()));
+        for slug in removed {
+            if !memory.contains(&slug) {
+                memory.push(slug);
+            }
+        }
+        if memory.len() > MAX_REMEMBERED_UNMOUNTS {
+            let excess = memory.len() - MAX_REMEMBERED_UNMOUNTS;
+            memory.drain(..excess);
+        }
+        if memory == before {
+            return;
+        }
+        let value = serde_json::to_value(&memory).expect("a list of strings serializes infallibly");
+        if let Err(error) = self
+            .store
+            .set_setting(GATEWAY_ENDPOINT_UNMOUNTS_KEY, &value)
+            .await
+        {
+            tracing::warn!("could not persist the gateway unmount memory: {error}");
+        }
+    }
+
     #[cfg(test)]
     async fn replace_with_commit_pause(
         &self,
@@ -1050,6 +1190,9 @@ impl McpRuntime {
             );
         }
         if persist {
+            // Before the new state publishes, while the published set is
+            // still what this replacement diffs against.
+            self.remember_endpoint_unmounts(&definitions).await;
             let now = chrono::Utc::now();
             let records: Vec<ConnectedApp> = definitions
                 .iter()
@@ -1492,6 +1635,41 @@ fn manual_lockdown_applies(definition: &McpServerDefinition, lockdown: ManualLoc
     }
 }
 
+/// The remembered explicit unmounts, an empty list when nothing was ever
+/// recorded. A malformed value is an error: the auto-mount caller must fail
+/// closed on it instead of treating "unreadable" as "nothing unmounted".
+async fn read_endpoint_unmounts(store: &dyn Store) -> Result<Vec<String>> {
+    let Some(value) = store.get_setting(GATEWAY_ENDPOINT_UNMOUNTS_KEY).await? else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_value(value).map_err(|error| {
+        AgentError::config(format!(
+            "invalid {GATEWAY_ENDPOINT_UNMOUNTS_KEY} setting: {error}"
+        ))
+    })
+}
+
+/// A valid, unused namespace for an auto-mounted endpoint: the slug,
+/// truncated to the name limit and de-duplicated against every configured
+/// server — the same derivation the desktop's mount toggle uses
+/// (`mountName` in `McpPanel.tsx`), so a mount gets the same name whichever
+/// side creates it. Slugs are ASCII by contract, so byte slicing is safe.
+fn gateway_mount_name(slug: &str, taken: &HashSet<String>) -> String {
+    let base = &slug[..slug.len().min(MAX_SERVER_NAME_BYTES)];
+    if !taken.contains(base) {
+        return base.to_string();
+    }
+    for n in 2u64.. {
+        let suffix = format!("_{n}");
+        let keep = base.len().min(MAX_SERVER_NAME_BYTES - suffix.len());
+        let candidate = format!("{}{suffix}", &base[..keep]);
+        if !taken.contains(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("some numeric suffix is always free")
+}
+
 /// The diagnostic a forced-down manual server carries, so the settings list
 /// says why it is off instead of showing an unexplained disabled row.
 fn managed_lockdown_diagnostic(
@@ -1870,6 +2048,99 @@ mod tests {
             store,
             directory,
         )
+    }
+
+    /// The explicit-unmount memory end to end: a settings save that removes
+    /// a gateway mount records the slug, auto-mount never resurrects it, and
+    /// a manual remount clears the record so it stays remounted. (Signed
+    /// out, the mount persists degraded — exactly what lets this run without
+    /// a live gateway.)
+    #[tokio::test]
+    async fn an_explicit_unmount_is_remembered_and_never_auto_remounted() {
+        let (runtime, store, _directory) = test_runtime().await;
+        assert!(runtime
+            .auto_mount_gateway_endpoints(&["docs".to_string()])
+            .await
+            .unwrap());
+        let saved = saved_definitions(&store).await;
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].name, "docs");
+        assert_eq!(saved[0].gateway_endpoint.as_deref(), Some("docs"));
+        assert!(saved[0].enabled);
+
+        // The user unmounts: a complete settings save without the mount.
+        runtime
+            .replace(McpServersConfig {
+                servers: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_setting(GATEWAY_ENDPOINT_UNMOUNTS_KEY)
+                .await
+                .unwrap()
+                .unwrap(),
+            serde_json::json!(["docs"])
+        );
+
+        // Auto-mount refuses to fight the recorded intent.
+        assert!(!runtime
+            .auto_mount_gateway_endpoints(&["docs".to_string()])
+            .await
+            .unwrap());
+        assert!(runtime.info().await.servers.is_empty());
+
+        // A manual remount clears the memory.
+        runtime
+            .replace(McpServersConfig {
+                servers: vec![gateway_definition("docs", "docs")],
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_setting(GATEWAY_ENDPOINT_UNMOUNTS_KEY)
+                .await
+                .unwrap()
+                .unwrap(),
+            serde_json::json!([])
+        );
+        // Already mounted: nothing to add, nothing rewritten.
+        assert!(!runtime
+            .auto_mount_gateway_endpoints(&["docs".to_string()])
+            .await
+            .unwrap());
+    }
+
+    /// An entitled slug colliding with a configured server name derives the
+    /// same suffixed namespace the desktop's mount toggle would, instead of
+    /// failing validation on the duplicate.
+    #[tokio::test]
+    async fn auto_mount_suffixes_a_name_a_manual_server_already_took() {
+        let (runtime, _store, _directory) = test_runtime().await;
+        runtime
+            .replace(McpServersConfig {
+                servers: vec![disabled_definition("docs", "/usr/local/bin/docs-mcp")],
+            })
+            .await
+            .unwrap();
+
+        assert!(runtime
+            .auto_mount_gateway_endpoints(&["docs".to_string()])
+            .await
+            .unwrap());
+        let info = runtime.info().await;
+        let names: Vec<&str> = info
+            .servers
+            .iter()
+            .map(|server| server.definition.name.as_str())
+            .collect();
+        assert_eq!(names, ["docs", "docs_2"]);
+        assert_eq!(
+            info.servers[1].definition.gateway_endpoint.as_deref(),
+            Some("docs")
+        );
     }
 
     #[test]

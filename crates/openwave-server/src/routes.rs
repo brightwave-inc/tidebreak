@@ -238,7 +238,7 @@ pub async fn get_gateway_status(
 pub async fn post_gateway_sign_in(
     State(state): State<AppState>,
 ) -> Result<Json<GatewaySignInStarted>, ServerError> {
-    let authorization_url = state.gateway.begin_sign_in().await?;
+    let authorization_url = state.gateway.begin_sign_in(state.mcp.clone()).await?;
     Ok(Json(GatewaySignInStarted { authorization_url }))
 }
 
