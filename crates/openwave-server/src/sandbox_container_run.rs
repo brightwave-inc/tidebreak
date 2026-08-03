@@ -48,7 +48,7 @@ use openwave_core::{
 use openwave_sandbox_protocol::{
     events::EventPayload,
     ids::{EventCursor, RunId},
-    init::{AdmissionMode, PolicySnapshot, RunInit},
+    init::{AdmissionMode, PolicySnapshot, RunInit, ScopedModelToken},
     protocol::{ErrorCode, ErrorResponse, Response, PROTOCOL_VERSION},
     reverse::{
         Capability, CapabilityResponder, GrantSet, ModelInferenceResult, ReverseRequest,
@@ -63,6 +63,7 @@ use uuid::Uuid;
 use crate::durable_oplog::DurableOperationStore;
 use crate::resolver::ProviderResolver;
 use crate::sandbox_admission::{evaluate_detached_admission, DetachedPreconditions};
+use crate::scoped_model_token::{GatewayScopedTokenIssuer, ScopedModelTokenIssuer};
 
 /// The provider attribution stamped on reverse operations from a local
 /// container. Untrusted attribution rendered on consent prompts, never a claim
@@ -264,6 +265,11 @@ pub struct SandboxContainerRunner {
     backend: Arc<dyn SandboxBackend>,
     resolver: Arc<dyn ProviderResolver>,
     config: SandboxContainerRunConfig,
+    /// The issuer of run-scoped model tokens for detached-admitted runs, and
+    /// the truthful source of the admission gate's
+    /// `scoped_model_token_available` input. Defaults to the gateway position
+    /// — unavailable, fail-closed — until the gateway can mint for real.
+    token_issuer: Arc<dyn ScopedModelTokenIssuer>,
 }
 
 impl SandboxContainerRunner {
@@ -281,6 +287,39 @@ impl SandboxContainerRunner {
             backend,
             resolver,
             config,
+            token_issuer: Arc::new(GatewayScopedTokenIssuer),
+        }
+    }
+
+    /// Replace the scoped-token issuer — the seam tests and future
+    /// mint-capable deployments plug into. The default is fail-closed.
+    // Production assembly keeps the default until a real issuer exists; the
+    // seam is exercised by the tests meanwhile.
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[must_use]
+    pub(crate) fn with_token_issuer(mut self, issuer: Arc<dyn ScopedModelTokenIssuer>) -> Self {
+        self.token_issuer = issuer;
+        self
+    }
+
+    /// The detached-admission preconditions this process can establish for a
+    /// local container run, each derived from the component that owns the fact
+    /// — never a constant.
+    fn detached_preconditions(&self) -> DetachedPreconditions {
+        DetachedPreconditions {
+            // The real fact from the configured issuer: true only when a
+            // run-scoped, short-lived, revocable token can actually be minted.
+            scoped_model_token_available: self.token_issuer.available(),
+            external_lifetime_cap: self.backend.enforces_external_lifetime_cap(),
+            // No image verification within a trust root yet (#1188).
+            image_verified: false,
+            // The container capability host grants ModelInference only; no
+            // reverse capability reaches a host-authority operation.
+            host_authority_tool_surface: false,
+            // No third-party credential is ever delivered into a container
+            // run today.
+            carries_third_party_credentials: false,
+            external_egress_enforcement: false,
         }
     }
 
@@ -378,26 +417,12 @@ impl SandboxContainerRunner {
         // The detached-admission gate (issue #824), evaluated before any
         // durable state is written and recorded on the provisioning intent:
         // every precondition from docs/sandbox-providers.md must hold or the
-        // run is admitted attached-only. Today every input is the unmet state
-        // for a local container — no run-scoped token issuer (slice 2), no
-        // external lifetime cap (the backend's fail-closed declaration), no
-        // image verification within a trust root (#1188) — so the decision is
-        // structurally a denial; what this establishes is that the mode is a
-        // recorded decision, never a constant.
-        let admission_decision = evaluate_detached_admission(DetachedPreconditions {
-            // No issuer of run-scoped, short-lived model tokens exists yet;
-            // the host is the model proxy and holds the only credentials.
-            scoped_model_token_available: false,
-            external_lifetime_cap: self.backend.enforces_external_lifetime_cap(),
-            image_verified: false,
-            // The container capability host grants ModelInference only; no
-            // reverse capability reaches a host-authority operation.
-            host_authority_tool_surface: false,
-            // No third-party credential is ever delivered into a container
-            // run today.
-            carries_third_party_credentials: false,
-            external_egress_enforcement: false,
-        });
+        // run is admitted attached-only. Every input is derived from the
+        // component that owns the fact — the token issuer, the backend's
+        // lifetime-cap declaration, the (still absent, #1188) image
+        // verification — so for a local container today the decision is
+        // structurally a denial, and it opens only when the real facts change.
+        let admission_decision = evaluate_detached_admission(self.detached_preconditions());
         let mut admission = admission_decision.mode();
 
         // Durable provisioning intent — carrying the host-minted correlation
@@ -590,9 +615,34 @@ impl SandboxContainerRunner {
         // The run init the host delivers after each attach: the task and the
         // policy snapshot, only ever over the authenticated connection — the
         // task no longer rides the container's environment, so a sandbox
-        // reclaimed before its handle committed never executed anything. An
-        // attached-only run carries no scoped token; the host is the model
-        // proxy.
+        // reclaimed before its handle committed never executed anything.
+        let deadline_unix_secs = run
+            .deadline_at
+            .map(|deadline| deadline.timestamp().max(0).unsigned_abs())
+            .unwrap_or_default();
+        // A detached-admitted run receives exactly one model credential: a
+        // token minted for this run, expiring no later than its deadline. An
+        // attached-only run carries none — the host is its model proxy. A
+        // detached admission whose token cannot be minted (or whose issuer
+        // overruns the cap) fails the run closed rather than delivering a
+        // detached init without one; the run is never silently downgraded
+        // against its durable admission record.
+        let scoped_token = match self
+            .scoped_token_for(*run_id.as_uuid(), admission, deadline_unix_secs)
+            .await
+        {
+            Ok(token) => token,
+            Err(error) => {
+                return self
+                    .fail(
+                        run_id,
+                        lease_token,
+                        "scoped_token_unavailable",
+                        &error.to_string(),
+                    )
+                    .await;
+            }
+        };
         let init = RunInit {
             run_id: protocol_run_id,
             provenance: RunProvenance {
@@ -600,15 +650,9 @@ impl SandboxContainerRunner {
                 provider: CONTAINER_PROVENANCE_PROVIDER.to_owned(),
             },
             task,
-            deadline_unix_secs: run
-                .deadline_at
-                .map(|deadline| deadline.timestamp().max(0).unsigned_abs())
-                .unwrap_or_default(),
+            deadline_unix_secs,
             // Derived from the durable admission decision — never a constant:
-            // absent an admitting record, this is attached-only. A detached
-            // init additionally requires the scoped token a later slice
-            // delivers, and the gate refuses detached admission until one can
-            // be minted.
+            // absent an admitting record, this is attached-only.
             admission: match admission {
                 SandboxAdmissionMode::AttachedOnly => AdmissionMode::AttachedOnly,
                 SandboxAdmissionMode::Detached => AdmissionMode::Detached,
@@ -617,7 +661,7 @@ impl SandboxContainerRunner {
                 egress_allowlist: Vec::new(),
                 granted_capabilities: vec![Capability::ModelInference],
             },
-            scoped_token: None,
+            scoped_token,
         };
 
         // Drive the container while holding the lease live. A container run
@@ -705,6 +749,52 @@ impl SandboxContainerRunner {
                 }
                 Ok(SandboxContainerRunOutcome::LeaseLost(run_id))
             }
+        }
+    }
+
+    /// The scoped model token a run's admission entitles it to: `None` for an
+    /// attached-only run, a freshly minted run-scoped token for a detached
+    /// one — verified against the run's absolute deadline before delivery.
+    ///
+    /// # Errors
+    /// Fails closed for a detached run when the issuer cannot mint, when the
+    /// run carries no absolute deadline to cap the token by, or when the
+    /// minted token would outlive that deadline (in which case whatever was
+    /// minted is revoked before refusing).
+    async fn scoped_token_for(
+        &self,
+        run_uuid: Uuid,
+        admission: SandboxAdmissionMode,
+        deadline_unix_secs: u64,
+    ) -> Result<Option<ScopedModelToken>> {
+        if admission != SandboxAdmissionMode::Detached {
+            return Ok(None);
+        }
+        if deadline_unix_secs == 0 {
+            return Err(AgentError::config(
+                "a detached run requires an absolute deadline to cap its scoped token",
+            ));
+        }
+        let minted = self.token_issuer.mint(run_uuid, deadline_unix_secs).await?;
+        if minted.expires_at_unix_secs > deadline_unix_secs {
+            // The issuer's claim is verified, not trusted: a token that would
+            // outlive the run must never enter the container.
+            self.revoke_scoped_token(run_uuid).await;
+            return Err(AgentError::config(
+                "the issuer minted a scoped token outliving the run deadline",
+            ));
+        }
+        Ok(Some(minted.token))
+    }
+
+    /// Revoke the run's scoped token, best-effort. Idempotent, and a safe
+    /// no-op for runs that never minted one; the mint-time lifetime cap still
+    /// bounds the credential when the issuer cannot be reached.
+    async fn revoke_scoped_token(&self, run_uuid: Uuid) {
+        if let Err(error) = self.token_issuer.revoke(run_uuid).await {
+            eprintln!(
+                "openwave: could not revoke the scoped model token for run {run_uuid}: {error}"
+            );
         }
     }
 
@@ -919,6 +1009,10 @@ impl SandboxContainerRunner {
     /// confirmed destroy, so an unconfirmed teardown survives this process and
     /// is re-driven by [`sweep`](Self::sweep) rather than abandoned.
     async fn teardown(&self, run_uuid: Uuid, handle: &SandboxHandle) {
+        // Every terminal path drives teardown, so this is where a detached
+        // run's scoped token dies with the run — before the container is even
+        // destroyed, and idempotently for runs that never minted one.
+        self.revoke_scoped_token(run_uuid).await;
         if let Err(error) = self.store.enqueue_sandbox_teardown(run_uuid).await {
             eprintln!("openwave: could not persist a container teardown obligation: {error}");
         }
@@ -1013,11 +1107,16 @@ impl SandboxContainerRunner {
                 "openwave: sandbox provisioning intent for run {} lapsed; its tag is reclaimable",
                 record.run_id
             );
+            self.revoke_scoped_token(record.run_id).await;
         }
 
         // Directed destroys first: obligations with a committed handle name
-        // their container exactly.
+        // their container exactly. Each obligation is a run some terminal
+        // path (this driver's, the reaper's, or an unattached cancellation's)
+        // wrote off, so its scoped token is revoked here too — the reaper
+        // path's revocation, for runs whose own driver never got to it.
         for record in self.store.list_sandbox_teardowns().await? {
+            self.revoke_scoped_token(record.run_id).await;
             let Some(reference) = record.handle.clone() else {
                 continue;
             };
