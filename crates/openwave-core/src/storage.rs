@@ -419,6 +419,17 @@ pub enum ClaimDelegatedFileReadOutcome {
     Unavailable,
 }
 
+/// Result of parking a claimed sandbox tool call for its single bounded retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetrySandboxToolCallOutcome {
+    /// The call is parked in `retry_wait` and becomes claimable at its
+    /// `retry_at`. Its waiting sandbox run is untouched.
+    Scheduled,
+    /// The lease no longer authorizes the call — cancellation, expiry, a
+    /// terminal receipt, or a competing executor already won.
+    LeaseLost,
+}
+
 /// Result of resolving sandbox tool work under its exact executor lease.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveSandboxToolCallOutcome {
@@ -2064,6 +2075,21 @@ pub trait Store: Send + Sync {
         _lease_token: uuid::Uuid,
         _lease_duration: chrono::Duration,
     ) -> Result<Option<chrono::Duration>> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Park a claimed sandbox tool call for its single bounded retry under
+    /// the exact live executor lease. The call moves to `retry_wait` with a
+    /// `retry_at` of the database clock plus `delay`, releases its executor
+    /// lease, and becomes claimable again once `retry_at` passes; its waiting
+    /// sandbox run is untouched. A call that already spent its retry cannot be
+    /// parked again — that is an executor invariant breach, not a race.
+    async fn retry_sandbox_tool_call(
+        &self,
+        _id: CallId,
+        _lease_token: uuid::Uuid,
+        _delay: chrono::Duration,
+    ) -> Result<RetrySandboxToolCallOutcome> {
         agent_run_storage_unavailable()
     }
 

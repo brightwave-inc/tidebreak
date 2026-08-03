@@ -14,8 +14,8 @@ use openwave_core::{
     AgentError, ClaimSandboxToolCallOutcome, Result, SandboxToolCall, Store, ToolCallResolution,
 };
 use openwave_web_search::{
-    request_from_tool_arguments, WebSearchProvider, WebSearchRequest, WebSearchResponse,
-    MAX_OUTPUT_BYTES,
+    request_from_tool_arguments, WebSearchError, WebSearchProvider, WebSearchRequest,
+    WebSearchResponse, MAX_OUTPUT_BYTES,
 };
 use tokio::sync::Notify;
 
@@ -70,6 +70,10 @@ pub(crate) struct SandboxWebSearchWorkerConfig {
     /// Ceiling on the lane's own backoff after consecutive iteration errors,
     /// so a store outage is not polled at a fixed rate forever.
     failure_delay_cap: Duration,
+    /// Backoff before a classified-transient provider failure's single bounded
+    /// retry becomes claimable. This work sits inside a foreground turn the
+    /// user is waiting on, so the whole envelope stays within a few seconds.
+    retry_delay: Duration,
     max_concurrency: usize,
 }
 
@@ -84,6 +88,7 @@ impl Default for SandboxWebSearchWorkerConfig {
             idle_cap: Duration::from_secs(5),
             failure_delay: Duration::from_secs(1),
             failure_delay_cap: Duration::from_secs(30),
+            retry_delay: Duration::from_secs(2),
             max_concurrency: 2,
         }
     }
@@ -93,6 +98,9 @@ impl Default for SandboxWebSearchWorkerConfig {
 pub(crate) enum SandboxWebSearchWorkerOutcome {
     Idle,
     Resolved(openwave_core::CallId),
+    /// A classified-transient provider failure parked the call in
+    /// `retry_wait`; it becomes claimable again after its short backoff.
+    RetryScheduled(openwave_core::CallId),
     LeaseLost(openwave_core::CallId),
 }
 
@@ -301,10 +309,19 @@ impl SandboxWebSearchWorker {
                                 None => return Ok(SandboxWebSearchWorkerOutcome::LeaseLost(call.id)),
                                 Some(result) => match result {
                                     Ok(Ok(response)) => serialize_response(response),
-                                    Ok(Err(_)) => failed_resolution(
-                                        "web_search_failed",
-                                        "Web search could not complete.",
-                                    ),
+                                    Ok(Err(error)) => {
+                                        if transient_provider_failure(&error)
+                                            && call.retry_at.is_none()
+                                        {
+                                            return self
+                                                .schedule_retry(call.id, lease_token)
+                                                .await;
+                                        }
+                                        failed_resolution(
+                                            "web_search_failed",
+                                            "Web search could not complete.",
+                                        )
+                                    }
                                     Err(_) => failed_resolution(
                                         "web_search_timed_out",
                                         "Web search did not complete before its sandbox lease expired.",
@@ -332,6 +349,42 @@ impl SandboxWebSearchWorker {
                 Ok(SandboxWebSearchWorkerOutcome::LeaseLost(call.id))
             }
         }
+    }
+
+    /// Park the call for its single bounded retry instead of writing a
+    /// terminal failure receipt. Only a first-attempt classified-transient
+    /// failure reaches here; the durable `retry_at` marker makes the second
+    /// attempt terminal on any failure.
+    async fn schedule_retry(
+        &self,
+        id: openwave_core::CallId,
+        lease_token: uuid::Uuid,
+    ) -> Result<SandboxWebSearchWorkerOutcome> {
+        match self
+            .store
+            .retry_sandbox_tool_call(id, lease_token, chrono_duration(self.config.retry_delay)?)
+            .await?
+        {
+            openwave_core::RetrySandboxToolCallOutcome::Scheduled => {
+                self.wake.notify_one();
+                Ok(SandboxWebSearchWorkerOutcome::RetryScheduled(id))
+            }
+            openwave_core::RetrySandboxToolCallOutcome::LeaseLost => {
+                Ok(SandboxWebSearchWorkerOutcome::LeaseLost(id))
+            }
+        }
+    }
+}
+
+/// Whether a provider failure is worth the single bounded retry: a transport
+/// fault (including a timed-out request), a provider 5xx, or a rate limit.
+/// Configuration and request failures recur on the next call and resolve
+/// terminally at once.
+fn transient_provider_failure(error: &WebSearchError) -> bool {
+    match error {
+        WebSearchError::Transport(_) | WebSearchError::RateLimited(_) => true,
+        WebSearchError::HttpStatus { status, .. } => (500..=599).contains(status),
+        _ => false,
     }
 }
 
@@ -406,6 +459,32 @@ mod tests {
     struct FakeProvider {
         requests: Mutex<Vec<WebSearchRequest>>,
         response: WebSearchResponse,
+    }
+
+    struct FlakyProvider {
+        failures: Mutex<Vec<WebSearchError>>,
+        requests: std::sync::atomic::AtomicUsize,
+        response: WebSearchResponse,
+    }
+
+    #[async_trait]
+    impl WebSearchProvider for FlakyProvider {
+        fn kind(&self) -> WebSearchProviderKind {
+            WebSearchProviderKind::Exa
+        }
+
+        async fn search(
+            &self,
+            _request: WebSearchRequest,
+        ) -> std::result::Result<WebSearchResponse, WebSearchError> {
+            self.requests.fetch_add(1, Ordering::SeqCst);
+            let mut failures = self.failures.lock().unwrap();
+            if failures.is_empty() {
+                Ok(self.response.clone())
+            } else {
+                Err(failures.remove(0))
+            }
+        }
     }
 
     struct DropMarker(Arc<AtomicBool>);
@@ -629,6 +708,126 @@ mod tests {
                 .status,
             AgentRunStatus::RetryWait
         );
+    }
+
+    #[tokio::test]
+    async fn transient_failure_retries_once_then_second_failure_terminalizes() {
+        let (store, _dir) = test_store().await;
+        let call = checkpoint(
+            &store,
+            WEB_SEARCH_TOOL,
+            serde_json::json!({"query":"flaky"}),
+        )
+        .await;
+        let provider = Arc::new(FlakyProvider {
+            failures: Mutex::new(vec![
+                WebSearchError::HttpStatus {
+                    provider: WebSearchProviderKind::Exa,
+                    status: 503,
+                },
+                WebSearchError::Transport("connection reset".into()),
+            ]),
+            requests: std::sync::atomic::AtomicUsize::new(0),
+            response: WebSearchResponse::new(WebSearchProviderKind::Exa, Vec::new()),
+        });
+        let fake = Arc::new(FakeSearch {
+            resolution: Ok(Some(provider.clone())),
+        });
+        // A zero backoff keeps the test fast; the schedule itself is durable.
+        let worker = SandboxWebSearchWorker::with_search(
+            store.clone(),
+            fake,
+            Arc::new(Notify::new()),
+            SandboxWebSearchWorkerConfig {
+                retry_delay: Duration::ZERO,
+                ..SandboxWebSearchWorkerConfig::default()
+            },
+        );
+        // The first transient failure parks the call instead of writing a
+        // terminal receipt, and the sandbox stays parked on its checkpoint.
+        assert_eq!(
+            worker.run_once().await.unwrap(),
+            SandboxWebSearchWorkerOutcome::RetryScheduled(call.id)
+        );
+        let parked = store.get_sandbox_tool_call(call.id).await.unwrap().unwrap();
+        assert_eq!(
+            parked.status,
+            openwave_core::SandboxToolCallStatus::RetryWait
+        );
+        assert!(parked.retry_at.is_some());
+        assert!(store
+            .get_sandbox_tool_call_receipt(call.id)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            store
+                .get_agent_run(call.agent_run_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            AgentRunStatus::Waiting
+        );
+        // The single retry is spent, so the second transient failure resolves
+        // terminally and resumes the sandbox with the failure receipt.
+        assert_eq!(
+            worker.run_once().await.unwrap(),
+            SandboxWebSearchWorkerOutcome::Resolved(call.id)
+        );
+        let receipt = store
+            .get_sandbox_tool_call_receipt(call.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.status, openwave_core::SandboxToolCallStatus::Failed);
+        assert_eq!(receipt.error_code.as_deref(), Some("web_search_failed"));
+        assert_eq!(provider.requests.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            store
+                .get_agent_run(call.agent_run_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            AgentRunStatus::RetryWait
+        );
+    }
+
+    #[tokio::test]
+    async fn non_transient_failure_never_spends_the_retry() {
+        let (store, _dir) = test_store().await;
+        let call = checkpoint(
+            &store,
+            WEB_SEARCH_TOOL,
+            serde_json::json!({"query":"quota"}),
+        )
+        .await;
+        let provider = Arc::new(FlakyProvider {
+            failures: Mutex::new(vec![WebSearchError::QuotaExhausted(
+                WebSearchProviderKind::Exa,
+            )]),
+            requests: std::sync::atomic::AtomicUsize::new(0),
+            response: WebSearchResponse::new(WebSearchProviderKind::Exa, Vec::new()),
+        });
+        let fake = Arc::new(FakeSearch {
+            resolution: Ok(Some(provider.clone())),
+        });
+        assert_eq!(
+            worker(store.clone(), fake).run_once().await.unwrap(),
+            SandboxWebSearchWorkerOutcome::Resolved(call.id)
+        );
+        assert_eq!(
+            store
+                .get_sandbox_tool_call_receipt(call.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .error_code
+                .as_deref(),
+            Some("web_search_failed")
+        );
+        assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

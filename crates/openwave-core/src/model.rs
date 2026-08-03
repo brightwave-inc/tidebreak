@@ -1703,6 +1703,10 @@ impl SandboxToolCallRequest {
 pub enum SandboxToolCallStatus {
     Accepted,
     Claimed,
+    /// A classified-transient failure parked awaiting its single bounded
+    /// retry. The call becomes claimable again once `retry_at` passes; a
+    /// second failure resolves terminally.
+    RetryWait,
     Completed,
     Failed,
     Cancelled,
@@ -1714,6 +1718,7 @@ impl SandboxToolCallStatus {
         match self {
             Self::Accepted => "accepted",
             Self::Claimed => "claimed",
+            Self::RetryWait => "retry_wait",
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
@@ -1741,6 +1746,10 @@ pub struct SandboxToolCall {
     pub park_claim_count: i32,
     pub executor_lease_token: Option<Uuid>,
     pub executor_lease_expires_at: Option<DateTime<Utc>>,
+    /// When the call's single bounded retry becomes claimable. Set exactly
+    /// once, by the transient failure that scheduled the retry, and kept
+    /// through the second attempt as the spent-retry marker.
+    pub retry_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub resolved_at: Option<DateTime<Utc>>,
 }

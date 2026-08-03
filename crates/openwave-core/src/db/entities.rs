@@ -766,6 +766,7 @@ pub mod sandbox_tool_call {
         pub park_claim_count: i32,
         pub executor_lease_token: Option<Uuid>,
         pub executor_lease_expires_at: Option<DateTimeUtc>,
+        pub retry_at: Option<DateTimeUtc>,
         pub created_at: DateTimeUtc,
         pub resolved_at: Option<DateTimeUtc>,
     }

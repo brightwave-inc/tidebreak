@@ -16,7 +16,7 @@ use crate::model::{
 };
 use crate::storage::{
     ClaimDelegatedFileReadOutcome, ClaimSandboxToolCallOutcome, ParkSandboxToolCallOutcome,
-    ResolveSandboxToolCallOutcome,
+    ResolveSandboxToolCallOutcome, RetrySandboxToolCallOutcome,
 };
 
 use super::super::{entities, store_err, DbStore};
@@ -117,6 +117,7 @@ pub(in crate::db) async fn park_agent_run_for_sandbox_tool_call(
         park_claim_count: Set(run.claim_count),
         executor_lease_token: Set(None),
         executor_lease_expires_at: Set(None),
+        retry_at: Set(None),
         created_at: Set(now),
         resolved_at: Set(None),
     }
@@ -370,7 +371,9 @@ async fn claim_sandbox_tool_call_matching(
         transaction.commit().await.map_err(store_err)?;
         return Ok(ClaimSandboxToolCallOutcome::Unavailable);
     }
-    if existing.status != SandboxToolCallStatus::Accepted.as_str() {
+    let due_retry = existing.status == SandboxToolCallStatus::RetryWait.as_str()
+        && existing.retry_at.is_some_and(|retry_at| retry_at <= now);
+    if existing.status != SandboxToolCallStatus::Accepted.as_str() && !due_retry {
         transaction.commit().await.map_err(store_err)?;
         return Ok(ClaimSandboxToolCallOutcome::Unavailable);
     }
@@ -682,6 +685,85 @@ pub(in crate::db) async fn resolve_sandbox_tool_call(
     Ok(ResolveSandboxToolCallOutcome::Resolved)
 }
 
+/// Park a claimed sandbox tool call for its single bounded retry (#1224).
+///
+/// The call moves to `retry_wait` under the exact live executor lease, keeps
+/// no lease of its own, and becomes claimable again once `retry_at` passes.
+/// Its waiting sandbox run is untouched — no receipt exists yet, so nothing
+/// resumes. `retry_at` doubles as the spent-retry marker: it is set exactly
+/// once, and a call that already carries one cannot be parked again.
+pub(in crate::db) async fn retry_sandbox_tool_call(
+    store: &DbStore,
+    id: CallId,
+    lease_token: uuid::Uuid,
+    delay: Duration,
+) -> Result<RetrySandboxToolCallOutcome> {
+    if id.0.is_nil() || lease_token.is_nil() || delay < Duration::zero() {
+        return Err(AgentError::Store(
+            "invalid sandbox tool retry request".into(),
+        ));
+    }
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    acquire_agent_run_claim_lock(&transaction).await?;
+    let now = database_now(&transaction).await?;
+    if entities::sandbox_tool_call_receipt::Entity::find_by_id(id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .is_some()
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(RetrySandboxToolCallOutcome::LeaseLost);
+    }
+    let Some(call) = entities::sandbox_tool_call::Entity::find_by_id(id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(RetrySandboxToolCallOutcome::LeaseLost);
+    };
+    if call.status != SandboxToolCallStatus::Claimed.as_str()
+        || call.executor_lease_token != Some(lease_token)
+        || call
+            .executor_lease_expires_at
+            .is_none_or(|expiry| expiry <= now)
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(RetrySandboxToolCallOutcome::LeaseLost);
+    }
+    if call.retry_at.is_some() {
+        // The single retry is already spent. Executors decide terminal versus
+        // retry from the claimed call's own retry marker, so reaching this is
+        // an invariant breach worth surfacing, not a schedulable state.
+        return Err(AgentError::Store(
+            "sandbox tool call retry budget exhausted".into(),
+        ));
+    }
+    let Some(run) = find_by_id_on(&transaction, AgentRunId(call.agent_run_id)).await? else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(RetrySandboxToolCallOutcome::LeaseLost);
+    };
+    if run.chat_id != call.chat_id
+        || run.status != AgentRunStatus::Waiting.as_str()
+        || run.deadline_at.is_none_or(|deadline| deadline <= now)
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(RetrySandboxToolCallOutcome::LeaseLost);
+    }
+    let retry_at = now
+        .checked_add_signed(delay)
+        .ok_or_else(|| AgentError::Store("sandbox tool retry overflows database time".into()))?;
+    let mut active: entities::sandbox_tool_call::ActiveModel = call.into();
+    active.status = Set(SandboxToolCallStatus::RetryWait.as_str().into());
+    active.executor_lease_token = Set(None);
+    active.executor_lease_expires_at = Set(None);
+    active.retry_at = Set(Some(retry_at));
+    active.update(&transaction).await.map_err(store_err)?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(RetrySandboxToolCallOutcome::Scheduled)
+}
+
 pub(in crate::db) async fn resolve_delegated_file_read(
     store: &DbStore,
     id: CallId,
@@ -928,6 +1010,11 @@ pub(in crate::db) async fn list_sandbox_tool_call_candidates(
                     entities::sandbox_tool_call::Column::Status
                         .eq(SandboxToolCallStatus::Claimed.as_str())
                         .and(entities::sandbox_tool_call::Column::ExecutorLeaseExpiresAt.lte(now)),
+                )
+                .add(
+                    entities::sandbox_tool_call::Column::Status
+                        .eq(SandboxToolCallStatus::RetryWait.as_str())
+                        .and(entities::sandbox_tool_call::Column::RetryAt.lte(now)),
                 ),
         )
         .order_by_asc(entities::sandbox_tool_call::Column::CreatedAt)
@@ -967,6 +1054,11 @@ pub(in crate::db) async fn list_sandbox_tool_call_candidates_named(
                     entities::sandbox_tool_call::Column::Status
                         .eq(SandboxToolCallStatus::Claimed.as_str())
                         .and(entities::sandbox_tool_call::Column::ExecutorLeaseExpiresAt.lte(now)),
+                )
+                .add(
+                    entities::sandbox_tool_call::Column::Status
+                        .eq(SandboxToolCallStatus::RetryWait.as_str())
+                        .and(entities::sandbox_tool_call::Column::RetryAt.lte(now)),
                 ),
         )
         .order_by_asc(entities::sandbox_tool_call::Column::CreatedAt)
@@ -1007,6 +1099,7 @@ where
         .filter(entities::sandbox_tool_call::Column::Status.is_in([
             SandboxToolCallStatus::Accepted.as_str(),
             SandboxToolCallStatus::Claimed.as_str(),
+            SandboxToolCallStatus::RetryWait.as_str(),
         ]))
         .all(conn)
         .await
@@ -1261,6 +1354,7 @@ fn call_from_model(model: entities::sandbox_tool_call::Model) -> Result<SandboxT
         park_claim_count: model.park_claim_count,
         executor_lease_token: model.executor_lease_token,
         executor_lease_expires_at: model.executor_lease_expires_at,
+        retry_at: model.retry_at,
         created_at: model.created_at,
         resolved_at: model.resolved_at,
     })
@@ -1284,6 +1378,7 @@ fn status_from_db(value: &str) -> Result<SandboxToolCallStatus> {
     match value {
         "accepted" => Ok(SandboxToolCallStatus::Accepted),
         "claimed" => Ok(SandboxToolCallStatus::Claimed),
+        "retry_wait" => Ok(SandboxToolCallStatus::RetryWait),
         "completed" => Ok(SandboxToolCallStatus::Completed),
         "failed" => Ok(SandboxToolCallStatus::Failed),
         "cancelled" => Ok(SandboxToolCallStatus::Cancelled),

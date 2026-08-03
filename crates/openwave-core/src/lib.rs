@@ -214,8 +214,8 @@ pub use storage::{
     ParkTurnForClientCallOutcome, PendingChatPrompt, RecordTurnFailureOutcome,
     RequestAgentRunCancellationOutcome, RequestToolApprovalOutcome, RequestTurnCancellationOutcome,
     ResolveSandboxToolCallOutcome, ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome,
-    SandboxProvision, SandboxProvisionState, SecretProvider, Store, SubmitAgentRunResultOutcome,
-    TurnLeaseFence, MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
+    RetrySandboxToolCallOutcome, SandboxProvision, SandboxProvisionState, SecretProvider, Store,
+    SubmitAgentRunResultOutcome, TurnLeaseFence, MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
 };
 pub use tool::{
     input_schema_for, strict_json_schema, ApprovalClass, OptionalProperties, Tool, ToolCtx,

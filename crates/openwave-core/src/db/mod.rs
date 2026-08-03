@@ -58,8 +58,8 @@ use crate::storage::{
     ParkTurnForAgentRunInboxOutcome, ParkTurnForAgentRunWaitSetOutcome,
     ParkTurnForClientCallOutcome, RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome,
     RequestToolApprovalOutcome, RequestTurnCancellationOutcome, ResolveSandboxToolCallOutcome,
-    ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome, Store,
-    SubmitAgentRunResultOutcome, TurnLeaseFence,
+    ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome, RetrySandboxToolCallOutcome,
+    Store, SubmitAgentRunResultOutcome, TurnLeaseFence,
 };
 
 mod ops;
@@ -1031,6 +1031,15 @@ impl Store for DbStore {
         lease_duration: chrono::Duration,
     ) -> Result<Option<chrono::Duration>> {
         ops::sandbox_tool::heartbeat_sandbox_tool_call(self, id, lease_token, lease_duration).await
+    }
+
+    async fn retry_sandbox_tool_call(
+        &self,
+        id: CallId,
+        lease_token: uuid::Uuid,
+        delay: chrono::Duration,
+    ) -> Result<RetrySandboxToolCallOutcome> {
+        ops::sandbox_tool::retry_sandbox_tool_call(self, id, lease_token, delay).await
     }
 
     async fn resolve_sandbox_tool_call(

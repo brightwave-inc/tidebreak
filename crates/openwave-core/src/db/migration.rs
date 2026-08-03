@@ -104,6 +104,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddChatNetworkPolicy),
             Box::new(ExtendUserQuestions),
             Box::new(RetainCancelledTurnOutput),
+            Box::new(AddSandboxToolCallRetry),
         ]
     }
 }
@@ -4244,139 +4245,166 @@ async fn create_turn_agent_run_wait_set_tables(manager: &SchemaManager<'_>) -> R
         .await
 }
 
+/// The `sandbox_tool_call` table, shared between its creating migration and
+/// the retry-state rebuild migration so the two definitions cannot drift.
+/// `table` is the physical table to create — the canonical one on creation, a
+/// scratch alias during a SQLite rebuild. `retry` selects the status domain:
+/// the original, or widened with `retry_wait` plus the `retry_at` column that
+/// parks one classified-transient failure for its single bounded retry
+/// (#1224).
+/// The status domain of `sandbox_tool_call`. Strict: the original vocabulary.
+/// Widened (#1224): `retry_wait` parks one classified-transient failure until
+/// its single bounded retry becomes claimable.
+fn sandbox_tool_call_status_check(retry: bool) -> SimpleExpr {
+    let mut valid_status = vec![
+        SandboxToolCallStatus::Accepted.as_str(),
+        SandboxToolCallStatus::Claimed.as_str(),
+        SandboxToolCallStatus::Completed.as_str(),
+        SandboxToolCallStatus::Failed.as_str(),
+        SandboxToolCallStatus::Cancelled.as_str(),
+    ];
+    if retry {
+        valid_status.insert(2, SandboxToolCallStatus::RetryWait.as_str());
+    }
+    Expr::col(SandboxToolCall::Status).is_in(valid_status)
+}
+
+fn sandbox_tool_call_table<T>(table: T, retry: bool) -> TableCreateStatement
+where
+    T: IntoTableRef + Clone,
+{
+    let mut statement = Table::create();
+    statement
+        .table(table.clone())
+        .if_not_exists()
+        .col(
+            ColumnDef::new(SandboxToolCall::Id)
+                .uuid()
+                .not_null()
+                .primary_key(),
+        )
+        .col(
+            ColumnDef::new(SandboxToolCall::AgentRunId)
+                .uuid()
+                .not_null(),
+        )
+        .col(ColumnDef::new(SandboxToolCall::ChatId).uuid().not_null())
+        .col(
+            ColumnDef::new(SandboxToolCall::AgentRunDepth)
+                .small_integer()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(SandboxToolCall::ProviderId)
+                .text()
+                .not_null(),
+        )
+        .col(ColumnDef::new(SandboxToolCall::Name).text().not_null())
+        .col(
+            ColumnDef::new(SandboxToolCall::Arguments)
+                .json_binary()
+                .not_null(),
+        )
+        .col(ColumnDef::new(SandboxToolCall::Status).text().not_null())
+        .col(
+            ColumnDef::new(SandboxToolCall::ParkLeaseToken)
+                .uuid()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(SandboxToolCall::ParkAttemptCount)
+                .integer()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(SandboxToolCall::ParkClaimCount)
+                .integer()
+                .not_null(),
+        )
+        .col(ColumnDef::new(SandboxToolCall::ExecutorLeaseToken).uuid())
+        .col(ColumnDef::new(SandboxToolCall::ExecutorLeaseExpiresAt).timestamp_with_time_zone());
+    if retry {
+        statement.col(ColumnDef::new(SandboxToolCall::RetryAt).timestamp_with_time_zone());
+    }
+    statement
+        .col(
+            ColumnDef::new(SandboxToolCall::CreatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .col(ColumnDef::new(SandboxToolCall::ResolvedAt).timestamp_with_time_zone())
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_sandbox_tool_call_run")
+                .from_tbl(table.clone())
+                .from_col(SandboxToolCall::AgentRunId)
+                .from_col(SandboxToolCall::ChatId)
+                .from_col(SandboxToolCall::AgentRunDepth)
+                .to_tbl(AgentRun::Table)
+                .to_col(AgentRun::Id)
+                .to_col(AgentRun::ChatId)
+                .to_col(AgentRun::Depth)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_sandbox_tool_call_park_claim")
+                .from_tbl(table.clone())
+                .from_col(SandboxToolCall::ParkLeaseToken)
+                .from_col(SandboxToolCall::AgentRunId)
+                .from_col(SandboxToolCall::ParkAttemptCount)
+                .from_col(SandboxToolCall::ParkClaimCount)
+                .to_tbl(AgentRunClaim::Table)
+                .to_col(AgentRunClaim::Token)
+                .to_col(AgentRunClaim::AgentRunId)
+                .to_col(AgentRunClaim::AttemptCount)
+                .to_col(AgentRunClaim::ClaimCount)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .check(Expr::col(SandboxToolCall::AgentRunDepth).eq(1))
+        .check(Expr::col(SandboxToolCall::ParkAttemptCount).gte(1))
+        .check(
+            Expr::col(SandboxToolCall::ParkClaimCount)
+                .gte(Expr::col(SandboxToolCall::ParkAttemptCount)),
+        )
+        .check(sandbox_tool_call_status_check(retry))
+        .check(
+            Expr::col(SandboxToolCall::ResolvedAt)
+                .is_null()
+                .or(Expr::col(SandboxToolCall::ResolvedAt)
+                    .gte(Expr::col(SandboxToolCall::CreatedAt))),
+        );
+    statement.to_owned()
+}
+
+/// Every index `sandbox_tool_call` carries, for its creating migration and
+/// for recreation after a SQLite table rebuild.
+fn sandbox_tool_call_indexes() -> Vec<IndexCreateStatement> {
+    vec![
+        Index::create()
+            .name("idx_sandbox_tool_call_run")
+            .table(SandboxToolCall::Table)
+            .col(SandboxToolCall::AgentRunId)
+            .col(SandboxToolCall::CreatedAt)
+            .to_owned(),
+        Index::create()
+            .name("idx_sandbox_tool_call_recovery")
+            .table(SandboxToolCall::Table)
+            .col(SandboxToolCall::Status)
+            .col(SandboxToolCall::ExecutorLeaseExpiresAt)
+            .col(SandboxToolCall::CreatedAt)
+            .col(SandboxToolCall::Id)
+            .to_owned(),
+    ]
+}
+
 async fn create_sandbox_tool_call_tables(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     manager
-        .create_table(
-            Table::create()
-                .table(SandboxToolCall::Table)
-                .if_not_exists()
-                .col(
-                    ColumnDef::new(SandboxToolCall::Id)
-                        .uuid()
-                        .not_null()
-                        .primary_key(),
-                )
-                .col(
-                    ColumnDef::new(SandboxToolCall::AgentRunId)
-                        .uuid()
-                        .not_null(),
-                )
-                .col(ColumnDef::new(SandboxToolCall::ChatId).uuid().not_null())
-                .col(
-                    ColumnDef::new(SandboxToolCall::AgentRunDepth)
-                        .small_integer()
-                        .not_null(),
-                )
-                .col(
-                    ColumnDef::new(SandboxToolCall::ProviderId)
-                        .text()
-                        .not_null(),
-                )
-                .col(ColumnDef::new(SandboxToolCall::Name).text().not_null())
-                .col(
-                    ColumnDef::new(SandboxToolCall::Arguments)
-                        .json_binary()
-                        .not_null(),
-                )
-                .col(ColumnDef::new(SandboxToolCall::Status).text().not_null())
-                .col(
-                    ColumnDef::new(SandboxToolCall::ParkLeaseToken)
-                        .uuid()
-                        .not_null(),
-                )
-                .col(
-                    ColumnDef::new(SandboxToolCall::ParkAttemptCount)
-                        .integer()
-                        .not_null(),
-                )
-                .col(
-                    ColumnDef::new(SandboxToolCall::ParkClaimCount)
-                        .integer()
-                        .not_null(),
-                )
-                .col(ColumnDef::new(SandboxToolCall::ExecutorLeaseToken).uuid())
-                .col(
-                    ColumnDef::new(SandboxToolCall::ExecutorLeaseExpiresAt)
-                        .timestamp_with_time_zone(),
-                )
-                .col(
-                    ColumnDef::new(SandboxToolCall::CreatedAt)
-                        .timestamp_with_time_zone()
-                        .not_null(),
-                )
-                .col(ColumnDef::new(SandboxToolCall::ResolvedAt).timestamp_with_time_zone())
-                .foreign_key(
-                    ForeignKey::create()
-                        .name("fk_sandbox_tool_call_run")
-                        .from_tbl(SandboxToolCall::Table)
-                        .from_col(SandboxToolCall::AgentRunId)
-                        .from_col(SandboxToolCall::ChatId)
-                        .from_col(SandboxToolCall::AgentRunDepth)
-                        .to_tbl(AgentRun::Table)
-                        .to_col(AgentRun::Id)
-                        .to_col(AgentRun::ChatId)
-                        .to_col(AgentRun::Depth)
-                        .on_delete(ForeignKeyAction::Restrict),
-                )
-                .foreign_key(
-                    ForeignKey::create()
-                        .name("fk_sandbox_tool_call_park_claim")
-                        .from_tbl(SandboxToolCall::Table)
-                        .from_col(SandboxToolCall::ParkLeaseToken)
-                        .from_col(SandboxToolCall::AgentRunId)
-                        .from_col(SandboxToolCall::ParkAttemptCount)
-                        .from_col(SandboxToolCall::ParkClaimCount)
-                        .to_tbl(AgentRunClaim::Table)
-                        .to_col(AgentRunClaim::Token)
-                        .to_col(AgentRunClaim::AgentRunId)
-                        .to_col(AgentRunClaim::AttemptCount)
-                        .to_col(AgentRunClaim::ClaimCount)
-                        .on_delete(ForeignKeyAction::Restrict),
-                )
-                .check(Expr::col(SandboxToolCall::AgentRunDepth).eq(1))
-                .check(Expr::col(SandboxToolCall::ParkAttemptCount).gte(1))
-                .check(
-                    Expr::col(SandboxToolCall::ParkClaimCount)
-                        .gte(Expr::col(SandboxToolCall::ParkAttemptCount)),
-                )
-                .check(Expr::col(SandboxToolCall::Status).is_in([
-                    SandboxToolCallStatus::Accepted.as_str(),
-                    SandboxToolCallStatus::Claimed.as_str(),
-                    SandboxToolCallStatus::Completed.as_str(),
-                    SandboxToolCallStatus::Failed.as_str(),
-                    SandboxToolCallStatus::Cancelled.as_str(),
-                ]))
-                .check(
-                    Expr::col(SandboxToolCall::ResolvedAt)
-                        .is_null()
-                        .or(Expr::col(SandboxToolCall::ResolvedAt)
-                            .gte(Expr::col(SandboxToolCall::CreatedAt))),
-                )
-                .to_owned(),
-        )
+        .create_table(sandbox_tool_call_table(SandboxToolCall::Table, false))
         .await?;
-    manager
-        .create_index(
-            Index::create()
-                .name("idx_sandbox_tool_call_run")
-                .table(SandboxToolCall::Table)
-                .col(SandboxToolCall::AgentRunId)
-                .col(SandboxToolCall::CreatedAt)
-                .to_owned(),
-        )
-        .await?;
-    manager
-        .create_index(
-            Index::create()
-                .name("idx_sandbox_tool_call_recovery")
-                .table(SandboxToolCall::Table)
-                .col(SandboxToolCall::Status)
-                .col(SandboxToolCall::ExecutorLeaseExpiresAt)
-                .col(SandboxToolCall::CreatedAt)
-                .col(SandboxToolCall::Id)
-                .to_owned(),
-        )
-        .await?;
+    for index in sandbox_tool_call_indexes() {
+        manager.create_index(index).await?;
+    }
     manager
         .create_table(
             Table::create()
@@ -9514,7 +9542,7 @@ enum TurnAgentRunWaitMember {
     Open,
 }
 
-#[derive(DeriveIden)]
+#[derive(DeriveIden, Clone, Copy)]
 enum SandboxToolCall {
     Table,
     Id,
@@ -9530,6 +9558,7 @@ enum SandboxToolCall {
     ParkClaimCount,
     ExecutorLeaseToken,
     ExecutorLeaseExpiresAt,
+    RetryAt,
     CreatedAt,
     ResolvedAt,
 }
@@ -10470,6 +10499,152 @@ impl MigrationTrait for RetainCancelledTurnOutput {
                  EXECUTE 'ALTER TABLE turn_run DROP CONSTRAINT chk_turn_run_terminal_output'; \
                  END $$;"
             ))
+            .await?;
+        Ok(())
+    }
+}
+
+const SANDBOX_TOOL_CALL_REBUILD: &str = "sandbox_tool_call_rebuild";
+
+/// Rebuild `sandbox_tool_call` on SQLite with the chosen retry domain.
+///
+/// The status check is an anonymous CHECK from the creating migration, and
+/// SQLite cannot drop or alter one in place — the sanctioned path is a
+/// scratch-table rebuild, the same shape `turn_run` uses for its terminal
+/// output domain. Other tables' foreign keys reference `sandbox_tool_call` by
+/// name and survive the drop-and-rename under `PRAGMA foreign_keys=OFF`.
+async fn rebuild_sandbox_tool_call_sqlite_retry(
+    manager: &SchemaManager<'_>,
+    retry: bool,
+) -> Result<(), DbErr> {
+    let columns = "id, agent_run_id, chat_id, agent_run_depth, provider_id, name, arguments, \
+         status, park_lease_token, park_attempt_count, park_claim_count, executor_lease_token, \
+         executor_lease_expires_at, created_at, resolved_at";
+    let mut statements = vec![
+        "PRAGMA foreign_keys=OFF".to_owned(),
+        "BEGIN IMMEDIATE".to_owned(),
+        sandbox_tool_call_table(Alias::new(SANDBOX_TOOL_CALL_REBUILD), retry)
+            .to_string(SqliteQueryBuilder),
+        format!(
+            "INSERT INTO {SANDBOX_TOOL_CALL_REBUILD} ({columns}) \
+             SELECT {columns} FROM sandbox_tool_call"
+        ),
+        "DROP TABLE sandbox_tool_call".to_owned(),
+        format!("ALTER TABLE {SANDBOX_TOOL_CALL_REBUILD} RENAME TO sandbox_tool_call"),
+    ];
+    statements.extend(
+        sandbox_tool_call_indexes()
+            .iter()
+            .map(|index| index.to_string(SqliteQueryBuilder)),
+    );
+    statements.push("COMMIT".to_owned());
+    statements.push("PRAGMA foreign_keys=ON".to_owned());
+    manager
+        .get_connection()
+        .execute_unprepared(&format!("{};", statements.join(";\n")))
+        .await?;
+    Ok(())
+}
+
+/// Refuse to narrow the sandbox-tool status domain while any call still
+/// carries retry state, so a rollback fails up front with the actual problem
+/// named instead of stranding a half-rebuilt schema.
+async fn reject_down_with_sandbox_retry_rows(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    let conn = manager.get_connection();
+    let backend = manager.get_database_backend();
+    let remaining = conn
+        .query_one_raw(sea_orm::Statement::from_string(
+            backend,
+            "SELECT COUNT(*) AS remaining FROM sandbox_tool_call \
+             WHERE status = 'retry_wait' OR retry_at IS NOT NULL",
+        ))
+        .await?;
+    let remaining = match remaining {
+        Some(row) => row.try_get::<i64>("", "remaining")?,
+        None => 0,
+    };
+    if remaining > 0 {
+        return Err(DbErr::Custom(format!(
+            "cannot narrow sandbox_tool_call's status domain: {remaining} call(s) carry \
+             retry state; let those calls settle before rolling this migration back"
+        )));
+    }
+    Ok(())
+}
+
+/// A sandbox tool call whose provider failed transiently gets one bounded
+/// retry (#1224). The creating migration pinned the status vocabulary in an
+/// anonymous CHECK on `sandbox_tool_call`; this widens that domain with
+/// `retry_wait` and adds the `retry_at` column that parks the call until its
+/// single retry becomes claimable.
+struct AddSandboxToolCallRetry;
+
+impl MigrationName for AddSandboxToolCallRetry {
+    fn name(&self) -> &str {
+        "m20260803_000042_add_sandbox_tool_call_retry"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddSandboxToolCallRetry {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if manager.get_database_backend() == DatabaseBackend::Sqlite {
+            return rebuild_sandbox_tool_call_sqlite_retry(manager, true).await;
+        }
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(SandboxToolCall::Table)
+                    .add_column(ColumnDef::new(SandboxToolCall::RetryAt).timestamp_with_time_zone())
+                    .to_owned(),
+            )
+            .await?;
+        // The check is anonymous, so locate it by definition. Add the widened
+        // constraint before dropping the strict one so no window exists in
+        // which the status column is unconstrained.
+        let widened = render_postgres_check(sandbox_tool_call_status_check(true));
+        manager
+            .get_connection()
+            .execute_unprepared(&format!(
+                "DO $$ DECLARE strict_name text; BEGIN \
+                 SELECT conname INTO strict_name FROM pg_constraint \
+                 WHERE conrelid = 'sandbox_tool_call'::regclass AND contype = 'c' \
+                 AND pg_get_constraintdef(oid) LIKE '%accepted%'; \
+                 IF strict_name IS NULL THEN \
+                 RAISE EXCEPTION 'sandbox_tool_call status check not found'; END IF; \
+                 EXECUTE $q$ALTER TABLE sandbox_tool_call ADD CONSTRAINT \
+                 chk_sandbox_tool_call_retry_status CHECK ({widened})$q$; \
+                 EXECUTE format('ALTER TABLE sandbox_tool_call DROP CONSTRAINT %I', strict_name); \
+                 END $$;"
+            ))
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        reject_down_with_sandbox_retry_rows(manager).await?;
+        if manager.get_database_backend() == DatabaseBackend::Sqlite {
+            return rebuild_sandbox_tool_call_sqlite_retry(manager, false).await;
+        }
+        let strict = render_postgres_check(sandbox_tool_call_status_check(false));
+        manager
+            .get_connection()
+            .execute_unprepared(&format!(
+                "DO $$ BEGIN \
+                 EXECUTE $q$ALTER TABLE sandbox_tool_call ADD CONSTRAINT \
+                 chk_sandbox_tool_call_status CHECK ({strict})$q$; \
+                 EXECUTE 'ALTER TABLE sandbox_tool_call DROP CONSTRAINT \
+                 chk_sandbox_tool_call_retry_status'; \
+                 END $$;"
+            ))
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(SandboxToolCall::Table)
+                    .drop_column(SandboxToolCall::RetryAt)
+                    .to_owned(),
+            )
             .await?;
         Ok(())
     }
