@@ -57,7 +57,15 @@ const MCP_HEADING: &str = "## External MCP tools";
 #[must_use]
 #[cfg(test)]
 pub(crate) fn compose(specs: &[ToolSpec]) -> String {
-    compose_for_surface(specs, &[], &[], &NetworkPolicy::default(), false, false)
+    compose_for_surface(
+        specs,
+        &[],
+        &[],
+        &NetworkPolicy::default(),
+        crate::code_execution::DEFAULT_TIMEOUT_MS,
+        false,
+        false,
+    )
 }
 
 /// Render a host path as a quoted JSON string, so a path carrying a quote or a
@@ -73,6 +81,16 @@ fn quoted_host(host: &str) -> String {
     serde_json::to_string(host).expect("serializing a host string cannot fail")
 }
 
+/// Render the host-configured exec time limit in the most readable exact
+/// unit; the value is validated host state, so it composes without quoting.
+fn render_timeout(timeout_ms: u64) -> String {
+    if timeout_ms % 1000 == 0 {
+        format!("{} seconds", timeout_ms / 1000)
+    } else {
+        format!("{timeout_ms} milliseconds")
+    }
+}
+
 /// Compose the prompt for one exact tool surface, with a bounded snapshot of
 /// host-resolved local-exec folders, in the chat's current permission
 /// posture. The sandbox profile resolves the folders again per invocation.
@@ -86,6 +104,7 @@ pub(crate) fn compose_for_surface(
     exec_folders: &[ResolvedExecFolderGrant],
     skills: &[SkillPackage],
     network_policy: &NetworkPolicy,
+    exec_timeout_ms: u64,
     offline_package_cache: bool,
     plan_mode: bool,
 ) -> String {
@@ -291,6 +310,13 @@ pub(crate) fn compose_for_surface(
             "- Use `exec` for bounded computation or validation when it improves the result. Keep generated intermediates in private scratch."
                 .to_owned(),
         ];
+        // The time limit is host state rendered the way the network policy
+        // is below: the model can plan around the current value but cannot
+        // change it, and execution re-reads the setting per invocation.
+        lines.push(format!(
+            "- Each command is killed by the host after {}; no argument extends this, and only the user can change it. Cold package installs and builds can exceed the limit — split long-running work into smaller commands, and when a result reports timed_out, report that instead of rerunning the same command unchanged.",
+            render_timeout(exec_timeout_ms)
+        ));
         // The chat's live policy composes into the prompt the way folder
         // grants do below: the host renders the current value, and stored
         // host names are JSON-quoted so they cannot forge a prompt line.
@@ -524,6 +550,7 @@ fn push_section<S: AsRef<str>>(prompt: &mut String, heading: &str, lines: &[S]) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::code_execution::DEFAULT_TIMEOUT_MS as TIMEOUT;
     use serde_json::json;
     use uuid::Uuid;
 
@@ -633,8 +660,24 @@ mod tests {
     #[test]
     fn plan_mode_adds_the_planning_contract_and_nothing_else() {
         let specs = [spec("read_file"), spec("list_sources")];
-        let plan = compose_for_surface(&specs, &[], &[], &NetworkPolicy::default(), false, true);
-        let normal = compose_for_surface(&specs, &[], &[], &NetworkPolicy::default(), false, false);
+        let plan = compose_for_surface(
+            &specs,
+            &[],
+            &[],
+            &NetworkPolicy::default(),
+            TIMEOUT,
+            false,
+            true,
+        );
+        let normal = compose_for_surface(
+            &specs,
+            &[],
+            &[],
+            &NetworkPolicy::default(),
+            TIMEOUT,
+            false,
+            false,
+        );
 
         assert!(plan.contains(PLAN_MODE_HEADING));
         assert!(plan.contains("do not carry it out"));
@@ -681,6 +724,7 @@ mod tests {
             &folders,
             &[],
             &NetworkPolicy::default(),
+            TIMEOUT,
             false,
             false,
         );
@@ -703,7 +747,7 @@ mod tests {
     #[test]
     fn network_policy_renders_truthfully_per_value() {
         let compose_with = |policy: &NetworkPolicy| {
-            compose_for_surface(&[spec("exec")], &[], &[], policy, false, false)
+            compose_for_surface(&[spec("exec")], &[], &[], policy, TIMEOUT, false, false)
         };
         let pip_line = "python3 -m pip install --user";
 
@@ -716,8 +760,15 @@ mod tests {
         // With verified shared wheels mounted, an off policy still supports
         // offline installs from the read-only cache — and says so instead of
         // claiming installs are unavailable.
-        let off_with_cache =
-            compose_for_surface(&[spec("exec")], &[], &[], &NetworkPolicy::Off, true, false);
+        let off_with_cache = compose_for_surface(
+            &[spec("exec")],
+            &[],
+            &[],
+            &NetworkPolicy::Off,
+            TIMEOUT,
+            true,
+            false,
+        );
         assert!(off_with_cache.contains("no outbound network access"));
         assert!(off_with_cache.contains("--no-index --find-links \"$OPENWAVE_PACKAGE_CACHE\""));
         assert!(!off_with_cache.contains("package installs are unavailable"));
@@ -754,10 +805,25 @@ mod tests {
         assert!(hosts_with_registries.contains("plus package-manager registries"));
         assert!(hosts_with_registries.contains(pip_line));
 
-        // Every posture keeps the shared contract lines.
+        // Every posture keeps the shared contract lines, including the
+        // rendered host time limit the model plans long commands around.
         for prompt in [&off, &packages, &open, &hosts] {
             assert!(prompt.contains("Only the user can change the network policy"));
+            assert!(prompt.contains("killed by the host after 60 seconds"));
         }
+
+        // A non-integral-second setting renders exactly, never rounded into
+        // a claim the host does not enforce.
+        let odd = compose_for_surface(
+            &[spec("exec")],
+            &[],
+            &[],
+            &NetworkPolicy::Open,
+            1_500,
+            false,
+            false,
+        );
+        assert!(odd.contains("killed by the host after 1500 milliseconds"));
     }
 
     #[test]
@@ -786,6 +852,7 @@ mod tests {
             &[],
             &skills,
             &NetworkPolicy::default(),
+            TIMEOUT,
             false,
             false,
         );
@@ -803,6 +870,7 @@ mod tests {
             &[],
             &skills,
             &NetworkPolicy::default(),
+            TIMEOUT,
             false,
             false,
         );
@@ -813,6 +881,7 @@ mod tests {
             &[],
             &skills[1..],
             &NetworkPolicy::default(),
+            TIMEOUT,
             false,
             false,
         );
@@ -895,13 +964,14 @@ mod tests {
             &[],
             &skills,
             &NetworkPolicy::default(),
+            TIMEOUT,
             false,
             false,
         );
 
         assert_eq!(
             identity(&prompt),
-            "foreground-v2:sha256:32d5254bcdf0481d32c5da177458ab3e40fd157d4d99b2fa66c571c4dcc4ecec"
+            "foreground-v2:sha256:a37f05bd14906db68575354e6118609ce6a2b5e8f908aeee4abad6ac2e1cb072"
         );
     }
 }

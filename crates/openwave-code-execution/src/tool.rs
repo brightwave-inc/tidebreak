@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -190,7 +191,17 @@ impl Tool for ExecTool {
             response.provider, response.duration_ms
         );
         if response.timed_out {
-            content.push_str("\ntimed_out: true");
+            // A timeout is not an ordinary failure: the command was killed by
+            // the host's time limit, so its output can be empty or partial.
+            // Say so plainly, or an empty stderr reads as an inexplicable
+            // crash and invites blind retries.
+            let _ = write!(
+                content,
+                "\ntimed_out: true (the host killed this command at its execution time limit \
+                 after {} ms; stdout/stderr may be empty or incomplete — split the work into \
+                 smaller commands rather than rerunning this one unchanged)",
+                response.duration_ms
+            );
         }
         if response.output_truncated {
             content.push_str("\noutput_truncated: true");
@@ -363,6 +374,54 @@ mod tests {
         assert!(spec.description.contains(".openwave/exec-scripts"));
         assert!(spec.description.contains("render_pdf.py"));
         assert!(spec.description.contains("analyze_xlsx.py"));
+    }
+
+    struct TimedOutProvider;
+
+    #[async_trait]
+    impl CodeExecutionProvider for TimedOutProvider {
+        async fn execute(
+            &self,
+            _request: CodeExecutionRequest,
+        ) -> std::result::Result<CodeExecutionResponse, CodeExecutionError> {
+            Ok(CodeExecutionResponse {
+                provider: CodeExecutionProviderKind::Local,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                timed_out: true,
+                output_truncated: false,
+                duration_ms: 60_012,
+                sync_notes: Vec::new(),
+            })
+        }
+    }
+
+    /// A timeout must read as the host's time limit, not as an inexplicable
+    /// failure with empty stderr — the E2B incident showed the model retrying
+    /// killed installs because the receipt said nothing.
+    #[tokio::test]
+    async fn timed_out_receipt_names_the_time_limit() {
+        let tool = ExecTool::new(Arc::new(TimedOutProvider));
+        let output = tool
+            .execute(
+                &ToolCtx::new_legacy_workspace(ChatId::new(), None, PathBuf::from("/tmp/unused"))
+                    .with_call_id(CallId::new()),
+                json!({"command": "pip", "args": ["install", "python-pptx"]}),
+            )
+            .await
+            .unwrap();
+
+        assert!(output.is_error);
+        assert!(
+            output
+                .content
+                .contains("killed this command at its execution time limit"),
+            "{}",
+            output.content
+        );
+        assert!(output.content.contains("60012 ms"), "{}", output.content);
+        assert_eq!(output.data.as_ref().unwrap()["timed_out"], true);
     }
 
     struct PreviewProvider {

@@ -26,7 +26,7 @@ The initial state is:
 ```json
 {
   "provider": "local",
-  "timeout_ms": 20000,
+  "timeout_ms": 60000,
   "available": true,
   "has_credential": false
 }
@@ -35,7 +35,7 @@ The initial state is:
 `available` reports whether the selected native confinement primitive exists on
 the current host. The example above is the supported macOS state; it is false
 when execution is disabled or unsupported.
-Timeouts must be between 1 and 120 seconds. Sending `{"provider": null}`
+Timeouts must be between 1 and 120 seconds; the default is 60 seconds, enough headroom for a cold package install that pulls compiled wheels. Sending `{"provider": null}`
 disables execution; sending `{"provider": "local"}` enables the local adapter.
 `e2b` and `daytona` select the managed adapters, which become available once
 their fixed credential slot is populated. No executable, endpoint, environment
