@@ -30,10 +30,18 @@ impl SandboxContainerAdmission {
 
 /// Resolve the backend and fixed location for this server process.
 pub(crate) fn resolve(config: &Config) -> SandboxContainerAdmission {
-    let backend = Arc::new(DockerSandboxBackend::new(docker_config(config)));
+    let docker = docker_config(config);
+    let backend = Arc::new(DockerSandboxBackend::new(docker));
     let backend_available = config.container_execution_enabled && backend.is_available();
     let execution_location =
         execution_location(config.container_execution_enabled, backend_available);
+    if execution_location == AgentRunExecutionLocation::Container
+        && !backend.verifies_image_integrity()
+    {
+        // The development fallback (or an operator's mutable-tag override):
+        // containers still run, but nothing verifies what the ref resolves to.
+        tracing::warn!("sandbox container image is not digest-pinned; running it unverified");
+    }
     SandboxContainerAdmission {
         backend,
         execution_location,
@@ -53,8 +61,10 @@ fn execution_location(
 }
 
 /// Build the Docker configuration shared by admission detection and the
-/// container worker service. An absent override retains the adapter's
-/// documented placeholder image.
+/// container worker service. An absent override retains the adapter's default
+/// image (the published documents image by digest, or the local development
+/// build while no digest is pinned); an explicit override replaces the whole
+/// ref, digest included, so a mutable-tag override is honestly unverified.
 pub(crate) fn docker_config(config: &Config) -> DockerConfig {
     let mut docker = DockerConfig::default();
     if let Some(image) = &config.container_image {
@@ -177,26 +187,26 @@ pub(crate) fn evaluate_detached_admission(
     }
 }
 
-/// The preconditions the current run shape establishes, given the two facts
+/// The preconditions the current run shape establishes, given the three facts
 /// owned by other components: token issuance (the issuer's honest
-/// availability) and the backend's external lifetime cap.
+/// availability), the backend's external lifetime cap, and the backend's
+/// image verification.
 ///
 /// The remaining fields are the run shape every sandbox run has today — the
 /// container capability host grants ModelInference only, so no reverse
 /// capability reaches a host-authority operation, and no third-party
-/// credential is ever delivered into a run. Image verification within a trust
-/// root does not exist yet (#1188). The runner and the settings surface both
-/// read this one function, so what settings says a provider is missing is by
-/// construction what the gate would deny it for.
+/// credential is ever delivered into a run. The runner and the settings
+/// surface both read this one function, so what settings says a provider is
+/// missing is by construction what the gate would deny it for.
 pub(crate) fn structural_preconditions(
     scoped_model_token_available: bool,
     external_lifetime_cap: bool,
+    image_verified: bool,
 ) -> DetachedPreconditions {
     DetachedPreconditions {
         scoped_model_token_available,
         external_lifetime_cap,
-        // No image verification within a trust root yet (#1188).
-        image_verified: false,
+        image_verified,
         // The container capability host grants ModelInference only; no
         // reverse capability reaches a host-authority operation.
         host_authority_tool_surface: false,
@@ -220,18 +230,25 @@ pub(crate) fn settings_detached_admissions(
     config: &Config,
 ) -> Vec<(CodeExecutionProviderKind, DetachedAdmission)> {
     let scoped_token = GatewayScopedTokenIssuer.available();
-    let local_lifetime_cap =
-        DockerSandboxBackend::new(docker_config(config)).enforces_external_lifetime_cap();
+    let local = DockerSandboxBackend::new(docker_config(config));
+    let local_facts = (
+        local.enforces_external_lifetime_cap(),
+        local.verifies_image_integrity(),
+    );
     [
-        (CodeExecutionProviderKind::Local, local_lifetime_cap),
-        (CodeExecutionProviderKind::E2b, false),
-        (CodeExecutionProviderKind::Daytona, false),
+        (CodeExecutionProviderKind::Local, local_facts),
+        (CodeExecutionProviderKind::E2b, (false, false)),
+        (CodeExecutionProviderKind::Daytona, (false, false)),
     ]
     .into_iter()
-    .map(|(provider, lifetime_cap)| {
+    .map(|(provider, (lifetime_cap, image_verified))| {
         (
             provider,
-            evaluate_detached_admission(structural_preconditions(scoped_token, lifetime_cap)),
+            evaluate_detached_admission(structural_preconditions(
+                scoped_token,
+                lifetime_cap,
+                image_verified,
+            )),
         )
     })
     .collect()

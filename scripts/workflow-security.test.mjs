@@ -252,6 +252,42 @@ test("production secrets remain isolated to the release workflow", () => {
   assert.match(release, /^permissions:\n  contents: read$/m);
 });
 
+test("sandbox image publishing is tag-driven, immutable, and secret-free", () => {
+  const publish = workflows["publish-sandbox-image.yml"];
+  assert.ok(publish);
+
+  // Only version tags and manual dispatch publish; a pull request never can.
+  assert.match(publish, /^on:\n  push:\n    tags: \["v\*"\]\n  workflow_dispatch:/m);
+  assert.doesNotMatch(publish, /^\s*pull_request(?:_target)?:/m);
+
+  // The default token with packages:write is the whole credential surface —
+  // publishing must not grow a dependency on repository secrets (that set
+  // stays isolated to release.yml by the production-secrets test above).
+  assert.match(publish, /^permissions:\n  contents: read$/m);
+  assert.match(publish, /^    permissions:\n      contents: read\n      packages: write$/m);
+  assert.doesNotMatch(publish, /secrets\./);
+
+  // Version tags are immutable: both the per-arch build job and the manifest
+  // job refuse a tag that already exists instead of repointing it.
+  const overwriteGuards = publish.match(
+    /Refusing to overwrite existing image tag/g,
+  );
+  assert.equal(overwriteGuards?.length, 2);
+  assert.match(publish, /docker manifest inspect "\$repository:\$IMAGE_TAG"/);
+
+  // Published refs stay under this owner's GHCR namespace, and the digest the
+  // local backend pins is surfaced by the run itself.
+  assert.match(
+    publish,
+    /ghcr\.io\/\$\{\{ github\.repository_owner \}\}\/openwave-sandbox-agent$/m,
+  );
+  assert.match(
+    publish,
+    /ghcr\.io\/\$\{\{ github\.repository_owner \}\}\/openwave-sandbox-agent-documents$/m,
+  );
+  assert.match(publish, /PUBLISHED_IMAGE_DIGEST/);
+});
+
 test("release builds use the trusted shared main cache scope", () => {
   const release = workflows["release.yml"];
   const dispatchJob = workflowJob(release, "dispatch");

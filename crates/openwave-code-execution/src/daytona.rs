@@ -78,6 +78,7 @@ pub struct DaytonaExecutionProvider {
     client: Client,
     endpoints: DaytonaEndpoints,
     egress: Option<EgressPolicy>,
+    snapshot: Option<String>,
 }
 
 #[derive(Clone)]
@@ -136,7 +137,24 @@ impl DaytonaExecutionProvider {
             client,
             endpoints,
             egress: None,
+            snapshot: None,
         })
+    }
+
+    /// Create every sandbox from this account-registered Daytona snapshot
+    /// instead of Daytona's default.
+    ///
+    /// Daytona cannot pull an arbitrary OCI ref at sandbox creation: an image
+    /// must first be registered as a *snapshot* in the account (their tooling
+    /// accepts a digest-pinned ref, which is where the integrity pin lives).
+    /// Pointing Daytona at the official OpenWave documents image means
+    /// registering it as a snapshot and naming that snapshot here. Absent an
+    /// override the default snapshot keeps working — skills fall back to
+    /// in-sandbox `pip install`.
+    #[must_use]
+    pub fn with_snapshot(mut self, snapshot: impl Into<String>) -> Self {
+        self.snapshot = Some(snapshot.into());
+        self
     }
 
     /// Compile an egress policy into every sandbox this provider creates.
@@ -219,6 +237,7 @@ impl DaytonaExecutionProvider {
                 // Delete once the idle stop happens. A later command creates a
                 // fresh chat workspace instead of leaving stopped resources.
                 auto_delete_interval: 0,
+                snapshot: self.snapshot.as_deref(),
             })
             .send()
             .await
@@ -712,6 +731,9 @@ struct CreateSandboxRequest<'a> {
     network: DaytonaNetworkSettings,
     auto_stop_interval: u32,
     auto_delete_interval: u32,
+    /// An account-registered snapshot name; omitted, Daytona uses its default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snapshot: Option<&'a str>,
 }
 
 #[derive(Serialize)]

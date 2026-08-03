@@ -312,6 +312,7 @@ impl SandboxContainerRunner {
             // run-scoped, short-lived, revocable token can actually be minted.
             self.token_issuer.available(),
             self.backend.enforces_external_lifetime_cap(),
+            self.backend.verifies_image_integrity(),
         )
     }
 

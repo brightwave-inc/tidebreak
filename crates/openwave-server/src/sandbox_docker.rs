@@ -88,12 +88,23 @@
 //! so an observer on the local segment could see looked-up names; payload
 //! connections stay blocked either way.
 //!
-//! # The image is not verified
+//! # Image verification
 //!
-//! [`DockerConfig::image`] is used verbatim. It accepts a digest-pinned ref, but
-//! nothing requires or checks one, so a mutable tag is resolved by the daemon at
-//! provisioning time with no host-side integrity check. The local backend's trust
-//! in the image is therefore the operator's trust in whatever ref they configured.
+//! The default image ref is the published documents-variant agent image pinned
+//! **by digest** ([`PUBLISHED_IMAGE_DIGEST`]): a `repository@sha256:…` ref is
+//! content-addressed, so the daemon resolves it to exactly those bytes or fails
+//! the provisioning — repointing the tag on the registry changes nothing, and a
+//! locally present image of another content cannot answer for it. That is the
+//! fail-closed digest check issue #1188 asked for, enforced at resolution
+//! rather than re-derived after the fact.
+//!
+//! A ref *without* a digest — the local development fallback while no pin is
+//! recorded, or an operator override that names a mutable tag — is used
+//! verbatim and stays unverified: the daemon resolves the tag at provisioning
+//! time with no host-side integrity check. The backend reports which case it is
+//! in through [`SandboxBackend::verifies_image_integrity`], so detached
+//! admission and the settings surface treat an unpinned image as the unmet
+//! precondition it is, and startup logs the unverified case.
 //!
 //! # The transport secret
 //!
@@ -164,9 +175,30 @@ const RELAY_TARGET_ENV: &str = "OPENWAVE_RELAY_TARGET";
 
 /// The default runtime binary, resolved on `PATH`.
 const DEFAULT_BINARY: &str = "docker";
-/// A documented placeholder image. The real agent image (loop plus supervisor) ships
-/// in a later slice; a container from this ref only needs to start and hold its port.
-const DEFAULT_IMAGE: &str = "ghcr.io/openwave/sandbox-agent:placeholder";
+/// The published documents-variant agent image: the agent binary plus
+/// LibreOffice and the document skills' pinned Python dependencies, built and
+/// pushed by `.github/workflows/publish-sandbox-image.yml` so background
+/// document runs need no in-sandbox package install.
+const PUBLISHED_IMAGE_REPOSITORY: &str = "ghcr.io/brightwave-inc/openwave-sandbox-agent-documents";
+/// The immutable manifest-list digest (`sha256:<64 hex>`) of the published
+/// documents image the default configuration runs.
+///
+/// PROVENANCE: recorded from the publish workflow's run summary — the digest
+/// each publish run prints next to the documents ref. Update it in a one-line
+/// PR whenever a new image version is published.
+///
+/// `None` until the first publish run exists: the digest cannot be pinned
+/// before an image is published, and the publish workflow lands together with
+/// this pin's machinery. While unset the default fails over to
+/// [`LOCAL_DEV_IMAGE`] — a ref that only exists after a local `docker build`
+/// and carries no digest verification, which
+/// [`SandboxBackend::verifies_image_integrity`] reports honestly.
+const PUBLISHED_IMAGE_DIGEST: Option<&str> = None;
+/// The locally built development image, produced by the documented
+/// `docker build -f crates/openwave-sandbox-agent/Dockerfile -t openwave-sandbox-agent .`
+/// (whose default target is the documents variant). The fallback default while
+/// no published digest is pinned; never digest-verified.
+const LOCAL_DEV_IMAGE: &str = "openwave-sandbox-agent:latest";
 /// The in-container port the sandbox supervisor listens on by default.
 const DEFAULT_LISTENER_PORT: u16 = 8080;
 /// The lifetime cap applied when a provisioning request names none: four hours.
@@ -220,7 +252,9 @@ pub struct DockerConfig {
     /// Docker-CLI-compatible path. Either a bare name resolved on `PATH` or an
     /// explicit path.
     pub binary: String,
-    /// The image ref to run. Defaults to a documented placeholder.
+    /// The image ref to run. Defaults to the published documents image pinned
+    /// by digest, or to the locally built development image while no digest is
+    /// recorded; see [`default_image`].
     pub image: String,
     /// The in-container port to publish to a loopback host port.
     pub listener_port: u16,
@@ -247,7 +281,7 @@ impl Default for DockerConfig {
     fn default() -> Self {
         Self {
             binary: DEFAULT_BINARY.to_owned(),
-            image: DEFAULT_IMAGE.to_owned(),
+            image: default_image(),
             listener_port: DEFAULT_LISTENER_PORT,
             command: Vec::new(),
             proxy_command: Vec::new(),
@@ -330,7 +364,7 @@ impl DockerSandboxBackend {
     }
 
     /// Build a backend with the default configuration (the `docker` binary and the
-    /// placeholder image).
+    /// default image; see [`default_image`]).
     #[must_use]
     pub fn with_defaults() -> Self {
         Self::new(DockerConfig::default())
@@ -483,6 +517,15 @@ impl DockerSandboxBackend {
 
 #[async_trait]
 impl SandboxBackend for DockerSandboxBackend {
+    /// Verified exactly when the configured ref is digest-pinned: a
+    /// `repository@sha256:…` ref is content-addressed, so the daemon either
+    /// resolves those bytes or fails the provisioning. A tag ref (the local
+    /// development fallback, or an operator override without a digest) is not
+    /// verified, and this reports it — fail closed, never assumed.
+    fn verifies_image_integrity(&self) -> bool {
+        image_digest_pinned(&self.config.image)
+    }
+
     async fn provision(&self, request: ProvisionRequest) -> Result<SandboxHandle, BackendError> {
         if !self.is_available() {
             return Err(BackendError::Provision(RUNTIME_UNAVAILABLE.to_owned()));
@@ -662,6 +705,30 @@ fn effective_lifetime_cap(config: &DockerConfig, request: &ProvisionRequest) -> 
         .lifetime_cap_secs
         .or(config.lifetime_cap_secs)
         .filter(|secs| *secs > 0)
+}
+
+/// The default image ref: the published documents image pinned by digest once
+/// [`PUBLISHED_IMAGE_DIGEST`] is recorded, the locally built development image
+/// until then. A digest-pinned ref is what makes the default verified — see
+/// the module docs' image-verification section.
+fn default_image() -> String {
+    match PUBLISHED_IMAGE_DIGEST {
+        Some(digest) => format!("{PUBLISHED_IMAGE_REPOSITORY}@{digest}"),
+        None => LOCAL_DEV_IMAGE.to_owned(),
+    }
+}
+
+/// Whether an image ref is pinned by a well-formed content digest
+/// (`…@sha256:<64 hex>`), making its resolution content-addressed and
+/// therefore fail-closed on any mismatch.
+pub(crate) fn image_digest_pinned(image: &str) -> bool {
+    image
+        .rsplit_once("@sha256:")
+        .is_some_and(|(repository, hex)| {
+            !repository.is_empty()
+                && hex.len() == 64
+                && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
 }
 
 /// The per-run internal network's name — a pure function of the tag, so
@@ -1085,6 +1152,40 @@ mod tests {
         // for a present runtime binary so the positive branch is covered too.
         #[cfg(unix)]
         assert!(resolve_on_path("/bin/sh").is_some());
+    }
+
+    /// The default-image pin's honesty invariants, guarding the decision that
+    /// is easiest to reverse by accident: a recorded [`PUBLISHED_IMAGE_DIGEST`]
+    /// must be well-formed and make the default verified; while unset the
+    /// default must be the local development build and be *reported* as
+    /// unverified rather than assumed safe.
+    #[test]
+    fn default_image_pin_is_wellformed_and_reported_honestly() {
+        let default = DockerConfig::default().image;
+        match PUBLISHED_IMAGE_DIGEST {
+            Some(digest) => {
+                assert_eq!(default, format!("{PUBLISHED_IMAGE_REPOSITORY}@{digest}"));
+                assert!(PUBLISHED_IMAGE_REPOSITORY.starts_with("ghcr.io/brightwave-inc/"));
+                assert!(image_digest_pinned(&default));
+                assert!(DockerSandboxBackend::with_defaults().verifies_image_integrity());
+            }
+            None => {
+                assert_eq!(default, LOCAL_DEV_IMAGE);
+                assert!(!DockerSandboxBackend::with_defaults().verifies_image_integrity());
+            }
+        }
+
+        // The pin grammar itself: exactly a 64-hex sha256 suffix counts.
+        let digest_ref = format!("ghcr.io/brightwave-inc/example@sha256:{}", "a".repeat(64));
+        assert!(image_digest_pinned(&digest_ref));
+        assert!(!image_digest_pinned(
+            "ghcr.io/brightwave-inc/example:latest"
+        ));
+        assert!(!image_digest_pinned(&format!(
+            "ghcr.io/brightwave-inc/example@sha256:{}",
+            "a".repeat(63)
+        )));
+        assert!(!image_digest_pinned(&format!("@sha256:{}", "a".repeat(64))));
     }
 
     #[tokio::test]

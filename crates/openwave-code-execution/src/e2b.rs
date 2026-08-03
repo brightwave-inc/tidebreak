@@ -85,6 +85,7 @@ pub struct E2BExecutionProvider {
     client: Client,
     endpoints: E2BEndpoints,
     egress: Option<EgressPolicy>,
+    template: String,
 }
 
 #[derive(Clone)]
@@ -143,7 +144,23 @@ impl E2BExecutionProvider {
             client,
             endpoints,
             egress: None,
+            template: E2B_TEMPLATE.into(),
         })
+    }
+
+    /// Create every sandbox from this E2B template instead of the default
+    /// public code-interpreter template.
+    ///
+    /// E2B provisions from account-registered *templates*, not arbitrary OCI
+    /// refs, so pointing E2B at the official OpenWave documents image means
+    /// registering a template built from
+    /// `crates/openwave-sandbox-agent/Dockerfile` with E2B's own tooling and
+    /// naming its id here. Absent an override the default template keeps
+    /// working — skills fall back to in-sandbox `pip install`.
+    #[must_use]
+    pub fn with_template(mut self, template: impl Into<String>) -> Self {
+        self.template = template.into();
+        self
     }
 
     /// Compile an egress policy into every sandbox this provider creates.
@@ -206,7 +223,7 @@ impl E2BExecutionProvider {
             .post(url)
             .header("X-API-Key", self.credential.as_str())
             .json(&CreateSandboxRequest {
-                template_id: E2B_TEMPLATE,
+                template_id: &self.template,
                 timeout: E2B_SANDBOX_TTL_SECONDS,
                 secure: true,
                 allow_internet_access: network.allow_internet_access,
@@ -610,7 +627,7 @@ impl CodeExecutionProvider for E2BExecutionProvider {
 #[derive(Serialize)]
 struct CreateSandboxRequest<'a> {
     #[serde(rename = "templateID")]
-    template_id: &'static str,
+    template_id: &'a str,
     timeout: u64,
     secure: bool,
     allow_internet_access: bool,
