@@ -12,6 +12,7 @@ pub(in crate::db) mod blob;
 pub(in crate::db) mod chat_prompt;
 pub(in crate::db) mod citation;
 pub(in crate::db) mod client_execution;
+pub(in crate::db) mod connected_app;
 pub(in crate::db) mod context_checkpoint;
 pub(in crate::db) mod conversation;
 pub(in crate::db) mod document;

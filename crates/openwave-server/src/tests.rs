@@ -1706,6 +1706,19 @@ async fn json_body<T: DeserializeOwned>(response: axum::response::Response) -> T
     serde_json::from_slice(&bytes).unwrap()
 }
 
+/// The connected-app record id behind one configured server name — how app
+/// fixtures learn what to bind after a `PUT /mcp/servers` created the record.
+async fn connected_app_id(store: &Arc<dyn Store>, name: &str) -> openwave_core::id::ConnectedAppId {
+    store
+        .list_connected_apps()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|record| record.name == name)
+        .map(|record| record.id)
+        .unwrap_or_else(|| panic!("no connected app named {name:?} is configured"))
+}
+
 /// Create a chat and return it.
 async fn make_chat(router: &Router, bearer: &str) -> Chat {
     let response = router

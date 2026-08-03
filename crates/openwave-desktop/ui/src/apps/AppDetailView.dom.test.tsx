@@ -22,7 +22,8 @@ const GRANTED: AppGrantState = {
   granted: true,
   bindings: [
     {
-      server: "cmd",
+      app: "11111111-1111-4111-8111-111111111111",
+      name: "cmd",
       tools: ["mcp__cmd__doit"],
       granted: true,
       definition_changed: false,
@@ -34,7 +35,8 @@ const STALE: AppGrantState = {
   granted: false,
   bindings: [
     {
-      server: "cmd",
+      app: "11111111-1111-4111-8111-111111111111",
+      name: "cmd",
       tools: ["mcp__cmd__doit"],
       granted: false,
       definition_changed: true,
@@ -123,11 +125,12 @@ describe("AppDetailView", () => {
     const apis = apisWith(STALE);
     render(<AppDetailView appId="app-1" apis={apis} onBack={() => {}} />);
 
-    // The sheet renders the server projection: names, and the marker for a
+    // The sheet renders the server projection: the connected app's display
+    // name and tools, and the marker for a
     // definition that changed since the previous consent.
     expect(await screen.findByText("mcp__cmd__doit")).toBeInTheDocument();
     expect(
-      screen.getByText("Server reconfigured since you agreed"),
+      screen.getByText("Reconfigured since you agreed"),
     ).toBeInTheDocument();
     expect(screen.queryByTitle(/^App:/)).not.toBeInTheDocument();
 

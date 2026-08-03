@@ -39,6 +39,7 @@ pub mod cancel;
 pub mod citation;
 pub mod client_tools;
 pub mod config;
+pub mod connected_app;
 pub mod context;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub mod db;

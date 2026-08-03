@@ -141,31 +141,38 @@ revisions: Array<AppRevisionSummary>, };
  */
 export type AppGrantBindingState = { 
 /**
- * Configured server namespace, by name only.
+ * Connected app the manifest binds, by record id.
  */
-server: string, 
+app: ConnectedAppId, 
 /**
- * Full mounted tool names the current manifest pins under this server.
+ * The connected app's display name, absent when no record with that id
+ * is configured — the sheet says so instead of showing a raw id alone.
+ */
+name: string | null, 
+/**
+ * Full mounted tool names the current manifest pins under this app.
  */
 tools: Array<string>, 
 /**
- * Whether the live grant covers every listed tool under this server and
- * the server's current definition still matches the granted fingerprint.
+ * Whether the live grant covers every listed tool under this connected
+ * app and the app's current definition still matches the granted
+ * fingerprint.
  */
 granted: boolean, 
 /**
- * Whether a grant names this server but its definition changed (or
- * disappeared) since consent — the "reconfigured since you agreed"
- * affordance, distinct from a binding that was simply never granted.
+ * Whether a grant names this connected app but its definition changed
+ * (or the record disappeared) since consent — the "reconfigured since
+ * you agreed" affordance, distinct from a binding that was simply never
+ * granted.
  */
 definition_changed: boolean, };
 
 /**
  * Renderer-safe grant state for one app: the consent sheet's whole input.
  *
- * `bindings` follows the app's **current** revision's manifest — names only.
- * The definitions behind the server names, and any environment or token
- * values they select, are deliberately absent from this projection.
+ * `bindings` follows the app's **current** revision's manifest — ids and
+ * names only. The definitions behind the connected apps, and any environment
+ * or token values they select, are deliberately absent from this projection.
  */
 export type AppGrantState = { 
 /**
@@ -176,7 +183,7 @@ export type AppGrantState = {
  */
 granted: boolean, 
 /**
- * The current manifest's bindings, one entry per bound server.
+ * The current manifest's bindings, one entry per bound connected app.
  */
 bindings: Array<AppGrantBindingState>, };
 
@@ -533,6 +540,16 @@ enforcement: Array<CodeExecutionEgressEnforcement>, };
  * A configured code-execution backend.
  */
 export type CodeExecutionProviderKind = "local" | "e2b" | "daytona";
+
+/**
+ * Identifies one profile-scoped connected app — an outside integration
+ * (an MCP server, a REST API) a profile can reach.
+ *
+ * App-keyed manifest bindings and grants name this identity rather than a
+ * raw server namespace, so consent follows the record even when display
+ * names or namespaces change around it.
+ */
+export type ConnectedAppId = string;
 
 /**
  * Conservative, user-inspectable capabilities for one model served by an

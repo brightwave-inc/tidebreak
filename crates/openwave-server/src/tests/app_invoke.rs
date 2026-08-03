@@ -93,7 +93,8 @@ fn tool_server_config(address: std::net::SocketAddr) -> crate::mcp_config::McpSe
     .unwrap()
 }
 
-/// Create an app whose current manifest pins exactly `tools` under `srv`.
+/// Create an app whose current manifest pins exactly `tools` under the
+/// connected app the configured `srv` server became.
 async fn create_pinned_app(store: &Arc<dyn Store>, tools: &[&str]) -> AppId {
     let app_id = AppId::new();
     store
@@ -104,7 +105,7 @@ async fn create_pinned_app(store: &Arc<dyn Store>, tools: &[&str]) -> AppId {
                 manifest: AppManifest {
                     name: "Invoke fixture".into(),
                     bindings: vec![AppBinding {
-                        server: "srv".into(),
+                        app: connected_app_id(store, "srv").await,
                         tools: tools.iter().map(|tool| (*tool).to_owned()).collect(),
                     }],
                 },
@@ -393,7 +394,7 @@ async fn a_widened_manifest_requires_fresh_consent_for_the_new_tools() {
                 manifest: AppManifest {
                     name: "Invoke fixture".into(),
                     bindings: vec![AppBinding {
-                        server: "srv".into(),
+                        app: connected_app_id(&store, "srv").await,
                         tools: vec!["mcp__srv__viewer".into(), "mcp__srv__unpinned".into()],
                     }],
                 },

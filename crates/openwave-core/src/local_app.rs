@@ -16,7 +16,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::deliverable::RevisionProducer;
-use crate::id::{AgentRunId, AppId, AppRevisionId, ChatId, TurnId};
+use crate::id::{AgentRunId, AppId, AppRevisionId, ChatId, ConnectedAppId, TurnId};
 
 /// Stable name of the foreground tool that creates and revises local apps.
 ///
@@ -189,13 +189,13 @@ pub struct CreateApp {
     pub revision: NewAppRevision,
 }
 
-/// The durable consent object for one app: the granted `(server, tools[])`
-/// set, with each bound server pinned to a fingerprint of its definition as it
-/// was configured at consent time.
+/// The durable consent object for one app: the granted `(app, tools[])` set,
+/// with each bound connected app pinned to a fingerprint of its definition as
+/// it was configured at consent time.
 ///
 /// One grant per app, replaced wholesale by a fresh consent and deleted by
 /// revocation. The fingerprint is what keeps consent honest: a Settings edit
-/// can swap the process behind a stable server name, so enforcement compares
+/// can swap the definition behind a stable record, so enforcement compares
 /// the granted fingerprint against the current definition on every invoke and
 /// treats any difference as a stale grant, never as a match.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,26 +203,27 @@ pub struct AppGrant {
     /// App the consent belongs to.
     pub app_id: AppId,
     /// The granted bindings, computed by the host from the manifest and the
-    /// server definitions current at consent time — never supplied by a
-    /// renderer.
+    /// connected-app definitions current at consent time — never supplied by
+    /// a renderer.
     pub bindings: Vec<AppGrantBinding>,
     /// Host-stamped consent time.
     pub created_at: DateTime<Utc>,
 }
 
-/// One granted server binding: the tools the user consented to under this
-/// server name, pinned to the definition that name resolved to at consent.
+/// One granted binding: the tools the user consented to under one connected
+/// app, pinned to the definition that record carried at consent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppGrantBinding {
-    /// Configured server namespace, matching the manifest binding it covers.
-    pub server: String,
-    /// Full mounted tool names (`mcp__{server}__{tool}`) the grant covers.
+    /// Connected app the consent names, matching the manifest binding it
+    /// covers.
+    pub app: ConnectedAppId,
+    /// Full mounted tool names (`mcp__{namespace}__{tool}`) the grant covers.
     pub tools: Vec<String>,
-    /// SHA-256 fingerprint of the server's definition as configured at consent
-    /// time, computed by the host over a canonical serialization that carries
-    /// configuration *names and structure* only — never environment or token
-    /// values. Persisted as lowercase hex.
+    /// SHA-256 fingerprint of the connected app's definition as configured at
+    /// consent time, computed by the host over a canonical serialization that
+    /// carries configuration *names and structure* only — never environment
+    /// or token values. Persisted as lowercase hex.
     #[serde(with = "hex_fingerprint")]
     pub fingerprint: [u8; 32],
 }
@@ -267,7 +268,7 @@ pub fn validate_app_grant(grant: &AppGrant) -> Result<serde_json::Value, String>
         grant
             .bindings
             .iter()
-            .map(|binding| (binding.server.as_str(), binding.tools.as_slice())),
+            .map(|binding| (binding.app, binding.tools.as_slice())),
     )?;
     serde_json::to_value(&grant.bindings).map_err(|error| format!("unencodable app grant: {error}"))
 }
@@ -286,18 +287,24 @@ pub fn validate_app_grant(grant: &AppGrant) -> Result<serde_json::Value, String>
 pub struct AppManifest {
     /// Display name shown in the transcript card and the Apps library.
     pub name: String,
-    /// Pinned tool bindings, grouped by configured server namespace.
+    /// Pinned tool bindings, grouped by connected app.
     pub bindings: Vec<AppBinding>,
 }
 
-/// The mounted tools one server namespace contributes to an app.
+/// The mounted tools one connected app contributes to a local app.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AppBinding {
-    /// Configured server namespace the tools are mounted under.
-    pub server: String,
-    /// Full mounted tool names, each `mcp__{server}__{tool}` under this
-    /// binding's server namespace.
+    /// Id of the connected app the tools belong to. The available ids are
+    /// listed in the `create_app` tool description.
+    #[schemars(description = "Id of the connected app these tools belong to.")]
+    pub app: ConnectedAppId,
+    /// Full mounted tool names, each `mcp__{namespace}__{tool}` under the
+    /// bound connected app's namespace.
+    #[schemars(
+        description = "Full mounted tool names (`mcp__{namespace}__{tool}`), all \
+                       under the bound connected app's namespace."
+    )]
     pub tools: Vec<String>,
 }
 
@@ -314,7 +321,7 @@ pub fn validate_app_manifest(manifest: &AppManifest) -> Result<serde_json::Value
         manifest
             .bindings
             .iter()
-            .map(|binding| (binding.server.as_str(), binding.tools.as_slice())),
+            .map(|binding| (binding.app, binding.tools.as_slice())),
     )?;
     let json =
         serde_json::to_value(manifest).map_err(|error| format!("unencodable manifest: {error}"))?;
@@ -327,23 +334,23 @@ pub fn validate_app_manifest(manifest: &AppManifest) -> Result<serde_json::Value
     Ok(json)
 }
 
-/// The binding grammar shared by manifests and grants: valid server names,
-/// no duplicate servers, and every tool a full mounted name under its
-/// binding's server namespace.
+/// The binding grammar shared by manifests and grants: no duplicate connected
+/// apps, and every tool shaped like a full mounted name.
+///
+/// A namespace may itself contain `_`, so a mounted name cannot be split
+/// unambiguously without knowing the namespace — and the bound record lives
+/// behind the store. The grammar here is therefore structural only; the exact
+/// `mcp__{namespace}__` cross-check against the bound connected app's
+/// configuration belongs to the host layers that resolve ids (the
+/// `create_app` door, grant computation, the invoke gate).
 fn validate_binding_set<'a>(
-    bindings: impl Iterator<Item = (&'a str, &'a [String])>,
+    bindings: impl Iterator<Item = (ConnectedAppId, &'a [String])>,
 ) -> Result<(), String> {
-    let mut servers = std::collections::HashSet::new();
-    for (server, binding_tools) in bindings {
-        if server.is_empty() || !is_mounted_name_charset(server) {
-            return Err(format!(
-                "binding server {server:?} must be a non-empty [A-Za-z0-9_-] name"
-            ));
+    let mut apps = std::collections::HashSet::new();
+    for (app, binding_tools) in bindings {
+        if !apps.insert(app) {
+            return Err(format!("duplicate binding for connected app {app}"));
         }
-        if !servers.insert(server) {
-            return Err(format!("duplicate binding for server {server:?}"));
-        }
-        let prefix = format!("mcp__{server}__");
         let mut tools = std::collections::HashSet::new();
         for tool in binding_tools {
             if tool.len() > MAX_MOUNTED_TOOL_NAME_BYTES || !is_mounted_name_charset(tool) {
@@ -351,13 +358,10 @@ fn validate_binding_set<'a>(
                     "tool {tool:?} must be at most {MAX_MOUNTED_TOOL_NAME_BYTES} bytes of [A-Za-z0-9_-]"
                 ));
             }
-            match tool.strip_prefix(&prefix) {
-                Some(rest) if !rest.is_empty() => {}
-                _ => {
-                    return Err(format!(
-                        "tool {tool:?} is not a mounted `{prefix}{{tool}}` name under server {server:?}"
-                    ));
-                }
+            if !is_mounted_name_shape(tool) {
+                return Err(format!(
+                    "tool {tool:?} is not a mounted `mcp__{{namespace}}__{{tool}}` name"
+                ));
             }
             if !tools.insert(tool.as_str()) {
                 return Err(format!("duplicate tool {tool:?}"));
@@ -365,6 +369,31 @@ fn validate_binding_set<'a>(
         }
     }
     Ok(())
+}
+
+/// Whether a name is shaped like `mcp__{namespace}__{tool}` with a non-empty
+/// namespace and tool segment under *some* split — the namespace itself may
+/// contain `_`, so the exact split is only decidable against a configured
+/// record.
+fn is_mounted_name_shape(name: &str) -> bool {
+    let Some(qualified) = name.strip_prefix("mcp__") else {
+        return false;
+    };
+    qualified
+        .match_indices("__")
+        .any(|(index, _)| index > 0 && index + 2 < qualified.len())
+}
+
+/// The bare tool segment of `name` when it is mounted under exactly
+/// `namespace` — the host-side half of the binding grammar, shared by the
+/// `create_app` door, grant computation, and the invoke gate so every layer
+/// applies the same exact-prefix reading.
+#[must_use]
+pub fn mounted_tool_under<'a>(namespace: &str, name: &'a str) -> Option<&'a str> {
+    name.strip_prefix("mcp__")?
+        .strip_prefix(namespace)?
+        .strip_prefix("__")
+        .filter(|tool| !tool.is_empty())
 }
 
 fn validate_app_name(name: &str) -> Result<(), String> {
@@ -420,10 +449,11 @@ mod tests {
 
     #[test]
     fn manifests_enforce_the_mounted_tool_grammar() {
+        let app = ConnectedAppId::new();
         let manifest = |tools: &[&str]| AppManifest {
             name: "Sentry triage".into(),
             bindings: vec![AppBinding {
-                server: "sentry".into(),
+                app,
                 tools: tools.iter().map(|tool| (*tool).to_owned()).collect(),
             }],
         };
@@ -442,8 +472,8 @@ mod tests {
 
         for tool in [
             "list_issues",                               // bare name, not mounted
-            "mcp__github__list_issues",                  // mounted under a different server
             "mcp__sentry__",                             // empty tool segment
+            "mcp____tool",                               // empty namespace segment
             "mcp__sentry__bad name",                     // charset
             &format!("mcp__sentry__{}", "x".repeat(64)), // over the 64-byte bound
         ] {
@@ -457,6 +487,23 @@ mod tests {
             .is_err(),
             "duplicate pins are refused"
         );
+        assert!(
+            validate_app_manifest(&AppManifest {
+                name: "Twice".into(),
+                bindings: vec![
+                    AppBinding {
+                        app,
+                        tools: Vec::new()
+                    },
+                    AppBinding {
+                        app,
+                        tools: Vec::new()
+                    },
+                ],
+            })
+            .is_err(),
+            "duplicate connected-app bindings are refused"
+        );
 
         for name in ["", " padded ", "line\nbreak", &"x".repeat(121)] {
             assert!(
@@ -468,5 +515,20 @@ mod tests {
                 "{name:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_exact_namespace_reading_is_prefix_anchored() {
+        // A namespace may contain `_`, so only the exact-prefix reading is
+        // sound — this is the check the host layers apply once the bound
+        // record's namespace is known.
+        assert_eq!(
+            mounted_tool_under("my_server", "mcp__my_server__tool"),
+            Some("tool")
+        );
+        assert_eq!(mounted_tool_under("my", "mcp__my_server__tool"), None);
+        assert_eq!(mounted_tool_under("sentry", "mcp__github__list"), None);
+        assert_eq!(mounted_tool_under("sentry", "mcp__sentry__"), None);
+        assert_eq!(mounted_tool_under("sentry", "sentry__tool"), None);
     }
 }

@@ -241,6 +241,19 @@ impl ToolRegistry {
         self.tools.contains_key(name)
     }
 
+    /// The shared server-side executor registered under `name`, for callers
+    /// that decorate a registration (re-registering under the same name with
+    /// an amended spec) while delegating execution to the original tool.
+    #[must_use]
+    pub fn server_tool(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        match self.tools.get(name)? {
+            RegisteredTool::Server(tool) => Some(tool.clone()),
+            RegisteredTool::Client { .. }
+            | RegisteredTool::ForegroundClient { .. }
+            | RegisteredTool::ForegroundOrchestration { .. } => None,
+        }
+    }
+
     /// Resolve the trusted execution surface for a registered tool name.
     #[must_use]
     pub fn execution(&self, name: &str) -> Option<ToolCallExecution> {

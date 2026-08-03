@@ -25,6 +25,7 @@ use serde_json::Value;
 use std::ops::Range;
 
 use crate::approval::{ApprovalDecision, ApprovalRequest, StandingGrant, ToolApproval};
+use crate::connected_app::{ConnectedApp, ConnectedAppKind};
 use crate::deliverable::{CreateOutput, NewOutputRevision, OutputRecord, OutputRevision};
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
@@ -992,6 +993,12 @@ fn app_storage_unavailable<T>() -> Result<T> {
     ))
 }
 
+fn connected_app_storage_unavailable<T>() -> Result<T> {
+    Err(AgentError::Store(
+        "connected-app storage is not implemented by this Store".into(),
+    ))
+}
+
 fn context_checkpoint_storage_unavailable<T>() -> Result<T> {
     Err(AgentError::Store(
         "durable context-checkpoint storage is not implemented by this Store".into(),
@@ -1616,6 +1623,29 @@ pub trait Store: Send + Sync {
     /// revoking twice is the same durable outcome, not a conflict.
     async fn delete_app_grant(&self, _app_id: AppId) -> Result<bool> {
         app_storage_unavailable()
+    }
+
+    /// List every connected app the profile holds, oldest first.
+    ///
+    /// Kind-specific definitions come back as the bounded JSON the owning
+    /// layer stored; callers parse per kind and fail closed per record.
+    async fn list_connected_apps(&self) -> Result<Vec<ConnectedApp>> {
+        connected_app_storage_unavailable()
+    }
+
+    /// Replace the profile's connected apps of one kind wholesale.
+    ///
+    /// Mirrors the settings surfaces that edit a complete list: rows of
+    /// `kind` absent from `apps` are deleted, present ids are updated in
+    /// place (keeping their `created_at`), and new ids are inserted. Records
+    /// of other kinds are untouched. Implementations validate each record's
+    /// kind-independent contract and refuse a mixed-kind call.
+    async fn replace_connected_apps(
+        &self,
+        _kind: ConnectedAppKind,
+        _apps: &[ConnectedApp],
+    ) -> Result<()> {
+        connected_app_storage_unavailable()
     }
 
     /// Persist the next versioned context checkpoint for one conversation.

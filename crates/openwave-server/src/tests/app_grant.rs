@@ -31,7 +31,11 @@ async fn grant_request(
         .unwrap()
 }
 
-async fn create_app_bound_to(store: &Arc<dyn Store>, server: &str, tools: &[&str]) -> AppId {
+async fn create_app_bound_to(
+    store: &Arc<dyn Store>,
+    app: openwave_core::id::ConnectedAppId,
+    tools: &[&str],
+) -> AppId {
     let app_id = AppId::new();
     store
         .create_app(&CreateApp {
@@ -41,7 +45,7 @@ async fn create_app_bound_to(store: &Arc<dyn Store>, server: &str, tools: &[&str
                 manifest: AppManifest {
                     name: "Grant fixture".into(),
                     bindings: vec![AppBinding {
-                        server: server.into(),
+                        app,
                         tools: tools.iter().map(|tool| (*tool).to_owned()).collect(),
                     }],
                 },
@@ -94,7 +98,8 @@ async fn grant_responses_carry_names_only_never_definitions_or_env_values() {
         .await
         .unwrap();
     assert_eq!(put.status(), StatusCode::OK);
-    let app_id = create_app_bound_to(&store, "cmd", &["mcp__cmd__doit"]).await;
+    let cmd = connected_app_id(&store, "cmd").await;
+    let app_id = create_app_bound_to(&store, cmd, &["mcp__cmd__doit"]).await;
 
     let mut responses = Vec::new();
     let state = grant_request(&router, &bearer, "GET", app_id).await;
@@ -132,9 +137,14 @@ async fn grant_responses_carry_names_only_never_definitions_or_env_values() {
     let missing = grant_request(&router, &bearer, "GET", AppId::new()).await;
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 
-    // A binding to a server that is not configured cannot be granted: there
-    // is no definition to pin the consent to.
-    let unbound = create_app_bound_to(&store, "ghost", &["mcp__ghost__walk"]).await;
+    // A binding to a connected app that is not configured cannot be granted:
+    // there is no definition to pin the consent to.
+    let unbound = create_app_bound_to(
+        &store,
+        openwave_core::id::ConnectedAppId::new(),
+        &["mcp__ghost__walk"],
+    )
+    .await;
     let refused = grant_request(&router, &bearer, "POST", unbound).await;
     assert_eq!(refused.status(), StatusCode::CONFLICT);
 }

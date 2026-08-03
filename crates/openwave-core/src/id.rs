@@ -494,6 +494,56 @@ impl AppId {
 }
 
 id_type!(
+    /// Identifies one profile-scoped connected app — an outside integration
+    /// (an MCP server, a REST API) a profile can reach.
+    ///
+    /// App-keyed manifest bindings and grants name this identity rather than a
+    /// raw server namespace, so consent follows the record even when display
+    /// names or namespaces change around it.
+    ConnectedAppId
+);
+
+// Ordered so fingerprint maps can key by record id; the macro's derives stop
+// at `Eq` because no other id is used as a map key in sorted collections.
+impl PartialOrd for ConnectedAppId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ConnectedAppId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.cmp(&other.0)
+    }
+}
+
+impl ConnectedAppId {
+    const NAMESPACE: Uuid = Uuid::from_u128(0x1f4c_9a70_60fd_4b2e_9a41_c2d1_08e7_5d23);
+
+    /// Derive the boot-stable identity for a server selected by the legacy
+    /// boot file (`OPENWAVE_MCP_CONFIG`), which configures servers without
+    /// persisting records. Deriving from the configured name keeps app grants
+    /// valid across restarts of a boot-file profile; a persisted record keeps
+    /// whatever id it was created with.
+    #[must_use]
+    pub fn for_boot_server(name: &str) -> Self {
+        Self(Uuid::new_v5(&Self::NAMESPACE, name.as_bytes()))
+    }
+}
+
+/// Schema for the one id type the model writes: `create_app` manifests bind
+/// connected apps by id, so the argument schema must carry it.
+impl schemars::JsonSchema for ConnectedAppId {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ConnectedAppId".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        <Uuid as schemars::JsonSchema>::json_schema(generator)
+    }
+}
+
+id_type!(
     /// Identifies one immutable revision of a local app.
     AppRevisionId
 );

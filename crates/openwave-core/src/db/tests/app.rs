@@ -1,5 +1,5 @@
 use super::*;
-use crate::id::{AgentRunId, AppId, AppRevisionId};
+use crate::id::{AgentRunId, AppId, AppRevisionId, ConnectedAppId};
 use crate::local_app::{
     AppBinding, AppManifest, CreateApp, NewAppRevision, MAX_APP_BUNDLE_BYTES, MAX_APP_REVISIONS,
 };
@@ -16,7 +16,7 @@ fn manifest(name: &str) -> AppManifest {
     AppManifest {
         name: name.to_owned(),
         bindings: vec![AppBinding {
-            server: "sentry".into(),
+            app: ConnectedAppId(uuid::Uuid::from_u128(1)),
             tools: vec!["mcp__sentry__list_issues".into()],
         }],
     }
@@ -177,11 +177,11 @@ async fn a_revision_records_one_producer_and_dangling_conversation_provenance() 
 async fn malformed_manifests_and_out_of_bounds_bundles_are_refused() {
     let (_dir, store) = temp_store().await;
 
-    // A tool pinned outside its binding's server namespace can never match a
-    // mounted tool, so the store refuses it at the door.
-    let mut foreign_tool = create_request(1);
-    foreign_tool.revision.manifest.bindings[0].tools = vec!["mcp__github__list_issues".into()];
-    assert!(store.create_app(&foreign_tool).await.is_err());
+    // A pinned name that is not shaped like a mounted tool can never match
+    // one, so the store refuses it at the door.
+    let mut bare_tool = create_request(1);
+    bare_tool.revision.manifest.bindings[0].tools = vec!["list_issues".into()];
+    assert!(store.create_app(&bare_tool).await.is_err());
 
     let mut empty_bundle = create_request(1);
     empty_bundle.revision.byte_len = 0;
@@ -195,7 +195,7 @@ async fn malformed_manifests_and_out_of_bounds_bundles_are_refused() {
     let mut oversized_manifest = create_request(1);
     oversized_manifest.revision.manifest.bindings = (0..2_000)
         .map(|index| AppBinding {
-            server: format!("server_{index:04}"),
+            app: ConnectedAppId::new(),
             tools: vec![format!("mcp__server_{index:04}__tool_padding_padding")],
         })
         .collect();

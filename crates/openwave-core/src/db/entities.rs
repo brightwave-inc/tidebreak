@@ -1370,6 +1370,37 @@ pub mod output_revision {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod connected_app {
+    use sea_orm::entity::prelude::*;
+
+    // One row per outside integration the profile can reach. `kind` is the
+    // closed `ConnectedAppKind` vocabulary as text; `definition_json` is the
+    // kind-specific definition, validated and bounded before it gets here.
+    // `(kind, name)` is unique: for `mcp_server` rows the name is the mount
+    // namespace, and two records may not claim one namespace.
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "connected_app")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub name: String,
+        pub kind: String,
+        #[sea_orm(column_type = "JsonBinary")]
+        pub definition_json: Json,
+        // Position within the record's kind. The settings surfaces edit an
+        // ordered list, and creation timestamps tie within one save, so the
+        // order is stored rather than inferred.
+        pub position: i32,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod app {
     use sea_orm::entity::prelude::*;
 
