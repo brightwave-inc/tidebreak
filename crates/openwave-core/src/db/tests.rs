@@ -6109,8 +6109,7 @@ async fn stale_lease_failure_with_passed_retry_time_reports_the_lost_race() {
         .unwrap()
         .turn
         .unwrap();
-    let second_scan_at =
-        retried.lease_expires_at.unwrap() + chrono::Duration::microseconds(1);
+    let second_scan_at = retried.lease_expires_at.unwrap() + chrono::Duration::microseconds(1);
     let scanned = store
         .claim_turn_run(
             uuid::Uuid::new_v4(),
