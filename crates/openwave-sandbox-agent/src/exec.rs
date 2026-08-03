@@ -14,15 +14,22 @@
 //! that whole group, a captured-output cap, and rlimit ceilings — so a
 //! runaway or wedged command is contained by resource bounds, not left to run.
 //!
-//! # NOT YET FOR CREDENTIAL-BEARING WORK
+//! # Egress
 //!
-//! A command run here can make network calls. The design routes egress through
-//! the sandbox supervisor (credential separation + an egress proxy), which is a
-//! **stub** in this crate. Nothing here reaches host authority — the containment
-//! above holds — but egress *from the container* is not yet externally enforced.
-//! This tool surface must not be routed to production credential-bearing work
-//! until externally-enforced egress (the run's egress policy applied to the
-//! container's network) and the transport-auth gate land. See the crate docs.
+//! Egress is enforced from *outside* this process, never in here: this tool
+//! shares a failure domain with the commands it runs, so nothing it could do
+//! would count as a boundary. On the local Docker backend the boundary is
+//! network topology (`openwave-server`'s `sandbox_docker`): the container's
+//! only network is an internal bridge with no route out, and the one
+//! dual-homed egress proxy (this binary's `egress-proxy` mode, see the
+//! [`egress`](crate::egress) module) enforces the chat's compiled network
+//! policy — deny by default — with `HTTP(S)_PROXY` in this environment
+//! pointing compliant tools at it. A command that ignores the proxy has no
+//! route anywhere.
+//!
+//! That guarantee belongs to the provisioning backend, not to this crate: an
+//! operator who runs the agent image by hand, on a network of their own
+//! choosing, gets exactly that network's reach and no policy enforcement.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

@@ -1597,6 +1597,9 @@ async fn docker_container_conforms_at_the_transport_boundary() {
             run_id,
             tag: SandboxTag::new(),
             lifetime_cap_secs: None,
+            // Deny-all egress: the attach transport must work through the
+            // proxy's relay even when the sandbox is granted no egress at all.
+            network_policy: Default::default(),
         })
         .await
         .expect("provisioning a conformance container succeeds");

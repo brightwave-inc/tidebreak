@@ -4133,6 +4133,7 @@ dependencies = [
  "async-trait",
  "libc",
  "openwave-core",
+ "openwave-egress",
  "openwave-sandbox-protocol",
  "schemars 1.2.2",
  "serde",

@@ -53,10 +53,31 @@
 //! memory and process count. See [`SandboxHardening`] for what each of those buys
 //! and where the writable surface is.
 //!
-//! What is *not* enforced here: egress. A command inside the container can still
-//! reach the network, and no proxy or network policy constrains it on this
-//! backend. That gap is disclosed on the in-container exec tool itself and is a
-//! separate piece of work.
+//! # Egress enforcement
+//!
+//! Egress is enforced by network topology, not by anything inside the sandbox
+//! container (whose `--cap-drop ALL` profile stays intact). Each provisioning
+//! creates an *internal* Docker network — no route out — as the sandbox
+//! container's only network, and stands up a second container from the same
+//! image running the agent binary's `egress-proxy` mode. Only the proxy is
+//! dual-homed: created on the default bridge (outbound reach plus a
+//! loopback-published host port) and then connected onto the internal network
+//! under the [`EGRESS_PROXY_ALIAS`] name. The sandbox's `HTTP(S)_PROXY`
+//! environment points compliant tools at the proxy; a command that ignores it
+//! has no route anywhere.
+//!
+//! The proxy enforces the run's compiled [`SandboxNetworkPolicy`] (deny by
+//! default, delivered as JSON in its environment) with the same CONNECT-only
+//! contract as the native local adapter's loopback broker, and it also carries
+//! the host-to-agent transport: a port published on a container whose only
+//! network is internal is not reachable from the host, so the proxy's published
+//! port TCP-relays to the sandbox's supervisor across the internal network and
+//! [`address`](SandboxBackend::address) resolves the proxy's port. The per-run
+//! transport secret still gates attach.
+//!
+//! Residual: engines differ on whether the embedded DNS resolver forwards
+//! external lookups from internal networks; where an older engine does, name
+//! lookups (not payload connections) can leak. Not closed here.
 //!
 //! # The image is not verified
 //!
@@ -81,9 +102,11 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use async_trait::async_trait;
+use openwave_core::NetworkPolicy;
+use openwave_egress::DomainPattern;
 use openwave_sandbox_protocol::{
     BackendError, ProvisionRequest, RunId, SandboxAddress, SandboxBackend, SandboxHandle,
-    SandboxTag, TransportSecret,
+    SandboxNetworkPolicy, SandboxTag, TransportSecret,
 };
 use tokio::process::Command;
 use uuid::Uuid;
@@ -102,6 +125,24 @@ pub const LIFETIME_CAP_ENV: &str = "OPENWAVE_SANDBOX_LIFETIME_CAP_SECS";
 /// Go-template that lists a tagged container's id and correlation tag, tab-separated.
 /// Kept in sync with [`RUN_TAG_LABEL`] by a unit test.
 const TAG_LIST_FORMAT: &str = "{{.ID}}\t{{.Label \"openwave.run-tag\"}}";
+/// Go-template that lists a tagged network's name and correlation tag,
+/// tab-separated. Kept in sync with [`RUN_TAG_LABEL`] by the same unit test.
+const NETWORK_TAG_LIST_FORMAT: &str = "{{.Name}}\t{{.Label \"openwave.run-tag\"}}";
+
+/// The DNS name the sandbox reaches the egress proxy under on the internal
+/// network, and the host the sandbox's `HTTP(S)_PROXY` environment names.
+pub const EGRESS_PROXY_ALIAS: &str = "openwave-egress";
+/// The in-proxy CONNECT listener port. Kept in sync with the agent binary's
+/// `egress-proxy` default; never published to the host.
+const EGRESS_PROXY_PORT: u16 = 3128;
+/// Environment variable carrying the compiled egress policy (JSON) into the
+/// proxy container. Kept in sync with the agent's constant of the same name.
+const EGRESS_POLICY_ENV: &str = "OPENWAVE_EGRESS_POLICY";
+/// Environment variable overriding the proxy's transport-relay listener.
+const RELAY_LISTEN_ENV: &str = "OPENWAVE_RELAY_LISTEN";
+/// Environment variable naming the relay's upstream — the sandbox container's
+/// supervisor endpoint on the internal network.
+const RELAY_TARGET_ENV: &str = "OPENWAVE_RELAY_TARGET";
 
 /// The default runtime binary, resolved on `PATH`.
 const DEFAULT_BINARY: &str = "docker";
@@ -142,6 +183,11 @@ const DEFAULT_PIDS_LIMIT: u32 = 512;
 const DEFAULT_TMPFS_OPTIONS: &str = "rw,exec,nosuid,nodev,size=1g";
 
 const RUNTIME_UNAVAILABLE: &str = "container runtime is unavailable";
+const NETWORK_CREATE_FAILED: &str = "could not create the sandbox's internal network";
+const PROXY_RUN_FAILED: &str = "could not start the sandbox egress proxy";
+const PROXY_CONNECT_FAILED: &str = "could not attach the egress proxy to the sandbox network";
+const NETWORK_REMOVE_FAILED: &str = "could not remove the sandbox network";
+const NETWORK_LIST_FAILED: &str = "could not list sandbox networks";
 const RUNTIME_SPAWN_FAILED: &str = "could not invoke the container runtime";
 const RUN_FAILED: &str = "could not start the sandbox container";
 const PORT_LOOKUP_FAILED: &str = "could not resolve the sandbox's published port";
@@ -164,6 +210,11 @@ pub struct DockerConfig {
     /// entrypoint. Empty means the image's default is used — the real agent image
     /// needs no override; tests pass a trivial port-holding command.
     pub command: Vec<String>,
+    /// A command (and arguments) for the egress-proxy container, overriding the
+    /// image's entrypoint. Empty means the image's entrypoint runs with the
+    /// `egress-proxy` argument — the real agent image's second face; tests on
+    /// stand-in images pass a trivial port-holding command.
+    pub proxy_command: Vec<String>,
     /// The absolute lifetime cap, in seconds, applied to a provisioning request
     /// that names none of its own. `None` disables the fallback, leaving a
     /// capless request uncapped; a request's own
@@ -181,6 +232,7 @@ impl Default for DockerConfig {
             image: DEFAULT_IMAGE.to_owned(),
             listener_port: DEFAULT_LISTENER_PORT,
             command: Vec::new(),
+            proxy_command: Vec::new(),
             lifetime_cap_secs: Some(DEFAULT_LIFETIME_CAP_SECS),
             hardening: SandboxHardening::default(),
         }
@@ -351,12 +403,108 @@ impl DockerSandboxBackend {
     }
 }
 
+impl DockerSandboxBackend {
+    /// Run one runtime invocation whose only interesting outcome is success.
+    async fn invoke(&self, args: &[String], failure: &str) -> Result<Vec<u8>, BackendError> {
+        let mut command = self.command();
+        command.args(args);
+        let output = command
+            .output()
+            .await
+            .map_err(|_| BackendError::Provision(RUNTIME_SPAWN_FAILED.to_owned()))?;
+        if !output.status.success() {
+            return Err(BackendError::Provision(failure.to_owned()));
+        }
+        Ok(output.stdout)
+    }
+
+    /// Best-effort removal of whatever a failed provisioning half-made. The
+    /// caller still enqueues the durable teardown obligation, so the tag sweep
+    /// re-covers anything this pass could not confirm.
+    async fn unwind_provision(&self, tag: SandboxTag) {
+        let _ = self.remove(&proxy_name(tag)).await;
+        let _ = self.remove_network(tag).await;
+    }
+
+    /// `docker network rm`, treating a missing network as success.
+    async fn remove_network(&self, tag: SandboxTag) -> Result<(), BackendError> {
+        let mut command = self.command();
+        command.args(["network", "rm", &network_name(tag)]);
+        let output = command
+            .output()
+            .await
+            .map_err(|_| BackendError::Teardown(RUNTIME_SPAWN_FAILED.to_owned()))?;
+        if output.status.success() || is_no_such_network(&output.stderr) {
+            Ok(())
+        } else {
+            Err(BackendError::Teardown(NETWORK_REMOVE_FAILED.to_owned()))
+        }
+    }
+
+    /// List every network carrying the correlation-tag label, with its tag parsed.
+    async fn list_tagged_networks(&self) -> Result<Vec<(String, SandboxTag)>, BackendError> {
+        let mut command = self.command();
+        command.args([
+            "network",
+            "ls",
+            "--filter",
+            &format!("label={RUN_TAG_LABEL}"),
+            "--format",
+            NETWORK_TAG_LIST_FORMAT,
+        ]);
+        let output = command
+            .output()
+            .await
+            .map_err(|_| BackendError::Teardown(RUNTIME_SPAWN_FAILED.to_owned()))?;
+        if !output.status.success() {
+            return Err(BackendError::Teardown(NETWORK_LIST_FAILED.to_owned()));
+        }
+        Ok(parse_network_tag_listing(&output.stdout))
+    }
+}
+
 #[async_trait]
 impl SandboxBackend for DockerSandboxBackend {
     async fn provision(&self, request: ProvisionRequest) -> Result<SandboxHandle, BackendError> {
         if !self.is_available() {
             return Err(BackendError::Provision(RUNTIME_UNAVAILABLE.to_owned()));
         }
+        let tag = request.tag;
+        let cap = effective_lifetime_cap(&self.config, &request);
+        let policy_json = serde_json::to_string(&request.network_policy)
+            .map_err(|_| BackendError::Provision(RUN_FAILED.to_owned()))?;
+
+        // 1. The internal network — the sandbox's only network, with no route
+        //    out. Tagged so the orphan sweep reclaims it with the containers.
+        self.invoke(&network_create_args(tag), NETWORK_CREATE_FAILED)
+            .await?;
+
+        // 2. The egress proxy, on the default bridge: outbound reach, the
+        //    loopback-published transport port, and the compiled policy in its
+        //    environment.
+        if let Err(error) = self
+            .invoke(
+                &proxy_run_args(&self.config, tag, request.run_id, cap, &policy_json),
+                PROXY_RUN_FAILED,
+            )
+            .await
+        {
+            self.unwind_provision(tag).await;
+            return Err(error);
+        }
+
+        // 3. Dual-home the proxy onto the internal network under the alias the
+        //    sandbox's HTTP(S)_PROXY environment names.
+        if let Err(error) = self
+            .invoke(&proxy_connect_args(tag), PROXY_CONNECT_FAILED)
+            .await
+        {
+            self.unwind_provision(tag).await;
+            return Err(error);
+        }
+
+        // 4. The sandbox itself, confined to the internal network.
+        //
         // Docker enforces no lifetime cap from outside the container, and neither
         // can this process: a host-side timer dies with the host, which is the very
         // failure that strands a container. The cap therefore rides into the
@@ -364,12 +512,7 @@ impl SandboxBackend for DockerSandboxBackend {
         // docs for why that is an absolute cap and not an idle timeout.
         let secret = Uuid::new_v4().to_string();
         let mut command = self.command();
-        command.args(run_args(
-            &self.config,
-            request.tag,
-            request.run_id,
-            effective_lifetime_cap(&self.config, &request),
-        ));
+        command.args(run_args(&self.config, tag, request.run_id, cap));
         // Set the secret on the runtime CLI's own environment and pass it through with
         // a valueless `--env`, so it never appears in this process's argv. The
         // delegated task never travels here at all: it arrives in the run-init
@@ -379,16 +522,16 @@ impl SandboxBackend for DockerSandboxBackend {
         let output = command
             .output()
             .await
-            .map_err(|_| BackendError::Provision(RUNTIME_SPAWN_FAILED.to_owned()))?;
-        if !output.status.success() {
+            .map_err(|_| BackendError::Provision(RUNTIME_SPAWN_FAILED.to_owned()));
+        let reference = match output {
+            Ok(output) if output.status.success() => parse_container_id(&output.stdout),
+            _ => None,
+        };
+        let Some(reference) = reference else {
+            self.unwind_provision(tag).await;
             return Err(BackendError::Provision(RUN_FAILED.to_owned()));
-        }
-        let reference = parse_container_id(&output.stdout)
-            .ok_or_else(|| BackendError::Provision(RUN_FAILED.to_owned()))?;
-        Ok(SandboxHandle {
-            reference,
-            tag: request.tag,
-        })
+        };
+        Ok(SandboxHandle { reference, tag })
     }
 
     async fn address(&self, handle: &SandboxHandle) -> Result<SandboxAddress, BackendError> {
@@ -400,12 +543,18 @@ impl SandboxBackend for DockerSandboxBackend {
         // unit-testable without a daemon), and it does not depend on `docker port`'s
         // line format. The publish is loopback-only, so the binding's host IP is
         // 127.0.0.1 and `base_url` names it directly.
+        //
+        // The published port lives on the *proxy* container: the sandbox's only
+        // network is internal, so its own port could not be published, and the
+        // proxy relays the transport across the internal network. The proxy's
+        // deterministic name is a pure function of the handle's tag, so this
+        // remains recoverable after a host restart.
         let mut command = self.command();
         command.args([
             "inspect",
             "--format",
             "{{json .NetworkSettings.Ports}}",
-            &handle.reference,
+            &proxy_name(handle.tag),
         ]);
         let output = command
             .output()
@@ -431,7 +580,11 @@ impl SandboxBackend for DockerSandboxBackend {
         if !self.is_available() {
             return Err(BackendError::Teardown(RUNTIME_UNAVAILABLE.to_owned()));
         }
-        self.remove(&handle.reference).await
+        // Containers before the network: a network with attached containers
+        // refuses removal. Each step is idempotent on "already gone".
+        self.remove(&handle.reference).await?;
+        self.remove(&proxy_name(handle.tag)).await?;
+        self.remove_network(handle.tag).await
     }
 
     /// Reclaim orphaned containers: destroy every tagged container whose
@@ -453,6 +606,8 @@ impl SandboxBackend for DockerSandboxBackend {
         }
         let mut reclaimed = Vec::new();
         let mut unconfirmed = false;
+        // The egress-proxy containers carry the same tag label, so one listing
+        // covers both halves of a run's pair.
         for handle in self.list_tagged().await? {
             if live_tags.contains(&handle.tag) {
                 continue;
@@ -460,6 +615,16 @@ impl SandboxBackend for DockerSandboxBackend {
             if self.remove(&handle.reference).await.is_ok() {
                 reclaimed.push(handle);
             } else {
+                unconfirmed = true;
+            }
+        }
+        // Networks after their containers, for the same attachment reason as
+        // `destroy`.
+        for (_, tag) in self.list_tagged_networks().await? {
+            if live_tags.contains(&tag) {
+                continue;
+            }
+            if self.remove_network(tag).await.is_err() {
                 unconfirmed = true;
             }
         }
@@ -481,23 +646,206 @@ fn effective_lifetime_cap(config: &DockerConfig, request: &ProvisionRequest) -> 
         .filter(|secs| *secs > 0)
 }
 
-/// The `docker run` argument vector for one provisioning. Factored out so the
-/// label, publish, and env-passthrough composition is testable without a runtime.
+/// The per-run internal network's name — a pure function of the tag, so
+/// teardown and restart recovery need no extra state.
+fn network_name(tag: SandboxTag) -> String {
+    format!("openwave-net-{tag}")
+}
+
+/// The per-run egress-proxy container's name.
+fn proxy_name(tag: SandboxTag) -> String {
+    format!("openwave-egress-{tag}")
+}
+
+/// The per-run sandbox container's name: the DNS name the proxy's transport
+/// relay dials on the internal network.
+fn sandbox_name(tag: SandboxTag) -> String {
+    format!("openwave-sbx-{tag}")
+}
+
+/// Compile a chat's provider-neutral [`NetworkPolicy`] into the closed,
+/// class-expanded form a sandbox backend enforces.
+///
+/// Persisted policies are already normalized (exact lowercase hosts, no
+/// wildcards), but the filter here is defensive rather than trusting: an entry
+/// that fails to parse as an exact domain pattern is dropped — narrowing, never
+/// widening — instead of shipped to the enforcement point.
+pub(crate) fn compile_network_policy(policy: &NetworkPolicy) -> SandboxNetworkPolicy {
+    let package_domains = || {
+        openwave_code_execution::PACKAGE_MANAGER_DOMAINS
+            .iter()
+            .map(|domain| (*domain).to_owned())
+            .collect::<Vec<_>>()
+    };
+    match policy {
+        NetworkPolicy::Off => SandboxNetworkPolicy::deny_all(),
+        NetworkPolicy::Open => SandboxNetworkPolicy::open(),
+        NetworkPolicy::PackageManagers => SandboxNetworkPolicy {
+            allow_all_public: false,
+            allowed_hosts: Vec::new(),
+            https_only_hosts: package_domains(),
+        },
+        NetworkPolicy::AllowedHosts {
+            allowed_hosts,
+            package_managers,
+        } => SandboxNetworkPolicy {
+            allow_all_public: false,
+            allowed_hosts: allowed_hosts
+                .iter()
+                .filter(|host| !host.starts_with("*."))
+                .filter_map(|host| DomainPattern::parse(host).ok().map(|_| host.to_owned()))
+                .collect(),
+            https_only_hosts: if *package_managers {
+                package_domains()
+            } else {
+                Vec::new()
+            },
+        },
+    }
+}
+
+/// The `docker network create` argument vector for one provisioning: an
+/// *internal* network — no route out — tagged for the orphan sweep.
+fn network_create_args(tag: SandboxTag) -> Vec<String> {
+    vec![
+        "network".to_owned(),
+        "create".to_owned(),
+        "--internal".to_owned(),
+        "--label".to_owned(),
+        format!("{RUN_TAG_LABEL}={tag}"),
+        network_name(tag),
+    ]
+}
+
+/// The `docker run` argument vector for the egress-proxy container. It runs on
+/// the default bridge (outbound reach) with the transport port published to
+/// host loopback and the compiled policy in its environment; a later
+/// `network connect` dual-homes it onto the internal network.
+fn proxy_run_args(
+    config: &DockerConfig,
+    tag: SandboxTag,
+    run_id: RunId,
+    lifetime_cap_secs: Option<u64>,
+    policy_json: &str,
+) -> Vec<String> {
+    let mut args = vec![
+        "run".to_owned(),
+        "-d".to_owned(),
+        "--name".to_owned(),
+        proxy_name(tag),
+        "--label".to_owned(),
+        format!("{RUN_TAG_LABEL}={tag}"),
+        "--label".to_owned(),
+        format!("{RUN_ID_LABEL}={run_id}"),
+        "--env".to_owned(),
+        format!("{EGRESS_POLICY_ENV}={policy_json}"),
+        "--env".to_owned(),
+        format!("{RELAY_LISTEN_ENV}=0.0.0.0:{}", config.listener_port),
+        "--env".to_owned(),
+        format!(
+            "{RELAY_TARGET_ENV}={}:{}",
+            sandbox_name(tag),
+            config.listener_port
+        ),
+    ];
+    // The proxy dies on its own exactly like a stranded sandbox.
+    if let Some(secs) = lifetime_cap_secs {
+        args.push("--env".to_owned());
+        args.push(format!("{LIFETIME_CAP_ENV}={secs}"));
+    }
+    args.extend(proxy_hardening_args(&config.hardening));
+    args.extend([
+        "--publish".to_owned(),
+        format!("127.0.0.1::{}", config.listener_port),
+        config.image.clone(),
+    ]);
+    if config.proxy_command.is_empty() {
+        args.push("egress-proxy".to_owned());
+    } else {
+        args.extend(config.proxy_command.iter().cloned());
+    }
+    args
+}
+
+/// The proxy's confinement: the sandbox profile minus the writable surface —
+/// the proxy writes nothing — and minus `--init`, since it never spawns
+/// children. It is trusted code, but it faces the untrusted network on one side
+/// and the untrusted sandbox on the other, so it keeps the non-root,
+/// no-capability, read-only, ceiling-bounded profile.
+fn proxy_hardening_args(hardening: &SandboxHardening) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(user) = &hardening.user {
+        args.extend(["--user".to_owned(), user.clone()]);
+    }
+    if hardening.drop_capabilities {
+        args.extend(["--cap-drop".to_owned(), "ALL".to_owned()]);
+    }
+    if hardening.no_new_privileges {
+        args.extend([
+            "--security-opt".to_owned(),
+            "no-new-privileges:true".to_owned(),
+        ]);
+    }
+    if hardening.read_only_rootfs {
+        args.push("--read-only".to_owned());
+    }
+    if let Some(memory) = &hardening.memory_limit {
+        args.extend(["--memory".to_owned(), memory.clone()]);
+    }
+    if let Some(pids) = hardening.pids_limit {
+        args.extend(["--pids-limit".to_owned(), pids.to_string()]);
+    }
+    args
+}
+
+/// The `docker network connect` argument vector that dual-homes the proxy onto
+/// the internal network under the alias the sandbox's proxy environment names.
+fn proxy_connect_args(tag: SandboxTag) -> Vec<String> {
+    vec![
+        "network".to_owned(),
+        "connect".to_owned(),
+        "--alias".to_owned(),
+        EGRESS_PROXY_ALIAS.to_owned(),
+        network_name(tag),
+        proxy_name(tag),
+    ]
+}
+
+/// The `docker run` argument vector for the sandbox container. Factored out so
+/// the label, network, and env-passthrough composition is testable without a
+/// runtime.
 fn run_args(
     config: &DockerConfig,
     tag: SandboxTag,
     run_id: RunId,
     lifetime_cap_secs: Option<u64>,
 ) -> Vec<String> {
+    let proxy_url = format!("http://{EGRESS_PROXY_ALIAS}:{EGRESS_PROXY_PORT}");
     let mut args = vec![
         "run".to_owned(),
         "-d".to_owned(),
+        "--name".to_owned(),
+        sandbox_name(tag),
+        // The sandbox's ONLY network: internal, so a command that ignores the
+        // proxy environment has no route anywhere. No port is published here —
+        // it could not reach the host anyway; the proxy relays the transport.
+        "--network".to_owned(),
+        network_name(tag),
         "--label".to_owned(),
         format!("{RUN_TAG_LABEL}={tag}"),
         "--label".to_owned(),
         format!("{RUN_ID_LABEL}={run_id}"),
         "--env".to_owned(),
         TRANSPORT_SECRET_ENV.to_owned(),
+        // Convenience for compliant tools; the topology is the enforcement.
+        "--env".to_owned(),
+        format!("HTTP_PROXY={proxy_url}"),
+        "--env".to_owned(),
+        format!("HTTPS_PROXY={proxy_url}"),
+        "--env".to_owned(),
+        format!("http_proxy={proxy_url}"),
+        "--env".to_owned(),
+        format!("https_proxy={proxy_url}"),
     ];
     args.extend(hardening_args(&config.hardening));
     // Unlike the secret, the cap is not sensitive, so it travels as
@@ -507,11 +855,7 @@ fn run_args(
         args.push("--env".to_owned());
         args.push(format!("{LIFETIME_CAP_ENV}={secs}"));
     }
-    args.extend([
-        "--publish".to_owned(),
-        format!("127.0.0.1::{}", config.listener_port),
-        config.image.clone(),
-    ]);
+    args.push(config.image.clone());
     args.extend(config.command.iter().cloned());
     args
 }
@@ -628,12 +972,37 @@ fn parse_tag_listing(stdout: &[u8]) -> Vec<SandboxHandle> {
         .collect()
 }
 
+/// Parse the name/tag pairs from the network tag-listing template's output.
+fn parse_network_tag_listing(stdout: &[u8]) -> Vec<(String, SandboxTag)> {
+    let text = String::from_utf8_lossy(stdout);
+    text.lines()
+        .filter_map(|line| {
+            let (name, tag) = line.trim().split_once('\t')?;
+            let (name, tag) = (name.trim(), tag.trim());
+            if name.is_empty() {
+                return None;
+            }
+            let tag = tag.parse::<SandboxTag>().ok()?;
+            Some((name.to_owned(), tag))
+        })
+        .collect()
+}
+
 /// Whether a runtime error names a container that does not exist — the idempotent
 /// case for destroy, and the unknown-handle case for address. Covers both Docker
 /// (`No such container`) and podman (`no such container` / `no such object`).
 fn is_no_such_container(stderr: &[u8]) -> bool {
     let text = String::from_utf8_lossy(stderr).to_ascii_lowercase();
     text.contains("no such container") || text.contains("no such object")
+}
+
+/// Whether a runtime error names a network that does not exist — the idempotent
+/// case for network removal, across Docker and podman phrasings.
+fn is_no_such_network(stderr: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    text.contains("no such network")
+        || text.contains("network not found")
+        || text.contains("unable to find network")
 }
 
 /// Resolve a runtime binary the way a shell would: an explicit path is checked as
@@ -698,6 +1067,7 @@ mod tests {
             run_id: RunId::new(),
             tag: SandboxTag::new(),
             lifetime_cap_secs: None,
+            network_policy: Default::default(),
         };
         assert!(matches!(
             backend.provision(request).await,
@@ -724,7 +1094,7 @@ mod tests {
     }
 
     #[test]
-    fn run_args_stamp_the_tag_publish_the_port_and_append_the_command() {
+    fn run_args_stamp_the_tag_confine_the_network_and_append_the_command() {
         let tag = SandboxTag::new();
         let run_id = RunId::new();
         let config = DockerConfig {
@@ -745,7 +1115,23 @@ mod tests {
         assert!(args
             .iter()
             .all(|arg| !arg.contains(TRANSPORT_SECRET_ENV) || arg == TRANSPORT_SECRET_ENV));
-        assert!(args.contains(&"127.0.0.1::9000".to_owned()));
+
+        // The sandbox's only network is the per-run internal network, and it
+        // publishes NO port: the proxy relays the transport, and a published
+        // port here would be dead weight at best.
+        let network_at = args.iter().position(|arg| arg == "--network").unwrap();
+        assert_eq!(args[network_at + 1], network_name(tag));
+        assert!(!args.iter().any(|arg| arg == "--publish"));
+        // Compliant tools are pointed at the proxy by every spelling.
+        for var in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+            assert!(args.contains(&format!(
+                "{var}=http://{EGRESS_PROXY_ALIAS}:{EGRESS_PROXY_PORT}"
+            )));
+        }
+        // The deterministic name is what the proxy's relay dials.
+        let name_at = args.iter().position(|arg| arg == "--name").unwrap();
+        assert_eq!(args[name_at + 1], sandbox_name(tag));
+
         // The image precedes the container command.
         let image_at = args
             .iter()
@@ -763,6 +1149,109 @@ mod tests {
         // the container would read as "expire now".
         let uncapped = run_args(&config, tag, run_id, None);
         assert!(uncapped.iter().all(|arg| !arg.contains(LIFETIME_CAP_ENV)));
+    }
+
+    /// The proxy container is the only dual-homed, host-published piece, and it
+    /// carries the compiled policy. Every property here is invisible at runtime
+    /// if silently dropped, so each is pinned.
+    #[test]
+    fn proxy_and_network_args_compose_the_egress_topology() {
+        let tag = SandboxTag::new();
+        let run_id = RunId::new();
+        let config = DockerConfig {
+            listener_port: 9000,
+            image: "example/image:tag".to_owned(),
+            ..DockerConfig::default()
+        };
+
+        // The network is internal — the property the whole boundary rests on.
+        let net = network_create_args(tag);
+        assert!(net.contains(&"--internal".to_owned()));
+        assert!(net.contains(&format!("{RUN_TAG_LABEL}={tag}")));
+        assert_eq!(net.last().unwrap(), &network_name(tag));
+
+        let policy = r#"{"allow_all_public":false}"#;
+        let args = proxy_run_args(&config, tag, run_id, Some(900), policy);
+        // Published to host loopback: this is the transport's front door.
+        assert!(args.contains(&"127.0.0.1::9000".to_owned()));
+        // Policy, relay wiring, and the lifetime cap ride the environment.
+        assert!(args.contains(&format!("{EGRESS_POLICY_ENV}={policy}")));
+        assert!(args.contains(&format!("{RELAY_LISTEN_ENV}=0.0.0.0:9000")));
+        assert!(args.contains(&format!("{RELAY_TARGET_ENV}={}:9000", sandbox_name(tag))));
+        assert!(args.contains(&format!("{LIFETIME_CAP_ENV}=900")));
+        // The default command is the agent image's second face.
+        assert_eq!(args.last().unwrap(), "egress-proxy");
+        // The proxy keeps the non-root, no-capability, read-only profile.
+        assert!(args.contains(&"--cap-drop".to_owned()));
+        assert!(args.contains(&"--read-only".to_owned()));
+        // It is tagged for the sweep and deterministically named for recovery.
+        assert!(args.contains(&format!("{RUN_TAG_LABEL}={tag}")));
+        assert!(args.contains(&proxy_name(tag)));
+
+        // A test image without the agent binary can stand in a port-holder.
+        let stand_in = DockerConfig {
+            proxy_command: vec!["nc".to_owned(), "-l".to_owned()],
+            ..config.clone()
+        };
+        let args = proxy_run_args(&stand_in, tag, run_id, None, policy);
+        assert_eq!(args.last().unwrap(), "-l");
+
+        // The connect dual-homes the proxy under the alias the sandbox's proxy
+        // environment names.
+        let connect = proxy_connect_args(tag);
+        assert_eq!(
+            connect,
+            vec![
+                "network".to_owned(),
+                "connect".to_owned(),
+                "--alias".to_owned(),
+                EGRESS_PROXY_ALIAS.to_owned(),
+                network_name(tag),
+                proxy_name(tag),
+            ]
+        );
+    }
+
+    /// Host-side policy compilation: classes expand to exact hosts, deny stays
+    /// deny, and nothing ever widens.
+    #[test]
+    fn network_policy_compiles_to_the_closed_sandbox_form() {
+        assert!(compile_network_policy(&NetworkPolicy::Off).denies_everything());
+
+        let open = compile_network_policy(&NetworkPolicy::Open);
+        assert!(open.allow_all_public);
+
+        let packages = compile_network_policy(&NetworkPolicy::PackageManagers);
+        assert!(!packages.allow_all_public);
+        assert!(packages.allowed_hosts.is_empty());
+        assert!(packages
+            .https_only_hosts
+            .iter()
+            .any(|host| host == "pypi.org"));
+        assert!(packages.permits("pypi.org", 443));
+        assert!(!packages.permits("pypi.org", 80));
+
+        let custom = compile_network_policy(&NetworkPolicy::AllowedHosts {
+            allowed_hosts: vec![
+                "api.example.com".to_owned(),
+                // Defensive: wildcards and malformed entries are dropped, not
+                // shipped — narrowing, never widening.
+                "*.unsafe.example".to_owned(),
+                "not a host".to_owned(),
+            ],
+            package_managers: true,
+        });
+        assert_eq!(custom.allowed_hosts, vec!["api.example.com".to_owned()]);
+        assert!(custom.permits("crates.io", 443));
+        assert!(!custom.permits("x.unsafe.example", 443));
+    }
+
+    #[test]
+    fn network_tag_listing_parser_keeps_valid_tags() {
+        let tag = SandboxTag::new();
+        let stdout = format!("openwave-net-{tag}\t{tag}\nother-net\tnot-a-uuid\n");
+        let networks = parse_network_tag_listing(stdout.as_bytes());
+        assert_eq!(networks, vec![(network_name(tag), tag)]);
     }
 
     /// Every confinement control reaches the argv. A container missing them
@@ -817,6 +1306,7 @@ mod tests {
             run_id: RunId::new(),
             tag: SandboxTag::new(),
             lifetime_cap_secs,
+            network_policy: Default::default(),
         };
         let config = DockerConfig::default();
         assert_eq!(config.lifetime_cap_secs, Some(DEFAULT_LIFETIME_CAP_SECS));
@@ -845,6 +1335,7 @@ mod tests {
     #[test]
     fn tag_list_format_tracks_the_label_constant() {
         assert!(TAG_LIST_FORMAT.contains(RUN_TAG_LABEL));
+        assert!(NETWORK_TAG_LIST_FORMAT.contains(RUN_TAG_LABEL));
     }
 
     #[test]
@@ -916,6 +1407,16 @@ mod tests {
             // published port keeps a real listener behind it; `|| sleep 1` avoids a
             // busy spin if a listen attempt ever fails.
             command: vec![
+                "sh".to_owned(),
+                "-c".to_owned(),
+                "while true; do nc -l -p 8080 || sleep 1; done".to_owned(),
+            ],
+            // The stand-in image has no agent binary, so the egress-proxy
+            // container holds its published port the same way. Reachability of
+            // the published port then proves the topology stood up (network,
+            // dual-homed proxy, sandbox), not the relay's forwarding — that is
+            // the sandbox-resident e2e lane's to prove.
+            proxy_command: vec![
                 "sh".to_owned(),
                 "-c".to_owned(),
                 "while true; do nc -l -p 8080 || sleep 1; done".to_owned(),
@@ -999,6 +1500,7 @@ mod tests {
                 run_id: RunId::new(),
                 tag: live_tag,
                 lifetime_cap_secs: None,
+                network_policy: Default::default(),
             })
             .await
             .expect("provision live container");
@@ -1010,6 +1512,7 @@ mod tests {
                 run_id: RunId::new(),
                 tag: orphan_tag,
                 lifetime_cap_secs: None,
+                network_policy: Default::default(),
             })
             .await
             .expect("provision orphan container");
