@@ -149,6 +149,7 @@ pub(crate) fn freeze_foreground_turn_surface(
         &openwave_core::NetworkPolicy::default(),
         crate::code_execution::DEFAULT_TIMEOUT_MS,
         false,
+        None,
         false,
     )
 }
@@ -162,6 +163,7 @@ fn freeze_foreground_turn_surface_with_folders(
     network_policy: &openwave_core::NetworkPolicy,
     exec_timeout_ms: u64,
     offline_package_cache: bool,
+    office_rendering: Option<bool>,
     plan_mode: bool,
 ) -> ForegroundTurnSurface {
     let mut agent_config = base_agent_config.clone();
@@ -172,6 +174,7 @@ fn freeze_foreground_turn_surface_with_folders(
         network_policy,
         exec_timeout_ms,
         offline_package_cache,
+        office_rendering,
         plan_mode,
     ));
     ForegroundTurnSurface {
@@ -607,6 +610,10 @@ impl TurnWorker {
             Some(provider) => provider.offline_package_cache_ready().await,
             None => false,
         };
+        let office_rendering = match self.exec_folder_context.as_ref() {
+            Some(provider) => provider.office_rendering_available().await,
+            None => None,
+        };
         let exec_timeout_ms = match self.exec_folder_context.as_ref() {
             Some(provider) => provider.current_timeout_ms().await,
             None => crate::code_execution::DEFAULT_TIMEOUT_MS,
@@ -619,6 +626,7 @@ impl TurnWorker {
             &chat.network_policy,
             exec_timeout_ms,
             offline_package_cache,
+            office_rendering,
             matches!(
                 chat.permission_mode,
                 Some(openwave_core::PermissionMode::Plan)

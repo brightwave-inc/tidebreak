@@ -824,6 +824,10 @@ pub struct ConfiguredCodeExecutionProvider {
     /// Host-provided office-to-PDF converter feeding the model's visual QA
     /// loop. `None` (headless embeddings) degrades to an honest sync note.
     office_converter: Option<Arc<dyn openwave_code_execution::HostOfficeConverter>>,
+    /// Broker that provides skill-declared host tools (the managed
+    /// LibreOffice install, on the desktop). `None` reports every tool
+    /// unavailable and warms nothing.
+    host_tool_broker: Option<Arc<dyn openwave_code_execution::HostToolBroker>>,
     /// Cross-process exclusion for the blobs a write-back snapshot publishes.
     blob_writes: Option<Arc<BlobWriteGuard>>,
     remote_sessions: RemoteSessionPool,
@@ -986,6 +990,7 @@ impl ConfiguredCodeExecutionProvider {
             user_skills_dir: None,
             folder_grant_resolver: None,
             office_converter: None,
+            host_tool_broker: None,
             blob_writes: None,
             remote_sessions: RemoteSessionPool::default(),
             write_overlays: Mutex::new(HashMap::new()),
@@ -1088,6 +1093,22 @@ impl ConfiguredCodeExecutionProvider {
         if skills.is_empty() {
             return;
         }
+        // Warm the staged skills' declared host tools while the turn runs:
+        // `ensure` is fire-and-forget with the broker's own discipline
+        // (serialized installs, remembered failures), so a declaration in a
+        // staged manifest is all it takes to start the managed install long
+        // before the QA loop needs it.
+        if let Some(broker) = self.host_tool_broker.as_deref() {
+            let mut warmed: Vec<openwave_code_execution::HostDep> = Vec::new();
+            for skill in &skills {
+                for dep in &skill.package.host_deps {
+                    if !warmed.contains(dep) {
+                        warmed.push(*dep);
+                        broker.ensure(*dep);
+                    }
+                }
+            }
+        }
         let host_dir = self.scratch_root.join(chat_id.to_string());
         if let Err(error) = prepare_execution_directories(
             &host_dir,
@@ -1099,6 +1120,34 @@ impl ConfiguredCodeExecutionProvider {
         {
             tracing::warn!("turn-start workspace staging failed for chat {chat_id}: {error}");
         }
+    }
+
+    /// Whether host-side office rendering is real for this turn, for the
+    /// operating prompt's capability line.
+    ///
+    /// `None` when no staged skill declares a LibreOffice dependency — the
+    /// line would steer nothing and is omitted. Otherwise the broker's status
+    /// is the truth: only a tool that resolves right now counts, so a prompt
+    /// never promises a converter that is mid-download or failed to install.
+    pub(crate) async fn office_rendering_available(&self) -> Option<bool> {
+        let declared = self.current_skills().iter().any(|skill| {
+            skill
+                .package
+                .host_deps
+                .contains(&openwave_code_execution::HostDep::LibreOffice)
+        });
+        if !declared {
+            return None;
+        }
+        let Some(broker) = self.host_tool_broker.as_deref() else {
+            return Some(false);
+        };
+        Some(matches!(
+            broker
+                .status(openwave_code_execution::HostDep::LibreOffice)
+                .await,
+            openwave_code_execution::HostToolStatus::Available
+        ))
     }
 
     /// The shared package cache keyspace for the local sandbox interpreter.
@@ -1218,6 +1267,19 @@ impl ConfiguredCodeExecutionProvider {
         converter: Option<Arc<dyn openwave_code_execution::HostOfficeConverter>>,
     ) -> Self {
         self.office_converter = converter;
+        self
+    }
+
+    /// Install the broker that provides skill-declared host tools. Turn
+    /// staging warms declared dependencies through it, and the operating
+    /// prompt's office-rendering capability line reads its status. Non-desktop
+    /// embeddings leave this absent.
+    #[must_use]
+    pub fn with_host_tool_broker(
+        mut self,
+        broker: Option<Arc<dyn openwave_code_execution::HostToolBroker>>,
+    ) -> Self {
+        self.host_tool_broker = broker;
         self
     }
 
@@ -2740,6 +2802,109 @@ mod tests {
         let bare_chat = ChatId::new();
         bare.stage_turn_workspace(bare_chat).await;
         assert!(!scratch_root.path().join(bare_chat.to_string()).exists());
+    }
+
+    /// The declaration-driven host-tool contract: staging a skill that
+    /// declares `host: ["libreoffice"]` warms the broker exactly once per
+    /// staging, and the prompt capability flag is the broker's status — never
+    /// a promise — omitted entirely when nothing declares the dependency.
+    #[tokio::test]
+    async fn declared_host_deps_warm_the_broker_and_gate_the_capability_flag() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct RecordingBroker {
+            ensures: AtomicUsize,
+            available: bool,
+        }
+
+        #[async_trait]
+        impl openwave_code_execution::HostToolBroker for RecordingBroker {
+            fn ensure(&self, tool: openwave_code_execution::HostDep) {
+                assert_eq!(tool, openwave_code_execution::HostDep::LibreOffice);
+                self.ensures.fetch_add(1, Ordering::SeqCst);
+            }
+
+            async fn status(
+                &self,
+                _tool: openwave_code_execution::HostDep,
+            ) -> openwave_code_execution::HostToolStatus {
+                if self.available {
+                    openwave_code_execution::HostToolStatus::Available
+                } else {
+                    openwave_code_execution::HostToolStatus::Unavailable("not installed".into())
+                }
+            }
+        }
+
+        let (store, _database) = test_store().await;
+        let store = Arc::new(store);
+        let scratch_root = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let skill_dir = source.path().join("presentations");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join(openwave_code_execution::SKILL_MANIFEST_FILE),
+            "---\n\
+             name: presentations\n\
+             description: Decks.\n\
+             deps: { python: [\"python-pptx==1.0.2\"], host: [\"libreoffice\"] }\n\
+             ---\n\
+             Body.\n",
+        )
+        .unwrap();
+
+        let broker = Arc::new(RecordingBroker {
+            ensures: AtomicUsize::new(0),
+            available: true,
+        });
+        let provider = ConfiguredCodeExecutionProvider::new(
+            store.clone(),
+            Arc::new(NoSecrets),
+            scratch_root.path(),
+        )
+        .with_skills(Some(source.path().to_owned()))
+        .with_host_tool_broker(Some(broker.clone()));
+
+        provider.stage_turn_workspace(ChatId::new()).await;
+        assert_eq!(broker.ensures.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.office_rendering_available().await, Some(true));
+
+        // An unavailable tool reports false — the prompt says so instead of
+        // teaching a QA loop the host cannot run.
+        let unavailable = Arc::new(RecordingBroker {
+            ensures: AtomicUsize::new(0),
+            available: false,
+        });
+        let provider = ConfiguredCodeExecutionProvider::new(
+            store.clone(),
+            Arc::new(NoSecrets),
+            scratch_root.path(),
+        )
+        .with_skills(Some(source.path().to_owned()))
+        .with_host_tool_broker(Some(unavailable));
+        assert_eq!(provider.office_rendering_available().await, Some(false));
+
+        // No declaration, no line; no broker, no promise.
+        let no_deps = tempfile::tempdir().unwrap();
+        let plain = no_deps.path().join("charts");
+        std::fs::create_dir(&plain).unwrap();
+        std::fs::write(
+            plain.join(openwave_code_execution::SKILL_MANIFEST_FILE),
+            "---\nname: charts\ndescription: Plots.\n---\nBody.\n",
+        )
+        .unwrap();
+        let provider = ConfiguredCodeExecutionProvider::new(
+            store.clone(),
+            Arc::new(NoSecrets),
+            scratch_root.path(),
+        )
+        .with_skills(Some(no_deps.path().to_owned()));
+        assert_eq!(provider.office_rendering_available().await, None);
+
+        let brokerless =
+            ConfiguredCodeExecutionProvider::new(store, Arc::new(NoSecrets), scratch_root.path())
+                .with_skills(Some(source.path().to_owned()));
+        assert_eq!(brokerless.office_rendering_available().await, Some(false));
     }
 
     /// Local exec is confined to the scratch directory but can create entries

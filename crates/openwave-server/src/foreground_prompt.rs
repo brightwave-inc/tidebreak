@@ -64,6 +64,7 @@ pub(crate) fn compose(specs: &[ToolSpec]) -> String {
         &NetworkPolicy::default(),
         crate::code_execution::DEFAULT_TIMEOUT_MS,
         false,
+        None,
         false,
     )
 }
@@ -99,6 +100,7 @@ fn render_timeout(timeout_ms: u64) -> String {
 /// reaches composition, so the section logic below stays truthful without
 /// consulting the flag; the flag only adds the planning contract itself.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compose_for_surface(
     specs: &[ToolSpec],
     exec_folders: &[ResolvedExecFolderGrant],
@@ -106,6 +108,7 @@ pub(crate) fn compose_for_surface(
     network_policy: &NetworkPolicy,
     exec_timeout_ms: u64,
     offline_package_cache: bool,
+    office_rendering: Option<bool>,
     plan_mode: bool,
 ) -> String {
     let names = specs
@@ -483,6 +486,21 @@ pub(crate) fn compose_for_surface(
                 "- Before producing a kind of document listed above, read `.openwave/skills/<name>/SKILL.md` with `read_file` and follow its instructions."
                     .to_owned(),
             );
+            // Host-derived truth, like the offline package cache line above:
+            // the QA loop a skill teaches must not promise a converter the
+            // host cannot produce. Omitted entirely when no staged skill
+            // declares the dependency.
+            match office_rendering {
+                Some(true) => lines.push(
+                    "- Office rendering is available: PPTX/DOCX files saved in output/ are converted to PDF under .openwave/render/ on the host after each successful command, for visual QA per the skill instructions."
+                        .to_owned(),
+                ),
+                Some(false) => lines.push(
+                    "- Office rendering is unavailable on this host: no PDF conversion of PPTX/DOCX outputs is possible unless the sandbox itself has LibreOffice. Validate office outputs by reopening them with their library and say the visual pass was not possible."
+                        .to_owned(),
+                ),
+                None => {}
+            }
             push_section(&mut prompt, DOCUMENT_SKILLS_HEADING, &lines);
         }
     }
@@ -676,6 +694,7 @@ mod tests {
             &NetworkPolicy::default(),
             TIMEOUT,
             false,
+            None,
             true,
         );
         let normal = compose_for_surface(
@@ -685,6 +704,7 @@ mod tests {
             &NetworkPolicy::default(),
             TIMEOUT,
             false,
+            None,
             false,
         );
 
@@ -735,6 +755,7 @@ mod tests {
             &NetworkPolicy::default(),
             TIMEOUT,
             false,
+            None,
             false,
         );
 
@@ -756,7 +777,16 @@ mod tests {
     #[test]
     fn network_policy_renders_truthfully_per_value() {
         let compose_with = |policy: &NetworkPolicy| {
-            compose_for_surface(&[spec("exec")], &[], &[], policy, TIMEOUT, false, false)
+            compose_for_surface(
+                &[spec("exec")],
+                &[],
+                &[],
+                policy,
+                TIMEOUT,
+                false,
+                None,
+                false,
+            )
         };
         let pip_line = "python3 -m pip install --user";
 
@@ -776,6 +806,7 @@ mod tests {
             &NetworkPolicy::Off,
             TIMEOUT,
             true,
+            None,
             false,
         );
         assert!(off_with_cache.contains("no outbound network access"));
@@ -830,6 +861,7 @@ mod tests {
             &NetworkPolicy::Open,
             1_500,
             false,
+            None,
             false,
         );
         assert!(odd.contains("killed by the host after 1500 milliseconds"));
@@ -877,6 +909,7 @@ mod tests {
             &NetworkPolicy::default(),
             TIMEOUT,
             false,
+            None,
             false,
         );
         assert!(prompt.contains(DOCUMENT_SKILLS_HEADING));
@@ -897,6 +930,7 @@ mod tests {
             &NetworkPolicy::default(),
             TIMEOUT,
             false,
+            None,
             false,
         );
         assert!(!without_exec.contains(DOCUMENT_SKILLS_HEADING));
@@ -908,9 +942,44 @@ mod tests {
             &NetworkPolicy::default(),
             TIMEOUT,
             false,
+            None,
             false,
         );
         assert!(!forged_only.contains(DOCUMENT_SKILLS_HEADING));
+    }
+
+    /// The office-rendering line is host truth like the offline-cache line:
+    /// present in exactly the state the broker reports, absent when nothing
+    /// declares the dependency.
+    #[test]
+    fn office_rendering_line_matches_the_host_state() {
+        let skills = vec![SkillPackage {
+            name: "presentations".into(),
+            description: "Decks.".into(),
+            python_deps: Vec::new(),
+            host_deps: vec![openwave_code_execution::HostDep::LibreOffice],
+            origin: SkillOrigin::Builtin,
+        }];
+        let for_state = |office_rendering| {
+            compose_for_surface(
+                &[spec("exec")],
+                &[],
+                &skills,
+                &NetworkPolicy::default(),
+                TIMEOUT,
+                false,
+                office_rendering,
+                false,
+            )
+        };
+        let available = for_state(Some(true));
+        assert!(available.contains("Office rendering is available"));
+        assert!(available.contains(".openwave/render/"));
+        let unavailable = for_state(Some(false));
+        assert!(unavailable.contains("Office rendering is unavailable"));
+        assert!(unavailable.contains("visual pass was not possible"));
+        let undeclared = for_state(None);
+        assert!(!undeclared.contains("Office rendering"));
     }
 
     #[test]
@@ -993,6 +1062,7 @@ mod tests {
             &NetworkPolicy::default(),
             TIMEOUT,
             false,
+            None,
             false,
         );
 
