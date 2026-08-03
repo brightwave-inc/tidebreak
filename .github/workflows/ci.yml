@@ -18,10 +18,18 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  # Only the newest commit on a branch matters. sccache publishes compiler
-  # objects as they are produced, so superseded main runs do not need to finish.
-  cancel-in-progress: true
+  # On a PR ref only the newest commit matters, so supersede in-progress runs.
+  # Every other event gets a unique group (keyed by run id) so nothing cancels
+  # it and it cancels nothing: post-merge runs are the full validation for the
+  # exact commits they cover — a later merge whose narrower change scope skips
+  # a lane (notably the sandbox-container e2e) must not cancel the earlier run
+  # that was responsible for it, and a manual workflow_dispatch is the
+  # deliberate backstop for those lanes, so an unrelated push must never kill
+  # it. During a merge train this runs main pushes in parallel instead of
+  # superseding them; that costs runner time, but sccache shares compiler
+  # objects across the runs and correctness of the scoped lanes wins.
+  group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.ref) || format('{0}-run-{1}', github.workflow, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   pr-title:
