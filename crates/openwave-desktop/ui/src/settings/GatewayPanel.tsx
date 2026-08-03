@@ -28,7 +28,7 @@ export function GatewayPanel({
   managed,
   gatewayUrl,
   onChanged,
-  onOpenMcpSettings,
+  onOpenConnectedApps,
 }: {
   client: ApiClient;
   /** Whether the resolved policy manages this profile. */
@@ -36,10 +36,11 @@ export function GatewayPanel({
   /** The policy's locked gateway origin, shown read-only. */
   gatewayUrl: string | null;
   onChanged: () => void;
-  /** Navigates to the MCP servers section, where entitled endpoints are
-   * mounted. Mounting lives beside the health of what is mounted, so this
-   * panel points at it rather than carrying its own toggles. */
-  onOpenMcpSettings: () => void;
+  /** Navigates to the Connected apps page, whose MCP section is where
+   * entitled endpoints are mounted. Mounting lives beside the health of what
+   * is mounted, so this panel points at it rather than carrying its own
+   * toggles. */
+  onOpenConnectedApps: () => void;
 }) {
   if (!managed) {
     // Deep links and stale history entries still resolve here even though
@@ -64,7 +65,7 @@ export function GatewayPanel({
       client={client}
       gatewayUrl={gatewayUrl}
       onChanged={onChanged}
-      onOpenMcpSettings={onOpenMcpSettings}
+      onOpenConnectedApps={onOpenConnectedApps}
     />
   );
 }
@@ -78,12 +79,12 @@ function ManagedGatewayPanel({
   client,
   gatewayUrl,
   onChanged,
-  onOpenMcpSettings,
+  onOpenConnectedApps,
 }: {
   client: ApiClient;
   gatewayUrl: string | null;
   onChanged: () => void;
-  onOpenMcpSettings: () => void;
+  onOpenConnectedApps: () => void;
 }) {
   const [status, setStatus] = useState<GatewayStatus | null>(null);
   const [apps, setApps] = useState<GatewayApps | null>(null);
@@ -166,16 +167,17 @@ function ManagedGatewayPanel({
   // (it is what the profile is locked to) and fall back to the echo.
   const origin = gatewayUrl ?? status.base_url ?? null;
   // The one route to mounting, shown whenever signed in: a gateway without
-  // the apps surface still mounts endpoints by slug on the MCP servers page.
+  // the apps surface still mounts endpoints by slug from the Connected apps
+  // page's MCP section.
   const mountSignpost = (
     <Button
       type="button"
       variant="outline"
       className="self-start"
-      onClick={onOpenMcpSettings}
+      onClick={onOpenConnectedApps}
     >
       <PlugZap size={14} />
-      Mount endpoints in MCP servers
+      Mount endpoints in Connected apps
     </Button>
   );
 
@@ -302,7 +304,7 @@ function ManagedGatewayPanel({
         (apps?.supported ? (
           <SettingsSection
             title="Connected apps"
-            description="The apps your teams have granted this deployment. Mounting their MCP endpoints happens under MCP servers, beside the health of what is mounted."
+            description="The apps your teams have granted this deployment. Mounting their MCP endpoints happens on the Connected apps page, beside the health of what is mounted."
           >
             {apps.apps.length === 0 ? (
               <p className="text-muted-foreground text-sm">

@@ -6,7 +6,6 @@ import {
   Globe,
   KeyRound,
   Palette,
-  PlugZap,
   RefreshCw,
   ShieldCheck,
   SquareTerminal,
@@ -20,7 +19,6 @@ import { AppearancePanel } from "./AppearancePanel";
 import { CodeExecutionPanel } from "./CodeExecutionPanel";
 import { ConnectedAppsPanel } from "./ConnectedAppsPanel";
 import { GatewayPanel } from "./GatewayPanel";
-import { McpPanel } from "./McpPanel";
 import { PermissionsPanel } from "./PermissionsPanel";
 import { ModelsPanel } from "./ModelsPanel";
 import { ProvidersPanel } from "./ProvidersPanel";
@@ -51,14 +49,14 @@ function GatewaySection() {
   const navigate = useNavigate();
   // Settings sections are registered from a runtime table, so TanStack's
   // generated route union contains `/settings` but not each literal child.
-  const mcpPath: string = "/settings/mcp";
+  const connectedAppsPath: string = "/settings/connected-apps";
   return (
     <GatewayPanel
       client={client}
       managed={policy.managed}
       gatewayUrl={policy.gateway_url ?? null}
       onChanged={() => void refreshCatalog()}
-      onOpenMcpSettings={() => void navigate({ to: mcpPath })}
+      onOpenConnectedApps={() => void navigate({ to: connectedAppsPath })}
     />
   );
 }
@@ -86,26 +84,10 @@ function CodeExecutionSection() {
   return <CodeExecutionPanel client={client} />;
 }
 
-function McpSection() {
-  const { client } = useApp();
-  const { managed } = useManagedPolicy();
-  return <McpPanel client={client} managed={managed} />;
-}
-
 function ConnectedAppsSection() {
   const { client } = useApp();
   const { managed } = useManagedPolicy();
-  const navigate = useNavigate();
-  // Settings sections are registered from a runtime table, so TanStack's
-  // generated route union contains `/settings` but not each literal child.
-  const mcpPath: string = "/settings/mcp";
-  return (
-    <ConnectedAppsPanel
-      client={client}
-      managed={managed}
-      onOpenMcpSettings={() => void navigate({ to: mcpPath })}
-    />
-  );
+  return <ConnectedAppsPanel client={client} managed={managed} />;
 }
 
 function PermissionsSection() {
@@ -179,7 +161,6 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     icon: Blocks,
     Component: ConnectedAppsSection,
   },
-  { path: "mcp", label: "MCP servers", icon: PlugZap, Component: McpSection },
   {
     path: "permissions",
     label: "Permissions",
