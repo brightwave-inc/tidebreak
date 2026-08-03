@@ -15,7 +15,13 @@ export type PanelContent =
   | { type: "outputs"; outputId?: string }
   | { type: "folders" }
   /** The Apps library; an app id turns the list into that app's detail. */
-  | { type: "apps"; appId?: string };
+  | { type: "apps"; appId?: string }
+  /**
+   * One background agent run, opened from its row in the transcript's agent
+   * list. There is no bare agent catalog — the transcript is the list — so the
+   * run id is always present.
+   */
+  | { type: "agent"; runId: string };
 
 export type PanelType = PanelContent["type"];
 
@@ -56,6 +62,7 @@ export function isContentPanel(panel: PanelContent): boolean {
       // you picked, and reads on the content side like a document does.
       return panel.outputId !== undefined;
     case "document":
+    case "agent":
       return true;
   }
 }

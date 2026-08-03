@@ -36,6 +36,7 @@ import type { RetryableTurn } from "./MessageList";
 import type { TranscriptFileAttachment } from "./TranscriptFileAttachments";
 import type { TranscriptImageAttachment } from "./ImageAttachments";
 import { AppsPanel } from "./apps/AppsPanel";
+import { BackgroundAgentPanel } from "./BackgroundAgentPanel";
 import { OutputDetailRoot } from "./outputs/OutputDetailRoot";
 import { OutputsView } from "./outputs/OutputsView";
 import { DocumentDetailRoot } from "./document-detail/DocumentDetailRoot";
@@ -610,6 +611,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             onSend={onSend}
             onRetryTurn={retryTurn}
             onViewOutput={() => openPanel({ type: "outputs" })}
+            onOpenAgentPanel={(runId) => openPanel({ type: "agent", runId })}
           />
         </TranscriptVisibilityProvider>
       );
@@ -650,6 +652,14 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         );
       case "apps":
         return <AppsPanel panel={panel} position={side} />;
+      case "agent":
+        return (
+          <BackgroundAgentPanel
+            chatId={chatId}
+            runId={panel.runId}
+            position={side}
+          />
+        );
     }
   }
 
