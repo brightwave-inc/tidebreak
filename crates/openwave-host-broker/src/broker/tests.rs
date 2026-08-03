@@ -341,6 +341,119 @@ fn unwrap_response<T>(envelope: ResponseEnvelope<T>) -> Result<T, ErrorResponse>
     }
 }
 
+fn grant_statements(controller: &Controller) -> Vec<GrantStatementSummary> {
+    let result = unwrap_response(controller.handle(ControlEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: crate::RequestId::new(),
+        request: ControlRequest::ListGrantStatements,
+    }))
+    .unwrap();
+    let ControlResult::ListGrantStatements { grants } = result else {
+        panic!("unexpected control result")
+    };
+    grants
+}
+
+fn revoke_grant(controller: &Controller, subject: GrantSubject, grant_id: GrantId) -> bool {
+    let result = unwrap_response(controller.handle(ControlEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: crate::RequestId::new(),
+        request: ControlRequest::RevokeGrant(RevokeGrantRequest { subject, grant_id }),
+    }))
+    .unwrap();
+    let ControlResult::RevokeGrant(result) = result else {
+        panic!("unexpected control result")
+    };
+    result.revoked
+}
+
+/// The statement-level boundary derivation: revoking one grant removes
+/// exactly that authority — plus what depends on it — and enforcement follows
+/// because `authorize()` reads the same rows the statements project.
+#[test]
+fn revoking_read_takes_exec_with_it_and_revoking_exec_leaves_read() {
+    let (_temp, broker, path) = setup();
+    let controller = broker.controller();
+    let conversation = Uuid::new_v4();
+    let subject = GrantSubject::conversation(conversation).unwrap();
+    let root_id = register(&controller, subject, conversation, path, OperationId::new())
+        .root
+        .root_id;
+    let context = ExecutionContext::standalone(conversation).unwrap();
+    let find = |capability: Capability| {
+        grant_statements(&controller)
+            .into_iter()
+            .find(|grant| grant.capability == capability)
+    };
+
+    // Revoking exec alone leaves the folder readable.
+    let exec_id = find(Capability::ExecuteCommands).unwrap().grant_id;
+    // Another subject's revocation touches nothing and cannot probe.
+    assert!(!revoke_grant(
+        &controller,
+        GrantSubject::conversation(Uuid::new_v4()).unwrap(),
+        exec_id,
+    ));
+    assert!(revoke_grant(&controller, subject, exec_id));
+    assert!(!revoke_grant(&controller, subject, exec_id));
+    assert!(find(Capability::ExecuteCommands).is_none());
+    assert!(operate(
+        &broker.operator(),
+        context,
+        OperationRequest::ListDirectory(PathRequest {
+            root_id,
+            path: RelativePath::parse("reports").unwrap(),
+        }),
+    )
+    .is_ok());
+
+    // Revoking read takes nothing else — except that nothing depends on it
+    // anymore — and enforcement denies the next read outright.
+    let read_id = find(Capability::ReadFiles).unwrap().grant_id;
+    assert!(revoke_grant(&controller, subject, read_id));
+    assert!(find(Capability::ReadFiles).is_none());
+    assert!(find(Capability::WriteFiles).is_some());
+    assert_eq!(
+        operate(
+            &broker.operator(),
+            context,
+            OperationRequest::ListDirectory(PathRequest {
+                root_id,
+                path: RelativePath::parse("reports").unwrap(),
+            }),
+        )
+        .unwrap_err()
+        .code,
+        ErrorCode::Denied
+    );
+}
+
+/// Read carries exec with it when both stand: exec reach is only ever
+/// additional on top of read.
+#[test]
+fn revoking_read_cascades_to_exec() {
+    let (_temp, broker, path) = setup();
+    let controller = broker.controller();
+    let conversation = Uuid::new_v4();
+    let subject = GrantSubject::conversation(conversation).unwrap();
+    register(&controller, subject, conversation, path, OperationId::new());
+    let read_id = grant_statements(&controller)
+        .into_iter()
+        .find(|grant| grant.capability == Capability::ReadFiles)
+        .unwrap()
+        .grant_id;
+
+    assert!(revoke_grant(&controller, subject, read_id));
+    let remaining = grant_statements(&controller)
+        .into_iter()
+        .map(|grant| grant.capability)
+        .collect::<Vec<_>>();
+    assert!(!remaining.contains(&Capability::ReadFiles));
+    assert!(!remaining.contains(&Capability::ExecuteCommands));
+    assert!(remaining.contains(&Capability::WriteFiles));
+    assert!(remaining.contains(&Capability::ListRoots));
+}
+
 #[test]
 fn an_empty_conversation_lists_no_roots_without_needing_a_grant() {
     let (_temp, broker, _path) = setup();

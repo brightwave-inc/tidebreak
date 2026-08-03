@@ -94,6 +94,13 @@ pub enum ControlRequest {
     LookupRootAttachmentReceipt(LookupRootAttachmentReceiptRequest),
     /// Disconnect a root owned by the exact subject. Idempotent.
     RevokeRoot(RevokeRootRequest),
+    /// Withdraw one capability grant by its stable identity.
+    ///
+    /// The statement-level revocation the unified consent surface offers:
+    /// "stop allowing writes here" without disconnecting the folder. No
+    /// operation id — the grant id already names the exact row, so a retry
+    /// observes `revoked: false` and nothing can be withdrawn twice.
+    RevokeGrant(RevokeGrantRequest),
 }
 
 /// Strict payload for a native-picker root registration.
@@ -173,6 +180,16 @@ pub struct RevokeRootRequest {
     /// Original registering subject allowed to forget this host approval.
     pub subject: GrantSubject,
     pub root_id: RootId,
+}
+
+/// Strict payload for an idempotent single-grant revocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevokeGrantRequest {
+    /// Subject the grant belongs to. A mismatched subject revokes nothing,
+    /// indistinguishable from a grant that does not exist.
+    pub subject: GrantSubject,
+    pub grant_id: GrantId,
 }
 
 /// Capability-checked agent operations.
@@ -329,6 +346,7 @@ pub enum ControlResult {
     DetachRoot(RootAttachmentMutationResult),
     LookupRootAttachmentReceipt(LookupRootAttachmentReceiptResult),
     RevokeRoot(RevokeRootResult),
+    RevokeGrant(RevokeGrantResult),
 }
 
 /// One currently authorized host root for native local execution.
@@ -494,6 +512,17 @@ pub enum RootAttachmentMutationReceipt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RevokeRootResult {
+    pub revoked: bool,
+}
+
+/// Result of an idempotent single-grant revocation.
+///
+/// `revoked` is `false` for a grant that does not exist, was already
+/// withdrawn, or belongs to another subject — deliberately one answer, so the
+/// response cannot be used to probe another subject's grants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevokeGrantResult {
     pub revoked: bool,
 }
 
