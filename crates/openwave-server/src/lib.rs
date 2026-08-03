@@ -59,6 +59,7 @@ mod sandbox_container_run_worker;
 pub mod sandbox_docker;
 mod sandbox_web_search_worker;
 mod scoped_model_token;
+mod scoped_store;
 /// Rewriting stored credentials so the running binary owns their keychain items.
 pub mod secret_rehome;
 mod source_tools;

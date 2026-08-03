@@ -42,8 +42,8 @@ use crate::exec_write_snapshot::{
 use crate::extract::{Json, Path, Query};
 use crate::mcp_config::{McpServersConfig, McpServersInfo};
 use crate::model_roles::{self, ModelRole};
-use crate::principal::AuthContext;
 use crate::providers::{self, ProviderCredential, ProviderInfo, ProviderKind, ProviderUpdate};
+use crate::scoped_store::ScopedStore;
 use crate::state::AppState;
 use crate::view_frames::ViewFrameSource;
 use crate::web_search::{
@@ -141,10 +141,11 @@ pub async fn put_mcp_servers(
 /// and the payload is handed to the renderer as an opaque envelope for the
 /// sandboxed frame — the transcript presentation itself never reads it.
 pub async fn get_mcp_app_payload(
-    State(state): State<AppState>,
+    store: ScopedStore,
     Path((chat_id, call_id)): Path<(ChatId, CallId)>,
 ) -> Result<Json<McpAppPayload>, ServerError> {
-    let events = state.store.list_events(chat_id, 0).await?;
+    store.require_chat(chat_id).await?;
+    let events = store.list_events(chat_id, 0).await?;
     mcp_app_payload_from_events(&events, call_id)
         .map(Json)
         .ok_or_else(|| ServerError::not_found("no MCP App payload for this call"))
@@ -665,8 +666,10 @@ pub async fn delete_code_execution_credential(
 /// prior bytes journaled for one turn without clobbering later edits.
 pub async fn post_undo_turn_file_changes(
     State(state): State<AppState>,
+    store: ScopedStore,
     Path((chat_id, turn_id)): Path<(ChatId, TurnId)>,
 ) -> Result<Json<ExecTurnUndoOutcome>, ServerError> {
+    store.require_chat(chat_id).await?;
     let outcome = undo_turn_file_changes(&*state.store, &*state.blobs, chat_id, turn_id).await?;
     if outcome.files.is_empty() {
         return Err(ServerError::not_found(format!(
@@ -680,8 +683,10 @@ pub async fn post_undo_turn_file_changes(
 /// restore one file from the turn without touching its siblings.
 pub async fn post_undo_one_file_change(
     State(state): State<AppState>,
+    store: ScopedStore,
     Path((chat_id, turn_id, snapshot_id)): Path<(ChatId, TurnId, uuid::Uuid)>,
 ) -> Result<Json<ExecFileUndoOutcome>, ServerError> {
+    store.require_chat(chat_id).await?;
     undo_one_file_change(&*state.store, &*state.blobs, chat_id, turn_id, snapshot_id)
         .await?
         .map(Json)
@@ -693,7 +698,7 @@ pub async fn post_undo_one_file_change(
 /// paths, or a reusable document identity.
 pub async fn get_file_change_preview(
     State(state): State<AppState>,
-    auth: AuthContext,
+    store: ScopedStore,
     Path((chat_id, turn_id, snapshot_id, revision)): Path<(
         ChatId,
         TurnId,
@@ -701,14 +706,7 @@ pub async fn get_file_change_preview(
         ExecFilePreviewRevision,
     )>,
 ) -> Result<Response, ServerError> {
-    if state
-        .store
-        .get_chat_scoped(&auth.principal.owner_id(), chat_id)
-        .await?
-        .is_none()
-    {
-        return Err(ServerError::not_found(format!("chat {chat_id} not found")));
-    }
+    store.require_chat(chat_id).await?;
     let _permit = state
         .file_preview_permits
         .clone()
@@ -1308,8 +1306,7 @@ fn normalize_chat_title(title: Option<String>) -> Result<Option<String>, ServerE
 
 /// `POST /projects` — create a project and return it (`201 Created`).
 pub async fn create_project(
-    State(state): State<AppState>,
-    auth: AuthContext,
+    store: ScopedStore,
     Json(body): Json<CreateProject>,
 ) -> Result<impl IntoResponse, ServerError> {
     let project = Project {
@@ -1319,79 +1316,50 @@ pub async fn create_project(
         root_attachments: Vec::new(),
         created_at: Utc::now(),
     };
-    state
-        .store
-        .create_project_scoped(&auth.principal.owner_id(), &project)
-        .await?;
+    store.create_project(&project).await?;
     Ok((StatusCode::CREATED, Json(project)))
 }
 
 /// `PATCH /projects/{id}` — update bounded human-facing project metadata.
 pub async fn patch_project(
-    State(state): State<AppState>,
-    auth: AuthContext,
+    store: ScopedStore,
     Path(id): Path<ProjectId>,
     Json(body): Json<ProjectUpdate>,
 ) -> Result<Json<Project>, ServerError> {
-    let owner = auth.principal.owner_id();
     let title = body.title.map(normalize_project_title).transpose()?;
     if let Some(title) = title {
-        if !state
-            .store
-            .update_project_title_scoped(&owner, id, title)
-            .await?
-        {
+        if !store.update_project_title(id, title).await? {
             return Err(ServerError::not_found(format!("project {id} not found")));
         }
     }
-    state
-        .store
-        .get_project_scoped(&owner, id)
+    store
+        .get_project(id)
         .await?
         .map(Json)
         .ok_or_else(|| ServerError::not_found(format!("project {id} not found")))
 }
 
 /// `GET /projects` — list projects, most-recently-created first.
-pub async fn list_projects(
-    State(state): State<AppState>,
-    auth: AuthContext,
-) -> Result<Json<Vec<Project>>, ServerError> {
-    Ok(Json(
-        state
-            .store
-            .list_projects_scoped(&auth.principal.owner_id())
-            .await?,
-    ))
+pub async fn list_projects(store: ScopedStore) -> Result<Json<Vec<Project>>, ServerError> {
+    Ok(Json(store.list_projects().await?))
 }
 
 /// `GET /projects/{id}` — fetch one project, or `404`.
 pub async fn get_project(
-    State(state): State<AppState>,
-    auth: AuthContext,
+    store: ScopedStore,
     Path(id): Path<ProjectId>,
 ) -> Result<Json<Project>, ServerError> {
-    state
-        .store
-        .get_project_scoped(&auth.principal.owner_id(), id)
-        .await?
-        .map(Json)
-        .ok_or_else(|| ServerError::not_found(format!("project {id} not found")))
+    Ok(Json(store.require_project(id).await?))
 }
 
 /// `DELETE /projects/{id}` — remove an empty project. Owned conversations,
 /// documents, and root defaults must be removed through their explicit
 /// lifecycle APIs first; this boundary never cascades them.
 pub async fn delete_project(
-    State(state): State<AppState>,
-    auth: AuthContext,
+    store: ScopedStore,
     Path(id): Path<ProjectId>,
 ) -> Result<StatusCode, ServerError> {
-    match state
-        .store
-        .delete_project_scoped(&auth.principal.owner_id(), id)
-        .await?
-    {
+    match store.delete_project(id).await? {
         DeleteProjectOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
         DeleteProjectOutcome::NotFound => {
             Err(ServerError::not_found(format!("project {id} not found")))
@@ -1431,18 +1399,13 @@ pub struct CreateChat {
 /// `POST /chats` — create a chat and return it (`201 Created`).
 pub async fn create_chat(
     State(state): State<AppState>,
-    auth: AuthContext,
+    store: ScopedStore,
     Json(mut body): Json<CreateChat>,
 ) -> Result<impl IntoResponse, ServerError> {
-    let owner = auth.principal.owner_id();
     // Return a product-facing 400 for an unknown project. The Store and schema
     // independently enforce the same membership invariant inside insertion.
     if let Some(project_id) = body.project_id {
-        state
-            .store
-            .get_project_scoped(&owner, project_id)
-            .await?
-            .ok_or_else(|| ServerError::not_found(format!("project {project_id} not found")))?;
+        store.require_project(project_id).await?;
     }
     if let Some(model) = body.model.as_mut() {
         *model = validate_model_selection(&state, model, false).await?;
@@ -1461,10 +1424,7 @@ pub async fn create_chat(
         root_attachments: Vec::new(),
         created_at: Utc::now(),
     };
-    let chat = state
-        .store
-        .create_chat_with_project_defaults_scoped(&owner, &chat)
-        .await?;
+    let chat = store.create_chat_with_project_defaults(&chat).await?;
     Ok((StatusCode::CREATED, Json(chat)))
 }
 
@@ -1495,11 +1455,10 @@ pub struct ChatUpdate {
 /// `PATCH /chats/{id}` — update the human-facing title and/or model selection.
 pub async fn patch_chat(
     State(state): State<AppState>,
-    auth: AuthContext,
+    store: ScopedStore,
     Path(id): Path<ChatId>,
     Json(mut body): Json<ChatUpdate>,
 ) -> Result<Json<Chat>, ServerError> {
-    let owner = auth.principal.owner_id();
     // Validate every supplied field before touching durable state. This keeps a
     // mixed request all-or-nothing from the user's point of view.
     if let Some(Some(model)) = body.model.as_mut() {
@@ -1514,16 +1473,10 @@ pub async fn patch_chat(
     refuse_permission_mode_over_ceiling(&state, body.permission_mode.flatten()).await?;
     let title = body.title.map(normalize_chat_title).transpose()?;
 
-    let mut chat = state
-        .store
-        .get_chat_scoped(&owner, id)
-        .await?
-        .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))?;
+    let mut chat = store.require_chat(id).await?;
 
-    if !state
-        .store
-        .update_chat_metadata_scoped(
-            &owner,
+    if !store
+        .update_chat_metadata(
             id,
             title.clone(),
             body.model.clone(),
@@ -1750,12 +1703,11 @@ impl ChatMessageSnapshot {
 /// an empty conversation.
 pub async fn list_chat_messages(
     State(state): State<AppState>,
-    auth: AuthContext,
+    store: ScopedStore,
     Path(id): Path<ChatId>,
 ) -> Result<Json<ChatTranscript>, ServerError> {
-    let transcript = state
-        .store
-        .get_chat_transcript_scoped(&auth.principal.owner_id(), id)
+    let transcript = store
+        .get_chat_transcript(id)
         .await?
         .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))?;
     let mut citations_by_message = std::collections::HashMap::new();
@@ -1833,30 +1785,16 @@ pub async fn list_chat_messages(
 }
 
 /// `GET /chats` — list chats, most-recently-created first.
-pub async fn list_chats(
-    State(state): State<AppState>,
-    auth: AuthContext,
-) -> Result<Json<Vec<Chat>>, ServerError> {
-    Ok(Json(
-        state
-            .store
-            .list_chats_scoped(&auth.principal.owner_id())
-            .await?,
-    ))
+pub async fn list_chats(store: ScopedStore) -> Result<Json<Vec<Chat>>, ServerError> {
+    Ok(Json(store.list_chats().await?))
 }
 
 /// `GET /chats/{id}` — fetch one chat, or `404`.
 pub async fn get_chat(
-    State(state): State<AppState>,
-    auth: AuthContext,
+    store: ScopedStore,
     Path(id): Path<ChatId>,
 ) -> Result<Json<Chat>, ServerError> {
-    state
-        .store
-        .get_chat_scoped(&auth.principal.owner_id(), id)
-        .await?
-        .map(Json)
-        .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))
+    Ok(Json(store.require_chat(id).await?))
 }
 
 /// `DELETE /chats/{id}` — remove a quiesced conversation and its product
@@ -1864,14 +1802,10 @@ pub async fn get_chat(
 /// caller must first finish cancellation and durable broker detachment.
 pub async fn delete_chat(
     State(state): State<AppState>,
-    auth: AuthContext,
+    store: ScopedStore,
     Path(id): Path<ChatId>,
 ) -> Result<StatusCode, ServerError> {
-    match state
-        .store
-        .delete_chat_scoped(&auth.principal.owner_id(), id)
-        .await?
-    {
+    match store.delete_chat(id).await? {
         DeleteChatOutcome::Deleted => {
             state.blob_retirement_wake.notify_one();
             let scratch_root = state.config.data_dir.join("scratch");
@@ -2177,28 +2111,20 @@ fn foreground_activity(
 
 /// `GET /chats/{id}/agent-runs` — list renderer-safe execution state.
 pub async fn list_agent_runs(
-    State(state): State<AppState>,
-    auth: AuthContext,
+    store: ScopedStore,
     Path(id): Path<ChatId>,
 ) -> Result<Json<Vec<AgentRunSnapshot>>, ServerError> {
-    state
-        .store
-        .get_chat_scoped(&auth.principal.owner_id(), id)
-        .await?
-        .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))?;
-    let runs = state.store.list_agent_runs(id).await?;
+    store.require_chat(id).await?;
+    let runs = store.list_agent_runs(id).await?;
     // This read model needs only live client checkpoints. Loading the complete
     // tool-call transcript here would needlessly deserialize historical model
     // arguments, results, and local diagnostics just to render current work.
-    let client_calls = state.store.list_pending_client_tool_calls(id).await?;
+    let client_calls = store.list_pending_client_tool_calls(id).await?;
     let now = Utc::now();
     let mut snapshots = Vec::with_capacity(runs.len());
     for run in runs {
         let activity = if run.tier == AgentRunTier::Background {
-            let calls = state
-                .store
-                .list_sandbox_tool_calls_for_agent_run(run.id)
-                .await?;
+            let calls = store.list_sandbox_tool_calls_for_agent_run(run.id).await?;
             sandbox_activity(&calls)
         } else if run.tier == AgentRunTier::Foreground {
             foreground_activity(&client_calls, now)
@@ -2221,20 +2147,11 @@ pub async fn list_agent_runs(
 /// wrong-chat, or foreground run returns `404` rather than revealing whether an
 /// unrelated run identifier exists.
 pub async fn list_agent_run_activity(
-    State(state): State<AppState>,
-    auth: AuthContext,
+    store: ScopedStore,
     Path((chat_id, run_id)): Path<(ChatId, openwave_core::AgentRunId)>,
 ) -> Result<Json<Vec<AgentActivityHistoryItem>>, ServerError> {
-    if state
-        .store
-        .get_chat_scoped(&auth.principal.owner_id(), chat_id)
-        .await?
-        .is_none()
-    {
-        return Err(ServerError::not_found(format!("chat {chat_id} not found")));
-    }
-    let run = state
-        .store
+    store.require_chat(chat_id).await?;
+    let run = store
         .get_agent_run(run_id)
         .await?
         .filter(|run| run.chat_id == chat_id && run.tier == AgentRunTier::Background);
@@ -2243,10 +2160,7 @@ pub async fn list_agent_run_activity(
             "agent run {run_id} not found"
         )));
     };
-    let calls = state
-        .store
-        .list_sandbox_tool_calls_for_agent_run(run.id)
-        .await?;
+    let calls = store.list_sandbox_tool_calls_for_agent_run(run.id).await?;
     Ok(Json(sandbox_activity_history(&calls)))
 }
 
@@ -2273,18 +2187,11 @@ pub enum AgentRunCancellationStatus {
 /// executor details.
 pub async fn post_agent_run_cancel(
     State(state): State<AppState>,
-    auth: AuthContext,
+    store: ScopedStore,
     Path((chat_id, run_id)): Path<(ChatId, openwave_core::AgentRunId)>,
 ) -> Result<(StatusCode, Json<AgentRunCancellationSnapshot>), ServerError> {
-    if state
-        .store
-        .get_chat_scoped(&auth.principal.owner_id(), chat_id)
-        .await?
-        .is_none()
-    {
-        return Err(ServerError::not_found(format!("chat {chat_id} not found")));
-    }
-    let Some(run) = state.store.get_agent_run(run_id).await? else {
+    store.require_chat(chat_id).await?;
+    let Some(run) = store.get_agent_run(run_id).await? else {
         return Err(ServerError::conflict("sandbox run is not cancellable"));
     };
     if run.chat_id != chat_id || run.tier != AgentRunTier::Background {
@@ -2293,11 +2200,11 @@ pub async fn post_agent_run_cancel(
 
     let mut outcome = None;
     for _ in 0..8 {
-        if let Some(resolved) = state.store.request_agent_run_cancellation(run_id).await? {
+        if let Some(resolved) = store.request_agent_run_cancellation(run_id).await? {
             outcome = Some(resolved);
             break;
         }
-        let Some(current) = state.store.get_agent_run(run_id).await? else {
+        let Some(current) = store.get_agent_run(run_id).await? else {
             return Err(ServerError::conflict("sandbox run is not cancellable"));
         };
         if current.chat_id != chat_id || current.tier != AgentRunTier::Background {
@@ -2545,7 +2452,7 @@ async fn resolve_message_attachments(
 }
 
 async fn resolve_file_attachments(
-    state: &AppState,
+    store: &ScopedStore,
     chat_id: ChatId,
     ids: &[DocumentId],
 ) -> Result<Vec<DocumentId>, ServerError> {
@@ -2569,7 +2476,7 @@ async fn resolve_file_attachments(
                 format!("file attachment {id} was submitted more than once"),
             ));
         }
-        let document = state.store.get_document(id).await?.ok_or_else(|| {
+        let document = store.get_document(id).await?.ok_or_else(|| {
             ServerError::bad_request_kind(
                 "file_attachment_not_found",
                 format!("file attachment {id} has not been imported"),
@@ -2679,7 +2586,7 @@ mod image_capability_tests {
 /// with `model_image_input_unsupported`.
 pub async fn post_message(
     State(state): State<AppState>,
-    auth: AuthContext,
+    store: ScopedStore,
     Path(id): Path<ChatId>,
     Json(body): Json<PostMessage>,
 ) -> Result<StatusCode, ServerError> {
@@ -2691,16 +2598,12 @@ pub async fn post_message(
             "message content must be non-empty and contain no NUL characters",
         ));
     }
-    let chat = state
-        .store
-        .get_chat_scoped(&auth.principal.owner_id(), id)
-        .await?
-        .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))?;
+    let chat = store.require_chat(id).await?;
 
     // An ambiguous HTTP retry names only its turn and content, not the resolved
     // model snapshot. Reuse the first acceptance's immutable model so a settings
     // change between attempts cannot turn the same request into a conflict.
-    let model = if let Some(existing) = state.store.get_turn_run(body.turn_id).await? {
+    let model = if let Some(existing) = store.get_turn_run(body.turn_id).await? {
         if existing.chat_id != id {
             return Err(ServerError::conflict(format!(
                 "turn {} was already accepted by another chat",
@@ -2729,7 +2632,7 @@ pub async fn post_message(
         validate_model_selection(&state, &selected, true).await?
     };
     let images = resolve_message_attachments(&state, &body.attachments).await?;
-    let documents = resolve_file_attachments(&state, id, &body.file_attachments).await?;
+    let documents = resolve_file_attachments(&store, id, &body.file_attachments).await?;
     if images.len().saturating_add(documents.len()) > openwave_core::MAX_MESSAGE_ATTACHMENTS {
         return Err(ServerError::bad_request_kind(
             "too_many_attachments",
@@ -2742,8 +2645,7 @@ pub async fn post_message(
     if !images.is_empty() {
         require_image_capable_model(&state, &model).await?;
     }
-    match state
-        .store
+    match store
         .accept_turn_with_attachments(body.turn_id, id, &model, &body.content, &images, &documents)
         .await?
     {
@@ -2755,7 +2657,7 @@ pub async fn post_message(
             // Concurrent identical requests can resolve different mutable model
             // defaults before either commits. Retry against the winner's immutable
             // model so the wire identity remains `(chat, turn_id, content)`.
-            let Some(existing) = state.store.get_turn_run(body.turn_id).await? else {
+            let Some(existing) = store.get_turn_run(body.turn_id).await? else {
                 return Err(ServerError::conflict(format!(
                     "turn {} was accepted with conflicting request data",
                     body.turn_id
@@ -2763,8 +2665,7 @@ pub async fn post_message(
             };
             if existing.chat_id == id
                 && matches!(
-                    state
-                        .store
+                    store
                         .accept_turn_with_attachments(
                             body.turn_id,
                             id,
@@ -2817,7 +2718,7 @@ pub struct SteerBody {
 /// unavailable turn, and `400` for malformed input.
 pub async fn post_steer(
     State(state): State<AppState>,
-    auth: AuthContext,
+    store: ScopedStore,
     Path(id): Path<ChatId>,
     Json(body): Json<SteerBody>,
 ) -> Result<StatusCode, ServerError> {
@@ -2832,16 +2733,8 @@ pub async fn post_steer(
             "steer content must be non-empty, contain no NUL characters, and fit the size limit",
         ));
     }
-    if state
-        .store
-        .get_chat_scoped(&auth.principal.owner_id(), id)
-        .await?
-        .is_none()
-    {
-        return Err(ServerError::not_found(format!("chat {id} not found")));
-    }
-    match state
-        .store
+    store.require_chat(id).await?;
+    match store
         .accept_turn_steer(
             body.steer_id,
             body.turn_id,
@@ -2883,21 +2776,13 @@ pub struct CancelBody {
 
 pub async fn post_cancel(
     State(state): State<AppState>,
-    auth: AuthContext,
+    store: ScopedStore,
     Path(id): Path<ChatId>,
     Json(body): Json<CancelBody>,
 ) -> Result<StatusCode, ServerError> {
     // Distinguish "unknown chat" (404) from "known chat, nothing running" (409).
-    if state
-        .store
-        .get_chat_scoped(&auth.principal.owner_id(), id)
-        .await?
-        .is_none()
-    {
-        return Err(ServerError::not_found(format!("chat {id} not found")));
-    }
-    if !state
-        .store
+    store.require_chat(id).await?;
+    if !store
         .get_turn_run(body.turn_id)
         .await?
         .is_some_and(|turn| turn.chat_id == id)
@@ -2908,8 +2793,7 @@ pub async fn post_cancel(
         )));
     }
     let resolution = loop {
-        if let Some(resolution) = state
-            .store
+        if let Some(resolution) = store
             .request_turn_cancellation_and_append_event(body.turn_id, Utc::now())
             .await?
         {
@@ -2918,8 +2802,7 @@ pub async fn post_cancel(
         // A heartbeat can advance `updated_at` after this request captures its
         // operational timestamp. Retry the same empty command with fresh time;
         // the store serializes it against the heartbeat and terminal decisions.
-        if !state
-            .store
+        if !store
             .get_turn_run(body.turn_id)
             .await?
             .is_some_and(|turn| turn.chat_id == id)
@@ -3105,8 +2988,7 @@ pub(crate) fn grant_rungs_from_scopes(
 
 /// `GET /chats/{id}/approvals` — recover a bounded page of pending cards.
 pub(crate) async fn list_pending_approvals(
-    State(state): State<AppState>,
-    auth: AuthContext,
+    store: ScopedStore,
     Path(chat_id): Path<ChatId>,
     Query(query): Query<PendingApprovalsQuery>,
 ) -> Result<Json<Vec<PendingApprovalSnapshot>>, ServerError> {
@@ -3115,16 +2997,8 @@ pub(crate) async fn list_pending_approvals(
             "approval limit must be between 1 and 100",
         ));
     }
-    if state
-        .store
-        .get_chat_scoped(&auth.principal.owner_id(), chat_id)
-        .await?
-        .is_none()
-    {
-        return Err(ServerError::not_found(format!("chat {chat_id} not found")));
-    }
-    let approvals = state
-        .store
+    store.require_chat(chat_id).await?;
+    let approvals = store
         .list_pending_tool_call_approvals(chat_id, query.limit)
         .await?;
     Ok(Json(
@@ -3158,19 +3032,20 @@ pub(crate) struct StandingGrantSnapshot {
 ///
 /// The settings surface for "what the agent can do without asking": a grant
 /// the reader cannot find is a one-way door, and this is where it is found.
+/// Grants themselves are not owner-keyed yet (#853 slice 5); the provenance
+/// titles are resolved through the requesting principal's own chats and
+/// projects, so this route never reads another owner's titles.
 pub(crate) async fn list_standing_grants(
-    State(state): State<AppState>,
+    store: ScopedStore,
 ) -> Result<Json<Vec<StandingGrantSnapshot>>, ServerError> {
-    let grants = state.store.list_standing_tool_grants().await?;
-    let chat_titles: std::collections::HashMap<ChatId, Option<String>> = state
-        .store
+    let grants = store.list_standing_tool_grants().await?;
+    let chat_titles: std::collections::HashMap<ChatId, Option<String>> = store
         .list_chats()
         .await?
         .into_iter()
         .map(|chat| (chat.id, chat.title))
         .collect();
-    let project_titles: std::collections::HashMap<ProjectId, Option<String>> = state
-        .store
+    let project_titles: std::collections::HashMap<ProjectId, Option<String>> = store
         .list_projects()
         .await?
         .into_iter()
@@ -3207,10 +3082,10 @@ pub(crate) async fn list_standing_grants(
 /// calls park on the approval card again. `204` on success, `404` when the
 /// grant does not exist (already revoked, or never granted).
 pub(crate) async fn delete_standing_grant(
-    State(state): State<AppState>,
+    store: ScopedStore,
     Path(call_id): Path<CallId>,
 ) -> Result<StatusCode, ServerError> {
-    if state.store.revoke_standing_tool_grant(call_id).await? {
+    if store.revoke_standing_tool_grant(call_id).await? {
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ServerError::not_found(format!(
@@ -3225,19 +3100,12 @@ pub(crate) async fn delete_standing_grant(
 /// holding its slot until it finishes after the decision.
 pub async fn post_approval(
     State(state): State<AppState>,
-    auth: AuthContext,
+    store: ScopedStore,
     Path((chat_id, call_id)): Path<(ChatId, CallId)>,
     Json(body): Json<ApprovalBody>,
 ) -> Result<StatusCode, ServerError> {
     // Confirm the chat exists so a typo'd id doesn't look like "not pending".
-    if state
-        .store
-        .get_chat_scoped(&auth.principal.owner_id(), chat_id)
-        .await?
-        .is_none()
-    {
-        return Err(ServerError::not_found(format!("chat {chat_id} not found")));
-    }
+    store.require_chat(chat_id).await?;
     let decision = match body.decision {
         ApprovalChoice::Approve => {
             if body.reason.is_some() {
@@ -3323,19 +3191,13 @@ pub struct EventsQuery {
 /// browser accepts the handshake (RFC 6455).
 pub async fn chat_events(
     State(state): State<AppState>,
-    auth: AuthContext,
+    store: ScopedStore,
     Path(id): Path<ChatId>,
     Query(query): Query<EventsQuery>,
     headers: axum::http::HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Result<Response, ServerError> {
-    let Some(chat) = state
-        .store
-        .get_chat_scoped(&auth.principal.owner_id(), id)
-        .await?
-    else {
-        return Err(ServerError::not_found(format!("chat {id} not found")));
-    };
+    let chat = store.require_chat(id).await?;
     let upgrade = if offered_handshake_subprotocol(&headers) {
         upgrade.protocols([WS_HANDSHAKE_SUBPROTOCOL])
     } else {
