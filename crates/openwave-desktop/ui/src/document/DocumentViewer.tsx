@@ -28,6 +28,13 @@ const UniverSpreadsheetViewer = lazy(
 const UniverDocumentViewer = lazy(
   () => import("@/document/UniverDocumentViewer"),
 );
+// Presentations render as converted PDFs; the viewer carries the conversion
+// states (preparing, converter missing) on top of the lazy PDF engine.
+const PresentationViewer = lazy(() =>
+  import("@/document/PresentationViewer").then((m) => ({
+    default: m.PresentationViewer,
+  })),
+);
 
 const SPREADSHEET_MEDIA_TYPES = new Set([
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -47,6 +54,17 @@ const WORD_DOCUMENT_MEDIA_TYPE =
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
 /**
+ * Presentations have no native engine here; their original view is a PDF
+ * conversion drawn by the PDF viewer, produced by a LibreOffice the user has
+ * installed. See `PresentationViewer` for the conversion states.
+ */
+const PRESENTATION_MEDIA_TYPES = new Set([
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "application/vnd.ms-powerpoint",
+  "application/vnd.oasis.opendocument.presentation",
+]);
+
+/**
  * Which viewer renders a source in its original form, chosen by media type.
  *
  * The dispatcher is the registration point for every format we learn to show:
@@ -59,6 +77,7 @@ export function hasOriginalViewer(mediaType: string): boolean {
   return (
     type === "application/pdf" ||
     type === WORD_DOCUMENT_MEDIA_TYPE ||
+    PRESENTATION_MEDIA_TYPES.has(type) ||
     SPREADSHEET_MEDIA_TYPES.has(type) ||
     DELIMITED_TEXT_MEDIA_TYPES.has(type)
   );
@@ -140,6 +159,19 @@ export function DocumentViewer({
         <UniverDocumentViewer
           key={source.id}
           source={source}
+          className={className}
+        />
+      </ViewerBoundary>
+    );
+  }
+
+  if (PRESENTATION_MEDIA_TYPES.has(type)) {
+    return (
+      <ViewerBoundary>
+        <PresentationViewer
+          key={source.id}
+          source={source}
+          mediaType={type}
           className={className}
         />
       </ViewerBoundary>

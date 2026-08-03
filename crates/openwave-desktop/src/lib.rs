@@ -23,6 +23,7 @@ mod documents;
 mod host_access;
 mod image_attachments;
 mod media_type;
+mod office_pdf;
 mod updater;
 
 /// Connection details the webview needs to reach the in-process API.
@@ -218,6 +219,7 @@ pub fn run() {
             deliverables::read_output_revision,
             deliverables::restore_output_revision,
             deliverables::delete_output,
+            office_pdf::convert_presentation_to_pdf,
             client_execution::resolve_folder_access_request,
             client_execution::output_writeback::resolve_output_writeback_request,
             host_access::connect_folder,
