@@ -1493,7 +1493,12 @@ model: string | null,
 /**
  * Whether a model API key is configured (never the key itself).
  */
-has_api_key: boolean, };
+has_api_key: boolean, 
+/**
+ * The sticky new-chat defaults, so a composer for a chat that does not
+ * exist yet can show what `POST /chats` will seed.
+ */
+chat_defaults: StickyChatDefaults, };
 
 /**
  * Renderer-safe progress of the current sign-in attempt.
@@ -1520,6 +1525,16 @@ level: GrantLevel,
  * that chat or project is untitled.
  */
 level_title: string | null, action: RendererToolName, approval: ToolApprovalKind, scope: GrantScope, granted_at: string, };
+
+/**
+ * The reader's last explicit per-chat choices — what an unspecified field of
+ * `POST /chats` seeds. A `None` field has no recorded choice and keeps the
+ * hard default (configured model, `ask`, no network).
+ *
+ * The permission mode is reported clamped to any managed ceiling, so what a
+ * picker displays is what creation will actually seed.
+ */
+export type StickyChatDefaults = { model: string | null, reasoning_effort: ReasoningEffort | null, permission_mode: PermissionMode | null, network_policy: NetworkPolicy | null, };
 
 /**
  * The action a call will take, in a form a human can inspect.

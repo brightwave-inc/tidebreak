@@ -1,102 +1,13 @@
 import { create } from "zustand";
 
 import type {
+  ApiClient,
   ModelSelectionKey,
   NetworkPolicy,
   PermissionMode,
   ReasoningEffort,
+  StickyChatDefaults,
 } from "./api";
-
-const MODEL_KEY = "openwave.new-chat-model";
-const REASONING_EFFORT_KEY = "openwave.new-chat-reasoning-effort";
-const PERMISSION_MODE_KEY = "openwave.new-chat-permission-mode";
-const NETWORK_POLICY_KEY = "openwave.new-chat-network-policy";
-
-const REASONING_EFFORTS: readonly ReasoningEffort[] = [
-  "none",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-];
-
-const PERMISSION_MODES: readonly PermissionMode[] = [
-  "plan",
-  "ask",
-  "auto",
-  "allow",
-];
-
-
-function read(key: string): string | null {
-  try {
-    return window.localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-
-function write(key: string, value: string | null): void {
-  try {
-    if (value === null) window.localStorage.removeItem(key);
-    else window.localStorage.setItem(key, value);
-  } catch {
-    // Persisting a pre-chat choice is best-effort; the session still holds it.
-  }
-}
-
-/**
- * A stored value is only honored when this build still recognizes it. A model
- * key is checked against the live catalog at the point of use rather than
- * here — the catalog is not loaded yet when this store initializes, and a
- * selection whose provider was since removed should read as "unavailable"
- * exactly the way it does inside a chat.
- */
-function readEnum<T extends string>(
-  key: string,
-  allowed: readonly T[],
-): T | null {
-  const stored = read(key);
-  return allowed.find((value) => value === stored) ?? null;
-}
-
-type NewChatSettings = {
-  model: ModelSelectionKey | null;
-  reasoningEffort: ReasoningEffort | null;
-  permissionMode: PermissionMode | null;
-  networkPolicy: NetworkPolicy;
-  setModel: (model: ModelSelectionKey | null) => void;
-  setReasoningEffort: (effort: ReasoningEffort | null) => void;
-  setPermissionMode: (mode: PermissionMode) => void;
-  setNetworkPolicy: (policy: NetworkPolicy) => void;
-};
-
-function readNetworkPolicy(): NetworkPolicy {
-  const stored = read(NETWORK_POLICY_KEY);
-  if (!stored) return { mode: "off" };
-  try {
-    const value = JSON.parse(stored) as NetworkPolicy;
-    if (
-      value.mode === "off" ||
-      value.mode === "package_managers" ||
-      value.mode === "open"
-    ) {
-      return value;
-    }
-    if (
-      value.mode === "allowed_hosts" &&
-      Array.isArray(value.allowed_hosts) &&
-      value.allowed_hosts.every((host) => typeof host === "string") &&
-      typeof value.package_managers === "boolean"
-    ) {
-      return value;
-    }
-  } catch {
-    // Fall through to the deny-by-default policy.
-  }
-  return { mode: "off" };
-}
 
 /**
  * What the next chat will be created with, chosen before it exists.
@@ -108,30 +19,75 @@ function readNetworkPolicy(): NetworkPolicy {
  * this avoids — it races the first turn, which reads the chat as it was
  * created.
  *
- * The choices persist, because "I work in Auto" is a standing preference, not
- * a per-visit one. They are deliberately not a global default applied to
- * chats created anywhere else: this is the state of one composer, and a chat
- * created from a project or a deep link has its own.
+ * Persistence lives on the server, not here. Every explicit choice — at these
+ * pickers or inside a chat — is recorded by the server as a sticky default,
+ * and an unspecified `POST /chats` field seeds from it. So this store holds
+ * only this visit's explicit picks (`null` follows the default) plus the
+ * server-reported defaults for display, refreshed on each home mount so a
+ * choice made inside a chat shows up when the reader comes back.
  */
+type NewChatSettings = {
+  /** Server-recorded sticky defaults; `null` until the first load lands. */
+  defaults: StickyChatDefaults | null;
+  model: ModelSelectionKey | null;
+  reasoningEffort: ReasoningEffort | null;
+  permissionMode: PermissionMode | null;
+  networkPolicy: NetworkPolicy | null;
+  setModel: (model: ModelSelectionKey | null) => void;
+  setReasoningEffort: (effort: ReasoningEffort | null) => void;
+  setPermissionMode: (mode: PermissionMode) => void;
+  setNetworkPolicy: (policy: NetworkPolicy) => void;
+  /**
+   * Refresh the server-side defaults. Best-effort: a failed read leaves the
+   * previous defaults standing — the server still seeds the create correctly,
+   * the pickers just display the hard defaults until a read lands.
+   */
+  loadDefaults: (client: ApiClient) => Promise<void>;
+};
+
 export const useNewChatSettings = create<NewChatSettings>((set) => ({
-  model: (read(MODEL_KEY) as ModelSelectionKey | null) ?? null,
-  reasoningEffort: readEnum(REASONING_EFFORT_KEY, REASONING_EFFORTS),
-  permissionMode: readEnum(PERMISSION_MODE_KEY, PERMISSION_MODES),
-  networkPolicy: readNetworkPolicy(),
-  setModel: (model) => {
-    write(MODEL_KEY, model);
-    set({ model });
-  },
-  setReasoningEffort: (reasoningEffort) => {
-    write(REASONING_EFFORT_KEY, reasoningEffort);
-    set({ reasoningEffort });
-  },
-  setPermissionMode: (permissionMode) => {
-    write(PERMISSION_MODE_KEY, permissionMode);
-    set({ permissionMode });
-  },
-  setNetworkPolicy: (networkPolicy) => {
-    write(NETWORK_POLICY_KEY, JSON.stringify(networkPolicy));
-    set({ networkPolicy });
+  defaults: null,
+  model: null,
+  reasoningEffort: null,
+  permissionMode: null,
+  networkPolicy: null,
+  setModel: (model) => set({ model }),
+  setReasoningEffort: (reasoningEffort) => set({ reasoningEffort }),
+  setPermissionMode: (permissionMode) => set({ permissionMode }),
+  setNetworkPolicy: (networkPolicy) => set({ networkPolicy }),
+  loadDefaults: async (client) => {
+    try {
+      const settings = await client.getSettings();
+      set({ defaults: settings.chat_defaults });
+    } catch {
+      // Keep whatever was displayed; creation seeds server-side regardless.
+    }
   },
 }));
+
+/**
+ * What the pickers display and the next chat will get: this visit's explicit
+ * pick, else the server's sticky default, else the hard default the server
+ * would fall back to (`ask`, no network, the configured model).
+ *
+ * The model stays a `ModelSelectionKey` cast because the server reports the
+ * raw sticky selection; one whose provider was since removed reads as
+ * "unavailable" in the picker, exactly the way it does inside a chat.
+ */
+export function effectiveNewChatSettings(state: NewChatSettings): {
+  model: ModelSelectionKey | null;
+  reasoningEffort: ReasoningEffort | null;
+  permissionMode: PermissionMode | null;
+  networkPolicy: NetworkPolicy;
+} {
+  return {
+    model:
+      state.model ?? (state.defaults?.model as ModelSelectionKey | null) ?? null,
+    reasoningEffort:
+      state.reasoningEffort ?? state.defaults?.reasoning_effort ?? null,
+    permissionMode:
+      state.permissionMode ?? state.defaults?.permission_mode ?? null,
+    networkPolicy:
+      state.networkPolicy ?? state.defaults?.network_policy ?? { mode: "off" },
+  };
+}

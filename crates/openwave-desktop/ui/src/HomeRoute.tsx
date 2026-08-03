@@ -25,7 +25,7 @@ import {
 } from "./ImageAttachments";
 import { ModelMenu, ReasoningEffortMenu } from "./ModelMenu";
 import { modelForSelection } from "./ModelSelection";
-import { useNewChatSettings } from "./NewChatSettings";
+import { effectiveNewChatSettings, useNewChatSettings } from "./NewChatSettings";
 import { AppsPanel } from "./apps/AppsPanel";
 import { PanelLayout } from "./panel/PanelLayout";
 import type { LayoutState, PanelContent } from "./panel/panelTypes";
@@ -57,7 +57,18 @@ export function HomeRoute() {
     composerDraftActions.setDraft(HOME_DRAFT_KEY, text);
   const [error, setError] = useState<string | null>(null);
   const newChat = useNewChatSettings();
-  const efforts = modelForSelection(models, newChat.model)?.reasoning_efforts ?? [];
+  // What the pickers show and the created chat will get: this visit's picks
+  // over the server's sticky defaults. Only the explicit picks are sent; the
+  // server seeds the rest from the same defaults being displayed.
+  const effective = effectiveNewChatSettings(newChat);
+  const efforts = modelForSelection(models, effective.model)?.reasoning_efforts ?? [];
+
+  // A choice made inside a chat is recorded server-side as the sticky
+  // default; re-read it whenever the reader lands back here so the pickers
+  // show what the next chat will actually start with.
+  useEffect(() => {
+    void useNewChatSettings.getState().loadDefaults(client);
+  }, [client]);
 
   // A chat created silently when the user attaches files before typing. The
   // chat exists on the server so files can upload, but the user stays on the
@@ -107,7 +118,7 @@ export function HomeRoute() {
     const created = await client.createChat(newChat.model ?? undefined, null, {
       reasoningEffort: newChat.reasoningEffort,
       permissionMode: newChat.permissionMode,
-      networkPolicy: newChat.networkPolicy,
+      networkPolicy: newChat.networkPolicy ?? undefined,
     });
     chatListActions.prependChat(created);
     chatListActions.setChatsError(null);
@@ -201,7 +212,7 @@ export function HomeRoute() {
           {
             reasoningEffort: newChat.reasoningEffort,
             permissionMode: newChat.permissionMode,
-            networkPolicy: newChat.networkPolicy,
+            networkPolicy: newChat.networkPolicy ?? undefined,
           },
         );
         chatListActions.prependChat(created);
@@ -310,7 +321,7 @@ export function HomeRoute() {
               <>
                 <ModelMenu
                   models={models}
-                  value={newChat.model}
+                  value={effective.model}
                   defaultKey={defaultModelKey}
                   disabled={creatingChat}
                   onChange={newChat.setModel}
@@ -318,18 +329,18 @@ export function HomeRoute() {
                 {efforts.length > 0 && (
                   <ReasoningEffortMenu
                     levels={efforts}
-                    value={newChat.reasoningEffort}
+                    value={effective.reasoningEffort}
                     disabled={creatingChat}
                     onChange={newChat.setReasoningEffort}
                   />
                 )}
                 <PermissionModeMenu
-                  value={newChat.permissionMode}
+                  value={effective.permissionMode}
                   disabled={creatingChat}
                   onChange={newChat.setPermissionMode}
                 />
                 <NetworkPolicyMenu
-                  value={newChat.networkPolicy}
+                  value={effective.networkPolicy}
                   disabled={creatingChat}
                   onChange={newChat.setNetworkPolicy}
                 />
