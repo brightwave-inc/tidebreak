@@ -54,6 +54,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "process", "rt-multi-thread", "macros", "sync", "time"] }
 tokio-util = { workspace = true }
 unicode-general-category = { workspace = true }
+url = "=2.5.8"
 uuid = { workspace = true }
 tempfile.workspace = true
 zip.workspace = true
