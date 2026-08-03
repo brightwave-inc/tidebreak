@@ -88,7 +88,6 @@ impl ApprovalBridge {
             class,
             kind,
             preview: action,
-            summary: format!("{tool_name} requires approval"),
             // The MCP face has no chat permission mode; every gated call is a
             // human's to decide.
             auto_judge: false,

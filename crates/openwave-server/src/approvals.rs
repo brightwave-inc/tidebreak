@@ -458,7 +458,6 @@ mod tests {
                 class: ApprovalClass::Sensitive,
                 kind: openwave_core::ToolApprovalKind::for_tool_name(tool_name),
                 preview: None,
-                summary: "private summary".into(),
             },
         )
     }
@@ -478,7 +477,6 @@ mod tests {
             class: ApprovalClass::Sensitive,
             kind: openwave_core::ToolApprovalKind::for_tool_name(tool_name),
             preview: None,
-            summary: "private summary".into(),
         };
         assert!(matches!(
             store
@@ -1420,7 +1418,6 @@ mod tests {
             class: ApprovalClass::Sensitive,
             kind: openwave_core::ToolApprovalKind::for_tool_name("search"),
             preview: None,
-            summary: "search requires approval".into(),
         };
         assert!(matches!(
             store

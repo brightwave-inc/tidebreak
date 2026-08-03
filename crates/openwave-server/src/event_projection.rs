@@ -393,7 +393,6 @@ mod tests {
                 kind: ToolApprovalKind::Unsupported,
                 grant_scopes: Vec::new(),
                 preview: None,
-                summary: "upload /Users/private/document.txt".into(),
             },
             AgentEvent::ToolCallCompleted {
                 call_id,
@@ -556,7 +555,6 @@ mod tests {
                         "cwd": "checkout",
                     }),
                 ),
-                summary: "private model-authored summary".into(),
             },
         });
         let json = serde_json::to_string(&projected).unwrap();
@@ -565,8 +563,6 @@ mod tests {
         assert!(json.contains(r#""command":"cargo""#));
         assert!(json.contains(r#""args":["test","--workspace"]"#));
         assert!(json.contains(r#""cwd":"checkout""#));
-        // The preview replaces the model-authored summary; it does not join it.
-        assert!(!json.contains("private model-authored summary"));
     }
 
     #[test]
@@ -588,7 +584,6 @@ mod tests {
                         "cwd": ".",
                     }),
                 ),
-                summary: "run an interpreter".into(),
             },
         });
 
@@ -719,12 +714,12 @@ mod tests {
                 kind: ToolApprovalKind::Unsupported,
                 grant_scopes: Vec::new(),
                 // A tool with no variant projects nothing, so the card has no
-                // action to show and the summary is all that crosses.
+                // action to show; the desktop renders its own canned ask from
+                // the approval kind.
                 preview: ToolActionPreview::build(
                     "write_file",
                     &serde_json::json!({ "path": "private/path" }),
                 ),
-                summary: "a write".into(),
             },
         });
         let json = serde_json::to_string(&projected).unwrap();
@@ -757,7 +752,6 @@ mod tests {
                     "web_search",
                     &serde_json::json!({ "query": "quarterly filings", "max_results": 5 }),
                 ),
-                summary: "a web search".into(),
             },
         });
         let json = serde_json::to_string(&projected).unwrap();
@@ -835,7 +829,6 @@ mod tests {
                 kind: ToolApprovalKind::SearchMayShareQueryAndExcerpts,
                 grant_scopes: vec![openwave_core::GrantScope::WholeTool],
                 preview: None,
-                summary: "private query and document title".into(),
             },
         });
         let json = serde_json::to_string(&projected).unwrap();
@@ -856,7 +849,6 @@ mod tests {
                 kind: ToolApprovalKind::WebSearchMayShareQuery,
                 grant_scopes: Vec::new(),
                 preview: None,
-                summary: "private query and domain filters".into(),
             },
         });
         let json = serde_json::to_string(&projected).unwrap();
@@ -878,7 +870,6 @@ mod tests {
                 kind: ToolApprovalKind::ExternalMcpMayCallServer,
                 grant_scopes: Vec::new(),
                 preview: None,
-                summary: "private model-authored arguments".into(),
             },
         });
         let json = serde_json::to_string(&projected).unwrap();

@@ -67,7 +67,7 @@ pub enum ToolApprovalStatus {
 ///
 /// Each presentable variant names the egress a human is consenting to, so the
 /// renderer can describe the action without ever seeing the model-authored
-/// summary or arguments. `Unsupported` is the fail-closed default: a Sensitive
+/// arguments. `Unsupported` is the fail-closed default: a Sensitive
 /// action the server can only reject, never approve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -835,8 +835,6 @@ pub struct ApprovalRequest {
     /// Closed projection of the arguments this call will run with, when the
     /// tool has one. Registration ignores it; it exists to be presented.
     pub preview: Option<ToolActionPreview>,
-    /// Short human-readable summary of what will happen.
-    pub summary: String,
     /// Whether the Auto-mode judge should own this call once parked. Stamped
     /// inside the park transaction so the renderer never flashes a bare human
     /// card before the judge's placeholder. Storage refuses the flag for any

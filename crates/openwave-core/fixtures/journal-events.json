@@ -42,8 +42,7 @@
         "status"
       ],
       "cwd": "."
-    },
-    "summary": "Run a command"
+    }
   },
   {
     "type": "approval_decided",
