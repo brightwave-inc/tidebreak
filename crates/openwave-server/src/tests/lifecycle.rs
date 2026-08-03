@@ -2658,3 +2658,114 @@ async fn self_host_tokens_resolve_named_principals() {
         "the per-launch bearer names nobody on a shared profile"
     );
 }
+
+/// The slice-4 boundary, exercised through real routes: handlers reach the
+/// store only through the `ScopedStore` bound to the requesting principal, so
+/// one user's root aggregates are invisible to another — reads, listings, and
+/// mutations all answer as if the row does not exist. This is the route-level
+/// face of the store partition test in `openwave-core`'s db suite.
+#[tokio::test]
+async fn routes_scope_root_aggregates_to_the_requesting_principal() {
+    let (dir, store) = temp_db_store("self-host-scoping.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
+    let tokens_file = dir.path().join("tokens");
+    std::fs::write(
+        &tokens_file,
+        "alice aaaaaaaaaaaaaaaa\nbob bbbbbbbbbbbbbbbb\n",
+    )
+    .unwrap();
+    let mut config = Config::desktop(dir.path());
+    config.profile = openwave_core::Profile::SelfHost;
+    config.auth_tokens_file = Some(tokens_file);
+    let state = AppState::new(
+        config,
+        store,
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let router = app(state);
+    let alice = "Bearer aaaaaaaaaaaaaaaa";
+    let bob = "Bearer bbbbbbbbbbbbbbbb";
+
+    let chat = make_chat(&router, alice).await;
+
+    // Alice sees her chat; Bob's view holds no trace of it.
+    let get = |bearer: &'static str, uri: String| {
+        let router = router.clone();
+        async move {
+            router
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header(header::AUTHORIZATION, bearer)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(
+        get(alice, format!("/chats/{}", chat.id)).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        get(bob, format!("/chats/{}", chat.id)).await.status(),
+        StatusCode::NOT_FOUND,
+        "another owner's chat must be indistinguishable from a missing one"
+    );
+    assert_eq!(
+        get(bob, format!("/chats/{}/messages", chat.id))
+            .await
+            .status(),
+        StatusCode::NOT_FOUND,
+        "the transcript behind the chat is equally invisible"
+    );
+    let listed: Vec<Chat> = json_body(get(bob, "/chats".to_owned()).await).await;
+    assert!(
+        listed.is_empty(),
+        "a listing never carries another owner's rows"
+    );
+
+    // Mutations answer the same way: nothing to patch, nothing to delete.
+    let patch = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/chats/{}", chat.id))
+                .header(header::AUTHORIZATION, bob)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"title": "taken over"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(patch.status(), StatusCode::NOT_FOUND);
+    let delete = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/chats/{}", chat.id))
+                .header(header::AUTHORIZATION, bob)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete.status(), StatusCode::NOT_FOUND);
+
+    // The chat survives the failed takeover, untouched.
+    let survived = get(alice, format!("/chats/{}", chat.id)).await;
+    assert_eq!(survived.status(), StatusCode::OK);
+    let survived: Chat = json_body(survived).await;
+    assert_eq!(survived.title, None, "a cross-owner patch changed nothing");
+}
