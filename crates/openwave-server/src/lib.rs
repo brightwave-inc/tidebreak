@@ -42,6 +42,10 @@ mod principal;
 mod provider;
 mod providers;
 mod resolver;
+/// Governed executor performing one declared operation of a `rest_api`
+/// connected app: catalog validation before any I/O, pinned bounded egress,
+/// request-time credential injection.
+pub mod rest_executor;
 mod retry;
 mod routes;
 mod sandbox_admission;
