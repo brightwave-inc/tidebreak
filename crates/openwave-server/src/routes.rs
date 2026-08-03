@@ -1970,7 +1970,9 @@ fn sandbox_activity(calls: &[SandboxToolCall]) -> Option<AgentActivitySnapshot> 
         _ => return None,
     };
     let status = match call.status {
-        SandboxToolCallStatus::Accepted => AgentActivityStatus::Waiting,
+        SandboxToolCallStatus::Accepted | SandboxToolCallStatus::RetryWait => {
+            AgentActivityStatus::Waiting
+        }
         SandboxToolCallStatus::Claimed => AgentActivityStatus::Running,
         SandboxToolCallStatus::Completed
         | SandboxToolCallStatus::Failed
@@ -2034,7 +2036,9 @@ fn sandbox_activity_history_item(call: &SandboxToolCall) -> Option<AgentActivity
     // admitted. `resolved_at` is always present once terminal, but fall back to
     // the creation time rather than dropping a settled step from the timeline.
     let (outcome, at) = match call.status {
-        SandboxToolCallStatus::Accepted => (AgentActivityOutcome::Waiting, call.created_at),
+        SandboxToolCallStatus::Accepted | SandboxToolCallStatus::RetryWait => {
+            (AgentActivityOutcome::Waiting, call.created_at)
+        }
         SandboxToolCallStatus::Claimed => (AgentActivityOutcome::Running, call.created_at),
         SandboxToolCallStatus::Completed => (
             AgentActivityOutcome::Completed,
