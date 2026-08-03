@@ -39,7 +39,10 @@ use crate::exec_write_snapshot::TurnSnapshotSink;
 use crate::state::BlobWriteGuard;
 
 const CODE_EXECUTION_SETTING: &str = "code_execution";
-pub const DEFAULT_TIMEOUT_MS: u64 = 20_000;
+/// Generous enough for a cold `pip install` that pulls compiled wheels
+/// (lxml, Pillow); 20s proved too tight and cut installs off mid-retry with
+/// empty stderr. Still host-owned: the model cannot request a longer limit.
+pub const DEFAULT_TIMEOUT_MS: u64 = 60_000;
 pub const MIN_TIMEOUT_MS: u64 = 1_000;
 pub const MAX_TIMEOUT_MS: u64 = 120_000;
 const MAX_NETWORK_ALLOWED_HOSTS: usize = 64;
@@ -942,6 +945,17 @@ impl ConfiguredCodeExecutionProvider {
         match self.shared_package_cache().await {
             Some(cache) => cache.is_ready(),
             None => false,
+        }
+    }
+
+    /// The host-configured per-command time limit, for truthful
+    /// operating-prompt steering. Execution re-reads the setting per
+    /// invocation; this is the same value rendered ahead of time so the model
+    /// can plan long-running commands around it.
+    pub(crate) async fn current_timeout_ms(&self) -> u64 {
+        match read_config(&*self.store).await {
+            Ok(config) => config.timeout_ms,
+            Err(_) => DEFAULT_TIMEOUT_MS,
         }
     }
 
