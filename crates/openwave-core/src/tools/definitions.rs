@@ -44,7 +44,12 @@ pub(super) fn create_app() -> ToolSpec {
          declared OpenAPI operationIds (`operation_ids`, for rest_api apps) under \
          it; the configured connected apps and their ids are listed at the end of \
          this description. The app renders in a sandboxed frame with no network \
-         access; pinned capabilities run only after the user grants them. Pass \
+         access; pinned capabilities run only after the user grants them. From \
+         inside the frame the bundle calls them by posting JSON-RPC 2.0 to its \
+         parent window: `tools/call` with `{name, arguments}` for pinned tools, \
+         or `operations/call` with `{operation_id, parameters?, body?}` for \
+         pinned REST operations, whose result carries the raw response as \
+         `{status, content_type, body_base64}`. Pass \
          the app_id from an earlier create_app result to publish a new revision \
          of that app — revisions append, never overwrite.",
     )

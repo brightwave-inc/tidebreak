@@ -18,7 +18,12 @@
 
 export const MCP_APPS_PROTOCOL_VERSION = "2026-01-26";
 
-import { AppInvokeRefusalError, type AppInvokeResult, type McpAppPayload } from "./api";
+import {
+  AppInvokeRefusalError,
+  type AppInvokeResult,
+  type AppRestInvokeResult,
+  type McpAppPayload,
+} from "./api";
 
 export type { McpAppPayload };
 
@@ -31,6 +36,19 @@ export type { McpAppPayload };
  * host-authored, so surfacing it is not interpretation).
  */
 export type AppToolInvoker = (tool: string, args: unknown) => Promise<AppInvokeResult>;
+
+/**
+ * Executes one granted REST operation on the embedded view's behalf — the
+ * `operations/call` sibling of [`AppToolInvoker`], wired to the same invoke
+ * route. Parameters, body, and the `{status, content_type, body_base64}`
+ * result are opaque passthrough in both directions; rejections map to
+ * JSON-RPC errors exactly as tool-call rejections do.
+ */
+export type AppOperationInvoker = (
+  operationId: string,
+  parameters: unknown,
+  body: unknown,
+) => Promise<AppRestInvokeResult>;
 
 const MIN_FRAME_HEIGHT = 160;
 const MAX_FRAME_HEIGHT = 800;
@@ -58,6 +76,13 @@ export function createMcpAppBridge(options: {
    * host deliberately declared.
    */
   invokeTool?: AppToolInvoker;
+  /**
+   * When present, the view may call `operations/call` and the bridge
+   * forwards it here — the REST sibling of `invokeTool`, under the same
+   * rule: absent, the method refuses with method-not-found, so a view only
+   * gets the methods its host deliberately declared.
+   */
+  invokeOperation?: AppOperationInvoker;
 }): McpAppBridge {
   let viewInitialized = false;
   let payload: McpAppPayload | null = null;
@@ -160,6 +185,51 @@ export function createMcpAppBridge(options: {
                   isError: result.is_error,
                 },
               }),
+            (error: unknown) =>
+              post({
+                jsonrpc: "2.0",
+                id,
+                error:
+                  error instanceof AppInvokeRefusalError
+                    ? {
+                        code: -32000,
+                        message: error.message,
+                        data: { kind: error.kind },
+                      }
+                    : { code: -32000, message: String(error) },
+              }),
+          );
+          break;
+        }
+        case "operations/call": {
+          const invoke = options.invokeOperation;
+          if (!invoke) {
+            post({
+              jsonrpc: "2.0",
+              id,
+              error: { code: -32601, message: "Method not found" },
+            });
+            break;
+          }
+          const params = isRecord(message.params) ? message.params : {};
+          const operationId =
+            typeof params.operation_id === "string" ? params.operation_id : null;
+          if (!operationId) {
+            post({
+              jsonrpc: "2.0",
+              id,
+              error: {
+                code: -32602,
+                message: "operations/call needs a string operation_id",
+              },
+            });
+            break;
+          }
+          // Parameters, body, and the REST result are opaque passthrough the
+          // bridge never interprets; the result object crosses back verbatim.
+          // The reply is asynchronous; `post` already refuses after dispose.
+          void invoke(operationId, params.parameters, params.body).then(
+            (result) => post({ jsonrpc: "2.0", id, result }),
             (error: unknown) =>
               post({
                 jsonrpc: "2.0",
