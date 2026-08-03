@@ -21,6 +21,10 @@ import {
   type Chat as WireChat,
   type ChatTranscript as WireChatTranscript,
   type CodeExecutionConfigInfo as WireCodeExecutionConfigInfo,
+  type ConnectedAppInfo as WireConnectedAppInfo,
+  type ConnectedAppsInfo as WireConnectedAppsInfo,
+  type CredentialPlacement as WireCredentialPlacement,
+  type RestCredentialStatus as WireRestCredentialStatus,
   type CodeExecutionCredentialReadiness as WireCodeExecutionCredentialReadiness,
   type CodeExecutionProviderKind as WireCodeExecutionProviderKind,
   type EgressConfig as WireEgressConfig,
@@ -221,6 +225,23 @@ export type McpServerDefinition = WireMcpServerDefinition;
 export type McpServerInfo = WireMcpServerInfo;
 
 export type McpServersInfo = WireMcpServersInfo;
+
+/** The Connected apps listing: per-kind projections, both kinds. */
+export type ConnectedAppsInfo = WireConnectedAppsInfo;
+export type ConnectedAppInfo = WireConnectedAppInfo;
+export type RestCredentialStatus = WireRestCredentialStatus;
+/** Where a stored REST credential is injected: `"bearer"` or a named header. */
+export type CredentialPlacement = WireCredentialPlacement;
+
+/**
+ * What a REST connected-app upsert does about the credential: clear it, keep
+ * the stored one unchanged, or store a new value. The value travels only in
+ * this request body and is never read back by any route.
+ */
+export type RestCredentialUpdate =
+  | "none"
+  | "keep"
+  | { set: { value: string; placement: CredentialPlacement } };
 
 /** The resolved managed-mode policy; read-only for the renderer. */
 export type ManagedPolicy = WireManagedPolicy;
@@ -873,6 +894,34 @@ export class ApiClient {
     provider: CodeExecutionProviderKind,
   ): Promise<CodeExecutionCredentialReadiness> {
     return this.json(`/code-execution/credentials/${provider}`, {
+      method: "DELETE",
+      headers: this.headers(),
+    });
+  }
+
+  listConnectedApps(): Promise<ConnectedAppsInfo> {
+    return this.json("/connected-apps", { headers: this.headers() });
+  }
+
+  putRestConnectedApp(
+    id: string,
+    body: {
+      name: string;
+      base_url: string;
+      /** The raw JSON OpenAPI document; the server ingests it once here. */
+      openapi_document: string;
+      credential: RestCredentialUpdate;
+    },
+  ): Promise<ConnectedAppsInfo> {
+    return this.json(`/connected-apps/rest/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      headers: this.headers(true),
+      body: JSON.stringify(body),
+    });
+  }
+
+  deleteRestConnectedApp(id: string): Promise<void> {
+    return this.json(`/connected-apps/rest/${encodeURIComponent(id)}`, {
       method: "DELETE",
       headers: this.headers(),
     });

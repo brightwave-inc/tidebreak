@@ -113,7 +113,7 @@ async fn rehome_secrets() -> Result<()> {
     let config = profile_config()?;
     let mut touched = 0usize;
     let mut lost = 0usize;
-    for (key, outcome) in openwave_server::rehome_configured_secrets(&config).await {
+    for (key, outcome) in openwave_server::rehome_configured_secrets(&config).await? {
         match outcome {
             RehomeOutcome::Absent => {}
             RehomeOutcome::Rehomed => {

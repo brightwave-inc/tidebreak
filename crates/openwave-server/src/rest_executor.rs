@@ -111,7 +111,7 @@ pub struct RestCredential {
 /// unknown variant refuses to deserialize. A named header must be a valid
 /// header token and may name `Authorization` explicitly, but never a header
 /// the executor owns or that alters routing (see [`RestExecuteError::ForbiddenHeader`]).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialPlacement {
     /// `Authorization: Bearer {value}`.
@@ -561,7 +561,7 @@ fn serialize_body(
 /// or a query is refused rather than stripped — a base URL is configuration,
 /// and configuration that cannot mean anything should be corrected, not
 /// silently rewritten.
-fn admit_base_url(base_url: &str) -> Result<Url, RestExecuteError> {
+pub(crate) fn admit_base_url(base_url: &str) -> Result<Url, RestExecuteError> {
     let refuse = |reason| Err(RestExecuteError::InadmissibleBaseUrl { reason });
     if base_url.len() > MAX_REST_BASE_URL_BYTES {
         return refuse("URL exceeds the byte limit");

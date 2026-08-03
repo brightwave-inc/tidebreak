@@ -313,6 +313,15 @@ pub fn app(state: AppState) -> Router {
                 .put(routes::put_mcp_servers)
                 .layer(DefaultBodyLimit::max(mcp_config::MAX_CONFIG_BODY_BYTES)),
         )
+        .route("/connected-apps", get(routes::get_connected_apps))
+        .route(
+            "/connected-apps/rest/{id}",
+            axum::routing::put(routes::put_rest_connected_app)
+                .delete(routes::delete_rest_connected_app)
+                .layer(DefaultBodyLimit::max(
+                    routes::MAX_REST_CONNECTED_APP_BODY_BYTES,
+                )),
+        )
         .route(
             "/mcp/servers/{name}/reconnect",
             post(routes::post_mcp_server_reconnect),
@@ -731,12 +740,16 @@ fn secret_provider(config: &Config) -> Arc<dyn SecretProvider> {
     Arc::new(CachingSecretProvider::new(keychain))
 }
 
-/// Re-home the configured profile's credentials — see [`secret_rehome`]. Does
-/// not open the data directory, so it runs without the daemon's instance lock.
+/// Re-home the configured profile's credentials — see [`secret_rehome`].
+///
+/// Opens the profile's store to enumerate the per-record connected-app
+/// credential keys (a static list cannot name them), but takes no instance
+/// lock, so it still runs beside or without the daemon.
 pub async fn rehome_configured_secrets(
     config: &Config,
-) -> Vec<(String, secret_rehome::RehomeOutcome)> {
-    secret_rehome::rehome_secrets(&*secret_provider(config)).await
+) -> Result<Vec<(String, secret_rehome::RehomeOutcome)>> {
+    let store = connect_store(config).await?;
+    secret_rehome::rehome_secrets(&*store, &*secret_provider(config)).await
 }
 
 async fn bind_inner(
