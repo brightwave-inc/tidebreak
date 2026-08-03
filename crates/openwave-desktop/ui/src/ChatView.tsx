@@ -10,6 +10,7 @@ import {
 import type { ApiClient, Chat } from "./api";
 import { followScrollBehavior, isNearBottom, scrollToLatest } from "./ChatScroll";
 import { useChatSessionStore } from "./ChatSessionStore";
+import { useComposerDraft } from "./ComposerDrafts";
 import {
   Composer,
   type ComposerFiles,
@@ -35,8 +36,7 @@ export type ChatViewProps = {
   hydrated: boolean;
   nativeHost: boolean;
   deletingChat: boolean;
-  draft: string;
-  /** The same draft, readable synchronously — see [useTurnControls]. */
+  /** The composer draft, readable synchronously — see [useTurnControls]. */
   draftRef: RefObject<string>;
   composerModelMenu: ReactNode;
   composerImages: ComposerImages;
@@ -66,7 +66,6 @@ export function ChatView({
   hydrated,
   nativeHost,
   deletingChat,
-  draft,
   draftRef,
   composerModelMenu,
   composerImages,
@@ -81,6 +80,11 @@ export function ChatView({
   onViewOutput,
 }: ChatViewProps) {
   const transcriptVisible = useTranscriptVisible();
+  // Subscribed here rather than in the route above: a keystroke should
+  // re-render the chat pane alone, never the panels beside it — a document
+  // viewer that re-renders per keystroke is one unstable dependency away from
+  // reloading its engine mid-typing.
+  const draft = useComposerDraft(chat.id);
   const folderAccess = useFolderAccessRequests(client, chat.id);
   const outputWritebacks = useOutputWritebackRequests(client, chat.id);
   const userQuestions = useUserQuestions(client, chat.id);
