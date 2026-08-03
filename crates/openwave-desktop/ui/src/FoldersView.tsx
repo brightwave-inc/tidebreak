@@ -1,7 +1,7 @@
 import { FolderOpenIcon, PlusIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-import type { Chat } from "./api";
+import type { Chat, ConsentStatementSnapshot } from "./api";
 import { PanelSecondaryHeader } from "@/components/PanelHeader";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { Badge } from "@/components/ui/badge";
@@ -20,32 +20,38 @@ import {
   connectFolder,
   disconnectFolder,
   listApprovedFolders,
+  listCapabilityConsents,
   listConnectedFolders,
+  revokeCapabilityConsent,
   type ConnectedFolder,
-  type ConnectedFolderAccess,
-  type FolderCapability,
 } from "./host";
 import {
   PICKER_BUSY_MESSAGE,
   PICKER_HOLDERS,
   useNativePickerLatch,
 } from "./NativePickerLatch";
-import { folderAccessLabel } from "./FolderAccess";
+import {
+  folderAccessLabel,
+  folderReach,
+  folderStatements,
+  type FolderReach,
+} from "./FolderAccess";
+import { verbLabel } from "./settings/PermissionsPanel";
 import { useRefreshSignals } from "./RefreshSignals";
 
 /**
- * A chat's connected folders: the directories the native host may reach on this
- * conversation's behalf, each shown with the access the broker actually grants
- * it.
+ * A chat's connected folders: the directories the native host may reach on
+ * this conversation's behalf.
  *
- * Two sections rather than one. The first is what this conversation can reach.
- * The second is what this device has already approved and can be reattached
- * without going back through the picker — an affordance that only makes sense
- * for an app holding its own grants, and the reason this panel is not simply
- * a list.
+ * This panel and the Permissions panel are two groupings of the same consent
+ * statements — this one by folder, that one by what the statements reach.
+ * Each folder row lists the statements that name it, with the same revocation
+ * the Permissions panel offers, so what a folder allows can be narrowed here
+ * without disconnecting it.
  */
 export function FoldersView({ chat }: { chat: Chat }) {
-  const [folders, setFolders] = useState<ConnectedFolderAccess[]>([]);
+  const [folders, setFolders] = useState<ConnectedFolder[]>([]);
+  const [consents, setConsents] = useState<ConsentStatementSnapshot[]>([]);
   const [approvedFolders, setApprovedFolders] = useState<ConnectedFolder[]>([]);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -61,13 +67,15 @@ export function FoldersView({ chat }: { chat: Chat }) {
     const generation = ++refreshGeneration.current;
     setError(null);
     try {
-      const [connected, approved] = await Promise.all([
+      const [connected, approved, statements] = await Promise.all([
         listConnectedFolders(chat),
         listApprovedFolders(),
+        listCapabilityConsents(),
       ]);
       if (generation !== refreshGeneration.current) return;
       setFolders(connected);
       setApprovedFolders(approved);
+      setConsents(statements);
     } catch (err) {
       if (generation !== refreshGeneration.current) return;
       setError(String(err));
@@ -77,6 +85,7 @@ export function FoldersView({ chat }: { chat: Chat }) {
   useEffect(() => {
     setFolders([]);
     setApprovedFolders([]);
+    setConsents([]);
     setWorking(false);
     setError(null);
     void refresh();
@@ -140,6 +149,34 @@ export function FoldersView({ chat }: { chat: Chat }) {
     }
   }
 
+  async function revokeStatement(
+    folder: ConnectedFolder,
+    statement: ConsentStatementSnapshot,
+  ) {
+    const capability =
+      statement.verb.kind === "capability" ? statement.verb.capability : null;
+    const accepted = await confirm({
+      title: `Revoke “${verbLabel(statement.verb)}” for ${folder.displayName}?`,
+      description:
+        capability === "read_files"
+          ? "The agent can no longer read this folder — and loses command access to it, which depends on reading."
+          : `The agent loses “${verbLabel(statement.verb).toLowerCase()}” for this folder. It stays connected.`,
+      confirmLabel: "Revoke",
+      destructive: true,
+    });
+    if (!accepted) return;
+    setWorking(true);
+    setError(null);
+    try {
+      await revokeCapabilityConsent(statement);
+      useRefreshSignals.getState().signal("folderAccess");
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setWorking(false);
+    }
+  }
+
   const connectButton = (
     <Button size="sm" disabled={working} onClick={() => void addFolder()}>
       <PlusIcon className="size-4" />
@@ -193,30 +230,62 @@ export function FoldersView({ chat }: { chat: Chat }) {
           <>
             {folders.length > 0 && (
               <FolderSection label="Connected">
-                {folders.map((folder) => (
-                  <FolderRow
-                    key={folder.rootId}
-                    name={folder.displayName}
-                    badge={<AccessBadge capabilities={folder.capabilities} />}
-                    action={
-                      <Button
-                        variant="outline"
-                        size="xs"
-                        disabled={working}
-                        onClick={() => void removeFolder(folder)}
-                      >
-                        Disconnect
-                      </Button>
-                    }
-                  />
-                ))}
+                {folders.map((folder) => {
+                  const statements = folderStatements(
+                    consents,
+                    folder.rootId,
+                    chat,
+                  );
+                  return (
+                    <FolderCard
+                      key={folder.rootId}
+                      name={folder.displayName}
+                      reach={folderReach(statements)}
+                      action={
+                        <Button
+                          variant="outline"
+                          size="xs"
+                          disabled={working}
+                          onClick={() => void removeFolder(folder)}
+                        >
+                          Disconnect
+                        </Button>
+                      }
+                    >
+                      {statements.map((statement) => (
+                        <div
+                          key={
+                            statement.handle.kind === "capability_grant"
+                              ? statement.handle.grant_id
+                              : statement.granted_at
+                          }
+                          className="flex items-center justify-between gap-3"
+                        >
+                          <span className="text-sm text-muted-foreground">
+                            {verbLabel(statement.verb)}
+                          </span>
+                          <Button
+                            variant="ghost"
+                            size="xs"
+                            disabled={working}
+                            onClick={() =>
+                              void revokeStatement(folder, statement)
+                            }
+                          >
+                            Revoke
+                          </Button>
+                        </div>
+                      ))}
+                    </FolderCard>
+                  );
+                })}
               </FolderSection>
             )}
 
             {availableFolders.length > 0 && (
               <FolderSection label="Available on this Mac">
                 {availableFolders.map((folder) => (
-                  <FolderRow
+                  <FolderCard
                     key={folder.rootId}
                     name={folder.displayName}
                     badge={
@@ -247,16 +316,12 @@ export function FoldersView({ chat }: { chat: Chat }) {
 }
 
 /**
- * The folder's access state, read off what the broker reports rather than
- * assumed from what the app requested.
- *
- * Connecting a folder currently grants reading and writing together, so this
- * renders "Read and write" in practice. It is derived anyway: the moment the
- * grant ladder narrows, a badge computed from a constant would keep claiming
- * access the agent no longer has, which is the failure worth designing out.
+ * The folder's access state, read off the consent statements the broker
+ * reports rather than assumed from what the app requested — the moment a
+ * statement is revoked, the badge follows.
  */
-function AccessBadge({ capabilities }: { capabilities: FolderCapability[] }) {
-  const label = folderAccessLabel(capabilities);
+function AccessBadge({ reach }: { reach: readonly FolderReach[] }) {
+  const label = folderAccessLabel(reach);
   const hasAccess = label !== "No access";
   return (
     <Badge variant={hasAccess ? "secondary" : "outline"} size="sm">
@@ -280,23 +345,30 @@ function FolderSection({
   );
 }
 
-function FolderRow({
+function FolderCard({
   name,
+  reach,
   badge,
   action,
+  children,
 }: {
   name: string;
-  badge: React.ReactNode;
+  reach?: readonly FolderReach[];
+  badge?: React.ReactNode;
   action: React.ReactNode;
+  children?: React.ReactNode;
 }) {
   return (
-    <Card className="flex flex-row items-center justify-between gap-3 px-3 py-2.5">
-      <div className="flex min-w-0 items-center gap-2">
-        <FolderOpenIcon className="size-4 shrink-0 text-muted-foreground" />
-        <span className="truncate text-sm font-medium">{name}</span>
-        {badge}
+    <Card className="flex flex-col gap-2 px-3 py-2.5">
+      <div className="flex flex-row items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <FolderOpenIcon className="size-4 shrink-0 text-muted-foreground" />
+          <span className="truncate text-sm font-medium">{name}</span>
+          {reach ? <AccessBadge reach={reach} /> : badge}
+        </div>
+        <div className="shrink-0">{action}</div>
       </div>
-      <div className="shrink-0">{action}</div>
+      {children}
     </Card>
   );
 }

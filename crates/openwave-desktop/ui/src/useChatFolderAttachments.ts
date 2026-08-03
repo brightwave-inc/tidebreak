@@ -4,9 +4,12 @@ import type { Chat } from "./api";
 import {
   connectFolder,
   disconnectFolder,
+  listCapabilityConsents,
   listConnectedFolders,
-  type ConnectedFolderAccess,
+  type ConnectedFolder,
 } from "./host";
+import { folderStatements } from "./FolderAccess";
+import type { ConsentStatementSnapshot } from "./api";
 import {
   PICKER_BUSY_MESSAGE,
   PICKER_HOLDERS,
@@ -14,8 +17,17 @@ import {
 } from "./NativePickerLatch";
 import { useRefreshSignals } from "./RefreshSignals";
 
+/**
+ * A connected folder joined with the consent statements that say what it
+ * allows for this chat — the same rows the Permissions surface lists, so a
+ * folder's access state cannot drift from what the broker holds.
+ */
+export type ChatFolderAccess = ConnectedFolder & {
+  statements: ConsentStatementSnapshot[];
+};
+
 export type ChatFolderAttachments = {
-  items: ConnectedFolderAccess[];
+  items: ChatFolderAccess[];
   working: boolean;
   error: string | null;
   attach: () => void;
@@ -31,7 +43,7 @@ export function useChatFolderAttachments(
   chat: Chat | null,
   nativeHost: boolean,
 ): ChatFolderAttachments {
-  const [items, setItems] = useState<ConnectedFolderAccess[]>([]);
+  const [items, setItems] = useState<ChatFolderAccess[]>([]);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const refreshGeneration = useRef(0);
@@ -45,9 +57,15 @@ export function useChatFolderAttachments(
       return;
     }
     setError(null);
-    void listConnectedFolders(chat).then(
-      (folders) => {
-        if (generation === refreshGeneration.current) setItems(folders);
+    void Promise.all([listConnectedFolders(chat), listCapabilityConsents()]).then(
+      ([folders, consents]) => {
+        if (generation !== refreshGeneration.current) return;
+        setItems(
+          folders.map((folder) => ({
+            ...folder,
+            statements: folderStatements(consents, folder.rootId, chat),
+          })),
+        );
       },
       (reason) => {
         if (generation === refreshGeneration.current) setError(String(reason));

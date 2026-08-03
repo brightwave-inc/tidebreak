@@ -12,6 +12,7 @@ import { useChatFolderAttachments } from "./useChatFolderAttachments";
 vi.mock("./host", () => ({
   connectFolder: vi.fn(),
   disconnectFolder: vi.fn(),
+  listCapabilityConsents: vi.fn(),
   listConnectedFolders: vi.fn(),
 }));
 
@@ -55,13 +56,13 @@ afterEach(() => {
 });
 
 it("connects and revokes a chat folder through the existing host flow", async () => {
+  vi.mocked(host.listCapabilityConsents).mockResolvedValue([]);
   vi.mocked(host.listConnectedFolders)
     .mockResolvedValueOnce([])
     .mockResolvedValueOnce([
       {
         rootId: "root-1",
         displayName: "Research",
-        capabilities: ["read", "write"],
       },
     ])
     .mockResolvedValueOnce([]);
