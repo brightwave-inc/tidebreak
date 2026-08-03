@@ -153,6 +153,18 @@ Local stdio and HTTP servers run under whatever authority the user configured
 them with. That is the existing local trust model, unchanged — an app adds no
 authority to a server the user already mounted.
 
+## Beyond MCP bindings
+
+Mounted MCP tools are the first binding vocabulary, not the last. The
+accepted next step ([connected-apps.md](connected-apps.md), tracked by
+#1330) makes MCP servers one *kind* of a broader connected-app record and
+adds a `rest_api` kind — a base URL, an ingested OpenAPI catalog, and a
+secret-store credential — executed through a governed local egress layer.
+App manifests then gain a sibling binding kind, `{ app, operation_ids[] }`,
+with the grant, consent-sheet, and invoke machinery on this page carried
+over unchanged. Until that lands, MCP tools remain the only callable
+surface.
+
 ## The authorization gate
 
 The invoke route rides the per-launch loopback bearer, which is a capability

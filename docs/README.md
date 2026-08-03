@@ -27,6 +27,9 @@ Project documentation, versioned alongside the code.
 - [Execution providers and sandbox-resident agent runs](sandbox-providers.md) —
   the run-tier/execution-provider split, reachability and credential
   invariants, and the phased route to detached background agent runs.
+- [Connected apps](connected-apps.md) — the umbrella record for outside
+  integrations: MCP servers as one kind, the planned REST kind with its
+  governed local executor, and the promotion-compatible binding vocabulary.
 - [Local apps](local-apps.md) — agent-generated mini-apps in the profile:
   sandboxed frame rendering, manifest-pinned tool invocation with durable
   consent, and the planned promotion path to gateway shared apps.

@@ -97,6 +97,17 @@ output still never reach the renderer.
 Views are served from memory and refreshed on reconnect. If a view cannot be
 fetched, its card degrades to a reconnect hint; the tool itself is unaffected.
 
+The view surface is deliberately frozen at this scope. The bridge answers
+`ui/initialize` with empty host capabilities and refuses every other request:
+a view renders one call's delivered payload and never initiates calls, which
+is why it is safe to run with no consent surface of its own. Any future
+view-initiated interactivity must ride the local-app grant machinery
+([local-apps.md](local-apps.md)) rather than a new approval door. Revisit
+point on record: once local apps and gateway promotion have shipped, if the
+gateway's inline console remains the only `ui://` producer in practice and a
+promoted app covers its use case, deprecating this surface is the recorded
+default — it would remove a special case, not a subsystem.
+
 ## Headless bootstrap
 
 `openwave serve` can still read an initial configuration from the JSON file
