@@ -237,7 +237,10 @@ impl fmt::Debug for RestTransportRequest {
             .debug_struct("RestTransportRequest")
             .field("method", &self.method)
             .field("url", &self.url.as_str())
-            .field("addresses", &format_args!("<{} vetted>", self.addresses.len()))
+            .field(
+                "addresses",
+                &format_args!("<{} vetted>", self.addresses.len()),
+            )
             .field(
                 "headers",
                 &self
@@ -605,10 +608,7 @@ fn admit_base_url(base_url: &str) -> Result<Url, RestExecuteError> {
 
 /// Join the admitted base URL's path prefix with the substituted operation
 /// path and attach the encoded query.
-fn assemble_url(
-    base: &Url,
-    rendered: &RenderedParameters,
-) -> Result<Url, RestExecuteError> {
+fn assemble_url(base: &Url, rendered: &RenderedParameters) -> Result<Url, RestExecuteError> {
     let mut url = base.clone();
     let prefix = base.path().trim_end_matches('/');
     let operation_path = if rendered.path.starts_with('/') {
@@ -742,7 +742,12 @@ fn is_header_token(name: &str) -> bool {
 fn is_routing_or_framing_header(lowercase: &str) -> bool {
     matches!(
         lowercase,
-        "host" | "content-length" | "transfer-encoding" | "connection" | "te" | "trailer"
+        "host"
+            | "content-length"
+            | "transfer-encoding"
+            | "connection"
+            | "te"
+            | "trailer"
             | "upgrade"
             | "expect"
     ) || lowercase.starts_with("proxy-")
@@ -1318,7 +1323,15 @@ mod tests {
         // (case-insensitively), as is a non-token name; `Authorization` is
         // reachable only as an explicit placement, and a benign named header
         // is fine.
-        for name in ["Host", "content-LENGTH", "Transfer-Encoding", "Connection", "Proxy-Authorization", "Content-Type", "not a token"] {
+        for name in [
+            "Host",
+            "content-LENGTH",
+            "Transfer-Encoding",
+            "Connection",
+            "Proxy-Authorization",
+            "Content-Type",
+            "not a token",
+        ] {
             let refused = run(
                 &transport,
                 FakeResolver(vec![PUBLIC_V4]),
@@ -1390,7 +1403,10 @@ mod tests {
         for (base_url, expected) in [
             ("http://api.example.com", "scheme must be https"),
             ("https://u:p@api.example.com", "URL must not carry userinfo"),
-            ("https://api.example.com/#frag", "URL must not carry a fragment"),
+            (
+                "https://api.example.com/#frag",
+                "URL must not carry a fragment",
+            ),
             ("https://api.example.com/?q=1", "URL must not carry a query"),
             ("not a url", "URL is not valid"),
         ] {
@@ -1611,7 +1627,12 @@ mod tests {
             Some(Duration::from_secs(600)),
         ] {
             executor
-                .execute(&target(None), &catalog(), &get_issue(full_parameters()), asked)
+                .execute(
+                    &target(None),
+                    &catalog(),
+                    &get_issue(full_parameters()),
+                    asked,
+                )
                 .await
                 .unwrap();
         }
