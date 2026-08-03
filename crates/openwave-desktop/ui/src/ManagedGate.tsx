@@ -150,7 +150,12 @@ export function ManagedGate({
           // product is correct, not a dead end.
           setPolicyState({
             kind: "resolved",
-            policy: { managed: false, source: "unmanaged", misconfigured: false },
+            policy: {
+              managed: false,
+              source: "unmanaged",
+              misconfigured: false,
+              allow_local_mcp_servers: false,
+            },
           });
           return;
         }

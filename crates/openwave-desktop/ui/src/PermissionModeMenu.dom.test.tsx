@@ -38,6 +38,7 @@ it("locks modes above a managed ceiling", async () => {
     managed: false,
     source: "unmanaged",
     misconfigured: false,
+    allow_local_mcp_servers: false,
     permission_mode_ceiling: "ask",
   };
   const onChange = vi.fn();
