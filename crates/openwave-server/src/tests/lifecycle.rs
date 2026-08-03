@@ -2578,3 +2578,83 @@ async fn auth_middleware_resolves_principal_and_capability() {
         "the native credential marks the capability on the same principal"
     );
 }
+
+/// The self-host boundary contract: the middleware resolves WHO from the
+/// configured named tokens — a named token yields its user, an unknown token
+/// answers 401, and the per-launch bearer (which names nobody on a shared
+/// profile) is rejected too.
+#[tokio::test]
+async fn self_host_tokens_resolve_named_principals() {
+    use crate::principal::{AuthContext, Principal};
+
+    let (dir, store) = temp_db_store("self-host-auth.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
+    let tokens_file = dir.path().join("tokens");
+    std::fs::write(&tokens_file, "# staff\nalice aaaaaaaaaaaaaaaa\n").unwrap();
+    let mut config = Config::desktop(dir.path());
+    config.profile = openwave_core::Profile::SelfHost;
+    config.auth_tokens_file = Some(tokens_file);
+    let state = AppState::new(
+        config,
+        store,
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let launch_bearer = state.token.clone();
+
+    let whoami = |auth: AuthContext| async move {
+        match auth.principal {
+            Principal::User(user) => user.to_string(),
+            other => format!("unexpected principal {other:?}"),
+        }
+    };
+    let probe = axum::Router::new()
+        .route("/whoami", axum::routing::get(whoami))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state,
+            crate::auth::require_token,
+        ));
+    let request = |bearer: &str| {
+        Request::builder()
+            .uri("/whoami")
+            .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    let response = probe
+        .clone()
+        .oneshot(request("aaaaaaaaaaaaaaaa"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1024).await.unwrap();
+    assert_eq!(&body[..], b"alice", "the named token identifies its user");
+
+    let response = probe
+        .clone()
+        .oneshot(request("bbbbbbbbbbbbbbbb"))
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "a token the file does not name admits no one"
+    );
+
+    let response = probe
+        .clone()
+        .oneshot(request(&launch_bearer))
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "the per-launch bearer names nobody on a shared profile"
+    );
+}

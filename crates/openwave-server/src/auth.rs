@@ -1,15 +1,43 @@
-//! Bearer-token authentication for the local API.
+//! Bearer-token authentication for the API.
 //!
-//! The server binds to loopback with a per-launch token (see [`AppState`]); a
-//! middleware layer rejects any request that doesn't present it. It's the one
-//! thing standing between the agent and any other local process that finds the
-//! port, so the check is mandatory on every non-health route.
+//! Which credentials authenticate depends on the boot [`Profile`]:
+//!
+//! - **Desktop** binds to loopback with a per-launch token (see [`AppState`]);
+//!   whoever presents it is the one person at the machine, so it resolves to
+//!   [`Principal::LocalOwner`]. It's the one thing standing between the agent
+//!   and any other local process that finds the port, so the check is
+//!   mandatory on every non-health route.
+//! - **Self-host** authenticates with static named bearer tokens from an
+//!   operator-maintained file ([`TokenMap`]); each token names the configured
+//!   user it belongs to, resolved to [`Principal::User`]. The per-launch token
+//!   names nobody on a shared deployment and is not accepted there — a
+//!   credential that names no one is rejected at this middleware (#853).
+//!
+//! # Self-host token file
+//!
+//! `OPENWAVE_AUTH_TOKENS_FILE` points at a plain-text file, one mapping per
+//! line — `<user-id> <token>`, whitespace-separated. Blank lines and lines
+//! starting with `#` are ignored. A user may hold several tokens (rotation);
+//! a token may name only one user, and duplicates fail the load. Tokens are
+//! opaque secrets matched exactly (no hashing scheme to misconfigure): at
+//! least 16 characters from `[A-Za-z0-9._~-]`, so they stay valid in both the
+//! `Authorization` header and the WebSocket subprotocol below. Generate them
+//! with e.g. `openssl rand -hex 32`. Gateway-derived identity (#578) later
+//! replaces this file behind the same credential-to-principal seam.
+//!
+//! ```text
+//! # user-id  token
+//! alice  4f9c0e9b2d5a4c1e8f7b6a5d4c3b2a1f
+//! bob    0123456789abcdef0123456789abcdef
+//! ```
 //!
 //! Browsers can't set an `Authorization` header on a WebSocket upgrade, so on
 //! upgrade requests the token is also accepted via `Sec-WebSocket-Protocol` as
 //! `openwave-token.<token>` (alongside the handshake subprotocol `openwave-v1`).
 //! Non-browser clients keep using `Authorization: Bearer`. Subprotocol auth is
 //! ignored on ordinary HTTP requests.
+
+use std::path::Path;
 
 use axum::extract::{Request, State};
 use axum::http::{
@@ -18,8 +46,9 @@ use axum::http::{
 };
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use openwave_core::{AgentError, Profile, Result};
 
-use crate::principal::{AuthContext, Principal};
+use crate::principal::{AuthContext, Principal, UserId};
 use crate::state::AppState;
 
 /// Handshake subprotocol the server selects when the client offered it.
@@ -36,29 +65,143 @@ pub const WS_TOKEN_SUBPROTOCOL_PREFIX: &str = "openwave-token.";
 pub const CLIENT_EXECUTOR_HEADER: HeaderName =
     HeaderName::from_static("x-openwave-client-executor");
 
-/// Reject requests without a valid bearer token — from
+/// Reject requests whose bearer token does not resolve to a principal — from
 /// `Authorization: Bearer <token>`, or (on WebSocket upgrades only)
 /// `Sec-WebSocket-Protocol: openwave-token.<token>`.
+///
+/// This is the only place a principal is minted; handlers learn it through
+/// the fail-closed `AuthContext` extractor.
 pub async fn require_token(
     State(state): State<AppState>,
     mut request: Request,
     next: Next,
 ) -> Response {
-    let presented = extract_token(request.headers());
+    let resolved =
+        extract_token(request.headers()).and_then(|presented| resolve_principal(&state, presented));
 
-    match presented {
-        Some(token) if constant_time_eq(token.as_bytes(), state.token.as_bytes()) => {
-            // The per-launch bearer is loopback-only and handed to one client,
-            // so the verified caller *is* the local owner. This is the only
-            // place a principal is minted; handlers learn it through the
-            // fail-closed `AuthContext` extractor.
+    match resolved {
+        Some(principal) => {
             request.extensions_mut().insert(AuthContext {
-                principal: Principal::LocalOwner,
+                principal,
                 client_executor: false,
             });
             next.run(request).await
         }
-        _ => StatusCode::UNAUTHORIZED.into_response(),
+        None => StatusCode::UNAUTHORIZED.into_response(),
+    }
+}
+
+/// Map the presented credential to WHO is asking, per the boot profile.
+///
+/// `None` is a 401: a token that names no one admits no one. Unknown future
+/// profiles resolve nobody until they choose an authenticator — fail closed,
+/// never defaulted to the local owner.
+fn resolve_principal(state: &AppState, presented: &str) -> Option<Principal> {
+    match state.config.profile {
+        // The per-launch bearer is loopback-only and handed to one client, so
+        // the verified caller *is* the local owner.
+        Profile::Desktop => constant_time_eq(presented.as_bytes(), state.token.as_bytes())
+            .then_some(Principal::LocalOwner),
+        // Every self-host credential names a configured user. The per-launch
+        // bearer is deliberately not consulted: on a shared deployment it
+        // names nobody, so it authenticates nobody.
+        Profile::SelfHost => state
+            .principal_tokens
+            .resolve(presented)
+            .map(Principal::User),
+        _ => None,
+    }
+}
+
+/// The self-host profile's static credential-to-principal mapping.
+///
+/// Loaded once at boot from the operator's token file (format in the module
+/// docs). This is the seam a future authenticator (gateway-derived identity,
+/// #578) replaces: whatever verifies the credential, the middleware's output
+/// stays "which [`UserId`] is asking".
+#[derive(Debug, Default)]
+pub struct TokenMap {
+    /// `(token, user)` pairs; tokens are unique, users may repeat.
+    entries: Vec<(Box<str>, UserId)>,
+}
+
+/// Tokens shorter than this are refused at load: a guessable credential names
+/// someone without authenticating them.
+const MIN_TOKEN_LEN: usize = 16;
+
+impl TokenMap {
+    /// Load and validate the token file at `path`.
+    pub fn load(path: &Path) -> Result<Self> {
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            AgentError::config(format!(
+                "failed to read auth tokens file {}: {e}",
+                path.display()
+            ))
+        })?;
+        Self::parse(&text)
+    }
+
+    /// Parse the token-file format. Rejects malformed lines, invalid ids,
+    /// weak or header-unsafe tokens, duplicate tokens, and a file that names
+    /// nobody — an empty authenticator must fail loudly at boot, not admit
+    /// nobody silently.
+    pub fn parse(text: &str) -> Result<Self> {
+        let mut entries: Vec<(Box<str>, UserId)> = Vec::new();
+        for (index, raw) in text.lines().enumerate() {
+            let line_no = index + 1;
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut fields = line.split_whitespace();
+            let (Some(user), Some(token), None) = (fields.next(), fields.next(), fields.next())
+            else {
+                return Err(AgentError::config(format!(
+                    "auth tokens file line {line_no}: expected `<user-id> <token>`"
+                )));
+            };
+            let user = UserId::new(user)
+                .map_err(|e| AgentError::config(format!("auth tokens file line {line_no}: {e}")))?;
+            // Never echo the token itself into an error message.
+            let token_ok = token.len() >= MIN_TOKEN_LEN
+                && token
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'~' | b'-'));
+            if !token_ok {
+                return Err(AgentError::config(format!(
+                    "auth tokens file line {line_no}: token must be at least {MIN_TOKEN_LEN} \
+                     characters from [A-Za-z0-9._~-]"
+                )));
+            }
+            if entries
+                .iter()
+                .any(|(existing, _)| existing.as_ref() == token)
+            {
+                return Err(AgentError::config(format!(
+                    "auth tokens file line {line_no}: duplicate token"
+                )));
+            }
+            entries.push((token.into(), user));
+        }
+        if entries.is_empty() {
+            return Err(AgentError::config(
+                "auth tokens file names no principals; a self-host server nobody can \
+                 authenticate to must not start",
+            ));
+        }
+        Ok(Self { entries })
+    }
+
+    /// The user the presented credential names, if any. Exact match; every
+    /// entry is compared in constant time regardless of where a match lands.
+    pub fn resolve(&self, presented: &str) -> Option<UserId> {
+        let mut resolved = None;
+        for (token, user) in &self.entries {
+            if constant_time_eq(token.as_bytes(), presented.as_bytes()) && resolved.is_none() {
+                resolved = Some(user.clone());
+            }
+        }
+        resolved
     }
 }
 
@@ -81,7 +224,7 @@ pub async fn require_client_executor_token(
         Some(token)
             if constant_time_eq(token.as_bytes(), state.client_executor_token.as_bytes()) =>
         {
-            let Some(auth) = request.extensions().get::<AuthContext>().copied() else {
+            let Some(auth) = request.extensions().get::<AuthContext>().cloned() else {
                 return StatusCode::UNAUTHORIZED.into_response();
             };
             request.extensions_mut().insert(AuthContext {
@@ -175,6 +318,50 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+
+    #[test]
+    fn token_map_parses_the_documented_format_and_resolves_exactly() {
+        let map = TokenMap::parse(
+            "# staff\n\nalice aaaaaaaaaaaaaaaa\nbob\tbbbbbbbbbbbbbbbb\nalice cccccccccccccccc\n",
+        )
+        .unwrap();
+        let alice = UserId::new("alice").unwrap();
+        assert_eq!(map.resolve("aaaaaaaaaaaaaaaa"), Some(alice.clone()));
+        assert_eq!(
+            map.resolve("cccccccccccccccc"),
+            Some(alice),
+            "a user may hold several tokens"
+        );
+        assert_eq!(
+            map.resolve("bbbbbbbbbbbbbbbb"),
+            Some(UserId::new("bob").unwrap())
+        );
+        assert_eq!(map.resolve("dddddddddddddddd"), None);
+        assert_eq!(
+            map.resolve("aaaaaaaaaaaaaaa"),
+            None,
+            "prefixes do not match"
+        );
+    }
+
+    #[test]
+    fn token_map_rejects_files_that_cannot_name_someone_safely() {
+        for (text, why) in [
+            ("", "names nobody"),
+            ("# only comments\n", "names nobody"),
+            ("alice\n", "missing token"),
+            ("alice aaaaaaaaaaaaaaaa extra\n", "trailing field"),
+            ("alice short\n", "guessably short token"),
+            ("alice aaaaaaaa,aaaaaaaa\n", "header-unsafe token character"),
+            ("al!ce aaaaaaaaaaaaaaaa\n", "invalid user id"),
+            (
+                "alice aaaaaaaaaaaaaaaa\nbob aaaaaaaaaaaaaaaa\n",
+                "one token must name one user",
+            ),
+        ] {
+            assert!(TokenMap::parse(text).is_err(), "{why}: {text:?}");
+        }
+    }
 
     #[test]
     fn extracts_bearer_authorization() {

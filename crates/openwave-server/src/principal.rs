@@ -16,25 +16,66 @@
 //!   own. [`ClientExecutor`] types that requirement into handler signatures so
 //!   it survives router refactors.
 
+use std::fmt;
+use std::sync::Arc;
+
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::http::StatusCode;
+use openwave_core::{AgentError, Result};
 
 /// The authenticated identity a request acts as.
 ///
-/// Today the only inhabitant is the single local owner: the desktop bearer is
-/// per-launch and loopback-only, so whoever presents it is the one person at
-/// the machine. A shared deployment adds a variant whose token names a user;
-/// nothing downstream may assume `LocalOwner` is the only case.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The desktop bearer is per-launch and loopback-only, so whoever presents it
+/// is the one person at the machine — [`Principal::LocalOwner`]. On the shared
+/// self-host profile every credential names a configured user instead
+/// ([`Principal::User`]); a token that names no one is rejected at the
+/// middleware, and the local-owner identity does not exist there. Nothing
+/// downstream may assume `LocalOwner` is the only case.
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Principal {
     /// The one person at the machine, authenticated by the per-launch bearer.
     LocalOwner,
+    /// A named user on a shared deployment, resolved from a configured
+    /// credential (today the self-host token file — see [`crate::auth`]).
+    User(UserId),
+}
+
+/// The operator-assigned identifier of a named user on a shared deployment.
+///
+/// Validated at construction: 1–64 ASCII characters from `[A-Za-z0-9._@-]`.
+/// The id is an identity label, not a secret — it appears in config files and
+/// (in later slices) owner columns, so it is kept greppable and log-safe.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UserId(Arc<str>);
+
+impl UserId {
+    /// Validate and intern a user id.
+    pub fn new(id: &str) -> Result<Self> {
+        let valid = !id.is_empty()
+            && id.len() <= 64
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'@' | b'-'));
+        if valid {
+            Ok(Self(id.into()))
+        } else {
+            Err(AgentError::config(format!(
+                "invalid user id {id:?}: expected 1-64 characters from [A-Za-z0-9._@-]"
+            )))
+        }
+    }
+}
+
+impl fmt::Display for UserId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// The authentication result the middleware attaches to a verified request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthContext {
     /// Who the request acts as.
     pub principal: Principal,
@@ -53,7 +94,7 @@ impl<S: Send + Sync> FromRequestParts<S> for AuthContext {
         parts
             .extensions
             .get::<AuthContext>()
-            .copied()
+            .cloned()
             .ok_or(StatusCode::UNAUTHORIZED)
     }
 }
