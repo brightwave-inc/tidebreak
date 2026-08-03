@@ -74,6 +74,38 @@ describe("AssistantWorkingIndicator", () => {
     ).toBe(false);
   });
 
+  it("returns under a partial response when the stream has stalled", () => {
+    const partial: ChatMessage[] = [
+      {
+        id: "assistant-streaming",
+        role: "assistant",
+        text: "Partial response",
+        sources: [],
+      },
+    ];
+
+    expect(shouldShowAssistantWorking(partial, true, 0, true)).toBe(true);
+    // A stall never overrides a more specific live status or a closed turn.
+    expect(
+      shouldShowAssistantWorking(
+        [
+          ...partial,
+          {
+            id: "tool",
+            role: "tool",
+            callId: "call",
+            name: "web_search",
+            status: "running",
+          },
+        ],
+        true,
+        0,
+        true,
+      ),
+    ).toBe(false);
+    expect(shouldShowAssistantWorking(partial, false, 0, true)).toBe(false);
+  });
+
   it("defers to active tool and user-action statuses", () => {
     const runningTool: ChatMessage = {
       id: "tool",
