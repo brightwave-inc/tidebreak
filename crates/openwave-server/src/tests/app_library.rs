@@ -3,7 +3,9 @@
 use super::*;
 
 use openwave_core::id::{AppId, AppRevisionId};
-use openwave_core::local_app::{AppBinding, AppManifest, CreateApp, NewAppRevision};
+use openwave_core::local_app::{
+    AppBinding, AppManifest, AppToolsBinding, CreateApp, NewAppRevision,
+};
 use serde_json::json;
 
 /// The library lifecycle in one pass: the listing carries renderer-safe rows
@@ -47,10 +49,10 @@ async fn library_lists_grant_verdicts_and_deletion_removes_the_row() {
                 id: AppRevisionId::new(),
                 manifest: AppManifest {
                     name: "Library fixture".into(),
-                    bindings: vec![AppBinding {
+                    bindings: vec![AppBinding::Tools(AppToolsBinding {
                         app: connected_app_id(&store, "cmd").await,
                         tools: vec!["mcp__cmd__doit".into()],
-                    }],
+                    })],
                 },
                 byte_len: 1,
                 sha256: [0; 32],

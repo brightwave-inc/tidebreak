@@ -1,4 +1,4 @@
-import { ShieldAlert, ShieldCheck, TriangleAlert, Wrench } from "lucide-react";
+import { Globe, ShieldAlert, ShieldCheck, TriangleAlert, Wrench } from "lucide-react";
 
 import type { AppGrantState } from "@/api";
 import { Button } from "@/components/ui/button";
@@ -59,7 +59,7 @@ export function AppConsentSheet({
                 )}
               </div>
               <ul className="flex flex-col gap-0.5">
-                {binding.tools.map((tool) => (
+                {(binding.tools ?? []).map((tool) => (
                   <li
                     key={tool}
                     className="text-muted-foreground flex items-center gap-1.5 pl-1 text-xs"
@@ -68,14 +68,23 @@ export function AppConsentSheet({
                     <span className="truncate font-mono">{tool}</span>
                   </li>
                 ))}
+                {(binding.operation_ids ?? []).map((operationId) => (
+                  <li
+                    key={operationId}
+                    className="text-muted-foreground flex items-center gap-1.5 pl-1 text-xs"
+                  >
+                    <Globe className="size-3 shrink-0" aria-hidden="true" />
+                    <span className="truncate font-mono">{operationId}</span>
+                  </li>
+                ))}
               </ul>
             </li>
           ))}
         </ul>
       )}
       <p className="text-muted-foreground text-xs">
-        The app can call only these tools, only while you have it open. You can
-        revoke this at any time from the app&rsquo;s page.
+        The app can call only these tools and operations, only while you have
+        it open. You can revoke this at any time from the app&rsquo;s page.
       </p>
       {error && (
         <p className="text-critical text-sm" role="alert">

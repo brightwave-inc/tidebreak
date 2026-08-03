@@ -1,7 +1,8 @@
 use super::*;
 use crate::id::{AgentRunId, AppId, AppRevisionId, ConnectedAppId};
 use crate::local_app::{
-    AppBinding, AppManifest, CreateApp, NewAppRevision, MAX_APP_BUNDLE_BYTES, MAX_APP_REVISIONS,
+    AppBinding, AppManifest, AppToolsBinding, CreateApp, NewAppRevision, MAX_APP_BUNDLE_BYTES,
+    MAX_APP_REVISIONS,
 };
 
 fn at(second: i64) -> DateTime<Utc> {
@@ -15,10 +16,10 @@ fn digest(seed: u8) -> [u8; 32] {
 fn manifest(name: &str) -> AppManifest {
     AppManifest {
         name: name.to_owned(),
-        bindings: vec![AppBinding {
+        bindings: vec![AppBinding::Tools(AppToolsBinding {
             app: ConnectedAppId(uuid::Uuid::from_u128(1)),
             tools: vec!["mcp__sentry__list_issues".into()],
-        }],
+        })],
     }
 }
 
@@ -180,7 +181,10 @@ async fn malformed_manifests_and_out_of_bounds_bundles_are_refused() {
     // A pinned name that is not shaped like a mounted tool can never match
     // one, so the store refuses it at the door.
     let mut bare_tool = create_request(1);
-    bare_tool.revision.manifest.bindings[0].tools = vec!["list_issues".into()];
+    bare_tool.revision.manifest.bindings[0] = AppBinding::Tools(AppToolsBinding {
+        app: ConnectedAppId(uuid::Uuid::from_u128(1)),
+        tools: vec!["list_issues".into()],
+    });
     assert!(store.create_app(&bare_tool).await.is_err());
 
     let mut empty_bundle = create_request(1);
@@ -194,9 +198,11 @@ async fn malformed_manifests_and_out_of_bounds_bundles_are_refused() {
     // A manifest over the 64 KiB bound is refused however well-formed it is.
     let mut oversized_manifest = create_request(1);
     oversized_manifest.revision.manifest.bindings = (0..2_000)
-        .map(|index| AppBinding {
-            app: ConnectedAppId::new(),
-            tools: vec![format!("mcp__server_{index:04}__tool_padding_padding")],
+        .map(|index| {
+            AppBinding::Tools(AppToolsBinding {
+                app: ConnectedAppId::new(),
+                tools: vec![format!("mcp__server_{index:04}__tool_padding_padding")],
+            })
         })
         .collect();
     assert!(store.create_app(&oversized_manifest).await.is_err());

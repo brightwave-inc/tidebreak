@@ -175,11 +175,11 @@ async fn absorption_migrates_servers_rekeys_manifests_and_drops_grants() {
         .unwrap()
         .expect("the revision row survives the cut");
     assert_eq!(revision.manifest.bindings.len(), 1);
-    assert_eq!(revision.manifest.bindings[0].app, apps[0].id);
-    assert_eq!(
-        revision.manifest.bindings[0].tools,
-        ["mcp__sentry__list_issues"]
-    );
+    let crate::local_app::AppBinding::Tools(binding) = &revision.manifest.bindings[0] else {
+        panic!("the surviving binding keeps the tools vocabulary");
+    };
+    assert_eq!(binding.app, apps[0].id);
+    assert_eq!(binding.tools, ["mcp__sentry__list_issues"]);
 
     assert!(
         store

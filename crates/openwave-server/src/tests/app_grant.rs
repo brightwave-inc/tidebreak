@@ -8,7 +8,9 @@
 use super::*;
 
 use openwave_core::id::{AppId, AppRevisionId};
-use openwave_core::local_app::{AppBinding, AppManifest, CreateApp, NewAppRevision};
+use openwave_core::local_app::{
+    AppBinding, AppManifest, AppToolsBinding, CreateApp, NewAppRevision,
+};
 use serde_json::json;
 
 async fn grant_request(
@@ -44,10 +46,10 @@ async fn create_app_bound_to(
                 id: AppRevisionId::new(),
                 manifest: AppManifest {
                     name: "Grant fixture".into(),
-                    bindings: vec![AppBinding {
+                    bindings: vec![AppBinding::Tools(AppToolsBinding {
                         app,
                         tools: tools.iter().map(|tool| (*tool).to_owned()).collect(),
-                    }],
+                    })],
                 },
                 byte_len: 1,
                 sha256: [0; 32],

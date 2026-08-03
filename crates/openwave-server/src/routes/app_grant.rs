@@ -3,44 +3,54 @@
 //!
 //! The renderer never supplies grant content. Consent (`POST`) is a bare
 //! affirmative — the server computes the grant from the app's *current*
-//! manifest and the server definitions *current* at that moment, so a stale
-//! sheet can never grant tools the manifest no longer pins or pin a
-//! definition that has since changed. State (`GET`) is renderer-safe
-//! metadata: server and tool *names* with coverage/staleness booleans, never
-//! definitions and never environment values.
+//! manifest and the connected-app definitions *current* at that moment, so a
+//! stale sheet can never grant capabilities the manifest no longer pins or
+//! pin a definition that has since changed. State (`GET`) is renderer-safe
+//! metadata: connected-app, tool, and operation *names* with
+//! coverage/staleness booleans, never definitions and never environment or
+//! credential values.
+
+use std::collections::BTreeMap;
 
 use axum::extract::State;
 use axum::http::StatusCode;
 use chrono::Utc;
 use serde::Serialize;
 
+use openwave_core::connected_app::ConnectedAppKind;
 use openwave_core::id::{AppId, ConnectedAppId};
 use openwave_core::local_app::{
-    mounted_tool_under, AppGrant, AppGrantBinding, AppManifest, AppRecord, AppRevision,
+    mounted_tool_under, AppBinding, AppGrant, AppGrantBinding, AppManifest,
+    AppOperationsGrantBinding, AppRecord, AppRevision, AppToolsGrantBinding,
 };
 
+use crate::connected_apps::{current_app_fingerprints, current_rest_definitions, AppFingerprint};
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
-use crate::mcp_config::McpAppFingerprint;
 use crate::state::AppState;
 
 /// Renderer-safe grant state for one app: the consent sheet's whole input.
 ///
 /// `bindings` follows the app's **current** revision's manifest — ids and
 /// names only. The definitions behind the connected apps, and any environment
-/// or token values they select, are deliberately absent from this projection.
+/// or credential values they select, are deliberately absent from this
+/// projection.
 #[derive(Debug, Serialize, ts_rs::TS)]
 pub struct AppGrantState {
     /// Whether a live grant fully covers the current manifest with every
     /// bound definition unchanged since consent — the "no sheet needed"
     /// verdict. When `false`, (re-)consent is required before every pinned
-    /// tool is invokable.
+    /// capability is invokable.
     pub granted: bool,
     /// The current manifest's bindings, one entry per bound connected app.
     pub bindings: Vec<AppGrantBindingState>,
 }
 
 /// One current-manifest binding, projected for the consent sheet.
+///
+/// Exactly one of `tools` and `operation_ids` is present, matching the
+/// binding's vocabulary: mounted MCP tools for an `mcp_server` binding,
+/// declared operations for a `rest_api` binding.
 #[derive(Debug, Serialize, ts_rs::TS)]
 pub struct AppGrantBindingState {
     /// Connected app the manifest binds, by record id.
@@ -48,11 +58,15 @@ pub struct AppGrantBindingState {
     /// The connected app's display name, absent when no record with that id
     /// is configured — the sheet says so instead of showing a raw id alone.
     pub name: Option<String>,
-    /// Full mounted tool names the current manifest pins under this app.
-    pub tools: Vec<String>,
-    /// Whether the live grant covers every listed tool under this connected
-    /// app and the app's current definition still matches the granted
-    /// fingerprint.
+    /// Full mounted tool names the current manifest pins under this app, for
+    /// an `mcp_server` binding.
+    pub tools: Option<Vec<String>>,
+    /// Catalog `operationId`s the current manifest pins under this app, for a
+    /// `rest_api` binding.
+    pub operation_ids: Option<Vec<String>>,
+    /// Whether the live grant covers every listed capability under this
+    /// connected app and the app's current definition still matches the
+    /// granted fingerprint.
     pub granted: bool,
     /// Whether a grant names this connected app but its definition changed
     /// (or the record disappeared) since consent — the "reconfigured since
@@ -68,7 +82,7 @@ pub async fn get_app_grant_state(
 ) -> Result<Json<AppGrantState>, ServerError> {
     let (app, revision) = current_live_app(&state, app_id).await?;
     let grant = state.store.get_app_grant(app.id).await?;
-    let current = state.mcp.app_fingerprints().await;
+    let current = current_app_fingerprints(&state).await?;
     Ok(Json(grant_state(
         &revision.manifest,
         grant.as_ref(),
@@ -87,36 +101,82 @@ pub async fn post_app_grant(
     Path(app_id): Path<AppId>,
 ) -> Result<Json<AppGrantState>, ServerError> {
     let (app, revision) = current_live_app(&state, app_id).await?;
-    let current = state.mcp.app_fingerprints().await;
+    let current = current_app_fingerprints(&state).await?;
+    let rest_definitions = current_rest_definitions(&state).await?;
     let mut bindings = Vec::with_capacity(revision.manifest.bindings.len());
     for binding in &revision.manifest.bindings {
         // A binding whose connected app is not configured cannot be pinned to
-        // a definition, so there is nothing coherent to consent to.
-        let Some(app_fingerprint) = current.get(&binding.app) else {
+        // a definition, so there is nothing coherent to consent to. An
+        // unparseable rest_api definition reads the same way, by design.
+        let Some(app_fingerprint) = current.get(&binding.app()) else {
             return Err(ServerError::conflict(format!(
                 "connected app {} is not configured, so this app cannot be granted",
-                binding.app
+                binding.app()
             )));
         };
-        // Nor is there anything coherent when a pinned name is not under the
-        // app's current namespace (the record was renamed after authoring):
-        // the grant would name tools that cannot exist under this app.
-        if let Some(tool) = binding
-            .tools
-            .iter()
-            .find(|tool| mounted_tool_under(&app_fingerprint.name, tool).is_none())
-        {
-            return Err(ServerError::conflict(format!(
-                "tool {tool:?} is not mounted under connected app {:?}, so this \
-                 app cannot be granted",
-                app_fingerprint.name
-            )));
+        match binding {
+            AppBinding::Tools(binding) => {
+                if app_fingerprint.kind != ConnectedAppKind::McpServer {
+                    return Err(ServerError::conflict(format!(
+                        "connected app {:?} is a {} app, so its tools binding cannot \
+                         be granted",
+                        app_fingerprint.name, app_fingerprint.kind
+                    )));
+                }
+                // Nor is there anything coherent when a pinned name is not
+                // under the app's current namespace (the record was renamed
+                // after authoring): the grant would name tools that cannot
+                // exist under this app.
+                if let Some(tool) = binding
+                    .tools
+                    .iter()
+                    .find(|tool| mounted_tool_under(&app_fingerprint.name, tool).is_none())
+                {
+                    return Err(ServerError::conflict(format!(
+                        "tool {tool:?} is not mounted under connected app {:?}, so this \
+                         app cannot be granted",
+                        app_fingerprint.name
+                    )));
+                }
+                bindings.push(AppGrantBinding::Tools(AppToolsGrantBinding {
+                    app: binding.app,
+                    tools: binding.tools.clone(),
+                    fingerprint: app_fingerprint.fingerprint,
+                }));
+            }
+            AppBinding::Operations(binding) => {
+                // Every pinned operation must exist in the record's current
+                // catalog — a pin the catalog no longer declares leaves
+                // nothing coherent to consent to.
+                let declared = rest_definitions
+                    .iter()
+                    .find(|(id, _, _)| *id == binding.app)
+                    .map(|(_, _, definition)| &definition.catalog.operations);
+                let Some(declared) = declared else {
+                    return Err(ServerError::conflict(format!(
+                        "connected app {:?} is a {} app, so its operations binding \
+                         cannot be granted",
+                        app_fingerprint.name, app_fingerprint.kind
+                    )));
+                };
+                if let Some(operation_id) = binding
+                    .operation_ids
+                    .iter()
+                    .find(|operation_id| !declared.contains_key(*operation_id))
+                {
+                    return Err(ServerError::conflict(format!(
+                        "operation {operation_id:?} is not declared by connected app \
+                         {:?}, so this app cannot be granted",
+                        app_fingerprint.name
+                    )));
+                }
+                bindings.push(AppGrantBinding::Operations(AppOperationsGrantBinding {
+                    app: binding.app,
+                    operation_ids: binding.operation_ids.clone(),
+                    fingerprint: app_fingerprint.fingerprint,
+                }));
+            }
         }
-        bindings.push(AppGrantBinding {
-            app: binding.app,
-            tools: binding.tools.clone(),
-            fingerprint: app_fingerprint.fingerprint,
-        });
     }
     let grant = AppGrant {
         app_id: app.id,
@@ -135,11 +195,11 @@ pub async fn post_app_grant(
 /// carries right now. A missing record is a mismatch, never a match.
 fn fingerprint_current(
     binding: &AppGrantBinding,
-    current: &std::collections::BTreeMap<ConnectedAppId, McpAppFingerprint>,
+    current: &BTreeMap<ConnectedAppId, AppFingerprint>,
 ) -> bool {
     current
-        .get(&binding.app)
-        .is_some_and(|app| app.fingerprint == binding.fingerprint)
+        .get(&binding.app())
+        .is_some_and(|app| app.fingerprint == binding.fingerprint())
 }
 
 /// `DELETE /apps/{id}/grant` — revoke consent.
@@ -179,16 +239,34 @@ async fn current_live_app(
     Ok((app, revision))
 }
 
+/// Whether a granted binding covers everything a current-manifest binding
+/// pins, in the same vocabulary. A grant kept under the other vocabulary
+/// covers nothing: consent named tools or operations, never "whatever the
+/// record now speaks".
+fn binding_covered(pinned: &AppBinding, granted: &AppGrantBinding) -> bool {
+    match (pinned, granted) {
+        (AppBinding::Tools(pinned), AppGrantBinding::Tools(granted)) => pinned
+            .tools
+            .iter()
+            .all(|tool| granted.tools.iter().any(|held| held == tool)),
+        (AppBinding::Operations(pinned), AppGrantBinding::Operations(granted)) => pinned
+            .operation_ids
+            .iter()
+            .all(|operation| granted.operation_ids.iter().any(|held| held == operation)),
+        _ => false,
+    }
+}
+
 /// Project grant state against the current manifest and current definitions.
 ///
 /// The same three checks the invoke gate applies, evaluated for the whole
-/// manifest: `granted` is true exactly when every pinned tool would pass the
-/// gate right now. Shared with the library listing so its granted badge is
-/// this verdict rather than a reimplementation of it.
+/// manifest: `granted` is true exactly when every pinned capability would
+/// pass the gate right now. Shared with the library listing so its granted
+/// badge is this verdict rather than a reimplementation of it.
 pub(crate) fn grant_state(
     manifest: &AppManifest,
     grant: Option<&AppGrant>,
-    current: &std::collections::BTreeMap<ConnectedAppId, McpAppFingerprint>,
+    current: &BTreeMap<ConnectedAppId, AppFingerprint>,
 ) -> AppGrantState {
     let bindings: Vec<AppGrantBindingState> = manifest
         .bindings
@@ -198,20 +276,20 @@ pub(crate) fn grant_state(
                 grant
                     .bindings
                     .iter()
-                    .find(|candidate| candidate.app == binding.app)
+                    .find(|candidate| candidate.app() == binding.app())
             });
-            let covered = granted_binding.is_some_and(|granted| {
-                binding
-                    .tools
-                    .iter()
-                    .all(|tool| granted.tools.iter().any(|held| held == tool))
-            });
+            let covered = granted_binding.is_some_and(|granted| binding_covered(binding, granted));
             let definition_changed =
                 granted_binding.is_some_and(|granted| !fingerprint_current(granted, current));
+            let (tools, operation_ids) = match binding {
+                AppBinding::Tools(binding) => (Some(binding.tools.clone()), None),
+                AppBinding::Operations(binding) => (None, Some(binding.operation_ids.clone())),
+            };
             AppGrantBindingState {
-                app: binding.app,
-                name: current.get(&binding.app).map(|app| app.name.clone()),
-                tools: binding.tools.clone(),
+                app: binding.app(),
+                name: current.get(&binding.app()).map(|app| app.name.clone()),
+                tools,
+                operation_ids,
                 granted: covered
                     && granted_binding.is_some_and(|granted| fingerprint_current(granted, current)),
                 definition_changed,
