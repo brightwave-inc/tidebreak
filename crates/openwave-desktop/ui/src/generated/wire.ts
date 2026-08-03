@@ -1251,7 +1251,16 @@ meta: string | null,
  * own closed mapping with a generic fallback. `default` because retained
  * projections predate the field.
  */
-media_type: string | null, };
+media_type: string | null, 
+/**
+ * The durable output this row names, when the row is one.
+ *
+ * Data rather than display text: the renderer routes a click through its
+ * own panel navigation and never prints the id. Present only on
+ * [`ResultEntryKind::Output`] rows; `default` because retained
+ * projections predate the field.
+ */
+output_id: string | null, };
 
 /**
  * What one row of a listed result is, which is what picks its icon.

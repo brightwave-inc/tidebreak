@@ -296,6 +296,7 @@ describe("published outputs", () => {
           detail: null,
           meta: "v2 · updated",
           media_type: null,
+          output_id: null,
         },
       ],
     };

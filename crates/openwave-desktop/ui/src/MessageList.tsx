@@ -30,6 +30,7 @@ import { ThinkingAccordion } from "./ThinkingAccordion";
 import { stripCitationDirectives } from "./citationDirectives";
 import { MessageCitationsProvider } from "./InlineCitation";
 import { McpAppCard } from "./McpAppCard";
+import { OutputCardList } from "./OutputCard";
 import { ToolCommandCard, type ToolCallStatus } from "./ToolCallCard";
 import { ErrorBoundary } from "./ErrorBoundary";
 import {
@@ -762,8 +763,10 @@ function surfacedCards(
   // than as two piles sorted by what kind of card they are.
   phase.forEach((entry, entryIndex) => {
     let card: ReactNode = null;
+    let outputCards: ReactNode = null;
     try {
       card = surfacedCard(entry, context);
+      outputCards = surfacedOutputCards(entry);
     } catch (error) {
       console.error("tool result card could not be built", error);
       // The entry's own id may be the unreadable part, so the placeholder is
@@ -771,8 +774,28 @@ function surfacedCards(
       card = <ToolActivityUnavailable key={`card-${entryIndex}`} />;
     }
     if (card !== null) cards.push(card);
+    if (outputCards !== null) cards.push(outputCards);
   });
   return cards;
+}
+
+/**
+ * The output cards an exec call earns, or `null` when it published nothing.
+ *
+ * Separate from {@link surfacedCard} because they are additive: the command
+ * card says what ran, and these say what it produced — one clickable card per
+ * created or updated output, the way Brightwave surfaces deliverables at the
+ * end of a turn.
+ */
+function surfacedOutputCards(entry: ChatMessage): ReactNode {
+  if (entry.role !== "tool" || entry.result?.tool !== "exec") return null;
+  const outputs = entry.result.outputs ?? [];
+  if (outputs.length === 0) return null;
+  return isolatedCard(
+    `${entry.id}-outputs`,
+    outputs.map((output) => output.outputId ?? output.label).join(" "),
+    <OutputCardList outputs={outputs} />,
+  );
 }
 
 /** The card one entry earns, or `null` when it earns none. */

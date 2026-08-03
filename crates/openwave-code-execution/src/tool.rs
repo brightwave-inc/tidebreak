@@ -260,6 +260,7 @@ impl Tool for ExecTool {
                     .map(|entry| {
                         json!({
                             "filename": entry.filename,
+                            "output_id": entry.output_id,
                             "version": entry.ordinal,
                             "status": match entry.status {
                                 crate::OutputArtifactStatus::Created => "created",
@@ -443,11 +444,13 @@ mod tests {
                 entries: vec![
                     crate::OutputArtifactEntry {
                         filename: "report.md".into(),
+                        output_id: "output-report".into(),
                         ordinal: 2,
                         status: crate::OutputArtifactStatus::Updated,
                     },
                     crate::OutputArtifactEntry {
                         filename: "data.csv".into(),
+                        output_id: "output-data".into(),
                         ordinal: 1,
                         status: crate::OutputArtifactStatus::Unchanged,
                     },

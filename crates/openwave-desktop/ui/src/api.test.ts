@@ -948,8 +948,16 @@ describe("parseToolResultPreview closed results", () => {
           detail: "scratch",
           meta: "1.2 KB",
           mediaType: "text/markdown",
+          outputId: null,
         },
-        { kind: "folder", label: "reports", detail: null, meta: null, mediaType: null },
+        {
+          kind: "folder",
+          label: "reports",
+          detail: null,
+          meta: null,
+          mediaType: null,
+          outputId: null,
+        },
       ],
       failures: [{ label: "q4.md", error: "unreadable" }],
     });

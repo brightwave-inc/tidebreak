@@ -1,4 +1,4 @@
-import { Check, Clock, FileOutput, Terminal, X } from "lucide-react";
+import { Check, Clock, Terminal, X } from "lucide-react";
 import {
   isRendererToolName,
   type ExecResultPreview,
@@ -246,7 +246,6 @@ export function ToolCommandCard({
   const running = presentation.tone === "running";
   const output = commandOutput(result);
   const images = result?.images ?? [];
-  const outputs = result?.outputs ?? [];
   // A command that finished silently has nothing to tab between, and a
   // "Command / Output → no output" pair reads as confusing noise.
   const tabbed = running || output !== null || images.length > 0;
@@ -258,7 +257,7 @@ export function ToolCommandCard({
       title={command.headline}
       titleClassName="font-mono"
       badge={<ToolStatusBadge presentation={presentation} result={result} />}
-      defaultExpanded={running || images.length > 0 || outputs.length > 0}
+      defaultExpanded={running || images.length > 0}
     >
       {tabbed ? (
         <Tabs defaultValue="output">
@@ -317,22 +316,6 @@ export function ToolCommandCard({
             {command.detail}
           </ScrollableContainer>
         </div>
-      )}
-      {outputs.length > 0 && (
-        <ul className="flex flex-col gap-0.5 px-2 pb-1.5" aria-label="Published outputs">
-          {outputs.map((entry) => (
-            <li
-              key={`${entry.label} ${entry.meta ?? ""}`}
-              className="text-muted-foreground flex items-center gap-1.5 text-xs"
-            >
-              <FileOutput className="size-3.5 shrink-0" aria-hidden="true" />
-              <span className="truncate">{entry.label}</span>
-              {entry.meta && (
-                <span className="text-2xs shrink-0 tabular-nums">{entry.meta}</span>
-              )}
-            </li>
-          ))}
-        </ul>
       )}
     </ToolCardShell>
   );
