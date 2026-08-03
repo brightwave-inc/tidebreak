@@ -11,7 +11,7 @@ use crate::approval::{
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{CallId, ChatId, TurnId};
-use crate::model::{ToolCallExecution, ToolCallStatus, TurnRunStatus};
+use crate::model::{OwnerId, ToolCallExecution, ToolCallStatus, TurnRunStatus};
 use crate::preview::ToolActionPreview;
 use crate::storage::{
     DecideToolApprovalOutcome, JournaledToolApprovalOutcome, RequestToolApprovalOutcome,
@@ -117,13 +117,41 @@ fn grant_level_from_row(
     }
 }
 
+/// The grants `owner` may see and withdraw: those whose level points at one
+/// of the owner's own chats or projects.
+///
+/// Ownership is derived from the level rather than stored on the grant row: a
+/// grant's chat or project carries an invariant owner, and the foreign keys
+/// delete the grant with its parent, so the derivation cannot dangle or drift.
+fn owned_grants_condition(owner: &OwnerId) -> sea_orm::Condition {
+    let owned_chats = sea_orm::sea_query::Query::select()
+        .column(entities::chat::Column::Id)
+        .from(entities::chat::Entity)
+        .and_where(entities::chat::Column::Owner.eq(owner.as_str()))
+        .to_owned();
+    let owned_projects = sea_orm::sea_query::Query::select()
+        .column(entities::project::Column::Id)
+        .from(entities::project::Entity)
+        .and_where(entities::project::Column::Owner.eq(owner.as_str()))
+        .to_owned();
+    sea_orm::Condition::any()
+        .add(entities::standing_tool_grant::Column::ChatId.in_subquery(owned_chats))
+        .add(entities::standing_tool_grant::Column::ProjectId.in_subquery(owned_projects))
+}
+
 /// Every durable standing grant, newest first, hydrated on the same terms as
 /// [`matching_standing_grant`]: a row whose kind, scope, or grantability no
-/// longer parses is skipped rather than surfaced or widened.
+/// longer parses is skipped rather than surfaced or widened. With an `owner`,
+/// only grants reachable through that owner's chats and projects are listed.
 pub(in crate::db) async fn list_standing_grants(
     store: &DbStore,
+    owner: Option<&OwnerId>,
 ) -> Result<Vec<crate::approval::StandingGrantRecord>> {
-    let rows = entities::standing_tool_grant::Entity::find()
+    let mut query = entities::standing_tool_grant::Entity::find();
+    if let Some(owner) = owner {
+        query = query.filter(owned_grants_condition(owner));
+    }
+    let rows = query
         .order_by_desc(entities::standing_tool_grant::Column::GrantedAt)
         .all(&store.conn)
         .await
@@ -145,15 +173,20 @@ pub(in crate::db) async fn list_standing_grants(
 }
 
 /// Delete one standing grant by its source approval. Idempotent: deleting a
-/// grant that is already gone reports `false` rather than erroring.
+/// grant that is already gone reports `false` rather than erroring. With an
+/// `owner`, another owner's grant is left standing and reports `false`,
+/// indistinguishable from absent.
 pub(in crate::db) async fn revoke_standing_grant(
     store: &DbStore,
     source_call_id: CallId,
+    owner: Option<&OwnerId>,
 ) -> Result<bool> {
-    let result = entities::standing_tool_grant::Entity::delete_by_id(source_call_id.0)
-        .exec(&store.conn)
-        .await
-        .map_err(store_err)?;
+    let mut delete = entities::standing_tool_grant::Entity::delete_many()
+        .filter(entities::standing_tool_grant::Column::SourceCallId.eq(source_call_id.0));
+    if let Some(owner) = owner {
+        delete = delete.filter(owned_grants_condition(owner));
+    }
+    let result = delete.exec(&store.conn).await.map_err(store_err)?;
     Ok(result.rows_affected == 1)
 }
 

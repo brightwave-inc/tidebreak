@@ -10,6 +10,12 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Compile the PostgreSQL driver in, so a self-host boot can open the store
+# `OPENWAVE_DATABASE_URL` names. Off by default: the desktop profile is
+# SQLite-only and the driver is a heavy build-time dependency.
+postgres = ["openwave-core/postgres"]
+
 [dependencies]
 openwave-shell-policy = { path = "../openwave-shell-policy" }
 openwave-code-execution = { path = "../openwave-code-execution" }
