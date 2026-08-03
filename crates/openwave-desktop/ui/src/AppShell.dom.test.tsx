@@ -408,8 +408,23 @@ describe("app shell", () => {
     for (const label of conversationOnly) {
       expect(screen.getByRole("button", { name: label })).toBeEnabled();
     }
-    // And the conversation's rail is not a place to browse the others from.
-    expect(screen.queryByLabelText("Recent chats")).not.toBeInTheDocument();
+  });
+
+  it("switches to another conversation from inside one", async () => {
+    const user = userEvent.setup();
+    const { router } = await mountApp({ at: "/c/chat-1" });
+    await screen.findByTestId("transcript");
+
+    // The rail lists the recents with the open chat marked, so leaving for
+    // another conversation is one click, not a trip through home.
+    const recentList = await screen.findByLabelText("Recent chats");
+    expect(
+      within(recentList).getByRole("button", { name: "Roadmap" }),
+    ).toHaveAttribute("aria-current", "page");
+
+    await user.click(within(recentList).getByRole("button", { name: "New chat" }));
+
+    await waitFor(() => expect(router.state.location.pathname).toBe("/c/chat-2"));
   });
 
   it("remembers the collapsed rail across a restart", async () => {

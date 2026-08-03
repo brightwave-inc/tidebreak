@@ -14,7 +14,8 @@ import { listDeliverables, type DeliverablesCatalog } from "@/deliverables";
 import type { PanelType } from "@/panel/panelTypes";
 import { usePanelNav } from "@/panel/usePanelNav";
 import { useRefreshSignals } from "@/RefreshSignals";
-import { SidebarButton } from "./primitives";
+import { RecentChatsSection } from "./RecentChatsSection";
+import { SidebarButton, SidebarSectionTitle } from "./primitives";
 import { SidebarFrame } from "./SidebarFrame";
 
 // Module scope, not an inline arrow: the count effect keys on the extractor's
@@ -23,13 +24,13 @@ const countDeliverables = (catalog: DeliverablesCatalog) =>
   catalog.deliverables.length;
 
 /**
- * The rail inside one conversation, holding only what acts on that
- * conversation.
+ * The rail inside one conversation: the controls that act on it, and the way
+ * to the others.
  *
- * The chat list is deliberately absent. Every control here needs a chat to
- * mean anything, and because this rail only exists inside one, none of them
- * has a disabled state to fall back to — which was the tell that the previous
- * shared rail was in the wrong place.
+ * The recent-chats list rides along even though nothing in it is scoped to
+ * this conversation, because switching conversations is the one navigation
+ * done most, and routing it through home made the common path the longest
+ * one. The open chat is marked so the list also says where the reader is.
  */
 export function ChatSidebar({ chat }: { chat: Chat }) {
   const navigate = useNavigate();
@@ -43,9 +44,8 @@ export function ChatSidebar({ chat }: { chat: Chat }) {
       ? new Set([layout.left.type, layout.right.type])
       : new Set<PanelType>(["chat"]);
 
-  // The list is not here to carry a per-row marker, but an agent parking a turn
-  // in another conversation still has to be noticeable from this one. The way
-  // back doubles as where that is reported.
+  // The recent list carries per-row markers, but a chat past its cut can still
+  // park a turn on a question. The way back doubles as where that is reported.
   const elsewhereNeedsAttention = [...chatIdsWithPendingPrompts].some(
     (id) => id !== chat.id,
   );
@@ -83,6 +83,11 @@ export function ChatSidebar({ chat }: { chat: Chat }) {
         active={openPanelTypes.has("folders")}
         onClick={() => openPanel({ type: "folders" })}
       />
+
+      <SidebarSectionTitle className="mt-4">Chats</SidebarSectionTitle>
+      <div className="flex flex-col gap-0.5">
+        <RecentChatsSection activeChatId={chat.id} />
+      </div>
     </SidebarFrame>
   );
 }
