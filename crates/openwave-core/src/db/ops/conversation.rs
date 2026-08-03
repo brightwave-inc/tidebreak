@@ -994,6 +994,25 @@ pub(in crate::db) async fn list_messages(store: &DbStore, chat_id: ChatId) -> Re
     list_messages_on(&store.conn, chat_id).await
 }
 
+/// Output message ids of the chat's cancelled turns — the partial prose a
+/// cancel committed (#1182), which context assembly annotates as interrupted.
+pub(in crate::db) async fn list_cancelled_output_message_ids(
+    store: &DbStore,
+    chat_id: ChatId,
+) -> Result<Vec<MessageId>> {
+    let turns = entities::turn_run::Entity::find()
+        .filter(entities::turn_run::Column::ChatId.eq(chat_id.0))
+        .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Cancelled.as_str()))
+        .filter(entities::turn_run::Column::OutputMessageId.is_not_null())
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(turns
+        .into_iter()
+        .filter_map(|turn| turn.output_message_id.map(MessageId))
+        .collect())
+}
+
 async fn list_messages_on<C>(conn: &C, chat_id: ChatId) -> Result<Vec<Message>>
 where
     C: ConnectionTrait,

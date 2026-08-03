@@ -16,7 +16,7 @@
 //! - context reduction is deterministic floor+restore (no LLM summarization);
 //!   retries with progressive reduction on provider prompt-too-long errors.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -79,6 +79,11 @@ const MAX_PARALLEL_READ_ONLY_CALLS: usize = 8;
 /// re-issuing the same call keeps getting the refusal while a changed argument
 /// proceeds normally.
 const REPEATED_CALL_LIMIT: usize = 3;
+
+/// Appended in model context to the partial prose a cancelled turn committed
+/// (#1182). Never stored and never rendered — the durable message and the
+/// transcript keep exactly what the user watched stream.
+const USER_INTERRUPTION_NOTE: &str = "\n\n[The user stopped this response here]";
 const MAX_ANNOUNCED_FILES: usize = 8;
 const MAX_ANNOUNCED_IMAGES: usize = 8;
 
@@ -3519,7 +3524,24 @@ impl Agent {
         chat_id: ChatId,
         checkpoint_source: Option<MessageId>,
     ) -> Result<LoadedTranscript> {
-        let messages = self.store.list_messages(chat_id).await?;
+        let mut messages = self.store.list_messages(chat_id).await?;
+        // The partial prose a cancelled turn committed (#1182) re-enters model
+        // context annotated, so the model reads it as a response the user
+        // stopped rather than one it chose to end mid-sentence. Applied here,
+        // in context assembly only — the durable row and the renderer keep the
+        // prose exactly as the user saw it.
+        let interrupted = self
+            .store
+            .list_cancelled_output_message_ids(chat_id)
+            .await?;
+        if !interrupted.is_empty() {
+            let interrupted: HashSet<MessageId> = interrupted.into_iter().collect();
+            for message in &mut messages {
+                if interrupted.contains(&message.id) {
+                    message.content.push_str(USER_INTERRUPTION_NOTE);
+                }
+            }
+        }
         let tool_calls = self.store.list_tool_calls(chat_id).await?;
         let attachments = self.store.list_message_attachments(chat_id).await?;
         let document_attachments = self
@@ -10167,6 +10189,127 @@ mod tests {
         let roles: Vec<Role> = messages.iter().map(|m| m.role).collect();
         assert_eq!(roles, vec![Role::User, Role::Assistant]);
         assert_eq!(messages[1].content, "partial");
+    }
+
+    /// The durable path's mid-stream cancel: the claimed outcome carries the
+    /// partial prose out for the worker to commit, and once committed the next
+    /// context load reads it annotated as user-stopped (#1182) while the
+    /// durable row keeps exactly what the user watched stream.
+    #[tokio::test]
+    async fn claimed_cancel_carries_partial_output_and_context_notes_the_stop() {
+        let (store, chat, _workspace) = cancel_test_chat().await;
+
+        let turn_id = TurnId::new();
+        store
+            .accept_turn(turn_id, chat.id, "stall", "go")
+            .await
+            .unwrap();
+        let claimed_at = Utc::now();
+        let lease = uuid::Uuid::new_v4();
+        store
+            .claim_turn_run(lease, claimed_at, claimed_at + chrono::Duration::minutes(1))
+            .await
+            .unwrap()
+            .turn
+            .expect("accepted turn is claimable");
+
+        let cancel = CancelToken::new();
+        let agent = Agent::new(
+            Arc::new(StallProvider),
+            Arc::new(ToolRegistry::new()),
+            store.clone(),
+            AgentConfig {
+                model: "stall".into(),
+                ..Default::default()
+            },
+        )
+        .with_cancel(cancel.clone());
+
+        let output_message_id = MessageId::new();
+        let (tx, mut rx) = unbounded();
+        let handle = tokio::spawn({
+            let chat = chat.clone();
+            async move {
+                agent
+                    .run_claimed_turn(&chat, turn_id, output_message_id, 1, &tx)
+                    .await
+            }
+        });
+        while let Some(emission) = rx.next().await {
+            match emission {
+                ClaimedAgentEvent::Pending {
+                    event: AgentEvent::TextDelta { .. },
+                    ..
+                } => cancel.cancel(),
+                ClaimedAgentEvent::Flush(ack) => {
+                    let _ = ack.send(());
+                }
+                _ => {}
+            }
+        }
+        let outcome = handle.await.unwrap().unwrap();
+        let AgentTurnOutcome::Cancelled {
+            output,
+            citations,
+            usage,
+            ..
+        } = outcome
+        else {
+            panic!("a mid-stream cancel ends the claimed turn as cancelled: {outcome:?}")
+        };
+        let output = output.expect("a prose-only cancel carries its partial output");
+        assert_eq!(
+            (output.id, output.content.as_str()),
+            (output_message_id, "partial")
+        );
+
+        // Play the worker: durably request, then acknowledge with the output.
+        store
+            .request_turn_cancellation(turn_id, Utc::now())
+            .await
+            .unwrap()
+            .expect("running cancellation is accepted");
+        store
+            .finish_turn_cancellation_and_append_event(
+                turn_id,
+                lease,
+                Utc::now(),
+                usage,
+                Some(&output),
+                &citations,
+            )
+            .await
+            .unwrap()
+            .expect("worker acknowledges cancellation with output");
+
+        let stored = store.list_messages(chat.id).await.unwrap();
+        assert_eq!(stored.last().map(|m| m.content.as_str()), Some("partial"));
+        let transcript = agent_for_store(&store).load_transcript(chat.id, None).await;
+        let assistant_text = transcript
+            .unwrap()
+            .messages
+            .iter()
+            .filter(|message| message.role == Role::Assistant)
+            .flat_map(|message| message.content.iter())
+            .find_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .expect("cancelled partial output reaches model context");
+        assert_eq!(assistant_text, format!("partial{USER_INTERRUPTION_NOTE}"));
+    }
+
+    /// A throwaway agent over `store`, for exercising context loading.
+    fn agent_for_store(store: &Arc<dyn Store>) -> Agent {
+        Agent::new(
+            Arc::new(StallProvider),
+            Arc::new(ToolRegistry::new()),
+            store.clone(),
+            AgentConfig {
+                model: "stall".into(),
+                ..Default::default()
+            },
+        )
     }
 
     struct ToolCallStallProvider;
