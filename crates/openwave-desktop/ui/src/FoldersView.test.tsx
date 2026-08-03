@@ -10,6 +10,7 @@ vi.mock("./host", () => ({
   connectApprovedFolder: vi.fn(),
   connectFolder: vi.fn(),
   disconnectFolder: vi.fn(),
+  grantFolderCapability: vi.fn(),
   listApprovedFolders: vi.fn(),
   listCapabilityConsents: vi.fn(),
   listConnectedFolders: vi.fn(),
@@ -64,6 +65,7 @@ beforeEach(() => {
   vi.mocked(host.connectApprovedFolder).mockResolvedValue(null);
   vi.mocked(host.connectFolder).mockResolvedValue(null);
   vi.mocked(host.disconnectFolder).mockResolvedValue(false);
+  vi.mocked(host.grantFolderCapability).mockResolvedValue(null);
   vi.mocked(host.revokeCapabilityConsent).mockResolvedValue(true);
 });
 
@@ -108,9 +110,10 @@ describe("FoldersView", () => {
       await screen.findByText("Read, write, and commands"),
     ).toBeInTheDocument();
     expect(screen.getByText("Read only")).toBeInTheDocument();
-    // Each statement is its own row, revocable in place.
-    expect(screen.getByText("Run commands")).toBeInTheDocument();
-    expect(screen.getByText("Write files")).toBeInTheDocument();
+    // Each held statement is its own row, revocable in place; what a folder
+    // is missing gets a grant affordance instead.
+    expect(screen.getAllByRole("button", { name: "Revoke" })).toHaveLength(4);
+    expect(screen.getAllByRole("button", { name: "Grant" })).toHaveLength(2);
   });
 
   it("revokes one statement in place and reloads what the broker holds", async () => {
@@ -136,12 +139,66 @@ describe("FoldersView", () => {
     await waitFor(() =>
       expect(host.revokeCapabilityConsent).toHaveBeenCalledWith(write),
     );
+    // The write statement is gone; what remains of it is a grant affordance.
     await waitFor(() =>
-      expect(screen.queryByText("Write files")).not.toBeInTheDocument(),
+      expect(screen.getAllByRole("button", { name: "Revoke" })).toHaveLength(1),
     );
     // The folder itself was not disconnected.
     expect(host.disconnectFolder).not.toHaveBeenCalled();
     expect(screen.getByText("Drafts")).toBeInTheDocument();
+  });
+
+  it("offers to grant what a read-only folder is missing and reloads once granted", async () => {
+    vi.mocked(host.listConnectedFolders).mockResolvedValue([
+      folder("read-only", "Archive"),
+    ]);
+    vi.mocked(host.listCapabilityConsents)
+      .mockResolvedValueOnce([statement("read-only", "read_files")])
+      .mockResolvedValue([
+        statement("read-only", "read_files"),
+        statement("read-only", "write_files"),
+      ]);
+    vi.mocked(host.grantFolderCapability).mockResolvedValue(true);
+    const user = userEvent.setup();
+    render(<FoldersView chat={chat} />);
+
+    // The missing rungs are visible before any refusal: write and commands
+    // each get a grant affordance beside the statements the folder holds.
+    await screen.findByText("Read only");
+    expect(screen.getByText("Write files")).toBeInTheDocument();
+    expect(screen.getByText("Run commands")).toBeInTheDocument();
+    const grants = screen.getAllByRole("button", { name: "Grant" });
+    expect(grants).toHaveLength(2);
+
+    await user.click(grants[0]);
+    expect(host.grantFolderCapability).toHaveBeenCalledWith(
+      chat,
+      "read-only",
+      "write_files",
+    );
+    // Consent happened natively; the panel just follows the broker's answer.
+    await waitFor(() =>
+      expect(screen.getByText("Read and write")).toBeInTheDocument(),
+    );
+    expect(screen.getAllByRole("button", { name: "Grant" })).toHaveLength(1);
+  });
+
+  it("changes nothing when native widening consent is canceled", async () => {
+    vi.mocked(host.listConnectedFolders).mockResolvedValue([
+      folder("read-only", "Archive"),
+    ]);
+    vi.mocked(host.listCapabilityConsents).mockResolvedValue([
+      statement("read-only", "read_files"),
+    ]);
+    const user = userEvent.setup();
+    render(<FoldersView chat={chat} />);
+
+    await screen.findByText("Read only");
+    await user.click(screen.getAllByRole("button", { name: "Grant" })[0]);
+
+    expect(host.grantFolderCapability).toHaveBeenCalledOnce();
+    expect(host.listConnectedFolders).toHaveBeenCalledOnce();
+    expect(screen.getByText("Read only")).toBeInTheDocument();
   });
 
   it("offers approved folders that are not already connected", async () => {
