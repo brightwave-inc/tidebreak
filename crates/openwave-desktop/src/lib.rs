@@ -229,7 +229,7 @@ pub fn run() {
             updater::check_for_update,
             updater::restart_for_update
         ])
-        .on_menu_event(|app, event| updater::handle_menu_event(app, event))
+        .on_menu_event(updater::handle_menu_event)
         .setup(move |app| {
             let handle = app.handle().clone();
             deep_link::install(&handle);

@@ -42,6 +42,19 @@ describe("toolPreviewPresentation", () => {
   });
 });
 
+describe("workspace write previews", () => {
+  it("names the file the write will land on", () => {
+    // The Ask-mode card used to ask about workspace files without saying
+    // which one; the path is the resource under review.
+    const write = toolPreviewPresentation({
+      tool: "write_file",
+      path: "reports/q3.md",
+    });
+    expect(write.headline).toBe("reports/q3.md");
+    expect(write.detail).toContain("this chat's workspace");
+  });
+});
+
 describe("search previews", () => {
   const unfiltered = {
     domains: [] as string[],

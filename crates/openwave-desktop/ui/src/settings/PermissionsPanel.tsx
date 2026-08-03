@@ -45,6 +45,11 @@ export function grantScopeLabel(
       if (scope.tool === "web_extract") {
         return scope.url;
       }
+      // Workspace writes are never standing-grantable, so no stored grant can
+      // carry this scope today; named anyway so the vocabulary stays total.
+      if (scope.tool === "write_file") {
+        return scope.path;
+      }
       return `“${scope.query}”`;
     }
     case "any_args_for":

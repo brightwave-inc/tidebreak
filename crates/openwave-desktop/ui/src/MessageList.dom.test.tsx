@@ -684,8 +684,8 @@ describe("mcp app views", () => {
               tool: "entries",
               elided: 3,
               entries: [
-                { kind: "file", label: "notes.md", detail: null, meta: "1.2 KB", mediaType: null },
-                { kind: "folder", label: "reports", detail: null, meta: null, mediaType: null },
+                { kind: "file", label: "notes.md", detail: null, meta: "1.2 KB", mediaType: null, outputId: null },
+                { kind: "folder", label: "reports", detail: null, meta: null, mediaType: null, outputId: null },
               ],
               failures: [],
             },
@@ -741,6 +741,7 @@ describe("mcp app views", () => {
                   detail: "Pages 3, 7",
                   meta: "2 matches",
                   mediaType: "application/pdf",
+                  outputId: null,
                 },
               ],
               failures: [],
@@ -787,7 +788,7 @@ describe("mcp app views", () => {
               tool: "entries",
               elided: 0,
               entries: [
-                { kind: "file", label: "q3.md", detail: null, meta: null, mediaType: null },
+                { kind: "file", label: "q3.md", detail: null, meta: null, mediaType: null, outputId: null },
               ],
               failures: [
                 { label: "q4.md", error: "file is not valid UTF-8" },
@@ -824,6 +825,63 @@ describe("mcp app views", () => {
 });
 
 describe("actionable tool results", () => {
+  it("opens a published output in the content panel from its card", async () => {
+    const user = userEvent.setup();
+    const { router } = await renderWithRouter(
+      <MessageList
+        messages={[
+          {
+            id: "exec-1",
+            role: "tool",
+            callId: "call-1",
+            name: "exec",
+            status: "completed",
+            preview: { tool: "exec", command: "python3", args: ["build_deck.py"] },
+            result: {
+              tool: "exec",
+              exit_code: 0,
+              timed_out: false,
+              output_truncated: false,
+              stdout: "",
+              stderr: "",
+              outputs: [
+                {
+                  kind: "output",
+                  label: "deck.pptx",
+                  detail: null,
+                  meta: "v1 · created",
+                  mediaType:
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                  outputId: "output-1",
+                },
+              ],
+            },
+          },
+        ]}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
+        busy={false}
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Open output deck.pptx" }));
+    await waitFor(() => {
+      expect(router.state.location.search).toMatchObject({
+        right: "outputs.output-1",
+      });
+    });
+  });
+
   it("takes an unconfigured web search directly to its settings section", async () => {
     const user = userEvent.setup();
     const { router } = await renderWithRouter(

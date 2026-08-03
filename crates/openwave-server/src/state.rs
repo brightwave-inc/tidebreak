@@ -41,6 +41,11 @@ pub struct AppState {
     pub tools: Arc<ToolRegistry>,
     /// Runtime-managed MCP connections and immutable per-turn tool snapshots.
     pub(crate) mcp: Arc<McpRuntime>,
+    /// Executes one governed REST operation for the app-invoke route. The
+    /// production assembly is the real executor over the real transport and
+    /// resolver ([`crate::connected_apps::governed_rest_dispatcher`]); tests
+    /// substitute a fake transport behind the same governed validation.
+    pub(crate) rest_dispatch: Arc<dyn crate::connected_apps::RestOperationDispatcher>,
     /// Outstanding single-use tokens redeemed by the sandboxed view frames —
     /// prefetched MCP views and stored local-app revisions alike.
     pub(crate) view_frames: Arc<ViewFrameTokens>,
@@ -170,6 +175,7 @@ impl AppState {
             gateway.clone(),
             os_policy.clone(),
         ));
+        let rest_dispatch = crate::connected_apps::governed_rest_dispatcher(secrets.clone());
         Ok(Self {
             config: Arc::new(config),
             store: store.clone(),
@@ -178,6 +184,7 @@ impl AppState {
             secrets,
             tools,
             mcp,
+            rest_dispatch,
             view_frames: Arc::default(),
             gateway,
             os_policy,

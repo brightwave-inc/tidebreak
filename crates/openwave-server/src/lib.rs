@@ -21,6 +21,7 @@ mod bus;
 mod chat_titling;
 /// Host-owned code-execution provider selection and policy.
 pub mod code_execution;
+mod connected_apps;
 mod desktop_schema;
 mod document_decode;
 mod durable_oplog;
@@ -57,6 +58,7 @@ mod sandbox_container_run_worker;
 /// correlation-tag orphan sweep.
 pub mod sandbox_docker;
 mod sandbox_web_search_worker;
+mod scoped_model_token;
 /// Rewriting stored credentials so the running binary owns their keychain items.
 pub mod secret_rehome;
 mod source_tools;

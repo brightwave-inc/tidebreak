@@ -157,7 +157,10 @@ export function AppDetailView({
                   <span>
                     Allowed to call{" "}
                     {grant.bindings
-                      .flatMap((binding) => binding.tools)
+                      .flatMap((binding) => [
+                        ...(binding.tools ?? []),
+                        ...(binding.operation_ids ?? []),
+                      ])
                       .join(", ") || "no tools"}
                   </span>
                 </div>

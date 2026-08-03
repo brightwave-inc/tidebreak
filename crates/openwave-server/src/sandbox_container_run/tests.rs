@@ -46,9 +46,13 @@ use super::{
 };
 use crate::durable_oplog::DurableOperationStore;
 use crate::resolver::ProviderResolver;
+use crate::sandbox_admission::{
+    evaluate_detached_admission, DetachedAdmission, DetachedAdmissionDenial,
+};
 use crate::sandbox_container_run_worker::{
     SandboxContainerRunWorker, SandboxContainerRunWorkerConfig,
 };
+use crate::scoped_model_token::{MintedScopedToken, ScopedModelTokenIssuer};
 
 // --- Mock host model (the resolver the driver proxies inference through) ------
 
@@ -357,6 +361,67 @@ async fn spawn_sandbox_agent() -> String {
     base_url
 }
 
+/// A scoped-token issuer that records every mint and revoke, minting tokens
+/// bounded by the deadline it is handed — or deliberately overrunning it, for
+/// the driver's verification path.
+struct RecordingTokenIssuer {
+    /// `(run, deadline cap, minted expiry)` per mint, in order.
+    minted: Mutex<Vec<(Uuid, u64, u64)>>,
+    revoked: Mutex<Vec<Uuid>>,
+    /// When true, the mint ignores the cap — the misbehaving issuer the
+    /// driver must refuse rather than trust.
+    overrun: bool,
+}
+
+impl RecordingTokenIssuer {
+    fn honest() -> Arc<Self> {
+        Arc::new(Self {
+            minted: Mutex::new(Vec::new()),
+            revoked: Mutex::new(Vec::new()),
+            overrun: false,
+        })
+    }
+
+    fn overrunning() -> Arc<Self> {
+        Arc::new(Self {
+            minted: Mutex::new(Vec::new()),
+            revoked: Mutex::new(Vec::new()),
+            overrun: true,
+        })
+    }
+}
+
+#[async_trait]
+impl ScopedModelTokenIssuer for RecordingTokenIssuer {
+    fn available(&self) -> bool {
+        true
+    }
+
+    async fn mint(&self, run_id: Uuid, deadline_unix_secs: u64) -> Result<MintedScopedToken> {
+        let now = chrono::Utc::now().timestamp().max(0).unsigned_abs();
+        let expires_at_unix_secs = if self.overrun {
+            deadline_unix_secs + 300
+        } else {
+            now.saturating_add(60).min(deadline_unix_secs)
+        };
+        self.minted
+            .lock()
+            .unwrap()
+            .push((run_id, deadline_unix_secs, expires_at_unix_secs));
+        Ok(MintedScopedToken {
+            token: openwave_sandbox_protocol::init::ScopedModelToken::new(format!(
+                "scoped-{run_id}"
+            )),
+            expires_at_unix_secs,
+        })
+    }
+
+    async fn revoke(&self, run_id: Uuid) -> Result<()> {
+        self.revoked.lock().unwrap().push(run_id);
+        Ok(())
+    }
+}
+
 fn fast_config() -> SandboxContainerRunConfig {
     SandboxContainerRunConfig {
         lease: Duration::from_secs(30),
@@ -460,6 +525,7 @@ async fn container_worker_service_cadence_completes_pending_teardown() {
                 run_id,
                 &SandboxTag::new().to_string(),
                 chrono::Utc::now() + chrono::Duration::seconds(60),
+                openwave_core::SandboxAdmissionMode::AttachedOnly,
             )
             .await
             .unwrap();
@@ -544,9 +610,244 @@ async fn drives_a_container_run_end_to_end_over_loopback() {
         // The container was provisioned once and torn down.
         assert_eq!(backend.provisions.load(Ordering::SeqCst), 1);
         assert_eq!(backend.destroys.load(Ordering::SeqCst), 1);
+
+        // The fail-closed detached gate: no precondition holds on a local
+        // container, so the durable admission decision the driver recorded is
+        // attached-only (issue #824).
+        let provision = store
+            .get_sandbox_provision(*run_id.as_uuid())
+            .await
+            .unwrap()
+            .expect("the run has a provisioning record");
+        assert_eq!(
+            provision.admission,
+            openwave_core::SandboxAdmissionMode::AttachedOnly,
+            "a local container run must be admitted attached-only"
+        );
     })
     .await
     .expect("test completed within its time bound");
+}
+
+/// The admission decision is a durable fact on the provisioning record: what
+/// was recorded is what reads back, and recovery derives the run's admission
+/// from the record rather than re-deciding — so a crash can never upgrade a
+/// run to detached, and a detached admission survives the host that made it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_admission_decision_is_durable_on_the_provisioning_record() {
+    let (_dir, store, _chat) = store().await;
+    let run_uuid = Uuid::new_v4();
+    assert!(matches!(
+        store
+            .begin_sandbox_provision(
+                run_uuid,
+                &SandboxTag::new().to_string(),
+                chrono::Utc::now() + chrono::Duration::seconds(600),
+                openwave_core::SandboxAdmissionMode::Detached,
+            )
+            .await
+            .unwrap(),
+        openwave_core::BeginSandboxProvisionOutcome::Started
+    ));
+    let record = store
+        .get_sandbox_provision(run_uuid)
+        .await
+        .unwrap()
+        .expect("the record exists");
+    assert_eq!(
+        record.admission,
+        openwave_core::SandboxAdmissionMode::Detached
+    );
+
+    // A second begin for the same run — the crash-recovery path — observes
+    // the recorded decision, not its own argument.
+    let openwave_core::BeginSandboxProvisionOutcome::Existing(existing) = store
+        .begin_sandbox_provision(
+            run_uuid,
+            &SandboxTag::new().to_string(),
+            chrono::Utc::now() + chrono::Duration::seconds(600),
+            openwave_core::SandboxAdmissionMode::AttachedOnly,
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("the second begin must observe the existing record");
+    };
+    assert_eq!(
+        existing.admission,
+        openwave_core::SandboxAdmissionMode::Detached,
+        "recovery reads the durable decision, never re-decides"
+    );
+}
+
+/// The scoped-token contract of #824 slice 2, at the driver's mint seam: an
+/// attached-only run mints nothing; a detached run's token is capped by the
+/// run deadline, with an issuer that overruns the cap refused and revoked;
+/// and every path that cannot produce a valid token fails closed — including
+/// the default (gateway) issuer, which cannot mint today.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_detached_scoped_token_is_capped_by_the_run_deadline_and_fails_closed() {
+    let (_dir, store, _chat) = store().await;
+    let backend = MockBackend::spawning();
+    let resolver = Arc::new(FixedResolver(Arc::new(ScriptedProvider::new(vec![]))));
+    let deadline = chrono::Utc::now().timestamp().max(0).unsigned_abs() + 600;
+
+    let issuer = RecordingTokenIssuer::honest();
+    let runner = SandboxContainerRunner::new(
+        store.clone(),
+        backend.clone(),
+        resolver.clone(),
+        fast_config(),
+    )
+    .with_token_issuer(issuer.clone());
+
+    // An attached-only run never mints: the host is its model proxy.
+    assert!(runner
+        .scoped_token_for(
+            Uuid::new_v4(),
+            openwave_core::SandboxAdmissionMode::AttachedOnly,
+            deadline,
+        )
+        .await
+        .unwrap()
+        .is_none());
+    assert!(issuer.minted.lock().unwrap().is_empty());
+
+    // A detached run's token expires no later than the run deadline.
+    let run = Uuid::new_v4();
+    runner
+        .scoped_token_for(run, openwave_core::SandboxAdmissionMode::Detached, deadline)
+        .await
+        .unwrap()
+        .expect("a detached run receives a token");
+    let minted = issuer.minted.lock().unwrap().clone();
+    assert_eq!(minted.len(), 1);
+    assert!(
+        minted[0].2 <= deadline,
+        "token lifetime must be capped by the run deadline"
+    );
+
+    // An issuer whose token would outlive the run is refused, and whatever it
+    // minted is revoked before the refusal.
+    let overrunning = RecordingTokenIssuer::overrunning();
+    let refusing = SandboxContainerRunner::new(
+        store.clone(),
+        backend.clone(),
+        resolver.clone(),
+        fast_config(),
+    )
+    .with_token_issuer(overrunning.clone());
+    let run = Uuid::new_v4();
+    assert!(refusing
+        .scoped_token_for(run, openwave_core::SandboxAdmissionMode::Detached, deadline)
+        .await
+        .is_err());
+    assert_eq!(overrunning.revoked.lock().unwrap().as_slice(), &[run]);
+
+    // No absolute deadline to cap by refuses rather than minting unbounded.
+    assert!(runner
+        .scoped_token_for(
+            Uuid::new_v4(),
+            openwave_core::SandboxAdmissionMode::Detached,
+            0
+        )
+        .await
+        .is_err());
+
+    // The default issuer — the gateway, which has no run-scoped mint API —
+    // fails closed rather than delivering any credential.
+    let default_runner =
+        SandboxContainerRunner::new(store.clone(), backend, resolver, fast_config());
+    assert!(default_runner
+        .scoped_token_for(
+            Uuid::new_v4(),
+            openwave_core::SandboxAdmissionMode::Detached,
+            deadline
+        )
+        .await
+        .is_err());
+}
+
+/// The admission gate's `scoped_model_token_available` input is the issuer's
+/// real availability, not a constant: the default (gateway) issuer reads
+/// unavailable and the evaluated denial names the missing token, while an
+/// issuer that can mint flips exactly that input.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_gate_input_reflects_the_issuers_availability() {
+    let (_dir, store, _chat) = store().await;
+    let backend = MockBackend::spawning();
+    let resolver = Arc::new(FixedResolver(Arc::new(ScriptedProvider::new(vec![]))));
+
+    let default_runner = SandboxContainerRunner::new(
+        store.clone(),
+        backend.clone(),
+        resolver.clone(),
+        fast_config(),
+    );
+    let preconditions = default_runner.detached_preconditions();
+    assert!(!preconditions.scoped_model_token_available);
+    let DetachedAdmission::Denied(denials) = evaluate_detached_admission(preconditions) else {
+        panic!("a local container run must be denied detached admission");
+    };
+    assert!(denials.contains(&DetachedAdmissionDenial::NoScopedModelToken));
+
+    let minting = SandboxContainerRunner::new(store.clone(), backend, resolver, fast_config())
+        .with_token_issuer(RecordingTokenIssuer::honest());
+    assert!(
+        minting
+            .detached_preconditions()
+            .scoped_model_token_available,
+        "an issuer that can mint must read as available, truthfully"
+    );
+}
+
+/// The reaper-shaped revocation path: a run whose own driver never revoked —
+/// a lapsed provisioning intent, or a teardown obligation left by a reaped or
+/// unattached-cancelled run — has its scoped token revoked by the sweep.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_sweep_revokes_tokens_for_lapsed_and_reaped_runs() {
+    let (_dir, store, _chat) = store().await;
+    let lapsed_run = Uuid::new_v4();
+    let reaped_run = Uuid::new_v4();
+    store
+        .begin_sandbox_provision(
+            lapsed_run,
+            &SandboxTag::new().to_string(),
+            chrono::Utc::now() - chrono::Duration::seconds(1),
+            openwave_core::SandboxAdmissionMode::AttachedOnly,
+        )
+        .await
+        .unwrap();
+    store
+        .begin_sandbox_provision(
+            reaped_run,
+            &SandboxTag::new().to_string(),
+            chrono::Utc::now() + chrono::Duration::seconds(600),
+            openwave_core::SandboxAdmissionMode::AttachedOnly,
+        )
+        .await
+        .unwrap();
+    store.enqueue_sandbox_teardown(reaped_run).await.unwrap();
+
+    let issuer = RecordingTokenIssuer::honest();
+    let runner = SandboxContainerRunner::new(
+        store.clone(),
+        MockBackend::spawning(),
+        Arc::new(FixedResolver(Arc::new(ScriptedProvider::new(vec![])))),
+        fast_config(),
+    )
+    .with_token_issuer(issuer.clone());
+    runner.sweep().await.expect("the sweep succeeds");
+
+    let revoked = issuer.revoked.lock().unwrap().clone();
+    assert!(
+        revoked.contains(&lapsed_run),
+        "a lapsed intent's token is revoked by the sweep"
+    );
+    assert!(
+        revoked.contains(&reaped_run),
+        "a reaped run's teardown obligation carries its revocation"
+    );
 }
 
 /// An agent loop that ends WITHOUT submitting a result — it exhausts its step
@@ -853,8 +1154,10 @@ async fn fails_terminally_and_tears_down_when_the_container_is_unreachable() {
         let backend = MockBackend::unreachable(format!("http://{dead_addr}"));
         let resolver = Arc::new(FixedResolver(Arc::new(ScriptedProvider::new(vec![]))));
 
+        let issuer = RecordingTokenIssuer::honest();
         let runner =
-            SandboxContainerRunner::new(store.clone(), backend.clone(), resolver, fast_config());
+            SandboxContainerRunner::new(store.clone(), backend.clone(), resolver, fast_config())
+                .with_token_issuer(issuer.clone());
         let outcome = runner
             .drive(run_id)
             .await
@@ -866,6 +1169,11 @@ async fn fails_terminally_and_tears_down_when_the_container_is_unreachable() {
         assert_eq!(failed.status, AgentRunStatus::Failed);
         // The teardown obligation was driven even though the run failed.
         assert_eq!(backend.destroys.load(Ordering::SeqCst), 1);
+        // Terminalization revoked the run's scoped token along the same path.
+        assert_eq!(
+            issuer.revoked.lock().unwrap().as_slice(),
+            &[*run_id.as_uuid()]
+        );
     })
     .await
     .expect("test completed within its time bound");
@@ -936,7 +1244,12 @@ async fn a_lapsed_intent_refuses_a_late_handle_commit() {
     let expired = chrono::Utc::now() - chrono::Duration::seconds(1);
     assert!(matches!(
         store
-            .begin_sandbox_provision(run_uuid, &tag.to_string(), expired)
+            .begin_sandbox_provision(
+                run_uuid,
+                &tag.to_string(),
+                expired,
+                openwave_core::SandboxAdmissionMode::AttachedOnly
+            )
             .await
             .unwrap(),
         openwave_core::BeginSandboxProvisionOutcome::Started
@@ -972,11 +1285,21 @@ async fn the_sweep_reclaims_a_lapsed_intent_and_preserves_live_ones() {
     let expired = chrono::Utc::now() - chrono::Duration::seconds(1);
     let open = chrono::Utc::now() + chrono::Duration::seconds(600);
     store
-        .begin_sandbox_provision(Uuid::new_v4(), &dead_tag.to_string(), expired)
+        .begin_sandbox_provision(
+            Uuid::new_v4(),
+            &dead_tag.to_string(),
+            expired,
+            openwave_core::SandboxAdmissionMode::AttachedOnly,
+        )
         .await
         .unwrap();
     store
-        .begin_sandbox_provision(Uuid::new_v4(), &live_tag.to_string(), open)
+        .begin_sandbox_provision(
+            Uuid::new_v4(),
+            &live_tag.to_string(),
+            open,
+            openwave_core::SandboxAdmissionMode::AttachedOnly,
+        )
         .await
         .unwrap();
 
@@ -1064,6 +1387,7 @@ async fn a_committed_handle_is_reconciled_not_reprovisioned() {
                 run_uuid,
                 &tag.to_string(),
                 chrono::Utc::now() + chrono::Duration::seconds(600),
+                openwave_core::SandboxAdmissionMode::AttachedOnly,
             )
             .await
             .unwrap();
@@ -1121,6 +1445,7 @@ async fn a_dead_drivers_container_run_is_recovered_to_completion() {
                 run_uuid,
                 &tag.to_string(),
                 chrono::Utc::now() + chrono::Duration::seconds(600),
+                openwave_core::SandboxAdmissionMode::AttachedOnly,
             )
             .await
             .unwrap();
@@ -1177,6 +1502,7 @@ async fn a_terminal_container_failure_enqueues_its_teardown() {
             run_uuid,
             &tag.to_string(),
             chrono::Utc::now() + chrono::Duration::seconds(600),
+            openwave_core::SandboxAdmissionMode::AttachedOnly,
         )
         .await
         .unwrap();
@@ -1272,6 +1598,7 @@ async fn a_late_result_is_retained_as_evidence_not_committed() {
             run_uuid,
             &SandboxTag::new().to_string(),
             chrono::Utc::now() + chrono::Duration::seconds(600),
+            openwave_core::SandboxAdmissionMode::AttachedOnly,
         )
         .await
         .unwrap();
@@ -1386,6 +1713,7 @@ async fn cancelling_an_unattached_container_child_enqueues_its_teardown() {
             run_uuid,
             &SandboxTag::new().to_string(),
             chrono::Utc::now() + chrono::Duration::seconds(600),
+            openwave_core::SandboxAdmissionMode::AttachedOnly,
         )
         .await
         .unwrap();

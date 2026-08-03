@@ -531,6 +531,11 @@ pub enum OutputArtifactStatus {
 pub struct OutputArtifactEntry {
     /// Display filename, equal to the file's name under `output/`.
     pub filename: String,
+    /// The durable output the file landed on, as its canonical id string.
+    ///
+    /// Carried so the renderer's result projection can route a click to the
+    /// output rather than dead-ending at a name.
+    pub output_id: String,
     /// The output's current version ordinal after the scan.
     pub ordinal: u32,
     /// Whether the file created, updated, or matched the output.

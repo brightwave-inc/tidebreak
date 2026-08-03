@@ -23,8 +23,8 @@ use crate::connected_app::ConnectedAppKind;
 use crate::error::Result;
 use crate::id::{AppId, AppRevisionId, TurnId};
 use crate::local_app::{
-    mounted_tool_under, publish_app_bundle, validate_app_manifest, AppManifest, AppRecord,
-    CreateApp, NewAppRevision, MAX_APP_BUNDLE_BYTES,
+    mounted_tool_under, publish_app_bundle, validate_app_manifest, AppBinding, AppManifest,
+    AppRecord, CreateApp, NewAppRevision, MAX_APP_BUNDLE_BYTES,
 };
 use crate::preview::{ResultEntry, ResultEntryKind};
 use crate::storage::Store;
@@ -47,12 +47,13 @@ pub(super) struct Arguments {
                        It runs in a sandboxed frame with no network access."
     )]
     bundle_html: String,
-    #[schemars(
-        description = "The app's manifest: its display name and the exact mounted \
-                       MCP tools it may call, grouped by connected app. Each binding \
-                       names a connected app by id (the tool description lists the \
-                       configured ids) and the full mounted tool names under it."
-    )]
+    #[schemars(description = "The app's manifest: its display name and the exact \
+                       capabilities it may call, grouped by connected app. Each \
+                       binding names a connected app by id (the tool description \
+                       lists the configured ids) and either the full mounted MCP \
+                       tool names under it (`tools`, for mcp_server apps) or the \
+                       declared OpenAPI operationIds (`operation_ids`, for \
+                       rest_api apps).")]
     manifest: AppManifest,
     #[serde(default)]
     #[schemars(
@@ -98,9 +99,11 @@ impl CreateAppTool {
             .ok_or_else(|| ToolOutput::error("this call is not recorded in this conversation"))
     }
 
-    /// Check that every manifest binding names a configured `mcp_server`
-    /// connected app and that each pinned tool is a mounted name under that
-    /// app's namespace.
+    /// Check that every manifest binding names a configured connected app of
+    /// the kind its vocabulary requires: tools bindings resolve to an
+    /// `mcp_server` record with each pinned name mounted under its namespace;
+    /// operation bindings resolve to a `rest_api` record with each pinned
+    /// `operationId` declared by its ingested catalog.
     async fn check_bindings(&self, manifest: &AppManifest) -> std::result::Result<(), String> {
         if manifest.bindings.is_empty() {
             return Ok(());
@@ -111,40 +114,80 @@ impl CreateAppTool {
             .await
             .map_err(|_| "could not read the configured connected apps".to_owned())?;
         for binding in &manifest.bindings {
-            let Some(app) = connected.iter().find(|app| app.id == binding.app) else {
+            let Some(app) = connected.iter().find(|app| app.id == binding.app()) else {
                 let configured: Vec<String> = connected
                     .iter()
-                    .filter(|app| app.kind == ConnectedAppKind::McpServer)
-                    .map(|app| format!("{} ({})", app.id, app.name))
+                    .map(|app| format!("{} ({}, {})", app.id, app.name, app.kind))
                     .collect();
                 return Err(if configured.is_empty() {
                     format!(
                         "connected app {} is not configured, and no connected apps \
                          are; only an empty bindings list is valid",
-                        binding.app
+                        binding.app()
                     )
                 } else {
                     format!(
                         "connected app {} is not configured; bind one of: {}",
-                        binding.app,
+                        binding.app(),
                         configured.join(", ")
                     )
                 });
             };
-            if app.kind != ConnectedAppKind::McpServer {
-                return Err(format!(
-                    "connected app {} ({}) is a {} app; only mcp_server apps \
-                     contribute mounted tools",
-                    app.id, app.name, app.kind
-                ));
-            }
-            for tool in &binding.tools {
-                if mounted_tool_under(&app.name, tool).is_none() {
-                    return Err(format!(
-                        "tool {tool:?} is not mounted under connected app {} — its \
-                         tools are named `mcp__{}__{{tool}}`",
-                        app.id, app.name
-                    ));
+            match binding {
+                AppBinding::Tools(binding) => {
+                    if app.kind != ConnectedAppKind::McpServer {
+                        return Err(format!(
+                            "connected app {} ({}) is a {} app; only mcp_server apps \
+                             contribute mounted tools — bind its operations with \
+                             `operation_ids` instead",
+                            app.id, app.name, app.kind
+                        ));
+                    }
+                    for tool in &binding.tools {
+                        if mounted_tool_under(&app.name, tool).is_none() {
+                            return Err(format!(
+                                "tool {tool:?} is not mounted under connected app {} — its \
+                                 tools are named `mcp__{}__{{tool}}`",
+                                app.id, app.name
+                            ));
+                        }
+                    }
+                }
+                AppBinding::Operations(binding) => {
+                    if app.kind != ConnectedAppKind::RestApi {
+                        return Err(format!(
+                            "connected app {} ({}) is a {} app; only rest_api apps \
+                             contribute operations — bind its mounted tools with \
+                             `tools` instead",
+                            app.id, app.name, app.kind
+                        ));
+                    }
+                    // A lenient read of the definition's catalog: the typed
+                    // shape and its validation live server-side, and an
+                    // authoring cross-check only needs the declared ids. A
+                    // definition without a readable catalog fails the binding
+                    // closed rather than admitting an uncheckable pin.
+                    let Some(operations) = app
+                        .definition
+                        .get("catalog")
+                        .and_then(|catalog| catalog.get("operations"))
+                        .and_then(serde_json::Value::as_object)
+                    else {
+                        return Err(format!(
+                            "connected app {} ({}) has no readable operation catalog, \
+                             so its operations cannot be bound",
+                            app.id, app.name
+                        ));
+                    };
+                    for operation_id in &binding.operation_ids {
+                        if !operations.contains_key(operation_id) {
+                            return Err(format!(
+                                "operation {operation_id:?} is not declared by connected \
+                                 app {} ({})",
+                                app.id, app.name
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -339,6 +382,7 @@ mod tests {
         turn_id: TurnId,
         profile_dir: PathBuf,
         sentry: ConnectedAppId,
+        issues: ConnectedAppId,
     }
 
     async fn fixture() -> Fixture {
@@ -361,6 +405,29 @@ mod tests {
                     name: "sentry".into(),
                     kind: ConnectedAppKind::McpServer,
                     definition: json!({ "name": "sentry", "command": "sentry-mcp" }),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                }],
+            )
+            .await
+            .unwrap();
+        // And one rest_api record, so operation bindings resolve too. The
+        // door reads the catalog leniently, so a minimal definition works.
+        let issues = ConnectedAppId::new();
+        store
+            .replace_connected_apps(
+                ConnectedAppKind::RestApi,
+                &[crate::connected_app::ConnectedApp {
+                    id: issues,
+                    name: "issues".into(),
+                    kind: ConnectedAppKind::RestApi,
+                    definition: json!({
+                        "base_url": "https://api.example.com",
+                        "catalog": {
+                            "document_sha256": "abc",
+                            "operations": { "listIssues": {} },
+                        },
+                    }),
                     created_at: Utc::now(),
                     updated_at: Utc::now(),
                 }],
@@ -395,6 +462,7 @@ mod tests {
             turn_id,
             profile_dir,
             sentry,
+            issues,
         }
     }
 
@@ -559,6 +627,73 @@ mod tests {
         assert!(refused.is_error);
         assert!(refused.content.contains("not recorded"));
         assert_eq!(fixture.store.list_apps(10).await.unwrap().len(), 0);
+    }
+
+    /// The authoring door resolves each binding's vocabulary against the
+    /// record's kind and, for operations, against the record's declared
+    /// catalog — so a wrong kind or an undeclared operation fails here with a
+    /// teachable error rather than at the user's first open.
+    #[tokio::test]
+    async fn operation_bindings_resolve_kind_and_catalog_at_the_door() {
+        let fixture = fixture().await;
+        let operations_manifest = |app: ConnectedAppId, operation_ids: &[&str]| {
+            json!({
+                "bundle_html": "<!doctype html><h1>Issues</h1>",
+                "manifest": {
+                    "name": "Issue browser",
+                    "bindings": [{ "app": app, "operation_ids": operation_ids }],
+                },
+            })
+        };
+
+        // A declared operation on a rest_api record publishes.
+        let (_, ctx) = fixture.recorded_call().await;
+        let created = fixture
+            .tool
+            .execute(&ctx, operations_manifest(fixture.issues, &["listIssues"]))
+            .await
+            .unwrap();
+        assert!(!created.is_error, "{}", created.content);
+
+        // An operation binding against an mcp_server record is refused.
+        let (_, ctx) = fixture.recorded_call().await;
+        let refused = fixture
+            .tool
+            .execute(&ctx, operations_manifest(fixture.sentry, &["listIssues"]))
+            .await
+            .unwrap();
+        assert!(refused.is_error);
+        assert!(
+            refused.content.contains("only rest_api apps"),
+            "{}",
+            refused.content
+        );
+
+        // An operation the catalog does not declare is refused.
+        let (_, ctx) = fixture.recorded_call().await;
+        let refused = fixture
+            .tool
+            .execute(&ctx, operations_manifest(fixture.issues, &["ghostOp"]))
+            .await
+            .unwrap();
+        assert!(refused.is_error);
+        assert!(
+            refused.content.contains("not declared"),
+            "{}",
+            refused.content
+        );
+
+        // And the mirror image: a tools binding against the rest_api record.
+        let (_, ctx) = fixture.recorded_call().await;
+        let mut tools_on_rest = arguments_bound_to(fixture.issues, None);
+        tools_on_rest["manifest"]["bindings"][0]["tools"] = json!(["mcp__issues__list"]);
+        let refused = fixture.tool.execute(&ctx, tools_on_rest).await.unwrap();
+        assert!(refused.is_error);
+        assert!(
+            refused.content.contains("only mcp_server apps"),
+            "{}",
+            refused.content
+        );
     }
 
     #[tokio::test]

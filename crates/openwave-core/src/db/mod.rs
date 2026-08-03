@@ -36,7 +36,7 @@ use crate::model::{
     AgentRunWaitSetCandidate, BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus,
     Chat, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceBlob,
     DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, MessageAttachment,
-    MessageDocumentAttachment, NetworkPolicy, PermissionMode, Project, ReasoningEffort,
+    MessageDocumentAttachment, NetworkPolicy, OwnerId, PermissionMode, Project, ReasoningEffort,
     RootAttachmentChange, RootAttachmentChangeTerminal, SandboxToolCall, SandboxToolCallReceipt,
     SandboxToolCallRequest, ToolCallRecord, ToolCallResolution, TurnAgentRunWaitStatus,
     TurnCheckpointProgress, TurnClientWaitStatus, TurnFailureRetry, TurnRun, TurnRunStatus,
@@ -116,9 +116,8 @@ impl DbStore {
     }
 }
 
-#[async_trait]
-impl Store for DbStore {
-    async fn create_project(&self, project: &Project) -> Result<()> {
+impl DbStore {
+    async fn create_project_impl(&self, project: &Project, owner: Option<&OwnerId>) -> Result<()> {
         validate_project_attachments(project)?;
         let transaction = self.conn.begin().await.map_err(store_err)?;
         entities::project::ActiveModel {
@@ -126,6 +125,12 @@ impl Store for DbStore {
             title: Set(project.title.clone()),
             attachment_revision: Set(project.attachment_revision),
             created_at: Set(project.created_at),
+            // The local owner rides the column default; only a named
+            // principal writes the column explicitly (#853).
+            owner: match owner {
+                Some(owner) if !owner.is_local() => Set(owner.as_str().to_owned()),
+                _ => sea_orm::ActiveValue::NotSet,
+            },
         }
         .insert(&transaction)
         .await
@@ -145,8 +150,16 @@ impl Store for DbStore {
         Ok(())
     }
 
-    async fn get_project(&self, id: ProjectId) -> Result<Option<Project>> {
-        let mut rows = entities::project::Entity::find_by_id(id.0)
+    async fn get_project_impl(
+        &self,
+        id: ProjectId,
+        owner: Option<&OwnerId>,
+    ) -> Result<Option<Project>> {
+        let mut query = entities::project::Entity::find_by_id(id.0);
+        if let Some(owner) = owner {
+            query = query.filter(entities::project::Column::Owner.eq(owner.as_str()));
+        }
+        let mut rows = query
             .find_with_related(entities::project_root_attachment::Entity)
             .order_by_asc(entities::project_root_attachment::Column::Position)
             .all(&self.conn)
@@ -157,8 +170,12 @@ impl Store for DbStore {
             .transpose()
     }
 
-    async fn list_projects(&self) -> Result<Vec<Project>> {
-        let mut projects = entities::project::Entity::find()
+    async fn list_projects_impl(&self, owner: Option<&OwnerId>) -> Result<Vec<Project>> {
+        let mut query = entities::project::Entity::find();
+        if let Some(owner) = owner {
+            query = query.filter(entities::project::Column::Owner.eq(owner.as_str()));
+        }
+        let mut projects = query
             .find_with_related(entities::project_root_attachment::Entity)
             .order_by_asc(entities::project_root_attachment::Column::Position)
             .all(&self.conn)
@@ -176,24 +193,48 @@ impl Store for DbStore {
         Ok(projects)
     }
 
-    async fn update_project_title(&self, id: ProjectId, title: Option<String>) -> Result<bool> {
-        let result = entities::project::Entity::update_many()
+    async fn update_project_title_impl(
+        &self,
+        id: ProjectId,
+        title: Option<String>,
+        owner: Option<&OwnerId>,
+    ) -> Result<bool> {
+        let mut update = entities::project::Entity::update_many()
             .set(entities::project::ActiveModel {
                 title: Set(title),
                 ..Default::default()
             })
-            .filter(entities::project::Column::Id.eq(id.0))
-            .exec(&self.conn)
-            .await
-            .map_err(store_err)?;
+            .filter(entities::project::Column::Id.eq(id.0));
+        if let Some(owner) = owner {
+            update = update.filter(entities::project::Column::Owner.eq(owner.as_str()));
+        }
+        let result = update.exec(&self.conn).await.map_err(store_err)?;
         Ok(result.rows_affected == 1)
     }
 
-    async fn delete_project(&self, id: ProjectId) -> Result<DeleteProjectOutcome> {
+    async fn delete_project_impl(
+        &self,
+        id: ProjectId,
+        owner: Option<&OwnerId>,
+    ) -> Result<DeleteProjectOutcome> {
         let transaction = self.conn.begin().await.map_err(store_err)?;
         if !ops::acquire_project_write_lock(&transaction, id).await? {
             transaction.rollback().await.map_err(store_err)?;
             return Ok(DeleteProjectOutcome::NotFound);
+        }
+        // Someone else's project is indistinguishable from an absent one
+        // (#853). The owner cannot change while the write lock is held.
+        if let Some(owner) = owner {
+            let owned = entities::project::Entity::find_by_id(id.0)
+                .filter(entities::project::Column::Owner.eq(owner.as_str()))
+                .one(&transaction)
+                .await
+                .map_err(store_err)?
+                .is_some();
+            if !owned {
+                transaction.rollback().await.map_err(store_err)?;
+                return Ok(DeleteProjectOutcome::NotFound);
+            }
         }
 
         let has_chats = entities::chat::Entity::find()
@@ -233,6 +274,81 @@ impl Store for DbStore {
         Ok(DeleteProjectOutcome::Deleted)
     }
 
+    async fn delete_document_impl(&self, id: DocumentId, owner: Option<&OwnerId>) -> Result<()> {
+        let transaction = self.conn.begin().await.map_err(store_err)?;
+        let document = entities::document::Entity::find_by_id(id.0)
+            .one(&transaction)
+            .await
+            .map_err(store_err)?;
+        // Someone else's document is left untouched — indistinguishable from
+        // an absent one, which is also this method's outcome for absent (#853).
+        let document = document
+            .filter(|document| !owner.is_some_and(|owner| owner.as_str() != document.owner));
+        if let Some(document) = document {
+            entities::document::Entity::delete_by_id(id.0)
+                .exec(&transaction)
+                .await
+                .map_err(store_err)?;
+            if let Some(blob_id) = document.source_blob_id {
+                ops::blob::enqueue_on(&transaction, blob_id).await?;
+            }
+        }
+        transaction.commit().await.map_err(store_err)?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Store for DbStore {
+    async fn create_project(&self, project: &Project) -> Result<()> {
+        self.create_project_impl(project, None).await
+    }
+
+    async fn create_project_scoped(&self, owner: &OwnerId, project: &Project) -> Result<()> {
+        self.create_project_impl(project, Some(owner)).await
+    }
+
+    async fn get_project(&self, id: ProjectId) -> Result<Option<Project>> {
+        self.get_project_impl(id, None).await
+    }
+
+    async fn get_project_scoped(&self, owner: &OwnerId, id: ProjectId) -> Result<Option<Project>> {
+        self.get_project_impl(id, Some(owner)).await
+    }
+
+    async fn list_projects(&self) -> Result<Vec<Project>> {
+        self.list_projects_impl(None).await
+    }
+
+    async fn list_projects_scoped(&self, owner: &OwnerId) -> Result<Vec<Project>> {
+        self.list_projects_impl(Some(owner)).await
+    }
+
+    async fn update_project_title(&self, id: ProjectId, title: Option<String>) -> Result<bool> {
+        self.update_project_title_impl(id, title, None).await
+    }
+
+    async fn update_project_title_scoped(
+        &self,
+        owner: &OwnerId,
+        id: ProjectId,
+        title: Option<String>,
+    ) -> Result<bool> {
+        self.update_project_title_impl(id, title, Some(owner)).await
+    }
+
+    async fn delete_project(&self, id: ProjectId) -> Result<DeleteProjectOutcome> {
+        self.delete_project_impl(id, None).await
+    }
+
+    async fn delete_project_scoped(
+        &self,
+        owner: &OwnerId,
+        id: ProjectId,
+    ) -> Result<DeleteProjectOutcome> {
+        self.delete_project_impl(id, Some(owner)).await
+    }
+
     async fn create_document(&self, document: &DocumentRecord) -> Result<()> {
         let source_byte_len = document
             .source_blob
@@ -242,6 +358,8 @@ impl Store for DbStore {
         let transaction = self.conn.begin().await.map_err(store_err)?;
         ops::require_document_scope_write_lock(&transaction, document.chat_id, document.project_id)
             .await?;
+        let parent_owner =
+            document_scope_owner_on(&transaction, document.chat_id, document.project_id).await?;
         entities::document::ActiveModel {
             id: Set(document.id.0),
             chat_id: Set(document.chat_id.map(|id| id.0)),
@@ -258,6 +376,13 @@ impl Store for DbStore {
             canonical_text: Set(document.canonical_text.clone()),
             created_at: Set(document.created_at),
             updated_at: Set(document.updated_at),
+            // A parented document always carries its parent's owner; a
+            // standalone one created through the unscoped surface belongs to
+            // the local owner via the column default (#853).
+            owner: match parent_owner {
+                Some(owner) if owner != OwnerId::LOCAL => Set(owner),
+                _ => sea_orm::ActiveValue::NotSet,
+            },
         }
         .insert(&transaction)
         .await
@@ -271,6 +396,20 @@ impl Store for DbStore {
 
     async fn get_document(&self, id: DocumentId) -> Result<Option<DocumentRecord>> {
         entities::document::Entity::find_by_id(id.0)
+            .one(&self.conn)
+            .await
+            .map_err(store_err)?
+            .map(document_from_model)
+            .transpose()
+    }
+
+    async fn get_document_scoped(
+        &self,
+        owner: &OwnerId,
+        id: DocumentId,
+    ) -> Result<Option<DocumentRecord>> {
+        entities::document::Entity::find_by_id(id.0)
+            .filter(entities::document::Column::Owner.eq(owner.as_str()))
             .one(&self.conn)
             .await
             .map_err(store_err)?
@@ -306,59 +445,17 @@ impl Store for DbStore {
         after: Option<DocumentListCursor>,
         limit: u64,
     ) -> Result<Vec<DocumentSummaryRecord>> {
-        let mut query = entities::document::Entity::find();
-        query = match scope {
-            DocumentScope::All => query,
-            DocumentScope::Unscoped => query
-                .filter(entities::document::Column::ChatId.is_null())
-                .filter(entities::document::Column::ProjectId.is_null()),
-            DocumentScope::Project(id) => query
-                .filter(entities::document::Column::ChatId.is_null())
-                .filter(entities::document::Column::ProjectId.eq(id.0)),
-            DocumentScope::Chat(id) => query.filter(entities::document::Column::ChatId.eq(id.0)),
-        };
-        if let Some(cursor) = after {
-            query = query.filter(
-                sea_orm::Condition::any()
-                    .add(entities::document::Column::CreatedAt.lt(cursor.created_at))
-                    .add(
-                        sea_orm::Condition::all()
-                            .add(entities::document::Column::CreatedAt.eq(cursor.created_at))
-                            .add(entities::document::Column::Id.lt(cursor.id.0)),
-                    ),
-            );
-        }
+        list_document_summaries_on(self, None, scope, after, limit).await
+    }
 
-        query
-            .select_only()
-            .columns([
-                entities::document::Column::Id,
-                entities::document::Column::ChatId,
-                entities::document::Column::ProjectId,
-                entities::document::Column::SourceUri,
-                entities::document::Column::MediaType,
-                entities::document::Column::Title,
-                entities::document::Column::SourceByteLen,
-                entities::document::Column::CreatedAt,
-                entities::document::Column::UpdatedAt,
-            ])
-            .column_as(
-                sea_orm::sea_query::ExprTrait::ne(
-                    sea_orm::sea_query::Expr::col(entities::document::Column::CanonicalText),
-                    "",
-                ),
-                "has_canonical_text",
-            )
-            .order_by_desc(entities::document::Column::CreatedAt)
-            .order_by_desc(entities::document::Column::Id)
-            .limit(limit)
-            .into_model::<DocumentSummaryRow>()
-            .all(&self.conn)
-            .await
-            .map_err(store_err)?
-            .into_iter()
-            .map(document_summary_from_row)
-            .collect()
+    async fn list_document_summaries_scoped(
+        &self,
+        owner: &OwnerId,
+        scope: DocumentScope,
+        after: Option<DocumentListCursor>,
+        limit: u64,
+    ) -> Result<Vec<DocumentSummaryRecord>> {
+        list_document_summaries_on(self, Some(owner), scope, after, limit).await
     }
 
     async fn list_document_ids(&self, scope: DocumentScope) -> Result<Vec<DocumentId>> {
@@ -484,22 +581,11 @@ impl Store for DbStore {
     }
 
     async fn delete_document(&self, id: DocumentId) -> Result<()> {
-        let transaction = self.conn.begin().await.map_err(store_err)?;
-        let document = entities::document::Entity::find_by_id(id.0)
-            .one(&transaction)
-            .await
-            .map_err(store_err)?;
-        if let Some(document) = document {
-            entities::document::Entity::delete_by_id(id.0)
-                .exec(&transaction)
-                .await
-                .map_err(store_err)?;
-            if let Some(blob_id) = document.source_blob_id {
-                ops::blob::enqueue_on(&transaction, blob_id).await?;
-            }
-        }
-        transaction.commit().await.map_err(store_err)?;
-        Ok(())
+        self.delete_document_impl(id, None).await
+    }
+
+    async fn delete_document_scoped(&self, owner: &OwnerId, id: DocumentId) -> Result<()> {
+        self.delete_document_impl(id, Some(owner)).await
     }
 
     async fn upsert_document(&self, document: &DocumentUpsert) -> Result<DocumentRecord> {
@@ -515,15 +601,35 @@ impl Store for DbStore {
         &self,
         document: &DocumentSourceUpsert,
     ) -> Result<DocumentRecord> {
-        ops::document::accept_source(self, document).await
+        ops::document::accept_source(self, document, None).await
+    }
+
+    async fn accept_document_source_scoped(
+        &self,
+        owner: &OwnerId,
+        document: &DocumentSourceUpsert,
+    ) -> Result<DocumentRecord> {
+        ops::document::accept_source(self, document, Some(owner)).await
     }
 
     async fn create_chat(&self, chat: &Chat) -> Result<()> {
-        ops::conversation::create_chat(self, chat).await
+        ops::conversation::create_chat(self, chat, None).await
+    }
+
+    async fn create_chat_scoped(&self, owner: &OwnerId, chat: &Chat) -> Result<()> {
+        ops::conversation::create_chat(self, chat, Some(owner)).await
     }
 
     async fn create_chat_with_project_defaults(&self, chat: &Chat) -> Result<Chat> {
-        ops::conversation::create_chat_with_project_defaults(self, chat).await
+        ops::conversation::create_chat_with_project_defaults(self, chat, None).await
+    }
+
+    async fn create_chat_with_project_defaults_scoped(
+        &self,
+        owner: &OwnerId,
+        chat: &Chat,
+    ) -> Result<Chat> {
+        ops::conversation::create_chat_with_project_defaults(self, chat, Some(owner)).await
     }
 
     async fn set_chat_model(&self, id: ChatId, model: Option<String>) -> Result<()> {
@@ -555,27 +661,71 @@ impl Store for DbStore {
             reasoning_effort,
             permission_mode,
             network_policy,
+            None,
+        )
+        .await
+    }
+
+    async fn update_chat_metadata_scoped(
+        &self,
+        owner: &OwnerId,
+        id: ChatId,
+        title: Option<Option<String>>,
+        model: Option<Option<String>>,
+        reasoning_effort: Option<Option<ReasoningEffort>>,
+        permission_mode: Option<Option<PermissionMode>>,
+        network_policy: Option<NetworkPolicy>,
+    ) -> Result<bool> {
+        ops::conversation::update_chat_metadata(
+            self,
+            id,
+            title,
+            model,
+            reasoning_effort,
+            permission_mode,
+            network_policy,
+            Some(owner),
         )
         .await
     }
 
     async fn get_chat(&self, id: ChatId) -> Result<Option<Chat>> {
-        ops::conversation::get_chat(self, id).await
+        ops::conversation::get_chat(self, id, None).await
+    }
+
+    async fn get_chat_scoped(&self, owner: &OwnerId, id: ChatId) -> Result<Option<Chat>> {
+        ops::conversation::get_chat(self, id, Some(owner)).await
     }
 
     async fn list_chats(&self) -> Result<Vec<Chat>> {
-        ops::conversation::list_chats(self).await
+        ops::conversation::list_chats(self, None).await
+    }
+
+    async fn list_chats_scoped(&self, owner: &OwnerId) -> Result<Vec<Chat>> {
+        ops::conversation::list_chats(self, Some(owner)).await
     }
 
     async fn delete_chat(&self, id: ChatId) -> Result<DeleteChatOutcome> {
-        ops::conversation::delete_chat(self, id).await
+        ops::conversation::delete_chat(self, id, None).await
+    }
+
+    async fn delete_chat_scoped(&self, owner: &OwnerId, id: ChatId) -> Result<DeleteChatOutcome> {
+        ops::conversation::delete_chat(self, id, Some(owner)).await
     }
 
     async fn get_chat_transcript(
         &self,
         id: ChatId,
     ) -> Result<Option<crate::storage::ChatTranscriptSnapshot>> {
-        ops::conversation::get_chat_transcript(self, id).await
+        ops::conversation::get_chat_transcript(self, id, None).await
+    }
+
+    async fn get_chat_transcript_scoped(
+        &self,
+        owner: &OwnerId,
+        id: ChatId,
+    ) -> Result<Option<crate::storage::ChatTranscriptSnapshot>> {
+        ops::conversation::get_chat_transcript(self, id, Some(owner)).await
     }
 
     async fn create_output(&self, request: &CreateOutput) -> Result<OutputRecord> {
@@ -840,8 +990,9 @@ impl Store for DbStore {
         run_id: uuid::Uuid,
         tag: &str,
         window_expires_at: chrono::DateTime<Utc>,
+        admission: crate::storage::SandboxAdmissionMode,
     ) -> Result<crate::storage::BeginSandboxProvisionOutcome> {
-        ops::sandbox_provision::begin(self, run_id, tag, window_expires_at).await
+        ops::sandbox_provision::begin(self, run_id, tag, window_expires_at, admission).await
     }
 
     async fn commit_sandbox_provision_handle(
@@ -2103,6 +2254,101 @@ impl Store for DbStore {
         ops::operation_log::len(self, run_id).await
     }
 }
+/// The owner of a document's parent scope: its chat's or project's owner, or
+/// `None` for a standalone document. Callers hold the document-scope write
+/// lock, so a present parent cannot disappear underneath this read.
+pub(in crate::db) async fn document_scope_owner_on<C>(
+    conn: &C,
+    chat_id: Option<ChatId>,
+    project_id: Option<ProjectId>,
+) -> Result<Option<String>>
+where
+    C: ConnectionTrait,
+{
+    if let Some(chat_id) = chat_id {
+        let chat = entities::chat::Entity::find_by_id(chat_id.0)
+            .one(conn)
+            .await
+            .map_err(store_err)?
+            .ok_or_else(|| AgentError::Store(format!("chat {chat_id} not found")))?;
+        return Ok(Some(chat.owner));
+    }
+    if let Some(project_id) = project_id {
+        let project = entities::project::Entity::find_by_id(project_id.0)
+            .one(conn)
+            .await
+            .map_err(store_err)?
+            .ok_or(AgentError::ProjectNotFound(project_id))?;
+        return Ok(Some(project.owner));
+    }
+    Ok(None)
+}
+
+async fn list_document_summaries_on(
+    store: &DbStore,
+    owner: Option<&OwnerId>,
+    scope: DocumentScope,
+    after: Option<DocumentListCursor>,
+    limit: u64,
+) -> Result<Vec<DocumentSummaryRecord>> {
+    let mut query = entities::document::Entity::find();
+    if let Some(owner) = owner {
+        query = query.filter(entities::document::Column::Owner.eq(owner.as_str()));
+    }
+    query = match scope {
+        DocumentScope::All => query,
+        DocumentScope::Unscoped => query
+            .filter(entities::document::Column::ChatId.is_null())
+            .filter(entities::document::Column::ProjectId.is_null()),
+        DocumentScope::Project(id) => query
+            .filter(entities::document::Column::ChatId.is_null())
+            .filter(entities::document::Column::ProjectId.eq(id.0)),
+        DocumentScope::Chat(id) => query.filter(entities::document::Column::ChatId.eq(id.0)),
+    };
+    if let Some(cursor) = after {
+        query = query.filter(
+            sea_orm::Condition::any()
+                .add(entities::document::Column::CreatedAt.lt(cursor.created_at))
+                .add(
+                    sea_orm::Condition::all()
+                        .add(entities::document::Column::CreatedAt.eq(cursor.created_at))
+                        .add(entities::document::Column::Id.lt(cursor.id.0)),
+                ),
+        );
+    }
+
+    query
+        .select_only()
+        .columns([
+            entities::document::Column::Id,
+            entities::document::Column::ChatId,
+            entities::document::Column::ProjectId,
+            entities::document::Column::SourceUri,
+            entities::document::Column::MediaType,
+            entities::document::Column::Title,
+            entities::document::Column::SourceByteLen,
+            entities::document::Column::CreatedAt,
+            entities::document::Column::UpdatedAt,
+        ])
+        .column_as(
+            sea_orm::sea_query::ExprTrait::ne(
+                sea_orm::sea_query::Expr::col(entities::document::Column::CanonicalText),
+                "",
+            ),
+            "has_canonical_text",
+        )
+        .order_by_desc(entities::document::Column::CreatedAt)
+        .order_by_desc(entities::document::Column::Id)
+        .limit(limit)
+        .into_model::<DocumentSummaryRow>()
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(document_summary_from_row)
+        .collect()
+}
+
 async fn upsert_document_on<C>(conn: &C, document: &DocumentUpsert) -> Result<DocumentRecord>
 where
     C: ConnectionTrait,
@@ -2130,6 +2376,14 @@ where
         }
     }
 
+    // The row's owner never changes on an upsert; a new row carries its
+    // parent's owner, or the local owner for a standalone document (#853).
+    let row_owner = match existing.as_ref() {
+        Some(existing) => existing.owner.clone(),
+        None => document_scope_owner_on(conn, document.chat_id, document.project_id)
+            .await?
+            .unwrap_or_else(|| OwnerId::LOCAL.to_owned()),
+    };
     let active = entities::document::ActiveModel {
         id: Set(document.id.0),
         chat_id: Set(document.chat_id.map(|id| id.0)),
@@ -2145,6 +2399,7 @@ where
             .as_ref()
             .map_or(document.updated_at, |current| current.created_at)),
         updated_at: Set(document.updated_at),
+        owner: Set(row_owner),
     };
     if existing.is_some() {
         active.update(conn).await.map_err(store_err)?;

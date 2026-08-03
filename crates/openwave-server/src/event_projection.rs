@@ -682,15 +682,15 @@ mod tests {
                 output: ToolOutput::text("private result").with_data(serde_json::json!({
                     "stdout": "private stream",
                 })),
-                // `write_file` projects neither an action nor a result, so
-                // nothing about it may cross — not the output text, and not
-                // the structured payload beside it.
+                // `read_file` projects neither an action nor an opted-in
+                // result here, so nothing about it may cross — not the output
+                // text, and not the structured payload beside it.
                 action: ToolActionPreview::build(
-                    "write_file",
+                    "read_file",
                     &serde_json::json!({ "path": "private/path" }),
                 ),
                 result: ToolResultPreview::build(
-                    "write_file",
+                    "read_file",
                     &ToolOutput::text("private result")
                         .with_data(serde_json::json!({ "stdout": "private stream" })),
                 ),
@@ -709,15 +709,15 @@ mod tests {
             event: AgentEvent::ApprovalRequired {
                 auto_judging: false,
                 call_id: CallId::new(),
-                tool_name: "write_file".into(),
-                class: ApprovalClass::Workspace,
-                kind: ToolApprovalKind::Unsupported,
+                tool_name: "mcp__server__tool".into(),
+                class: ApprovalClass::Sensitive,
+                kind: ToolApprovalKind::ExternalMcpMayCallServer,
                 grant_scopes: Vec::new(),
                 // A tool with no variant projects nothing, so the card has no
                 // action to show; the desktop renders its own canned ask from
                 // the approval kind.
                 preview: ToolActionPreview::build(
-                    "write_file",
+                    "mcp__server__tool",
                     &serde_json::json!({ "path": "private/path" }),
                 ),
             },
@@ -725,6 +725,31 @@ mod tests {
         let json = serde_json::to_string(&projected).unwrap();
         assert!(!json.contains("preview"));
         assert!(!json.contains("private"));
+    }
+
+    /// A gated workspace write names the file it is about to touch. The path
+    /// crosses because it is the resource under review; the content never
+    /// does — it is not part of the projection at all.
+    #[test]
+    fn a_workspace_write_approval_carries_the_path_and_not_the_content() {
+        let projected = RendererSequencedEvent::from(&SequencedEvent {
+            seq: 11,
+            event: AgentEvent::ApprovalRequired {
+                auto_judging: false,
+                call_id: CallId::new(),
+                tool_name: "write_file".into(),
+                class: ApprovalClass::Workspace,
+                kind: ToolApprovalKind::WorkspaceMayModifyFiles,
+                grant_scopes: Vec::new(),
+                preview: ToolActionPreview::build(
+                    "write_file",
+                    &serde_json::json!({ "path": "reports/q3.md", "content": "private body" }),
+                ),
+            },
+        });
+        let json = serde_json::to_string(&projected).unwrap();
+        assert!(json.contains("reports/q3.md"), "{json}");
+        assert!(!json.contains("private body"), "{json}");
     }
 
     /// Consent to an action you cannot see is not consent, and for a web search

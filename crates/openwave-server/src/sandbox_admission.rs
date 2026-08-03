@@ -1,4 +1,5 @@
-//! Startup-time routing for newly admitted background agent runs.
+//! Startup-time routing for newly admitted background agent runs, and the
+//! fail-closed detached-admission gate (issue #824).
 //!
 //! The container runtime is a detected capability, but checking it belongs at
 //! process assembly rather than at every model-authored spawn. The resolved
@@ -7,7 +8,7 @@
 
 use std::sync::Arc;
 
-use openwave_core::{AgentRunExecutionLocation, Config};
+use openwave_core::{AgentRunExecutionLocation, Config, SandboxAdmissionMode};
 
 use crate::sandbox_docker::{DockerConfig, DockerSandboxBackend};
 
@@ -59,6 +60,120 @@ pub(crate) fn docker_config(config: &Config) -> DockerConfig {
     docker
 }
 
+/// The facts the detached-admission decision consumes, gathered by the caller
+/// at run admission.
+///
+/// Every field defaults to the unmet state, so a caller that cannot establish
+/// a precondition does not have to remember to deny it — constructing the
+/// struct with `..Default::default()` is already the closed position. The
+/// preconditions are the ones docs/sandbox-providers.md fixes for detached
+/// admission; each maps one-to-one onto a [`DetachedAdmissionDenial`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DetachedPreconditions {
+    /// A short-lived, scoped, revocable model token can be minted for this
+    /// run (a gateway session or a provider that issues them). A long-lived
+    /// provider API key never satisfies this.
+    pub(crate) scoped_model_token_available: bool,
+    /// The backend enforces a sandbox lifetime cap from outside the sandbox,
+    /// set at provisioning to no more than the run's absolute deadline.
+    pub(crate) external_lifetime_cap: bool,
+    /// The agent image is verified within the topology's trust root.
+    pub(crate) image_verified: bool,
+    /// The run's tool surface can reach a host-authority operation (work that
+    /// needs consent mid-run). Such a run is refused detached admission at
+    /// the start, not parked indefinitely in the middle.
+    pub(crate) host_authority_tool_surface: bool,
+    /// The run carries third-party credentials (connected-app or similar).
+    /// The scoped model token itself is deliberately exempt.
+    pub(crate) carries_third_party_credentials: bool,
+    /// Egress policy is enforced from outside the sandbox by a mechanism the
+    /// host knows out-of-band. Consulted only for credential-bearing runs.
+    pub(crate) external_egress_enforcement: bool,
+}
+
+impl Default for DetachedPreconditions {
+    /// The closed position: nothing established, host-authority reach and
+    /// credential carriage assumed present. Evaluating the default denies.
+    fn default() -> Self {
+        Self {
+            scoped_model_token_available: false,
+            external_lifetime_cap: false,
+            image_verified: false,
+            host_authority_tool_surface: true,
+            carries_third_party_credentials: true,
+            external_egress_enforcement: false,
+        }
+    }
+}
+
+/// One unmet detached-admission precondition, named for surfacing (the
+/// settings slice renders these per provider) and for the audit trail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DetachedAdmissionDenial {
+    /// No issuer of short-lived, scoped, revocable model tokens.
+    NoScopedModelToken,
+    /// Nothing outside the sandbox bounds its lifetime.
+    NoExternalLifetimeCap,
+    /// The agent image is not verified within the topology's trust root.
+    ImageNotVerified,
+    /// The tool surface reaches a host-authority operation.
+    HostAuthorityToolSurface,
+    /// The run carries third-party credentials without externally enforced
+    /// egress policy.
+    CredentialsWithoutExternalEgress,
+}
+
+/// The detached-admission decision: admitted only when every precondition
+/// holds, otherwise denied with every unmet precondition named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DetachedAdmission {
+    /// Every precondition held; the run may be recorded as detached-admitted.
+    Admitted,
+    /// At least one precondition failed; the run falls back to attached-only.
+    Denied(Vec<DetachedAdmissionDenial>),
+}
+
+impl DetachedAdmission {
+    /// The durable admission mode this decision records.
+    pub(crate) fn mode(&self) -> SandboxAdmissionMode {
+        match self {
+            Self::Admitted => SandboxAdmissionMode::Detached,
+            Self::Denied(_) => SandboxAdmissionMode::AttachedOnly,
+        }
+    }
+}
+
+/// Evaluate the doc's detached-admission preconditions, failing closed.
+///
+/// The contract: `Admitted` requires **all** preconditions to hold, and a
+/// denial names every unmet one rather than the first, so the settings
+/// surface can say exactly what a provider is missing.
+pub(crate) fn evaluate_detached_admission(
+    preconditions: DetachedPreconditions,
+) -> DetachedAdmission {
+    let mut denials = Vec::new();
+    if !preconditions.scoped_model_token_available {
+        denials.push(DetachedAdmissionDenial::NoScopedModelToken);
+    }
+    if !preconditions.external_lifetime_cap {
+        denials.push(DetachedAdmissionDenial::NoExternalLifetimeCap);
+    }
+    if !preconditions.image_verified {
+        denials.push(DetachedAdmissionDenial::ImageNotVerified);
+    }
+    if preconditions.host_authority_tool_surface {
+        denials.push(DetachedAdmissionDenial::HostAuthorityToolSurface);
+    }
+    if preconditions.carries_third_party_credentials && !preconditions.external_egress_enforcement {
+        denials.push(DetachedAdmissionDenial::CredentialsWithoutExternalEgress);
+    }
+    if denials.is_empty() {
+        DetachedAdmission::Admitted
+    } else {
+        DetachedAdmission::Denied(denials)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,6 +192,92 @@ mod tests {
             execution_location(true, false),
             AgentRunExecutionLocation::InProcess
         );
+    }
+
+    /// The fail-closed contract of the detached gate: admission requires
+    /// every precondition, any single unmet one denies with its name, and the
+    /// default (nothing established) denies.
+    #[test]
+    fn detached_admission_fails_closed_on_any_unmet_precondition() {
+        let all_met = DetachedPreconditions {
+            scoped_model_token_available: true,
+            external_lifetime_cap: true,
+            image_verified: true,
+            host_authority_tool_surface: false,
+            carries_third_party_credentials: false,
+            external_egress_enforcement: false,
+        };
+        assert_eq!(
+            evaluate_detached_admission(all_met),
+            DetachedAdmission::Admitted
+        );
+        assert_eq!(
+            evaluate_detached_admission(all_met).mode(),
+            SandboxAdmissionMode::Detached
+        );
+
+        let single_failures = [
+            (
+                DetachedPreconditions {
+                    scoped_model_token_available: false,
+                    ..all_met
+                },
+                DetachedAdmissionDenial::NoScopedModelToken,
+            ),
+            (
+                DetachedPreconditions {
+                    external_lifetime_cap: false,
+                    ..all_met
+                },
+                DetachedAdmissionDenial::NoExternalLifetimeCap,
+            ),
+            (
+                DetachedPreconditions {
+                    image_verified: false,
+                    ..all_met
+                },
+                DetachedAdmissionDenial::ImageNotVerified,
+            ),
+            (
+                DetachedPreconditions {
+                    host_authority_tool_surface: true,
+                    ..all_met
+                },
+                DetachedAdmissionDenial::HostAuthorityToolSurface,
+            ),
+            (
+                DetachedPreconditions {
+                    carries_third_party_credentials: true,
+                    ..all_met
+                },
+                DetachedAdmissionDenial::CredentialsWithoutExternalEgress,
+            ),
+        ];
+        for (preconditions, expected) in single_failures {
+            let decision = evaluate_detached_admission(preconditions);
+            assert_eq!(decision, DetachedAdmission::Denied(vec![expected]));
+            assert_eq!(decision.mode(), SandboxAdmissionMode::AttachedOnly);
+        }
+
+        // Credential-bearing work with externally enforced egress is not a
+        // denial on its own.
+        assert_eq!(
+            evaluate_detached_admission(DetachedPreconditions {
+                carries_third_party_credentials: true,
+                external_egress_enforcement: true,
+                ..all_met
+            }),
+            DetachedAdmission::Admitted
+        );
+
+        // The default is the closed position, and the denial names every
+        // unmet precondition, not the first.
+        let DetachedAdmission::Denied(denials) =
+            evaluate_detached_admission(DetachedPreconditions::default())
+        else {
+            panic!("the default preconditions must deny");
+        };
+        assert_eq!(denials.len(), 5);
     }
 
     #[test]

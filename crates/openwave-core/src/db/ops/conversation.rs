@@ -12,8 +12,8 @@ use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{ChatId, HostRootId, MessageId, ProjectId, TurnId};
 use crate::model::{
     validate_chat_root_projection, validate_chat_root_projection_against_project, Chat,
-    ChatRootAttachment, Message, PermissionMode, ReasoningEffort, Role, RootAttachmentOrigin,
-    ToolCallRecord, TurnRunStatus, MAX_ROOT_ATTACHMENTS,
+    ChatRootAttachment, Message, OwnerId, PermissionMode, ReasoningEffort, Role,
+    RootAttachmentOrigin, ToolCallRecord, TurnRunStatus, MAX_ROOT_ATTACHMENTS,
 };
 use crate::storage::{
     ChatTerminalTurnSnapshot, ChatTerminalTurnStatus, ChatToolActivitySnapshot,
@@ -103,11 +103,15 @@ where
         })
 }
 
-pub(in crate::db) async fn create_chat(store: &DbStore, chat: &Chat) -> Result<()> {
+pub(in crate::db) async fn create_chat(
+    store: &DbStore,
+    chat: &Chat,
+    owner: Option<&OwnerId>,
+) -> Result<()> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
-    let project_roots = load_chat_project_roots(&transaction, chat.project_id).await?;
+    let project_roots = load_chat_project_roots(&transaction, chat.project_id, owner).await?;
     validate_chat_attachments(chat, &project_roots)?;
-    insert_chat_on(&transaction, chat).await?;
+    insert_chat_on(&transaction, chat, owner).await?;
     insert_foreground_agent_run_on(&transaction, chat.id, chat.created_at).await?;
     transaction.commit().await.map_err(store_err)?;
     Ok(())
@@ -116,6 +120,7 @@ pub(in crate::db) async fn create_chat(store: &DbStore, chat: &Chat) -> Result<(
 pub(in crate::db) async fn create_chat_with_project_defaults(
     store: &DbStore,
     base: &Chat,
+    owner: Option<&OwnerId>,
 ) -> Result<Chat> {
     if base.attachment_revision != 0 || !base.root_attachments.is_empty() {
         return Err(AgentError::Store(
@@ -123,7 +128,7 @@ pub(in crate::db) async fn create_chat_with_project_defaults(
         ));
     }
     let transaction = store.conn.begin().await.map_err(store_err)?;
-    let project_roots = load_chat_project_roots(&transaction, base.project_id).await?;
+    let project_roots = load_chat_project_roots(&transaction, base.project_id, owner).await?;
     let mut chat = base.clone();
     chat.root_attachments = project_roots
         .into_iter()
@@ -136,7 +141,7 @@ pub(in crate::db) async fn create_chat_with_project_defaults(
         chat.attachment_revision = 1;
     }
     validate_chat_root_projection(&chat).map_err(|message| AgentError::Store(message.into()))?;
-    insert_chat_on(&transaction, &chat).await?;
+    insert_chat_on(&transaction, &chat, owner).await?;
     insert_foreground_agent_run_on(&transaction, chat.id, chat.created_at).await?;
     transaction.commit().await.map_err(store_err)?;
     Ok(chat)
@@ -145,6 +150,7 @@ pub(in crate::db) async fn create_chat_with_project_defaults(
 async fn load_chat_project_roots<C>(
     conn: &C,
     project_id: Option<ProjectId>,
+    owner: Option<&OwnerId>,
 ) -> Result<Vec<HostRootId>>
 where
     C: ConnectionTrait,
@@ -164,10 +170,15 @@ where
     let (model, roots) = rows
         .pop()
         .ok_or_else(|| AgentError::Store(format!("chat project {project_id} does not exist")))?;
+    // A project belonging to someone else must be indistinguishable from a
+    // missing one (#853).
+    if owner.is_some_and(|owner| owner.as_str() != model.owner) {
+        return Err(AgentError::ProjectNotFound(project_id));
+    }
     Ok(project_from_models(model, roots)?.root_attachments)
 }
 
-async fn insert_chat_on<C>(conn: &C, chat: &Chat) -> Result<()>
+async fn insert_chat_on<C>(conn: &C, chat: &Chat, owner: Option<&OwnerId>) -> Result<()>
 where
     C: ConnectionTrait,
 {
@@ -196,6 +207,13 @@ where
         },
         attachment_revision: Set(chat.attachment_revision),
         created_at: Set(chat.created_at),
+        // The local owner rides the column default (which also keeps this
+        // insert valid against a pre-owner schema in the upgrade tests); only
+        // a named principal writes the column explicitly.
+        owner: match owner {
+            Some(owner) if !owner.is_local() => Set(owner.as_str().to_owned()),
+            _ => sea_orm::ActiveValue::NotSet,
+        },
     }
     .insert(conn)
     .await
@@ -272,6 +290,7 @@ pub(in crate::db) async fn set_chat_title_if_unset(
     Ok(result.rows_affected == 1)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::db) async fn update_chat_metadata(
     store: &DbStore,
     id: ChatId,
@@ -280,6 +299,7 @@ pub(in crate::db) async fn update_chat_metadata(
     reasoning_effort: Option<Option<ReasoningEffort>>,
     permission_mode: Option<Option<PermissionMode>>,
     network_policy: Option<crate::NetworkPolicy>,
+    owner: Option<&OwnerId>,
 ) -> Result<bool> {
     if title.is_none()
         && model.is_none()
@@ -287,11 +307,11 @@ pub(in crate::db) async fn update_chat_metadata(
         && permission_mode.is_none()
         && network_policy.is_none()
     {
-        return Ok(entities::chat::Entity::find_by_id(id.0)
-            .one(&store.conn)
-            .await
-            .map_err(store_err)?
-            .is_some());
+        let mut query = entities::chat::Entity::find_by_id(id.0);
+        if let Some(owner) = owner {
+            query = query.filter(entities::chat::Column::Owner.eq(owner.as_str()));
+        }
+        return Ok(query.one(&store.conn).await.map_err(store_err)?.is_some());
     }
 
     let mut update = entities::chat::Entity::update_many();
@@ -330,16 +350,24 @@ pub(in crate::db) async fn update_chat_metadata(
             sea_orm::sea_query::Expr::value(encoded),
         );
     }
-    let result = update
-        .filter(entities::chat::Column::Id.eq(id.0))
-        .exec(&store.conn)
-        .await
-        .map_err(store_err)?;
+    let mut update = update.filter(entities::chat::Column::Id.eq(id.0));
+    if let Some(owner) = owner {
+        update = update.filter(entities::chat::Column::Owner.eq(owner.as_str()));
+    }
+    let result = update.exec(&store.conn).await.map_err(store_err)?;
     Ok(result.rows_affected == 1)
 }
 
-pub(in crate::db) async fn get_chat(store: &DbStore, id: ChatId) -> Result<Option<Chat>> {
-    let mut rows = entities::chat::Entity::find_by_id(id.0)
+pub(in crate::db) async fn get_chat(
+    store: &DbStore,
+    id: ChatId,
+    owner: Option<&OwnerId>,
+) -> Result<Option<Chat>> {
+    let mut query = entities::chat::Entity::find_by_id(id.0);
+    if let Some(owner) = owner {
+        query = query.filter(entities::chat::Column::Owner.eq(owner.as_str()));
+    }
+    let mut rows = query
         .find_with_related(entities::chat_root_attachment::Entity)
         .order_by_asc(entities::chat_root_attachment::Column::Position)
         .all(&store.conn)
@@ -350,8 +378,15 @@ pub(in crate::db) async fn get_chat(store: &DbStore, id: ChatId) -> Result<Optio
         .transpose()
 }
 
-pub(in crate::db) async fn list_chats(store: &DbStore) -> Result<Vec<Chat>> {
-    let mut chats = entities::chat::Entity::find()
+pub(in crate::db) async fn list_chats(
+    store: &DbStore,
+    owner: Option<&OwnerId>,
+) -> Result<Vec<Chat>> {
+    let mut query = entities::chat::Entity::find();
+    if let Some(owner) = owner {
+        query = query.filter(entities::chat::Column::Owner.eq(owner.as_str()));
+    }
+    let mut chats = query
         .find_with_related(entities::chat_root_attachment::Entity)
         .order_by_asc(entities::chat_root_attachment::Column::Position)
         .all(&store.conn)
@@ -379,11 +414,27 @@ pub(in crate::db) async fn list_chats(store: &DbStore) -> Result<Vec<Chat>> {
 pub(in crate::db) async fn delete_chat(
     store: &DbStore,
     chat_id: ChatId,
+    owner: Option<&OwnerId>,
 ) -> Result<DeleteChatOutcome> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_chat_write_lock(&transaction, chat_id).await? {
         transaction.rollback().await.map_err(store_err)?;
         return Ok(DeleteChatOutcome::NotFound);
+    }
+    // Someone else's chat is indistinguishable from an absent one (#853). The
+    // owner cannot change while the write lock above is held: no owner
+    // transfer exists.
+    if let Some(owner) = owner {
+        let owned = entities::chat::Entity::find_by_id(chat_id.0)
+            .filter(entities::chat::Column::Owner.eq(owner.as_str()))
+            .one(&transaction)
+            .await
+            .map_err(store_err)?
+            .is_some();
+        if !owned {
+            transaction.rollback().await.map_err(store_err)?;
+            return Ok(DeleteChatOutcome::NotFound);
+        }
     }
 
     let roots_attached = entities::chat_root_attachment::Entity::find()
@@ -686,11 +737,25 @@ pub(in crate::db) async fn delete_chat(
 pub(in crate::db) async fn get_chat_transcript(
     store: &DbStore,
     chat_id: ChatId,
+    owner: Option<&OwnerId>,
 ) -> Result<Option<ChatTranscriptSnapshot>> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_chat_write_lock(&transaction, chat_id).await? {
         transaction.rollback().await.map_err(store_err)?;
         return Ok(None);
+    }
+    // Someone else's transcript is indistinguishable from an absent one (#853).
+    if let Some(owner) = owner {
+        let owned = entities::chat::Entity::find_by_id(chat_id.0)
+            .filter(entities::chat::Column::Owner.eq(owner.as_str()))
+            .one(&transaction)
+            .await
+            .map_err(store_err)?
+            .is_some();
+        if !owned {
+            transaction.rollback().await.map_err(store_err)?;
+            return Ok(None);
+        }
     }
     let messages = list_messages_on(&transaction, chat_id).await?;
     let message_attachments =

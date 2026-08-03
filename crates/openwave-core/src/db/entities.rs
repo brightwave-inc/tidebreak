@@ -46,6 +46,7 @@ pub mod document {
         pub canonical_text: String,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
+        pub owner: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -65,6 +66,7 @@ pub mod project {
         pub title: Option<String>,
         pub attachment_revision: i64,
         pub created_at: DateTimeUtc,
+        pub owner: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -98,6 +100,7 @@ pub mod chat {
         pub network_policy: String,
         pub attachment_revision: i64,
         pub created_at: DateTimeUtc,
+        pub owner: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -310,6 +313,10 @@ pub mod sandbox_provision {
         pub tag: String,
         /// `intended` | `committed` | `teardown` | `done`.
         pub state: String,
+        /// `attached_only` | `detached` — the run's durable admission
+        /// decision, recorded before the create call. Fail closed: anything
+        /// unrecognized reads as `attached_only`.
+        pub admission: String,
         /// The backend's sandbox reference, `NULL` until committed.
         pub handle: Option<String>,
         /// A well-formed result that arrived after the run was already

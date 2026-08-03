@@ -75,6 +75,14 @@ pub enum ToolActionPreview {
     /// both what leaves the device and where the request goes — so the card
     /// shows it whole.
     WebExtract { url: String },
+    /// A file write inside the chat's private workspace. The path is the
+    /// resource under review — which file the call will create or replace —
+    /// and deliberately the only field: the content is not projected, so the
+    /// card names the target without carrying a document across the boundary.
+    WriteFile {
+        /// Workspace-relative destination path, never a host path.
+        path: String,
+    },
 }
 
 impl ToolActionPreview {
@@ -115,6 +123,13 @@ impl ToolActionPreview {
                     arguments.get("url")?.as_str()?.trim(),
                     MAX_ACTION_FIELD_CHARS,
                 )?,
+            }),
+            // A workspace write gated in Ask mode names the file it will touch.
+            // The content stays behind the boundary: the resource is the path,
+            // and the card's job is to say where the write lands, not to
+            // preview a document.
+            "write_file" => Some(Self::WriteFile {
+                path: clamp(arguments.get("path")?.as_str()?, MAX_ACTION_FIELD_CHARS)?,
             }),
             _ => None,
         }
@@ -168,6 +183,12 @@ impl ToolActionPreview {
                 .get("url")
                 .and_then(Value::as_str)
                 .is_some_and(|url| survives_clamp(url.trim())),
+            // Deliberately not exact: the preview names the path and omits the
+            // content, so it can never reproduce the call. A workspace write is
+            // one-shot anyway (its standing "yes" is the chat's Auto mode), and
+            // keeping it inexact means no narrow grant or judge candidacy can
+            // ever be built from a projection that lost the document.
+            "write_file" => false,
             // A tool with no variant projects nothing, so there is nothing a
             // narrower scope could name — and claiming otherwise would invite a
             // narrow grant with nothing to narrow to.
@@ -220,6 +241,14 @@ pub struct ResultEntry {
     /// projections predate the field.
     #[serde(default)]
     pub media_type: Option<String>,
+    /// The durable output this row names, when the row is one.
+    ///
+    /// Data rather than display text: the renderer routes a click through its
+    /// own panel navigation and never prints the id. Present only on
+    /// [`ResultEntryKind::Output`] rows; `default` because retained
+    /// projections predate the field.
+    #[serde(default)]
+    pub output_id: Option<String>,
 }
 
 impl ResultEntry {
@@ -232,6 +261,7 @@ impl ResultEntry {
             detail: None,
             meta: None,
             media_type: None,
+            output_id: None,
         }
     }
 
@@ -253,6 +283,13 @@ impl ResultEntry {
     #[must_use]
     pub fn with_media_type(mut self, media_type: impl Into<String>) -> Self {
         self.media_type = Some(media_type.into());
+        self
+    }
+
+    /// Name the durable output this row is.
+    #[must_use]
+    pub fn with_output_id(mut self, output_id: impl Into<String>) -> Self {
+        self.output_id = Some(output_id.into());
         self
     }
 }
@@ -589,10 +626,18 @@ fn exec_output_entries(value: Option<&Value>) -> Vec<ResultEntry> {
             }
             let label = clamp(row.get("filename")?.as_str()?, MAX_RESULT_ENTRY_CHARS)?;
             let version = row.get("version")?.as_u64()?;
-            Some(
-                ResultEntry::new(ResultEntryKind::Output, label)
-                    .with_meta(format!("v{version} · {status}")),
-            )
+            // The media type is derived from the filename by the same rules
+            // output creation uses, so the transcript card and the outputs
+            // panel show one file with one icon.
+            let media_type = crate::deliverable::deliverable_media_type(&label)
+                .unwrap_or_else(|| crate::deliverable::binary_media_type_for_extension(&label));
+            let mut entry = ResultEntry::new(ResultEntryKind::Output, label)
+                .with_meta(format!("v{version} · {status}"))
+                .with_media_type(media_type);
+            if let Some(output_id) = row.get("output_id").and_then(Value::as_str) {
+                entry = entry.with_output_id(output_id);
+            }
+            Some(entry)
         })
         .take(MAX_RESULT_ENTRIES)
         .collect()
@@ -605,6 +650,7 @@ fn result_entry(value: &Value) -> Option<ResultEntry> {
         detail: entry_field(value.get("detail")),
         meta: entry_field(value.get("meta")),
         media_type: entry_field(value.get("media_type")),
+        output_id: entry_field(value.get("output_id")),
     })
 }
 
@@ -890,7 +936,7 @@ mod tests {
         let output = output_with_data(serde_json::json!({
             "exit_code": 0,
             "outputs": [
-                { "filename": "report.md", "version": 3, "status": "updated" },
+                { "filename": "report.md", "output_id": "output-report", "version": 3, "status": "updated" },
                 { "filename": "chart.png", "version": 1, "status": "created" },
                 { "filename": "data.csv", "version": 2, "status": "unchanged" },
                 { "filename": 7, "version": "x", "status": "created" },
@@ -914,6 +960,14 @@ mod tests {
         assert!(outputs
             .iter()
             .all(|entry| entry.kind == ResultEntryKind::Output));
+        // The routable id crosses when the scan recorded one — that is what
+        // makes the transcript card clickable — and the icon's media type is
+        // derived from the filename by the output-creation rules. A row
+        // without an id (older journal data) still renders, unrouted.
+        assert_eq!(outputs[0].output_id.as_deref(), Some("output-report"));
+        assert_eq!(outputs[0].media_type.as_deref(), Some("text/markdown"));
+        assert_eq!(outputs[1].output_id, None);
+        assert_eq!(outputs[1].media_type.as_deref(), Some("image/png"));
 
         // A pre-outputs journal row deserializes with the field defaulted.
         let stored: ToolResultPreview = serde_json::from_value(serde_json::json!({
@@ -934,10 +988,7 @@ mod tests {
     #[test]
     fn only_tools_with_a_variant_project_anything() {
         for (tool, arguments) in [
-            (
-                "write_file",
-                serde_json::json!({ "path": "/Users/private" }),
-            ),
+            ("read_file", serde_json::json!({ "path": "notes.md" })),
             ("mcp__server__tool", serde_json::json!({ "any": "thing" })),
         ] {
             assert_eq!(ToolActionPreview::build(tool, &arguments), None);
@@ -959,6 +1010,38 @@ mod tests {
                 None
             );
         }
+    }
+
+    /// A gated workspace write names the file it will touch, and nothing else.
+    ///
+    /// The card used to ask about "files in this chat's workspace" without
+    /// saying which one. The projection carries the path — the resource under
+    /// review — and deliberately not the content, so the action can never be
+    /// exactly describable: no narrow grant and no judge candidacy can be
+    /// built from a projection that lost the document.
+    #[test]
+    fn a_workspace_write_names_its_path_but_is_never_exact() {
+        let arguments = json!({ "path": "reports/q3.md", "content": "private document body" });
+        let preview = ToolActionPreview::build("write_file", &arguments);
+        assert_eq!(
+            preview,
+            Some(ToolActionPreview::WriteFile {
+                path: "reports/q3.md".into()
+            })
+        );
+        // Wire shape: the serialized preview carries the path and never the
+        // content, whatever the arguments held.
+        let json = serde_json::to_string(&preview.unwrap()).unwrap();
+        assert_eq!(json, r#"{"tool":"write_file","path":"reports/q3.md"}"#);
+        assert!(!ToolActionPreview::describes_exactly(
+            "write_file",
+            &arguments
+        ));
+        // Malformed arguments project nothing rather than an empty card.
+        assert_eq!(
+            ToolActionPreview::build("write_file", &json!({ "content": "x" })),
+            None
+        );
     }
 
     #[test]

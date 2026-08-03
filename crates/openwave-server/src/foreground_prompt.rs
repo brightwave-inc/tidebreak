@@ -57,7 +57,7 @@ const MCP_HEADING: &str = "## External MCP tools";
 #[must_use]
 #[cfg(test)]
 pub(crate) fn compose(specs: &[ToolSpec]) -> String {
-    compose_for_surface(specs, &[], &[], &NetworkPolicy::default(), false)
+    compose_for_surface(specs, &[], &[], &NetworkPolicy::default(), false, false)
 }
 
 /// Render a host path as a quoted JSON string, so a path carrying a quote or a
@@ -86,6 +86,7 @@ pub(crate) fn compose_for_surface(
     exec_folders: &[ResolvedExecFolderGrant],
     skills: &[SkillPackage],
     network_policy: &NetworkPolicy,
+    offline_package_cache: bool,
     plan_mode: bool,
 ) -> String {
     let names = specs
@@ -297,10 +298,20 @@ pub(crate) fn compose_for_surface(
         // enforces it again per invocation.
         let package_installs_reachable = match network_policy {
             NetworkPolicy::Off => {
-                lines.push(
-                    "- This chat's network policy is off: commands have no outbound network access, and package installs are unavailable."
-                        .to_owned(),
-                );
+                // The cache flag is host-derived state, like the policy: with
+                // verified wheels mounted read-only, "installs are
+                // unavailable" would be false.
+                if offline_package_cache {
+                    lines.push(
+                        "- This chat's network policy is off: commands have no outbound network access. Previously verified packages can still be installed offline with `python3 -m pip install --user --no-index --find-links \"$OPENWAVE_PACKAGE_CACHE\" <package>==<version>`; packages not in that read-only cache are unavailable."
+                            .to_owned(),
+                    );
+                } else {
+                    lines.push(
+                        "- This chat's network policy is off: commands have no outbound network access, and package installs are unavailable."
+                            .to_owned(),
+                    );
+                }
                 false
             }
             NetworkPolicy::PackageManagers => {
@@ -622,8 +633,8 @@ mod tests {
     #[test]
     fn plan_mode_adds_the_planning_contract_and_nothing_else() {
         let specs = [spec("read_file"), spec("list_sources")];
-        let plan = compose_for_surface(&specs, &[], &[], &NetworkPolicy::default(), true);
-        let normal = compose_for_surface(&specs, &[], &[], &NetworkPolicy::default(), false);
+        let plan = compose_for_surface(&specs, &[], &[], &NetworkPolicy::default(), false, true);
+        let normal = compose_for_surface(&specs, &[], &[], &NetworkPolicy::default(), false, false);
 
         assert!(plan.contains(PLAN_MODE_HEADING));
         assert!(plan.contains("do not carry it out"));
@@ -671,6 +682,7 @@ mod tests {
             &[],
             &NetworkPolicy::default(),
             false,
+            false,
         );
 
         assert!(prompt.contains(
@@ -690,13 +702,25 @@ mod tests {
 
     #[test]
     fn network_policy_renders_truthfully_per_value() {
-        let compose_with =
-            |policy: &NetworkPolicy| compose_for_surface(&[spec("exec")], &[], &[], policy, false);
+        let compose_with = |policy: &NetworkPolicy| {
+            compose_for_surface(&[spec("exec")], &[], &[], policy, false, false)
+        };
         let pip_line = "python3 -m pip install --user";
 
         let off = compose_with(&NetworkPolicy::Off);
         assert!(off.contains("network policy is off"));
         assert!(!off.contains(pip_line));
+        assert!(off.contains("package installs are unavailable"));
+        assert!(!off.contains("OPENWAVE_PACKAGE_CACHE"));
+
+        // With verified shared wheels mounted, an off policy still supports
+        // offline installs from the read-only cache — and says so instead of
+        // claiming installs are unavailable.
+        let off_with_cache =
+            compose_for_surface(&[spec("exec")], &[], &[], &NetworkPolicy::Off, true, false);
+        assert!(off_with_cache.contains("no outbound network access"));
+        assert!(off_with_cache.contains("--no-index --find-links \"$OPENWAVE_PACKAGE_CACHE\""));
+        assert!(!off_with_cache.contains("package installs are unavailable"));
 
         let packages = compose_with(&NetworkPolicy::PackageManagers);
         assert!(packages.contains("package-manager registries only"));
@@ -763,6 +787,7 @@ mod tests {
             &skills,
             &NetworkPolicy::default(),
             false,
+            false,
         );
         assert!(prompt.contains(DOCUMENT_SKILLS_HEADING));
         assert!(prompt.contains("- pdf-documents: Generate and manipulate PDF documents."));
@@ -779,6 +804,7 @@ mod tests {
             &skills,
             &NetworkPolicy::default(),
             false,
+            false,
         );
         assert!(!without_exec.contains(DOCUMENT_SKILLS_HEADING));
         // Nothing but forged entries composes no section at all.
@@ -787,6 +813,7 @@ mod tests {
             &[],
             &skills[1..],
             &NetworkPolicy::default(),
+            false,
             false,
         );
         assert!(!forged_only.contains(DOCUMENT_SKILLS_HEADING));
@@ -863,7 +890,14 @@ mod tests {
             spec("wait_for_agents"),
             spec("mcp__example__tool"),
         ];
-        let prompt = compose_for_surface(&specs, &[], &skills, &NetworkPolicy::default(), false);
+        let prompt = compose_for_surface(
+            &specs,
+            &[],
+            &skills,
+            &NetworkPolicy::default(),
+            false,
+            false,
+        );
 
         assert_eq!(
             identity(&prompt),

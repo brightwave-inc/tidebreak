@@ -25,6 +25,7 @@ const GRANTED: AppGrantState = {
       app: "11111111-1111-4111-8111-111111111111",
       name: "cmd",
       tools: ["mcp__cmd__doit"],
+      operation_ids: null,
       granted: true,
       definition_changed: false,
     },
@@ -38,8 +39,17 @@ const STALE: AppGrantState = {
       app: "11111111-1111-4111-8111-111111111111",
       name: "cmd",
       tools: ["mcp__cmd__doit"],
+      operation_ids: null,
       granted: false,
       definition_changed: true,
+    },
+    {
+      app: "22222222-2222-4222-8222-222222222222",
+      name: "issues",
+      tools: null,
+      operation_ids: ["listIssues"],
+      granted: false,
+      definition_changed: false,
     },
   ],
 };
@@ -63,6 +73,12 @@ function apisWith(grant: AppGrantState): AppsApis {
         structured_content: { ok: true },
         is_error: false,
       }),
+    invokeOperation: vi.fn().mockResolvedValue({
+      status: 200,
+      content_type: "application/json",
+      body_base64: "e30=",
+      is_error: false,
+    }),
   };
 }
 
@@ -129,6 +145,8 @@ describe("AppDetailView", () => {
     // name and tools, and the marker for a
     // definition that changed since the previous consent.
     expect(await screen.findByText("mcp__cmd__doit")).toBeInTheDocument();
+    // A rest_api binding renders its operation ids in the same list.
+    expect(screen.getByText("listIssues")).toBeInTheDocument();
     expect(
       screen.getByText("Reconfigured since you agreed"),
     ).toBeInTheDocument();

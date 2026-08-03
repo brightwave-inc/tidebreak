@@ -46,6 +46,15 @@ pub const MAX_APP_NAME_CHARS: usize = 120;
 /// Provider-safe bound every mounted tool name already obeys, reused verbatim
 /// for manifest bindings so a pinned name can always match a mounted one.
 pub const MAX_MOUNTED_TOOL_NAME_BYTES: usize = 64;
+/// Largest `operationId` a `rest_api` binding may pin, in bytes.
+///
+/// A deliberate mirror of the OpenAPI ingest module's bound
+/// (`openwave_server::openapi_catalog::MAX_OPERATION_ID_BYTES`): the catalog
+/// enforces the same length and `[A-Za-z0-9_.-]` charset on every ingested
+/// operation, so a pinned id within this grammar can always match an ingested
+/// one. Duplicated here rather than imported because the manifest contract
+/// must not depend on server code.
+pub const MAX_OPERATION_ID_BYTES: usize = 128;
 
 /// Profile-data location of one immutable revision's bundle bytes.
 ///
@@ -189,7 +198,8 @@ pub struct CreateApp {
     pub revision: NewAppRevision,
 }
 
-/// The durable consent object for one app: the granted `(app, tools[])` set,
+/// The durable consent object for one app: the granted binding set —
+/// `(app, tools[])` or `(app, operation_ids[])` per bound connected app —
 /// with each bound connected app pinned to a fingerprint of its definition as
 /// it was configured at consent time.
 ///
@@ -210,11 +220,45 @@ pub struct AppGrant {
     pub created_at: DateTime<Utc>,
 }
 
-/// One granted binding: the tools the user consented to under one connected
-/// app, pinned to the definition that record carried at consent.
+/// One granted binding: the capabilities the user consented to under one
+/// connected app, pinned to the definition that record carried at consent.
+///
+/// Untagged, mirroring [`AppBinding`]: the variants differ in exactly one
+/// field name, and unknown fields refuse both shapes, so a persisted grant
+/// binding deserializes to exactly the vocabulary it was granted under.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AppGrantBinding {
+    /// `{ app, tools[], fingerprint }` — granted mounted MCP tools.
+    Tools(AppToolsGrantBinding),
+    /// `{ app, operation_ids[], fingerprint }` — granted REST operations.
+    Operations(AppOperationsGrantBinding),
+}
+
+impl AppGrantBinding {
+    /// The connected app the grant binding names.
+    #[must_use]
+    pub fn app(&self) -> ConnectedAppId {
+        match self {
+            Self::Tools(binding) => binding.app,
+            Self::Operations(binding) => binding.app,
+        }
+    }
+
+    /// The definition fingerprint pinned at consent time.
+    #[must_use]
+    pub fn fingerprint(&self) -> [u8; 32] {
+        match self {
+            Self::Tools(binding) => binding.fingerprint,
+            Self::Operations(binding) => binding.fingerprint,
+        }
+    }
+}
+
+/// The granted mounted tools under one `mcp_server` connected app.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AppGrantBinding {
+pub struct AppToolsGrantBinding {
     /// Connected app the consent names, matching the manifest binding it
     /// covers.
     pub app: ConnectedAppId,
@@ -224,6 +268,23 @@ pub struct AppGrantBinding {
     /// consent time, computed by the host over a canonical serialization that
     /// carries configuration *names and structure* only — never environment
     /// or token values. Persisted as lowercase hex.
+    #[serde(with = "hex_fingerprint")]
+    pub fingerprint: [u8; 32],
+}
+
+/// The granted declared operations under one `rest_api` connected app.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppOperationsGrantBinding {
+    /// Connected app the consent names, matching the manifest binding it
+    /// covers.
+    pub app: ConnectedAppId,
+    /// Catalog `operationId`s the grant covers.
+    pub operation_ids: Vec<String>,
+    /// SHA-256 fingerprint of the connected app's definition as configured at
+    /// consent time — for a `rest_api` record, over the base URL, document
+    /// hash, and credential *reference* and placement, never a credential
+    /// value. Persisted as lowercase hex.
     #[serde(with = "hex_fingerprint")]
     pub fingerprint: [u8; 32],
 }
@@ -264,12 +325,15 @@ mod hex_fingerprint {
 /// storage door so no other write path can persist a binding the manifest
 /// validator would have refused.
 pub fn validate_app_grant(grant: &AppGrant) -> Result<serde_json::Value, String> {
-    validate_binding_set(
-        grant
-            .bindings
-            .iter()
-            .map(|binding| (binding.app, binding.tools.as_slice())),
-    )?;
+    validate_binding_set(grant.bindings.iter().map(|binding| match binding {
+        AppGrantBinding::Tools(binding) => {
+            (binding.app, BindingCapabilities::Tools(&binding.tools))
+        }
+        AppGrantBinding::Operations(binding) => (
+            binding.app,
+            BindingCapabilities::Operations(&binding.operation_ids),
+        ),
+    }))?;
     serde_json::to_value(&grant.bindings).map_err(|error| format!("unencodable app grant: {error}"))
 }
 
@@ -291,13 +355,42 @@ pub struct AppManifest {
     pub bindings: Vec<AppBinding>,
 }
 
-/// The mounted tools one connected app contributes to a local app.
+/// The capabilities one connected app contributes to a local app: mounted MCP
+/// tools for an `mcp_server` record, declared REST operations for a
+/// `rest_api` record.
+///
+/// Untagged and closed: the two shapes are distinguished by their one
+/// differing field (`tools` vs `operation_ids`), each variant refuses unknown
+/// fields, and a body carrying both fields matches neither.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum AppBinding {
+    /// `{ app, tools[] }` — mounted MCP tools of an `mcp_server` record.
+    Tools(AppToolsBinding),
+    /// `{ app, operation_ids[] }` — declared operations of a `rest_api`
+    /// record.
+    Operations(AppOperationsBinding),
+}
+
+impl AppBinding {
+    /// The connected app the binding names.
+    #[must_use]
+    pub fn app(&self) -> ConnectedAppId {
+        match self {
+            Self::Tools(binding) => binding.app,
+            Self::Operations(binding) => binding.app,
+        }
+    }
+}
+
+/// The mounted tools one `mcp_server` connected app contributes to a local
+/// app.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct AppBinding {
+pub struct AppToolsBinding {
     /// Id of the connected app the tools belong to. The available ids are
     /// listed in the `create_app` tool description.
-    #[schemars(description = "Id of the connected app these tools belong to.")]
+    #[schemars(description = "Id of the mcp_server connected app these tools belong to.")]
     pub app: ConnectedAppId,
     /// Full mounted tool names, each `mcp__{namespace}__{tool}` under the
     /// bound connected app's namespace.
@@ -306,6 +399,22 @@ pub struct AppBinding {
                        under the bound connected app's namespace."
     )]
     pub tools: Vec<String>,
+}
+
+/// The declared operations one `rest_api` connected app contributes to a
+/// local app.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AppOperationsBinding {
+    /// Id of the connected app the operations belong to. The available ids
+    /// are listed in the `create_app` tool description.
+    #[schemars(description = "Id of the rest_api connected app these operations belong to.")]
+    pub app: ConnectedAppId,
+    /// Catalog `operationId`s of the bound connected app's ingested OpenAPI
+    /// document.
+    #[schemars(description = "OpenAPI operationIds declared by the bound rest_api \
+                       connected app's catalog.")]
+    pub operation_ids: Vec<String>,
 }
 
 /// Validate an app manifest structurally and return the JSON to store.
@@ -317,12 +426,13 @@ pub struct AppBinding {
 /// that could never match a mounted tool is refused at the door.
 pub fn validate_app_manifest(manifest: &AppManifest) -> Result<serde_json::Value, String> {
     validate_app_name(&manifest.name)?;
-    validate_binding_set(
-        manifest
-            .bindings
-            .iter()
-            .map(|binding| (binding.app, binding.tools.as_slice())),
-    )?;
+    validate_binding_set(manifest.bindings.iter().map(|binding| match binding {
+        AppBinding::Tools(binding) => (binding.app, BindingCapabilities::Tools(&binding.tools)),
+        AppBinding::Operations(binding) => (
+            binding.app,
+            BindingCapabilities::Operations(&binding.operation_ids),
+        ),
+    }))?;
     let json =
         serde_json::to_value(manifest).map_err(|error| format!("unencodable manifest: {error}"))?;
     let encoded_len = json.to_string().len();
@@ -334,37 +444,67 @@ pub fn validate_app_manifest(manifest: &AppManifest) -> Result<serde_json::Value
     Ok(json)
 }
 
+/// One binding's capability list, by vocabulary, for the shared grammar check.
+enum BindingCapabilities<'a> {
+    Tools(&'a [String]),
+    Operations(&'a [String]),
+}
+
 /// The binding grammar shared by manifests and grants: no duplicate connected
-/// apps, and every tool shaped like a full mounted name.
+/// apps (one binding per record, whichever vocabulary), every tool shaped
+/// like a full mounted name, and every operation id within the ingest
+/// module's `operationId` grammar.
 ///
 /// A namespace may itself contain `_`, so a mounted name cannot be split
 /// unambiguously without knowing the namespace — and the bound record lives
 /// behind the store. The grammar here is therefore structural only; the exact
 /// `mcp__{namespace}__` cross-check against the bound connected app's
-/// configuration belongs to the host layers that resolve ids (the
-/// `create_app` door, grant computation, the invoke gate).
+/// configuration — and the catalog membership check for operation ids —
+/// belongs to the host layers that resolve ids (the `create_app` door, grant
+/// computation, the invoke gate).
 fn validate_binding_set<'a>(
-    bindings: impl Iterator<Item = (ConnectedAppId, &'a [String])>,
+    bindings: impl Iterator<Item = (ConnectedAppId, BindingCapabilities<'a>)>,
 ) -> Result<(), String> {
     let mut apps = std::collections::HashSet::new();
-    for (app, binding_tools) in bindings {
+    for (app, capabilities) in bindings {
         if !apps.insert(app) {
             return Err(format!("duplicate binding for connected app {app}"));
         }
-        let mut tools = std::collections::HashSet::new();
-        for tool in binding_tools {
-            if tool.len() > MAX_MOUNTED_TOOL_NAME_BYTES || !is_mounted_name_charset(tool) {
-                return Err(format!(
-                    "tool {tool:?} must be at most {MAX_MOUNTED_TOOL_NAME_BYTES} bytes of [A-Za-z0-9_-]"
-                ));
+        match capabilities {
+            BindingCapabilities::Tools(binding_tools) => {
+                let mut tools = std::collections::HashSet::new();
+                for tool in binding_tools {
+                    if tool.len() > MAX_MOUNTED_TOOL_NAME_BYTES || !is_mounted_name_charset(tool) {
+                        return Err(format!(
+                            "tool {tool:?} must be at most {MAX_MOUNTED_TOOL_NAME_BYTES} bytes of [A-Za-z0-9_-]"
+                        ));
+                    }
+                    if !is_mounted_name_shape(tool) {
+                        return Err(format!(
+                            "tool {tool:?} is not a mounted `mcp__{{namespace}}__{{tool}}` name"
+                        ));
+                    }
+                    if !tools.insert(tool.as_str()) {
+                        return Err(format!("duplicate tool {tool:?}"));
+                    }
+                }
             }
-            if !is_mounted_name_shape(tool) {
-                return Err(format!(
-                    "tool {tool:?} is not a mounted `mcp__{{namespace}}__{{tool}}` name"
-                ));
-            }
-            if !tools.insert(tool.as_str()) {
-                return Err(format!("duplicate tool {tool:?}"));
+            BindingCapabilities::Operations(binding_operations) => {
+                let mut operations = std::collections::HashSet::new();
+                for operation_id in binding_operations {
+                    if operation_id.is_empty()
+                        || operation_id.len() > MAX_OPERATION_ID_BYTES
+                        || !is_operation_id_charset(operation_id)
+                    {
+                        return Err(format!(
+                            "operation id {operation_id:?} must be 1 to \
+                             {MAX_OPERATION_ID_BYTES} bytes of [A-Za-z0-9_.-]"
+                        ));
+                    }
+                    if !operations.insert(operation_id.as_str()) {
+                        return Err(format!("duplicate operation id {operation_id:?}"));
+                    }
+                }
             }
         }
     }
@@ -416,6 +556,14 @@ fn is_mounted_name_charset(name: &str) -> bool {
         .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
+/// The ingest module's `operationId` charset, mirrored (see
+/// [`MAX_OPERATION_ID_BYTES`]).
+fn is_operation_id_charset(operation_id: &str) -> bool {
+    operation_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,10 +600,10 @@ mod tests {
         let app = ConnectedAppId::new();
         let manifest = |tools: &[&str]| AppManifest {
             name: "Sentry triage".into(),
-            bindings: vec![AppBinding {
+            bindings: vec![AppBinding::Tools(AppToolsBinding {
                 app,
                 tools: tools.iter().map(|tool| (*tool).to_owned()).collect(),
-            }],
+            })],
         };
 
         assert!(validate_app_manifest(&manifest(&[
@@ -491,14 +639,14 @@ mod tests {
             validate_app_manifest(&AppManifest {
                 name: "Twice".into(),
                 bindings: vec![
-                    AppBinding {
+                    AppBinding::Tools(AppToolsBinding {
                         app,
                         tools: Vec::new()
-                    },
-                    AppBinding {
+                    }),
+                    AppBinding::Tools(AppToolsBinding {
                         app,
                         tools: Vec::new()
-                    },
+                    }),
                 ],
             })
             .is_err(),
@@ -515,6 +663,92 @@ mod tests {
                 "{name:?}"
             );
         }
+    }
+
+    #[test]
+    fn manifests_enforce_the_operation_id_grammar() {
+        let app = ConnectedAppId::new();
+        let manifest = |operation_ids: &[&str]| AppManifest {
+            name: "Issue browser".into(),
+            bindings: vec![AppBinding::Operations(AppOperationsBinding {
+                app,
+                operation_ids: operation_ids.iter().map(|id| (*id).to_owned()).collect(),
+            })],
+        };
+
+        assert!(validate_app_manifest(&manifest(&["listIssues", "get.issue-v2_1"])).is_ok());
+        for operation_id in [
+            "",            // empty
+            "bad id",      // charset (space)
+            "issues/list", // charset (slash)
+            &"x".repeat(MAX_OPERATION_ID_BYTES + 1),
+        ] {
+            assert!(
+                validate_app_manifest(&manifest(&[operation_id])).is_err(),
+                "{operation_id:?}"
+            );
+        }
+        assert!(
+            validate_app_manifest(&manifest(&["listIssues", "listIssues"])).is_err(),
+            "duplicate pins are refused"
+        );
+        // One binding per connected app holds across vocabularies: the same
+        // record cannot be bound once for tools and once for operations.
+        assert!(
+            validate_app_manifest(&AppManifest {
+                name: "Twice".into(),
+                bindings: vec![
+                    AppBinding::Tools(AppToolsBinding {
+                        app,
+                        tools: Vec::new()
+                    }),
+                    AppBinding::Operations(AppOperationsBinding {
+                        app,
+                        operation_ids: Vec::new()
+                    }),
+                ],
+            })
+            .is_err(),
+            "duplicate connected-app bindings are refused across binding kinds"
+        );
+    }
+
+    #[test]
+    fn bindings_deserialize_untagged_and_closed() {
+        use serde_json::json;
+
+        let app = ConnectedAppId::new();
+        let tools: AppBinding =
+            serde_json::from_value(json!({ "app": app, "tools": ["mcp__srv__viewer"] })).unwrap();
+        assert!(matches!(tools, AppBinding::Tools(_)));
+        let operations: AppBinding =
+            serde_json::from_value(json!({ "app": app, "operation_ids": ["listIssues"] })).unwrap();
+        assert!(matches!(operations, AppBinding::Operations(_)));
+        // Both vocabularies in one binding, or any unknown field, match
+        // neither closed variant.
+        for body in [
+            json!({ "app": app, "tools": [], "operation_ids": [] }),
+            json!({ "app": app, "tools": [], "extra": true }),
+            json!({ "app": app }),
+        ] {
+            assert!(
+                serde_json::from_value::<AppBinding>(body.clone()).is_err(),
+                "{body}"
+            );
+        }
+
+        // The grant vocabulary round-trips the same way, fingerprint included.
+        let fingerprint = "ab".repeat(32);
+        let granted: AppGrantBinding = serde_json::from_value(
+            json!({ "app": app, "operation_ids": ["listIssues"], "fingerprint": fingerprint }),
+        )
+        .unwrap();
+        assert!(matches!(granted, AppGrantBinding::Operations(_)));
+        assert_eq!(granted.fingerprint(), [0xab; 32]);
+        assert!(serde_json::from_value::<AppGrantBinding>(
+            json!({ "app": app, "tools": [], "operation_ids": [], "fingerprint": fingerprint })
+        )
+        .is_err());
     }
 
     #[test]

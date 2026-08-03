@@ -381,6 +381,8 @@ export type ResultEntry = {
   meta: string | null;
   /** The document's media type, when the row is a document with one. */
   mediaType: string | null;
+  /** The durable output this row names, when the row is one. */
+  outputId: string | null;
 };
 
 /** One thing a listed call could not do. */
@@ -451,6 +453,24 @@ export type AppInvokeResult = {
   content: string;
   structured_content?: unknown;
   is_error: boolean;
+};
+
+/**
+ * Result of a granted REST-operation invoke — {@link AppInvokeResult}'s
+ * sibling for `rest_api` bindings, hand-written for the same reason.
+ *
+ * An executed operation is opaque passthrough: whatever HTTP status the API
+ * answered (4xx/5xx included) with `is_error: false` and the raw response
+ * body base64-encoded in `body_base64` so binary responses survive JSON. A
+ * refused or failed execution is `is_error: true` with the server's closed
+ * refusal text in `error` and no response fields.
+ */
+export type AppRestInvokeResult = {
+  status?: number;
+  content_type?: string;
+  body_base64?: string;
+  is_error: boolean;
+  error?: string;
 };
 
 export type { AppInvokeRefusalKind };
@@ -996,12 +1016,38 @@ export class ApiClient {
     tool: string,
     args: unknown,
   ): Promise<AppInvokeResult> {
+    return (await this.postAppInvoke(appId, {
+      tool,
+      arguments: args,
+    })) as AppInvokeResult;
+  }
+
+  /**
+   * Execute one of an app's pinned REST operations outside any turn — the
+   * `operation_id` sibling of {@link invokeApp}, with the same opaque
+   * passthrough and refusal contract. The response body crosses base64-
+   * encoded in `body_base64` (see {@link AppRestInvokeResult}).
+   */
+  async invokeAppOperation(
+    appId: string,
+    operationId: string,
+    parameters?: unknown,
+    body?: unknown,
+  ): Promise<AppRestInvokeResult> {
+    const request: Record<string, unknown> = { operation_id: operationId };
+    if (parameters !== undefined) request.parameters = parameters;
+    if (body !== undefined) request.body = body;
+    return (await this.postAppInvoke(appId, request)) as AppRestInvokeResult;
+  }
+
+  /** The shared invoke POST: one route, typed refusals surfaced as errors. */
+  private async postAppInvoke(appId: string, request: unknown): Promise<unknown> {
     const response = await fetch(
       `${this.baseUrl}/apps/${encodeURIComponent(appId)}/invoke`,
       {
         method: "POST",
         headers: this.headers(true),
-        body: JSON.stringify({ tool, arguments: args }),
+        body: JSON.stringify(request),
       },
     );
     if (!response.ok) {
@@ -1025,7 +1071,7 @@ export class ApiClient {
       }
       await throwIfNotOk(response);
     }
-    return (await response.json()) as AppInvokeResult;
+    return await response.json();
   }
 
   createProject(title: string): Promise<Project> {
@@ -2140,17 +2186,19 @@ function parseResultEntry(value: unknown): ResultEntry | null {
   const detail = value.detail ?? null;
   const meta = value.meta ?? null;
   const mediaType = value.media_type ?? null;
+  const outputId = value.output_id ?? null;
   if (
     typeof label !== "string" ||
     label.length === 0 ||
     !(RESULT_ENTRY_KINDS as readonly unknown[]).includes(kind) ||
     !isOptionalString(detail) ||
     !isOptionalString(meta) ||
-    !isOptionalString(mediaType)
+    !isOptionalString(mediaType) ||
+    !isOptionalString(outputId)
   ) {
     return null;
   }
-  return { kind: kind as ResultEntryKind, label, detail, meta, mediaType };
+  return { kind: kind as ResultEntryKind, label, detail, meta, mediaType, outputId };
 }
 
 /**

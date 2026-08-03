@@ -331,11 +331,35 @@ impl RemoteSandboxAdapter for E2BExecutionProvider {
         self.credential.fingerprint()
     }
 
+    fn egress_fingerprint(&self) -> [u8; 32] {
+        crate::remote::egress_policy_fingerprint(self.egress.as_ref())
+    }
+
     async fn create_session(
         &self,
         workspace_id: &str,
     ) -> Result<RemoteSession, CodeExecutionError> {
         self.create_sandbox(workspace_id).await
+    }
+
+    async fn destroy_sandbox(&self, session: &RemoteSession) -> Result<(), CodeExecutionError> {
+        validate_sandbox_id(&session.sandbox_id)?;
+        let url = format!(
+            "{}/sandboxes/{}",
+            self.endpoints.api_base.trim_end_matches('/'),
+            session.sandbox_id
+        );
+        let response = self
+            .client
+            .delete(url)
+            .header("X-API-Key", self.credential.as_str())
+            .send()
+            .await
+            .map_err(|_| CodeExecutionError::Unavailable("could not reach the E2B API".into()))?;
+        if response.status() == StatusCode::NOT_FOUND || response.status().is_success() {
+            return Ok(());
+        }
+        Err(provider_status_error(response.status()))
     }
 
     async fn reconnect_session(
@@ -484,26 +508,6 @@ impl RemoteWorkspaceAdapter for E2BExecutionProvider {
         let truncated = entries.len() > MAX_WORKSPACE_LIST_ENTRIES;
         entries.truncate(MAX_WORKSPACE_LIST_ENTRIES);
         Ok(WorkspaceListing { entries, truncated })
-    }
-
-    async fn destroy_sandbox(&self, session: &RemoteSession) -> Result<(), CodeExecutionError> {
-        validate_sandbox_id(&session.sandbox_id)?;
-        let url = format!(
-            "{}/sandboxes/{}",
-            self.endpoints.api_base.trim_end_matches('/'),
-            session.sandbox_id
-        );
-        let response = self
-            .client
-            .delete(url)
-            .header("X-API-Key", self.credential.as_str())
-            .send()
-            .await
-            .map_err(|_| CodeExecutionError::Unavailable("could not reach the E2B API".into()))?;
-        if response.status() == StatusCode::NOT_FOUND || response.status().is_success() {
-            return Ok(());
-        }
-        Err(provider_status_error(response.status()))
     }
 }
 
@@ -1060,14 +1064,9 @@ mod tests {
         }
     }
 
-    async fn mock_provider(
+    async fn mock_server(
         mode: ProcessMode,
-        egress: Option<EgressPolicy>,
-    ) -> (
-        E2BExecutionProvider,
-        Arc<MockState>,
-        tokio::task::JoinHandle<()>,
-    ) {
+    ) -> (Arc<MockState>, String, tokio::task::JoinHandle<()>) {
         let state = Arc::new(MockState::new(mode));
         let app = Router::new()
             .route("/sandboxes", post(mock_create))
@@ -1084,20 +1083,40 @@ mod tests {
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
+        (state, base, server)
+    }
+
+    fn provider_at(
+        base: &str,
+        pool: RemoteSessionPool,
+        egress: Option<EgressPolicy>,
+    ) -> E2BExecutionProvider {
         let provider = E2BExecutionProvider::with_endpoints(
             E2BCredential::parse("test-e2b-key").unwrap(),
             Duration::from_secs(2),
-            RemoteSessionPool::default(),
+            pool,
             E2BEndpoints {
-                api_base: base.clone(),
-                sandbox_base: base,
+                api_base: base.to_owned(),
+                sandbox_base: base.to_owned(),
             },
         )
         .unwrap();
-        let provider = match egress {
+        match egress {
             Some(policy) => provider.with_egress_policy(policy),
             None => provider,
-        };
+        }
+    }
+
+    async fn mock_provider(
+        mode: ProcessMode,
+        egress: Option<EgressPolicy>,
+    ) -> (
+        E2BExecutionProvider,
+        Arc<MockState>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (state, base, server) = mock_server(mode).await;
+        let provider = provider_at(&base, RemoteSessionPool::default(), egress);
         (provider, state, server)
     }
 
@@ -1483,6 +1502,54 @@ mod tests {
         let block_all = e2b_network_settings(Some(&EgressPolicy::BlockAll));
         assert!(!block_all.allow_internet_access);
         assert!(block_all.network.is_none());
+        server.abort();
+    }
+
+    /// Reproduction of a bug we hit: a chat starts with network off, the E2B
+    /// sandbox is created deny-by-default, and after the user opens the chat's
+    /// network policy every pip install still fails DNS because the pooled
+    /// sandbox — whose egress is fixed at creation — keeps being reused. A
+    /// policy change must destroy the stale sandbox and create one under the
+    /// new policy; an unchanged policy must keep reusing the live sandbox.
+    #[tokio::test]
+    async fn e2b_replaces_the_pooled_sandbox_when_the_egress_policy_changes() {
+        use openwave_egress::EgressAllowlist;
+
+        let (state, base, server) = mock_server(ProcessMode::Complete).await;
+        let pool = RemoteSessionPool::default();
+
+        // Chat network policy off: deny-all sandbox.
+        let blocked = provider_at(
+            &base,
+            pool.clone(),
+            Some(EgressPolicy::Allowlist(EgressAllowlist::default())),
+        );
+        blocked
+            .execute(request("execution-1", "workspace-policy", "first"))
+            .await
+            .unwrap();
+        assert_eq!(state.creates.load(Ordering::SeqCst), 1);
+        assert_eq!(state.deletes.load(Ordering::SeqCst), 0);
+
+        // The user opens the policy; resolve() builds a fresh provider over the
+        // same pool. The stale deny-all sandbox is destroyed and replaced by an
+        // open-internet one instead of being reused.
+        let open = provider_at(&base, pool.clone(), None);
+        open.execute(request("execution-2", "workspace-policy", "second"))
+            .await
+            .unwrap();
+        assert_eq!(state.deletes.load(Ordering::SeqCst), 1);
+        assert_eq!(state.creates.load(Ordering::SeqCst), 2);
+        let create = state.create_body.lock().unwrap().clone().unwrap();
+        assert_eq!(create["allow_internet_access"], true);
+
+        // Unchanged policy: the live sandbox is reconnected, not replaced.
+        let same = provider_at(&base, pool, None);
+        same.execute(request("execution-3", "workspace-policy", "third"))
+            .await
+            .unwrap();
+        assert_eq!(state.creates.load(Ordering::SeqCst), 2);
+        assert_eq!(state.deletes.load(Ordering::SeqCst), 1);
         server.abort();
     }
 
