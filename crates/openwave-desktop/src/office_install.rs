@@ -44,7 +44,6 @@
 //! rest of the app run and reported alongside the install hint. Nothing
 //! re-downloads on its own; the user's explicit retry clears the memory.
 
-#[cfg(target_os = "macos")]
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -53,7 +52,6 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-#[cfg(target_os = "macos")]
 use sha2::{Digest, Sha256};
 use tauri::AppHandle;
 #[cfg(target_os = "macos")]
@@ -467,7 +465,9 @@ async fn download(
 }
 
 /// SHA-256 of a file's contents, streamed, as lowercase hex.
-#[cfg(target_os = "macos")]
+// Compiled on every platform — its test is platform-neutral — but only the
+// macOS install path calls it from the lib target.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn sha256_hex_of_file(path: &Path) -> std::io::Result<String> {
     let mut file = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();
