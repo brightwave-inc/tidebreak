@@ -508,6 +508,89 @@ async fn patch_chat_sets_and_clears_the_model() {
     assert_eq!(json_body::<Chat>(cleared).await.model, None);
 }
 
+/// A per-chat choice of model, effort, mode, or network policy becomes the
+/// default the next chat seeds from; an explicit value in the create request
+/// still wins, and clearing a choice clears its sticky default too.
+#[tokio::test]
+async fn chat_settings_stick_to_the_next_chat() {
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let first = make_chat(&router, &bearer).await;
+
+    let patched = patch_chat(
+        &router,
+        &bearer,
+        first.id,
+        serde_json::json!({
+            "model": "m-sticky",
+            "reasoning_effort": "high",
+            "permission_mode": "allow",
+            "network_policy": {"mode": "package_managers"},
+        }),
+    )
+    .await;
+    assert_eq!(patched.status(), StatusCode::OK);
+
+    let second = make_chat(&router, &bearer).await;
+    assert_eq!(second.model.as_deref(), Some("m-sticky"));
+    assert_eq!(
+        second.reasoning_effort,
+        Some(openwave_core::ReasoningEffort::High)
+    );
+    assert_eq!(
+        second.permission_mode,
+        Some(openwave_core::PermissionMode::Allow)
+    );
+    assert_eq!(
+        second.network_policy,
+        openwave_core::NetworkPolicy::PackageManagers
+    );
+
+    // An explicit value in the create request beats the sticky default.
+    let explicit: Chat = json_body(
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/chats")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "permission_mode": "plan",
+                            "network_policy": {"mode": "off"},
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        explicit.permission_mode,
+        Some(openwave_core::PermissionMode::Plan)
+    );
+    assert_eq!(explicit.network_policy, openwave_core::NetworkPolicy::Off);
+    // Untouched fields still seed from the sticky defaults.
+    assert_eq!(explicit.model.as_deref(), Some("m-sticky"));
+
+    // Clearing the per-chat choice clears the sticky default with it.
+    let cleared = patch_chat(
+        &router,
+        &bearer,
+        first.id,
+        serde_json::json!({"model": null, "permission_mode": null}),
+    )
+    .await;
+    assert_eq!(cleared.status(), StatusCode::OK);
+    let third = make_chat(&router, &bearer).await;
+    assert_eq!(third.model, None);
+    assert_eq!(third.permission_mode, None);
+}
+
 #[tokio::test]
 async fn chat_network_policy_defaults_off_and_persists_normalized_exact_hosts() {
     let (router, token, _store, _dir) = test_app().await;
@@ -1387,7 +1470,7 @@ async fn a_managed_ceiling_locks_over_ceiling_permission_modes() {
     let store: Arc<dyn Store> = Arc::new(store);
     let mut state = AppState::new(
         Config::desktop(dir.path()),
-        store,
+        store.clone(),
         Arc::new(FixedResolver(Arc::new(FakeProvider))),
         Arc::new(MemSecrets::default()),
         Arc::new(ToolRegistry::new()),
@@ -1435,4 +1518,16 @@ async fn a_managed_ceiling_locks_over_ceiling_permission_modes() {
         .await
         .unwrap();
     assert_eq!(over_ceiling_creation.status(), StatusCode::CONFLICT);
+
+    // A sticky `allow` recorded before the policy arrived seeds clamped to
+    // the ceiling, exactly like the turn gate treats stored modes.
+    store
+        .set_setting("chat_default.permission_mode", &serde_json::json!("allow"))
+        .await
+        .unwrap();
+    let seeded = make_chat(&router, &bearer).await;
+    assert_eq!(
+        seeded.permission_mode,
+        Some(openwave_core::PermissionMode::Ask)
+    );
 }
