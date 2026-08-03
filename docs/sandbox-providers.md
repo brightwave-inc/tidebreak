@@ -579,7 +579,16 @@ The implementation is intentionally incremental:
       admission is offered; local containers never qualify, because nothing
       outside the container bounds their lifetime.
    3. Self-hosted backends become expressible once the protocol is
-      published; what remains is conformance, not new machinery.
+      published; what remains is conformance, not new machinery. *(The
+      conformance side has shipped: the protocol suite drives every scenario
+      through the self-hosted reference backend with the shared attach path as
+      the no-special-case check, and an environment-configured black-box
+      harness — `tests/selfhost_conformance.rs` in the protocol crate —
+      verifies the attach gates of any third-party backend given only an
+      address and a credential. The product surface for registering one, with
+      the consent ceremony the trust model requires, is deliberately not
+      built until detached admission (7.2) fixes where such a backend plugs
+      in.)*
 
    Exit criteria for this step exercise the semantics this document adds,
    not the ones the run tier already tests: unplanned disconnect and
@@ -662,7 +671,14 @@ mismatch refusal, deny-by-default, the resumable event-cursor contract and
 buffer-overflow checkpointing, reverse-RPC correlation / cancellation /
 disconnect-reissue and operation-id conflict, the provision/address/destroy
 decomposition with the self-hosted backend as the no-special-case test, and
-artifact collection. Re-pointing those scenarios at the local container
+artifact collection. `tests/wire_conformance.rs` pins the same semantics as
+bytes on a real socket, and `tests/selfhost_conformance.rs` is the black-box
+face of the suite: pointed by environment at any backend's address and
+credential, it verifies the attach gates — ordered version-then-secret
+refusal, unauthenticated refusal installing nothing, exact version echo on
+acceptance — without sending a run init, so a third party can prove their
+endpoint conforms with no OpenWave code on their side.
+Re-pointing those scenarios at the local container
 backend is the next step's work; the assertions do not change. The managed adapters keep their existing CI coverage through
 injected HTTP seams; what stays out of CI is live vendor exercise, which
 needs paid accounts and credentials, is unrunnable on forks, and flakes.
