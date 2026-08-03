@@ -836,12 +836,17 @@ describe("actionable tool results", () => {
             callId: "call-1",
             name: "exec",
             status: "completed",
-            preview: { tool: "exec", command: "python3", args: ["build_deck.py"] },
+            preview: {
+              tool: "exec",
+              command: "python3",
+              args: ["build_deck.py"],
+              cwd: ".",
+            },
             result: {
               tool: "exec",
-              exit_code: 0,
-              timed_out: false,
-              output_truncated: false,
+              exitCode: 0,
+              timedOut: false,
+              outputTruncated: false,
               stdout: "",
               stderr: "",
               outputs: [
