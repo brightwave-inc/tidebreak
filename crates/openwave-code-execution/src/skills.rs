@@ -33,6 +33,27 @@ const MAX_DESCRIPTION_BYTES: usize = 200;
 const MAX_PYTHON_DEPS: usize = 8;
 const MAX_DEP_BYTES: usize = 100;
 
+/// A host-provided tool a skill declares it wants, from a closed vocabulary.
+///
+/// Unlike Python deps — free-form pins the sandbox installs — a host dep names
+/// a capability only the host can provide (a managed install outside the
+/// sandbox). The vocabulary is closed on purpose: an unknown value rejects the
+/// whole manifest rather than parsing into a string nothing can act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostDep {
+    /// LibreOffice, for converting office documents to renderable PDFs.
+    LibreOffice,
+}
+
+impl HostDep {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "libreoffice" => Some(Self::LibreOffice),
+            _ => None,
+        }
+    }
+}
+
 /// Which source a validated skill package was loaded from.
 ///
 /// Origin is host-derived from the load path, never from manifest content, so
@@ -55,6 +76,8 @@ pub struct SkillPackage {
     pub description: String,
     /// Exactly pinned `package==version` Python requirements.
     pub python_deps: Vec<String>,
+    /// Host-provided tools the skill's instructions depend on.
+    pub host_deps: Vec<HostDep>,
     /// Where the package was loaded from.
     pub origin: SkillOrigin,
 }
@@ -127,8 +150,9 @@ pub(crate) fn is_pinned_python_dep(dep: &str) -> bool {
 /// the caller is loading from; it never comes from the manifest itself.
 ///
 /// Recognized frontmatter keys are exactly `name`, `description`, and the
-/// optional single-line `deps: { python: ["package==version", ...] }`.
-/// Anything else — unknown keys, duplicates, an unpinned dependency, a
+/// optional single-line `deps: { python: ["package==version", ...], host:
+/// ["libreoffice"] }` (either list may be omitted, not both). Anything else —
+/// unknown keys, duplicates, an unpinned dependency, an unknown host tool, a
 /// control character in the description — rejects the whole manifest.
 pub fn parse_skill_manifest(
     source: &str,
@@ -146,7 +170,7 @@ pub fn parse_skill_manifest(
 
     let mut name = None;
     let mut description = None;
-    let mut python_deps = None;
+    let mut deps = None;
     for line in frontmatter.lines() {
         if line.trim().is_empty() {
             return Err(invalid("blank line inside frontmatter"));
@@ -167,7 +191,7 @@ pub fn parse_skill_manifest(
                 }
             }
             "deps" => {
-                if python_deps.replace(parse_python_deps(value)?).is_some() {
+                if deps.replace(parse_deps(value)?).is_some() {
                     return Err(invalid("duplicate 'deps'"));
                 }
             }
@@ -188,30 +212,74 @@ pub fn parse_skill_manifest(
     if body.trim().is_empty() {
         return Err(invalid("empty instruction body"));
     }
+    let (python_deps, host_deps) = deps.unwrap_or_default();
     Ok(SkillPackage {
         name: name.to_owned(),
         description: description.to_owned(),
-        python_deps: python_deps.unwrap_or_default(),
+        python_deps,
+        host_deps,
         origin,
     })
 }
 
-/// Parse the single-line flow form `{ python: ["a==1", "b==2"] }`.
-fn parse_python_deps(value: &str) -> Result<Vec<String>, SkillParseError> {
-    let malformed = || invalid("'deps' must be `{ python: [\"package==version\", ...] }`");
-    let inner = value
+/// Parse the single-line flow form `{ python: ["a==1"], host: ["libreoffice"] }`.
+///
+/// Each key appears at most once and at least one must be present; every item
+/// is a double-quoted string. The quoted grammars downstream admit neither
+/// `"` nor `]`, so scanning for the closing bracket cannot land inside an
+/// item.
+fn parse_deps(value: &str) -> Result<(Vec<String>, Vec<HostDep>), SkillParseError> {
+    let malformed = || {
+        invalid(
+            "'deps' must be `{ python: [\"package==version\", ...], host: [\"libreoffice\"] }` \
+             with at least one list",
+        )
+    };
+    let mut inner = value
         .strip_prefix('{')
         .and_then(|rest| rest.strip_suffix('}'))
         .ok_or_else(malformed)?
         .trim();
-    let list = inner.strip_prefix("python:").ok_or_else(malformed)?.trim();
-    let items = list
-        .strip_prefix('[')
-        .and_then(|rest| rest.strip_suffix(']'))
-        .ok_or_else(malformed)?
-        .trim();
+    let mut python: Option<Vec<String>> = None;
+    let mut host: Option<Vec<HostDep>> = None;
+    while !inner.is_empty() {
+        let (key, rest) = inner.split_once(':').ok_or_else(malformed)?;
+        let rest = rest.trim_start().strip_prefix('[').ok_or_else(malformed)?;
+        let (list, tail) = rest.split_once(']').ok_or_else(malformed)?;
+        match key.trim() {
+            "python" => {
+                if python.replace(parse_python_deps(list.trim())?).is_some() {
+                    return Err(invalid("duplicate 'python' list in 'deps'"));
+                }
+            }
+            "host" => {
+                if host.replace(parse_host_deps(list.trim())?).is_some() {
+                    return Err(invalid("duplicate 'host' list in 'deps'"));
+                }
+            }
+            other => return Err(invalid(format!("unknown 'deps' key {other:?}"))),
+        }
+        inner = tail.trim_start();
+        if let Some(after) = inner.strip_prefix(',') {
+            inner = after.trim_start();
+            if inner.is_empty() {
+                return Err(malformed());
+            }
+        } else if !inner.is_empty() {
+            return Err(malformed());
+        }
+    }
+    if python.is_none() && host.is_none() {
+        return Err(invalid("'deps' lists nothing"));
+    }
+    Ok((python.unwrap_or_default(), host.unwrap_or_default()))
+}
+
+/// Parse the items of one `python: [...]` list.
+fn parse_python_deps(items: &str) -> Result<Vec<String>, SkillParseError> {
+    let malformed = || invalid("'deps' python items must be `\"package==version\"` strings");
     if items.is_empty() {
-        return Err(invalid("'deps' lists no packages"));
+        return Err(invalid("'deps' python list is empty"));
     }
     let mut deps = Vec::new();
     for item in items.split(',') {
@@ -229,6 +297,30 @@ fn parse_python_deps(value: &str) -> Result<Vec<String>, SkillParseError> {
     }
     if deps.len() > MAX_PYTHON_DEPS {
         return Err(invalid("'deps' lists too many packages"));
+    }
+    Ok(deps)
+}
+
+/// Parse the items of one `host: [...]` list against the closed vocabulary.
+fn parse_host_deps(items: &str) -> Result<Vec<HostDep>, SkillParseError> {
+    let malformed = || invalid("'deps' host items must be `\"libreoffice\"` strings");
+    if items.is_empty() {
+        return Err(invalid("'deps' host list is empty"));
+    }
+    let mut deps = Vec::new();
+    for item in items.split(',') {
+        let tool = item
+            .trim()
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+            .ok_or_else(malformed)?;
+        let Some(tool) = HostDep::parse(tool) else {
+            return Err(invalid(format!("unknown host tool in 'deps': {tool:?}")));
+        };
+        if deps.contains(&tool) {
+            return Err(invalid("duplicate host tool in 'deps'"));
+        }
+        deps.push(tool);
     }
     Ok(deps)
 }
@@ -347,6 +439,7 @@ Instructions live here.\n";
             "Create, merge, split, and fill PDF documents."
         );
         assert_eq!(package.python_deps, ["fpdf2==2.8.3", "pypdf==5.1.0"]);
+        assert_eq!(package.host_deps, []);
 
         let no_deps = "---\nname: charts\ndescription: Plots.\n---\nBody.\n";
         assert_eq!(
@@ -355,6 +448,57 @@ Instructions live here.\n";
                 .python_deps,
             [""; 0]
         );
+    }
+
+    /// The `host:` list is a closed vocabulary: `libreoffice` parses into its
+    /// enum value alongside python pins or alone, and anything else rejects
+    /// the manifest rather than becoming a string nothing can act on.
+    #[test]
+    fn host_deps_parse_from_the_closed_vocabulary_only() {
+        let combined = "---\nname: presentations\ndescription: Decks.\n\
+                        deps: { python: [\"python-pptx==1.0.2\"], host: [\"libreoffice\"] }\n\
+                        ---\nBody.\n";
+        let package = parse_skill_manifest(combined, SkillOrigin::Builtin).unwrap();
+        assert_eq!(package.python_deps, ["python-pptx==1.0.2"]);
+        assert_eq!(package.host_deps, [HostDep::LibreOffice]);
+
+        let host_only =
+            "---\nname: a\ndescription: b\ndeps: { host: [\"libreoffice\"] }\n---\nBody.\n";
+        let package = parse_skill_manifest(host_only, SkillOrigin::Builtin).unwrap();
+        assert_eq!(package.python_deps, [""; 0]);
+        assert_eq!(package.host_deps, [HostDep::LibreOffice]);
+
+        for (case, source) in [
+            (
+                "unknown host tool",
+                "---\nname: a\ndescription: b\ndeps: { host: [\"imagemagick\"] }\n---\nBody.\n",
+            ),
+            (
+                "duplicate host tool",
+                "---\nname: a\ndescription: b\ndeps: { host: [\"libreoffice\", \"libreoffice\"] }\n---\nBody.\n",
+            ),
+            (
+                "duplicate host list",
+                "---\nname: a\ndescription: b\ndeps: { host: [\"libreoffice\"], host: [\"libreoffice\"] }\n---\nBody.\n",
+            ),
+            (
+                "empty host list",
+                "---\nname: a\ndescription: b\ndeps: { host: [] }\n---\nBody.\n",
+            ),
+            (
+                "unknown deps key",
+                "---\nname: a\ndescription: b\ndeps: { npm: [\"left-pad==1.0.0\"] }\n---\nBody.\n",
+            ),
+            (
+                "trailing comma",
+                "---\nname: a\ndescription: b\ndeps: { host: [\"libreoffice\"], }\n---\nBody.\n",
+            ),
+        ] {
+            assert!(
+                parse_skill_manifest(source, SkillOrigin::Builtin).is_err(),
+                "{case} should be rejected"
+            );
+        }
     }
 
     #[test]
@@ -501,6 +645,20 @@ Instructions live here.\n";
                     .all(|dep| dep.contains("==")),
                 "bundled skill {} must pin its dependencies exactly",
                 skill.package.name
+            );
+        }
+        // The office skills teach a LibreOffice-backed visual QA loop; the
+        // declaration is what drives the host-side install and the honest
+        // capability line, so losing it silently regresses both.
+        for name in ["presentations", "word-documents"] {
+            let skill = skills
+                .iter()
+                .find(|skill| skill.package.name == name)
+                .unwrap();
+            assert_eq!(
+                skill.package.host_deps,
+                [HostDep::LibreOffice],
+                "{name} must declare its LibreOffice host dependency"
             );
         }
     }
