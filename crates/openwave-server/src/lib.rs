@@ -35,6 +35,7 @@ mod mcp_config;
 mod model_registry;
 mod model_roles;
 mod pairing;
+mod principal;
 mod provider;
 mod providers;
 mod resolver;

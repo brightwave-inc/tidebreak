@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::error::ServerError;
 use crate::extract::{Json, Path, Query};
+use crate::principal::ClientExecutor;
 use crate::state::AppState;
 
 const DEFAULT_PENDING_LIMIT: u64 = 64;
@@ -132,6 +133,7 @@ pub struct PendingRootAttachmentChanges {
 /// Begin or recover one exact product-side attachment intent.
 pub async fn begin_root_attachment_change(
     State(state): State<AppState>,
+    _executor: ClientExecutor,
     Path((chat_id, change_id)): Path<(ChatId, RootAttachmentChangeId)>,
     Json(body): Json<BeginRootAttachmentChangeBody>,
 ) -> Result<Json<BegunRootAttachmentChange>, ServerError> {
@@ -199,6 +201,7 @@ pub async fn begin_root_attachment_change(
 /// List awaiting work owned by this app-private native executor.
 pub async fn list_pending_root_attachment_changes(
     State(state): State<AppState>,
+    _executor: ClientExecutor,
     Query(query): Query<PendingRootAttachmentChangesQuery>,
 ) -> Result<Json<PendingRootAttachmentChanges>, ServerError> {
     let limit = query.limit.unwrap_or(DEFAULT_PENDING_LIMIT);
@@ -220,6 +223,7 @@ pub async fn list_pending_root_attachment_changes(
 /// Finish or recover one exact product-side attachment change.
 pub async fn finish_root_attachment_change(
     State(state): State<AppState>,
+    _executor: ClientExecutor,
     Path(change_id): Path<RootAttachmentChangeId>,
     Json(body): Json<FinishRootAttachmentChangeBody>,
 ) -> Result<Json<FinishedRootAttachmentChange>, ServerError> {

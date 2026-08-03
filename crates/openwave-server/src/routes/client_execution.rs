@@ -21,6 +21,7 @@ use openwave_core::{
 
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
+use crate::principal::ClientExecutor;
 use crate::state::AppState;
 
 const CLIENT_EXECUTION_LEASE: Duration = Duration::seconds(60);
@@ -210,6 +211,7 @@ pub async fn list_pending_output_writebacks(
 /// Native-only authoritative pending work used by the trusted executor.
 pub async fn list_pending_client_executions_raw(
     State(state): State<AppState>,
+    _executor: ClientExecutor,
     Path(id): Path<ChatId>,
 ) -> Result<Json<Vec<ToolCallRecord>>, ServerError> {
     ensure_chat(&state, id).await?;
@@ -268,6 +270,7 @@ fn renderer_output_writeback_request(
 /// `POST .../{call_id}/claim` — atomically acquire or recover one exact claim.
 pub async fn claim_client_execution(
     State(state): State<AppState>,
+    _executor: ClientExecutor,
     Path((id, call_id)): Path<(ChatId, CallId)>,
     Json(body): Json<ClaimClientExecution>,
 ) -> Result<Json<ClaimedClientExecution>, ServerError> {
@@ -307,6 +310,7 @@ pub async fn claim_client_execution(
 /// repeated request can extend the lease again from its new server receive time.
 pub async fn heartbeat_client_execution(
     State(state): State<AppState>,
+    _executor: ClientExecutor,
     Path((id, call_id)): Path<(ChatId, CallId)>,
     Json(body): Json<HeartbeatClientExecution>,
 ) -> Result<Json<ClientExecutionHeartbeat>, ServerError> {
@@ -342,6 +346,7 @@ pub async fn heartbeat_client_execution(
 /// with the first committed result.
 pub async fn resolve_client_execution(
     State(state): State<AppState>,
+    _executor: ClientExecutor,
     Path((id, call_id)): Path<(ChatId, CallId)>,
     Json(body): Json<ResolveClientExecution>,
 ) -> Result<Json<ResolvedClientExecution>, ServerError> {

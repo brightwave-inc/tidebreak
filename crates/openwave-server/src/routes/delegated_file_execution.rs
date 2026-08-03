@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
+use crate::principal::ClientExecutor;
 use crate::state::AppState;
 
 const DELEGATED_FILE_EXECUTION_LEASE: Duration = Duration::seconds(60);
@@ -111,6 +112,7 @@ pub struct ResolvedDelegatedFileRead {
 
 pub async fn list_pending_delegated_file_reads(
     State(state): State<AppState>,
+    _executor: ClientExecutor,
 ) -> Result<Json<Vec<PendingDelegatedFileRead>>, ServerError> {
     let pending = state
         .store
@@ -127,6 +129,7 @@ pub async fn list_pending_delegated_file_reads(
 
 pub async fn claim_delegated_file_read(
     State(state): State<AppState>,
+    _executor: ClientExecutor,
     Path(call_id): Path<CallId>,
     Json(body): Json<ClaimDelegatedFileReadBody>,
 ) -> Result<Json<ClaimedDelegatedFileRead>, ServerError> {
@@ -163,6 +166,7 @@ pub async fn claim_delegated_file_read(
 
 pub async fn heartbeat_delegated_file_read(
     State(state): State<AppState>,
+    _executor: ClientExecutor,
     Path(call_id): Path<CallId>,
     Json(body): Json<DelegatedFileLeaseBody>,
 ) -> Result<Json<DelegatedFileHeartbeat>, ServerError> {
@@ -184,6 +188,7 @@ pub async fn heartbeat_delegated_file_read(
 
 pub async fn resolve_delegated_file_read(
     State(state): State<AppState>,
+    _executor: ClientExecutor,
     Path(call_id): Path<CallId>,
     Json(body): Json<ResolveDelegatedFileReadBody>,
 ) -> Result<Json<ResolvedDelegatedFileRead>, ServerError> {
