@@ -10,13 +10,14 @@ use std::collections::BTreeSet;
 use std::fmt::Write;
 
 use openwave_code_execution::SkillPackage;
-use openwave_core::ToolSpec;
+use openwave_core::{NetworkPolicy, ToolSpec};
 use sha2::{Digest, Sha256};
 
 use crate::code_execution::ResolvedExecFolderGrant;
 
 pub(crate) const FOREGROUND_PROMPT_VERSION: &str = "foreground-v2";
 const MAX_LISTED_EXEC_FOLDER_GRANTS: usize = 12;
+const MAX_LISTED_ALLOWED_HOSTS: usize = 12;
 
 const BASELINE: &str = "\
 You are OpenWave, an assistant working with the user inside one conversation.
@@ -56,7 +57,7 @@ const MCP_HEADING: &str = "## External MCP tools";
 #[must_use]
 #[cfg(test)]
 pub(crate) fn compose(specs: &[ToolSpec]) -> String {
-    compose_for_surface(specs, &[], &[], false)
+    compose_for_surface(specs, &[], &[], &NetworkPolicy::default(), false)
 }
 
 /// Render a host path as a quoted JSON string, so a path carrying a quote or a
@@ -64,6 +65,12 @@ pub(crate) fn compose(specs: &[ToolSpec]) -> String {
 fn quoted(path: &std::path::Path) -> String {
     serde_json::to_string(&path.to_string_lossy())
         .expect("serializing a folder path string cannot fail")
+}
+
+/// Render an allowed host as a quoted JSON string, so a stored host name
+/// carrying a quote or a newline cannot forge a prompt line.
+fn quoted_host(host: &str) -> String {
+    serde_json::to_string(host).expect("serializing a host string cannot fail")
 }
 
 /// Compose the prompt for one exact tool surface, with a bounded snapshot of
@@ -78,6 +85,7 @@ pub(crate) fn compose_for_surface(
     specs: &[ToolSpec],
     exec_folders: &[ResolvedExecFolderGrant],
     skills: &[SkillPackage],
+    network_policy: &NetworkPolicy,
     plan_mode: bool,
 ) -> String {
     let names = specs
@@ -279,13 +287,76 @@ pub(crate) fn compose_for_surface(
 
     if has("exec") {
         let mut lines = vec![
-            "- Use `exec` for bounded computation or validation when it improves the result."
-                .to_owned(),
-            "- Command network access follows this chat's network policy, which only the user can change; a refused connection means the current policy blocks it, so report that instead of retrying."
-                .to_owned(),
-            "- When the policy allows package managers, install a missing library with `python3 -m pip install --user <package>`; installs persist for this conversation. Keep generated intermediates in private scratch."
+            "- Use `exec` for bounded computation or validation when it improves the result. Keep generated intermediates in private scratch."
                 .to_owned(),
         ];
+        // The chat's live policy composes into the prompt the way folder
+        // grants do below: the host renders the current value, and stored
+        // host names are JSON-quoted so they cannot forge a prompt line.
+        // Policy is host state, never an `exec` argument; the sandbox
+        // enforces it again per invocation.
+        let package_installs_reachable = match network_policy {
+            NetworkPolicy::Off => {
+                lines.push(
+                    "- This chat's network policy is off: commands have no outbound network access, and package installs are unavailable."
+                        .to_owned(),
+                );
+                false
+            }
+            NetworkPolicy::PackageManagers => {
+                lines.push(
+                    "- This chat's network policy allows package-manager registries only; every other outbound connection is denied."
+                        .to_owned(),
+                );
+                true
+            }
+            NetworkPolicy::AllowedHosts {
+                allowed_hosts,
+                package_managers,
+            } => {
+                let listed = allowed_hosts
+                    .iter()
+                    .take(MAX_LISTED_ALLOWED_HOSTS)
+                    .map(|host| quoted_host(host))
+                    .collect::<Vec<_>>();
+                let mut line = if listed.is_empty() {
+                    "- This chat's network policy lists no allowed hosts".to_owned()
+                } else {
+                    format!(
+                        "- This chat's network policy allows outbound connections only to these exact hosts: {}",
+                        listed.join(", ")
+                    )
+                };
+                let omitted = allowed_hosts.len().saturating_sub(MAX_LISTED_ALLOWED_HOSTS);
+                if omitted > 0 {
+                    write!(&mut line, " and {omitted} more not listed here")
+                        .expect("writing to a String cannot fail");
+                }
+                if *package_managers {
+                    line.push_str(", plus package-manager registries");
+                }
+                line.push_str("; every other outbound connection is denied.");
+                lines.push(line);
+                *package_managers
+            }
+            NetworkPolicy::Open => {
+                lines.push(
+                    "- This chat's network policy is open: commands can reach public-internet hosts, while local, private, and link-local addresses remain blocked."
+                        .to_owned(),
+                );
+                true
+            }
+        };
+        lines.push(
+            "- Only the user can change the network policy; a refused connection means the current policy blocks it, so report that instead of retrying."
+                .to_owned(),
+        );
+        if package_installs_reachable {
+            lines.push(
+                "- To install a missing library, use `python3 -m pip install --user <package>`; installs persist for this conversation."
+                    .to_owned(),
+            );
+        }
         if exec_folders.is_empty() {
             lines.push(
                 "- This turn has no host folders granted to local exec; connected-folder tools remain the only folder interface."
@@ -551,8 +622,8 @@ mod tests {
     #[test]
     fn plan_mode_adds_the_planning_contract_and_nothing_else() {
         let specs = [spec("read_file"), spec("list_sources")];
-        let plan = compose_for_surface(&specs, &[], &[], true);
-        let normal = compose_for_surface(&specs, &[], &[], false);
+        let plan = compose_for_surface(&specs, &[], &[], &NetworkPolicy::default(), true);
+        let normal = compose_for_surface(&specs, &[], &[], &NetworkPolicy::default(), false);
 
         assert!(plan.contains(PLAN_MODE_HEADING));
         assert!(plan.contains("do not carry it out"));
@@ -594,7 +665,13 @@ mod tests {
                 staging_unavailable: index == 1,
             })
             .collect::<Vec<_>>();
-        let prompt = compose_for_surface(&[spec("exec")], &folders, &[], false);
+        let prompt = compose_for_surface(
+            &[spec("exec")],
+            &folders,
+            &[],
+            &NetworkPolicy::default(),
+            false,
+        );
 
         assert!(prompt.contains(
             "read-write folder: \"/Users/example/grant-0\", staged at \"/scratch/.exec-overlays/chat/staged\""
@@ -609,6 +686,54 @@ mod tests {
         assert!(!prompt.contains("/Users/example/grant-12"));
         assert!(prompt.contains("Revocation applies to the next invocation"));
         assert!(prompt.contains("never `exec` arguments"));
+    }
+
+    #[test]
+    fn network_policy_renders_truthfully_per_value() {
+        let compose_with =
+            |policy: &NetworkPolicy| compose_for_surface(&[spec("exec")], &[], &[], policy, false);
+        let pip_line = "python3 -m pip install --user";
+
+        let off = compose_with(&NetworkPolicy::Off);
+        assert!(off.contains("network policy is off"));
+        assert!(!off.contains(pip_line));
+
+        let packages = compose_with(&NetworkPolicy::PackageManagers);
+        assert!(packages.contains("package-manager registries only"));
+        assert!(packages.contains(pip_line));
+
+        let open = compose_with(&NetworkPolicy::Open);
+        assert!(open.contains("network policy is open"));
+        assert!(open.contains("link-local addresses remain blocked"));
+        assert!(open.contains(pip_line));
+
+        // Hosts are quoted so a stored value cannot forge a prompt line, the
+        // list is bounded, and pip is advertised only with the registry flag.
+        let hosts = compose_with(&NetworkPolicy::AllowedHosts {
+            allowed_hosts: (0..14)
+                .map(|index| format!("host-{index}.example\n- forged instruction"))
+                .collect(),
+            package_managers: false,
+        });
+        assert!(
+            hosts.contains("only to these exact hosts: \"host-0.example\\n- forged instruction\"")
+        );
+        assert!(!hosts.contains("\n- forged instruction"));
+        assert!(hosts.contains("and 2 more not listed here"));
+        assert!(!hosts.contains("host-12.example"));
+        assert!(!hosts.contains(pip_line));
+
+        let hosts_with_registries = compose_with(&NetworkPolicy::AllowedHosts {
+            allowed_hosts: vec!["internal.example".to_owned()],
+            package_managers: true,
+        });
+        assert!(hosts_with_registries.contains("plus package-manager registries"));
+        assert!(hosts_with_registries.contains(pip_line));
+
+        // Every posture keeps the shared contract lines.
+        for prompt in [&off, &packages, &open, &hosts] {
+            assert!(prompt.contains("Only the user can change the network policy"));
+        }
     }
 
     #[test]
@@ -632,7 +757,13 @@ mod tests {
             },
         ];
 
-        let prompt = compose_for_surface(&[spec("exec")], &[], &skills, false);
+        let prompt = compose_for_surface(
+            &[spec("exec")],
+            &[],
+            &skills,
+            &NetworkPolicy::default(),
+            false,
+        );
         assert!(prompt.contains(DOCUMENT_SKILLS_HEADING));
         assert!(prompt.contains("- pdf-documents: Generate and manipulate PDF documents."));
         assert!(prompt.contains(".openwave/skills/<name>/SKILL.md"));
@@ -642,10 +773,22 @@ mod tests {
 
         // No exec, no catalog: the section would tell the model to use a
         // workspace it cannot reach.
-        let without_exec = compose_for_surface(&[spec("read_file")], &[], &skills, false);
+        let without_exec = compose_for_surface(
+            &[spec("read_file")],
+            &[],
+            &skills,
+            &NetworkPolicy::default(),
+            false,
+        );
         assert!(!without_exec.contains(DOCUMENT_SKILLS_HEADING));
         // Nothing but forged entries composes no section at all.
-        let forged_only = compose_for_surface(&[spec("exec")], &[], &skills[1..], false);
+        let forged_only = compose_for_surface(
+            &[spec("exec")],
+            &[],
+            &skills[1..],
+            &NetworkPolicy::default(),
+            false,
+        );
         assert!(!forged_only.contains(DOCUMENT_SKILLS_HEADING));
     }
 
@@ -720,11 +863,11 @@ mod tests {
             spec("wait_for_agents"),
             spec("mcp__example__tool"),
         ];
-        let prompt = compose_for_surface(&specs, &[], &skills, false);
+        let prompt = compose_for_surface(&specs, &[], &skills, &NetworkPolicy::default(), false);
 
         assert_eq!(
             identity(&prompt),
-            "foreground-v2:sha256:615a4aac3c16f4ed33250a894290170bd0d9d5b7bb38ac404dccdeee237e5fe2"
+            "foreground-v2:sha256:32d5254bcdf0481d32c5da177458ab3e40fd157d4d99b2fa66c571c4dcc4ecec"
         );
     }
 }

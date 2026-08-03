@@ -141,7 +141,14 @@ pub(crate) fn freeze_foreground_turn_surface(
     tools: Arc<ToolRegistry>,
     base_agent_config: &AgentConfig,
 ) -> ForegroundTurnSurface {
-    freeze_foreground_turn_surface_with_folders(tools, base_agent_config, &[], &[], false)
+    freeze_foreground_turn_surface_with_folders(
+        tools,
+        base_agent_config,
+        &[],
+        &[],
+        &openwave_core::NetworkPolicy::default(),
+        false,
+    )
 }
 
 fn freeze_foreground_turn_surface_with_folders(
@@ -149,6 +156,7 @@ fn freeze_foreground_turn_surface_with_folders(
     base_agent_config: &AgentConfig,
     exec_folders: &[crate::code_execution::ResolvedExecFolderGrant],
     skills: &[openwave_code_execution::SkillPackage],
+    network_policy: &openwave_core::NetworkPolicy,
     plan_mode: bool,
 ) -> ForegroundTurnSurface {
     let mut agent_config = base_agent_config.clone();
@@ -156,6 +164,7 @@ fn freeze_foreground_turn_surface_with_folders(
         &tools.specs_for_surface(true, plan_mode),
         exec_folders,
         skills,
+        network_policy,
         plan_mode,
     ));
     ForegroundTurnSurface {
@@ -571,6 +580,7 @@ impl TurnWorker {
             &self.agent_config,
             &exec_folders,
             &skills,
+            &chat.network_policy,
             matches!(
                 chat.permission_mode,
                 Some(openwave_core::PermissionMode::Plan)
