@@ -192,6 +192,9 @@ fn extend_input(
     message: &openwave_core::ChatMessage,
     images: &ImageAttachments,
 ) -> Result<()> {
+    if message.role == Role::Assistant {
+        return extend_assistant_input(out, message);
+    }
     let mut message_parts = Vec::new();
     for block in &message.content {
         match block {
@@ -246,12 +249,65 @@ fn extend_input(
         }
     }
     if !message_parts.is_empty() {
-        let role = match message.role {
-            Role::Assistant => "assistant",
-            Role::User | Role::System | Role::Tool => "user",
-        };
-        out.push(json!({ "role": role, "content": message_parts }));
+        // Assistant messages took the branch above; everything else is input.
+        out.push(json!({ "role": "user", "content": message_parts }));
     }
+    Ok(())
+}
+
+/// Assistant history items cannot carry `input_text` parts: the Responses API
+/// only accepts `output_text` and `refusal` there. Prior assistant prose goes
+/// back as a message item whose `content` is a bare string, which the API
+/// accepts and stores as assistant output text.
+fn extend_assistant_input(
+    out: &mut Vec<Value>,
+    message: &openwave_core::ChatMessage,
+) -> Result<()> {
+    let mut texts = Vec::new();
+    let mut calls = Vec::new();
+    for block in &message.content {
+        match block {
+            ContentBlock::Text { text } => texts.push(text.as_str()),
+            ContentBlock::Image { .. } => {
+                return Err(AgentError::Provider(
+                    "openai cannot express an image in assistant history".into(),
+                ))
+            }
+            ContentBlock::ToolUse { id, name, input } => {
+                calls.push(json!({
+                    "type": "function_call",
+                    "call_id": id,
+                    "name": name,
+                    "arguments": serde_json::to_string(input).unwrap_or_else(|_| "{}".into()),
+                }));
+            }
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                let output = if *is_error {
+                    format!("Error: the tool call failed.\n{content}")
+                } else {
+                    content.clone()
+                };
+                calls.push(json!({
+                    "type": "function_call_output",
+                    "call_id": tool_use_id,
+                    "output": output,
+                }));
+            }
+            other => {
+                return Err(AgentError::Provider(format!(
+                    "openai cannot express content block {other:?}"
+                )))
+            }
+        }
+    }
+    if !texts.is_empty() {
+        out.push(json!({ "role": "assistant", "content": texts.join("\n\n") }));
+    }
+    out.extend(calls);
     Ok(())
 }
 
@@ -569,6 +625,100 @@ mod tests {
         assert_eq!(input.len(), 2);
         assert_eq!(input[0]["type"], "function_call");
         assert_eq!(input[1]["type"], "function_call_output");
+    }
+
+    #[test]
+    fn assistant_history_uses_bare_string_content() {
+        let messages = vec![
+            ChatMessage::text(Role::User, "what is here?"),
+            ChatMessage::text(Role::Assistant, "Let me look."),
+            openwave_core::ChatMessage {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "Running it.".into(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "call_1".into(),
+                        name: "exec".into(),
+                        input: json!({"command":"pwd"}),
+                    },
+                ],
+                reasoning: Vec::new(),
+            },
+            openwave_core::ChatMessage {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_1".into(),
+                    content: "/tmp".into(),
+                    is_error: false,
+                }],
+                reasoning: Vec::new(),
+            },
+            ChatMessage::text(Role::User, "thanks"),
+        ];
+        let req = ChatRequest {
+            model: "gpt-5.6-sol".into(),
+            messages,
+            ..Default::default()
+        };
+        let input = build_input(&req).unwrap();
+
+        let assistant: Vec<_> = input
+            .iter()
+            .filter(|item| item["role"] == "assistant")
+            .collect();
+        assert_eq!(assistant.len(), 2);
+        assert_eq!(assistant[0]["content"], json!("Let me look."));
+        assert_eq!(assistant[1]["content"], json!("Running it."));
+        assert!(
+            !input
+                .iter()
+                .filter(|item| item["role"] == "assistant")
+                .any(|item| item.to_string().contains("input_text")),
+            "assistant items must not carry input_text parts: {input:?}"
+        );
+
+        let user: Vec<_> = input
+            .iter()
+            .filter(|item| item["role"] == "user" && item["content"].is_array())
+            .collect();
+        assert_eq!(user.len(), 2);
+        for item in user {
+            assert_eq!(item["content"][0]["type"], "input_text");
+        }
+
+        // The assistant's prose precedes the call it made, and the pair survives.
+        let types: Vec<_> = input
+            .iter()
+            .map(|item| {
+                item["type"]
+                    .as_str()
+                    .unwrap_or_else(|| item["role"].as_str().unwrap())
+            })
+            .collect();
+        assert_eq!(
+            types,
+            vec![
+                "user",
+                "assistant",
+                "assistant",
+                "function_call",
+                "function_call_output",
+                "user"
+            ]
+        );
+        let call = input
+            .iter()
+            .find(|item| item["type"] == "function_call")
+            .unwrap();
+        assert_eq!(call["call_id"], "call_1");
+        let output = input
+            .iter()
+            .find(|item| item["type"] == "function_call_output")
+            .unwrap();
+        assert_eq!(output["call_id"], "call_1");
+        assert_eq!(output["output"], "/tmp");
     }
 
     #[test]
