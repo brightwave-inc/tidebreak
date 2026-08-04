@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Component, Path};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -29,7 +30,27 @@ use crate::{
 
 const E2B_API_BASE: &str = "https://api.e2b.app";
 const E2B_SANDBOX_BASE: &str = "https://sandbox.e2b.app";
-const E2B_TEMPLATE: &str = "code-interpreter-v1";
+/// The published OpenWave documents template every sandbox is created from.
+///
+/// E2B provisions from account-registered *templates*, not arbitrary OCI refs,
+/// so the image reaches E2B as a template published from the OpenWave account —
+/// public, and therefore usable by any E2B account by alias, exactly like E2B's
+/// own `code-interpreter-v1`. A user who pastes an API key gets the documents
+/// image with no template setup of their own.
+///
+/// The alias carries the image version so the pin is visible in one place. It
+/// is currently built from
+/// `ghcr.io/brightwave-inc/openwave-sandbox-agent-documents:v0.26.0`
+/// (`sha256:dd22da7a3c5b1f315e888da902e7a46ae034585e2ab5c09c0ae4588a69f158a2`),
+/// the same ref recorded in `crates/openwave-sandbox-agent/e2b/e2b.Dockerfile`.
+/// Publishing a new image version means publishing a new alias and moving this
+/// constant with it — that directory's README has the procedure.
+const E2B_TEMPLATE: &str = "openwave-documents-v0-26-0";
+
+/// E2B's own public code-interpreter template, used only when the OpenWave
+/// template cannot be resolved. Degraded but working: document skills fall back
+/// to installing their Python dependencies inside the sandbox at run time.
+const E2B_FALLBACK_TEMPLATE: &str = "code-interpreter-v1";
 const E2B_WORKSPACE_ROOT: &str = "/home/user";
 const E2B_USER: &str = "user";
 const E2B_ENVD_PORT: &str = "49983";
@@ -86,6 +107,13 @@ pub struct E2BExecutionProvider {
     endpoints: E2BEndpoints,
     egress: Option<EgressPolicy>,
     template: String,
+    /// Whether `template` is the built-in default rather than a caller's
+    /// override. Only the default may fall back.
+    default_template: bool,
+    /// Latched once E2B reports the default template unresolvable, so the
+    /// remaining sandbox creations of this provider's life skip the doomed
+    /// first attempt.
+    template_unavailable: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -145,21 +173,22 @@ impl E2BExecutionProvider {
             endpoints,
             egress: None,
             template: E2B_TEMPLATE.into(),
+            default_template: true,
+            template_unavailable: AtomicBool::new(false),
         })
     }
 
-    /// Create every sandbox from this E2B template instead of the default
-    /// public code-interpreter template.
+    /// Create every sandbox from this E2B template instead of the published
+    /// OpenWave documents template.
     ///
-    /// E2B provisions from account-registered *templates*, not arbitrary OCI
-    /// refs, so pointing E2B at the official OpenWave documents image means
-    /// registering a template built from
-    /// `crates/openwave-sandbox-agent/Dockerfile` with E2B's own tooling and
-    /// naming its id here. Absent an override the default template keeps
-    /// working — skills fall back to in-sandbox `pip install`.
+    /// This is an escape hatch for an account that maintains its own template.
+    /// Unlike the default it never falls back: a template the caller named and
+    /// E2B cannot resolve is an error they need to see, not something to paper
+    /// over with different sandbox contents.
     #[must_use]
     pub fn with_template(mut self, template: impl Into<String>) -> Self {
         self.template = template.into();
+        self.default_template = false;
         self
     }
 
@@ -213,6 +242,47 @@ impl E2BExecutionProvider {
         &self,
         workspace_id: &str,
     ) -> Result<RemoteSession, CodeExecutionError> {
+        if !self.default_template || self.template_unavailable.load(Ordering::Relaxed) {
+            let template = if self.default_template {
+                E2B_FALLBACK_TEMPLATE
+            } else {
+                self.template.as_str()
+            };
+            return self
+                .create_sandbox_from(workspace_id, template)
+                .await
+                .map_err(|failure| failure.into_error(template));
+        }
+
+        match self.create_sandbox_from(workspace_id, &self.template).await {
+            Ok(session) => Ok(session),
+            Err(CreateSandboxFailure::TemplateMissing) => {
+                // The OpenWave template is published from one account and used
+                // by all of them, so it can be absent here for reasons the user
+                // cannot fix: the publish has not happened yet on a build that
+                // shipped ahead of it, or it was withdrawn. Rather than leave
+                // code execution dead, run the same skills on E2B's public
+                // template and pay the in-sandbox install.
+                tracing::warn!(
+                    "E2B could not resolve the OpenWave template '{}'; falling back to '{E2B_FALLBACK_TEMPLATE}' \
+                     for the rest of this session. Document skills will install their Python \
+                     dependencies inside the sandbox at run time.",
+                    self.template
+                );
+                self.template_unavailable.store(true, Ordering::Relaxed);
+                self.create_sandbox_from(workspace_id, E2B_FALLBACK_TEMPLATE)
+                    .await
+                    .map_err(|failure| failure.into_error(E2B_FALLBACK_TEMPLATE))
+            }
+            Err(failure) => Err(failure.into_error(&self.template)),
+        }
+    }
+
+    async fn create_sandbox_from(
+        &self,
+        workspace_id: &str,
+        template: &str,
+    ) -> Result<RemoteSession, CreateSandboxFailure> {
         let url = format!(
             "{}/sandboxes",
             self.endpoints.api_base.trim_end_matches('/')
@@ -223,7 +293,7 @@ impl E2BExecutionProvider {
             .post(url)
             .header("X-API-Key", self.credential.as_str())
             .json(&CreateSandboxRequest {
-                template_id: &self.template,
+                template_id: template,
                 timeout: E2B_SANDBOX_TTL_SECONDS,
                 secure: true,
                 allow_internet_access: network.allow_internet_access,
@@ -232,8 +302,22 @@ impl E2BExecutionProvider {
             })
             .send()
             .await
-            .map_err(|_| CodeExecutionError::Unavailable("could not reach the E2B API".into()))?;
-        decode_session(response).await
+            .map_err(|_| {
+                CreateSandboxFailure::Other(CodeExecutionError::Unavailable(
+                    "could not reach the E2B API".into(),
+                ))
+            })?;
+        // Template resolution is the only thing creation looks up by name, and
+        // E2B answers an unresolvable one — unknown alias, or a template the
+        // key's team cannot see — with 404 and a `template '<id>' not found`
+        // body. Every other failure (401/403 credential, 429 quota, 5xx) keeps
+        // its own meaning.
+        if response.status() == StatusCode::NOT_FOUND {
+            return Err(CreateSandboxFailure::TemplateMissing);
+        }
+        decode_session(response)
+            .await
+            .map_err(CreateSandboxFailure::Other)
     }
 
     async fn connect_sandbox(
@@ -621,6 +705,25 @@ impl CodeExecutionProvider for E2BExecutionProvider {
 
     fn workspace_lifecycle(&self) -> Option<&dyn WorkspaceLifecycle> {
         Some(self)
+    }
+}
+
+/// Why a single sandbox-creation attempt failed. Split out from
+/// [`CodeExecutionError`] because only one shape — E2B failing to resolve the
+/// template — may be retried against a different template.
+enum CreateSandboxFailure {
+    TemplateMissing,
+    Other(CodeExecutionError),
+}
+
+impl CreateSandboxFailure {
+    fn into_error(self, template: &str) -> CodeExecutionError {
+        match self {
+            Self::TemplateMissing => CodeExecutionError::Unavailable(format!(
+                "E2B could not find the sandbox template '{template}'"
+            )),
+            Self::Other(error) => error,
+        }
     }
 }
 
@@ -1051,12 +1154,16 @@ mod tests {
 
     struct MockState {
         mode: ProcessMode,
+        /// Template id the mock refuses to resolve, answering the 404 E2B
+        /// returns for an alias its team cannot see.
+        missing_template: Option<String>,
         creates: AtomicUsize,
         connects: AtomicUsize,
         starts: AtomicUsize,
         deletes: AtomicUsize,
         uploads: AtomicUsize,
         create_body: StdMutex<Option<Value>>,
+        create_templates: StdMutex<Vec<String>>,
         start_bodies: StdMutex<Vec<Vec<u8>>>,
         api_keys: StdMutex<Vec<String>>,
         access_tokens: StdMutex<Vec<String>>,
@@ -1067,12 +1174,14 @@ mod tests {
         fn new(mode: ProcessMode) -> Self {
             Self {
                 mode,
+                missing_template: None,
                 creates: AtomicUsize::new(0),
                 connects: AtomicUsize::new(0),
                 starts: AtomicUsize::new(0),
                 deletes: AtomicUsize::new(0),
                 uploads: AtomicUsize::new(0),
                 create_body: StdMutex::new(None),
+                create_templates: StdMutex::new(Vec::new()),
                 start_bodies: StdMutex::new(Vec::new()),
                 api_keys: StdMutex::new(Vec::new()),
                 access_tokens: StdMutex::new(Vec::new()),
@@ -1084,7 +1193,21 @@ mod tests {
     async fn mock_server(
         mode: ProcessMode,
     ) -> (Arc<MockState>, String, tokio::task::JoinHandle<()>) {
-        let state = Arc::new(MockState::new(mode));
+        serve(MockState::new(mode)).await
+    }
+
+    /// A mock whose account cannot resolve `missing_template` — E2B's answer
+    /// when the alias is unknown or not published to this team.
+    async fn mock_server_without_template(
+        missing_template: &str,
+    ) -> (Arc<MockState>, String, tokio::task::JoinHandle<()>) {
+        let mut state = MockState::new(ProcessMode::Complete);
+        state.missing_template = Some(missing_template.to_owned());
+        serve(state).await
+    }
+
+    async fn serve(state: MockState) -> (Arc<MockState>, String, tokio::task::JoinHandle<()>) {
+        let state = Arc::new(state);
         let app = Router::new()
             .route("/sandboxes", post(mock_create))
             .route("/sandboxes/{sandbox_id}", delete(mock_delete))
@@ -1141,19 +1264,35 @@ mod tests {
         State(state): State<Arc<MockState>>,
         headers: HeaderMap,
         Json(body): Json<Value>,
-    ) -> Json<Value> {
+    ) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
         state.creates.fetch_add(1, Ordering::SeqCst);
         state
             .api_keys
             .lock()
             .unwrap()
             .push(header_value(&headers, "x-api-key"));
+        let template = body["templateID"].as_str().unwrap().to_owned();
+        state
+            .create_templates
+            .lock()
+            .unwrap()
+            .push(template.clone());
+        if state.missing_template.as_deref() == Some(template.as_str()) {
+            // The body E2B's API returns for an unresolvable template.
+            return Err((
+                axum::http::StatusCode::NOT_FOUND,
+                Json(json!({
+                    "code": 404,
+                    "message": format!("template '{template}' not found"),
+                })),
+            ));
+        }
         *state.create_body.lock().unwrap() = Some(body);
-        Json(json!({
+        Ok(Json(json!({
             "sandboxID": "sandbox-123",
             "envdVersion": "0.3.0",
             "envdAccessToken": "access-123"
-        }))
+        })))
     }
 
     async fn mock_connect(
@@ -1387,7 +1526,10 @@ mod tests {
         );
 
         let create = state.create_body.lock().unwrap().clone().unwrap();
-        assert_eq!(create["templateID"], E2B_TEMPLATE);
+        // Spelled out rather than compared to the constant: reverting the
+        // default to E2B's public template silently costs every document run
+        // an in-sandbox dependency install.
+        assert_eq!(create["templateID"], "openwave-documents-v0-26-0");
         assert_eq!(create["metadata"]["openwave_workspace_id"], "workspace-1");
         assert_eq!(create["secure"], true);
         assert_eq!(create["allow_internet_access"], true);
@@ -1567,6 +1709,54 @@ mod tests {
             .unwrap();
         assert_eq!(state.creates.load(Ordering::SeqCst), 2);
         assert_eq!(state.deletes.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    /// The OpenWave template is published from one account and consumed by
+    /// every account, so a client can outrun the publish or see it withdrawn.
+    /// Creation then falls back to E2B's public template — once, with the
+    /// decision latched so later sandboxes skip the doomed first attempt.
+    #[tokio::test]
+    async fn e2b_falls_back_to_the_public_template_when_openwave_s_is_unresolvable() {
+        let (state, base, server) = mock_server_without_template(E2B_TEMPLATE).await;
+        let provider = provider_at(&base, RemoteSessionPool::default(), None);
+
+        provider
+            .execute(request("execution-1", "workspace-a", "first"))
+            .await
+            .unwrap();
+        provider
+            .execute(request("execution-2", "workspace-b", "second"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            state.create_templates.lock().unwrap().as_slice(),
+            [E2B_TEMPLATE, E2B_FALLBACK_TEMPLATE, E2B_FALLBACK_TEMPLATE]
+        );
+        server.abort();
+    }
+
+    /// A template the caller named is theirs to fix: creation surfaces the
+    /// failure instead of quietly running on different sandbox contents.
+    #[tokio::test]
+    async fn e2b_does_not_fall_back_from_an_explicit_template_override() {
+        let (state, base, server) = mock_server_without_template("acme-custom").await;
+        let provider =
+            provider_at(&base, RemoteSessionPool::default(), None).with_template("acme-custom");
+
+        let error = provider
+            .execute(request("execution-1", "workspace-a", "first"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, CodeExecutionError::Unavailable(message) if message.contains("acme-custom")),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(
+            state.create_templates.lock().unwrap().as_slice(),
+            ["acme-custom"]
+        );
         server.abort();
     }
 
