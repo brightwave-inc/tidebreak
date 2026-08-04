@@ -111,7 +111,7 @@ pub use pairing::{
     register_pending_pairing, register_replacing_pairing, PairingError, PairingHandle,
     PendingRegistration,
 };
-pub use state::{AppState, LocalVoiceRunner, LocalVoiceState, LocalVoiceStatus};
+pub use state::{AppState, LocalVoiceError, LocalVoiceRunner, LocalVoiceState, LocalVoiceStatus};
 
 pub(crate) const MAX_RAW_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_WEB_SEARCH_CREDENTIAL_BODY_BYTES: usize = 16 * 1024;

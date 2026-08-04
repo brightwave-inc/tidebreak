@@ -9,7 +9,7 @@ use openwave_core::{SecretProvider, Store};
 
 use crate::error::ServerError;
 use crate::providers::{self, ProviderCredential, ProviderKind};
-use crate::state::{LocalVoiceRunner, LocalVoiceState};
+use crate::state::{LocalVoiceError, LocalVoiceRunner, LocalVoiceState};
 
 const SETTING_KEY: &str = "voice.transcription_v1";
 pub const MAX_AUDIO_BYTES: usize = 25 * 1024 * 1024;
@@ -150,7 +150,15 @@ pub async fn transcribe(
         return local_voice
             .transcribe(content_type, audio.to_vec())
             .await
-            .map_err(ServerError::internal);
+            .map_err(|error| match error {
+                LocalVoiceError::UnsupportedMedia(message) => {
+                    ServerError::unsupported_media_type_kind("voice_recording_unsupported", message)
+                }
+                LocalVoiceError::Undecodable(message) => {
+                    ServerError::unprocessable_kind("voice_recording_undecodable", message)
+                }
+                LocalVoiceError::Runner(message) => ServerError::internal(message),
+            });
     }
     if config.model == VoiceTranscriptionModel::GeminiFlash {
         return transcribe_gemini(store, secrets, content_type, &audio).await;
@@ -302,7 +310,11 @@ mod tests {
             Ok(self.status().await)
         }
 
-        async fn transcribe(&self, content_type: &str, audio: Vec<u8>) -> Result<String, String> {
+        async fn transcribe(
+            &self,
+            content_type: &str,
+            audio: Vec<u8>,
+        ) -> Result<String, LocalVoiceError> {
             assert_eq!(content_type, "audio/webm");
             assert_eq!(audio, b"local audio");
             Ok("local transcript".into())
