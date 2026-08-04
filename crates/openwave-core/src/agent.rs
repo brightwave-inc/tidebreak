@@ -134,6 +134,7 @@ enum RegisteredTool {
     ForegroundOrchestration {
         spec: ToolSpec,
         kind: ForegroundOrchestrationKind,
+        class: ApprovalClass,
     },
 }
 
@@ -212,6 +213,19 @@ impl ToolRegistry {
     /// A claimed foreground worker must still opt in before either definition
     /// is advertised. Sandboxed workers never opt in, keeping delegation depth
     /// bounded at one.
+    ///
+    /// Both declare [`ApprovalClass::Sensitive`]. A delegated child reaches the
+    /// public web and, where the host routes children to a container, runs
+    /// commands there; none of those calls pass back through this chat's
+    /// approval gate, so the delegation itself is the boundary that carries
+    /// their weight. The pair shares one class because it is one contract: the
+    /// wait exists only to consume what a spawn produced, and advertising half
+    /// of it in a surface that forbids the other half would only invite a call
+    /// that cannot be honored.
+    ///
+    /// The class decides advertisement, not admission: a spawn writes its tool
+    /// call already completed, so there is no pending record for the approval
+    /// gate to park on. Issue #1477 holds what closing that would take.
     pub fn register_foreground_agent_orchestration(&mut self) {
         for (spec, kind) in [
             (
@@ -225,7 +239,11 @@ impl ToolRegistry {
         ] {
             self.tools.insert(
                 spec.name.clone(),
-                RegisteredTool::ForegroundOrchestration { spec, kind },
+                RegisteredTool::ForegroundOrchestration {
+                    spec,
+                    kind,
+                    class: ApprovalClass::Sensitive,
+                },
             );
         }
     }
@@ -301,9 +319,10 @@ impl ToolRegistry {
     /// narrowed to the read-only planning subset.
     ///
     /// A plan-mode turn advertises only `ReadOnly` registrations — server
-    /// tools by their declared [`Tool::approval_class`], client tools by the
-    /// class declared at registration — and never the orchestration pair:
-    /// spawned agents execute, and executing is exactly what a plan turn
+    /// tools by their declared [`Tool::approval_class`], client and
+    /// orchestration tools by the class declared at registration. The
+    /// orchestration pair is `Sensitive`, so a plan turn drops it by that same
+    /// rule: spawned agents execute, and executing is exactly what a plan turn
     /// must not do.
     #[must_use]
     pub fn specs_for_surface(
@@ -322,6 +341,7 @@ impl ToolRegistry {
                 RegisteredTool::Server(tool) => Some(tool.spec()),
                 RegisteredTool::Client { class, .. }
                 | RegisteredTool::ForegroundClient { class, .. }
+                | RegisteredTool::ForegroundOrchestration { class, .. }
                     if read_only && *class != ApprovalClass::ReadOnly =>
                 {
                     None
@@ -340,7 +360,7 @@ impl ToolRegistry {
                 }
                 RegisteredTool::ForegroundClient { .. } => None,
                 RegisteredTool::ForegroundOrchestration { spec, .. }
-                    if allow_agent_orchestration && !read_only =>
+                    if allow_agent_orchestration =>
                 {
                     Some(spec.clone())
                 }
@@ -349,18 +369,19 @@ impl ToolRegistry {
             .collect()
     }
 
-    /// The declared approval class of a registered tool, if it has one.
+    /// The declared approval class of every registered tool.
     ///
-    /// Orchestration registrations return `None`: they have no class because
-    /// no mode admits them outside the foreground coordinator's opt-in, and
-    /// plan mode treats classless as mutating.
+    /// `None` means only that nothing is registered under `name`. Every
+    /// registration declares a class, including the orchestration pair, so a
+    /// caller asking what a name costs is never answered with silence it has
+    /// to interpret.
     #[must_use]
     pub fn registered_class(&self, name: &str) -> Option<ApprovalClass> {
         match self.tools.get(name)? {
             RegisteredTool::Server(tool) => Some(tool.approval_class()),
             RegisteredTool::Client { class, .. }
-            | RegisteredTool::ForegroundClient { class, .. } => Some(*class),
-            RegisteredTool::ForegroundOrchestration { .. } => None,
+            | RegisteredTool::ForegroundClient { class, .. }
+            | RegisteredTool::ForegroundOrchestration { class, .. } => Some(*class),
         }
     }
 
