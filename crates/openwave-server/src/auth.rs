@@ -41,7 +41,7 @@ use std::path::Path;
 
 use axum::extract::{Request, State};
 use axum::http::{
-    header::{AUTHORIZATION, SEC_WEBSOCKET_PROTOCOL, UPGRADE},
+    header::{AUTHORIZATION, HOST, ORIGIN, SEC_WEBSOCKET_PROTOCOL, UPGRADE},
     HeaderMap, HeaderName, StatusCode,
 };
 use axum::middleware::Next;
@@ -237,6 +237,116 @@ pub async fn require_client_executor_token(
     }
 }
 
+/// Reject a request whose `Origin` names a site that is not this app, or
+/// whose `Host` is not the loopback address the desktop server binds to.
+///
+/// The bearer stays the gate; this is the second condition that makes a
+/// *leaked* bearer insufficient rather than sufficient. Two attacks it closes,
+/// neither of which CORS covers:
+///
+/// - **WebSocket upgrades.** CORS does not apply to them at all, and a browser
+///   can set `Sec-WebSocket-Protocol` freely — so a page that learned the
+///   token could open the event stream. It cannot forge `Origin`.
+/// - **DNS rebinding.** A name the attacker controls, re-resolved to
+///   `127.0.0.1`, reaches the server as a same-origin request from the
+///   attacker's page. The `Host` header still carries their name.
+///
+/// Deliberately permissive in two places, because the alternative is breaking
+/// legitimate callers to close nothing:
+///
+/// - **A request with no `Origin` passes.** Only browsers attach one; a `curl`
+///   or an SDK never does, and rejecting them would gate a header the threat
+///   model does not depend on.
+/// - **Only the desktop profile is checked.** A self-host deployment is
+///   reached from an operator-chosen origin over an operator-chosen name, and
+///   neither is knowable here. It keeps the bearer and the operator's own
+///   fronting.
+///
+/// The desktop profile is also what a bare `openwave serve` boots, so an
+/// integrator driving that daemon from a browser page of their own must run it
+/// as `OPENWAVE_PROFILE=self_host`. A parent process reading the daemon's
+/// stdout — the documented integration — sends no `Origin` and is unaffected.
+pub async fn require_app_origin(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if state.config.profile == Profile::Desktop
+        && !(origin_is_this_app(request.headers()) && host_is_loopback(request.headers()))
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    next.run(request).await
+}
+
+/// Whether the request's `Origin`, if it declared one, is this app's.
+#[must_use]
+pub fn origin_is_this_app(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get(ORIGIN) else {
+        // Not a browser request, or a same-origin navigation (an iframe
+        // loading a view frame). Nothing to check.
+        return true;
+    };
+    origin_value_is_this_app(origin)
+}
+
+/// The same judgement on a bare header value, for the CORS layer's predicate.
+#[must_use]
+pub fn origin_value_is_this_app(origin: &axum::http::HeaderValue) -> bool {
+    origin
+        .to_str()
+        .is_ok_and(|origin| APP_ORIGINS.contains(&origin) || dev_server_origin(origin))
+}
+
+/// The origins the packaged webview loads its frontend from.
+///
+/// Tauri serves `frontendDist` over its own protocol: `tauri://localhost` on
+/// macOS and Linux, `http(s)://tauri.localhost` on Windows. `null` is here
+/// because a document on a non-http scheme is reported as an opaque origin by
+/// some webviews, and refusing it would take the packaged app's own requests
+/// down; it grants nothing a page could not already reach without an `Origin`
+/// header at all.
+const APP_ORIGINS: &[&str] = &[
+    "tauri://localhost",
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+    "null",
+];
+
+/// The Vite dev server, in debug builds only — `build.devUrl` in
+/// `tauri.conf.json`, and the same port a browser tab uses during UI work.
+fn dev_server_origin(origin: &str) -> bool {
+    cfg!(debug_assertions) && matches!(origin, "http://localhost:1420" | "http://127.0.0.1:1420")
+}
+
+/// Whether the request addressed the server by a loopback name.
+///
+/// The desktop server binds loopback, so a `Host` naming anything else is a
+/// request that arrived through a name resolving there — the rebinding case.
+/// An absent `Host` passes, for the same reason an absent `Origin` does: HTTP/2
+/// carries the authority in the request line instead, and every browser sends
+/// one, so the header's absence never describes the attack.
+#[must_use]
+pub fn host_is_loopback(headers: &HeaderMap) -> bool {
+    let Some(host) = headers.get(HOST) else {
+        return true;
+    };
+    let Ok(host) = host.to_str() else {
+        return false;
+    };
+    // Strip the port, keeping an IPv6 literal's brackets intact.
+    let name = match host.strip_prefix('[') {
+        Some(rest) => match rest.split_once(']') {
+            Some((inner, _)) => inner,
+            None => return false,
+        },
+        None => host.split(':').next().unwrap_or(host),
+    };
+    // `localhost` is resolved locally rather than through the DNS an attacker
+    // could answer, so it is as loopback-bound as the literals.
+    name.eq_ignore_ascii_case("localhost") || name == "127.0.0.1" || name == "::1"
+}
+
 /// Resolve the presented token: `Authorization` wins; on WebSocket upgrades,
 /// fall back to the `openwave-token.` subprotocol entry.
 pub fn extract_token(headers: &HeaderMap) -> Option<&str> {
@@ -318,6 +428,54 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+
+    fn headers(pairs: &[(HeaderName, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(name.clone(), HeaderValue::from_str(value).unwrap());
+        }
+        map
+    }
+
+    /// The point of the check: a page on the public web that has somehow
+    /// learned the bearer still cannot open the event stream, because CORS
+    /// never covered WebSocket upgrades and `Origin` is the one header its
+    /// script cannot forge.
+    #[test]
+    fn a_foreign_origin_is_refused_and_the_app_and_non_browsers_are_not() {
+        assert!(!origin_is_this_app(&headers(&[(
+            axum::http::header::ORIGIN,
+            "https://evil.example"
+        )])));
+        // A loopback port that is not the dev server is a foreign site too —
+        // the embedded API itself serves untrusted app HTML on one.
+        assert!(!origin_is_this_app(&headers(&[(
+            axum::http::header::ORIGIN,
+            "http://127.0.0.1:53219"
+        )])));
+        // The packaged webview's own origin.
+        assert!(origin_is_this_app(&headers(&[(
+            axum::http::header::ORIGIN,
+            "tauri://localhost"
+        )])));
+        // A CLI or SDK attaches no Origin at all; only browsers do.
+        assert!(origin_is_this_app(&HeaderMap::new()));
+    }
+
+    /// DNS rebinding: the request reaches loopback, but the name the browser
+    /// was pointed at travels with it.
+    #[test]
+    fn a_host_that_is_not_loopback_is_refused() {
+        assert!(!host_is_loopback(&headers(&[(
+            HOST,
+            "rebind.example:7777"
+        )])));
+        assert!(host_is_loopback(&headers(&[(HOST, "127.0.0.1:7777")])));
+        assert!(host_is_loopback(&headers(&[(HOST, "localhost:7777")])));
+        assert!(host_is_loopback(&headers(&[(HOST, "[::1]:7777")])));
+        // HTTP/2 carries the authority in the request line instead.
+        assert!(host_is_loopback(&HeaderMap::new()));
+    }
 
     #[test]
     fn token_map_parses_the_documented_format_and_resolves_exactly() {
