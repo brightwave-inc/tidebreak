@@ -142,6 +142,51 @@ pub struct PendingChatPrompt {
     pub output_writeback_call_ids: Vec<CallId>,
 }
 
+/// What kind of decision one inbox item is waiting for.
+///
+/// The set is closed and each variant names an existing park/resume surface,
+/// so a reader can route an item back to the card that owns it without the
+/// inbox knowing anything about that card's contents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum InboxItemKind {
+    /// A Sensitive tool call parked on its approval gate.
+    ToolApproval,
+    /// An `ask_user_questions` continuation awaiting answers.
+    Question,
+    /// An `exit_plan_mode` proposal awaiting a decision.
+    PlanReview,
+    /// A folder-access request awaiting a native grant.
+    FolderAccess,
+    /// A write-back to a connected folder awaiting confirmation.
+    OutputWriteback,
+}
+
+/// One thing waiting on the reader, wherever in their chats it parked.
+///
+/// A projection of the journal rows that already carry park/resume state —
+/// deliberately not a store of its own, so resolving an item through its
+/// existing route is what removes it from here. It stays as opaque as the
+/// per-chat attention summary: identity, kind, and when it parked, never
+/// question text, plan prose, or canonical tool arguments. Detail comes from
+/// the chat the item deep-links to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboxItem {
+    pub chat_id: ChatId,
+    /// The conversation's title, or `None` while it is still untitled.
+    pub chat_title: Option<String>,
+    pub turn_id: TurnId,
+    /// The parked call — both the item's identity and the transcript position
+    /// a deep link returns to.
+    pub call_id: CallId,
+    pub kind: InboxItemKind,
+    /// The tool whose call parked, for a tool approval. `None` for every other
+    /// kind, whose tool is implied by the kind itself.
+    pub tool_name: Option<String>,
+    /// When the item started waiting.
+    pub requested_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Result of a fail-closed conversation deletion request.
 ///
 /// A conversation is only removable after every turn is terminal and no host
@@ -3466,6 +3511,15 @@ pub trait Store: Send + Sync {
     /// user. The result carries opaque call ids only; callers fetch detail for
     /// an individual open conversation through its dedicated recovery route.
     async fn list_pending_chat_prompts(&self) -> Result<Vec<PendingChatPrompt>> {
+        turn_storage_unavailable()
+    }
+
+    /// Every item waiting on `owner`, across their conversations, oldest first.
+    ///
+    /// A read model over the same parked rows the per-chat recovery routes
+    /// serve: an item disappears from here exactly when its own resolution
+    /// path lands, because there is nothing else to update.
+    async fn list_inbox_items_scoped(&self, _owner: &OwnerId) -> Result<Vec<InboxItem>> {
         turn_storage_unavailable()
     }
 

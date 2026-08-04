@@ -423,6 +423,7 @@ pub fn app(state: AppState) -> Router {
             "/chats/pending-prompts",
             get(routes::list_pending_chat_prompts),
         )
+        .route("/inbox", get(routes::list_inbox))
         .route(
             "/chats/{id}",
             get(routes::get_chat)
