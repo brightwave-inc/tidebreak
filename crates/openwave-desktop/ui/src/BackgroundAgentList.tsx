@@ -223,6 +223,7 @@ function BackgroundAgentRow({
   };
 
   const contentId = `background-agent-activity-${run.id}`;
+  const terminalLabel = run.status === "failed" ? "Error" : "Result";
 
   return (
     <div className="px-3 py-2.5">
@@ -254,8 +255,11 @@ function BackgroundAgentRow({
             className={cn("size-2 shrink-0 rounded-full", getAgentRunDotClass(run.status))}
             aria-hidden="true"
           />
-          <span className="min-w-0 flex-1 truncate font-medium text-foreground">
-            {label}
+          <span className="min-w-0 flex-1">
+            <span className="block truncate font-medium text-foreground">{label}</span>
+            {run.task && (
+              <span className="block truncate text-xs text-muted-foreground">{run.task}</span>
+            )}
           </span>
         </button>
         <span className="shrink-0 text-xs text-muted-foreground">
@@ -287,6 +291,12 @@ function BackgroundAgentRow({
           </Button>
         )}
       </div>
+      {run.terminal_text && (
+        <div className="mt-2 rounded-md bg-muted/50 px-2.5 py-2 text-sm text-foreground">
+          <span className="font-medium">{terminalLabel}: </span>
+          <span className="whitespace-pre-wrap break-words">{run.terminal_text}</span>
+        </div>
+      )}
       {expanded && (
         <div id={contentId} className="mt-2 pl-5">
           <AgentActivityTimeline state={activity} />

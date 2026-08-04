@@ -2170,8 +2170,8 @@ fn remove_private_chat_scratch(root: &FsPath, id: ChatId) -> std::io::Result<()>
 
 /// Renderer-safe state for one agent run.
 ///
-/// Worker lease tokens, delegated inputs, scheduling budgets, and other
-/// executor-facing fields intentionally remain inside the server/store boundary.
+/// Worker lease tokens, scheduling budgets, and other executor-facing fields
+/// intentionally remain inside the server/store boundary.
 #[derive(Debug, Serialize, ts_rs::TS)]
 pub struct AgentRunSnapshot {
     pub id: openwave_core::AgentRunId,
@@ -2179,6 +2179,8 @@ pub struct AgentRunSnapshot {
     pub tier: AgentRunTier,
     pub execution_location: AgentRunExecutionLocation,
     pub status: AgentRunStatus,
+    /// The exact bounded task delegated by the visible spawn step.
+    pub task: Option<String>,
     pub started_at: Option<chrono::DateTime<Utc>>,
     pub finished_at: Option<chrono::DateTime<Utc>>,
     /// Stable, bounded classification suitable for renderer display.
@@ -2196,6 +2198,8 @@ pub struct AgentRunSnapshot {
     /// deliverable never cross this boundary. A renderer uses it to offer a
     /// "view output" affordance and link to the outputs surface.
     pub produced_output: bool,
+    /// Bounded terminal display text returned to the parent, if settled.
+    pub terminal_text: Option<String>,
     pub created_at: chrono::DateTime<Utc>,
     pub updated_at: chrono::DateTime<Utc>,
     // This is an OpenWave call id, not a provider call identity. It lets a
@@ -2205,7 +2209,11 @@ pub struct AgentRunSnapshot {
 }
 
 impl AgentRunSnapshot {
-    fn from_run(run: AgentRun, activity: Option<AgentActivitySnapshot>) -> Self {
+    fn from_run(
+        run: AgentRun,
+        activity: Option<AgentActivitySnapshot>,
+        terminal_text: Option<String>,
+    ) -> Self {
         // A background child commits its final result receipt in the same
         // transaction as its terminal `Completed` state, so the terminal state
         // is an exact, renderer-safe proxy for output presence.
@@ -2218,11 +2226,13 @@ impl AgentRunSnapshot {
             tier: run.tier,
             execution_location: run.execution_location,
             status: run.status,
+            task: run.input,
             started_at: run.started_at,
             finished_at: run.finished_at,
             last_error_code: run.last_error_code,
             activity,
             produced_output,
+            terminal_text,
             created_at: run.created_at,
             updated_at: run.updated_at,
         }
@@ -2406,6 +2416,17 @@ pub async fn list_agent_runs(
     let now = Utc::now();
     let mut snapshots = Vec::with_capacity(runs.len());
     for run in runs {
+        let terminal_text = match run.status {
+            AgentRunStatus::Completed | AgentRunStatus::Cancelled => store
+                .get_agent_run_result(run.id)
+                .await?
+                .map(|result| result.text),
+            AgentRunStatus::Failed => run
+                .last_error_code
+                .as_deref()
+                .map(|code| format!("Sandbox task failed ({code})")),
+            _ => None,
+        };
         let activity = if run.tier == AgentRunTier::Background {
             let calls = store.list_sandbox_tool_calls_for_agent_run(run.id).await?;
             sandbox_activity(&calls)
@@ -2414,7 +2435,7 @@ pub async fn list_agent_runs(
         } else {
             None
         };
-        snapshots.push(AgentRunSnapshot::from_run(run, activity));
+        snapshots.push(AgentRunSnapshot::from_run(run, activity, terminal_text));
     }
     Ok(Json(snapshots))
 }

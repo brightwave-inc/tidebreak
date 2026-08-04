@@ -313,6 +313,11 @@ async fn agent_run_activity_history_is_ordered_renderer_safe_and_flags_a_produce
         snapshot.get("produced_output"),
         Some(&serde_json::json!(true))
     );
+    assert_eq!(snapshot.get("task"), Some(&serde_json::json!("research")));
+    assert_eq!(
+        snapshot.get("terminal_text"),
+        Some(&serde_json::json!("final answer"))
+    );
     assert_eq!(snapshot.get("activity"), Some(&serde_json::json!(null)));
 
     // The activity history is the ordered, terminal-outcome projection.
@@ -1170,28 +1175,33 @@ async fn agent_run_snapshots_omit_persisted_raw_failure_detail() {
     let chat: Chat = json_body(response).await;
 
     let run = admit_sandbox_for_test(&store, chat.id, "research").await;
-    let lease_token = uuid::Uuid::new_v4();
-    assert_eq!(
-        store
-            .claim_agent_run(lease_token, chrono::Duration::minutes(5), 1, 1)
+    let raw_detail = "upstream request failed: Authorization: Bearer private-token";
+    for attempt in 1..=openwave_core::AgentRun::DEFAULT_MAX_ATTEMPTS {
+        let lease_token = uuid::Uuid::new_v4();
+        assert_eq!(
+            store
+                .claim_agent_run(lease_token, chrono::Duration::minutes(5), 1, 1)
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            run.id
+        );
+        assert!(store
+            .fail_agent_run(
+                run.id,
+                lease_token,
+                "sandbox_transport_failed",
+                raw_detail,
+                chrono::Duration::microseconds(1),
+            )
             .await
             .unwrap()
-            .unwrap()
-            .id,
-        run.id
-    );
-    let raw_detail = "upstream request failed: Authorization: Bearer private-token";
-    assert!(store
-        .fail_agent_run(
-            run.id,
-            lease_token,
-            "sandbox_transport_failed",
-            raw_detail,
-            chrono::Duration::seconds(1),
-        )
-        .await
-        .unwrap()
-        .is_some());
+            .is_some());
+        if attempt < openwave_core::AgentRun::DEFAULT_MAX_ATTEMPTS {
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+    }
     assert_eq!(
         store
             .get_agent_run(run.id)
@@ -1222,6 +1232,12 @@ async fn agent_run_snapshots_omit_persisted_raw_failure_detail() {
     assert_eq!(
         snapshot.get("last_error_code"),
         Some(&serde_json::json!("sandbox_transport_failed"))
+    );
+    assert_eq!(
+        snapshot.get("terminal_text"),
+        Some(&serde_json::json!(
+            "Sandbox task failed (sandbox_transport_failed)"
+        ))
     );
     assert!(snapshot.get("last_error_detail").is_none());
     assert!(!serde_json::to_string(snapshot)
