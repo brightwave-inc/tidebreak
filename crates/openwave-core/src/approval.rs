@@ -107,6 +107,11 @@ impl ToolApprovalKind {
             "web_extract" => Self::WebExtractMayFetchUrl,
             "exec" => Self::ExecMayRunNetworkedCommand,
             "write_file" => Self::WorkspaceMayModifyFiles,
+            // `create_app` writes app revisions, a `Workspace`-class effect.
+            // Recovery of a parked call re-derives the kind from this table
+            // alone, so a workspace tool missing here parks as an approvable
+            // card the renderer presents and then 409s the approval itself.
+            "create_app" => Self::WorkspaceMayModifyFiles,
             name if name.starts_with("mcp__") => Self::ExternalMcpMayCallServer,
             _ => Self::Unsupported,
         }
