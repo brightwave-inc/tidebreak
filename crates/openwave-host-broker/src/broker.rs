@@ -137,6 +137,7 @@ pub struct Operator {
 
 struct Shared {
     policy: RootPolicy,
+    execute_commands: bool,
     state: Mutex<State>,
     state_file: Option<StateFile>,
     audit: Arc<dyn AuditSink>,
@@ -303,7 +304,7 @@ struct PreparedRegistration {
     conversation_id: Uuid,
     root_id: RootId,
     root: RegisteredRoot,
-    grants: [Grant; 4],
+    grants: Vec<Grant>,
     attachment: RootAttachment,
 }
 
@@ -551,9 +552,15 @@ impl OperationAudit {
 impl Broker {
     /// Create an empty broker using the reviewed host-root policy.
     pub fn new(policy: RootPolicy) -> Self {
+        Self::new_with_execute_commands(policy, true)
+    }
+
+    /// Create an empty broker with the host's local command reach declared.
+    pub fn new_with_execute_commands(policy: RootPolicy, execute_commands: bool) -> Self {
         Self {
             shared: Arc::new(Shared {
                 policy,
+                execute_commands,
                 state: Mutex::new(State::default()),
                 state_file: None,
                 audit: Arc::new(MemoryAuditSink::new()),
@@ -567,6 +574,7 @@ impl Broker {
         Self {
             shared: Arc::new(Shared {
                 policy,
+                execute_commands: true,
                 state: Mutex::new(State::default()),
                 state_file: None,
                 audit,
@@ -579,8 +587,17 @@ impl Broker {
     /// Persisted roots are revalidated and descriptor-pinned before this
     /// constructor returns, so stale state is never advertised.
     pub fn open(policy: RootPolicy, data_dir: &Path) -> Result<Self, BrokerError> {
+        Self::open_with_execute_commands(policy, data_dir, true)
+    }
+
+    /// Open durable broker state with the host's local command reach declared.
+    pub fn open_with_execute_commands(
+        policy: RootPolicy,
+        data_dir: &Path,
+        execute_commands: bool,
+    ) -> Result<Self, BrokerError> {
         let state_file = StateFile::open(data_dir)?;
-        let state = state_file.load(&policy)?;
+        let state = state_file.load(&policy, execute_commands)?;
         // A sink that could not be prepared is not replaced by one that discards
         // records: it stays the real sink, refusing until the host can hold the
         // log. Registration and writes fail with a stated reason, reads keep
@@ -594,6 +611,7 @@ impl Broker {
         let broker = Self {
             shared: Arc::new(Shared {
                 policy,
+                execute_commands,
                 state: Mutex::new(state),
                 state_file: Some(state_file),
                 audit,
@@ -767,6 +785,7 @@ impl Controller {
                         prepared.root.owner,
                         root_id,
                         prepared.grants[0].consent().clone(),
+                        self.shared.execute_commands,
                     )
                     .map_err(error_response)?;
                     if !next.attachments.iter().any(|attachment| {
@@ -916,13 +935,16 @@ impl Controller {
         // exec reach is part of that consent rather than a second prompt. The
         // capability exists so it can be named, audited, and revoked on its own
         // afterwards, not to add a step here.
-        let exec_grant = Grant::from_consent(
-            GrantId::new(),
-            request.subject,
-            Capability::ExecuteCommands,
-            Scope::Root { root_id },
-            consent,
-        )?;
+        let mut grants = vec![list_grant, read_grant, write_grant];
+        if self.shared.execute_commands {
+            grants.push(Grant::from_consent(
+                GrantId::new(),
+                request.subject,
+                Capability::ExecuteCommands,
+                Scope::Root { root_id },
+                consent,
+            )?);
+        }
         Ok(PreparedRegistration {
             conversation_id: request.conversation_id,
             root_id,
@@ -931,7 +953,7 @@ impl Controller {
                 display_name,
                 root: Arc::new(validated),
             },
-            grants: [list_grant, read_grant, write_grant, exec_grant],
+            grants,
             attachment: RootAttachment::new(request.conversation_id, root_id)?,
         })
     }
@@ -957,7 +979,8 @@ impl Controller {
             Claim::Start => {}
         }
 
-        let result = apply_root_attachment(&mut next, fingerprint).map_err(error_response);
+        let result = apply_root_attachment(&mut next, fingerprint, self.shared.execute_commands)
+            .map_err(error_response);
         complete_attachment(&mut next, request.operation_id, fingerprint, result.clone())
             .map_err(error_response)?;
         self.commit_state(&mut state, next)
@@ -1124,6 +1147,9 @@ impl Controller {
         if !has_root_attachment(&next, request.conversation_id, request.root_id) {
             return Err(error_response(BrokerError::Denied));
         }
+        if request.capability == Capability::ExecuteCommands && !self.shared.execute_commands {
+            return Err(error_response(BrokerError::Denied));
+        }
         let already_granted = next.grants.iter().any(|grant| {
             grant.subject() == request.subject
                 && grant.capability() == request.capability
@@ -1213,7 +1239,8 @@ impl Operator {
             match envelope.request {
                 OperationRequest::ListRoots => {
                     let state = self.lock_state()?;
-                    let (result, authorized_by) = list_roots(&state, envelope.context)?;
+                    let (result, authorized_by) =
+                        list_roots(&state, envelope.context, self.shared.execute_commands)?;
                     grant_id = authorized_by;
                     Ok(result)
                 }
@@ -2067,6 +2094,7 @@ fn destination_matches(root: &Dir, path: &RelativePath, byte_len: usize, sha256:
 fn apply_root_attachment(
     state: &mut State,
     request: AttachmentFingerprint,
+    execute_commands: bool,
 ) -> Result<RootAttachmentMutationResult, BrokerError> {
     validate_subject_conversation(request.subject, request.conversation_id)?;
     let changed = match request.mutation {
@@ -2084,7 +2112,13 @@ fn apply_root_attachment(
                 return Err(BrokerError::InvalidConsentMethod);
             }
             let consent = ConsentRecord::new(method, Utc::now());
-            ensure_subject_grants(state, request.subject, request.root_id, consent)?;
+            ensure_subject_grants(
+                state,
+                request.subject,
+                request.root_id,
+                consent,
+                execute_commands,
+            )?;
             if has_root_attachment(state, request.conversation_id, request.root_id) {
                 false
             } else {
@@ -2233,6 +2267,7 @@ fn ensure_subject_grants(
     subject: GrantSubject,
     root_id: RootId,
     consent: ConsentRecord,
+    execute_commands: bool,
 ) -> Result<(), BrokerError> {
     if !state.grants.iter().any(|grant| {
         grant.subject() == subject
@@ -2269,11 +2304,13 @@ fn ensure_subject_grants(
             consent.clone(),
         )?);
     }
-    if !state.grants.iter().any(|grant| {
-        grant.subject() == subject
-            && grant.capability() == Capability::ExecuteCommands
-            && matches!(grant.scope(), Scope::Root { root_id: granted } if *granted == root_id)
-    }) {
+    if execute_commands
+        && !state.grants.iter().any(|grant| {
+            grant.subject() == subject
+                && grant.capability() == Capability::ExecuteCommands
+                && matches!(grant.scope(), Scope::Root { root_id: granted } if *granted == root_id)
+        })
+    {
         state.grants.push(Grant::from_consent(
             GrantId::new(),
             subject,
@@ -2453,6 +2490,7 @@ fn list_unavailable_roots(state: &State) -> Result<Vec<UnavailableRootSummary>, 
 fn list_roots(
     state: &State,
     context: ExecutionContext,
+    execute_commands: bool,
 ) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
     if !state
         .attachments
@@ -2477,7 +2515,7 @@ fn list_roots(
         .map(|(root_id, root)| RootAccess {
             root_id: *root_id,
             display_name: root.display_name.clone(),
-            capabilities: root_capabilities(state, context, root_id),
+            capabilities: root_capabilities(state, context, root_id, execute_commands),
         })
         .take(MAX_LIST_ROOTS + 1)
         .collect::<Vec<_>>();
@@ -2561,6 +2599,7 @@ fn root_capabilities(
     state: &State,
     context: ExecutionContext,
     root_id: &RootId,
+    execute_commands: bool,
 ) -> Vec<Capability> {
     let mut capabilities = [Capability::ReadFiles, Capability::WriteFiles]
         .into_iter()
@@ -2568,7 +2607,7 @@ fn root_capabilities(
             authorize(state, context, *capability, Resource::Root(root_id)).is_ok()
         })
         .collect::<Vec<_>>();
-    if authorize_exec_reach(state, context, root_id).is_ok() {
+    if execute_commands && authorize_exec_reach(state, context, root_id).is_ok() {
         capabilities.push(Capability::ExecuteCommands);
     }
     capabilities

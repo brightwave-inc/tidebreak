@@ -48,6 +48,38 @@ fn setup() -> (tempfile::TempDir, Broker, PathBuf) {
     (temp, Broker::new(policy), root)
 }
 
+#[test]
+fn a_no_exec_host_does_not_report_command_reach_for_a_fresh_folder() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home/Documents");
+    std::fs::create_dir_all(&root).unwrap();
+    let broker = Broker::new_with_execute_commands(test_policy(&temp), false);
+    let conversation = Uuid::new_v4();
+    let registered = register(
+        &broker.controller(),
+        GrantSubject::conversation(conversation).unwrap(),
+        conversation,
+        root,
+        OperationId::new(),
+    );
+
+    assert_eq!(
+        operate(
+            &broker.operator(),
+            ExecutionContext::standalone(conversation).unwrap(),
+            OperationRequest::ListRoots,
+        )
+        .unwrap(),
+        OperationResult::ListRoots {
+            roots: vec![RootAccess {
+                root_id: registered.root.root_id,
+                display_name: registered.root.display_name,
+                capabilities: vec![Capability::ReadFiles, Capability::WriteFiles],
+            }],
+        }
+    );
+}
+
 fn durable_setup() -> (tempfile::TempDir, Broker, PathBuf, PathBuf) {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("home/Documents");
@@ -1609,7 +1641,11 @@ fn connected_root_results_are_bounded_before_transport_serialization() {
         );
     }
     assert!(matches!(
-        list_roots(&state, ExecutionContext::standalone(conversation).unwrap()),
+        list_roots(
+            &state,
+            ExecutionContext::standalone(conversation).unwrap(),
+            true,
+        ),
         Err(BrokerError::RootListTooLarge)
     ));
 }

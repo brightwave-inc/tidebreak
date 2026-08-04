@@ -37,7 +37,8 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let broker = match Broker::open(policy, &data_dir) {
+    let broker = match Broker::open_with_execute_commands(policy, &data_dir, args.execute_commands)
+    {
         Ok(broker) => broker,
         Err(error) => {
             eprintln!("openwave-host-broker: could not open broker state: {error}");
@@ -59,13 +60,22 @@ fn main() -> ExitCode {
 struct Args {
     data_dir: PathBuf,
     home: PathBuf,
+    execute_commands: bool,
 }
 
 impl Args {
     fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Self, &'static str> {
         let mut data_dir = None;
         let mut home = None;
+        let mut execute_commands = false;
         while let Some(argument) = args.next() {
+            if argument == OsStr::new("--execute-commands") {
+                if execute_commands {
+                    return Err("duplicate sidecar argument");
+                }
+                execute_commands = true;
+                continue;
+            }
             let destination = match argument.as_os_str() {
                 value if value == OsStr::new("--data-dir") && data_dir.is_none() => &mut data_dir,
                 value if value == OsStr::new("--home") && home.is_none() => &mut home,
@@ -83,7 +93,11 @@ impl Args {
         if !data_dir.is_absolute() || !home.is_absolute() {
             return Err("sidecar paths must be absolute");
         }
-        Ok(Self { data_dir, home })
+        Ok(Self {
+            data_dir,
+            home,
+            execute_commands,
+        })
     }
 }
 
