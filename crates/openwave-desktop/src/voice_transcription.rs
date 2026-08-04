@@ -4,11 +4,15 @@
 //! runner owns the pinned model path, download verification, media decoding,
 //! resampling, and whisper.cpp inference.
 
+use std::collections::HashMap;
 use std::io::{Cursor, Read as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use futures::StreamExt as _;
+use openwave_server::voice_transcription::{
+    local_voice_model, LocalVoiceModel, LOCAL_VOICE_REPO_COMMIT,
+};
 use openwave_server::{LocalVoiceError, LocalVoiceRunner, LocalVoiceState, LocalVoiceStatus};
 use sha2::{Digest, Sha256};
 use symphonia::core::codecs::audio::AudioDecoderOptions;
@@ -21,16 +25,30 @@ use symphonia::core::meta::MetadataOptions;
 use tokio::io::AsyncWriteExt as _;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
-const MODEL_VERSION: &str = "whisper.cpp-c521a4b02f422512d734391fdf08bb08c0862f68-tiny.en-q5_1";
-const MODEL_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/c521a4b02f422512d734391fdf08bb08c0862f68/ggml-tiny.en-q5_1.bin";
-const MODEL_SHA256: &str = "c77c5766f1cef09b6b7d47f21b546cbddd4157886b3b5d6d4f709e91e66c7c2b";
-const MODEL_BYTES: u64 = 32_166_155;
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
+
+fn model_version(model: &LocalVoiceModel) -> String {
+    format!("whisper.cpp-{LOCAL_VOICE_REPO_COMMIT}-{}", model.id)
+}
+
+fn model_url(model: &LocalVoiceModel) -> String {
+    format!(
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/{LOCAL_VOICE_REPO_COMMIT}/{}",
+        model.file
+    )
+}
+
+fn catalog_model(id: &str) -> Result<&'static LocalVoiceModel, String> {
+    local_voice_model(id).ok_or_else(|| "Unknown local voice model".to_owned())
+}
 
 #[derive(Clone)]
 pub(crate) struct DesktopLocalVoiceRunner {
     data_dir: PathBuf,
-    state: Arc<Mutex<RuntimeState>>,
+    /// Download progress and the last failure, per catalog model id. Only a
+    /// model that has been downloaded in this session has an entry; an
+    /// installed model's state is read from disk.
+    state: Arc<Mutex<HashMap<&'static str, RuntimeState>>>,
     install_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -51,43 +69,51 @@ impl DesktopLocalVoiceRunner {
         }
     }
 
-    fn model_dir(&self) -> PathBuf {
+    fn model_dir(&self, model: &LocalVoiceModel) -> PathBuf {
         self.data_dir
             .join("models")
             .join("voice")
-            .join(MODEL_VERSION)
+            .join(model_version(model))
     }
 
-    fn model_path(&self) -> PathBuf {
-        self.model_dir().join("model.bin")
+    fn model_path(&self, model: &LocalVoiceModel) -> PathBuf {
+        self.model_dir(model).join("model.bin")
     }
 
-    fn marker_path(&self) -> PathBuf {
-        self.model_dir().join("installed.json")
+    fn marker_path(&self, model: &LocalVoiceModel) -> PathBuf {
+        self.model_dir(model).join("installed.json")
     }
 
-    fn installed(&self) -> bool {
-        let Ok(marker) = std::fs::read(self.marker_path()) else {
+    fn installed(&self, model: &LocalVoiceModel) -> bool {
+        let Ok(marker) = std::fs::read(self.marker_path(model)) else {
             return false;
         };
         let Ok(marker): Result<serde_json::Value, _> = serde_json::from_slice(&marker) else {
             return false;
         };
-        marker["version"].as_str() == Some(MODEL_VERSION)
-            && marker["sha256"].as_str() == Some(MODEL_SHA256)
-            && self.model_path().is_file()
+        marker["version"].as_str() == Some(model_version(model).as_str())
+            && marker["sha256"].as_str() == Some(model.sha256)
+            && self.model_path(model).is_file()
     }
 
-    fn status_now(&self) -> LocalVoiceStatus {
-        if self.installed() {
+    fn status_now(&self, model: &LocalVoiceModel) -> LocalVoiceStatus {
+        if self.installed(model) {
             return LocalVoiceStatus {
                 state: LocalVoiceState::Ready,
-                downloaded_bytes: Some(MODEL_BYTES),
-                total_bytes: Some(MODEL_BYTES),
+                downloaded_bytes: Some(model.bytes),
+                total_bytes: Some(model.bytes),
                 error: None,
             };
         }
-        let state = self.state.lock().expect("voice state lock");
+        let states = self.state.lock().expect("voice state lock");
+        let Some(state) = states.get(model.id) else {
+            return LocalVoiceStatus {
+                state: LocalVoiceState::NotInstalled,
+                downloaded_bytes: None,
+                total_bytes: Some(model.bytes),
+                error: None,
+            };
+        };
         LocalVoiceStatus {
             state: if state.downloading {
                 LocalVoiceState::Downloading
@@ -97,33 +123,38 @@ impl DesktopLocalVoiceRunner {
                 LocalVoiceState::NotInstalled
             },
             downloaded_bytes: state.downloading.then_some(state.downloaded_bytes),
-            total_bytes: state.total_bytes,
+            total_bytes: state.total_bytes.or(Some(model.bytes)),
             error: state.error.clone(),
         }
     }
 
-    async fn ensure_installed(&self) -> Result<LocalVoiceStatus, String> {
+    async fn ensure_installed(&self, model: &LocalVoiceModel) -> Result<LocalVoiceStatus, String> {
+        // One download at a time across the catalog: two multi-hundred-megabyte
+        // fetches racing each other help nobody, and the picker starts one.
         let _guard = self.install_lock.lock().await;
-        if self.installed() {
-            return Ok(self.status_now());
+        if self.installed(model) {
+            return Ok(self.status_now(model));
         }
         {
-            let mut state = self.state.lock().expect("voice state lock");
+            let mut states = self.state.lock().expect("voice state lock");
+            let state = states.entry(model.id).or_default();
             state.downloading = true;
             state.downloaded_bytes = 0;
-            state.total_bytes = Some(MODEL_BYTES);
+            state.total_bytes = Some(model.bytes);
             state.error = None;
         }
-        let outcome = self.download_model().await;
-        let mut state = self.state.lock().expect("voice state lock");
-        state.downloading = false;
-        state.error = outcome.as_ref().err().cloned();
-        drop(state);
-        outcome.map(|()| self.status_now())
+        let outcome = self.download_model(model).await;
+        {
+            let mut states = self.state.lock().expect("voice state lock");
+            let state = states.entry(model.id).or_default();
+            state.downloading = false;
+            state.error = outcome.as_ref().err().cloned();
+        }
+        outcome.map(|()| self.status_now(model))
     }
 
-    async fn download_model(&self) -> Result<(), String> {
-        let directory = self.model_dir();
+    async fn download_model(&self, model: &LocalVoiceModel) -> Result<(), String> {
+        let directory = self.model_dir(model);
         tokio::fs::create_dir_all(&directory)
             .await
             .map_err(|error| {
@@ -132,7 +163,7 @@ impl DesktopLocalVoiceRunner {
         let partial = directory.join("model.bin.partial");
         let _ = tokio::fs::remove_file(&partial).await;
         let response = reqwest::Client::new()
-            .get(MODEL_URL)
+            .get(model_url(model))
             .send()
             .await
             .map_err(|_| "Could not download the local voice model".to_owned())?;
@@ -157,6 +188,8 @@ impl DesktopLocalVoiceRunner {
             self.state
                 .lock()
                 .expect("voice state lock")
+                .entry(model.id)
+                .or_default()
                 .downloaded_bytes = downloaded;
         }
         file.flush()
@@ -165,22 +198,22 @@ impl DesktopLocalVoiceRunner {
         drop(file);
         let digest = sha256_file(&partial)
             .map_err(|error| format!("Could not verify the local voice model: {error}"))?;
-        if digest != MODEL_SHA256 {
+        if digest != model.sha256 {
             let _ = tokio::fs::remove_file(&partial).await;
             return Err("The downloaded local voice model failed its pinned SHA-256 check and was discarded".into());
         }
-        tokio::fs::rename(&partial, self.model_path())
+        tokio::fs::rename(&partial, self.model_path(model))
             .await
             .map_err(|error| format!("Could not install the local voice model: {error}"))?;
         let marker = serde_json::to_vec_pretty(
-            &serde_json::json!({"version": MODEL_VERSION, "sha256": MODEL_SHA256}),
+            &serde_json::json!({"version": model_version(model), "sha256": model.sha256}),
         )
         .map_err(|_| "Could not record the local voice model install".to_owned())?;
         let marker_partial = directory.join("installed.json.partial");
         tokio::fs::write(&marker_partial, marker)
             .await
             .map_err(|error| format!("Could not record the local voice model install: {error}"))?;
-        tokio::fs::rename(&marker_partial, self.marker_path())
+        tokio::fs::rename(&marker_partial, self.marker_path(model))
             .await
             .map_err(|error| format!("Could not record the local voice model install: {error}"))?;
         Ok(())
@@ -189,36 +222,50 @@ impl DesktopLocalVoiceRunner {
 
 #[async_trait::async_trait]
 impl LocalVoiceRunner for DesktopLocalVoiceRunner {
-    async fn status(&self) -> LocalVoiceStatus {
-        self.status_now()
+    async fn status(&self, model: &str) -> LocalVoiceStatus {
+        match catalog_model(model) {
+            Ok(model) => self.status_now(model),
+            Err(error) => LocalVoiceStatus {
+                state: LocalVoiceState::Unavailable,
+                downloaded_bytes: None,
+                total_bytes: None,
+                error: Some(error),
+            },
+        }
     }
 
-    async fn install(&self) -> Result<LocalVoiceStatus, String> {
-        self.ensure_installed().await
+    async fn install(&self, model: &str) -> Result<LocalVoiceStatus, String> {
+        self.ensure_installed(catalog_model(model)?).await
     }
 
     async fn transcribe(
         &self,
+        model: &str,
         content_type: &str,
         audio: Vec<u8>,
     ) -> Result<String, LocalVoiceError> {
-        self.ensure_installed()
+        let model = catalog_model(model).map_err(LocalVoiceError::Runner)?;
+        self.ensure_installed(model)
             .await
             .map_err(LocalVoiceError::Runner)?;
-        let model = self.model_path();
+        let path = self.model_path(model);
+        let language = if model.english_only { "en" } else { "auto" };
         let content_type = content_type.to_owned();
-        tokio::task::spawn_blocking(move || transcribe_blocking(&model, &content_type, audio))
-            .await
-            .map_err(|_| {
-                LocalVoiceError::Runner(
-                    "Local voice transcription worker stopped unexpectedly".to_owned(),
-                )
-            })?
+        tokio::task::spawn_blocking(move || {
+            transcribe_blocking(&path, language, &content_type, audio)
+        })
+        .await
+        .map_err(|_| {
+            LocalVoiceError::Runner(
+                "Local voice transcription worker stopped unexpectedly".to_owned(),
+            )
+        })?
     }
 }
 
 fn transcribe_blocking(
     model: &Path,
+    language: &str,
     content_type: &str,
     audio: Vec<u8>,
 ) -> Result<String, LocalVoiceError> {
@@ -229,7 +276,9 @@ fn transcribe_blocking(
         LocalVoiceError::Runner("Could not initialize local voice transcription".to_owned())
     })?;
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-    params.set_language(Some("en"));
+    // "auto" asks whisper to detect the language; the English-only models
+    // reject anything else, so the catalog decides which is passed.
+    params.set_language(Some(language));
     params.set_translate(false);
     params.set_no_context(true);
     params.set_print_progress(false);
@@ -402,14 +451,31 @@ mod tests {
     fn marker_must_match_the_exact_pinned_model() {
         let dir = tempfile::tempdir().unwrap();
         let runner = DesktopLocalVoiceRunner::new(dir.path().to_owned());
-        std::fs::create_dir_all(runner.model_dir()).unwrap();
-        std::fs::write(runner.model_path(), b"model").unwrap();
+        let model = catalog_model("tiny.en-q5_1").unwrap();
+        std::fs::create_dir_all(runner.model_dir(model)).unwrap();
+        std::fs::write(runner.model_path(model), b"model").unwrap();
         std::fs::write(
-            runner.marker_path(),
+            runner.marker_path(model),
             br#"{"version":"other","sha256":"bad"}"#,
         )
         .unwrap();
-        assert!(!runner.installed());
+        assert!(!runner.installed(model));
+    }
+
+    /// Two catalog entries must never share an install directory, or one
+    /// download would silently satisfy the other's verified marker.
+    #[test]
+    fn every_catalog_model_installs_to_its_own_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = DesktopLocalVoiceRunner::new(dir.path().to_owned());
+        let mut paths: Vec<PathBuf> = openwave_server::voice_transcription::LOCAL_VOICE_MODELS
+            .iter()
+            .map(|model| runner.model_path(model))
+            .collect();
+        let count = paths.len();
+        paths.sort();
+        paths.dedup();
+        assert_eq!(paths.len(), count);
     }
 
     #[test]
@@ -430,6 +496,58 @@ mod tests {
         assert!(seconds > 1.4, "decoded only {seconds}s of the recording");
     }
 
+    /// Drives a second catalog entry through the real install path: download,
+    /// SHA-256 verification, marker, and inference on a recording. Ignored
+    /// because it fetches 57 MB; run it when the catalog or the runner's
+    /// per-model layout changes.
+    ///
+    /// `cargo test -p openwave-desktop installs_and_transcribes -- --ignored`
+    #[tokio::test]
+    #[ignore = "downloads a catalog model over the network"]
+    async fn installs_and_transcribes_with_a_second_catalog_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = DesktopLocalVoiceRunner::new(dir.path().to_owned());
+        let id = "base.en-q5_1";
+        let model = catalog_model(id).unwrap();
+
+        assert_eq!(runner.status(id).await.state, LocalVoiceState::NotInstalled);
+        let installed = runner.install(id).await.expect("install");
+        assert_eq!(installed.state, LocalVoiceState::Ready);
+        // Verification is the install's contract: the file on disk is exactly
+        // the pinned artifact, not merely something the server answered with.
+        assert_eq!(
+            sha256_file(&runner.model_path(model)).unwrap(),
+            model.sha256
+        );
+        assert_eq!(
+            std::fs::metadata(runner.model_path(model)).unwrap().len(),
+            model.bytes
+        );
+        assert_eq!(runner.status(id).await.state, LocalVoiceState::Ready);
+        // A second install is a no-op rather than a second download.
+        assert_eq!(
+            runner.install(id).await.expect("reinstall").state,
+            LocalVoiceState::Ready
+        );
+
+        // The fixture is a tone, not speech, so the transcript is expected to
+        // be empty. What this proves is the plumbing: the id selected a model,
+        // its verified bytes loaded, and inference ran to completion on a
+        // recording decoded by the same path the app uses.
+        runner
+            .transcribe(
+                id,
+                "audio/webm;codecs=opus",
+                include_bytes!("../tests/fixtures/mediarecorder-opus.webm").to_vec(),
+            )
+            .await
+            .expect("runs inference with the selected model");
+
+        // The id names the model: an entry that is not in the catalog cannot
+        // silently fall back to one that is.
+        assert!(runner.install("whisper-imaginary").await.is_err());
+    }
+
     #[test]
     #[ignore = "downloads the pinned model and runs real local inference"]
     fn transcribes_real_webm_and_mp4_fixtures() {
@@ -439,6 +557,7 @@ mod tests {
         for (mime, path) in [("audio/webm", webm), ("audio/mp4", mp4)] {
             let text = transcribe_blocking(
                 Path::new(&model),
+                "en",
                 mime,
                 std::fs::read(path).expect("voice fixture"),
             )

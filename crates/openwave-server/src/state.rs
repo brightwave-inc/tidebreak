@@ -62,12 +62,15 @@ impl LocalVoiceError {
     }
 }
 
+/// The trusted half of local voice input. Every call names a catalog model by
+/// id; the runner owns where its bytes live and how they are verified.
 #[async_trait::async_trait]
 pub trait LocalVoiceRunner: Send + Sync {
-    async fn status(&self) -> LocalVoiceStatus;
-    async fn install(&self) -> std::result::Result<LocalVoiceStatus, String>;
+    async fn status(&self, model: &str) -> LocalVoiceStatus;
+    async fn install(&self, model: &str) -> std::result::Result<LocalVoiceStatus, String>;
     async fn transcribe(
         &self,
+        model: &str,
         content_type: &str,
         audio: Vec<u8>,
     ) -> std::result::Result<String, LocalVoiceError>;
@@ -77,7 +80,7 @@ struct UnavailableLocalVoiceRunner;
 
 #[async_trait::async_trait]
 impl LocalVoiceRunner for UnavailableLocalVoiceRunner {
-    async fn status(&self) -> LocalVoiceStatus {
+    async fn status(&self, _model: &str) -> LocalVoiceStatus {
         LocalVoiceStatus {
             state: LocalVoiceState::Unavailable,
             downloaded_bytes: None,
@@ -86,12 +89,13 @@ impl LocalVoiceRunner for UnavailableLocalVoiceRunner {
         }
     }
 
-    async fn install(&self) -> std::result::Result<LocalVoiceStatus, String> {
+    async fn install(&self, _model: &str) -> std::result::Result<LocalVoiceStatus, String> {
         Err("local voice input is available only in the desktop app".into())
     }
 
     async fn transcribe(
         &self,
+        _model: &str,
         _content_type: &str,
         _audio: Vec<u8>,
     ) -> std::result::Result<String, LocalVoiceError> {

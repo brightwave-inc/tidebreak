@@ -167,15 +167,34 @@ export type StickyChatDefaults = WireStickyChatDefaults;
 export type ProviderInfo = WireProviderInfo;
 
 export type VoiceTranscriptionModel = "local" | "gpt4o_transcribe" | "gemini_flash";
+export type LocalVoiceState =
+  | "not_installed"
+  | "downloading"
+  | "ready"
+  | "failed"
+  | "unavailable";
 export type LocalVoiceInfo = {
-  state: "not_installed" | "downloading" | "ready" | "failed" | "unavailable";
+  state: LocalVoiceState;
   downloaded_bytes: number | null;
   total_bytes: number | null;
   error: string | null;
 };
+/** One entry of the local speech catalog, with its install state on this device. */
+export type LocalVoiceModelInfo = {
+  id: string;
+  label: string;
+  description: string;
+  total_bytes: number;
+  english_only: boolean;
+  recommended: boolean;
+  state: LocalVoiceState;
+  downloaded_bytes: number | null;
+  error: string | null;
+};
 export type VoiceTranscriptionInfo = {
   model: VoiceTranscriptionModel;
-  local: LocalVoiceInfo;
+  local_model: string;
+  local_models: LocalVoiceModelInfo[];
   openai_ready: boolean;
   gemini_ready: boolean;
 };
@@ -794,18 +813,20 @@ export class ApiClient {
 
   putVoiceTranscription(
     model: VoiceTranscriptionModel,
+    localModel?: string,
   ): Promise<VoiceTranscriptionInfo> {
     return this.json("/voice-transcription", {
       method: "PUT",
       headers: this.headers(true),
-      body: JSON.stringify({ model }),
+      body: JSON.stringify({ model, local_model: localModel ?? null }),
     });
   }
 
-  installLocalVoice(): Promise<LocalVoiceInfo> {
+  installLocalVoice(model: string): Promise<LocalVoiceInfo> {
     return this.json("/voice-transcription/install", {
       method: "POST",
-      headers: this.headers(),
+      headers: this.headers(true),
+      body: JSON.stringify({ model }),
     });
   }
 

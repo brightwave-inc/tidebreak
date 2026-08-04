@@ -1151,9 +1151,10 @@ pub async fn post_voice_transcription(
 
 pub async fn post_voice_transcription_install(
     State(state): State<AppState>,
+    Json(request): Json<voice_transcription::LocalVoiceInstall>,
 ) -> Result<Json<voice_transcription::LocalVoiceInfo>, ServerError> {
     Ok(Json(
-        voice_transcription::install_local(&*state.local_voice).await?,
+        voice_transcription::install_local(&*state.store, &*state.local_voice, request).await?,
     ))
 }
 
