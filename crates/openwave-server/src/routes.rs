@@ -361,6 +361,17 @@ pub async fn get_mcp_view_frame(
 /// whatever its source: the document's own strict Content-Security-Policy
 /// (inline script and style may run; every network direction is shut) plus
 /// the no-sniff/no-referrer/no-store envelope.
+///
+/// The policy asserts `sandbox allow-scripts` itself rather than relying on
+/// the embedder's `sandbox` attribute. Both embedders set that attribute, and
+/// a test pins that they do — but the attribute is one edit away from being
+/// dropped, and the whole isolation of a served app document rests on it: with
+/// `allow-same-origin`, the document shares the API server's origin and can
+/// read `server_info` (which carries the API bearer). Stating it in the
+/// response makes the opaque origin a property of the document, not of
+/// whoever embeds it. `allow-scripts` and nothing else: the document's own
+/// inline script is the point, and forms, popups, top-level navigation, and
+/// downloads are not.
 fn view_frame_response(body: impl Into<axum::body::Body>) -> Response {
     (
         [
@@ -368,6 +379,7 @@ fn view_frame_response(body: impl Into<axum::body::Body>) -> Response {
             (
                 "content-security-policy",
                 concat!(
+                    "sandbox allow-scripts; ",
                     "default-src 'none'; script-src 'unsafe-inline'; ",
                     "style-src 'unsafe-inline'; img-src data:; font-src data:; ",
                     "connect-src 'none'; form-action 'none'; base-uri 'none'"

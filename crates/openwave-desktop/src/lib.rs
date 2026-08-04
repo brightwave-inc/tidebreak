@@ -250,6 +250,13 @@ pub fn run() {
         ])
         .on_menu_event(updater::handle_menu_event)
         .setup(move |app| {
+            // The dev server's origin is remote as far as the IPC is
+            // concerned, so `tauri dev` needs it granted explicitly. Added
+            // here rather than in `capabilities/` so a release binary cannot
+            // carry it: a packaged app serves its frontend from Tauri's own
+            // protocol and has no business trusting anything on loopback.
+            #[cfg(debug_assertions)]
+            app.add_capability(include_str!("../capabilities-dev/dev-server.json"))?;
             let handle = app.handle().clone();
             deep_link::install(&handle);
             #[cfg(target_os = "macos")]
