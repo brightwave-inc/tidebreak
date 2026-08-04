@@ -2,17 +2,20 @@
 
 E2B provisions sandboxes from templates registered with an E2B account, not
 from arbitrary OCI references. Publishing a template makes it public: any E2B
-account can create sandboxes from it by alias, the same way E2B's own
-`code-interpreter-v1` works. That is how a user who has pasted nothing but an
+account can create sandboxes from it — by its opaque *template ID*. The human
+alias is not portable: E2B resolves a custom template's alias only inside the
+team that owns it, and only E2B's own base templates (`code-interpreter-v1`)
+resolve by alias from anywhere (verified against `api.e2b.app`, 2026-08-04).
+That is how a user who has pasted nothing but an
 E2B API key still gets OpenWave's official documents image — LibreOffice, the
 `exec` helper scripts, and the document skills' Python dependencies already
 installed, so a document run needs no in-sandbox `pip install`.
 
-The alias is version-suffixed — `openwave-documents-v0-26-0` — so the client
-pins the exact sandbox contents it was built against, and publishing a new
-image version cannot change what an older client gets. `E2B_TEMPLATE` in
+The alias is version-suffixed — `openwave-documents-v0-26-0` — so publishing a
+new image version cannot change what an older client gets. `E2B_TEMPLATE` in
 [`crates/openwave-code-execution/src/e2b.rs`](../../openwave-code-execution/src/e2b.rs)
-is the client side of that pin.
+pins the template ID that alias resolves to, with the alias kept alongside in
+its doc comment for legibility.
 
 ## What is here
 
@@ -32,7 +35,7 @@ the alias and sizing out of `e2b.toml`, and:
 2. otherwise builds the template from `e2b.Dockerfile` on E2B's own
    infrastructure and publishes it, making it creatable by any E2B account;
 3. verifies the alias now resolves as public, then opens a PR bumping
-   `E2B_TEMPLATE` in `e2b.rs` to it.
+   `E2B_TEMPLATE` in `e2b.rs` to the template ID it resolves to.
 
 Because the alias is version-suffixed, the pin PR from a sandbox image publish
 is what puts a new alias in `e2b.toml`, and merging that PR is what sets this
@@ -58,11 +61,13 @@ Two things the workflow deliberately does not do:
   dispatch the workflow manually with `force_rebuild` set.
 - It cannot prove *cross-account* resolution, which is the whole point of
   publishing and the one thing a publish from inside the account does not
-  demonstrate. Check it once, by hand, with a throwaway account's API key:
+  demonstrate. Check it once, by hand, with a throwaway account's API key and
+  the template ID from the run's summary (the alias would 404 from another
+  account even when everything is right):
 
   ```sh
   E2B_API_KEY=<other-account-key> \
-    e2b sandbox create openwave-documents-v0-26-0
+    e2b sandbox create <template-id>
   ```
 
 ### Doing it by hand
@@ -105,14 +110,14 @@ step is a PR someone merges:
    `e2b.toml` to match the new version, e.g. `openwave-documents-v0-27-0`.
    Merge it.
 2. That merge touches this directory, so `publish-e2b-template.yml` builds and
-   publishes the new alias, then opens the PR moving `E2B_TEMPLATE` onto it.
-   Merge that one too.
+   publishes the new alias, then opens the PR moving `E2B_TEMPLATE` onto the
+   new template's ID. Merge that one too.
 
 `E2B_TEMPLATE` moves last on purpose: until the template is actually published,
-the new alias resolves for nobody and every E2B user drops to
-`code-interpreter-v1`. Leave the previous alias published until clients pinned
-to it are out of circulation — unpublishing it drops those users to the same
-degraded fallback.
+the new template resolves for nobody and every E2B user drops to
+`code-interpreter-v1`. Leave the previous template published until clients
+pinned to it are out of circulation — unpublishing it drops those users to the
+same degraded fallback.
 
 ## Notes on the template
 
