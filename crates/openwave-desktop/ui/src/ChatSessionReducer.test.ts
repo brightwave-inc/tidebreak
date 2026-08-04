@@ -587,7 +587,11 @@ describe("terminal events", () => {
     const { state, effects } = play([
       TURN,
       { type: "tool_call_started", call_id: "call-1", name: "search" },
-      { type: "turn_failed", category: "rate_limited" },
+      {
+        type: "turn_failed",
+        category: "rate_limited",
+        model: { id: "gemini-3.6-flash", provider: "gemini" },
+      },
     ]);
     expect(state.messages.find((m) => m.role === "tool")).toMatchObject({
       status: "failed",
@@ -595,6 +599,7 @@ describe("terminal events", () => {
     expect(state.messages[state.messages.length - 1]).toMatchObject({
       role: "turn_failure",
       category: "rate_limited",
+      model: { id: "gemini-3.6-flash", provider: "gemini" },
     });
     expect(effects).toContainEqual({ type: "hydrate_terminal_transcript" });
   });

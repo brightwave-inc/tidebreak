@@ -3,7 +3,7 @@ import { useNavigate } from "@tanstack/react-router";
 
 import { Button } from "@/components/ui/button";
 import type { TurnFailureCategory } from "./generated/wire";
-import type { ModelInfo } from "./api";
+import type { ProviderKind } from "./api";
 import { providerLabel } from "./ModelSelection";
 
 /**
@@ -54,7 +54,7 @@ export function TurnFailureNotice({
   onRetry,
 }: {
   category: TurnFailureCategory;
-  model?: ModelInfo | null;
+  model?: { id: string; provider: ProviderKind };
   onRetry?: () => void;
 }) {
   const navigate = useNavigate();

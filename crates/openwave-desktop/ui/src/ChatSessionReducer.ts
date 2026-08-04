@@ -478,6 +478,7 @@ export function reduceChatSessionEvent(
               id: deps.nextId(),
               role: "turn_failure",
               category: event.category,
+              model: event.model,
             },
           ],
         },

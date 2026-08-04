@@ -837,6 +837,7 @@ where
             reasoning: String::new(),
             refusal: None,
             failure_kind: turn.last_error_code,
+            model: turn.model,
             finished_at,
         });
     }

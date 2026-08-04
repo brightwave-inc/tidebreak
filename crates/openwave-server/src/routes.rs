@@ -21,12 +21,13 @@ use tokio::sync::broadcast::error::RecvError;
 use openwave_core::id::{AppId, AppRevisionId};
 use openwave_core::local_app::app_revision_relative_path;
 use openwave_core::{
-    AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentError, AgentRun, AgentRunExecutionLocation,
-    AgentRunStatus, AgentRunTier, ApprovalDecision, CallId, Chat, ChatId, DeleteChatOutcome,
-    DeleteProjectOutcome, DocumentId, Message as StoredMessage, MessageId, PermissionMode, Project,
-    ProjectId, ReasoningEffort, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome,
-    Role, SandboxToolCall, SandboxToolCallStatus, SecretProvider, SequencedEvent, Store,
-    ToolCallExecution, ToolCallRecord, ToolCallStatus, TurnId, TurnSteer, TurnSteerId,
+    AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentError, AgentEvent, AgentRun,
+    AgentRunExecutionLocation, AgentRunStatus, AgentRunTier, ApprovalDecision, CallId, Chat,
+    ChatId, DeleteChatOutcome, DeleteProjectOutcome, DocumentId, Message as StoredMessage,
+    MessageId, PermissionMode, Project, ProjectId, ReasoningEffort,
+    RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, Role, SandboxToolCall,
+    SandboxToolCallStatus, SecretProvider, SequencedEvent, Store, ToolCallExecution,
+    ToolCallRecord, ToolCallStatus, TurnId, TurnSteer, TurnSteerId,
 };
 
 use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
@@ -1867,6 +1868,9 @@ pub struct ChatTerminalTurnSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub failure_category: Option<crate::event_projection::TurnFailureCategory>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub failure_model: Option<crate::event_projection::RendererModelIdentity>,
     pub file_changes: Vec<ExecFileChangeSummary>,
     pub finished_at: chrono::DateTime<Utc>,
 }
@@ -1891,6 +1895,8 @@ impl From<openwave_core::ChatTerminalTurnSnapshot> for ChatTerminalTurnSnapshot 
                 snapshot.failure_kind.as_deref().unwrap_or_default(),
             )
         });
+        let failure_model =
+            failure_category.and_then(|_| crate::event_projection::model_identity(&snapshot.model));
         Self {
             turn_id: snapshot.turn_id,
             message_id: snapshot.message_id,
@@ -1899,6 +1905,7 @@ impl From<openwave_core::ChatTerminalTurnSnapshot> for ChatTerminalTurnSnapshot 
             reasoning: (!snapshot.reasoning.trim().is_empty()).then_some(snapshot.reasoning),
             refusal: snapshot.refusal.as_ref().map(Into::into),
             failure_category,
+            failure_model,
             file_changes: Vec::new(),
             finished_at: snapshot.finished_at,
         }
@@ -3610,7 +3617,14 @@ async fn stream_events(
                         continue;
                     }
                     last_seq = event.seq;
-                    if send_event(&mut socket, &event).await.is_err() {
+                    let model = state
+                        .store
+                        .list_turn_runs(chat)
+                        .await
+                        .ok()
+                        .and_then(|turns| turns.into_iter().find(|turn| !turn.status.is_terminal()))
+                        .map(|turn| turn.model);
+                    if send_event(&mut socket, &event, model.as_deref()).await.is_err() {
                         break;
                     }
                 }
@@ -3641,18 +3655,38 @@ async fn replay_after(
     last_seq: &mut i64,
 ) -> Result<(), ()> {
     let events = store.list_events(chat, *last_seq).await.map_err(|_| ())?;
+    let turn_models = store
+        .list_turn_runs(chat)
+        .await
+        .map_err(|_| ())?
+        .into_iter()
+        .map(|turn| (turn.id, turn.model))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut active_turn_id = None;
     for event in events {
         *last_seq = event.seq;
-        send_event(socket, &event).await.map_err(|_| ())?;
+        if let AgentEvent::TurnStarted { turn_id } = &event.event {
+            active_turn_id = Some(*turn_id);
+        }
+        let model = active_turn_id.and_then(|turn_id| turn_models.get(&turn_id));
+        send_event(socket, &event, model.map(String::as_str))
+            .await
+            .map_err(|_| ())?;
     }
     Ok(())
 }
 
 /// Send one journaled event as a frame.
-async fn send_event(socket: &mut WebSocket, event: &SequencedEvent) -> Result<(), axum::Error> {
+async fn send_event(
+    socket: &mut WebSocket,
+    event: &SequencedEvent,
+    model: Option<&str>,
+) -> Result<(), axum::Error> {
     send_frame(
         socket,
-        &RendererChatFrame::Event(Box::new(RendererSequencedEvent::from(event))),
+        &RendererChatFrame::Event(Box::new(
+            RendererSequencedEvent::from(event).with_turn_model(model),
+        )),
     )
     .await
 }

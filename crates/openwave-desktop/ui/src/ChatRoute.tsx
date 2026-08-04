@@ -551,7 +551,6 @@ export function ChatRoute({ chatId }: { chatId: string }) {
           <ChatView
             client={client}
             chat={chat!}
-            failureModel={modelForSelection(models, chat!.model ?? defaultModelKey)}
             hydrated={hydrated}
             nativeHost={nativeHost}
             deletingChat={deletingChatId !== null}
