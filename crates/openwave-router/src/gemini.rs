@@ -425,7 +425,22 @@ fn gemini_function_calling_config(choice: Option<&ToolChoice>) -> Result<Value> 
 /// validation keywords are omitted, while the structural shape and constraints
 /// Gemini can express are retained. Building from an allowlist prevents a new
 /// JSON Schema keyword from becoming an unknown protobuf field in every turn.
+///
+/// Every node this emits carries an explicit `type` (optionally alongside
+/// `nullable`) or is an `anyOf` whose branches each satisfy the same rule.
+/// Gemini rejects the whole request when any node omits its type, so a schema
+/// that carries its shape some other way — a `$ref` into `$defs`, a bare
+/// `const`, an enum with the type left implicit — has to be resolved here
+/// rather than forwarded.
 fn gemini_tool_schema(schema: &Value) -> Result<Value> {
+    gemini_tool_schema_node(schema, schema, &mut Vec::new())
+}
+
+fn gemini_tool_schema_node(
+    schema: &Value,
+    root: &Value,
+    resolving: &mut Vec<String>,
+) -> Result<Value> {
     let unsupported = |detail: &str| {
         AgentError::Provider(format!(
             "gemini function parameters cannot express {detail}"
@@ -434,12 +449,41 @@ fn gemini_tool_schema(schema: &Value) -> Result<Value> {
     let object = schema
         .as_object()
         .ok_or_else(|| unsupported("a non-object schema"))?;
+
+    // Gemini has no `$defs`, so a reference is inlined before translation.
+    // Sibling keywords on the referring node (a `description`, a `default`)
+    // stay authoritative over the target's own.
+    if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+        if resolving.iter().any(|seen| seen == reference) {
+            return Err(unsupported(&format!(
+                "the recursive schema reference `{reference}`"
+            )));
+        }
+        let target = resolve_schema_ref(root, reference)
+            .and_then(Value::as_object)
+            .ok_or_else(|| unsupported(&format!("the unresolvable reference `{reference}`")))?;
+        let mut inlined = target.clone();
+        for (keyword, value) in object {
+            if keyword != "$ref" {
+                inlined.insert(keyword.clone(), value.clone());
+            }
+        }
+        resolving.push(reference.to_owned());
+        let translated = gemini_tool_schema_node(&Value::Object(inlined), root, resolving);
+        resolving.pop();
+        return translated;
+    }
+
     let mut out = serde_json::Map::new();
 
     for keyword in GEMINI_SCHEMA_KEYWORDS {
         if let Some(value) = object.get(*keyword) {
             out.insert((*keyword).to_owned(), value.clone());
         }
+    }
+    // Gemini has no `const`; a single-member enum says the same thing.
+    if let Some(value) = object.get("const") {
+        out.insert("enum".to_owned(), json!([value]));
     }
     if let Some(format) = object.get("format").and_then(Value::as_str) {
         if GEMINI_FORMATS.contains(&format) {
@@ -454,6 +498,20 @@ fn gemini_tool_schema(schema: &Value) -> Result<Value> {
         .get("nullable")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    // A `null` member of an enum is Gemini's `nullable`, not an enum value.
+    let denulled = out
+        .get("enum")
+        .and_then(Value::as_array)
+        .and_then(|values| {
+            values
+                .iter()
+                .any(Value::is_null)
+                .then(|| values.iter().filter(|value| !value.is_null()).cloned())
+        });
+    if let Some(values) = denulled {
+        nullable = true;
+        out.insert("enum".to_owned(), Value::Array(values.collect()));
+    }
     let mut declared: Option<&str> = None;
     let mut any_of = None;
     if let Some(branches) = object.get("anyOf") {
@@ -465,7 +523,7 @@ fn gemini_tool_schema(schema: &Value) -> Result<Value> {
             if branch.get("type").is_some_and(|value| value == "null") {
                 nullable = true;
             } else {
-                concrete.push(gemini_tool_schema(branch)?);
+                concrete.push(gemini_tool_schema_node(branch, root, resolving)?);
             }
         }
         if concrete.len() == 1 && object.get("type").is_none() {
@@ -509,7 +567,12 @@ fn gemini_tool_schema(schema: &Value) -> Result<Value> {
                 .map(|properties| {
                     properties
                         .iter()
-                        .map(|(name, property)| Ok((name.clone(), gemini_tool_schema(property)?)))
+                        .map(|(name, property)| {
+                            Ok((
+                                name.clone(),
+                                gemini_tool_schema_node(property, root, resolving)?,
+                            ))
+                        })
                         .collect::<Result<serde_json::Map<_, _>>>()
                 })
                 .transpose()?
@@ -523,17 +586,66 @@ fn gemini_tool_schema(schema: &Value) -> Result<Value> {
             let items = object
                 .get("items")
                 .ok_or_else(|| unsupported("an array with no item schema"))?;
-            out.insert("items".to_owned(), gemini_tool_schema(items)?);
+            out.insert(
+                "items".to_owned(),
+                gemini_tool_schema_node(items, root, resolving)?,
+            );
         }
     } else if let Some(branches) = any_of {
         out.insert("anyOf".to_owned(), Value::Array(branches));
-    } else if !out.contains_key("type") && !out.contains_key("enum") {
-        return Err(unsupported("a schema with no type, enum, or anyOf"));
+    } else if !out.contains_key("type") && !out.contains_key("anyOf") {
+        // A schema that only lists its permitted values still owes Gemini a
+        // type; JSON Schema leaves it implicit, Gemini rejects the request.
+        let inferred = out
+            .get("enum")
+            .and_then(Value::as_array)
+            .ok_or_else(|| unsupported("a schema with no type, enum, or anyOf"))
+            .and_then(|values| {
+                gemini_enum_type(values)
+                    .ok_or_else(|| unsupported("an enum with no single value type"))
+            })?;
+        out.insert("type".to_owned(), json!(inferred));
     }
     if nullable {
         out.insert("nullable".to_owned(), json!(true));
     }
     Ok(Value::Object(out))
+}
+
+/// Resolve a local `#/...` JSON pointer reference against the root schema.
+///
+/// Only same-document references are supported; this boundary never fetches a
+/// remote schema, and every generator this repository uses emits `$defs`
+/// pointers.
+fn resolve_schema_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
+    let pointer = reference.strip_prefix('#')?;
+    if pointer.is_empty() {
+        return Some(root);
+    }
+    root.pointer(pointer)
+}
+
+/// Infer the Gemini type an enum's members share, or `None` when they disagree.
+fn gemini_enum_type(values: &[Value]) -> Option<&'static str> {
+    let mut inferred: Option<&'static str> = None;
+    for value in values {
+        let name = match value {
+            Value::String(_) => "STRING",
+            Value::Bool(_) => "BOOLEAN",
+            Value::Number(number) if number.is_i64() || number.is_u64() => "INTEGER",
+            Value::Number(_) => "NUMBER",
+            _ => return None,
+        };
+        inferred = Some(match inferred {
+            None => name,
+            // Integer literals mixed with fractional ones are still numbers.
+            Some(seen) if seen == name => seen,
+            Some("INTEGER") if name == "NUMBER" => "NUMBER",
+            Some("NUMBER") if name == "INTEGER" => "NUMBER",
+            Some(_) => return None,
+        });
+    }
+    inferred
 }
 
 /// Keywords `responseSchema` understands and that carry over unchanged.
@@ -1168,6 +1280,13 @@ mod tests {
                 "default",
             ];
             let object = schema.as_object().expect("Gemini schema must be an object");
+            // Gemini rejects the whole request when any node omits its type,
+            // so the translator must resolve a shape JSON Schema left implicit
+            // rather than forward it.
+            assert!(
+                object.contains_key("type") || object.contains_key("anyOf"),
+                "Gemini schema node must declare a type or anyOf: {schema}"
+            );
             for (keyword, value) in object {
                 assert!(
                     SUPPORTED.contains(&keyword.as_str()),
@@ -1204,6 +1323,49 @@ mod tests {
             .is_none());
         let nullable = gemini_tool_schema(&json!({ "type": ["string", "null"] })).unwrap();
         assert_eq!(nullable, json!({ "type": "STRING", "nullable": true }));
+    }
+
+    /// Reproduces the shapes a derived tool schema reaches Gemini with that
+    /// carry no type of their own: a `$defs` reference, a bare `const`, and an
+    /// enum whose type is left implicit. Gemini rejects the entire request for
+    /// any one of them.
+    #[test]
+    fn derived_schema_shapes_without_a_type_are_resolved() {
+        let translated = gemini_tool_schema(&json!({
+            "type": "object",
+            "$defs": {
+                "Capability": { "enum": ["read_files", "write_files"] },
+                "Version": { "const": 2 },
+            },
+            "properties": {
+                "capabilities": {
+                    "type": "array",
+                    "items": { "$ref": "#/$defs/Capability" },
+                    "uniqueItems": true,
+                },
+                "version": { "$ref": "#/$defs/Version", "description": "Wire version." },
+            },
+            "required": ["capabilities"],
+        }))
+        .unwrap();
+        assert_eq!(
+            translated["properties"]["capabilities"]["items"],
+            json!({ "type": "STRING", "enum": ["read_files", "write_files"] })
+        );
+        assert_eq!(
+            translated["properties"]["version"],
+            json!({ "type": "INTEGER", "enum": [2], "description": "Wire version." })
+        );
+
+        let cyclic = gemini_tool_schema(&json!({
+            "$defs": { "Node": { "type": "object", "properties": { "next": { "$ref": "#/$defs/Node" } } } },
+            "$ref": "#/$defs/Node",
+        }))
+        .unwrap_err();
+        assert!(
+            cyclic.to_string().contains("recursive schema reference"),
+            "expected a descriptive cycle error, got {cyclic}"
+        );
     }
 
     #[test]
