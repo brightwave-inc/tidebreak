@@ -3381,6 +3381,11 @@ fn exec_grant(subject: GrantSubject, root_id: RootId) -> Grant {
     .unwrap()
 }
 
+/// A registered root must never hand its path to exec once something else has
+/// taken that path. Unix permits the rename that stages this, so the broker
+/// closes the gap itself by re-confirming the directory's identity before the
+/// path leaves it.
+#[cfg(unix)]
 #[test]
 fn exec_root_resolution_rejects_a_replaced_registered_path() {
     let (temp, broker, path) = setup();
@@ -3403,6 +3408,41 @@ fn exec_root_resolution_rejects_a_replaced_registered_path() {
     )
     .unwrap_err();
     assert_eq!(error.code, ErrorCode::HostIo);
+}
+
+/// The same invariant on Windows, enforced a layer lower: the rename that the
+/// Unix test performs cannot happen at all while the root is pinned, because
+/// cap-std opens directories without `FILE_SHARE_DELETE` precisely so a
+/// registered directory cannot be renamed or deleted underneath it. Asserting
+/// the refusal is what keeps that guarantee from being lost in a dependency
+/// bump — if the share mode ever widened, the rename would start succeeding
+/// here and the identity re-check would become load-bearing on Windows too.
+#[cfg(windows)]
+#[test]
+fn a_registered_root_cannot_be_replaced_underneath_its_pinned_handle() {
+    let (temp, broker, path) = setup();
+    let conversation = Uuid::new_v4();
+    let registered = register(
+        &broker.controller(),
+        GrantSubject::conversation(conversation).unwrap(),
+        conversation,
+        path.clone(),
+        OperationId::new(),
+    );
+
+    let moved = temp.path().join("moved-documents");
+    let denied = std::fs::rename(&path, &moved).unwrap_err();
+    // ERROR_SHARING_VIOLATION
+    assert_eq!(denied.raw_os_error(), Some(32));
+
+    let roots = resolve_exec(
+        &broker.controller(),
+        ExecutionContext::standalone(conversation).unwrap(),
+        vec![registered.root.root_id],
+    )
+    .unwrap();
+    assert_eq!(roots.len(), 1);
+    assert_eq!(roots[0].root_id, registered.root.root_id);
 }
 
 #[test]

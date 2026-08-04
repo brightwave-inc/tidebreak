@@ -1,7 +1,7 @@
 //! Cross-platform root registration and containment policy.
 
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     io,
     path::{Component, Path, PathBuf, Prefix},
 };
@@ -44,6 +44,20 @@ pub enum RootPolicyError {
     /// incomplete.
     #[error("required host policy location is unavailable: {0}")]
     MissingKnownFolder(&'static str),
+    /// A UNC root reached a hidden administrative share (`C$`, `ADMIN$`) or a
+    /// loopback server name. Either one reaches a local volume the drive-letter
+    /// policy protects, under a name that policy cannot recognize.
+    #[error("root uses an administrative or loopback network share")]
+    AdministrativeShare,
+    /// A canonical Windows path component that can name something other than
+    /// the directory it appears to name: an alternate data stream, a reserved
+    /// device name, or a name Windows silently rewrites.
+    #[error("root path contains a non-portable Windows component")]
+    NonPortableComponent,
+    /// The canonical path is not already its long-name form, so it may be an
+    /// 8.3 short name aliasing a different directory than policy compared.
+    #[error("root path could not be confirmed as its long-name form")]
+    ShortNameAlias,
 }
 
 /// A canonical root pinned to a descriptor after policy validation.
@@ -119,7 +133,7 @@ impl RootPolicy {
     /// read from ambient environment. Unsupported targets return an error rather
     /// than receiving an empty allow-most policy.
     pub fn for_host(home: PathBuf) -> Result<Self, RootPolicyError> {
-        let home = std::fs::canonicalize(home)?;
+        let home = canonicalize_host_path(&home)?;
         #[cfg(unix)]
         let paths = |items: &[&str]| items.iter().map(PathBuf::from).collect();
 
@@ -192,7 +206,7 @@ impl RootPolicy {
         if !candidate.is_absolute() {
             return Err(RootPolicyError::NotAbsolute);
         }
-        let canonical_path = std::fs::canonicalize(candidate)?;
+        let canonical_path = canonicalize_host_path(candidate)?;
         self.validate_canonical(&canonical_path)?;
         let directory = open_canonical_dir_nofollow(&canonical_path)?;
         let identity = root_identity(&directory)?;
@@ -209,7 +223,7 @@ impl RootPolicy {
         if !path.is_absolute() {
             return Err(RootPolicyError::NotAbsolute);
         }
-        self.sensitive.push(std::fs::canonicalize(path)?);
+        self.sensitive.push(canonicalize_host_path(path)?);
         Ok(self)
     }
 
@@ -219,6 +233,9 @@ impl RootPolicy {
         }
         if !supported_canonical_namespace(root) {
             return Err(RootPolicyError::UnsupportedNamespace);
+        }
+        if cfg!(windows) {
+            validate_windows_shape(root)?;
         }
         if is_within(root, &self.home) {
             return Err(RootPolicyError::TooBroad);
@@ -304,7 +321,7 @@ fn canonical_windows_known_folder(
     variables: &'static [&'static str],
 ) -> Result<PathBuf, RootPolicyError> {
     let path = windows_known_folder_from(variables, |name| std::env::var_os(name))?;
-    std::fs::canonicalize(path).map_err(Into::into)
+    canonicalize_host_path(&path)
 }
 
 #[cfg(windows)]
@@ -323,7 +340,7 @@ fn windows_known_folder_from(
 fn supported_canonical_namespace(path: &Path) -> bool {
     #[cfg(windows)]
     {
-        return path.components().find_map(|component| match component {
+        path.components().find_map(|component| match component {
             Component::Prefix(prefix) => Some(matches!(
                 prefix.kind(),
                 Prefix::Disk(_)
@@ -332,7 +349,7 @@ fn supported_canonical_namespace(path: &Path) -> bool {
                     | Prefix::VerbatimUNC(_, _)
             )),
             _ => None,
-        }) == Some(true);
+        }) == Some(true)
     }
 
     #[cfg(not(windows))]
@@ -340,6 +357,139 @@ fn supported_canonical_namespace(path: &Path) -> bool {
         let _ = path;
         true
     }
+}
+
+/// Resolve a host path to its canonical form, refusing anything Windows could
+/// still resolve somewhere else.
+///
+/// `std::fs::canonicalize` already resolves symlinks, junctions, and 8.3 short
+/// names — on Windows it opens the path and asks the kernel for the final name.
+/// The extra step here does not repeat that work; it refuses to trust it
+/// silently. Every path policy compares — the home directory, the known folders
+/// it protects, the broker's private directory, and each candidate root — goes
+/// through this one function, so all sides of every comparison are in the same
+/// long-name form.
+fn canonicalize_host_path(path: &Path) -> Result<PathBuf, RootPolicyError> {
+    let canonical = std::fs::canonicalize(path)?;
+    #[cfg(windows)]
+    require_long_name_form(&canonical)?;
+    Ok(canonical)
+}
+
+/// Require a canonical Windows path to already equal its long-name expansion.
+///
+/// `C:\PROGRA~1` and `C:\Program Files` name one directory and compare unequal,
+/// so a short name reaching a protected location would pass a policy written in
+/// long names. Canonicalization is expected to have expanded it; this confirms
+/// it did rather than assuming. The path was just opened successfully by
+/// `canonicalize`, so a failure here means the host cannot tell us what this
+/// path names, and the registration is refused.
+#[cfg(windows)]
+fn require_long_name_form(canonical: &Path) -> Result<(), RootPolicyError> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
+
+    let mut wide: Vec<u16> = canonical.as_os_str().encode_wide().collect();
+    wide.push(0);
+    let required = unsafe { GetLongPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0) };
+    if required == 0 {
+        return Err(RootPolicyError::ShortNameAlias);
+    }
+    let mut buffer = vec![0u16; required as usize];
+    let written = unsafe { GetLongPathNameW(wide.as_ptr(), buffer.as_mut_ptr(), required) };
+    // A second call that needs more room than the first reported means the path
+    // changed underneath us.
+    if written == 0 || written >= required {
+        return Err(RootPolicyError::ShortNameAlias);
+    }
+    buffer.truncate(written as usize);
+    let long = PathBuf::from(OsString::from_wide(&buffer));
+    if !same_canonical_path(&long, canonical) {
+        return Err(RootPolicyError::ShortNameAlias);
+    }
+    Ok(())
+}
+
+/// Refuse canonical Windows paths whose components can name something other
+/// than the directory they appear to name.
+///
+/// Nothing rejected here can be an ordinary NTFS directory: `:`, `<>"|?*`, and
+/// control characters are not legal in a name, reserved device names cannot be
+/// created, and Windows strips trailing dots and spaces rather than storing
+/// them. A canonical path containing one is therefore not a folder the user
+/// picked — it is a stream reference, a device, or a name that will resolve
+/// differently the next time it is opened.
+fn validate_windows_shape(root: &Path) -> Result<(), RootPolicyError> {
+    for component in root.components() {
+        match component {
+            Component::Prefix(prefix) if !is_addressable_share(prefix.kind()) => {
+                return Err(RootPolicyError::AdministrativeShare);
+            }
+            Component::Normal(segment)
+                if !portable_windows_component(&segment.to_string_lossy()) =>
+            {
+                return Err(RootPolicyError::NonPortableComponent);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Whether a UNC prefix names a share the user could have meant.
+///
+/// `\\localhost\C$\Windows` and `\\host\ADMIN$` reach the same bytes as the
+/// drive-letter paths the policy protects, under a name no drive-letter
+/// comparison can match. Non-UNC prefixes are the namespace check's business.
+fn is_addressable_share(prefix: Prefix<'_>) -> bool {
+    match prefix {
+        Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
+            !is_hidden_share(&share.to_string_lossy())
+                && !is_loopback_server(&server.to_string_lossy())
+        }
+        _ => true,
+    }
+}
+
+/// Whether one path component of a canonical Windows path names exactly the
+/// directory it spells.
+fn portable_windows_component(segment: &str) -> bool {
+    // A colon opens an alternate data stream (`Documents:evil`) or a
+    // drive-relative path; either way the component no longer names the
+    // directory the rest of the policy compared.
+    !segment.is_empty()
+        && !segment.contains(':')
+        && crate::relative_path::portable_filename(segment)
+}
+
+/// Administrative and hidden shares end in `$` — `C$`, `ADMIN$`, `IPC$`.
+fn is_hidden_share(share: &str) -> bool {
+    share.ends_with('$')
+}
+
+/// Server names that route a UNC path back to this machine's own volumes.
+fn is_loopback_server(server: &str) -> bool {
+    let server = server.trim_start_matches('[').trim_end_matches(']');
+    server.eq_ignore_ascii_case("localhost")
+        || server.eq_ignore_ascii_case("::1")
+        || server == "."
+        || server
+            .split_once('.')
+            .is_some_and(|(first, rest)| first == "127" && rest.chars().any(|c| c.is_ascii_digit()))
+}
+
+/// Whether two absolute paths name the same location under host path
+/// comparison rules.
+#[cfg(windows)]
+fn same_canonical_path(left: &Path, right: &Path) -> bool {
+    let left = normalized_components(left);
+    let right = normalized_components(right);
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right.iter())
+            .all(|(&left, &right)| component_eq(left, right))
 }
 
 fn open_canonical_dir_nofollow(path: &Path) -> io::Result<Dir> {
@@ -410,12 +560,25 @@ fn component_eq(left: Component<'_>, right: Component<'_>) -> bool {
     }
 }
 
-fn os_component_eq(left: &std::ffi::OsStr, right: &std::ffi::OsStr) -> bool {
+fn os_component_eq(left: &OsStr, right: &OsStr) -> bool {
     if cfg!(windows) {
-        left.eq_ignore_ascii_case(right)
+        windows_component_eq(left, right)
     } else {
         left == right
     }
+}
+
+/// Compare two Windows path components the way the filesystem does.
+///
+/// NTFS folds case over the whole Unicode range, not just ASCII, so an
+/// ASCII-only comparison would read `C:\Ünister\Documents` and
+/// `C:\ünister\Documents` as different folders. Every caller uses equality to
+/// *refuse* — a protected location, the whole home directory, another user's
+/// profile — so widening what counts as equal only ever fails closed. Lossy
+/// conversion is safe for the same reason: it can merge two unpaired surrogates
+/// into one replacement character, which again only refuses more.
+fn windows_component_eq(left: &OsStr, right: &OsStr) -> bool {
+    left == right || left.to_string_lossy().to_lowercase() == right.to_string_lossy().to_lowercase()
 }
 
 fn prefix_eq(left: Prefix<'_>, right: Prefix<'_>) -> bool {
@@ -432,10 +595,7 @@ fn prefix_eq(left: Prefix<'_>, right: Prefix<'_>) -> bool {
         | (
             Prefix::VerbatimUNC(left_server, left_share),
             Prefix::VerbatimUNC(right_server, right_share),
-        ) => {
-            left_server.eq_ignore_ascii_case(right_server)
-                && left_share.eq_ignore_ascii_case(right_share)
-        }
+        ) => os_component_eq(left_server, right_server) && os_component_eq(left_share, right_share),
         (Prefix::Verbatim(left), Prefix::Verbatim(right))
         | (Prefix::DeviceNS(left), Prefix::DeviceNS(right)) => os_component_eq(left, right),
         _ => false,
@@ -497,6 +657,15 @@ mod tests {
             Path::new(r"\\?\C:\Windows\System32")
         ));
         assert!(is_within(
+            Path::new(r"\\server\share\projects"),
+            Path::new(r"\\?\UNC\server\share\projects\app")
+        ));
+        // A whole network share carries no named folder, so it is a filesystem
+        // root like `C:\` or `/` — too broad to register, and it contains
+        // nothing for policy purposes. The share-relative root above is the
+        // shallowest UNC path containment is defined for.
+        assert!(is_filesystem_root(Path::new(r"\\server\share")));
+        assert!(!is_within(
             Path::new(r"\\server\share"),
             Path::new(r"\\?\UNC\server\share\folder")
         ));
@@ -660,5 +829,160 @@ mod tests {
             policy.open_root(Path::new("Documents/project")),
             Err(RootPolicyError::NotAbsolute)
         ));
+    }
+
+    /// The component grammar is a plain string rule, so it is checked on every
+    /// host even though it only governs Windows roots. Windows path *parsing*
+    /// is not available off Windows, which is why the whole-path cases below
+    /// are separate.
+    #[test]
+    fn windows_root_components_that_can_name_something_else_are_refused() {
+        for component in [
+            // Alternate data stream and drive-relative forms.
+            "Documents:evil",
+            "C:",
+            // Reserved device names, with and without an extension.
+            "NUL",
+            "con",
+            "COM1",
+            "lpt0.log",
+            "CONIN$",
+            // Windows strips these, so the stored name is not what was checked.
+            "Reports.",
+            "Reports ",
+            "",
+        ] {
+            assert!(
+                !portable_windows_component(component),
+                "accepted {component:?}"
+            );
+        }
+        for component in ["Documents", "my.project", "COM", "COM10", "résumé", "$"] {
+            assert!(
+                portable_windows_component(component),
+                "refused {component:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unc_hidden_shares_and_loopback_servers_are_recognized() {
+        for share in ["C$", "ADMIN$", "IPC$"] {
+            assert!(is_hidden_share(share), "{share}");
+        }
+        assert!(!is_hidden_share("projects"));
+        for server in ["localhost", "LOCALHOST", "127.0.0.1", "[::1]", "::1", "."] {
+            assert!(is_loopback_server(server), "{server}");
+        }
+        for server in ["fileserver", "127", "files.example.com"] {
+            assert!(!is_loopback_server(server), "{server}");
+        }
+    }
+
+    #[test]
+    fn windows_component_comparison_folds_case_beyond_ascii() {
+        assert!(windows_component_eq(
+            OsStr::new("Ünister"),
+            OsStr::new("ÜNISTER")
+        ));
+        assert!(!windows_component_eq(
+            OsStr::new("Ünister"),
+            OsStr::new("Unister")
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_unc_roots_that_alias_a_local_volume() {
+        let policy = RootPolicy::for_test(
+            PathBuf::from(r"C:\Users\alice"),
+            vec![PathBuf::from(r"C:\Windows")],
+            vec![PathBuf::from(r"C:\Users")],
+            Vec::new(),
+        );
+        for path in [
+            r"\\localhost\C$\Windows\System32",
+            r"\\WORKSTATION\ADMIN$\System32",
+            r"\\?\UNC\127.0.0.1\projects\app",
+        ] {
+            assert!(
+                matches!(
+                    policy.validate_canonical(Path::new(path)),
+                    Err(RootPolicyError::AdministrativeShare)
+                ),
+                "{path}"
+            );
+        }
+        assert!(policy
+            .validate_canonical(Path::new(r"\\fileserver\projects\app"))
+            .is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_stream_and_device_components_in_a_canonical_root() {
+        let policy = RootPolicy::for_test(
+            PathBuf::from(r"C:\Users\alice"),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        for path in [r"C:\Users\alice\Documents:evil", r"C:\Users\alice\NUL"] {
+            assert!(
+                matches!(
+                    policy.validate_canonical(Path::new(path)),
+                    Err(RootPolicyError::NonPortableComponent)
+                ),
+                "{path}"
+            );
+        }
+    }
+
+    /// The long-name confirmation must not refuse ordinary folders — if it
+    /// did, no Windows user could connect one.
+    #[cfg(windows)]
+    #[test]
+    fn long_name_confirmation_accepts_an_ordinary_canonical_folder() {
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().join("Project Reports");
+        std::fs::create_dir(&folder).unwrap();
+        require_long_name_form(&folder.canonicalize().unwrap()).unwrap();
+    }
+
+    /// The escape a Windows host adds over Unix: a junction is a reparse point
+    /// rather than a symlink, and nothing in the policy layer would notice one
+    /// appearing inside an already-registered root. Containment for it comes
+    /// from resolving every component without following links.
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_inside_a_registered_root_cannot_reach_its_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let root = home.join("Documents");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "secret").unwrap();
+
+        let junction = root.join("escape");
+        let created = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&outside)
+            .status()
+            .unwrap();
+        assert!(created.success(), "could not create a directory junction");
+
+        let policy = RootPolicy::for_test(
+            home.canonicalize().unwrap(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let opened = policy.open_root(&root).unwrap();
+        let directory = opened.directory();
+        assert!(directory.open_dir_nofollow("escape").is_err());
+        assert!(directory.read_dir("escape").is_err());
+        assert!(directory.open("escape/secret.txt").is_err());
     }
 }

@@ -361,12 +361,27 @@ impl JsonlAuditSink {
             file.sync_all()
         });
         if let Err(source) = write_result {
-            return match file.set_len(original_length).and_then(|()| file.sync_all()) {
+            return match self.roll_back_to(original_length) {
                 Ok(()) => Err(AppendFailure::safe(source)),
                 Err(_) => Err(AppendFailure::ambiguous(source)),
             };
         }
         Ok(())
+    }
+
+    /// Return the log to the length it had before a failed append.
+    ///
+    /// This needs a second handle rather than the appending one. Windows opens
+    /// a file for append with `FILE_APPEND_DATA` and explicitly *without*
+    /// `FILE_WRITE_DATA`, and `SetEndOfFile` requires `FILE_WRITE_DATA`, so
+    /// truncating through the appending handle always fails there. That failure
+    /// is not cosmetic: it turns every transient write failure into an
+    /// ambiguous one, which refuses the operation and demands a broker restart
+    /// instead of allowing a clean retry.
+    fn roll_back_to(&self, length: u64) -> io::Result<()> {
+        let file = OpenOptions::new().write(true).open(&self.path)?;
+        file.set_len(length)?;
+        file.sync_all()
     }
 
     fn rotate(&self, writer: &mut WriterState) -> io::Result<()> {

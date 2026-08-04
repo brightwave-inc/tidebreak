@@ -409,6 +409,14 @@ jobs:
           -p openwave-server
           -p openwave-desktop
           --locked
+      # The host broker's containment tests are the only ones in the workspace
+      # that need real NTFS — directory junctions, hidden shares, 8.3 short
+      # names. `cargo check` never compiles a test target, so without this step
+      # those tests exist and run nowhere. Deliberately one crate: this lane is
+      # for the checks that cannot be answered off Windows, not a second copy of
+      # the workspace suite.
+      - name: Host broker containment tests
+        run: cargo test -p openwave-host-broker --locked
 
   test:
     name: test
