@@ -101,24 +101,40 @@ pub fn frame_data(frame: &str) -> Option<serde_json::Value> {
     frame_data_raw(frame).and_then(|data| serde_json::from_str(&data).ok())
 }
 
-/// Build a client-safe provider error: status + optional stable `error.type` /
-/// `error.code` from the JSON body. Never include the raw body (it can echo
-/// secrets, and `AgentError` strings reach the client via `TurnFailed`).
+/// Build a client-safe provider error from structured JSON fields.
+///
+/// A compact stable `error.type` / `error.code` is included when present. The
+/// provider's message is useful for field-level request failures, but can echo
+/// credentials or request fragments, so only a short single-line excerpt that
+/// passes conservative secret redaction reaches `TurnFailed`.
 pub fn safe_http_error(provider: &str, status: u16, body: &str) -> String {
-    let detail = serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| {
-            let err = v.get("error").unwrap_or(&v);
-            err.get("type")
-                .or_else(|| err.get("code"))
+    let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
+    let error = parsed
+        .as_ref()
+        .map(|value| value.get("error").unwrap_or(value));
+    let raw_code = error
+        .and_then(|error| error.get("type").or_else(|| error.get("code")))
+        .and_then(serde_json::Value::as_str);
+    let code = raw_code.filter(|code| safe_error_code(code));
+    let message = raw_code
+        .is_none_or(safe_error_code)
+        .then(|| {
+            error
+                .and_then(|error| error.get("message"))
                 .and_then(serde_json::Value::as_str)
-                .filter(|code| safe_error_code(code))
-                .map(str::to_owned)
-        });
-    match detail {
-        Some(code) => format!("{provider} returned {status} ({code})"),
-        None => format!("{provider} returned {status}"),
+                .and_then(safe_error_message)
+        })
+        .flatten();
+
+    let mut result = format!("{provider} returned {status}");
+    if let Some(code) = code {
+        result.push_str(&format!(" ({code})"));
     }
+    if let Some(message) = message {
+        result.push_str(": ");
+        result.push_str(&message);
+    }
+    result
 }
 
 /// Classify an error delivered *inside* a 200 stream — the in-band counterpart
@@ -157,6 +173,37 @@ fn safe_error_code(code: &str) -> bool {
         && bytes
             .iter()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_')
+}
+
+fn safe_error_message(message: &str) -> Option<String> {
+    const MAX_ERROR_MESSAGE_CHARS: usize = 240;
+    let collapsed = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() || contains_secret_marker(&collapsed) {
+        return None;
+    }
+    let mut excerpt: String = collapsed.chars().take(MAX_ERROR_MESSAGE_CHARS).collect();
+    if collapsed.chars().count() > MAX_ERROR_MESSAGE_CHARS {
+        excerpt.push('…');
+    }
+    Some(excerpt)
+}
+
+fn contains_secret_marker(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "sk-",
+        "aiza",
+        "bearer ",
+        "api_key",
+        "api-key",
+        "apikey",
+        "authorization:",
+        "x-goog-api-key",
+        "private_key",
+        "private key",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
 }
 
 /// Longest provider-requested wait taken at face value.
@@ -410,6 +457,28 @@ mod tests {
         assert_eq!(
             safe_http_error("anthropic", 429, r#"{"error":{"type":"rate_limit_error"}}"#),
             "anthropic returned 429 (rate_limit_error)"
+        );
+    }
+
+    #[test]
+    fn safe_http_error_surfaces_a_bounded_structured_message() {
+        let body = serde_json::json!({
+            "error": {
+                "type": "invalid_request_error",
+                "message": format!("Unknown model: {}", "x".repeat(300))
+            }
+        })
+        .to_string();
+        let error = safe_http_error("openai-compat", 400, &body);
+        assert!(error
+            .starts_with("openai-compat returned 400 (invalid_request_error): Unknown model: "));
+        assert!(error.ends_with('…'));
+        assert!(error.chars().count() < 320);
+
+        let secret = r#"{"error":{"message":"invalid x-goog-api-key abc123"}}"#;
+        assert_eq!(
+            safe_http_error("gemini", 400, secret),
+            "gemini returned 400"
         );
     }
 }
