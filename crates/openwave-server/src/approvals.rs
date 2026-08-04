@@ -1493,6 +1493,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_parked_create_app_call_can_be_approved() {
+        // `create_app` is `Workspace`-class, so in Ask mode it parks behind
+        // the workspace consent card. The card is presentable and approvable;
+        // resolving re-derives the kind from the stored tool name, so a name
+        // missing from `for_tool_name` made every approval of that card 409
+        // (`NotApprovable`) while the renderer showed an approvable prompt.
+        let (store, request) = setup("create_app").await;
+        assert_eq!(
+            request.kind,
+            openwave_core::ToolApprovalKind::WorkspaceMayModifyFiles
+        );
+        let broker = ApprovalBroker::new(store);
+        let _pending = broker.register(request.clone(), None).await;
+        assert_eq!(
+            broker
+                .resolve(request.chat_id, request.call_id, ApprovalDecision::Approve)
+                .await
+                .unwrap(),
+            ResolveApprovalOutcome::Resolved
+        );
+    }
+
+    #[tokio::test]
     async fn unknown_action_cannot_be_approved_but_can_be_rejected() {
         let (store, request) = setup("third_party_sensitive").await;
         let broker = ApprovalBroker::new(store);
