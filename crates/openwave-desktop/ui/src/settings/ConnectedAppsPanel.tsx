@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Pencil, Plus, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Pencil, Plus, Trash2 } from "lucide-react";
 import type {
   ApiClient,
   ConnectedAppInfo,
@@ -19,6 +19,7 @@ import {
 } from "./primitives";
 
 type RestEntry = Extract<ConnectedAppInfo, { kind: "rest_api" }>;
+type McpEntry = Extract<ConnectedAppInfo, { kind: "mcp_server" }>;
 
 type CredentialMode = "none" | "bearer" | "header";
 
@@ -81,12 +82,109 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** The name an app entry leads with. A gateway-backed record shows the
+ * organization's entitled app names when the gateway reported them; a local
+ * record has no org-app concept — its record display name is the app. */
+function mcpTitle(entry: McpEntry): string {
+  return entry.gateway_endpoint !== null && entry.gateway_apps.length > 0
+    ? entry.gateway_apps.join(", ")
+    : entry.name;
+}
+
+/** One renderer-safe status sentence per entry; diagnostics already are one. */
+function mcpStatus(entry: McpEntry): string {
+  switch (entry.health) {
+    case "healthy":
+      return `${entry.tool_count} tool${entry.tool_count === 1 ? "" : "s"} available to new turns.`;
+    case "initializing":
+    case "reconnecting":
+      return "Connecting…";
+    case "disabled":
+      return entry.diagnostic ?? "Disabled.";
+    default:
+      return entry.diagnostic ?? "Needs attention. See Advanced below.";
+  }
+}
+
 /**
- * The Connected apps page: the one settings surface for both kinds. The MCP
- * section is the full server editor — `McpPanel`, absorbed here when the
- * standalone MCP servers page retired — and REST entries are created,
- * edited, and deleted below it. The absorption is presentation only; the
- * connected-apps record was authoritative throughout the phasing.
+ * One MCP-backed app entry: the app name first, a status line, and a
+ * collapsed accordion enumerating the mounted tool names. Names only — never
+ * remote-authored tool descriptions — the same renderer-safety posture as
+ * the consent sheet.
+ */
+function McpAppCard({ entry }: { entry: McpEntry }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="flex flex-col gap-1 rounded-md border px-3 py-2">
+      <p className="text-sm font-bold">{mcpTitle(entry)}</p>
+      <p className="text-xs text-muted-foreground">
+        {entry.gateway_endpoint !== null &&
+          "Via your organization's gateway · "}
+        {mcpStatus(entry)}
+      </p>
+      {entry.tools.length > 0 && (
+        <>
+          <button
+            type="button"
+            className="flex items-center gap-1 self-start text-xs text-muted-foreground hover:text-foreground"
+            aria-expanded={open}
+            onClick={() => setOpen((current) => !current)}
+          >
+            {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+            {entry.tools.length} tool{entry.tools.length === 1 ? "" : "s"}
+          </button>
+          {open && (
+            <ul className="flex flex-col gap-0.5 pl-4">
+              {entry.tools.map((tool) => (
+                <li key={tool} className="font-mono text-xs">
+                  {tool}
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The demoted transport machinery: gateway endpoint mounts, per-server
+ * health, and (on unmanaged profiles) the manual MCP server editor — the
+ * whole `McpPanel`, unchanged, behind a disclosure. Everything it could do
+ * it still does; it just no longer leads the page.
+ */
+function AdvancedSection({
+  client,
+  managed,
+}: {
+  client: ApiClient;
+  managed: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <section className="flex flex-col gap-6">
+      <button
+        type="button"
+        className="flex items-center gap-1 self-start text-sm font-medium text-muted-foreground hover:text-foreground"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+      >
+        {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        Advanced: transport &amp; endpoints
+      </button>
+      {open && <McpPanel client={client} managed={managed} />}
+    </section>
+  );
+}
+
+/**
+ * The Connected apps page, app-first: the primary list is the apps this
+ * profile can reach — org-app names for gateway-backed MCP records, record
+ * names for local ones, REST entries beside them — each with a names-only
+ * tool accordion. The transport machinery (endpoint mounts, the manual MCP
+ * server editor absorbed from the retired MCP page) is demoted to an
+ * Advanced disclosure below; nothing is removed, only de-emphasized.
  */
 export function ConnectedAppsPanel({
   client,
@@ -126,10 +224,6 @@ export function ConnectedAppsPanel({
       cancelled = true;
     };
   }, [client]);
-
-  const restEntries = apps.filter(
-    (entry): entry is RestEntry => entry.kind === "rest_api",
-  );
 
   function update(change: Partial<Draft>) {
     setDraft((current) => (current === null ? null : { ...current, ...change }));
@@ -203,8 +297,11 @@ export function ConnectedAppsPanel({
     }
   }
 
-  const restRows = restEntries.map((entry) => (
-    <div key={entry.id} className="flex items-center justify-between gap-4">
+  const restRow = (entry: RestEntry) => (
+    <div
+      key={entry.id}
+      className="flex items-center justify-between gap-4 rounded-md border px-3 py-2"
+    >
       <div className="min-w-0 flex-1">
         <p className="text-sm font-bold">{entry.name}</p>
         <p className="truncate text-xs text-muted-foreground">
@@ -237,7 +334,7 @@ export function ConnectedAppsPanel({
         </div>
       )}
     </div>
-  ));
+  );
 
   const editor = draft !== null && (
     <SettingsSection
@@ -358,18 +455,16 @@ export function ConnectedAppsPanel({
   return (
     <SettingsPanel
       title="Connected apps"
-      description="Outside integrations this profile can reach: MCP servers and REST APIs, bound by local apps with your consent."
+      description="The apps this profile can reach — through your organization's gateway, local MCP servers, and REST APIs — bound by local apps with your consent."
       busy={loading || saving || deleting !== null}
     >
-      <McpPanel client={client} managed={managed} />
-
       {loading ? (
         <p className="text-sm text-muted-foreground">Loading connected apps…</p>
       ) : (
         <>
           <SettingsSection
-            title="REST APIs"
-            description="A base URL and an OpenAPI document; requests run through the governed executor."
+            title="Apps"
+            description="Each entry is one connected app. Expand it to see the tools it makes available."
           >
             {managed && (
               <SettingsStatus
@@ -378,12 +473,19 @@ export function ConnectedAppsPanel({
                 description="REST connected apps are managed by your organization's gateway; there is nothing to configure here."
               />
             )}
-            {restEntries.length === 0 ? (
+            {apps.length === 0 ? (
               <p className="text-sm text-muted-foreground">
-                No REST APIs connected.
+                No apps connected. Add a REST API here, or configure MCP
+                servers under Advanced below.
               </p>
             ) : (
-              restRows
+              apps.map((entry) =>
+                entry.kind === "mcp_server" ? (
+                  <McpAppCard key={entry.id} entry={entry} />
+                ) : (
+                  restRow(entry)
+                ),
+              )
             )}
             {!managed && draft === null && (
               <div>
@@ -405,6 +507,9 @@ export function ConnectedAppsPanel({
           {!managed && editor}
         </>
       )}
+
+      <AdvancedSection client={client} managed={managed} />
+
       {listError && <SettingsError>{listError}</SettingsError>}
     </SettingsPanel>
   );

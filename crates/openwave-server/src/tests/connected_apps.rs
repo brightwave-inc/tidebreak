@@ -280,6 +280,91 @@ async fn rest_credential_lifecycle_walks_set_keep_none_and_delete() {
     );
 }
 
+/// A minimal streamable-HTTP MCP fixture advertising one tool whose
+/// remote-authored description must never reach the settings listing.
+async fn serve_fake_http_mcp() -> std::net::SocketAddr {
+    use axum::routing::post;
+
+    async fn handler(body: String) -> ([(&'static str, &'static str); 1], String) {
+        let request: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let id = request.get("id").cloned().unwrap_or_default();
+        let result = match request["method"].as_str().unwrap_or_default() {
+            "initialize" => json!({
+                "protocolVersion": openwave_mcp::PROTOCOL_VERSION,
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "listing-fixture", "version": "1"}
+            }),
+            "tools/list" => json!({
+                "tools": [{
+                    "name": "lookup",
+                    "description": "Remote-authored prose that stays out of settings",
+                    "inputSchema": {"type": "object"}
+                }]
+            }),
+            _ => json!({}),
+        };
+        (
+            [("content-type", "application/json")],
+            json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string(),
+        )
+    }
+
+    let app = axum::Router::new().route("/mcp", post(handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    address
+}
+
+/// The listing enumerates a mounted server's tool names — and only names:
+/// the remote-authored tool description never crosses to this renderer
+/// surface. A local record also reads as non-gateway (`gateway_endpoint`
+/// null) with no org-app names.
+#[tokio::test]
+async fn the_listing_carries_mounted_tool_names_only() {
+    let (router, bearer, _state, _dir) = connected_apps_test_app().await;
+    let address = serve_fake_http_mcp().await;
+
+    let put = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/mcp/servers")
+                .header("authorization", &bearer)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"servers": [{
+                        "name": "docs",
+                        "url": format!("http://{address}/mcp")
+                    }]})
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    let body = raw_body(get_listing(&router, &bearer).await).await;
+    assert!(
+        !body.contains("Remote-authored"),
+        "tool descriptions must never reach the listing: {body}"
+    );
+    let listing: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let entry = listing["apps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["kind"] == "mcp_server" && entry["name"] == "docs")
+        .expect("the mounted server is listed");
+    assert_eq!(entry["tools"], json!(["lookup"]));
+    assert_eq!(entry["gateway_endpoint"], json!(null));
+    assert_eq!(entry["gateway_apps"], json!([]));
+}
+
 /// Configuration-time refusals persist nothing: a rejected document (or an
 /// inadmissible base URL) leaves no record and stores no credential value.
 #[tokio::test]

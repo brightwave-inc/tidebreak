@@ -7,7 +7,7 @@ import { ConnectedAppsPanel } from "./ConnectedAppsPanel";
 
 const SECRET = "sk-rest-value-hunter2";
 
-/** One configured manual server, so the embedded editor has a row to show. */
+/** One configured manual server, so the demoted editor has a row to show. */
 const docsServer: McpServerInfo = {
   name: "docs",
   command: "/usr/local/bin/docs-mcp",
@@ -25,15 +25,31 @@ const docsServer: McpServerInfo = {
   diagnostic: null,
 };
 
-const bothKinds: ConnectedAppsInfo = {
+/** The app-first listing: a gateway-backed record (org apps ride the
+ * `primary` endpoint), a local record, and a REST entry. */
+const listing: ConnectedAppsInfo = {
   apps: [
+    {
+      kind: "mcp_server",
+      id: "00000000-0000-4000-8000-000000000000",
+      name: "primary",
+      health: "healthy",
+      tool_count: 2,
+      tools: ["sentry__proxy_api", "linear__proxy_api"],
+      diagnostic: null,
+      gateway_endpoint: "primary",
+      gateway_apps: ["Sentry (org)", "Linear (org)"],
+    },
     {
       kind: "mcp_server",
       id: "11111111-1111-4111-8111-111111111111",
       name: "docs",
       health: "healthy",
       tool_count: 3,
+      tools: ["search", "fetch", "list_sources"],
       diagnostic: null,
+      gateway_endpoint: null,
+      gateway_apps: [],
     },
     {
       kind: "rest_api",
@@ -51,14 +67,37 @@ const bothKinds: ConnectedAppsInfo = {
 
 function api(overrides: Partial<Record<keyof ApiClient, unknown>> = {}) {
   return {
-    listConnectedApps: vi.fn().mockResolvedValue(bothKinds),
-    putRestConnectedApp: vi.fn().mockResolvedValue(bothKinds),
+    listConnectedApps: vi.fn().mockResolvedValue(listing),
+    putRestConnectedApp: vi.fn().mockResolvedValue(listing),
     deleteRestConnectedApp: vi.fn().mockResolvedValue(undefined),
-    // The embedded MCP editor reads its own server list and gateway session.
+    // The demoted MCP editor reads its own server list and gateway session.
     listMcpServers: vi.fn().mockResolvedValue({ servers: [docsServer] }),
     getGatewayStatus: vi.fn().mockResolvedValue({ signed_in: false }),
+    getGatewayApps: vi.fn().mockResolvedValue({ supported: true, apps: [] }),
     ...overrides,
   } as unknown as ApiClient;
+}
+
+/** A signed-in gateway session whose org apps ride the `primary` endpoint,
+ * for tests that open the Advanced disclosure's endpoint toggles. */
+function signedInOverrides() {
+  return {
+    getGatewayStatus: vi
+      .fn()
+      .mockResolvedValue({ signed_in: true, model_count: 1, sign_in: { state: "idle" } }),
+    getGatewayApps: vi.fn().mockResolvedValue({
+      supported: true,
+      apps: [
+        {
+          id: "app-1",
+          name: "Sentry (org)",
+          app_kind: "mcp_server",
+          enabled: true,
+          mcp_endpoint_slugs: ["primary"],
+        },
+      ],
+    }),
+  };
 }
 
 afterEach(() => {
@@ -67,34 +106,79 @@ afterEach(() => {
 });
 
 describe("ConnectedAppsPanel", () => {
-  it("is one page with both kinds: the embedded MCP editor beside REST detail", async () => {
-    const client = api();
-    render(<ConnectedAppsPanel client={client} managed={false} />);
+  it("leads with apps: org-app names for gateway entries, record names for local ones", async () => {
+    render(<ConnectedAppsPanel client={api()} managed={false} />);
 
-    // The MCP section is the full server editor, not a read-only list with a
-    // deep link to a separate page.
-    expect(await screen.findByText("docs")).toBeInTheDocument();
+    // The gateway-backed entry leads with the organization's app names, not
+    // its endpoint slug; the local record is its own app.
     expect(
-      screen.getByRole("button", { name: /Save and verify/ }),
+      await screen.findByText("Sentry (org), Linear (org)"),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText(/Namespace/)).toHaveValue("docs");
-    expect(
-      screen.queryByRole("button", { name: /Manage MCP servers/ }),
-    ).not.toBeInTheDocument();
+    expect(screen.getByText("docs")).toBeInTheDocument();
+    expect(screen.queryByText("primary")).not.toBeInTheDocument();
 
-    expect(await screen.findByText("Sentry")).toBeInTheDocument();
+    // REST entries are first-class app entries in the same list.
+    expect(screen.getByText("Sentry")).toBeInTheDocument();
     expect(
-      screen.getByText(/api\.sentry\.example\/v2 · 2 operations · Credential configured/),
+      screen.getByText(
+        /api\.sentry\.example\/v2 · 2 operations · Credential configured/,
+      ),
     ).toBeInTheDocument();
   });
 
-  it("managed: shows the read-only notice and no REST editing affordances", async () => {
-    render(<ConnectedAppsPanel client={api()} managed />);
+  it("expands a collapsed accordion to monospace tool names", async () => {
+    const user = userEvent.setup();
+    render(<ConnectedAppsPanel client={api()} managed={false} />);
+
+    await screen.findByText("docs");
+    // Collapsed by default: no tool names anywhere.
+    expect(screen.queryByText("search")).not.toBeInTheDocument();
+    expect(screen.queryByText("sentry__proxy_api")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "3 tools" }));
+    const tool = screen.getByText("search");
+    expect(tool).toHaveClass("font-mono");
+    expect(screen.getByText("list_sources")).toBeInTheDocument();
+    // Only the clicked entry expanded.
+    expect(screen.queryByText("sentry__proxy_api")).not.toBeInTheDocument();
+  });
+
+  it("keeps endpoints and the manual editor inside the Advanced disclosure", async () => {
+    const user = userEvent.setup();
+    render(
+      <ConnectedAppsPanel client={api(signedInOverrides())} managed={false} />,
+    );
+
+    await screen.findByText("docs");
+    // Before expanding: no mount toggles, no editor, no endpoint section.
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Save and verify/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Gateway endpoints")).not.toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: /Advanced: transport & endpoints/ }),
+    );
+    // Every existing capability is reachable: the mount toggle, the manual
+    // editor with its namespace field, and save.
+    expect(
+      await screen.findByRole("switch", { name: "Mount primary" }),
+    ).toBeInTheDocument();
+    expect(await screen.findByLabelText(/Namespace/)).toHaveValue("docs");
+    expect(
+      screen.getByRole("button", { name: /Save and verify/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("managed: keeps the notice and mount toggles but no edit affordances", async () => {
+    const user = userEvent.setup();
+    render(<ConnectedAppsPanel client={api(signedInOverrides())} managed />);
 
     expect(
       await screen.findByText(/Managed by your organization/),
     ).toBeInTheDocument();
-    // Entries stay visible read-only; every write affordance is gone.
+    // Entries stay visible read-only; every REST write affordance is gone.
     expect(screen.getByText("Sentry")).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /Add REST API/ }),
@@ -103,7 +187,25 @@ describe("ConnectedAppsPanel", () => {
       screen.queryByRole("button", { name: /Edit/ }),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: /Remove/ }),
+      screen.queryByRole("button", { name: /^Remove/ }),
+    ).not.toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: /Advanced: transport & endpoints/ }),
+    );
+    // The endpoint toggle — the one write managed policy admits — stays
+    // live; nothing manual is editable.
+    expect(
+      await screen.findByRole("switch", { name: "Mount primary" }),
+    ).toBeEnabled();
+    await waitFor(() =>
+      expect(screen.queryByRole("textbox")).not.toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByRole("button", { name: "Add server" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Save and verify/ }),
     ).not.toBeInTheDocument();
   });
 
