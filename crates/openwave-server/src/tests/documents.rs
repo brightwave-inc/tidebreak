@@ -1570,14 +1570,8 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() 
     let extract_store = store.clone();
     let (mut tools, config) = agent_deps(
         Arc::new(UnavailableCodeExecution),
-        Box::new(web_search::foreground_tool(
-            store.clone(),
-            Arc::new(MemSecrets::default()),
-        )),
-        Box::new(web_search::foreground_extract_tool(
-            extract_store,
-            Arc::new(MemSecrets::default()),
-        )),
+        web_search::foreground_tool(store.clone(), Arc::new(MemSecrets::default())),
+        web_search::foreground_extract_tool(extract_store, Arc::new(MemSecrets::default())),
         store,
         dir.path().join("profile-data"),
     );

@@ -630,11 +630,11 @@ async fn chat_settings_stick_to_the_next_chat() {
 }
 
 #[tokio::test]
-async fn chat_network_policy_defaults_off_and_persists_normalized_exact_hosts() {
+async fn chat_network_policy_defaults_open_and_persists_normalized_exact_hosts() {
     let (router, token, _store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");
     let chat = make_chat(&router, &bearer).await;
-    assert_eq!(chat.network_policy, openwave_core::NetworkPolicy::Off);
+    assert_eq!(chat.network_policy, openwave_core::NetworkPolicy::Open);
 
     let updated = patch_chat(
         &router,

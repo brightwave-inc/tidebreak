@@ -68,7 +68,7 @@ export const useNewChatSettings = create<NewChatSettings>((set) => ({
 /**
  * What the pickers display and the next chat will get: this visit's explicit
  * pick, else the server's sticky default, else the hard default the server
- * would fall back to (`ask`, no network, the configured model).
+ * would fall back to (`ask`, open network, the configured model).
  *
  * The model stays a `ModelSelectionKey` cast because the server reports the
  * raw sticky selection; one whose provider was since removed reads as
@@ -88,6 +88,6 @@ export function effectiveNewChatSettings(state: NewChatSettings): {
     permissionMode:
       state.permissionMode ?? state.defaults?.permission_mode ?? null,
     networkPolicy:
-      state.networkPolicy ?? state.defaults?.network_policy ?? { mode: "off" },
+      state.networkPolicy ?? state.defaults?.network_policy ?? { mode: "open" },
   };
 }

@@ -35,7 +35,7 @@ it("gathers the turn's setup actions behind one button", async () => {
     "Attach files",
     "Attach folder",
     "ReasoningHigh",
-    "NetworkNetwork off",
+    "NetworkOffline",
   ]);
 
   await userEvent.setup().click(

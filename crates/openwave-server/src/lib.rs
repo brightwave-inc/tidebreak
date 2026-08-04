@@ -885,12 +885,8 @@ async fn bind_inner(
         .with_office_converter(office_converter)
         .with_host_tool_broker(host_tool_broker),
     );
-    let foreground_web_search =
-        Box::new(web_search::foreground_tool(store.clone(), secrets.clone()));
-    let web_extract = Box::new(web_search::foreground_extract_tool(
-        store.clone(),
-        secrets.clone(),
-    ));
+    let foreground_web_search = web_search::foreground_tool(store.clone(), secrets.clone());
+    let web_extract = web_search::foreground_extract_tool(store.clone(), secrets.clone());
     let (tools, agent_config) = agent_deps(
         code_execution.clone(),
         foreground_web_search,

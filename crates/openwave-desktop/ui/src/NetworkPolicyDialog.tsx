@@ -22,8 +22,8 @@ import { Textarea } from "@/components/ui/textarea";
 const OPTIONS = [
   {
     mode: "off",
-    label: "Network off",
-    description: "Commands cannot make outbound connections.",
+    label: "Offline",
+    description: "Opt in to blocking outbound network access for this chat.",
     icon: ShieldOff,
   },
   {
@@ -40,7 +40,7 @@ const OPTIONS = [
   },
   {
     mode: "open",
-    label: "Open internet",
+    label: "Internet access",
     description: "Reach public internet destinations; local networks stay blocked.",
     icon: Globe2,
   },

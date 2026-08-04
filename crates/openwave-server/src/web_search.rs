@@ -10,7 +10,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use openwave_core::{ChatId, DocumentId, DocumentUpsert, Result, SecretProvider, Store};
+use openwave_core::{
+    ApprovalClass, ChatId, DocumentId, DocumentUpsert, NetworkPolicy, Result, SecretProvider,
+    Store, Tool, ToolCtx, ToolOutput, ToolSpec,
+};
 use openwave_web_search::{
     BraveProvider, ExaProvider, ExtractedPageSink, ExtractedPageSinkError, NativeExtractor,
     OutboundOrigin, PageExtractor, ReqwestHttpClient, ReqwestPageFetcher, SearxngBaseUrl,
@@ -22,6 +25,50 @@ use openwave_web_search::{
 use serde::{Deserialize, Serialize};
 
 use crate::error::ServerError;
+
+const NETWORK_OFF_ERROR_CODE: &str = "chat_network_off";
+const NETWORK_OFF_MESSAGE: &str =
+    "Network is off for this chat. Turn it on from the composer's + menu under Network.";
+
+/// Enforce the per-chat network choice before a network-capable tool runs.
+///
+/// Destination admission remains inside each transport; this gate exists so
+/// an intentional offline choice is reported clearly instead of collapsing
+/// into an empty search or an opaque fetch failure.
+struct ChatNetworkPolicyTool {
+    store: Arc<dyn Store>,
+    inner: Box<dyn Tool>,
+}
+
+impl ChatNetworkPolicyTool {
+    fn new(store: Arc<dyn Store>, inner: Box<dyn Tool>) -> Self {
+        Self { store, inner }
+    }
+
+    fn denied_output() -> ToolOutput {
+        ToolOutput::error(NETWORK_OFF_MESSAGE)
+            .with_data(serde_json::json!({ "error_code": NETWORK_OFF_ERROR_CODE }))
+    }
+}
+
+#[async_trait]
+impl Tool for ChatNetworkPolicyTool {
+    fn spec(&self) -> ToolSpec {
+        self.inner.spec()
+    }
+
+    fn approval_class(&self) -> ApprovalClass {
+        self.inner.approval_class()
+    }
+
+    async fn execute(&self, ctx: &ToolCtx, args: serde_json::Value) -> Result<ToolOutput> {
+        let chat = self.store.get_chat(ctx.chat_id).await?;
+        if chat.is_some_and(|chat| chat.network_policy == NetworkPolicy::Off) {
+            return Ok(Self::denied_output());
+        }
+        self.inner.execute(ctx, args).await
+    }
+}
 
 /// Store key for the non-secret web-search configuration.
 const WEB_SEARCH_SETTING: &str = "web_search";
@@ -445,8 +492,14 @@ impl WebSearchResolver for HostWebSearchResolver {
 pub(crate) fn foreground_tool(
     store: Arc<dyn Store>,
     secrets: Arc<dyn SecretProvider>,
-) -> WebSearchTool {
-    WebSearchTool::new(Arc::new(HostWebSearchResolver { store, secrets }))
+) -> Box<dyn Tool> {
+    Box::new(ChatNetworkPolicyTool::new(
+        store.clone(),
+        Box::new(WebSearchTool::new(Arc::new(HostWebSearchResolver {
+            store,
+            secrets,
+        }))),
+    ))
 }
 
 /// Native page extraction under live host policy.
@@ -553,8 +606,8 @@ impl ExtractedPageSink for HostExtractedPageSink {
 pub(crate) fn foreground_extract_tool(
     store: Arc<dyn Store>,
     secrets: Arc<dyn SecretProvider>,
-) -> WebExtractTool {
-    WebExtractTool::new(
+) -> Box<dyn Tool> {
+    let tool = WebExtractTool::new(
         Arc::new(HostWebSearchResolver {
             store: store.clone(),
             secrets,
@@ -563,7 +616,10 @@ pub(crate) fn foreground_extract_tool(
             store: store.clone(),
         })),
     )
-    .with_page_sink(Arc::new(HostExtractedPageSink { store }))
+    .with_page_sink(Arc::new(HostExtractedPageSink {
+        store: store.clone(),
+    }));
+    Box::new(ChatNetworkPolicyTool::new(store, Box::new(tool)))
 }
 
 #[cfg(test)]
@@ -572,7 +628,8 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
-    use openwave_core::{AgentError, DbStore};
+    use chrono::Utc;
+    use openwave_core::{AgentError, Chat, DbStore, ToolCtx};
 
     use super::*;
 
@@ -608,6 +665,53 @@ mod tests {
         .await
         .unwrap();
         (store, dir)
+    }
+
+    struct UnexpectedNetworkTool;
+
+    #[async_trait]
+    impl Tool for UnexpectedNetworkTool {
+        fn spec(&self) -> ToolSpec {
+            openwave_core::web_search_tool_spec()
+        }
+
+        fn approval_class(&self) -> ApprovalClass {
+            ApprovalClass::Sensitive
+        }
+
+        async fn execute(&self, _ctx: &ToolCtx, _args: serde_json::Value) -> Result<ToolOutput> {
+            panic!("offline policy must stop the network tool before execution")
+        }
+    }
+
+    #[tokio::test]
+    async fn offline_chat_network_denial_is_actionable_and_structured() {
+        let (store, _dir) = test_store().await;
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            reasoning_effort: None,
+            permission_mode: None,
+            network_policy: NetworkPolicy::Off,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let tool = ChatNetworkPolicyTool::new(Arc::new(store), Box::new(UnexpectedNetworkTool));
+
+        let output = tool
+            .execute(
+                &ToolCtx::without_private_scratch(chat.id, None),
+                serde_json::json!({"query": "anything"}),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output.content, NETWORK_OFF_MESSAGE);
+        assert_eq!(output.data.unwrap()["error_code"], NETWORK_OFF_ERROR_CODE);
     }
 
     #[test]
