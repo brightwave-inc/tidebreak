@@ -1557,6 +1557,32 @@ chat_defaults: StickyChatDefaults, };
 export type SignInProgress = { "state": "idle" } | { "state": "pending", authorization_url: string, } | { "state": "failed", message: string, };
 
 /**
+ * What a document declares, for the configuration form's operation picker.
+ * Renderer-safe: ids, methods, paths, and truncated summaries only.
+ */
+export type SpecPreviewInfo = { 
+/**
+ * Hex SHA-256 of the raw document — the pin the upsert must carry back
+ * with a URL source.
+ */
+document_sha256: string, operations: Array<SpecPreviewOperation>, 
+/**
+ * Operations the document declares that cannot be selected (no
+ * well-formed `operationId`, an over-bound path, or a repeated id).
+ */
+unlistable: number, 
+/**
+ * Whether the operation list was cut at the inventory bound.
+ */
+truncated: boolean, };
+
+export type SpecPreviewOperation = { operation_id: string, 
+/**
+ * Lowercase HTTP method, as a path item declares it.
+ */
+method: string, path: string, summary: string | null, };
+
+/**
  * One durable "don't ask again" the reader has made, with enough provenance
  * to recognize it later and withdraw it. Grant scopes are already closed
  * renderer-safe projections, so the snapshot carries them verbatim.

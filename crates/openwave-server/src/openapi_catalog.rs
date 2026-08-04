@@ -23,9 +23,11 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-/// Largest OpenAPI document accepted, in bytes. Prevents a configuration
-/// upload from ballooning the connected-app record and the ingest's memory.
-pub const MAX_OPENAPI_DOCUMENT_BYTES: usize = 1024 * 1024;
+/// Largest OpenAPI document accepted as ingest *input*, in bytes. Real vendor
+/// documents run to many megabytes; the bound only caps ingest memory and the
+/// configuration upload, because the record never stores the document — only
+/// the bounded catalog, whose own limits below are what keep it small.
+pub const MAX_OPENAPI_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 /// Most operations one catalog may hold. Prevents a spec from minting an
 /// unbounded binding/consent surface.
 pub const MAX_CATALOG_OPERATIONS: usize = 256;
@@ -225,14 +227,228 @@ pub enum OpenApiIngestError {
     RefDepthExceeded { operation_id: String },
     #[error("malformed OpenAPI structure: {context}")]
     MalformedStructure { context: &'static str },
+    #[error(
+        "a selected operationId is empty, over {} bytes, or outside [A-Za-z0-9_.-]",
+        MAX_OPERATION_ID_BYTES
+    )]
+    InvalidSelectedOperationId,
+    #[error("selected operationId {operation_id} is not declared by the document")]
+    SelectedOperationNotFound { operation_id: String },
 }
 
 /// Ingest an OpenAPI document into a bounded [`OperationCatalog`], or refuse.
 ///
-/// JSON, OpenAPI 3.x documents only. Every declared operation must carry a
-/// well-formed `operationId`; any operation the catalog cannot represent
-/// within its bounds refuses the whole document rather than being skipped.
-pub fn ingest_openapi_document(document: &[u8]) -> Result<OperationCatalog, OpenApiIngestError> {
+/// JSON, OpenAPI 3.x documents only. With `selection: None` the whole
+/// document is the catalog: every declared operation must carry a well-formed
+/// `operationId`, and any operation the catalog cannot represent within its
+/// bounds refuses the whole document rather than being skipped.
+///
+/// With a selection, the fail-closed posture scopes to what the catalog will
+/// actually declare: only selected operations are validated and ingested,
+/// and paths declaring none of them are skipped wholesale — a vendor document
+/// is allowed to be broken in the parts the record will never execute. Every
+/// selected id must still be found, exactly once, and ingest cleanly; the
+/// selection cannot exceed [`MAX_CATALOG_OPERATIONS`].
+pub fn ingest_openapi_document(
+    document: &[u8],
+    selection: Option<&BTreeSet<String>>,
+) -> Result<OperationCatalog, OpenApiIngestError> {
+    if let Some(selection) = selection {
+        if selection.is_empty() {
+            return Err(OpenApiIngestError::NoOperations);
+        }
+        if selection.len() > MAX_CATALOG_OPERATIONS {
+            return Err(OpenApiIngestError::TooManyOperations);
+        }
+        // Selected ids are caller input: they are only ever echoed in errors
+        // after passing the same well-formedness bound declared ids do.
+        if !selection.iter().all(|id| well_formed_operation_id(id)) {
+            return Err(OpenApiIngestError::InvalidSelectedOperationId);
+        }
+    }
+    let root = parse_openapi_root(document)?;
+    let paths = declared_paths(&root)?;
+
+    let mut operations = BTreeMap::new();
+    for (path, path_item) in paths.into_iter().flatten() {
+        if let Some(selection) = selection {
+            // Peek before validating: a path contributing nothing to the
+            // selection must not be able to refuse the ingest.
+            let declares_selected = path_item.as_object().is_some_and(|item| {
+                item.iter().any(|(key, operation_value)| {
+                    HttpMethod::from_path_item_key(key).is_some()
+                        && operation_value
+                            .get("operationId")
+                            .and_then(Value::as_str)
+                            .is_some_and(|id| selection.contains(id))
+                })
+            });
+            if !declares_selected {
+                continue;
+            }
+        }
+        if path.len() > MAX_PATH_TEMPLATE_BYTES {
+            return Err(OpenApiIngestError::PathTemplateTooLong);
+        }
+        let template_parameters = parse_path_template(path)?;
+        let Value::Object(path_item) = path_item else {
+            return Err(OpenApiIngestError::MalformedStructure {
+                context: "a path item is not an object",
+            });
+        };
+        let path_level_parameters = path_item.get("parameters");
+        for (key, operation_value) in path_item {
+            let Some(method) = HttpMethod::from_path_item_key(key) else {
+                continue;
+            };
+            if let Some(selection) = selection {
+                let selected = operation_value
+                    .get("operationId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| selection.contains(id));
+                if !selected {
+                    continue;
+                }
+            }
+            let operation = ingest_operation(
+                &root,
+                method,
+                path,
+                operation_value,
+                path_level_parameters,
+                &template_parameters,
+            )?;
+            if operations.len() == MAX_CATALOG_OPERATIONS {
+                return Err(OpenApiIngestError::TooManyOperations);
+            }
+            let operation_id = operation.operation_id.clone();
+            if operations.insert(operation_id.clone(), operation).is_some() {
+                return Err(OpenApiIngestError::DuplicateOperationId { operation_id });
+            }
+        }
+    }
+    if let Some(selection) = selection {
+        // Refusing an absent selection, rather than storing a narrower
+        // catalog, keeps the catalog honest about the selection it was built
+        // from — the same no-partial-acceptance posture as the bounds.
+        if let Some(missing) = selection.iter().find(|id| !operations.contains_key(*id)) {
+            return Err(OpenApiIngestError::SelectedOperationNotFound {
+                operation_id: missing.clone(),
+            });
+        }
+    }
+    if operations.is_empty() {
+        return Err(OpenApiIngestError::NoOperations);
+    }
+
+    Ok(OperationCatalog {
+        document_sha256: sha256_hex(document),
+        operations,
+    })
+}
+
+/// One operation surfaced by [`enumerate_openapi_operations`] for selection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InventoryOperation {
+    /// The declared, well-formed `operationId` a selection would name.
+    pub operation_id: String,
+    pub method: HttpMethod,
+    /// Path template as declared. Bounded by [`MAX_PATH_TEMPLATE_BYTES`].
+    pub path: String,
+    /// The operation's `summary`, truncated to a display-sized prefix.
+    pub summary: Option<String>,
+}
+
+/// What a document declares, listed for the configuration surface's
+/// operation picker without judging ingestibility.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SpecInventory {
+    /// Lowercase-hex SHA-256 of the raw document bytes — the pin a
+    /// URL-sourced upsert re-verifies against.
+    pub document_sha256: String,
+    /// Every listable operation, in document order.
+    pub operations: Vec<InventoryOperation>,
+    /// Operations the inventory could not list (no well-formed `operationId`,
+    /// an over-bound path, or a repeated id). They exist in the document but
+    /// cannot be selected; a count keeps the inventory honest about them.
+    pub unlistable: usize,
+    /// Whether the operation list was cut at [`MAX_INVENTORY_OPERATIONS`].
+    pub truncated: bool,
+}
+
+/// Most operations one inventory reports. Far above any real selection need;
+/// keeps a pathological document from minting an unbounded response.
+pub const MAX_INVENTORY_OPERATIONS: usize = 4096;
+
+/// Longest `summary` prefix the inventory retains, in bytes.
+const MAX_INVENTORY_SUMMARY_BYTES: usize = 160;
+
+/// List the operations an OpenAPI document declares, tolerantly.
+///
+/// The document-level checks (size, JSON, OpenAPI 3.x) still refuse, but a
+/// malformed *operation* is counted rather than refusing the walk: the
+/// inventory exists so a selection can be made from a document that only
+/// needs to be partially ingestible, so it must survive the parts an eventual
+/// selection would skip.
+pub fn enumerate_openapi_operations(document: &[u8]) -> Result<SpecInventory, OpenApiIngestError> {
+    let root = parse_openapi_root(document)?;
+    let paths = declared_paths(&root)?;
+
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut operations = Vec::new();
+    let mut unlistable = 0usize;
+    let mut truncated = false;
+    for (path, path_item) in paths.into_iter().flatten() {
+        let Value::Object(path_item) = path_item else {
+            continue;
+        };
+        for (key, operation_value) in path_item {
+            let Some(method) = HttpMethod::from_path_item_key(key) else {
+                continue;
+            };
+            let listable_id = operation_value
+                .get("operationId")
+                .and_then(Value::as_str)
+                .filter(|id| well_formed_operation_id(id));
+            let Some(operation_id) = listable_id else {
+                unlistable += 1;
+                continue;
+            };
+            // A repeated id cannot be selected (ingest would refuse the
+            // duplicate), so only its first occurrence is listable.
+            if path.len() > MAX_PATH_TEMPLATE_BYTES || !seen.insert(operation_id.to_string()) {
+                unlistable += 1;
+                continue;
+            }
+            if operations.len() == MAX_INVENTORY_OPERATIONS {
+                truncated = true;
+                unlistable += 1;
+                continue;
+            }
+            let summary = operation_value
+                .get("summary")
+                .and_then(Value::as_str)
+                .map(truncate_to_display_prefix);
+            operations.push(InventoryOperation {
+                operation_id: operation_id.to_string(),
+                method,
+                path: path.clone(),
+                summary,
+            });
+        }
+    }
+
+    Ok(SpecInventory {
+        document_sha256: sha256_hex(document),
+        operations,
+        unlistable,
+        truncated,
+    })
+}
+
+/// The document-level admission shared by ingest and enumeration: byte bound,
+/// JSON object, not Swagger 2.0, declares OpenAPI 3.x.
+fn parse_openapi_root(document: &[u8]) -> Result<Value, OpenApiIngestError> {
     if document.len() > MAX_OPENAPI_DOCUMENT_BYTES {
         return Err(OpenApiIngestError::DocumentTooLarge);
     }
@@ -261,65 +477,52 @@ pub fn ingest_openapi_document(document: &[u8]) -> Result<OperationCatalog, Open
     if !declares_openapi_3 {
         return Err(OpenApiIngestError::NotOpenApi3);
     }
+    Ok(root)
+}
 
-    let paths = match root_object.get("paths") {
-        None | Some(Value::Object(_)) => root_object.get("paths").and_then(Value::as_object),
-        Some(_) => {
-            return Err(OpenApiIngestError::MalformedStructure {
-                context: "paths is not an object",
-            })
-        }
-    };
-
-    let mut operations = BTreeMap::new();
-    for (path, path_item) in paths.into_iter().flatten() {
-        if path.len() > MAX_PATH_TEMPLATE_BYTES {
-            return Err(OpenApiIngestError::PathTemplateTooLong);
-        }
-        let template_parameters = parse_path_template(path)?;
-        let Value::Object(path_item) = path_item else {
-            return Err(OpenApiIngestError::MalformedStructure {
-                context: "a path item is not an object",
-            });
-        };
-        let path_level_parameters = path_item.get("parameters");
-        for (key, operation_value) in path_item {
-            let Some(method) = HttpMethod::from_path_item_key(key) else {
-                continue;
-            };
-            let operation = ingest_operation(
-                &root,
-                method,
-                path,
-                operation_value,
-                path_level_parameters,
-                &template_parameters,
-            )?;
-            if operations.len() == MAX_CATALOG_OPERATIONS {
-                return Err(OpenApiIngestError::TooManyOperations);
-            }
-            let operation_id = operation.operation_id.clone();
-            if operations.insert(operation_id.clone(), operation).is_some() {
-                return Err(OpenApiIngestError::DuplicateOperationId { operation_id });
-            }
-        }
+/// The document's `paths` object, or a refusal if it declares a non-object.
+fn declared_paths(root: &Value) -> Result<Option<&Map<String, Value>>, OpenApiIngestError> {
+    let root_object = root.as_object().expect("admitted root is an object");
+    match root_object.get("paths") {
+        None => Ok(None),
+        Some(Value::Object(paths)) => Ok(Some(paths)),
+        Some(_) => Err(OpenApiIngestError::MalformedStructure {
+            context: "paths is not an object",
+        }),
     }
-    if operations.is_empty() {
-        return Err(OpenApiIngestError::NoOperations);
-    }
+}
 
+/// Whether an `operationId` fits the bounds every echoing surface assumes.
+fn well_formed_operation_id(operation_id: &str) -> bool {
+    !operation_id.is_empty()
+        && operation_id.len() <= MAX_OPERATION_ID_BYTES
+        && operation_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+}
+
+/// Truncate free text to a UTF-8-clean display prefix of at most
+/// [`MAX_INVENTORY_SUMMARY_BYTES`].
+fn truncate_to_display_prefix(text: &str) -> String {
+    if text.len() <= MAX_INVENTORY_SUMMARY_BYTES {
+        return text.to_string();
+    }
+    let mut end = MAX_INVENTORY_SUMMARY_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
+}
+
+/// Lowercase-hex SHA-256 of the raw document bytes.
+pub(crate) fn sha256_hex(document: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(document);
-    let document_sha256 = hasher
+    hasher
         .finalize()
         .iter()
         .map(|byte| format!("{byte:02x}"))
-        .collect();
-
-    Ok(OperationCatalog {
-        document_sha256,
-        operations,
-    })
+        .collect()
 }
 
 /// Validate one path template and return its `{param}` names.
@@ -380,12 +583,7 @@ fn ingest_operation(
             })
         }
     };
-    let well_formed_id = !operation_id.is_empty()
-        && operation_id.len() <= MAX_OPERATION_ID_BYTES
-        && operation_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'));
-    if !well_formed_id {
+    if !well_formed_operation_id(operation_id) {
         return Err(OpenApiIngestError::InvalidOperationId {
             method,
             path: path.to_string(),
@@ -627,6 +825,87 @@ mod tests {
         .unwrap()
     }
 
+    /// A vendor-shaped document: one clean operation, one path with no
+    /// `operationId`, and one operation that declares an unsupported cookie
+    /// parameter — both siblings refuse a whole-document ingest.
+    fn partially_broken_document() -> Vec<u8> {
+        document(json!({
+            "/clean": { "get": { "operationId": "clean.get", "summary": "The good one" } },
+            "/anonymous": { "get": { "summary": "no operationId" } },
+            "/cookie": {
+                "get": {
+                    "operationId": "cookie.get",
+                    "parameters": [{ "name": "sid", "in": "cookie", "required": true }]
+                }
+            }
+        }))
+    }
+
+    #[test]
+    fn a_selection_scopes_the_fail_closed_posture_to_itself() {
+        let bytes = partially_broken_document();
+
+        // Unselected, the document refuses on the first broken sibling.
+        assert!(ingest_openapi_document(&bytes, None).is_err());
+
+        // Selected, the catalog is exactly the selection: broken siblings are
+        // skipped wholesale, not judged.
+        let selection = BTreeSet::from(["clean.get".to_string()]);
+        let catalog = ingest_openapi_document(&bytes, Some(&selection)).unwrap();
+        assert_eq!(catalog.operations.keys().collect::<Vec<_>>(), ["clean.get"]);
+
+        // A selected operation must still ingest cleanly…
+        let cookie = BTreeSet::from(["cookie.get".to_string()]);
+        assert_eq!(
+            ingest_openapi_document(&bytes, Some(&cookie)).unwrap_err(),
+            OpenApiIngestError::UnsupportedParameterLocation {
+                operation_id: "cookie.get".to_string()
+            }
+        );
+        // …every selected id must exist…
+        let absent = BTreeSet::from(["clean.get".to_string(), "ghost".to_string()]);
+        assert_eq!(
+            ingest_openapi_document(&bytes, Some(&absent)).unwrap_err(),
+            OpenApiIngestError::SelectedOperationNotFound {
+                operation_id: "ghost".to_string()
+            }
+        );
+        // …and a malformed selected id is refused before it can be echoed.
+        let malformed = BTreeSet::from(["not valid!".to_string()]);
+        assert_eq!(
+            ingest_openapi_document(&bytes, Some(&malformed)).unwrap_err(),
+            OpenApiIngestError::InvalidSelectedOperationId
+        );
+    }
+
+    #[test]
+    fn enumeration_lists_tolerantly_and_pins_the_same_document_hash() {
+        let bytes = partially_broken_document();
+        let inventory = enumerate_openapi_operations(&bytes).unwrap();
+
+        // Listability is about selectability, not ingestibility: the cookie
+        // operation has a well-formed id, so it is listed (its ingest refusal
+        // comes later, precisely, if selected); the id-less one cannot be.
+        let ids: Vec<&str> = inventory
+            .operations
+            .iter()
+            .map(|operation| operation.operation_id.as_str())
+            .collect();
+        assert_eq!(ids, ["clean.get", "cookie.get"]);
+        assert_eq!(inventory.unlistable, 1);
+        assert!(!inventory.truncated);
+        assert_eq!(
+            inventory.operations[0].summary.as_deref(),
+            Some("The good one")
+        );
+
+        // The inventory's pin is the ingest's pin: what was previewed is what
+        // a hash-pinned upsert verifies against.
+        let selection = BTreeSet::from(["clean.get".to_string()]);
+        let catalog = ingest_openapi_document(&bytes, Some(&selection)).unwrap();
+        assert_eq!(inventory.document_sha256, catalog.document_sha256);
+    }
+
     #[test]
     fn realistic_spec_ingests_to_a_selfcontained_catalog_that_round_trips() {
         let bytes = serde_json::to_vec(&json!({
@@ -680,7 +959,7 @@ mod tests {
         }))
         .unwrap();
 
-        let catalog = ingest_openapi_document(&bytes).unwrap();
+        let catalog = ingest_openapi_document(&bytes, None).unwrap();
 
         let mut hasher = Sha256::new();
         hasher.update(&bytes);
@@ -951,7 +1230,7 @@ mod tests {
         ];
         for (case, bytes, expected) in cases {
             assert_eq!(
-                ingest_openapi_document(&bytes).unwrap_err(),
+                ingest_openapi_document(&bytes, None).unwrap_err(),
                 expected,
                 "{case}"
             );
@@ -983,7 +1262,7 @@ mod tests {
         };
 
         // S0 → … → S7 (terminal): eight followed refs, exactly at the cap.
-        let catalog = ingest_openapi_document(&spec_with_chain(7)).unwrap();
+        let catalog = ingest_openapi_document(&spec_with_chain(7), None).unwrap();
         assert_eq!(
             catalog.operations["op"].parameters[0].schema,
             Some(json!({ "type": "string" }))
@@ -991,7 +1270,7 @@ mod tests {
 
         // One more link exceeds the cap; a cyclic graph hits the same refusal.
         assert_eq!(
-            ingest_openapi_document(&spec_with_chain(8)).unwrap_err(),
+            ingest_openapi_document(&spec_with_chain(8), None).unwrap_err(),
             OpenApiIngestError::RefDepthExceeded {
                 operation_id: "op".to_string(),
             }
@@ -1005,7 +1284,7 @@ mod tests {
         cyclic["components"] =
             json!({ "schemas": { "Loop": { "$ref": "#/components/schemas/Loop" } } });
         assert_eq!(
-            ingest_openapi_document(&serde_json::to_vec(&cyclic).unwrap()).unwrap_err(),
+            ingest_openapi_document(&serde_json::to_vec(&cyclic).unwrap(), None).unwrap_err(),
             OpenApiIngestError::RefDepthExceeded {
                 operation_id: "op".to_string(),
             }

@@ -329,6 +329,12 @@ pub fn app(state: AppState) -> Router {
                 )),
         )
         .route(
+            "/connected-apps/rest/spec-preview",
+            post(routes::post_rest_spec_preview).layer(DefaultBodyLimit::max(
+                routes::MAX_REST_CONNECTED_APP_BODY_BYTES,
+            )),
+        )
+        .route(
             "/mcp/servers/{name}/reconnect",
             post(routes::post_mcp_server_reconnect),
         )

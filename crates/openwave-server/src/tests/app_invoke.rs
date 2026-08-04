@@ -701,7 +701,7 @@ async fn seed_rest_record(store: &Arc<dyn Store>, id: ConnectedAppId, base_url: 
         }
     });
     let catalog =
-        crate::openapi_catalog::ingest_openapi_document(spec.to_string().as_bytes()).unwrap();
+        crate::openapi_catalog::ingest_openapi_document(spec.to_string().as_bytes(), None).unwrap();
     store
         .replace_connected_apps(
             ConnectedAppKind::RestApi,

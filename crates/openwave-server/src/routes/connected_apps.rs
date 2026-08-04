@@ -22,9 +22,13 @@ use crate::connected_apps::{
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
 use crate::mcp_config::McpHealth;
-use crate::openapi_catalog::{ingest_openapi_document, MAX_OPENAPI_DOCUMENT_BYTES};
+use crate::openapi_catalog::{
+    enumerate_openapi_operations, ingest_openapi_document, sha256_hex, MAX_OPENAPI_DOCUMENT_BYTES,
+};
 use crate::providers::managed_profile_refusal;
-use crate::rest_executor::{admit_base_url, CredentialPlacement, RestCredential};
+use crate::rest_executor::{
+    admit_base_url, fetch_spec_document, CredentialPlacement, RestCredential,
+};
 use crate::state::AppState;
 
 /// Body bound for the `rest_api` upsert route: the OpenAPI document travels
@@ -104,15 +108,32 @@ pub enum RestCredentialStatus {
 }
 
 /// `PUT /connected-apps/rest/{id}` body: the complete configuration of one
-/// `rest_api` connected app, with the raw OpenAPI document to ingest.
+/// `rest_api` connected app, with the OpenAPI document to ingest — inline, or
+/// fetched from a URL under a hash pin. Ingested once, here; only the bounded
+/// operation catalog (with the document's hash) is stored.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RestConnectedAppUpsert {
     pub name: String,
     pub base_url: String,
-    /// The raw JSON OpenAPI document. Ingested once, here; only the bounded
-    /// operation catalog (with the document's hash) is stored.
-    pub openapi_document: String,
+    /// The raw JSON OpenAPI document, when supplied inline. Exactly one of
+    /// this and `openapi_document_url` must be present.
+    #[serde(default)]
+    pub openapi_document: Option<String>,
+    /// URL to fetch the document from at upsert time, under the executor's
+    /// egress hygiene. Requires `document_sha256`.
+    #[serde(default)]
+    pub openapi_document_url: Option<String>,
+    /// Hex SHA-256 the (fetched or inline) document must hash to — the pin
+    /// carried forward from the preview, so what was previewed is exactly
+    /// what ingests. Required with a URL source, optional inline.
+    #[serde(default)]
+    pub document_sha256: Option<String>,
+    /// When present, ingest only these `operationId`s: the catalog is the
+    /// selection, and the rest of the document is not judged. Absent means
+    /// the whole document must ingest, as before.
+    #[serde(default)]
+    pub operation_ids: Option<Vec<String>>,
     pub credential: RestCredentialUpdate,
 }
 
@@ -175,11 +196,62 @@ pub async fn put_rest_connected_app(
 
     admit_base_url(&body.base_url).map_err(|error| ServerError::bad_request(error.to_string()))?;
 
+    let document = match (&body.openapi_document, &body.openapi_document_url) {
+        (Some(_), Some(_)) => {
+            return Err(ServerError::bad_request(
+                "supply the OpenAPI document inline or by URL, not both",
+            ))
+        }
+        (None, None) => {
+            return Err(ServerError::bad_request(
+                "an OpenAPI document is required, inline or by URL",
+            ))
+        }
+        (Some(inline), None) => inline.as_bytes().to_vec(),
+        (None, Some(url)) => {
+            if body.document_sha256.is_none() {
+                return Err(ServerError::bad_request(
+                    "a URL-sourced document requires document_sha256 from the preview",
+                ));
+            }
+            fetch_spec_document(url)
+                .await
+                .map_err(|error| ServerError::bad_request_kind("spec_fetch", error.to_string()))?
+        }
+    };
+    // The pin closes the preview-to-upsert gap: if the published document
+    // changed in between, what the picker showed is not what would ingest,
+    // so nothing does.
+    if let Some(expected) = &body.document_sha256 {
+        let actual = sha256_hex(&document);
+        if !actual.eq_ignore_ascii_case(expected) {
+            return Err(ServerError::conflict(
+                "the document no longer matches the previewed hash — it changed upstream; \
+                 re-run the preview and reselect operations",
+            ));
+        }
+    }
+    let selection = match &body.operation_ids {
+        None => None,
+        Some(ids) => {
+            if ids.is_empty() {
+                return Err(ServerError::bad_request(
+                    "operation_ids must select at least one operation when present",
+                ));
+            }
+            Some(
+                ids.iter()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>(),
+            )
+        }
+    };
+
     // Ingest once, at configuration time. The raw document is not stored;
     // only the bounded catalog — carrying the document's hash — is. The
     // ingest errors are bounded and renderer-safe, so they travel verbatim
     // as the form error.
-    let catalog = ingest_openapi_document(body.openapi_document.as_bytes())
+    let catalog = ingest_openapi_document(&document, selection.as_ref())
         .map_err(|error| ServerError::bad_request_kind("openapi_ingest", error.to_string()))?;
 
     let mut rest_records = rest_records(&state).await?;
@@ -304,6 +376,89 @@ pub async fn delete_rest_connected_app(
         .delete_secret(&rest_credential_secret_key(id))
         .await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /connected-apps/rest/spec-preview` body: where the OpenAPI document
+/// comes from. Externally tagged and closed: `{"url": …}` or
+/// `{"document": …}`.
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum SpecPreviewSource {
+    /// Fetch the document from this URL, with the executor's egress hygiene.
+    Url(String),
+    /// The raw JSON document, inline.
+    Document(String),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpecPreviewRequest {
+    pub source: SpecPreviewSource,
+}
+
+/// What a document declares, for the configuration form's operation picker.
+/// Renderer-safe: ids, methods, paths, and truncated summaries only.
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub struct SpecPreviewInfo {
+    /// Hex SHA-256 of the raw document — the pin the upsert must carry back
+    /// with a URL source.
+    pub document_sha256: String,
+    pub operations: Vec<SpecPreviewOperation>,
+    /// Operations the document declares that cannot be selected (no
+    /// well-formed `operationId`, an over-bound path, or a repeated id).
+    pub unlistable: usize,
+    /// Whether the operation list was cut at the inventory bound.
+    pub truncated: bool,
+}
+
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub struct SpecPreviewOperation {
+    pub operation_id: String,
+    /// Lowercase HTTP method, as a path item declares it.
+    pub method: String,
+    pub path: String,
+    pub summary: Option<String>,
+}
+
+/// `POST /connected-apps/rest/spec-preview` — list what an OpenAPI document
+/// declares so the form can offer an operation selection, without judging
+/// whether the unselected remainder would ingest.
+///
+/// Refused on managed profiles like the upsert: this surface exists only to
+/// configure local REST records, and the URL source performs egress.
+pub async fn post_rest_spec_preview(
+    State(state): State<AppState>,
+    Json(body): Json<SpecPreviewRequest>,
+) -> Result<Json<SpecPreviewInfo>, ServerError> {
+    let policy = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
+    if policy.managed {
+        return Err(managed_profile_refusal(
+            "REST connected apps are managed by your organization's gateway",
+        ));
+    }
+    let document = match &body.source {
+        SpecPreviewSource::Document(inline) => inline.as_bytes().to_vec(),
+        SpecPreviewSource::Url(url) => fetch_spec_document(url)
+            .await
+            .map_err(|error| ServerError::bad_request_kind("spec_fetch", error.to_string()))?,
+    };
+    let inventory = enumerate_openapi_operations(&document)
+        .map_err(|error| ServerError::bad_request_kind("openapi_ingest", error.to_string()))?;
+    Ok(Json(SpecPreviewInfo {
+        document_sha256: inventory.document_sha256,
+        operations: inventory
+            .operations
+            .into_iter()
+            .map(|operation| SpecPreviewOperation {
+                operation_id: operation.operation_id,
+                method: operation.method.as_str().to_string(),
+                path: operation.path,
+                summary: operation.summary,
+            })
+            .collect(),
+        unlistable: inventory.unlistable,
+        truncated: inventory.truncated,
+    }))
 }
 
 /// Every stored `rest_api` record, in storage order.
