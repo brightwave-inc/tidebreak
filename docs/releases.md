@@ -134,9 +134,13 @@ automatic.
    credential-free prerequisite otherwise compiles the tag with its product
    version and saves unsigned Cargo outputs before any signing or notarization
    can fail.
-6. The production job restores those exact prepared outputs, signs the app with
-   the Developer ID identity, notarizes and staples the app and DMG, verifies
-   them with Apple tooling, and creates a signed Tauri updater archive.
+6. The production job reuses those prepared compiler outputs — every cache key
+   it can restore names the release commit or, at minimum, the `Cargo.lock` and
+   toolchain hashes, and it deletes the linked binaries the archive carries so
+   the products it signs are always linked from the tag's own sources. It then
+   signs the app with the Developer ID identity, notarizes and staples the app
+   and DMG, verifies them with Apple tooling, and creates a signed Tauri updater
+   archive.
 7. Only after the build passes does the publisher upload immutable versioned
    files, advance the public manifests, invalidate their CDN paths, and
    smoke-test the hosted release. If a prior attempt already uploaded the

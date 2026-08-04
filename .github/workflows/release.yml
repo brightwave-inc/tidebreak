@@ -399,6 +399,16 @@ jobs:
 
       # This restore-only step runs before production secrets are loaded. The
       # matching cache is written by a credential-free prerequisite job.
+      #
+      # Every key below pins the source identity of what it may restore: the
+      # release commit SHA, or at minimum the Cargo.lock and toolchain hashes.
+      # An arch-only fallback would let this job restore a `main`-warmed
+      # archive that has no relation to the released tag. The path list must
+      # stay byte-identical to the writing jobs' — `actions/cache` folds it
+      # into the cache version, so trimming entries here would silently miss
+      # every key instead of restoring a subset. The next step deletes the
+      # linked products the archive carries, so only compiler intermediates
+      # survive into the signed build.
       - name: Restore unsigned Rust build cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -420,7 +430,22 @@ jobs:
             macos-release-prepared-v3-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
             macos-release-target-v3-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}
             macos-release-target-v3-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
-            macos-release-target-v3-${{ matrix.arch }}-
+
+      # A restore extracts the whole archive, including the linked products a
+      # cache-warming run left in it. Those are the bytes that get signed, so
+      # delete them and let the signed build relink them from the tag's
+      # sources; the compiler intermediates that make the reuse worthwhile
+      # stay. The sidecar matters most: Tauri copies it into the signed
+      # product verbatim, with no Cargo fingerprint governing it.
+      - name: Discard restored product binaries
+        env:
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: |
+          rm -rf \
+            "target/$RELEASE_TARGET/release/openwave-desktop" \
+            "target/$RELEASE_TARGET/release/openwave-host-broker" \
+            "target/$RELEASE_TARGET/release/"libopenwave_desktop_lib.* \
+            "crates/openwave-desktop/binaries/openwave-host-broker-$RELEASE_TARGET"
 
       - name: Validate production signing configuration
         env:

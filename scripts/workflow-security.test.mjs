@@ -523,6 +523,19 @@ test("release caches restore only credential-free compiler products", () => {
     assert.doesNotMatch(cacheStep, /bundle|\.app|dmg|signature|keychain/i);
   }
 
+  // `actions/cache` folds the path list into the cache version, so the signing
+  // job can only reach an archive a writing job saved under the same list.
+  // Keeping them identical is what makes the key ladder below, rather than a
+  // silent total miss, the thing that governs what gets restored.
+  const cachedPaths = (step) =>
+    step.match(/path: \|\n([\s\S]*?)\n\s+key:/)?.[1];
+  assert.ok(cachedPaths(releaseBuildCache));
+  assert.equal(
+    cachedPaths(releaseBuildCache),
+    cachedPaths(releasePrepareCacheSave),
+  );
+  assert.equal(cachedPaths(releaseBuildCache), cachedPaths(warmBuildCacheSave));
+
   for (const restoreStep of [
     releasePrepareCache,
     releaseBuildCache,
@@ -539,6 +552,56 @@ test("release caches restore only credential-free compiler products", () => {
       "older cache generations bake in a stale MACOSX_DEPLOYMENT_TARGET and must not be restored",
     );
   }
+
+  // The credential-free jobs recompile from the tag or from `main`'s tip, so a
+  // fallback that names only the architecture costs them compile time at
+  // worst.
+  for (const restoreStep of [releasePrepareCache, warmBuildCache]) {
+    assert.match(
+      restoreStep,
+      /^\s*macos-release-target-v3-\$\{\{ matrix\.arch \}\}-$/m,
+      "credential-free jobs may fall back to any warmed cache for this arch",
+    );
+  }
+
+  // The signing job signs what it restores, so every key it can hit must pin
+  // the source identity of the archive: the release commit SHA, or at minimum
+  // the Cargo.lock and toolchain hashes. An arch-only fallback would restore
+  // an archive warmed from an unrelated `main` commit and sign binaries that
+  // do not correspond to the released tag.
+  const signingCacheKeys = releaseBuildCache
+    .split("\n")
+    .map((line) => line.trim().replace(/^key: /, ""))
+    .filter((line) => line.startsWith("macos-release-"));
+  assert.ok(signingCacheKeys.length >= 4);
+  for (const key of signingCacheKeys) {
+    assert.ok(
+      key.includes("hashFiles('Cargo.lock',"),
+      `restorable signing-job cache key does not pin the source: ${key}`,
+    );
+  }
+
+  // Whatever a restore extracts, the products that actually get signed are
+  // relinked from the tag's own sources.
+  const discardProducts = signedBuildJob.match(
+    /- name: Discard restored product binaries[\s\S]*?(?=\n\s+- name:)/,
+  )?.[0];
+  assert.ok(discardProducts);
+  for (const product of [
+    /release\/openwave-desktop/,
+    /release\/openwave-host-broker/,
+    /libopenwave_desktop_lib\./,
+    /binaries\/openwave-host-broker-\$RELEASE_TARGET/,
+  ]) {
+    assert.match(discardProducts, product);
+  }
+  assert.ok(
+    signedBuildJob.indexOf("Discard restored product binaries") >
+      signedBuildJob.indexOf("Restore unsigned Rust build cache") &&
+      signedBuildJob.indexOf("Discard restored product binaries") <
+        signedBuildJob.indexOf("Build, sign, and notarize the Tauri app"),
+    "restored product binaries must be discarded before the signed build",
+  );
 });
 
 test("an existing immutable release resumes without rebuilding or overwriting", () => {
