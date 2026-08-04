@@ -9,6 +9,11 @@
 //! the app runs, so rendering becomes a host service instead of a sandbox
 //! binary.
 //!
+//! Running a converter on the host does not mean running it unconfined: the
+//! bytes it parses were written by the sandbox, so the desktop's converter
+//! puts `soffice` under its own Seatbelt profile (see the desktop crate's
+//! `office_sandbox`), built with the shared helpers in [`crate::sbpl`].
+//!
 //! The seam is the workspace itself: after an exec lands office files under
 //! `output/` in host scratch (directly for the local provider, via the
 //! result pull for remote ones), the host converts each to a PDF under

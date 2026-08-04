@@ -26,6 +26,7 @@ use crate::network::LocalEgressBroker;
 #[cfg(target_os = "macos")]
 use crate::output::{Capture, StreamKind};
 use crate::receipt::{request_fingerprint, BeginExecution, ExecutionReceipt};
+use crate::sbpl::SANDBOX_EXEC;
 #[cfg(target_os = "macos")]
 use crate::CodeExecutionProviderKind;
 use crate::{
@@ -36,7 +37,6 @@ use crate::{
 #[cfg(target_os = "macos")]
 use crate::{ExecFolderAccess, ExecFolderGrant};
 
-const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 const RECEIPT_DIR: &str = ".code-execution-receipts";
 const ENV_HOME_DIR: &str = ".code-execution-env-homes";
 const MAX_RECEIPT_BYTES: u64 = 96 * 1_024;
@@ -1203,43 +1203,22 @@ fn macos_developer_dir() -> Option<PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn sbpl_literal(path: &str) -> String {
-    format!("(literal \"{}\")", escape_sbpl(path))
+    crate::sbpl::literal_str(path)
 }
 
 #[cfg(target_os = "macos")]
 fn sbpl_subpath(path: &str) -> String {
-    format!("(subpath \"{}\")", escape_sbpl(path))
+    crate::sbpl::subpath_str(path)
 }
 
 #[cfg(target_os = "macos")]
 fn sandbox_subpath(path: &Path) -> Result<String, CodeExecutionError> {
-    let path = path
-        .to_str()
-        .ok_or_else(|| CodeExecutionError::Sandbox("sandbox paths must be valid UTF-8".into()))?;
-    if path.chars().any(char::is_control) {
-        return Err(CodeExecutionError::Sandbox(
-            "sandbox paths cannot contain control characters".into(),
-        ));
-    }
-    Ok(sbpl_subpath(path))
+    crate::sbpl::subpath(path).map_err(|error| CodeExecutionError::Sandbox(error.to_string()))
 }
 
 #[cfg(target_os = "macos")]
 fn sandbox_literal(path: &Path) -> Result<String, CodeExecutionError> {
-    let path = path
-        .to_str()
-        .ok_or_else(|| CodeExecutionError::Sandbox("sandbox paths must be valid UTF-8".into()))?;
-    if path.chars().any(char::is_control) {
-        return Err(CodeExecutionError::Sandbox(
-            "sandbox paths cannot contain control characters".into(),
-        ));
-    }
-    Ok(sbpl_literal(path))
-}
-
-#[cfg(target_os = "macos")]
-fn escape_sbpl(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
+    crate::sbpl::literal(path).map_err(|error| CodeExecutionError::Sandbox(error.to_string()))
 }
 
 #[cfg(test)]
