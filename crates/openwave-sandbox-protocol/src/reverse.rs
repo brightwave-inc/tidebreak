@@ -132,7 +132,8 @@ pub enum RequestFrame {
 /// A unit of the **reserved control lane**, distinct from the request lane so
 /// it is never subject to request backpressure.
 ///
-/// Cancellation flows sandbox -> host; liveness flows in both directions. A
+/// Cancellation flows sandbox -> host; liveness flows in both directions, and
+/// the host's keepalive proves that an attached run is still owned. A
 /// conforming transport MUST carry this lane independently of [`RequestFrame`]
 /// (a separate stream, queue, or priority), so a [`ControlFrame::Cancel`] can
 /// preempt a saturated request backlog.
@@ -151,6 +152,8 @@ pub enum ControlFrame {
     Ping { nonce: u64 },
     /// Liveness response.
     Pong { nonce: u64 },
+    /// Host -> sandbox: reset the sandbox's idle watchdog.
+    Keepalive,
 }
 
 /// Provenance carried on every reverse operation for audit.

@@ -21,6 +21,8 @@
 //!   `/workspace`, provisioned in the container image).
 //! - `OPENWAVE_SANDBOX_LIFETIME_CAP_SECS` — an absolute lifetime cap. When it
 //!   elapses the entrypoint exits, which stops the container.
+//! - `OPENWAVE_SANDBOX_IDLE_TIMEOUT_SECS` — an idle timeout reset by authenticated
+//!   host keepalives and run activity. When it elapses the entrypoint exits.
 //!
 //! # Why the cap is enforced here
 //!
@@ -32,10 +34,9 @@
 //! reclaims containers a *living* host has lost track of; this cap covers the
 //! host that never comes back.
 //!
-//! It is an absolute bound on existence, not an idle timeout — a long, legitimate
-//! exec is not interrupted for being slow, and a container that keeps itself
-//! nominally busy still dies. Distinguishing idle from busy would need a keepalive
-//! from the attached host, which the transport does not carry yet.
+//! The idle watchdog reclaims an abandoned container promptly, while the
+//! absolute cap remains independent and ends even a host-owned run that is
+//! genuinely wedged forever.
 
 use std::env;
 use std::time::Duration;
@@ -57,6 +58,8 @@ const DEFAULT_WORKSPACE: &str = "/workspace";
 /// match the name the backend injects (see `sandbox_docker`'s
 /// `LIFETIME_CAP_ENV`).
 const LIFETIME_CAP_ENV: &str = "OPENWAVE_SANDBOX_LIFETIME_CAP_SECS";
+/// Environment variable carrying the idle timeout, in seconds.
+const IDLE_TIMEOUT_ENV: &str = "OPENWAVE_SANDBOX_IDLE_TIMEOUT_SECS";
 
 #[tokio::main]
 async fn main() {
@@ -105,9 +108,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // waits for the host to attach and deliver the run init — the task never
     // rides the environment, so a sandbox reclaimed before its handle committed
     // never executed anything — then runs to a submitted result.
+    let agent_run = run.clone();
     tokio::spawn(async move {
-        let init = run.init().await;
-        match run_agent(run, init.task, workspace).await {
+        let init = agent_run.init().await;
+        match run_agent(agent_run, init.task, workspace).await {
             Ok(answer) => eprintln!("openwave-sandbox-agent: submitted result: {answer}"),
             Err(error) => eprintln!("openwave-sandbox-agent: run failed: {error}"),
         }
@@ -116,12 +120,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Keep serving so the host can drain the event stream and drive teardown —
     // but no longer than the lifetime cap, whose whole purpose is to end a run
     // whose host will never drive that teardown.
-    let cap = lifetime_cap(env::var(LIFETIME_CAP_ENV).ok().as_deref());
+    let cap = positive_duration(env::var(LIFETIME_CAP_ENV).ok().as_deref());
+    let idle = positive_duration(env::var(IDLE_TIMEOUT_ENV).ok().as_deref());
+    let activity = run.activity();
     tokio::select! {
         () = supervisor.serve() => {}
         () = lifetime_elapsed(cap) => {
             let secs = cap.unwrap_or_default().as_secs();
             eprintln!("openwave-sandbox-agent: lifetime cap of {secs}s reached; exiting");
+        }
+        () = idle_elapsed(idle, activity) => {
+            let secs = idle.unwrap_or_default().as_secs();
+            eprintln!("openwave-sandbox-agent: idle timeout of {secs}s reached; exiting");
         }
     }
     Ok(())
@@ -142,7 +152,7 @@ async fn run_egress_proxy() -> Result<(), Box<dyn std::error::Error>> {
             None => "off".to_owned(),
         }
     );
-    let cap = lifetime_cap(env::var(LIFETIME_CAP_ENV).ok().as_deref());
+    let cap = positive_duration(env::var(LIFETIME_CAP_ENV).ok().as_deref());
     tokio::select! {
         () = proxy.serve() => {}
         () = lifetime_elapsed(cap) => {
@@ -158,13 +168,32 @@ async fn run_egress_proxy() -> Result<(), Box<dyn std::error::Error>> {
 /// Absent, unparseable, and zero all mean "no cap": a container must not die on
 /// arrival because a cap was mistyped, and a run with no cap configured is no
 /// worse off than before one existed.
-fn lifetime_cap(configured: Option<&str>) -> Option<Duration> {
+fn positive_duration(configured: Option<&str>) -> Option<Duration> {
     configured?
         .trim()
         .parse::<u64>()
         .ok()
         .filter(|secs| *secs > 0)
         .map(Duration::from_secs)
+}
+
+/// Completes after one uninterrupted idle period. Every activity generation
+/// resets the deadline; with no timeout it never completes.
+async fn idle_elapsed(timeout: Option<Duration>, mut activity: tokio::sync::watch::Receiver<u64>) {
+    let Some(timeout) = timeout else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep(timeout) => return,
+            changed = activity.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 /// Completes when the cap elapses. With no cap it never completes, so the
@@ -182,13 +211,16 @@ mod tests {
 
     #[test]
     fn a_malformed_or_zero_cap_leaves_the_sandbox_uncapped() {
-        assert_eq!(lifetime_cap(Some(" 900 ")), Some(Duration::from_secs(900)));
-        assert_eq!(lifetime_cap(None), None);
-        assert_eq!(lifetime_cap(Some("")), None);
-        assert_eq!(lifetime_cap(Some("soon")), None);
-        assert_eq!(lifetime_cap(Some("-1")), None);
+        assert_eq!(
+            positive_duration(Some(" 900 ")),
+            Some(Duration::from_secs(900))
+        );
+        assert_eq!(positive_duration(None), None);
+        assert_eq!(positive_duration(Some("")), None);
+        assert_eq!(positive_duration(Some("soon")), None);
+        assert_eq!(positive_duration(Some("-1")), None);
         // The dangerous misreading: zero must not mean "expire immediately".
-        assert_eq!(lifetime_cap(Some("0")), None);
+        assert_eq!(positive_duration(Some("0")), None);
     }
 
     /// The cap must fire on its own, and only when configured. A paused clock
@@ -204,5 +236,30 @@ mod tests {
             () = &mut uncapped => panic!("an uncapped sandbox must never self-terminate"),
             () = tokio::time::sleep(Duration::from_secs(365 * 24 * 60 * 60)) => {}
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn activity_resets_idle_but_not_the_absolute_cap() {
+        let (activity, receiver) = tokio::sync::watch::channel(0u64);
+        let idle = idle_elapsed(Some(Duration::from_secs(10)), receiver);
+        tokio::pin!(idle);
+        let absolute = tokio::time::sleep(Duration::from_secs(25));
+        tokio::pin!(absolute);
+
+        tokio::time::advance(Duration::from_secs(9)).await;
+        activity.send_modify(|generation| *generation += 1);
+        tokio::time::advance(Duration::from_secs(9)).await;
+        assert!(tokio::time::timeout(Duration::ZERO, &mut idle)
+            .await
+            .is_err());
+
+        tokio::time::advance(Duration::from_secs(7)).await;
+        absolute.await;
+        assert!(tokio::time::timeout(Duration::ZERO, &mut idle)
+            .await
+            .is_err());
+
+        tokio::time::advance(Duration::from_secs(3)).await;
+        idle.await;
     }
 }
