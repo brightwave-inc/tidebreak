@@ -282,14 +282,25 @@ Treat the release workflow as public even while the repository is private:
   for proposing reviewed action updates.
 - A published native GitHub Release dispatches the production build on the
   protected `main` workflow. The build accepts only a published, non-prerelease
-  tag whose resolved commit is on `main`, and every secret-bearing job checks
-  out that immutable commit SHA. It never runs with production secrets for a
-  pull request or a manually selected feature-branch workflow.
+  tag whose resolved commit is on `main`. It never runs with production secrets
+  for a pull request or a manually selected feature-branch workflow.
+- The jobs that build and sign check out that immutable commit SHA. The two
+  AWS-credentialed jobs — the hosted-release inspection and the publisher —
+  deliberately check out the dispatching `main` commit instead, so they run the
+  release automation as it exists on `main` rather than as it existed at the
+  tag. The consequence to keep in mind: manifests and hosted metadata are
+  produced by main-tip `scripts/`, so a change to
+  `scripts/create-release-manifests.mjs` alters what a *rerun* of an older tag
+  would generate. The immutability preflight is what stops that from silently
+  overwriting a published release — it requires an existing manifest to match
+  before it can skip rebuilding, and a mismatch fails the run.
 - Apple and Tauri credentials remain environment secrets. The Tauri private key
-  is exposed only to the post-notarization updater-signing step, not the build
-  action. AWS authentication uses GitHub OIDC, so no long-lived AWS key is
-  stored in GitHub or the source tree. Infrastructure identifiers remain
-  environment variables rather than committed configuration.
+  reaches the configuration-validation precheck that runs before the build, and
+  the post-notarization updater-signing and artifact-verification steps. It is
+  not passed to the Tauri build action itself. AWS authentication uses GitHub
+  OIDC, so no long-lived AWS key is stored in GitHub or the source tree.
+  Infrastructure identifiers remain environment variables rather than committed
+  configuration.
 - The Developer ID certificate is imported into an ephemeral runner keychain
   before Tauri invokes the release-only resource-signing hook. The workflow
   verifies the configured identity is available, then deletes the keychain and
@@ -375,7 +386,20 @@ commits to maintaining multiple release lines.
 ## Required repository settings
 
 Keep squash merge as the only merge method and set its defaults to **Pull
-request title** and **Pull request body**. Keep the protected aggregate CI,
-PostgreSQL state-machine, secret-scan, semantic-title, and release-policy checks
-required on `main`. The release-draft workflow uses the built-in
-`GITHUB_TOKEN`; it does not require a personal access token.
+request title** and **Pull request body**.
+
+Branch protection on `main` requires the individual CI jobs, not an aggregate
+wrapper — there is none. The required contexts are `change scope`, `semantic PR
+title`, `release policy`, `secret scan (gitleaks)`, `rustfmt`, `clippy`,
+`desktop test`, `test`, `postgres state machine`, and `desktop UI`. Only the
+first five run on an ordinary pull request; the compile-heavy lanes (`clippy`,
+`desktop test`, `test`, `postgres state machine`, `desktop UI`) are opt-in
+behind the `full-ci` label and otherwise report a successful skip, which is what
+lets a required check pass without running. That is the deliberate fast gate
+described in [`CLAUDE.md`](../CLAUDE.md), backed by full validation on every
+push to `main` and on the weekly scheduled run — not a claim that PostgreSQL
+state-machine coverage gates every merge. Keep both sets required so the
+skip-reporting stays wired up, and add any new always-running lane to the list.
+
+The release-draft workflow uses the built-in `GITHUB_TOKEN`; it does not require
+a personal access token.
