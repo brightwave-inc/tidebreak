@@ -38,6 +38,9 @@
     }
   },
   "plugins": {
+    "shell": {
+      "open": "https?://.+"
+    },
     "deep-link": {
       "desktop": {
         "schemes": ["openwave", "openwave-dev"]

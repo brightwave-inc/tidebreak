@@ -159,9 +159,10 @@ export function hasMacOverlayTitlebar(): boolean {
  *
  * The webview swallows `window.open` and `target="_blank"` (no new-window
  * handler by design), so anything that must leave the app — the gateway
- * sign-in page — goes through the shell plugin, whose `open` permission
- * validates the URL scheme. Returns false outside the native host so callers
- * can fall back to `window.open` in a plain browser.
+ * sign-in page — goes through the shell plugin, whose `open` scope
+ * (`plugins.shell.open` in `tauri.conf.json`) admits only `http(s)` URLs.
+ * Returns false outside the native host so callers can fall back to
+ * `window.open` in a plain browser.
  */
 export async function openExternal(url: string): Promise<boolean> {
   if (!isTauri()) return false;

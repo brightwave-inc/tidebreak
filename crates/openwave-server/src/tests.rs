@@ -2074,6 +2074,11 @@ async fn mcp_view_frames_are_single_use_capabilities_with_their_own_csp() {
     assert!(csp.contains("default-src 'none'"));
     assert!(csp.contains("script-src 'unsafe-inline'"));
     assert!(csp.contains("connect-src 'none'"));
+    // The opaque origin is asserted by the response, not left to whoever
+    // embeds it: without this an embedder that forgot `sandbox` would give the
+    // document the API server's own origin, and with it the bearer.
+    assert!(csp.contains("sandbox allow-scripts"));
+    assert!(!csp.contains("allow-same-origin"));
     assert_eq!(
         frame
             .headers()
@@ -2194,6 +2199,11 @@ async fn app_view_frames_serve_stored_revisions_under_the_same_contract() {
     assert!(csp.contains("default-src 'none'"));
     assert!(csp.contains("script-src 'unsafe-inline'"));
     assert!(csp.contains("connect-src 'none'"));
+    // The opaque origin is asserted by the response, not left to whoever
+    // embeds it: without this an embedder that forgot `sandbox` would give the
+    // document the API server's own origin, and with it the bearer.
+    assert!(csp.contains("sandbox allow-scripts"));
+    assert!(!csp.contains("allow-same-origin"));
     assert_eq!(
         frame
             .headers()

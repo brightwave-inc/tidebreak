@@ -1,0 +1,21 @@
+{
+  "identifier": "dev-server",
+  "description": "The Vite dev server's origin, which `tauri dev` loads the frontend from (`build.devUrl`). Deliberately outside `capabilities/` so the build script's `./capabilities/**/*` glob cannot compile it into a release binary: it is added at runtime under `debug_assertions` only. The port is the exact one `build.devUrl` names — a wildcard would hand the IPC to anything else listening on loopback, including HTML the embedded API server serves to sandboxed app frames.",
+  "windows": [
+    "main"
+  ],
+  "remote": {
+    "urls": [
+      "http://localhost:1420",
+      "http://127.0.0.1:1420"
+    ]
+  },
+  "permissions": [
+    "core:default",
+    "core:event:deny-emit",
+    "core:event:deny-emit-to",
+    "core:window:allow-start-dragging",
+    "core:webview:allow-set-webview-zoom",
+    "shell:allow-open"
+  ]
+}

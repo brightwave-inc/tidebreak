@@ -1,16 +1,10 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
+  "description": "Capability for the main window. Local origins only: a packaged app serves its frontend from Tauri's own protocol, so nothing served over http://localhost — including MCP-app HTML the embedded API serves — reaches the IPC through this capability. The Vite dev server's origin is granted separately and only in debug builds; see capabilities-dev/dev-server.json.",
   "windows": [
     "main"
   ],
-  "remote": {
-    "urls": [
-      "http://localhost:*",
-      "http://127.0.0.1:*"
-    ]
-  },
   "permissions": [
     "core:default",
     "core:event:deny-emit",
