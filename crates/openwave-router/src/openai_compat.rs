@@ -1,11 +1,11 @@
 //! OpenAI-compatible Chat Completions provider.
 //!
 //! Speaks the widely-supported `/v1/chat/completions` streaming protocol so the
-//! same adapter covers OpenAI itself, OpenRouter, Fireworks, vLLM, LM Studio,
-//! and other OpenAI-compatible gateways. Point `base_url` at the gateway's
+//! same adapter covers OpenRouter, Fireworks, vLLM, LM Studio, and other
+//! OpenAI-compatible gateways. Point `base_url` at the gateway's
 //! `/v1` root (default: `https://api.openai.com/v1`).
 //!
-//! Native OpenAI's Responses API is a separate concern; this adapter deliberately
+//! Native OpenAI uses the separate Responses API adapter; this one deliberately
 //! targets the Chat Completions shape that local and third-party runtimes share.
 
 use async_trait::async_trait;
@@ -42,7 +42,10 @@ pub struct OpenAiCompatProvider {
 }
 
 impl OpenAiCompatProvider {
-    /// Build a provider hitting OpenAI's Chat Completions API.
+    /// Build a Chat Completions provider with OpenAI's default API root.
+    ///
+    /// Native OpenAI routing uses [`crate::OpenAiProvider`]; this constructor
+    /// remains for direct embedders that already depend on the adapter.
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             client: crate::http::streaming_client(),
@@ -195,12 +198,7 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         body["max_completion_tokens"] = json!(max_tokens);
         // Only reasoning models understand `reasoning_effort`; forwarding it to a
         // plain chat model would be rejected. Absent, the provider's default holds.
-        // Chat Completions rejects function tools with an active reasoning
-        // effort. Keep tools usable by explicitly disabling effort for that
-        // request; without tools, preserve the chat's selected level.
-        if !req.tools.is_empty() {
-            body["reasoning_effort"] = json!(openwave_core::ReasoningEffort::None.as_str());
-        } else if let Some(effort) = req
+        if let Some(effort) = req
             .reasoning_effort
             .filter(|effort| *effort != openwave_core::ReasoningEffort::None)
         {
@@ -781,29 +779,6 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_models_disable_effort_when_tools_are_advertised() {
-        for effort in [None, Some(ReasoningEffort::Low)] {
-            let req = ChatRequest {
-                provider: Some(ProviderId::new("openai")),
-                model: "gpt-5.6-sol".into(),
-                reasoning_model: true,
-                messages: vec![ChatMessage::text(Role::User, "call a tool")],
-                tools: vec![ToolSpec {
-                    name: "exec".into(),
-                    description: "run a command".into(),
-                    input_schema: json!({"type": "object"}),
-                }],
-                max_tokens: Some(1024),
-                reasoning_effort: effort,
-                ..Default::default()
-            };
-            let body = build_request_json(&req).unwrap();
-            assert_eq!(body["reasoning_effort"], "none");
-            assert_eq!(body["tools"][0]["function"]["name"], "exec");
-        }
-    }
-
-    #[test]
     fn gpt_5_6_none_uses_the_provider_default() {
         let req = ChatRequest {
             provider: Some(ProviderId::new("openai")),
@@ -1226,5 +1201,60 @@ mod tests {
         let mut out = Vec::new();
         extend_openai_messages(&mut out, &msg, &ImageAttachments::new()).unwrap();
         assert_eq!(out[0]["content"], "hi");
+    }
+
+    #[tokio::test]
+    async fn compatible_provider_keeps_the_chat_completions_endpoint() {
+        use axum::extract::{Request, State};
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use axum::Router;
+        use tokio::sync::oneshot;
+
+        async fn capture(
+            State(tx): State<std::sync::Arc<std::sync::Mutex<Option<oneshot::Sender<String>>>>>,
+            request: Request,
+        ) -> impl IntoResponse {
+            if let Some(tx) = tx.lock().unwrap().take() {
+                let _ = tx.send(request.uri().path().to_owned());
+            }
+            (
+                StatusCode::OK,
+                [("content-type", "text/event-stream")],
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+                ),
+            )
+        }
+
+        let (tx, rx) = oneshot::channel();
+        let state = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
+        let app = Router::new().fallback(post(capture)).with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let provider = OpenAiCompatProvider::compatible("key", format!("http://{address}/v1"));
+        let stream = provider
+            .stream(ChatRequest {
+                model: "local-model".into(),
+                messages: vec![ChatMessage::text(Role::User, "hi")],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let events: Vec<_> = stream.collect().await;
+        assert_eq!(rx.await.unwrap(), "/v1/chat/completions");
+        assert_eq!(
+            events,
+            vec![
+                ProviderEvent::TextDelta { text: "ok".into() },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn
+                },
+            ]
+        );
     }
 }
