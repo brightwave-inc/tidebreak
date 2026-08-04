@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import {
   ChevronDown,
   ChevronRight,
+  Loader2,
   Pencil,
   Plus,
   RefreshCw,
@@ -444,8 +445,12 @@ export function ConnectedAppsPanel({
     try {
       const preview = await client.previewRestSpec(source);
       update({ preview, selected: defaultSelection(preview) });
+      toast.success(
+        `Found ${preview.operations.length} operation${preview.operations.length === 1 ? "" : "s"}`,
+      );
     } catch (err) {
       setFormError(errorMessage(err));
+      toast.error(errorMessage(err));
     } finally {
       setPreviewing(false);
     }
@@ -546,6 +551,7 @@ export function ConnectedAppsPanel({
       toast.success(`Saved ${name}`);
     } catch (err) {
       setFormError(errorMessage(err));
+      toast.error(errorMessage(err));
     } finally {
       setSaving(false);
     }
@@ -716,6 +722,7 @@ export function ConnectedAppsPanel({
               disabled={saving || previewing}
               onClick={() => void loadOperations()}
             >
+              {previewing && <Loader2 size={14} className="animate-spin" />}
               {previewing ? "Fetching…" : "Fetch operations"}
             </Button>
           </div>
@@ -744,6 +751,7 @@ export function ConnectedAppsPanel({
             disabled={saving || previewing}
             onClick={() => void loadOperations()}
           >
+            {previewing && <Loader2 size={14} className="animate-spin" />}
             {previewing ? "Loading…" : "Select operations…"}
           </Button>
         </div>
@@ -813,7 +821,8 @@ export function ConnectedAppsPanel({
       {formError && <SettingsError>{formError}</SettingsError>}
       <div className="flex gap-2">
         <Button disabled={saving} onClick={() => void save()}>
-          Save
+          {saving && <Loader2 size={14} className="animate-spin" />}
+          {saving ? "Saving…" : "Save"}
         </Button>
         <Button
           variant="outline"
