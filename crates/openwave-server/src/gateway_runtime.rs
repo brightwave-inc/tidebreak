@@ -1512,6 +1512,136 @@ mod tests {
         assert!(mcp.snapshot().get("mcp__tools__lookup").is_none());
     }
 
+    /// #1441: the assembled `AppState` must give the resolver, the /gateway
+    /// routes, and MCP dispatch ONE gateway runtime. Attestation contexts
+    /// live in a per-instance registry, so when `state.mcp` held its own
+    /// runtime a chat's inference token and its MCP call bearer minted in
+    /// two different contexts and the gateway's observation-consume refused
+    /// every attested `tools/call`. Assembled the way `bind_inner` does —
+    /// one runtime injected into the resolver and the state — and driven
+    /// across the boundary that used to be two instances: the token source
+    /// from `state.gateway`, the dispatch bearer through `state.mcp`.
+    #[tokio::test]
+    async fn assembled_state_mints_inference_and_mcp_dispatch_in_one_attestation_context() {
+        let gateway = Arc::new(FakeGateway::default());
+        let address = serve(gateway.clone()).await;
+        let base = format!("http://{address}");
+        let directory = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                directory.path().join("gateway.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let secrets: Arc<dyn SecretProvider> = Arc::new(MockSecrets::default());
+        let credentials: openwave_connectors::GatewayCredentials = serde_json::from_value(json!({
+            "base_url": base,
+            "installation_id": "install-1",
+            "user_id": "user-1",
+            "refresh_token": "mg_rt_seed",
+            "access_tokens": {}
+        }))
+        .unwrap();
+        CredentialVault::new(secrets.clone())
+            .save(&credentials)
+            .await
+            .unwrap();
+        crate::managed_policy::provision(&*store, &base)
+            .await
+            .unwrap();
+
+        let os_policy: Arc<dyn crate::managed_policy::OsPolicySource> =
+            Arc::new(crate::managed_policy::NoOsPolicy);
+        let runtime = GatewayRuntime::new(store.clone(), secrets.clone(), os_policy.clone());
+        let resolver = Arc::new(crate::resolver::ConfiguredResolver::new(
+            store.clone(),
+            secrets.clone(),
+            runtime.clone(),
+            os_policy.clone(),
+        ));
+        let state = crate::state::AppState::with_gateway_runtime(
+            openwave_core::Config::desktop(directory.path()),
+            store.clone(),
+            resolver,
+            secrets,
+            Arc::new(openwave_core::ToolRegistry::new()),
+            openwave_core::AgentConfig::default(),
+            uuid::Uuid::new_v4(),
+            runtime,
+            os_policy,
+        )
+        .unwrap();
+
+        // Identity first: dispatch resolves through the very runtime the
+        // routes and resolver hold — the cheap pin on the bug class.
+        let dispatch = state.mcp.gateway_endpoints();
+        assert!(
+            std::ptr::eq(
+                Arc::as_ptr(&dispatch) as *const (),
+                Arc::as_ptr(&state.gateway) as *const (),
+            ),
+            "MCP dispatch must share the state's gateway runtime"
+        );
+
+        // And behaviorally: mount an endpoint through the state's MCP
+        // runtime, dispatch one chat's tools/call, mint that chat's
+        // router-facing inference token — one attestation context.
+        let info = state
+            .mcp
+            .replace(crate::mcp_config::McpServersConfig {
+                servers: vec![crate::mcp_config::McpServerDefinition {
+                    name: "tools".to_string(),
+                    command: None,
+                    args: Vec::new(),
+                    env: std::collections::BTreeMap::new(),
+                    env_from: Vec::new(),
+                    cwd: None,
+                    url: None,
+                    bearer_token_env: None,
+                    gateway_endpoint: Some("tools".to_string()),
+                    request_timeout_ms: 60_000,
+                    enabled: true,
+                }],
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            info.servers[0].health,
+            crate::mcp_config::McpHealth::Healthy
+        );
+
+        let chat = openwave_core::id::ChatId::new();
+        let snapshot = state.mcp.snapshot();
+        let tool = snapshot.get("mcp__tools__lookup").unwrap();
+        let ctx = openwave_core::ToolCtx::without_private_scratch(chat, None);
+        tool.execute(&ctx, json!({})).await.unwrap();
+        let source = state
+            .gateway
+            .route_token_source()
+            .await
+            .expect("signed-in runtime offers a token source");
+        source.bearer_token_for(Some(chat)).await.unwrap();
+
+        let minted = gateway.minted.lock().unwrap();
+        let chat_mcp = minted
+            .iter()
+            .filter(|(resource, _)| resource == "mcp:tools")
+            .nth(1)
+            .map(|(_, context)| context.clone().unwrap())
+            .expect("the tool call minted a chat-scoped mcp:tools token");
+        let chat_llm = minted
+            .iter()
+            .find(|(resource, _)| resource == "llm")
+            .map(|(_, context)| context.clone().unwrap())
+            .expect("the chat's inference minted an llm token");
+        assert_eq!(
+            chat_mcp, chat_llm,
+            "inference and MCP dispatch must mint in the same attestation context"
+        );
+    }
+
     /// Mount-by-default, end to end: a reconcile against the entitled apps
     /// list mounts the endpoint enabled and connected, and a second
     /// reconcile with unchanged entitlements is a strict no-op — the

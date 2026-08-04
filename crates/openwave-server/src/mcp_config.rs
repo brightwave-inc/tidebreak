@@ -684,6 +684,15 @@ impl McpRuntime {
         }
     }
 
+    /// The gateway resolver MCP dispatch rides on — exposed so tests can pin
+    /// that it is the same instance as `AppState::gateway` (#1441: a second
+    /// runtime splits attestation contexts and every attested `tools/call`
+    /// is refused).
+    #[cfg(test)]
+    pub(crate) fn gateway_endpoints(&self) -> Arc<dyn GatewayEndpoints> {
+        self.gateway.clone()
+    }
+
     /// How far managed policy currently locks the manual transports.
     ///
     /// Read per operation rather than cached at boot, like every other policy
