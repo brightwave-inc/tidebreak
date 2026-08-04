@@ -246,6 +246,27 @@ jobs:
             ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
             detect --source=/repo --redact --verbose
 
+  advisories:
+    name: supply-chain advisories (cargo-deny)
+    needs: changes
+    # cargo-deny resolves the crate graph and reads the RustSec database; it
+    # compiles nothing, so this runs on every Rust-scoped pull request instead
+    # of hiding behind `full-ci`. The weekly scheduled run re-checks an
+    # unchanged lockfile against newly published advisories.
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2.85.7
+        with:
+          tool: cargo-deny@0.20.2
+      # Posture and exceptions live in deny.toml. `--all-features` covers
+      # optional dependencies that a default-feature graph would miss.
+      - name: Check RustSec advisories
+        run: cargo deny --all-features check advisories
+
   fmt:
     name: rustfmt
     needs: changes
