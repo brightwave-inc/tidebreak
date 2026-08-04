@@ -1066,9 +1066,11 @@ mod tests {
             false,
         );
 
+        // Re-pinned when #1491 made Open the default network policy for new
+        // chats: the representative prompt's network guidance moved with it.
         assert_eq!(
             identity(&prompt),
-            "foreground-v2:sha256:a37f05bd14906db68575354e6118609ce6a2b5e8f908aeee4abad6ac2e1cb072"
+            "foreground-v2:sha256:28043f7e84f2ef827100574ba635f534c04ad969f9e8e9b2cf534fd91ff7d664"
         );
     }
 }
