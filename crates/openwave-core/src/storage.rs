@@ -408,7 +408,7 @@ pub enum CheckpointSandboxSpawnOutcome {
     DelegatedResourceUnavailable,
     /// The exact foreground claim is missing, stale, or no longer live.
     LeaseLost,
-    /// Four nonterminal children already belong to this origin turn.
+    /// The chat already has the configured number of active background runs.
     AtCapacity,
     /// A durable steer won the checkpoint race and must be applied first.
     SteerPending(TurnRun),
@@ -2014,7 +2014,7 @@ pub trait Store: Send + Sync {
     /// second identity for the same model request. The origin turn, foreground
     /// parent, child, and immutable admission receipt commit together under the
     /// chat/turn write lock. Existing exact receipts are recovered before the
-    /// bounded outstanding-child check, making an ambiguous commit retry safe.
+    /// bounded per-chat active-run check, making an ambiguous commit retry safe.
     /// A non-blocking checkpoint may additionally bind one exact root-relative
     /// file identity after validating its root against the locked chat
     /// attachment projection; the receipt itself grants no host authority.
@@ -2028,7 +2028,7 @@ pub trait Store: Send + Sync {
         _input: &str,
         _lease_token: uuid::Uuid,
         _expected_steer_revision: i64,
-        _max_outstanding_children: u32,
+        _max_active_background_agents: u32,
         _now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<AdmitSandboxAgentRunOutcome>> {
         agent_run_storage_unavailable()
@@ -2052,7 +2052,7 @@ pub trait Store: Send + Sync {
         _input: &str,
         _lease_token: uuid::Uuid,
         _expected_steer_revision: i64,
-        _max_outstanding_children: u32,
+        _max_active_background_agents: u32,
         _now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<AdmitSandboxAgentRunOutcome>> {
         agent_run_storage_unavailable()
@@ -2212,6 +2212,8 @@ pub trait Store: Send + Sync {
     /// A successful transition writes one terminal, non-executable
     /// orchestration tool call and its `ToolCallCompleted` event, applies one
     /// progress delta, then moves `running` to `resuming` with no live lease.
+    /// Admission counts nonterminal background runs across the whole chat
+    /// against the request's settings-resolved limit.
     /// Foreground orchestration advertises this together with the explicit
     /// ordered wait boundary; sandbox agents receive neither contract.
     async fn checkpoint_sandbox_spawn(

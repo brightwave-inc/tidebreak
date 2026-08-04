@@ -257,7 +257,7 @@ pub(in crate::db) async fn admit_sandbox_agent_run(
     input: &str,
     lease_token: uuid::Uuid,
     expected_steer_revision: i64,
-    max_outstanding_children: u32,
+    max_active_background_agents: u32,
     now: chrono::DateTime<Utc>,
 ) -> Result<Option<AdmitSandboxAgentRunOutcome>> {
     admit_sandbox_agent_run_at(
@@ -268,7 +268,7 @@ pub(in crate::db) async fn admit_sandbox_agent_run(
         AgentRunExecutionLocation::InProcess,
         lease_token,
         expected_steer_revision,
-        max_outstanding_children,
+        max_active_background_agents,
         now,
     )
     .await
@@ -287,7 +287,7 @@ pub(in crate::db) async fn admit_sandbox_container_agent_run(
     input: &str,
     lease_token: uuid::Uuid,
     expected_steer_revision: i64,
-    max_outstanding_children: u32,
+    max_active_background_agents: u32,
     now: chrono::DateTime<Utc>,
 ) -> Result<Option<AdmitSandboxAgentRunOutcome>> {
     admit_sandbox_agent_run_at(
@@ -298,7 +298,7 @@ pub(in crate::db) async fn admit_sandbox_container_agent_run(
         AgentRunExecutionLocation::Container,
         lease_token,
         expected_steer_revision,
-        max_outstanding_children,
+        max_active_background_agents,
         now,
     )
     .await
@@ -313,7 +313,7 @@ async fn admit_sandbox_agent_run_at(
     execution_location: AgentRunExecutionLocation,
     lease_token: uuid::Uuid,
     expected_steer_revision: i64,
-    max_outstanding_children: u32,
+    max_active_background_agents: u32,
     now: chrono::DateTime<Utc>,
 ) -> Result<Option<AdmitSandboxAgentRunOutcome>> {
     validate_admission_request(
@@ -321,7 +321,7 @@ async fn admit_sandbox_agent_run_at(
         spawn_call_id,
         input,
         lease_token,
-        max_outstanding_children,
+        max_active_background_agents,
     )?;
     // Validate the caller timestamp at the boundary, but never use a value
     // captured before lock acquisition to fence a live lease.
@@ -359,7 +359,7 @@ async fn admit_sandbox_agent_run_at(
         execution_location,
         lease_token,
         expected_steer_revision,
-        max_outstanding_children,
+        max_active_background_agents,
         now,
     )
     .await;
@@ -414,7 +414,7 @@ pub(in crate::db) async fn admit_sandbox_agent_run_on<C>(
     execution_location: AgentRunExecutionLocation,
     lease_token: uuid::Uuid,
     expected_steer_revision: i64,
-    max_outstanding_children: u32,
+    max_active_background_agents: u32,
     now: chrono::DateTime<Utc>,
 ) -> Result<AdmitSandboxAgentRunOutcome>
 where
@@ -494,14 +494,14 @@ where
         }
     }
 
-    // A terminal child remains outstanding until its immutable delivery has
-    // been consumed or explicitly retired. Counting only live run rows would
-    // let fast children fall out of this bound before the foreground model can
-    // wait on them, eventually producing more IDs than one ordered wait can
-    // consume. The shared classifier also validates admission and terminal
-    // receipt provenance before capacity can be released.
-    let outstanding = unsettled_sandbox_children_for_origin_turn_on(conn, turn).await?;
-    if outstanding.len() >= max_outstanding_children as usize {
+    // Capacity remains occupied until the parent consumes or retires a
+    // terminal delivery. Counting only nonterminal run rows would let fast
+    // children release their slot before their result is safely incorporated,
+    // so churn could orphan completed work. The provenance-validating
+    // unsettled classifier deliberately fails closed when a terminal child is
+    // missing its delivery.
+    let unsettled = unsettled_sandbox_children_for_origin_turn_on(conn, turn).await?;
+    if unsettled.len() >= max_active_background_agents as usize {
         return Ok(AdmitSandboxAgentRunOutcome::AtCapacity);
     }
 
@@ -672,7 +672,7 @@ pub(in crate::db) async fn accept_sandbox_agent_run_and_park_turn(
         spawn_call_id,
         input,
         lease_token,
-        AgentRun::DEFAULT_MAX_OUTSTANDING_CHILDREN,
+        AgentRun::DEFAULT_MAX_ACTIVE_BACKGROUND_AGENTS,
     )?;
     let admission_outcome = admit_sandbox_agent_run_on(
         &transaction,
@@ -683,7 +683,7 @@ pub(in crate::db) async fn accept_sandbox_agent_run_and_park_turn(
         AgentRunExecutionLocation::InProcess,
         lease_token,
         expected_steer_revision,
-        AgentRun::DEFAULT_MAX_OUTSTANDING_CHILDREN,
+        AgentRun::DEFAULT_MAX_ACTIVE_BACKGROUND_AGENTS,
         now,
     )
     .await;
@@ -2889,16 +2889,18 @@ fn validate_admission_request(
     spawn_call_id: CallId,
     input: &str,
     lease_token: uuid::Uuid,
-    max_outstanding_children: u32,
+    max_active_background_agents: u32,
 ) -> Result<()> {
     if origin_turn_id.0.is_nil() || spawn_call_id.0.is_nil() || lease_token.is_nil() {
         return Err(AgentError::Store(
             "sandbox admission identities must not be nil".into(),
         ));
     }
-    if max_outstanding_children == 0 || max_outstanding_children > AgentRun::MAX_CONCURRENCY_LIMIT {
+    if max_active_background_agents == 0
+        || max_active_background_agents > AgentRun::MAX_CONCURRENCY_LIMIT
+    {
         return Err(AgentError::Store(format!(
-            "sandbox outstanding-child limit must be in 1..={}",
+            "sandbox active-agent limit must be in 1..={}",
             AgentRun::MAX_CONCURRENCY_LIMIT
         )));
     }

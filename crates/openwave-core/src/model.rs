@@ -1364,13 +1364,8 @@ impl AgentRun {
     pub const DEFAULT_MAX_DURATION: chrono::Duration = chrono::Duration::hours(1);
     /// Largest accepted scheduler concurrency bound.
     pub const MAX_CONCURRENCY_LIMIT: u32 = 1_024;
-    /// Default maximum unsettled children from one foreground turn.
-    ///
-    /// A child remains unsettled while it is running or while its terminal
-    /// delivery is still pending or claimed. Admission enforces this
-    /// independently from worker concurrency so both queued work and unread
-    /// results stay bounded.
-    pub const DEFAULT_MAX_OUTSTANDING_CHILDREN: u32 = 4;
+    /// Default maximum concurrently active background agents in one chat.
+    pub const DEFAULT_MAX_ACTIVE_BACKGROUND_AGENTS: u32 = 5;
     /// Maximum stable failure-category length.
     pub const MAX_ERROR_CODE_LEN: usize = 128;
     /// Maximum persisted diagnostic-detail length.
@@ -1448,6 +1443,8 @@ pub struct SandboxSpawnCheckpointRequest {
     pub result: String,
     pub event_ordinal: i32,
     pub progress: TurnCheckpointProgress,
+    /// Settings-resolved per-chat ceiling on nonterminal background runs.
+    pub max_active_background_agents: u32,
     /// Host-resolved execution location for the child admitted by this atomic
     /// checkpoint. Existing callers use the in-process default.
     pub execution_location: AgentRunExecutionLocation,
@@ -2119,10 +2116,10 @@ pub struct AgentRunWaitSetCandidate {
 }
 
 impl TurnAgentRunWaitSet {
-    /// The admission layer caps unsettled children at four, including terminal
-    /// deliveries that have not been consumed or retired. Keeping the wait
-    /// bound equal prevents an oversized continuation checkpoint.
-    pub const MAX_CHILDREN: usize = AgentRun::DEFAULT_MAX_OUTSTANDING_CHILDREN as usize;
+    /// Keep one ordered wait within the durable result-envelope budget. This
+    /// bound is independent of the configurable admission cap; larger caps are
+    /// consumed in groups as children settle.
+    pub const MAX_CHILDREN: usize = 4;
 }
 
 /// Durable lifecycle of a [`TurnAgentRunWait`].

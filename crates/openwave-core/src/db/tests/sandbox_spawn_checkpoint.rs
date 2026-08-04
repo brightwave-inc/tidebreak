@@ -69,6 +69,7 @@ fn request(
         .unwrap(),
         event_ordinal: ordinal,
         progress,
+        max_active_background_agents: AgentRun::DEFAULT_MAX_ACTIVE_BACKGROUND_AGENTS,
         execution_location: crate::AgentRunExecutionLocation::InProcess,
     }
 }
@@ -634,11 +635,11 @@ async fn stale_lease_pending_steer_and_capacity_leave_no_checkpoint_fragments() 
     assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
     assert_eq!(store.list_events(chat.id, 0).await.unwrap().len(), 1);
 
-    // Use a fresh chat to exercise the fixed four-child outstanding cap.
+    // Use a fresh chat to exercise the default per-chat active-agent cap.
     let cap_chat = sample_chat();
     store.create_chat(&cap_chat).await.unwrap();
     let (cap_turn, cap_lease) = running_turn(&store, cap_chat.id).await;
-    for index in 0..AgentRun::DEFAULT_MAX_OUTSTANDING_CHILDREN {
+    for index in 0..AgentRun::DEFAULT_MAX_ACTIVE_BACKGROUND_AGENTS {
         let call = CallId::new();
         assert!(matches!(
             store
@@ -648,7 +649,7 @@ async fn stale_lease_pending_steer_and_capacity_leave_no_checkpoint_fragments() 
                     &format!("child {index}"),
                     cap_lease,
                     cap_turn.steer_revision,
-                    AgentRun::DEFAULT_MAX_OUTSTANDING_CHILDREN,
+                    AgentRun::DEFAULT_MAX_ACTIVE_BACKGROUND_AGENTS,
                     Utc::now(),
                 )
                 .await
@@ -660,7 +661,7 @@ async fn stale_lease_pending_steer_and_capacity_leave_no_checkpoint_fragments() 
         &cap_turn,
         cap_lease,
         CallId::new(),
-        "fifth child",
+        "sixth child",
         2,
         progress(),
     );
@@ -671,7 +672,7 @@ async fn stale_lease_pending_steer_and_capacity_leave_no_checkpoint_fragments() 
             .unwrap(),
         Some(CheckpointSandboxSpawnOutcome::AtCapacity)
     ));
-    assert_eq!(store.list_agent_runs(cap_chat.id).await.unwrap().len(), 5);
+    assert_eq!(store.list_agent_runs(cap_chat.id).await.unwrap().len(), 6);
     assert!(store.list_tool_calls(cap_chat.id).await.unwrap().is_empty());
 }
 

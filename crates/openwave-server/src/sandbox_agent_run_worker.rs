@@ -3086,6 +3086,8 @@ mod tests {
                         model_steps: 1,
                         usage: Usage::default(),
                     },
+                    max_active_background_agents:
+                        openwave_core::AgentRun::DEFAULT_MAX_ACTIVE_BACKGROUND_AGENTS,
                     execution_location: openwave_core::AgentRunExecutionLocation::InProcess,
                 },
                 Utc::now(),

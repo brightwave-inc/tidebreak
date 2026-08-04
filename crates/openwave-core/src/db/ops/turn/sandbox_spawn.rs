@@ -178,7 +178,7 @@ where
         request.execution_location,
         request.lease_token,
         request.expected_steer_revision,
-        AgentRun::DEFAULT_MAX_OUTSTANDING_CHILDREN,
+        request.max_active_background_agents,
         now,
     )
     .await?;
@@ -504,6 +504,8 @@ fn validate_request(request: &SandboxSpawnCheckpointRequest) -> Result<()> {
         || request.expected_steer_revision < 0
         || !(2..i32::MAX).contains(&request.event_ordinal)
         || request.progress.model_steps <= 0
+        || request.max_active_background_agents == 0
+        || request.max_active_background_agents > AgentRun::MAX_CONCURRENCY_LIMIT
         || !labels_valid
         || !result_valid
         || !serde_json::to_vec(&request.arguments)

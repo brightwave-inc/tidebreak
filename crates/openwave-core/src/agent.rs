@@ -654,6 +654,8 @@ pub enum AgentTurnOutcome {
     SandboxAgentSpawn {
         /// Canonical child identity and bounded task derived from the tool call.
         request: SandboxAgentSpawnRequest,
+        /// Remaining spawn calls from the same provider step, in model order.
+        remaining_requests: Vec<SandboxAgentSpawnRequest>,
         /// Provider usage incurred in this agent invocation.
         usage: Usage,
         /// Durable steering epoch captured before the producing model call.
@@ -940,6 +942,8 @@ pub struct Agent {
     durable_steer_lease: Option<uuid::Uuid>,
     agent_orchestration_enabled: bool,
     continuation_instruction: Option<String>,
+    pending_sandbox_spawns: Vec<SandboxAgentSpawnRequest>,
+    pending_sandbox_spawn_steer_revision: Option<i64>,
 }
 
 /// A tool call accumulated from the provider stream.
@@ -1063,6 +1067,8 @@ impl Agent {
             durable_steer_lease: None,
             agent_orchestration_enabled: false,
             continuation_instruction: None,
+            pending_sandbox_spawns: Vec::new(),
+            pending_sandbox_spawn_steer_revision: None,
         }
     }
 
@@ -1131,6 +1137,19 @@ impl Agent {
     #[must_use]
     pub fn with_continuation_instruction(mut self, instruction: Option<String>) -> Self {
         self.continuation_instruction = instruction;
+        self
+    }
+
+    /// Continue checkpointing sandbox siblings from a model step already
+    /// evaluated by an earlier segment of this turn.
+    #[must_use]
+    pub fn with_pending_sandbox_spawns(
+        mut self,
+        pending: Vec<SandboxAgentSpawnRequest>,
+        steer_revision: Option<i64>,
+    ) -> Self {
+        self.pending_sandbox_spawns = pending;
+        self.pending_sandbox_spawn_steer_revision = steer_revision;
         self
     }
 
@@ -1274,6 +1293,20 @@ impl Agent {
         if persist_input {
             self.persist(chat.id, turn_id, Role::User, user_input)
                 .await?;
+        }
+        if let Some(request) = self.pending_sandbox_spawns.first().cloned() {
+            let Some(steer_revision) = self.pending_sandbox_spawn_steer_revision else {
+                return Err(AgentError::Store(
+                    "pending sandbox spawns require a durably claimed turn".into(),
+                ));
+            };
+            return Ok(AgentTurnOutcome::SandboxAgentSpawn {
+                request,
+                remaining_requests: self.pending_sandbox_spawns[1..].to_vec(),
+                usage: Usage::default(),
+                steer_revision,
+                model_steps: 0,
+            });
         }
         // The provider transcript for this turn: prior stored text + the blocks
         // we build up as the loop runs.
@@ -1937,7 +1970,10 @@ impl Agent {
             // carries neither the request nor the refusal.
             if let Some(taken) = isolated {
                 for (index, call) in calls.iter().enumerate() {
-                    if isolations[index].is_none() || index == taken {
+                    if isolations[index].is_none()
+                        || index == taken
+                        || matches!(isolations[index], Some(CallIsolation::SandboxSpawn))
+                    {
                         continue;
                     }
                     outputs[index] = Some(self.decline_call(
@@ -2015,12 +2051,29 @@ impl Agent {
                         CallIsolation::SandboxSpawn => {
                             match self.sandbox_checkpoint(call, generation_steer_revision) {
                                 Ok((request, steer_revision)) => {
+                                    let remaining_requests = calls
+                                        .iter()
+                                        .enumerate()
+                                        .skip(index + 1)
+                                        .filter(|(sibling, _)| {
+                                            matches!(
+                                                isolations[*sibling],
+                                                Some(CallIsolation::SandboxSpawn)
+                                            )
+                                        })
+                                        .filter_map(|(_, sibling)| {
+                                            self.sandbox_checkpoint(sibling, Some(steer_revision))
+                                                .ok()
+                                                .map(|(request, _)| request)
+                                        })
+                                        .collect();
                                     return Ok(AgentTurnOutcome::SandboxAgentSpawn {
                                         request,
+                                        remaining_requests,
                                         usage: total_usage,
                                         steer_revision,
                                         model_steps: steps_used,
-                                    })
+                                    });
                                 }
                                 Err(reason) => {
                                     outputs[index] =
@@ -4645,6 +4698,8 @@ mod tests {
         calls: AtomicUsize,
     }
 
+    struct SiblingSandboxSpawnProvider;
+
     /// Asks for a tool once, then answers, recording the tool surface each
     /// request advertised.
     struct ToolSurfaceRecordingProvider {
@@ -4918,6 +4973,40 @@ mod tests {
                     output_tokens: 2,
                     ..Usage::default()
                 }),
+                ProviderEvent::Stop {
+                    reason: StopReason::ToolUse,
+                },
+            ])
+            .boxed())
+        }
+    }
+
+    #[async_trait]
+    impl ModelProvider for SiblingSandboxSpawnProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("sibling-sandbox-spawn")
+        }
+
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            Ok(stream::iter(vec![
+                ProviderEvent::ToolCallStarted {
+                    index: 0,
+                    id: "spawn_a".into(),
+                    name: crate::SPAWN_SANDBOX_AGENT_TOOL.into(),
+                },
+                ProviderEvent::ToolCallArgsDelta {
+                    index: 0,
+                    fragment: r#"{"task":"research A"}"#.into(),
+                },
+                ProviderEvent::ToolCallStarted {
+                    index: 1,
+                    id: "spawn_b".into(),
+                    name: crate::SPAWN_SANDBOX_AGENT_TOOL.into(),
+                },
+                ProviderEvent::ToolCallArgsDelta {
+                    index: 1,
+                    fragment: r#"{"task":"research B"}"#.into(),
+                },
                 ProviderEvent::Stop {
                     reason: StopReason::ToolUse,
                 },
@@ -5409,6 +5498,7 @@ mod tests {
             usage,
             steer_revision,
             model_steps,
+            ..
         } = outcome
         else {
             panic!("foreground agent should return a sandbox checkpoint");
@@ -5482,6 +5572,72 @@ mod tests {
             )),
             "{correction_events:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn sibling_sandbox_spawns_are_retained_for_sequential_checkpoints() {
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("siblings.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            reasoning_effort: None,
+            permission_mode: None,
+            network_policy: Default::default(),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let turn_id = TurnId::new();
+        store
+            .accept_turn(turn_id, chat.id, "fake", "delegate")
+            .await
+            .unwrap();
+        let lease_token = uuid::Uuid::new_v4();
+        let now = Utc::now();
+        store
+            .claim_turn_run(lease_token, now, now + chrono::Duration::minutes(1))
+            .await
+            .unwrap();
+        let mut registry = ToolRegistry::new();
+        registry.register_foreground_agent_orchestration();
+        let agent = Agent::new(
+            Arc::new(SiblingSandboxSpawnProvider),
+            Arc::new(registry),
+            store,
+            AgentConfig {
+                model: "fake".into(),
+                ..AgentConfig::default()
+            },
+        )
+        .with_durable_steer(lease_token)
+        .with_foreground_agent_orchestration();
+        let (tx, _rx) = unbounded();
+        let outcome = agent
+            .run_claimed_turn(&chat, turn_id, MessageId::new(), 1, &tx)
+            .await
+            .unwrap();
+        let AgentTurnOutcome::SandboxAgentSpawn {
+            request,
+            remaining_requests,
+            ..
+        } = outcome
+        else {
+            panic!("sibling spawns should produce a checkpoint");
+        };
+        assert_eq!(request.task, "research A");
+        assert_eq!(remaining_requests.len(), 1);
+        assert_eq!(remaining_requests[0].task, "research B");
     }
 
     #[tokio::test]

@@ -894,6 +894,7 @@ export class ApiClient {
    */
   putSettings(body: {
     model?: ModelSelectionKey | null;
+    max_active_background_agents?: number;
   }): Promise<RuntimeSettings> {
     return this.json("/settings", {
       method: "PUT",

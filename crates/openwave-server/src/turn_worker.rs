@@ -540,6 +540,8 @@ impl TurnWorker {
         let mut checkpoint_usage = openwave_core::Usage::default();
         let mut checkpoint_steps = 0_usize;
         let mut continuation_instruction = None;
+        let mut pending_sandbox_spawns = Vec::new();
+        let mut pending_sandbox_spawn_steer_revision = None;
         // A segment arriving with zero remaining steps is not refused: the
         // budget was spent by earlier segments — a checkpoint parked on the
         // last budgeted step, or a wrap-up whose provider call failed
@@ -759,7 +761,11 @@ impl TurnWorker {
                 .with_steer(steer.clone())
                 .with_durable_steer(lease_token)
                 .with_foreground_agent_orchestration()
-                .with_continuation_instruction(continuation_instruction.clone());
+                .with_continuation_instruction(continuation_instruction.clone())
+                .with_pending_sandbox_spawns(
+                    pending_sandbox_spawns.clone(),
+                    pending_sandbox_spawn_steer_revision,
+                );
             if let Some(blobs) = self.blobs.clone() {
                 agent = agent.with_blobs(blobs);
             }
@@ -1452,17 +1458,22 @@ impl TurnWorker {
                 }
                 Ok(AgentTurnOutcome::SandboxAgentSpawn {
                     request,
+                    remaining_requests,
                     usage,
                     steer_revision,
                     model_steps,
                 }) => {
-                    if model_steps == 0 || model_steps > remaining_steps {
+                    if (model_steps == 0 && pending_sandbox_spawns.is_empty())
+                        || model_steps > remaining_steps
+                    {
                         return Err(AgentError::msg(format!(
                             "turn {} returned an invalid model-step count {model_steps}",
                             turn.id
                         )));
                     }
                     remaining_steps -= model_steps;
+                    pending_sandbox_spawns = remaining_requests;
+                    pending_sandbox_spawn_steer_revision = Some(steer_revision);
                     total_model_steps = checked_model_step_sum(total_model_steps, model_steps)?;
                     total_usage = match checked_usage_sum(total_usage, usage) {
                         Ok(total) => total,
@@ -1538,6 +1549,8 @@ impl TurnWorker {
                         })?,
                         event_ordinal: ordinal,
                         progress,
+                        max_active_background_agents:
+                            crate::routes::read_max_active_background_agents(&*self.store).await?,
                         execution_location: self.config.sandbox_spawn_execution_location,
                     };
                     let mut checkpoint_heartbeat = AbortOnDrop(tokio::spawn(
@@ -1592,9 +1605,13 @@ impl TurnWorker {
                             }
                             Ok(Some(CheckpointSandboxSpawnOutcome::AtCapacity)) => {
                                 continuation_instruction = Some(
-                                    "The background-agent capacity is full. Do not spawn another agent. Call wait_for_agents with previously returned agent IDs before trying to delegate more work."
-                                        .into(),
+                                    format!(
+                                        "The per-chat background-agent cap is {} active agents. This spawn was not run. Call wait_for_agents with previously returned agent IDs, then try again after one finishes.",
+                                        checkpoint.max_active_background_agents
+                                    ),
                                 );
+                                pending_sandbox_spawns.clear();
+                                pending_sandbox_spawn_steer_revision = None;
                                 break;
                             }
                             Ok(Some(

@@ -1571,7 +1571,11 @@ has_api_key: boolean,
  * The sticky new-chat defaults, so a composer for a chat that does not
  * exist yet can show what `POST /chats` will seed.
  */
-chat_defaults: StickyChatDefaults, };
+chat_defaults: StickyChatDefaults, 
+/**
+ * Maximum nonterminal spawned agents allowed in one chat.
+ */
+max_active_background_agents: number, };
 
 /**
  * Renderer-safe progress of the current sign-in attempt.
