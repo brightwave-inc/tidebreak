@@ -787,6 +787,16 @@ export type EgressConfig = { "mode": "open" } | { "mode": "allowlist", domains: 
 export type EgressEnforcementStatus = "boundary" | "conditional_boundary" | "applied_with_gaps" | "unconfirmed";
 
 /**
+ * The execution backend that ran a command, as a closed vocabulary.
+ *
+ * Read through this enum rather than surfaced as a string, on the same terms
+ * as [`ExecDegradation`]: the card names the backend, and the card's words
+ * are written on this side. A backend the renderer does not know projects as
+ * nothing rather than as passthrough text.
+ */
+export type ExecBackend = "local" | "e2b" | "daytona";
+
+/**
  * A way the execution backend ran with less than its intended setup.
  *
  * Closed, and deliberately coarse: what a reader needs is what happened and
@@ -1689,7 +1699,12 @@ outputs?: Array<ResultEntry>,
  * did. Reported on the first execution that degrades and not on the
  * ones after it, so a chat says this once rather than on every card.
  */
-degraded?: ExecDegradation, } | { "tool": "web_search_provider_required" } | { "tool": "mcp_app", 
+degraded?: ExecDegradation, 
+/**
+ * Which backend ran the command. Defaulted so exec rows persisted
+ * before the field existed read back unchanged.
+ */
+backend?: ExecBackend, } | { "tool": "web_search_provider_required" } | { "tool": "mcp_app", 
 /**
  * The configured MCP server namespace that serves the view.
  */

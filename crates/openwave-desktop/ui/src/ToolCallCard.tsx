@@ -1,6 +1,7 @@
 import { Check, Clock, Terminal, X } from "lucide-react";
 import {
   isRendererToolName,
+  type ExecBackend,
   type ExecDegradation,
   type ExecResultPreview,
   type RendererToolName,
@@ -31,6 +32,17 @@ const SANDBOX_PREPARING_NOTICE =
 const EXEC_DEGRADATION_NOTICE: Record<ExecDegradation, string> = {
   sandbox_image_unavailable:
     "The prepared OpenWave sandbox image was unavailable, so commands run on the backend's stock image — document tools will install their dependencies at run time, which is slower.",
+};
+
+/**
+ * Where the command ran, named on the card. A closed vocabulary like the
+ * degradation notices: the server reports the backend as an enum, and the
+ * words shown for each are written here.
+ */
+const EXEC_BACKEND_LABEL: Record<ExecBackend, string> = {
+  local: "Local",
+  e2b: "E2B",
+  daytona: "Daytona",
 };
 
 export type ToolCallStatus =
@@ -279,11 +291,22 @@ export function ToolCommandCard({
         title={command.headline}
         titleClassName="font-mono"
         badge={
-          <ToolStatusBadge
-            presentation={presentation}
-            result={result}
-            preparing={preparing}
-          />
+          <>
+            {result?.backend && (
+              <Badge
+                variant="outline"
+                className="text-muted-foreground shrink-0"
+                title={`Ran on the ${EXEC_BACKEND_LABEL[result.backend]} execution backend`}
+              >
+                {EXEC_BACKEND_LABEL[result.backend]}
+              </Badge>
+            )}
+            <ToolStatusBadge
+              presentation={presentation}
+              result={result}
+              preparing={preparing}
+            />
+          </>
         }
         defaultExpanded={running || images.length > 0}
       >

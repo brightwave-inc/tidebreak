@@ -435,6 +435,23 @@ pub enum ExecDegradation {
     SandboxImageUnavailable,
 }
 
+/// The execution backend that ran a command, as a closed vocabulary.
+///
+/// Read through this enum rather than surfaced as a string, on the same terms
+/// as [`ExecDegradation`]: the card names the backend, and the card's words
+/// are written on this side. A backend the renderer does not know projects as
+/// nothing rather than as passthrough text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecBackend {
+    /// The host's native process sandbox.
+    Local,
+    /// A managed E2B cloud sandbox.
+    E2b,
+    /// A managed Daytona cloud sandbox.
+    Daytona,
+}
+
 /// What a call produced, in a form a human can read.
 ///
 /// A command's output is the whole reason to run it. Withholding it leaves the
@@ -466,6 +483,11 @@ pub enum ToolResultPreview {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         degraded: Option<ExecDegradation>,
+        /// Which backend ran the command. Defaulted so exec rows persisted
+        /// before the field existed read back unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        backend: Option<ExecBackend>,
     },
     /// Web search is available after the reader chooses and configures a
     /// provider. Carries no model- or provider-authored text.
@@ -571,6 +593,9 @@ impl ToolResultPreview {
                     // a tool's data is not a place the card takes prose from.
                     degraded: data.get("degraded").and_then(|value| {
                         serde_json::from_value::<ExecDegradation>(value.clone()).ok()
+                    }),
+                    backend: data.get("provider").and_then(|value| {
+                        serde_json::from_value::<ExecBackend>(value.clone()).ok()
                     }),
                 })
             }
@@ -1407,6 +1432,7 @@ mod tests {
                 "output_truncated": true,
                 "stdout": "line one\nline two\n",
                 "stderr": "boom\n",
+                "provider": "e2b",
             })),
         );
         assert_eq!(
@@ -1420,6 +1446,7 @@ mod tests {
                 images: Vec::new(),
                 outputs: Vec::new(),
                 degraded: None,
+                backend: Some(ExecBackend::E2b),
             })
         );
         assert!(result.unwrap().has_output());
@@ -1444,6 +1471,7 @@ mod tests {
                 images: Vec::new(),
                 outputs: Vec::new(),
                 degraded: None,
+                backend: None,
             }
         );
         assert!(!result.has_output());

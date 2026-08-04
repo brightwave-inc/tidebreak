@@ -361,6 +361,7 @@ mod tests {
                     images: Vec::new(),
                     outputs: Vec::new(),
                     degraded: None,
+                    backend: None,
                 }),
             },
             AgentEvent::TurnCompleted {

@@ -68,6 +68,7 @@ import {
   type ChatTerminalTurnSnapshot,
   type ChatToolActivitySnapshot,
   type ChatToolActivityStatus,
+  type ExecBackend,
   type ExecDegradation,
   type ExecFileChangeSummary as WireExecFileChangeSummary,
   type RendererAgentEvent,
@@ -97,6 +98,7 @@ export type {
   ResultEntryKind,
   ToolActionPreview,
   RendererRefusal,
+  ExecBackend,
   ExecDegradation,
 };
 
@@ -423,6 +425,8 @@ export type ToolResultPreview =
        * after it, so a conversation says this once.
        */
       degraded?: ExecDegradation;
+      /** Which backend ran the command, when the server said. */
+      backend?: ExecBackend;
     }
   | {
       /** Web search is available after the reader configures a provider. */
@@ -2431,6 +2435,7 @@ export function parseToolResultPreview(
     images,
     outputs,
     degraded,
+    backend,
   }: UncheckedExecResult = value;
   const imageValues = images ?? [];
   const outputValues = outputs ?? [];
@@ -2485,11 +2490,16 @@ export function parseToolResultPreview(
     // Unknown to this build means unshowable, not unusable: the command's
     // output still renders, without a sentence nobody wrote copy for.
     degraded: isExecDegradation(degraded) ? degraded : undefined,
+    backend: isExecBackend(backend) ? backend : undefined,
   };
 }
 
 function isExecDegradation(value: unknown): value is ExecDegradation {
   return value === "sandbox_image_unavailable";
+}
+
+function isExecBackend(value: unknown): value is ExecBackend {
+  return value === "local" || value === "e2b" || value === "daytona";
 }
 
 /**
