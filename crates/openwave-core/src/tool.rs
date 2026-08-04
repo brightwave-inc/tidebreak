@@ -388,6 +388,9 @@ pub enum ToolErrorCategory {
     InvalidArguments,
     /// The capability is available after the reader configures it.
     ConfigurationRequired,
+    /// The channel to an external tool failed before the tool could report an
+    /// outcome of its own.
+    TransportFailed,
     /// The tool ran and reported a failure of its own.
     ToolFailed,
 }
@@ -402,6 +405,7 @@ impl ToolErrorCategory {
             Self::NotFound => "not_found",
             Self::InvalidArguments => "invalid_arguments",
             Self::ConfigurationRequired => "configuration_required",
+            Self::TransportFailed => "transport_failed",
             Self::ToolFailed => "tool_failed",
         }
     }
@@ -416,7 +420,7 @@ impl ToolErrorCategory {
             | Self::NotFound
             | Self::ConfigurationRequired
             | Self::InvalidArguments => false,
-            Self::ToolFailed => true,
+            Self::TransportFailed | Self::ToolFailed => true,
         }
     }
 }
@@ -866,6 +870,7 @@ mod tests {
         ] {
             assert!(!category.is_product_failure(), "{}", category.as_str());
         }
+        assert!(ToolErrorCategory::TransportFailed.is_product_failure());
         assert!(ToolErrorCategory::ToolFailed.is_product_failure());
 
         // Every category has a distinct durable spelling.
@@ -874,6 +879,7 @@ mod tests {
             ToolErrorCategory::UserDeclined,
             ToolErrorCategory::NotFound,
             ToolErrorCategory::ConfigurationRequired,
+            ToolErrorCategory::TransportFailed,
             ToolErrorCategory::ToolFailed,
         ]
         .map(ToolErrorCategory::as_str);
