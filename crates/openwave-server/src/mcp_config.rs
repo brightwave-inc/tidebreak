@@ -905,6 +905,35 @@ impl McpRuntime {
         }
     }
 
+    /// The bare mounted tool names of every connected server, by namespace —
+    /// the name each tool carries after the `mcp__{server}__` mount prefix.
+    ///
+    /// Names only, never remote-authored descriptions or schemas: the same
+    /// renderer-safety posture as the consent sheet. Bounded by the
+    /// per-server discovery cap the client enforces at connect time.
+    pub(crate) async fn tool_names(&self) -> BTreeMap<String, Vec<String>> {
+        let state = self.state.lock().await;
+        state
+            .servers
+            .iter()
+            .map(|(name, server)| {
+                let prefix = format!("mcp__{name}__");
+                let tools = server.client.as_ref().map_or_else(Vec::new, |client| {
+                    client
+                        .tools()
+                        .map(|spec| {
+                            spec.name
+                                .strip_prefix(&prefix)
+                                .unwrap_or(&spec.name)
+                                .to_string()
+                        })
+                        .collect()
+                });
+                (name.clone(), tools)
+            })
+            .collect()
+    }
+
     /// The unmanaged shape of [`replace_under_policy`](Self::replace_under_policy),
     /// whose refusal arm is unreachable. Production has one entry point; this
     /// keeps the tests that predate the policy check reading as they did.

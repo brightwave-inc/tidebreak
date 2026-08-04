@@ -56,7 +56,20 @@ pub enum ConnectedAppInfo {
         name: String,
         health: McpHealth,
         tool_count: usize,
+        /// The bare mounted tool names (after the `mcp__{server}__` prefix),
+        /// bounded by the per-server discovery cap. Names only — never
+        /// remote-authored descriptions — the consent sheet's posture.
+        tools: Vec<String>,
         diagnostic: Option<String>,
+        /// The gateway MCP endpoint slug this record mounts, when it is
+        /// gateway-backed rather than a local stdio/HTTP definition.
+        gateway_endpoint: Option<String>,
+        /// Display names of the organization's entitled apps that ride this
+        /// record's gateway endpoint. Empty for local records — and, by
+        /// graceful degradation, when the gateway is unreachable or predates
+        /// the apps surface: the entry then renders without org-app names
+        /// rather than erroring.
+        gateway_apps: Vec<String>,
     },
     RestApi {
         /// The record id app bindings name.
@@ -317,20 +330,51 @@ async fn connected_apps_info(state: &AppState) -> Result<ConnectedAppsInfo, Serv
         .into_iter()
         .map(|(id, fingerprint)| (fingerprint.name, id))
         .collect();
-    let mut apps: Vec<ConnectedAppInfo> = state
-        .mcp
-        .info()
-        .await
-        .servers
+    let tool_names = state.mcp.tool_names().await;
+    let servers = state.mcp.info().await.servers;
+    // Org-app display names by endpoint slug, so gateway-backed entries can
+    // lead with the apps the organization granted instead of endpoint slugs.
+    // Best-effort by design: fetched only when a gateway-backed record exists,
+    // and any failure — signed out, unreachable, a gateway predating the apps
+    // surface — degrades to entries without org-app names, never an error.
+    let mut gateway_app_names: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    if servers
+        .iter()
+        .any(|server| server.definition.gateway_endpoint.is_some())
+    {
+        if let Ok(gateway_apps) = state.gateway.apps().await {
+            for app in gateway_apps.apps.into_iter().filter(|app| app.enabled) {
+                for slug in &app.mcp_endpoint_slugs {
+                    gateway_app_names
+                        .entry(slug.clone())
+                        .or_default()
+                        .push(app.name.clone());
+                }
+            }
+        }
+    }
+    let mut apps: Vec<ConnectedAppInfo> = servers
         .into_iter()
         .filter_map(|server| {
             let id = *ids.get(&server.definition.name)?;
+            let gateway_endpoint = server.definition.gateway_endpoint.clone();
+            let gateway_apps = gateway_endpoint
+                .as_ref()
+                .and_then(|slug| gateway_app_names.get(slug).cloned())
+                .unwrap_or_default();
             Some(ConnectedAppInfo::McpServer {
                 id,
+                tools: tool_names
+                    .get(&server.definition.name)
+                    .cloned()
+                    .unwrap_or_default(),
                 name: server.definition.name,
                 health: server.health,
                 tool_count: server.tool_count,
                 diagnostic: server.diagnostic,
+                gateway_endpoint,
+                gateway_apps,
             })
         })
         .collect();

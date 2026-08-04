@@ -585,7 +585,26 @@ id: ConnectedAppId,
 /**
  * Display name — also the namespace the server's tools mount under.
  */
-name: string, health: McpHealth, tool_count: number, diagnostic: string | null, } | { "kind": "rest_api", 
+name: string, health: McpHealth, tool_count: number, 
+/**
+ * The bare mounted tool names (after the `mcp__{server}__` prefix),
+ * bounded by the per-server discovery cap. Names only — never
+ * remote-authored descriptions — the consent sheet's posture.
+ */
+tools: Array<string>, diagnostic: string | null, 
+/**
+ * The gateway MCP endpoint slug this record mounts, when it is
+ * gateway-backed rather than a local stdio/HTTP definition.
+ */
+gateway_endpoint: string | null, 
+/**
+ * Display names of the organization's entitled apps that ride this
+ * record's gateway endpoint. Empty for local records — and, by
+ * graceful degradation, when the gateway is unreachable or predates
+ * the apps surface: the entry then renders without org-app names
+ * rather than erroring.
+ */
+gateway_apps: Array<string>, } | { "kind": "rest_api", 
 /**
  * The record id app bindings name.
  */
