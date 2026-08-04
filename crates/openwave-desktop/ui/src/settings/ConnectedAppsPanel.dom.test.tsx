@@ -275,6 +275,7 @@ describe("ConnectedAppsPanel", () => {
       screen.getByLabelText(/Base URL/),
       "https://api.example.com/v2",
     );
+    await user.click(screen.getByRole("radio", { name: /Paste document/ }));
     await user.type(
       screen.getByLabelText(/OpenAPI document/),
       '{{"openapi": "3.0.3"}',
@@ -301,12 +302,95 @@ describe("ConnectedAppsPanel", () => {
     expect(document.body.textContent).not.toContain(SECRET);
   });
 
+  it("fetches a spec by URL, picks operations, and saves under the hash pin", async () => {
+    const preview = {
+      document_sha256: "cd".repeat(32),
+      operations: [
+        {
+          operation_id: "listOrganizations",
+          method: "get",
+          path: "/api/organizations/",
+          summary: "List organizations.",
+        },
+        {
+          operation_id: "deleteOrganization",
+          method: "delete",
+          path: "/api/organizations/{id}/",
+          summary: null,
+        },
+      ],
+      unlistable: 3,
+      truncated: false,
+    };
+    const client = api({
+      previewRestSpec: vi.fn().mockResolvedValue(preview),
+    });
+    const user = userEvent.setup();
+    render(<ConnectedAppsPanel client={client} managed={false} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: /Add REST API/ }),
+    );
+    await user.type(screen.getByLabelText(/^Name$/), "PostHog");
+    await user.type(
+      screen.getByLabelText(/Base URL/),
+      "https://us.posthog.example",
+    );
+    // URL is the default source: no paste textarea on screen.
+    expect(
+      screen.queryByLabelText(/OpenAPI document/),
+    ).not.toBeInTheDocument();
+    await user.type(
+      screen.getByLabelText(/Document URL/),
+      "https://us.posthog.example/api/schema/?format=json",
+    );
+    await user.click(
+      screen.getByRole("button", { name: /Fetch operations/ }),
+    );
+
+    // Everything under the catalog bound starts selected, and the picker is
+    // honest about what it could not list.
+    const picker = await screen.findByRole("list", { name: "Operations" });
+    expect(
+      within(picker).getByRole("checkbox", {
+        name: /GET \/api\/organizations\//,
+      }),
+    ).toBeChecked();
+    expect(
+      screen.getByText(/2 of 2 selected · 3 unselectable/),
+    ).toBeInTheDocument();
+
+    // Drop the destructive one; the saved catalog is exactly the selection.
+    await user.click(
+      within(picker).getByRole("checkbox", {
+        name: /DELETE \/api\/organizations\/\{id\}\//,
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: /^Save$/ }));
+
+    await waitFor(() =>
+      expect(client.putRestConnectedApp).toHaveBeenCalledWith(
+        expect.any(String),
+        {
+          name: "PostHog",
+          base_url: "https://us.posthog.example",
+          openapi_document_url:
+            "https://us.posthog.example/api/schema/?format=json",
+          document_sha256: "cd".repeat(32),
+          operation_ids: ["listOrganizations"],
+          credential: "none",
+        },
+      ),
+    );
+  });
+
   it("an edit with an untouched value keeps the stored credential", async () => {
     const client = api();
     const user = userEvent.setup();
     render(<ConnectedAppsPanel client={client} managed={false} />);
 
     await user.click(await screen.findByRole("button", { name: /Edit/ }));
+    await user.click(screen.getByRole("radio", { name: /Paste document/ }));
     await user.type(
       screen.getByLabelText(/OpenAPI document/),
       '{{"openapi": "3.0.3"}',

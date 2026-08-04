@@ -25,6 +25,8 @@ import {
   type ConnectedAppsInfo as WireConnectedAppsInfo,
   type CredentialPlacement as WireCredentialPlacement,
   type RestCredentialStatus as WireRestCredentialStatus,
+  type SpecPreviewInfo as WireSpecPreviewInfo,
+  type SpecPreviewOperation as WireSpecPreviewOperation,
   type CodeExecutionCredentialReadiness as WireCodeExecutionCredentialReadiness,
   type CodeExecutionProviderKind as WireCodeExecutionProviderKind,
   type EgressConfig as WireEgressConfig,
@@ -277,6 +279,8 @@ export type McpServersInfo = WireMcpServersInfo;
 export type ConnectedAppsInfo = WireConnectedAppsInfo;
 export type ConnectedAppInfo = WireConnectedAppInfo;
 export type RestCredentialStatus = WireRestCredentialStatus;
+export type SpecPreviewInfo = WireSpecPreviewInfo;
+export type SpecPreviewOperation = WireSpecPreviewOperation;
 /** Where a stored REST credential is injected: `"bearer"` or a named header. */
 export type CredentialPlacement = WireCredentialPlacement;
 
@@ -999,8 +1003,19 @@ export class ApiClient {
     body: {
       name: string;
       base_url: string;
-      /** The raw JSON OpenAPI document; the server ingests it once here. */
-      openapi_document: string;
+      /** The raw JSON OpenAPI document, when supplied inline; the server
+       * ingests it once here. Exactly one of this and
+       * `openapi_document_url` must be present. */
+      openapi_document?: string;
+      /** URL the server fetches the document from at save time. Requires
+       * `document_sha256`. */
+      openapi_document_url?: string;
+      /** The preview's document hash pin; the save refuses (409) if the
+       * document no longer matches it. */
+      document_sha256?: string;
+      /** When present, only these operationIds are ingested; the rest of
+       * the document is not judged. */
+      operation_ids?: string[];
       credential: RestCredentialUpdate;
     },
   ): Promise<ConnectedAppsInfo> {
@@ -1008,6 +1023,17 @@ export class ApiClient {
       method: "PUT",
       headers: this.headers(true),
       body: JSON.stringify(body),
+    });
+  }
+
+  /** List what an OpenAPI document declares, for the operation picker. */
+  previewRestSpec(
+    source: { url: string } | { document: string },
+  ): Promise<SpecPreviewInfo> {
+    return this.json("/connected-apps/rest/spec-preview", {
+      method: "POST",
+      headers: this.headers(true),
+      body: JSON.stringify({ source }),
     });
   }
 
