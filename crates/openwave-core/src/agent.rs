@@ -126,10 +126,15 @@ struct RegisteredSpec {
 
 impl RegisteredSpec {
     fn new(spec: ToolSpec) -> Self {
-        // ToolSpec schemas are draft 2020-12, including schemars-generated
-        // schemas whose compact provider form deliberately omits `$schema`.
-        // Invalid tool-authored schemas fail open: they are registration bugs,
-        // and refusing every call would make an existing tool unusable.
+        // OpenWave's schemars-generated ToolSpec schemas target draft 2020-12,
+        // but their compact provider form deliberately omits `$schema`, so pin
+        // the draft instead of relying on auto-detection. External MCP schemas
+        // share this registration path and draft-07 is common in the wild; in
+        // particular, its tuple-form `items` has different 2020-12 semantics.
+        // Such incompatible schemas must fail compilation and therefore remain
+        // unvalidated, rather than being mis-validated under the wrong draft.
+        // Invalid schemas fail open because refusing every call would make one
+        // misconfigured tool permanently unusable.
         let validator = jsonschema::options()
             .with_draft(jsonschema::Draft::Draft202012)
             .build(&spec.input_schema)
@@ -438,19 +443,6 @@ impl ToolRegistry {
             | RegisteredTool::ForegroundOrchestration { registered, .. } => registered,
         };
         registered.mismatch(arguments)
-    }
-
-    #[cfg(test)]
-    fn schema_is_compiled(&self, name: &str) -> bool {
-        match self.tools.get(name) {
-            Some(RegisteredTool::Server { registered, .. })
-            | Some(RegisteredTool::Client { registered, .. })
-            | Some(RegisteredTool::ForegroundClient { registered, .. })
-            | Some(RegisteredTool::ForegroundOrchestration { registered, .. }) => {
-                registered.validator.is_some()
-            }
-            None => false,
-        }
     }
 
     /// Validate canonical arguments against a registered client-owned contract.
@@ -7212,7 +7204,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_compiles_draft_2020_12_schemas_once_for_every_tool_surface() {
+    fn registry_refuses_schema_mismatches_for_server_and_client_tools() {
         let spec = ToolSpec {
             name: "client_schema".into(),
             description: "a schema-validated client tool".into(),
@@ -7234,8 +7226,9 @@ mod tests {
         }));
         registry.register_client(spec, ApprovalClass::ReadOnly);
 
-        assert!(registry.schema_is_compiled("strict_counter"));
-        assert!(registry.schema_is_compiled("client_schema"));
+        assert!(registry
+            .schema_mismatch("strict_counter", &serde_json::json!({"path": 42}))
+            .is_some_and(|mismatch| mismatch.contains("string")));
         assert_eq!(
             registry.schema_mismatch(
                 "client_schema",
@@ -7246,6 +7239,24 @@ mod tests {
         assert!(registry
             .schema_mismatch("client_schema", &serde_json::json!({"labels": ["other"]}))
             .is_some());
+    }
+
+    #[test]
+    fn registry_fails_open_when_a_tool_schema_does_not_compile() {
+        let mut registry = ToolRegistry::new();
+        registry.register_client(
+            ToolSpec {
+                name: "invalid_schema".into(),
+                description: "a tool with a misconfigured schema".into(),
+                input_schema: serde_json::json!({"type": "nonsense"}),
+            },
+            ApprovalClass::ReadOnly,
+        );
+
+        assert_eq!(
+            registry.schema_mismatch("invalid_schema", &serde_json::json!({})),
+            None
+        );
     }
 
     #[tokio::test]
