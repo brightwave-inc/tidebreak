@@ -2,9 +2,6 @@ name-template: "OpenWave v$RESOLVED_VERSION"
 tag-template: "v$RESOLVED_VERSION"
 tag-prefix: "v"
 categories:
-  - type: pre-exclude
-    when:
-      label: "semver:none"
   - title: "Breaking Changes"
     exclusive: true
     when:
@@ -29,8 +26,16 @@ categories:
     exclusive: true
     when:
       label: "release-note:revert"
+  # Maintenance changes carry no user-facing feature or fix, but they are not
+  # invisible: a refactor can rebuild the local database or change build
+  # requirements. Every merged PR is accounted for in the notes — nothing is
+  # pre-excluded — with maintenance listed after the user-facing sections.
+  - title: "Maintenance"
+    exclusive: true
+    when:
+      label: "semver:none"
   # Historical PRs merged before managed labels existed remain visible here in
-  # the first draft. Current maintenance PRs are removed by the pre-exclude.
+  # the first draft.
   - title: "Other Changes"
   - type: version-resolver
     semver-increment: minor
