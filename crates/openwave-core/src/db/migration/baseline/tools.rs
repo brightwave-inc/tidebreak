@@ -1,0 +1,747 @@
+//! Tool-call, grant, and user-question tables of the schema baseline.
+
+use sea_orm_migration::prelude::*;
+
+use crate::db::migration::idens::*;
+
+pub(super) fn tool_call_table() -> TableCreateStatement {
+    Table::create()
+        .table(ToolCall::Table)
+        .col(ColumnDef::new(ToolCall::Id).uuid().not_null().primary_key())
+        .col(ColumnDef::new(ToolCall::ChatId).uuid().not_null())
+        .col(ColumnDef::new(ToolCall::TurnId).uuid().not_null())
+        .col(ColumnDef::new(ToolCall::ProviderId).text().not_null())
+        .col(
+            ColumnDef::new(ToolCall::HistoryOrder)
+                .big_integer()
+                .not_null(),
+        )
+        .col(ColumnDef::new(ToolCall::Name).text().not_null())
+        .col(ColumnDef::new(ToolCall::Arguments).json_binary().not_null())
+        .col(ColumnDef::new(ToolCall::Execution).text().not_null())
+        .col(ColumnDef::new(ToolCall::Status).text().not_null())
+        .col(ColumnDef::new(ToolCall::Result).text())
+        .col(ColumnDef::new(ToolCall::ErrorCode).text())
+        .col(ColumnDef::new(ToolCall::ErrorDetail).text())
+        .col(ColumnDef::new(ToolCall::ApprovalStatus).text())
+        .col(ColumnDef::new(ToolCall::ApprovalClass).text())
+        .col(ColumnDef::new(ToolCall::ApprovalKind).text())
+        .col(ColumnDef::new(ToolCall::ApprovalReason).text())
+        .col(ColumnDef::new(ToolCall::ApprovalRequestedAt).timestamp_with_time_zone())
+        .col(ColumnDef::new(ToolCall::ApprovalDecidedAt).timestamp_with_time_zone())
+        .col(ColumnDef::new(ToolCall::ApprovalEventSeq).big_integer())
+        .col(ColumnDef::new(ToolCall::ClientExecutorId).uuid())
+        .col(ColumnDef::new(ToolCall::ClientLeaseToken).uuid())
+        .col(ColumnDef::new(ToolCall::ClientLeaseExpiresAt).timestamp_with_time_zone())
+        .col(
+            ColumnDef::new(ToolCall::CreatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .col(ColumnDef::new(ToolCall::ResolvedAt).timestamp_with_time_zone())
+        .col(ColumnDef::new(ToolCall::TurnLeaseToken).uuid())
+        .col(ColumnDef::new(ToolCall::ResolutionTurnLeaseToken).uuid())
+        .col(ColumnDef::new(ToolCall::ApprovalGrantSourceCallId).uuid())
+        .col(ColumnDef::new(ToolCall::ResultPreview).json_binary())
+        .col(ColumnDef::new(ToolCall::AutoJudgeStatus).text())
+        .col(ColumnDef::new(ToolCall::RawArguments).text())
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_tool_call_chat")
+                .from(ToolCall::Table, ToolCall::ChatId)
+                .to(Chat::Table, Chat::Id),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_tool_call_approval_event")
+                .from_tbl(ToolCall::Table)
+                .from_col(ToolCall::ChatId)
+                .from_col(ToolCall::ApprovalEventSeq)
+                .to_tbl(Event::Table)
+                .to_col(Event::ChatId)
+                .to_col(Event::Seq),
+        )
+        .check(Expr::col(ToolCall::Execution).is_in([
+            crate::model::ToolCallExecution::Server.as_str(),
+            crate::model::ToolCallExecution::Client.as_str(),
+            crate::model::ToolCallExecution::Orchestration.as_str(),
+        ]))
+        .check(Expr::col(ToolCall::Status).is_in([
+            crate::model::ToolCallStatus::Pending.as_str(),
+            crate::model::ToolCallStatus::Completed.as_str(),
+            crate::model::ToolCallStatus::Failed.as_str(),
+            crate::model::ToolCallStatus::Cancelled.as_str(),
+        ]))
+        .check(Expr::col(ToolCall::HistoryOrder).gt(0))
+        .check(
+            Func::char_length(Expr::col(ToolCall::ProviderId))
+                .between(1, crate::model::ToolCallRecord::MAX_LABEL_LEN as i32),
+        )
+        .check(
+            Func::char_length(Expr::col(ToolCall::Name))
+                .between(1, crate::model::ToolCallRecord::MAX_LABEL_LEN as i32),
+        )
+        .check(
+            Expr::col(ToolCall::Result)
+                .is_null()
+                .or(Func::char_length(Expr::col(ToolCall::Result))
+                    .lte(crate::model::ToolCallRecord::MAX_RESULT_BYTES as i32)),
+        )
+        .check(
+            Expr::col(ToolCall::ErrorCode)
+                .is_null()
+                .or(Func::char_length(Expr::col(ToolCall::ErrorCode))
+                    .between(1, crate::model::ToolCallRecord::MAX_ERROR_CODE_LEN as i32)),
+        )
+        .check(
+            Expr::col(ToolCall::ErrorDetail)
+                .is_null()
+                .or(Func::char_length(Expr::col(ToolCall::ErrorDetail))
+                    .between(1, crate::model::ToolCallRecord::MAX_ERROR_DETAIL_LEN as i32)),
+        )
+        .check(
+            Expr::col(ToolCall::ResolvedAt)
+                .is_null()
+                .or(Expr::col(ToolCall::ResolvedAt).gte(Expr::col(ToolCall::CreatedAt))),
+        )
+        .check(
+            Expr::col(ToolCall::ClientLeaseExpiresAt)
+                .is_null()
+                .or(Expr::col(ToolCall::ClientLeaseExpiresAt).gt(Expr::col(ToolCall::CreatedAt))),
+        )
+        .check(
+            Expr::col(ToolCall::Status)
+                .eq(crate::model::ToolCallStatus::Pending.as_str())
+                .and(Expr::col(ToolCall::Result).is_null())
+                .and(Expr::col(ToolCall::ErrorCode).is_null())
+                .and(Expr::col(ToolCall::ErrorDetail).is_null())
+                .and(Expr::col(ToolCall::ResolvedAt).is_null())
+                .or(Expr::col(ToolCall::Status)
+                    .ne(crate::model::ToolCallStatus::Pending.as_str())
+                    .and(Expr::col(ToolCall::Result).is_not_null())
+                    .and(Expr::col(ToolCall::ResolvedAt).is_not_null())
+                    .and(Expr::col(ToolCall::ClientLeaseExpiresAt).is_null())),
+        )
+        .check(
+            Expr::col(ToolCall::Status)
+                .eq(crate::model::ToolCallStatus::Failed.as_str())
+                .and(Expr::col(ToolCall::ErrorCode).is_not_null())
+                .or(Expr::col(ToolCall::Status)
+                    .ne(crate::model::ToolCallStatus::Failed.as_str())
+                    .and(Expr::col(ToolCall::ErrorCode).is_null())
+                    .and(Expr::col(ToolCall::ErrorDetail).is_null())),
+        )
+        .check(
+            Expr::col(ToolCall::Execution)
+                .eq(crate::model::ToolCallExecution::Server.as_str())
+                .and(Expr::col(ToolCall::ClientExecutorId).is_null())
+                .and(Expr::col(ToolCall::ClientLeaseToken).is_null())
+                .and(Expr::col(ToolCall::ClientLeaseExpiresAt).is_null())
+                .or(Expr::col(ToolCall::Execution)
+                    .eq(crate::model::ToolCallExecution::Client.as_str())
+                    .and(
+                        Expr::col(ToolCall::Status)
+                            .eq(crate::model::ToolCallStatus::Pending.as_str())
+                            .and(
+                                Expr::col(ToolCall::ClientExecutorId)
+                                    .is_null()
+                                    .and(Expr::col(ToolCall::ClientLeaseToken).is_null())
+                                    .and(Expr::col(ToolCall::ClientLeaseExpiresAt).is_null())
+                                    .or(Expr::col(ToolCall::ClientExecutorId)
+                                        .is_not_null()
+                                        .and(Expr::col(ToolCall::ClientLeaseToken).is_not_null())
+                                        .and(
+                                            Expr::col(ToolCall::ClientLeaseExpiresAt).is_not_null(),
+                                        )),
+                            )
+                            .or(Expr::col(ToolCall::Status)
+                                .ne(crate::model::ToolCallStatus::Pending.as_str())
+                                .and(Expr::col(ToolCall::ClientExecutorId).is_not_null())
+                                .and(Expr::col(ToolCall::ClientLeaseToken).is_not_null())
+                                .and(Expr::col(ToolCall::ClientLeaseExpiresAt).is_null()))
+                            .or(Expr::col(ToolCall::Status)
+                                .eq(crate::model::ToolCallStatus::Cancelled.as_str())
+                                .and(Expr::col(ToolCall::ClientExecutorId).is_null())
+                                .and(Expr::col(ToolCall::ClientLeaseToken).is_null())
+                                .and(Expr::col(ToolCall::ClientLeaseExpiresAt).is_null())),
+                    ))
+                .or(Expr::col(ToolCall::Execution)
+                    .eq(crate::model::ToolCallExecution::Orchestration.as_str())
+                    .and(Expr::col(ToolCall::Status).is_in([
+                        crate::model::ToolCallStatus::Pending.as_str(),
+                        crate::model::ToolCallStatus::Completed.as_str(),
+                        crate::model::ToolCallStatus::Cancelled.as_str(),
+                    ]))
+                    .and(Expr::col(ToolCall::ErrorCode).is_null())
+                    .and(Expr::col(ToolCall::ErrorDetail).is_null())
+                    .and(Expr::col(ToolCall::ClientExecutorId).is_null())
+                    .and(Expr::col(ToolCall::ClientLeaseToken).is_null())
+                    .and(Expr::col(ToolCall::ClientLeaseExpiresAt).is_null())),
+        )
+        .check(
+            Expr::col(ToolCall::ApprovalStatus)
+                .is_null()
+                .and(Expr::col(ToolCall::ApprovalClass).is_null())
+                .and(Expr::col(ToolCall::ApprovalKind).is_null())
+                .and(Expr::col(ToolCall::ApprovalReason).is_null())
+                .and(Expr::col(ToolCall::ApprovalRequestedAt).is_null())
+                .and(Expr::col(ToolCall::ApprovalDecidedAt).is_null())
+                .and(Expr::col(ToolCall::ApprovalEventSeq).is_null())
+                .or(Expr::col(ToolCall::Execution)
+                    .eq(crate::model::ToolCallExecution::Server.as_str())
+                    .and(Expr::col(ToolCall::ApprovalStatus).is_in([
+                        crate::ToolApprovalStatus::Pending.as_str(),
+                        crate::ToolApprovalStatus::Approved.as_str(),
+                        crate::ToolApprovalStatus::Rejected.as_str(),
+                    ]))
+                    .and(
+                        Expr::col(ToolCall::ApprovalClass)
+                            .eq(crate::ApprovalClass::Sensitive.as_str()),
+                    )
+                    .and(Expr::col(ToolCall::ApprovalKind).is_in([
+                        crate::ToolApprovalKind::SearchMayShareQueryAndExcerpts.as_str(),
+                        crate::ToolApprovalKind::ExecMayRunNetworkedCommand.as_str(),
+                        crate::ToolApprovalKind::Unsupported.as_str(),
+                    ]))
+                    .and(Expr::col(ToolCall::ApprovalRequestedAt).is_not_null())
+                    .and(
+                        Expr::col(ToolCall::ApprovalStatus)
+                            .eq(crate::ToolApprovalStatus::Pending.as_str())
+                            .and(
+                                Expr::col(ToolCall::Status)
+                                    .eq(crate::model::ToolCallStatus::Pending.as_str()),
+                            )
+                            .and(Expr::col(ToolCall::ApprovalReason).is_null())
+                            .and(Expr::col(ToolCall::ApprovalDecidedAt).is_null())
+                            .or(Expr::col(ToolCall::ApprovalStatus)
+                                .eq(crate::ToolApprovalStatus::Approved.as_str())
+                                .and(Expr::col(ToolCall::ApprovalReason).is_null())
+                                .and(Expr::col(ToolCall::ApprovalDecidedAt).is_not_null()))
+                            .or(Expr::col(ToolCall::ApprovalStatus)
+                                .eq(crate::ToolApprovalStatus::Rejected.as_str())
+                                .and(Expr::col(ToolCall::ApprovalReason).is_not_null())
+                                .and(Expr::col(ToolCall::ApprovalDecidedAt).is_not_null())),
+                    )),
+        )
+        .check(
+            Expr::col(ToolCall::ApprovalReason)
+                .is_null()
+                .or(Func::char_length(Expr::col(ToolCall::ApprovalReason))
+                    .between(1, crate::ToolApproval::MAX_REASON_CHARS as i32)),
+        )
+        .check(Expr::col(ToolCall::ApprovalDecidedAt).is_null().or(
+            Expr::col(ToolCall::ApprovalDecidedAt).gte(Expr::col(ToolCall::ApprovalRequestedAt)),
+        ))
+        .to_owned()
+}
+
+pub(super) fn tool_call_indexes() -> Vec<IndexCreateStatement> {
+    vec![
+        Index::create()
+            .name("idx_tool_call_chat_history")
+            .table(ToolCall::Table)
+            .col(ToolCall::ChatId)
+            .col(ToolCall::HistoryOrder)
+            .unique()
+            .to_owned(),
+        Index::create()
+            .name("idx_tool_call_wait_identity")
+            .table(ToolCall::Table)
+            .col(ToolCall::Id)
+            .col(ToolCall::ChatId)
+            .col(ToolCall::TurnId)
+            .unique()
+            .to_owned(),
+        Index::create()
+            .name("idx_tool_call_checkpoint_identity")
+            .table(ToolCall::Table)
+            .col(ToolCall::Id)
+            .col(ToolCall::ChatId)
+            .col(ToolCall::HistoryOrder)
+            .unique()
+            .to_owned(),
+        Index::create()
+            .name("idx_tool_call_client_pending")
+            .table(ToolCall::Table)
+            .col(ToolCall::ChatId)
+            .col(ToolCall::Execution)
+            .col(ToolCall::Status)
+            .col(ToolCall::ClientLeaseExpiresAt)
+            .to_owned(),
+    ]
+}
+
+pub(super) fn standing_tool_grant_table() -> TableCreateStatement {
+    Table::create()
+        .table(StandingToolGrant::Table)
+        .col(
+            ColumnDef::new(StandingToolGrant::SourceCallId)
+                .uuid()
+                .not_null()
+                .primary_key(),
+        )
+        .col(ColumnDef::new(StandingToolGrant::ChatId).uuid())
+        .col(
+            ColumnDef::new(StandingToolGrant::ToolName)
+                .text()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(StandingToolGrant::ApprovalKind)
+                .string_len(64)
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(StandingToolGrant::Scope)
+                .json_binary()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(StandingToolGrant::GrantedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .col(ColumnDef::new(StandingToolGrant::ProjectId).uuid())
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_standing_tool_grant_chat")
+                .from(StandingToolGrant::Table, StandingToolGrant::ChatId)
+                .to(Chat::Table, Chat::Id)
+                .on_delete(ForeignKeyAction::Cascade),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_standing_tool_grant_project")
+                .from(StandingToolGrant::Table, StandingToolGrant::ProjectId)
+                .to(Project::Table, Project::Id)
+                .on_delete(ForeignKeyAction::Cascade),
+        )
+        .check(
+            Func::char_length(Expr::col(StandingToolGrant::ToolName))
+                .between(1, crate::model::ToolCallRecord::MAX_LABEL_LEN as i32),
+        )
+        // The closed `approval_kind` vocabulary a standing-grant row may carry.
+        .check(Expr::col(StandingToolGrant::ApprovalKind).is_in([
+            crate::ToolApprovalKind::SearchMayShareQueryAndExcerpts.standing_grant_key(),
+            crate::ToolApprovalKind::WebSearchMayShareQuery.standing_grant_key(),
+            crate::ToolApprovalKind::ExecMayRunNetworkedCommand.standing_grant_key(),
+            crate::ToolApprovalKind::WebExtractMayFetchUrl.standing_grant_key(),
+            crate::ToolApprovalKind::WorkspaceMayModifyFiles.standing_grant_key(),
+        ]))
+        // Exactly one of `chat_id` / `project_id` names the level.
+        .check(
+            Expr::col(StandingToolGrant::ChatId)
+                .is_not_null()
+                .and(Expr::col(StandingToolGrant::ProjectId).is_null())
+                .or(Expr::col(StandingToolGrant::ChatId)
+                    .is_null()
+                    .and(Expr::col(StandingToolGrant::ProjectId).is_not_null())),
+        )
+        .to_owned()
+}
+
+pub(super) fn standing_tool_grant_indexes() -> Vec<IndexCreateStatement> {
+    vec![Index::create()
+        .name("idx_standing_tool_grant_lookup")
+        .table(StandingToolGrant::Table)
+        .col(StandingToolGrant::ChatId)
+        .col(StandingToolGrant::ToolName)
+        .col(StandingToolGrant::ApprovalKind)
+        .col(StandingToolGrant::GrantedAt)
+        .to_owned()]
+}
+
+pub(super) fn operation_log_table() -> TableCreateStatement {
+    Table::create()
+        .table(OperationLog::Table)
+        .col(ColumnDef::new(OperationLog::RunId).uuid().not_null())
+        .col(ColumnDef::new(OperationLog::OperationId).uuid().not_null())
+        .col(
+            ColumnDef::new(OperationLog::State)
+                .string_len(16)
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(OperationLog::Fingerprint)
+                .binary()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(OperationLog::ExternalEffect)
+                .boolean()
+                .not_null(),
+        )
+        .col(ColumnDef::new(OperationLog::OwnerEpoch).uuid().not_null())
+        .col(ColumnDef::new(OperationLog::Body).binary().null())
+        .col(
+            ColumnDef::new(OperationLog::Retained)
+                .boolean()
+                .not_null()
+                .default(true),
+        )
+        .col(
+            ColumnDef::new(OperationLog::CreatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(OperationLog::UpdatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .primary_key(
+            Index::create()
+                .name("pk_operation_log")
+                .col(OperationLog::RunId)
+                .col(OperationLog::OperationId),
+        )
+        .check(Expr::col(OperationLog::State).is_in(["claimed", "recorded", "failed"]))
+        // A claimed entry has not recorded a body yet.
+        .check(
+            Expr::col(OperationLog::State)
+                .ne("claimed")
+                .or(Expr::col(OperationLog::Body).is_null()),
+        )
+        // An unretained entry keeps only a commit marker, never a body.
+        .check(Expr::col(OperationLog::Retained).or(Expr::col(OperationLog::Body).is_null()))
+        .to_owned()
+}
+
+pub(super) fn operation_log_indexes() -> Vec<IndexCreateStatement> {
+    Vec::new()
+}
+
+pub(super) fn plan_request_table() -> TableCreateStatement {
+    Table::create()
+        .table(PlanRequest::Table)
+        .col(
+            ColumnDef::new(PlanRequest::CallId)
+                .uuid()
+                .not_null()
+                .primary_key(),
+        )
+        .col(ColumnDef::new(PlanRequest::TurnId).uuid().not_null())
+        .col(ColumnDef::new(PlanRequest::ChatId).uuid().not_null())
+        .col(
+            ColumnDef::new(PlanRequest::Status)
+                .string_len(16)
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(PlanRequest::EventSeq)
+                .big_integer()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(PlanRequest::Title)
+                .string_len(crate::MAX_PLAN_TITLE_CHARS as u32)
+                .not_null(),
+        )
+        .col(ColumnDef::new(PlanRequest::Plan).text().not_null())
+        .col(
+            ColumnDef::new(PlanRequest::Feedback).string_len(crate::MAX_PLAN_FEEDBACK_CHARS as u32),
+        )
+        .col(
+            ColumnDef::new(PlanRequest::ProposedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .col(ColumnDef::new(PlanRequest::ResolvedAt).timestamp_with_time_zone())
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_plan_request_call")
+                .from(PlanRequest::Table, PlanRequest::CallId)
+                .to(ToolCall::Table, ToolCall::Id)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_plan_request_turn")
+                .from(PlanRequest::Table, PlanRequest::TurnId)
+                .to(TurnRun::Table, TurnRun::Id)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_plan_request_chat")
+                .from(PlanRequest::Table, PlanRequest::ChatId)
+                .to(Chat::Table, Chat::Id)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_plan_request_event")
+                .from_tbl(PlanRequest::Table)
+                .from_col(PlanRequest::ChatId)
+                .from_col(PlanRequest::EventSeq)
+                .to_tbl(Event::Table)
+                .to_col(Event::ChatId)
+                .to_col(Event::Seq)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .check(Expr::col(PlanRequest::Status).is_in([
+            crate::PlanRequestStatus::Pending.as_str(),
+            crate::PlanRequestStatus::Accepted.as_str(),
+            crate::PlanRequestStatus::Rejected.as_str(),
+            crate::PlanRequestStatus::Cancelled.as_str(),
+        ]))
+        .check(
+            Expr::col(PlanRequest::Status)
+                .eq(crate::PlanRequestStatus::Pending.as_str())
+                .and(Expr::col(PlanRequest::ResolvedAt).is_null())
+                .or(Expr::col(PlanRequest::Status)
+                    .ne(crate::PlanRequestStatus::Pending.as_str())
+                    .and(Expr::col(PlanRequest::ResolvedAt).is_not_null())),
+        )
+        .check(
+            Expr::col(PlanRequest::ResolvedAt)
+                .is_null()
+                .or(Expr::col(PlanRequest::ResolvedAt).gte(Expr::col(PlanRequest::ProposedAt))),
+        )
+        .to_owned()
+}
+
+pub(super) fn plan_request_indexes() -> Vec<IndexCreateStatement> {
+    vec![
+        Index::create()
+            .name("idx_plan_request_pending")
+            .table(PlanRequest::Table)
+            .col(PlanRequest::ChatId)
+            .col(PlanRequest::ProposedAt)
+            .col(PlanRequest::CallId)
+            .and_where(
+                Expr::col(PlanRequest::Status).eq(crate::PlanRequestStatus::Pending.as_str()),
+            )
+            .to_owned(),
+        Index::create()
+            .name("idx_plan_request_turn")
+            .table(PlanRequest::Table)
+            .col(PlanRequest::TurnId)
+            .col(PlanRequest::CallId)
+            .to_owned(),
+        Index::create()
+            .name("idx_plan_request_event")
+            .table(PlanRequest::Table)
+            .col(PlanRequest::ChatId)
+            .col(PlanRequest::EventSeq)
+            .unique()
+            .to_owned(),
+    ]
+}
+
+pub(super) fn user_question_request_table() -> TableCreateStatement {
+    Table::create()
+        .table(UserQuestionRequest::Table)
+        .col(
+            ColumnDef::new(UserQuestionRequest::CallId)
+                .uuid()
+                .not_null()
+                .primary_key(),
+        )
+        .col(
+            ColumnDef::new(UserQuestionRequest::TurnId)
+                .uuid()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(UserQuestionRequest::ChatId)
+                .uuid()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(UserQuestionRequest::Status)
+                .string_len(16)
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(UserQuestionRequest::EventSeq)
+                .big_integer()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(UserQuestionRequest::AskedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .col(ColumnDef::new(UserQuestionRequest::ResolvedAt).timestamp_with_time_zone())
+        .col(
+            ColumnDef::new(UserQuestionRequest::AdditionalUserContext)
+                .string_len(crate::MAX_ADDITIONAL_USER_CONTEXT_CHARS as u32),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_user_question_request_call")
+                .from(UserQuestionRequest::Table, UserQuestionRequest::CallId)
+                .to(ToolCall::Table, ToolCall::Id)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_user_question_request_turn")
+                .from(UserQuestionRequest::Table, UserQuestionRequest::TurnId)
+                .to(TurnRun::Table, TurnRun::Id)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_user_question_request_chat")
+                .from(UserQuestionRequest::Table, UserQuestionRequest::ChatId)
+                .to(Chat::Table, Chat::Id)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_user_question_request_event")
+                .from_tbl(UserQuestionRequest::Table)
+                .from_col(UserQuestionRequest::ChatId)
+                .from_col(UserQuestionRequest::EventSeq)
+                .to_tbl(Event::Table)
+                .to_col(Event::ChatId)
+                .to_col(Event::Seq)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .check(Expr::col(UserQuestionRequest::Status).is_in([
+            crate::UserQuestionRequestStatus::Pending.as_str(),
+            crate::UserQuestionRequestStatus::Answered.as_str(),
+            crate::UserQuestionRequestStatus::Cancelled.as_str(),
+        ]))
+        .check(
+            Expr::col(UserQuestionRequest::Status)
+                .eq(crate::UserQuestionRequestStatus::Pending.as_str())
+                .and(Expr::col(UserQuestionRequest::ResolvedAt).is_null())
+                .or(Expr::col(UserQuestionRequest::Status)
+                    .ne(crate::UserQuestionRequestStatus::Pending.as_str())
+                    .and(Expr::col(UserQuestionRequest::ResolvedAt).is_not_null())),
+        )
+        .check(Expr::col(UserQuestionRequest::ResolvedAt).is_null().or(
+            Expr::col(UserQuestionRequest::ResolvedAt).gte(Expr::col(UserQuestionRequest::AskedAt)),
+        ))
+        .to_owned()
+}
+
+pub(super) fn user_question_request_indexes() -> Vec<IndexCreateStatement> {
+    vec![
+        Index::create()
+            .name("idx_user_question_request_pending")
+            .table(UserQuestionRequest::Table)
+            .col(UserQuestionRequest::ChatId)
+            .col(UserQuestionRequest::AskedAt)
+            .col(UserQuestionRequest::CallId)
+            .and_where(
+                Expr::col(UserQuestionRequest::Status)
+                    .eq(crate::UserQuestionRequestStatus::Pending.as_str()),
+            )
+            .to_owned(),
+        Index::create()
+            .name("idx_user_question_request_chat")
+            .table(UserQuestionRequest::Table)
+            .col(UserQuestionRequest::ChatId)
+            .col(UserQuestionRequest::CallId)
+            .to_owned(),
+        Index::create()
+            .name("idx_user_question_request_turn")
+            .table(UserQuestionRequest::Table)
+            .col(UserQuestionRequest::TurnId)
+            .col(UserQuestionRequest::CallId)
+            .to_owned(),
+        Index::create()
+            .name("idx_user_question_request_event")
+            .table(UserQuestionRequest::Table)
+            .col(UserQuestionRequest::ChatId)
+            .col(UserQuestionRequest::EventSeq)
+            .unique()
+            .to_owned(),
+    ]
+}
+
+pub(super) fn user_question_table() -> TableCreateStatement {
+    Table::create()
+        .table(UserQuestion::Table)
+        .col(ColumnDef::new(UserQuestion::CallId).uuid().not_null())
+        .col(
+            ColumnDef::new(UserQuestion::QuestionId)
+                .string_len(crate::MAX_QUESTION_ID_CHARS as u32)
+                .not_null(),
+        )
+        .col(ColumnDef::new(UserQuestion::Position).integer().not_null())
+        .col(
+            ColumnDef::new(UserQuestion::Header)
+                .string_len(crate::MAX_QUESTION_HEADER_CHARS as u32)
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(UserQuestion::Prompt)
+                .string_len(crate::MAX_QUESTION_PROMPT_CHARS as u32)
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(UserQuestion::Options)
+                .json_binary()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(UserQuestion::AllowFreeForm)
+                .boolean()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(UserQuestion::AnswerOptionId)
+                .string_len(crate::MAX_QUESTION_OPTION_ID_CHARS as u32),
+        )
+        .col(
+            ColumnDef::new(UserQuestion::AnswerFreeForm)
+                .string_len(crate::MAX_FREE_FORM_ANSWER_CHARS as u32),
+        )
+        .col(ColumnDef::new(UserQuestion::AnsweredAt).timestamp_with_time_zone())
+        .col(
+            ColumnDef::new(UserQuestion::QuestionType)
+                .string_len(16)
+                .not_null()
+                .default(crate::UserQuestionType::SingleSelect.as_str()),
+        )
+        .col(ColumnDef::new(UserQuestion::AnswerSelectedOptionIds).json_binary())
+        .col(
+            ColumnDef::new(UserQuestion::AnswerCustomAnswer)
+                .string_len(crate::MAX_FREE_FORM_ANSWER_CHARS as u32),
+        )
+        .col(ColumnDef::new(UserQuestion::ResponseRecordedAt).timestamp_with_time_zone())
+        .primary_key(
+            Index::create()
+                .name("pk_user_question")
+                .col(UserQuestion::CallId)
+                .col(UserQuestion::QuestionId),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_user_question_request")
+                .from(UserQuestion::Table, UserQuestion::CallId)
+                .to(UserQuestionRequest::Table, UserQuestionRequest::CallId)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .check(Expr::col(UserQuestion::Position).between(0, crate::MAX_USER_QUESTIONS as i32 - 1))
+        .check(
+            Expr::col(UserQuestion::AnswerOptionId)
+                .is_null()
+                .and(Expr::col(UserQuestion::AnswerFreeForm).is_null())
+                .and(Expr::col(UserQuestion::AnsweredAt).is_null())
+                .or(Expr::col(UserQuestion::AnswerOptionId)
+                    .is_not_null()
+                    .and(Expr::col(UserQuestion::AnswerFreeForm).is_null())
+                    .and(Expr::col(UserQuestion::AnsweredAt).is_not_null()))
+                .or(Expr::col(UserQuestion::AnswerOptionId)
+                    .is_null()
+                    .and(Expr::col(UserQuestion::AnswerFreeForm).is_not_null())
+                    .and(Expr::col(UserQuestion::AnsweredAt).is_not_null())),
+        )
+        .to_owned()
+}
+
+pub(super) fn user_question_indexes() -> Vec<IndexCreateStatement> {
+    vec![Index::create()
+        .name("idx_user_question_order")
+        .table(UserQuestion::Table)
+        .col(UserQuestion::CallId)
+        .col(UserQuestion::Position)
+        .unique()
+        .to_owned()]
+}

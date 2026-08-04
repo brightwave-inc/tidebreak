@@ -32,16 +32,17 @@ use crate::local_app::{AppGrant, AppRecord, AppRevision, CreateApp, NewAppRevisi
 #[cfg(test)]
 use crate::model::Role;
 use crate::model::{
-    validate_project_root_projection, AgentRun, AgentRunInboxEntry, AgentRunStatus, AgentRunTier,
+    validate_project_root_projection, AgentRun, AgentRunInboxEntry, AgentRunTier,
     AgentRunWaitSetCandidate, BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus,
     Chat, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceBlob,
     DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, MessageAttachment,
     MessageDocumentAttachment, NetworkPolicy, OwnerId, PermissionMode, Project, ReasoningEffort,
     RootAttachmentChange, RootAttachmentChangeTerminal, SandboxToolCall, SandboxToolCallReceipt,
-    SandboxToolCallRequest, ToolCallRecord, ToolCallResolution, TurnAgentRunWaitStatus,
-    TurnCheckpointProgress, TurnClientWaitStatus, TurnFailureRetry, TurnRun, TurnRunStatus,
-    TurnSteerStatus, MAX_ROOT_ATTACHMENTS,
+    SandboxToolCallRequest, ToolCallRecord, ToolCallResolution, TurnCheckpointProgress,
+    TurnFailureRetry, TurnRun, MAX_ROOT_ATTACHMENTS,
 };
+#[cfg(test)]
+use crate::model::{AgentRunStatus, TurnRunStatus, TurnSteerStatus};
 use crate::provider::{StopReason, Usage};
 use crate::semantic_checkpoint::{ContextCheckpoint, SaveContextCheckpointOutcome};
 use crate::storage::{

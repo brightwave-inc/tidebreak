@@ -1,6 +1,6 @@
 //! Pre-v1 lifecycle for the local SQLite profile.
 //!
-//! During `0.0.0` development we intentionally edit the baseline migrations.
+//! During `0.0.0` development we intentionally edit the schema baseline.
 //! SeaORM cannot detect that an already-recorded baseline changed, so the
 //! local profile keeps a small schema epoch outside SQLite. An older pre-v1
 //! epoch (or a database from before epochs existed) is disposable and gets
@@ -24,8 +24,8 @@ const PRE_V1_LIFECYCLE: &str = "pre_v1";
 const VECTOR_DIRECTORY: &str = "vectors";
 const MAX_MARKER_BYTES: u64 = 1_024;
 
-/// Bump this whenever a pre-v1 baseline migration changes incompatibly.
-const DESKTOP_SCHEMA_EPOCH: u32 = 2;
+/// Bump this whenever the pre-v1 schema baseline changes incompatibly.
+const DESKTOP_SCHEMA_EPOCH: u32 = 3;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -117,12 +117,10 @@ executor identity, broker grants, and the broker audit log are preserved;
 native recovery still has to validate them against the new canonical database
 and fails closed when their old conversation no longer exists.
 
-When an incompatible baseline migration changes during pre-v1 development,
-bump `DESKTOP_SCHEMA_EPOCH` in
-`crates/openwave-server/src/desktop_schema.rs` in the same change. Do not bump
-it for additive migrations that an existing database can apply normally. The
-epoch is a deliberate reset boundary, not a replacement for migrations after
-the schema stabilizes for v1.
+When the baseline changes incompatibly during pre-v1 development, bump
+`DESKTOP_SCHEMA_EPOCH` in `crates/openwave-server/src/desktop_schema.rs` in the
+same change. The epoch is a deliberate reset boundary, not a replacement for
+migrations after the schema stabilizes for v1.
 
 Non-secret provider settings and the default model live in the operational
 store and can change while the process runs. Model routing observes those
@@ -868,8 +866,7 @@ The main next steps are:
 - add platform CI, readiness/metrics, graceful shutdown, and backup/repair
   documentation;
 - split remaining very large implementation and test modules along stable domain
-  boundaries as those boundaries settle;
-- condense the pre-v1 migration history once the model stabilizes.
+  boundaries as those boundaries settle.
 
 ## Working in the repository
 
@@ -893,9 +890,11 @@ SQLite coverage, and PostgreSQL coverage when database locking or transactional
 semantics are involved. Keep public routes thin: orchestration belongs in the
 server, while reusable state transitions belong in `openwave-core`.
 
-Before v1, there are no deployed users to migrate. Schema work may update and
-reset the existing migration set instead of preserving obsolete compatibility
-steps; the migrations should be condensed into a clean baseline before v1.
+Before v1, there are no deployed users to migrate. The schema is therefore a
+single baseline migration that schema work edits in place, rather than a chain
+of upgrade steps; the epoch below is what makes an already-written database
+disposable. The baseline becomes the first entry of an ordinary migration chain
+when the schema stabilizes for v1.
 
 ## Glossary
 
