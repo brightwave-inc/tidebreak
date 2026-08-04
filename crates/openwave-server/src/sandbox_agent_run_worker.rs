@@ -1223,7 +1223,7 @@ async fn complete_sandbox_task(
                     ));
                 }
                 if reason == StopReason::ToolUse {
-                    if !text.is_empty() || calls.len() != 1 {
+                    if calls.len() != 1 {
                         return Err(AgentError::msg(
                             "sandbox agent emitted an ambiguous tool checkpoint",
                         ));
@@ -1396,6 +1396,9 @@ mod tests {
             };
             let events = if call_number == 1 {
                 vec![
+                    ProviderEvent::TextDelta {
+                        text: "I’ll research that now.".into(),
+                    },
                     ProviderEvent::ToolCallStarted {
                         index: 0,
                         id: "search_1".into(),
@@ -1825,7 +1828,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn checkpoints_one_web_search_and_rebuilds_its_receipt_before_finalizing() {
+    async fn checkpoints_web_search_after_a_text_preamble_and_rebuilds_its_receipt() {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn Store> = Arc::new(
             DbStore::connect(&format!(
