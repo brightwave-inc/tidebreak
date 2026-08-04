@@ -23,6 +23,8 @@ use crate::AnthropicProvider;
 use crate::GeminiProvider;
 #[cfg(feature = "openai-compat")]
 use crate::OpenAiCompatProvider;
+#[cfg(feature = "openai")]
+use crate::OpenAiProvider;
 
 /// A per-request credential supplier for routes whose token is short-lived.
 ///
@@ -97,7 +99,7 @@ impl std::fmt::Debug for VertexRoute {
 pub enum RouteKind {
     /// Anthropic Messages API.
     Anthropic,
-    /// OpenAI Chat Completions (api.openai.com).
+    /// Native OpenAI Responses API (api.openai.com).
     Openai,
     /// Any OpenAI-compatible Chat Completions gateway.
     OpenaiCompatible,
@@ -327,9 +329,9 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
         #[cfg(not(feature = "anthropic"))]
         RouteKind::ModelGateway => None,
 
-        #[cfg(feature = "openai-compat")]
+        #[cfg(feature = "openai")]
         RouteKind::Openai => {
-            let mut p = OpenAiCompatProvider::new(route.api_key.clone());
+            let mut p = OpenAiProvider::new(route.api_key.clone());
             if let Some(base) = &route.base_url {
                 p = p.with_base_url(base.clone());
             }
@@ -371,8 +373,10 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
         }
         #[cfg(not(feature = "gemini"))]
         RouteKind::Gemini => None,
+        #[cfg(not(feature = "openai"))]
+        RouteKind::Openai => None,
         #[cfg(not(feature = "openai-compat"))]
-        RouteKind::Openai | RouteKind::OpenaiCompatible => None,
+        RouteKind::OpenaiCompatible => None,
     }
 }
 

@@ -11,10 +11,12 @@ authors.workspace = true
 workspace = true
 
 [features]
-default = ["anthropic", "openai-compat", "gemini"]
+default = ["anthropic", "openai", "openai-compat", "gemini"]
 # The Anthropic (Messages API) provider adapter.
 anthropic = ["_http"]
-# OpenAI-compatible Chat Completions adapter (OpenAI, OpenRouter, vLLM, …).
+# Native OpenAI Responses API adapter.
+openai = ["_http"]
+# OpenAI-compatible Chat Completions adapter (OpenRouter, vLLM, …).
 openai-compat = ["_http"]
 # Google Gemini Developer API adapter (native GenerateContent protocol).
 gemini = ["_http", "dep:ring", "dep:uuid"]

@@ -217,7 +217,12 @@ const MAX_RETRY_AFTER: Duration = Duration::from_secs(3600);
 ///
 /// Returns `None` when the header is absent, unparseable, or not a form we
 /// understand; a missing hint just leaves the caller on its own backoff.
-#[cfg(any(feature = "anthropic", feature = "openai-compat", feature = "gemini"))]
+#[cfg(any(
+    feature = "anthropic",
+    feature = "openai",
+    feature = "openai-compat",
+    feature = "gemini"
+))]
 pub fn retry_after_hint(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
     parse_retry_after(headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?)
 }

@@ -1,11 +1,11 @@
 //! OpenAI-compatible Chat Completions provider.
 //!
 //! Speaks the widely-supported `/v1/chat/completions` streaming protocol so the
-//! same adapter covers OpenAI itself, OpenRouter, Fireworks, vLLM, LM Studio,
-//! and other OpenAI-compatible gateways. Point `base_url` at the gateway's
+//! same adapter covers OpenRouter, Fireworks, vLLM, LM Studio, and other
+//! OpenAI-compatible gateways. Point `base_url` at the gateway's
 //! `/v1` root (default: `https://api.openai.com/v1`).
 //!
-//! Native OpenAI's Responses API is a separate concern; this adapter deliberately
+//! Native OpenAI uses the separate Responses API adapter; this one deliberately
 //! targets the Chat Completions shape that local and third-party runtimes share.
 
 use async_trait::async_trait;
@@ -42,7 +42,10 @@ pub struct OpenAiCompatProvider {
 }
 
 impl OpenAiCompatProvider {
-    /// Build a provider hitting OpenAI's Chat Completions API.
+    /// Build a Chat Completions provider with OpenAI's default API root.
+    ///
+    /// Native OpenAI routing uses [`crate::OpenAiProvider`]; this constructor
+    /// remains for direct embedders that already depend on the adapter.
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             client: crate::http::streaming_client(),
@@ -1198,5 +1201,60 @@ mod tests {
         let mut out = Vec::new();
         extend_openai_messages(&mut out, &msg, &ImageAttachments::new()).unwrap();
         assert_eq!(out[0]["content"], "hi");
+    }
+
+    #[tokio::test]
+    async fn compatible_provider_keeps_the_chat_completions_endpoint() {
+        use axum::extract::{Request, State};
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use axum::Router;
+        use tokio::sync::oneshot;
+
+        async fn capture(
+            State(tx): State<std::sync::Arc<std::sync::Mutex<Option<oneshot::Sender<String>>>>>,
+            request: Request,
+        ) -> impl IntoResponse {
+            if let Some(tx) = tx.lock().unwrap().take() {
+                let _ = tx.send(request.uri().path().to_owned());
+            }
+            (
+                StatusCode::OK,
+                [("content-type", "text/event-stream")],
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+                ),
+            )
+        }
+
+        let (tx, rx) = oneshot::channel();
+        let state = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
+        let app = Router::new().fallback(post(capture)).with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let provider = OpenAiCompatProvider::compatible("key", format!("http://{address}/v1"));
+        let stream = provider
+            .stream(ChatRequest {
+                model: "local-model".into(),
+                messages: vec![ChatMessage::text(Role::User, "hi")],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let events: Vec<_> = stream.collect().await;
+        assert_eq!(rx.await.unwrap(), "/v1/chat/completions");
+        assert_eq!(
+            events,
+            vec![
+                ProviderEvent::TextDelta { text: "ok".into() },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn
+                },
+            ]
+        );
     }
 }

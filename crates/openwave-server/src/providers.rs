@@ -210,7 +210,7 @@ async fn clear_legacy_gateway_row(store: &dyn Store) -> Result<()> {
 pub enum ProviderKind {
     /// Anthropic Messages API.
     Anthropic,
-    /// OpenAI Chat Completions (api.openai.com).
+    /// Native OpenAI Responses API (api.openai.com).
     Openai,
     /// Google Gemini Developer API (generativelanguage.googleapis.com).
     Gemini,

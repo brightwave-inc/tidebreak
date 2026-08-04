@@ -105,7 +105,7 @@ async fn capture_openai_image_request(
     // also gets a background titling call, on a different model, which can
     // arrive first. It is identifiable by its output constraint — the turn has
     // none — and it is not what this test is capturing.
-    if request.get("response_format").is_none() {
+    if request.get("text").is_none() {
         if let Some(sender) = capture.lock().unwrap().take() {
             let _ = sender.send(request);
         }
@@ -113,8 +113,8 @@ async fn capture_openai_image_request(
     (
         [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
         concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"The images arrived.\"},\"finish_reason\":null}]}\n\n",
-            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"The images arrived.\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
             "data: [DONE]\n\n"
         ),
     )
@@ -734,7 +734,7 @@ async fn a_curated_openai_model_answers_after_receiving_png_and_jpeg_attachments
     let capture: OpenAiRequestCapture = Arc::new(std::sync::Mutex::new(Some(sender)));
     let provider = axum::Router::new()
         .route(
-            "/v1/chat/completions",
+            "/v1/responses",
             axum::routing::post(capture_openai_image_request),
         )
         .with_state(capture);
@@ -834,28 +834,30 @@ async fn a_curated_openai_model_answers_after_receiving_png_and_jpeg_attachments
         .expect("configured provider did not receive the image request")
         .expect("configured provider request capture was dropped");
     assert_eq!(request["model"], "gpt-5.6-sol");
-    let content = request["messages"]
+    let content = request["input"]
         .as_array()
         .unwrap()
         .iter()
         .find(|message| message["role"] == "user" && message["content"].is_array())
         .and_then(|message| message["content"].as_array())
         .expect("the provider request has the user message parts");
-    assert_eq!(content[0]["type"], "text");
-    let text = content[0]["text"].as_str().unwrap();
+    assert_eq!(content[0]["type"], "input_image");
+    assert_eq!(content[1]["type"], "input_image");
+    let text = content[2]["text"].as_str().unwrap();
     assert!(text.starts_with("Describe these attachments.\n\n<attachments>"));
     assert!(text.contains(&format!("image_1: id={png};")));
     assert!(text.contains(&format!("image_2: id={jpeg};")));
     assert!(text.ends_with("</attachments>"));
-    for (part, media_type) in content[1..].iter().zip(["image/png", "image/jpeg"]) {
-        assert_eq!(part["type"], "image_url");
+    for (part, media_type) in content[..2].iter().zip(["image/png", "image/jpeg"]) {
+        assert_eq!(part["type"], "input_image");
         assert!(
-            part["image_url"]["url"]
+            part["image_url"]
                 .as_str()
                 .unwrap()
                 .starts_with(&format!("data:{media_type};base64,")),
             "expected {media_type} data URL, got {part}"
         );
     }
+    assert_eq!(content[2]["type"], "input_text");
     assert_eq!(content.len(), 3);
 }
