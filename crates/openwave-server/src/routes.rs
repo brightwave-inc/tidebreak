@@ -5,8 +5,10 @@
 //! here.
 
 use axum::body::Body;
+use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use cap_std::ambient_authority;
@@ -46,6 +48,7 @@ use crate::providers::{self, ProviderCredential, ProviderInfo, ProviderKind, Pro
 use crate::scoped_store::ScopedStore;
 use crate::state::AppState;
 use crate::view_frames::ViewFrameSource;
+use crate::voice_transcription::{self, VoiceTranscriptionInfo, VoiceTranscriptionUpdate};
 use crate::web_search::{
     self, WebSearchConfigInfo, WebSearchConfigUpdate, WebSearchCredentialReadiness,
     WebSearchCredentialsInfo,
@@ -1101,6 +1104,37 @@ pub async fn delete_provider_credential(
     refuse_credential_writes_when_managed(&state).await?;
     providers::delete_credential(&*state.secrets, kind).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn get_voice_transcription(
+    State(state): State<AppState>,
+) -> Result<Json<VoiceTranscriptionInfo>, ServerError> {
+    Ok(Json(
+        voice_transcription::info(&*state.store, &*state.secrets).await?,
+    ))
+}
+
+pub async fn put_voice_transcription(
+    State(state): State<AppState>,
+    Json(body): Json<VoiceTranscriptionUpdate>,
+) -> Result<Json<VoiceTranscriptionInfo>, ServerError> {
+    Ok(Json(
+        voice_transcription::update(&*state.store, &*state.secrets, body).await?,
+    ))
+}
+
+pub async fn post_voice_transcription(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    audio: Bytes,
+) -> Result<Json<serde_json::Value>, ServerError> {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| ServerError::bad_request("voice recording content type is required"))?;
+    let text = voice_transcription::transcribe(&*state.store, &*state.secrets, content_type, audio)
+        .await?;
+    Ok(Json(serde_json::json!({ "text": text })))
 }
 
 /// A selectable model in the catalog.

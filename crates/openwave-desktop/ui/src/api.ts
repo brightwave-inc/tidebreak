@@ -166,6 +166,13 @@ export type StickyChatDefaults = WireStickyChatDefaults;
 
 export type ProviderInfo = WireProviderInfo;
 
+export type VoiceTranscriptionModel = "local" | "gpt4o_transcribe";
+export type VoiceTranscriptionInfo = {
+  model: VoiceTranscriptionModel;
+  local_ready: boolean;
+  openai_ready: boolean;
+};
+
 export type CustomModelConfig = WireCustomModelConfig;
 
 /**
@@ -772,6 +779,33 @@ export class ApiClient {
       method: "DELETE",
       headers: this.headers(),
     });
+  }
+
+  getVoiceTranscription(): Promise<VoiceTranscriptionInfo> {
+    return this.json("/voice-transcription", { headers: this.headers() });
+  }
+
+  putVoiceTranscription(
+    model: VoiceTranscriptionModel,
+  ): Promise<VoiceTranscriptionInfo> {
+    return this.json("/voice-transcription", {
+      method: "PUT",
+      headers: this.headers(true),
+      body: JSON.stringify({ model }),
+    });
+  }
+
+  async transcribeVoice(audio: Blob): Promise<string> {
+    const response = await fetch(`${this.baseUrl}/voice-transcription`, {
+      method: "POST",
+      headers: {
+        ...this.headers(),
+        "Content-Type": audio.type || "audio/webm",
+      },
+      body: audio,
+    });
+    await throwIfNotOk(response);
+    return ((await response.json()) as { text: string }).text;
   }
 
   /**

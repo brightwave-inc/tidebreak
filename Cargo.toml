@@ -65,7 +65,7 @@ sea-orm = { version = "=2.0.0", default-features = false, features = ["macros", 
 sea-orm-migration = { version = "=2.0.0", default-features = false, features = ["runtime-tokio-rustls"] }
 tokio = { version = "=1.53.1", features = ["rt", "macros", "fs"] }
 tokio-util = { version = "=0.7.19", features = ["io-util"] }
-reqwest = { version = "=0.12.28", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "multipart", "stream", "rustls-tls"] }
 ring = "=0.17.14"
 sha2 = "=0.11.0"
 base64 = "=0.23.0"

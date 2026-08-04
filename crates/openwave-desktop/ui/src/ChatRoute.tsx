@@ -73,6 +73,7 @@ import { useRefreshSignals } from "./RefreshSignals";
 import { TranscriptVisibilityProvider } from "./TranscriptVisibility";
 import { useTurnLifecycle } from "./TurnLifecycleSignals";
 import { useChatFolderAttachments } from "./useChatFolderAttachments";
+import { appendTranscript, useVoiceComposer } from "./useVoiceComposer";
 
 let msgSeq = 0;
 
@@ -286,6 +287,10 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     draftRef.current = next;
     composerDraftActions.setDraft(chatId, next);
   }
+
+  const voice = useVoiceComposer((audio) => client.transcribeVoice(audio), (transcript) => {
+    setComposerDraft(appendTranscript(draftRef.current, transcript));
+  });
 
   function setComposerFiles(
     update: (current: readonly ImportedDocument[]) => ImportedDocument[],
@@ -550,6 +555,13 @@ export function ChatRoute({ chatId }: { chatId: string }) {
               error: folders.error,
               onAttach: nativeHost ? folders.attach : undefined,
               onRemove: folders.remove,
+            }}
+            voice={{
+              available: voice.available,
+              state: voice.state,
+              error: voice.error,
+              onStart: () => void voice.start(),
+              onStop: voice.stop,
             }}
             nativeDropTarget={
               <DocumentDropTarget

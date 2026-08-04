@@ -9,6 +9,7 @@ import {
   RefreshCw,
   ShieldCheck,
   SquareTerminal,
+  Mic,
   Waypoints,
 } from "lucide-react";
 
@@ -24,6 +25,7 @@ import { ModelsPanel } from "./ModelsPanel";
 import { ProvidersPanel } from "./ProvidersPanel";
 import { UpdatesPanel } from "./UpdatesPanel";
 import { WebSearchPanel } from "./WebSearchPanel";
+import { VoiceTranscriptionPanel } from "./VoiceTranscriptionPanel";
 
 /**
  * Each section reads what it needs from the shell context rather than being
@@ -77,6 +79,11 @@ function ModelsSection() {
 function WebSearchSection() {
   const { client } = useApp();
   return <WebSearchPanel client={client} />;
+}
+
+function VoiceTranscriptionSection() {
+  const { client } = useApp();
+  return <VoiceTranscriptionPanel client={client} />;
 }
 
 function CodeExecutionSection() {
@@ -148,6 +155,12 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     unmanagedHidden: true,
   },
   { path: "models", label: "Models", icon: Cpu, Component: ModelsSection },
+  {
+    path: "voice-transcription",
+    label: "Voice input",
+    icon: Mic,
+    Component: VoiceTranscriptionSection,
+  },
   { path: "web-search", label: "Web search", icon: Globe, Component: WebSearchSection },
   {
     path: "code-execution",

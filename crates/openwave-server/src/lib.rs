@@ -70,6 +70,7 @@ mod source_tools;
 mod state;
 mod turn_worker;
 mod view_frames;
+mod voice_transcription;
 /// Host-owned, inert web-search configuration and provider selection.
 pub mod web_search;
 mod wire_types;
@@ -383,6 +384,13 @@ pub fn app(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(MAX_WEB_SEARCH_CREDENTIAL_BODY_BYTES)),
         )
         .route("/providers", get(routes::list_providers))
+        .route(
+            "/voice-transcription",
+            get(routes::get_voice_transcription)
+                .put(routes::put_voice_transcription)
+                .post(routes::post_voice_transcription)
+                .layer(DefaultBodyLimit::max(voice_transcription::MAX_AUDIO_BYTES)),
+        )
         .route(
             "/providers/{kind}",
             axum::routing::put(routes::put_provider),
