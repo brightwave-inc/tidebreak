@@ -316,6 +316,32 @@ impl McpServer {
             .filter(|tool| self.exposes(tool.approval_class()))
             .ok_or_else(|| RpcError::invalid_params(format!("unknown tool: {}", params.name)))?;
 
+        // Hold the call to the contract `tools/list` advertised, before consent
+        // is asked for it and before the tool's own deserializer decides what
+        // enforcement means. The in-app agent validates at the same point
+        // (`openwave_core::tool::schema_mismatch`); an MCP client reaching the
+        // same registry through this face gets the same answer instead of
+        // whichever fields the tool happened to read.
+        //
+        // `arguments` is an object or it is nothing: a scalar or an array is
+        // not an argument map, and reporting that as `invalid_params` tells the
+        // client what to fix rather than surfacing a schema error about types.
+        if !params.arguments.is_object() {
+            return Err(RpcError::invalid_params(format!(
+                "arguments for {} must be a JSON object",
+                params.name
+            )));
+        }
+        let spec = tool.spec();
+        if let Some(mismatch) =
+            openwave_core::tool::schema_mismatch(&spec.input_schema, &params.arguments)
+        {
+            return Err(RpcError::invalid_params(format!(
+                "arguments for {} do not satisfy its schema: {mismatch}",
+                params.name
+            )));
+        }
+
         // A mutating call crosses the boundary only through the approval bridge.
         // `exposes` guarantees `self.approval` is `Some` for a non-ReadOnly tool.
         let class = tool.approval_class();
@@ -812,6 +838,55 @@ mod tests {
             .unwrap()
             .contains("requires approval"));
         assert!(!sensitive_ran.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn arguments_that_miss_the_advertised_schema_never_reach_the_tool() {
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let tools = ToolRegistry::new()
+            .with(Box::new(EchoTool))
+            .with(Box::new(ClassifiedTool {
+                name: "read",
+                class: ApprovalClass::ReadOnly,
+                ran: Arc::clone(&ran),
+            }));
+        let server = McpServer::new(Arc::new(tools), ctx_for(ChatId::new()));
+        initialize_session(&server).await;
+
+        // `echo` advertises a required `text`; a call without it is the client's
+        // bug, answered as invalid params rather than run with a default.
+        let response = server
+            .handle(request(
+                2,
+                "tools/call",
+                json!({"name": "echo", "arguments": {"other": 1}}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.error.unwrap().code, error_code::INVALID_PARAMS);
+
+        // Non-object `arguments` are not an argument map at all, whatever the
+        // tool's schema says, and the tool is never entered.
+        for arguments in [json!("text"), json!([1, 2]), Value::Null] {
+            let response = server
+                .handle(request(
+                    3,
+                    "tools/call",
+                    json!({"name": "read", "arguments": arguments}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.error.unwrap().code, error_code::INVALID_PARAMS);
+        }
+        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
+
+        // Omitted entirely is "no arguments", which the permissive schema takes.
+        let response = server
+            .handle(request(4, "tools/call", json!({"name": "read"})))
+            .await
+            .unwrap();
+        assert!(response.error.is_none());
+        assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[tokio::test]

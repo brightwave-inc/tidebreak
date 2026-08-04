@@ -209,8 +209,17 @@ pub struct ToolDescriptor {
 #[derive(Debug, Clone, Deserialize)]
 pub struct CallToolParams {
     pub name: String,
-    #[serde(default)]
+    /// MCP declares `arguments` as an optional object. Absent means "this call
+    /// passes no arguments", which is an empty object — not JSON `null`, which
+    /// no object-typed tool schema accepts and which would turn "omitted" into
+    /// a validation failure the client cannot act on. Anything present that is
+    /// not an object is rejected at dispatch, not defaulted.
+    #[serde(default = "empty_arguments")]
     pub arguments: Value,
+}
+
+fn empty_arguments() -> Value {
+    Value::Object(serde_json::Map::new())
 }
 
 /// Result of `tools/call`.
